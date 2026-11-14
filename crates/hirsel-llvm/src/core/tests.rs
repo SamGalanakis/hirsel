@@ -2879,3 +2879,118 @@ fn failure_sites_and_relative_debug_rows_match_the_evaluator() {
 fn aarch64_failure_sites_and_relative_debug_rows_match_the_evaluator() {
     site_fixture(Target::Aarch64Linux);
 }
+
+fn inheritance_fixture(target: Target) {
+    let module = text::parse(
+        r#"core v1
+item i0 = p@0/m/caller
+item i1 = p@0/m/local
+item i2 = core@1/m/k
+sig g0 = (u64) -> (u64)
+inst n0 = core@1/m/k [] []
+inst n1 = p@0/m/caller [] []
+inst n2 = p@0/m/local [] []
+inst n3 = p@0/m/caller.$glue [] []
+inst n4 = p@0/m/caller_local [] []
+inst n5 = p@0/m/caller_generated [] []
+inst n6 = p@0/m/caller_indirect_core [] []
+inst n7 = p@0/m/caller_indirect_local [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1 at i2 5..10
+  return v2
+}
+fn f1 = n1 g0 {
+b0(v0: u64):
+  v1: u64 = call f0 g0 (v0) at i0 20..30
+  return v1
+}
+fn f2 = n2 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1 at i1 35..40
+  return v2
+}
+fn f3 = n4 g0 {
+b0(v0: u64):
+  v1: u64 = call f2 g0 (v0) at i0 40..45
+  return v1
+}
+fn f4 = n3 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1
+  return v2
+}
+fn f5 = n5 g0 {
+b0(v0: u64):
+  v1: u64 = call f4 g0 (v0) at i0 50..55
+  return v1
+}
+fn f6 = n6 g0 {
+b0(v0: u64):
+  v1: ptr = fnref f0
+  v2: u64 = call v1 g0 (v0) at i0 60..65
+  return v2
+}
+fn f7 = n7 g0 {
+b0(v0: u64):
+  v1: ptr = fnref f2
+  v2: u64 = call v1 g0 (v0) at i0 70..75
+  return v2
+}
+"#,
+    )
+    .unwrap();
+    hirsel_core_ir::wf::module(&module).unwrap();
+    let ir = emit_ir_for_target(&module, target, false).unwrap();
+    let callee = symbol(&module, FuncId(2));
+    let direct = ir
+        .lines()
+        .find(|line| line.contains("call ") && line.contains(&format!("@{callee}(")))
+        .unwrap();
+    assert!(
+        direct.contains("i64 poison)"),
+        "non-inheriting direct call materializes a site: {direct}"
+    );
+    let expected = [
+        0,
+        (1u64 << 32) | 20,
+        (2u64 << 32) | 35,
+        (2u64 << 32) | 35,
+        0,
+        (1u64 << 32) | 50,
+        (1u64 << 32) | 60,
+        (2u64 << 32) | 35,
+    ];
+    let cases = (0..8)
+        .map(|f| Case {
+            function: FuncId(f),
+            args: vec![u64::MAX],
+            limit: u64::MAX,
+            injection: None,
+        })
+        .collect::<Vec<_>>();
+    for opt in [Optimization::None, Optimization::Speed] {
+        let bytes = emit_object_for_target(&module, target, opt, false).unwrap();
+        let reports = execute_target_object(&module, &cases, "", "", opt, Some(bytes), target);
+        for ((case, actual), site) in cases.iter().zip(reports).zip(expected) {
+            let oracle = eval::run(&module, case.function, &case.args, u64::MAX);
+            assert_eq!(actual.outcome, oracle.outcome);
+            assert_eq!(actual.sites, vec![site], "inheritance f{}", case.function.0);
+        }
+    }
+    println!("caller inheritance observations: 16");
+}
+
+#[test]
+fn caller_sites_follow_core_generated_direct_and_indirect_inheritance() {
+    inheritance_fixture(Target::X86_64Linux);
+}
+
+#[test]
+#[ignore = "explicit AArch64 runtime integration target"]
+fn aarch64_caller_sites_follow_core_generated_direct_and_indirect_inheritance() {
+    inheritance_fixture(Target::Aarch64Linux);
+}

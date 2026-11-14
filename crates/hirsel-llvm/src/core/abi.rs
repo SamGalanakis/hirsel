@@ -215,7 +215,7 @@ impl FunctionEmitter<'_> {
             Callee::Indirect(v) => self.get(v),
             Callee::Runtime(_) => unreachable!(),
         };
-        args.push(format!("i64 {}", self.site_word()));
+        args.push(format!("i64 {}", self.call_site_word(site.callee)));
         if abi.fields != self.abi.fields {
             // An infallible private callee has no status; the public caller
             // still returns its constant zero. Its destination can be forwarded
@@ -384,7 +384,7 @@ impl FunctionEmitter<'_> {
             Callee::Indirect(v) => self.get(v),
             Callee::Runtime(_) => unreachable!(),
         };
-        args.push(format!("i64 {}", self.site_word()));
+        args.push(format!("i64 {}", self.call_site_word(site.callee)));
         let mut values = self.invoke(&abi, &callee, args);
         if has_status {
             let status = values.pop().unwrap();

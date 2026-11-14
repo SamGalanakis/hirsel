@@ -75,6 +75,7 @@ pub(super) fn drop_glue(
     let empty = Body::default();
     for t in normal {
         let mut e = FunctionEmitter {
+            function: None,
             append_fast: false,
             module,
             body: &empty,
@@ -121,6 +122,7 @@ pub(super) fn drop_glue(
         // A resource's finalizer runs under its grant; a core slot kernel's on an
         // own row runs under the current limit (FORM v1c).
         if let Some(f) = module.types[t].finalizer {
+            let finalizer_site = e.call_site_word(Callee::Direct(FuncId(f.0)));
             if resource {
                 e.runtime_void(
                     "hirsel_core_finalizer_begin",
@@ -132,13 +134,13 @@ pub(super) fn drop_glue(
             }
             if failures.may_fail[f.0 as usize] {
                 let failed = e.calc(format!(
-                    "call i8 @{}(ptr %context, ptr {base}, i64 %caller_site)",
+                    "call i8 @{}(ptr %context, ptr {base}, i64 {finalizer_site})",
                     symbol(module, FuncId(f.0))
                 ));
                 e.line(format!("store i8 {failed}, ptr {status}"));
             } else {
                 e.line(format!(
-                    "call void @{}.infallible(ptr %context, ptr {base}, i64 %caller_site)",
+                    "call void @{}.infallible(ptr %context, ptr {base}, i64 {finalizer_site})",
                     symbol(module, FuncId(f.0))
                 ));
             }
@@ -523,6 +525,7 @@ fn counted_glue(
             continue;
         }
         let mut e = FunctionEmitter {
+            function: None,
             append_fast: false,
             module,
             body: &empty,

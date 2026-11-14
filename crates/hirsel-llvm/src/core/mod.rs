@@ -202,6 +202,7 @@ fn emit_ir_target_with_facts(
             )
         });
         let mut e = FunctionEmitter {
+            function: Some(FuncId(i as u32)),
             append_fast,
             caller_site: "%caller_site",
             debug_location: function_debug.map(|d| d.location(None)),
@@ -571,6 +572,7 @@ fn size(t: Ty) -> u64 {
 }
 
 struct FunctionEmitter<'a> {
+    function: Option<FuncId>,
     module: &'a Module,
     body: &'a Body,
     recipes: &'a [hirsel_core_layout::Recipe],

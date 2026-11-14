@@ -2,12 +2,33 @@
 use super::*;
 
 impl FunctionEmitter<'_> {
+    pub(super) fn call_site_word(&mut self, callee: Callee) -> String {
+        if let Callee::Direct(f) = callee {
+            let function = &self.module.functions[f.index()];
+            if !hirsel_core_ir::source::inherits_site(
+                &self.module.instances[function.instance.index()],
+            ) {
+                return "poison".into();
+            }
+        }
+        self.site_word()
+    }
+
     pub(super) fn site_word(&mut self) -> String {
         let Some(anchor) = self
             .anchor
             .filter(|a| !self.module.items[a.item.index()].package_is("core", "1"))
         else {
-            return self.caller_site.into();
+            return if self.function.is_none_or(|f| {
+                let function = &self.module.functions[f.index()];
+                hirsel_core_ir::source::inherits_site(
+                    &self.module.instances[function.instance.index()],
+                )
+            }) {
+                self.caller_site.into()
+            } else {
+                "0".into()
+            };
         };
         if !self.relocatable_sites {
             return (((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start)).to_string();

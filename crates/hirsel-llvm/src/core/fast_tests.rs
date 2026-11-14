@@ -225,6 +225,7 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
     let failures = failure::Failures::new(&module);
     let mut intrinsics = BTreeSet::new();
     let mut e = FunctionEmitter {
+        function: None,
         append_fast: false,
         module: &module,
         body: &body,

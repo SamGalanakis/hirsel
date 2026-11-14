@@ -249,6 +249,27 @@ fn execute_object(
     optimization: Optimization,
     object: Option<Vec<u8>>,
 ) -> Vec<NativeReport> {
+    execute_target_object(
+        module,
+        cases,
+        bindings,
+        configuration,
+        optimization,
+        object,
+        Target::X86_64Linux,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_target_object(
+    module: &Module,
+    cases: &[Case],
+    bindings: &str,
+    configuration: &str,
+    optimization: Optimization,
+    object: Option<Vec<u8>>,
+    target: Target,
+) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "hirsel-core-llvm-{}-{}",
@@ -268,12 +289,12 @@ fn execute_object(
     }
     let _scratch = Scratch(dir.clone());
     let observing = std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some();
-    let ir = emit_ir_with_charge_observation(module, observing).unwrap();
+    let ir = emit_ir_for_target(module, target, observing).unwrap();
     let context = Context::new();
     let llvm = LlvmModule::parse(&context, "test", &ir).unwrap();
     llvm.verify().unwrap_or_else(|e| panic!("{e}\n{ir}"));
     let bytes = object.unwrap_or_else(|| {
-        emit_object_with_charge_observation(module, optimization, observing).unwrap()
+        emit_object_for_target(module, target, optimization, observing).unwrap()
     });
     std::fs::write(dir.join("core.o"), bytes).unwrap();
     let mut c = String::from(
@@ -466,9 +487,16 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         .join(
             std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("CoreIR native runtime test input"),
         );
+    let mut compiler = match target {
+        Target::X86_64Linux => {
+            let mut command = Command::new(prefix.join("bin/clang"));
+            command.arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()));
+            command
+        }
+        Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
+    };
     output(
-        Command::new(prefix.join("bin/clang"))
-            .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
+        compiler
             .args(["-std=c11", "-O0", "-no-pie", "-I"])
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"))
             .arg(dir.join("test.c"))
@@ -478,7 +506,18 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             .arg("-o")
             .arg(dir.join("test")),
     );
-    output(&mut Command::new(dir.join("test")))
+    let mut executable = match target {
+        Target::X86_64Linux => Command::new(dir.join("test")),
+        Target::Aarch64Linux => {
+            let mut command = Command::new(std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap());
+            command
+                .arg("-L")
+                .arg(std::env::var_os("HIRSEL_AARCH64_SYSROOT").unwrap())
+                .arg(dir.join("test"));
+            command
+        }
+    };
+    output(&mut executable)
         .lines()
         .map(|line| {
             let mut parts = line.split('|');
@@ -2139,4 +2178,78 @@ fn private_register_results_keep_the_public_destination_and_failure_abi() {
             assert_eq!(actual.trace, expected.trace);
         }
     }
+}
+
+#[test]
+#[ignore = "explicit AArch64 runtime integration target"]
+fn aarch64_memory_custody_and_calls_match_the_evaluator() {
+    let target = Target::Aarch64Linux;
+    let mut count = 0;
+    for source in [
+        include_str!("../../../hirsel-core-ir/samples/arith.core"),
+        include_str!("../../../hirsel-core-ir/samples/calls.core"),
+        include_str!("../../../hirsel-core-ir/samples/admission.core"),
+        include_str!("../../../hirsel-core-ir/samples/cleanup.core"),
+        include_str!("../../../hirsel-core-ir/samples/counted.core"),
+        include_str!("../../../hirsel-core-ir/samples/failure.core"),
+        include_str!("../../../hirsel-core-ir/samples/variants.core"),
+        include_str!("../../../hirsel-core-ir/samples/custody.core"),
+    ] {
+        let module = text::parse(source).unwrap();
+        wf::module(&module).unwrap();
+        let mut cases = sample_cases(&module, source);
+        for case in sample_cases(&module, source) {
+            let report = eval::run(&module, case.function, &case.args, case.limit);
+            for nth in 1..=report.admissions {
+                for later in [false, true] {
+                    cases.push(Case {
+                        function: case.function,
+                        args: case.args.clone(),
+                        limit: case.limit,
+                        injection: Some((nth, later)),
+                    });
+                }
+            }
+        }
+        assert!(!cases.is_empty());
+        for speed in [false, true] {
+            for facts in [false, true] {
+                let ir = emit_ir_target_with_facts(&module, target, false, facts).unwrap();
+                let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
+                let got = execute_target_object(
+                    &module,
+                    &cases,
+                    "",
+                    "",
+                    if speed {
+                        Optimization::Speed
+                    } else {
+                        Optimization::None
+                    },
+                    Some(object),
+                    target,
+                );
+                assert_eq!(got.len(), cases.len());
+                for (case, got) in cases.iter().zip(got) {
+                    let expected = eval::run_injected(
+                        &module,
+                        case.function,
+                        &case.args,
+                        case.limit,
+                        case.injection,
+                    );
+                    assert_eq!(
+                        got.outcome, expected.outcome,
+                        "f{}({:?}),speed={speed},facts={facts}",
+                        case.function.0, case.args
+                    );
+                    assert_eq!(got.used, expected.used, "used");
+                    assert_eq!(got.trace, expected.trace, "cleanup trace");
+                    assert_eq!(got.admissions, expected.admissions, "admissions");
+                    count += 1;
+                }
+            }
+        }
+    }
+    println!("ARM runtime sample and refusal executions: {count}");
 }

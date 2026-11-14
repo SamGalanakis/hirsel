@@ -14,6 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 SUITES = (
     ('native', 'core-driver-native', ['--test-arg=--test-threads=1']),
+    ('llvm-arm', 'core-llvm-aarch64-runtime', ['--test-arg=--test-threads=1']),
     ('land', 'test-land', []),
 )
 

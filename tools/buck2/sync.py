@@ -1332,6 +1332,9 @@ def first_party(meta: dict) -> str:
                            data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/src/provider_m3.*", "core/core/**"])')))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/core/**", "core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-abi", data=[], selection=["core::target_tests::linux_c_results_execute_with_mixed_fields_padding_and_hfas", "core::tests::lazy_component_preserves_exact_core_objects", "--exact"]))
+    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-failure", data=Raw('glob(["crates/hirsel-core-rt/include/**"])'), selection=["core::target_tests::checked_arithmetic_preserves_status_context_and_cause_copies", "--exact"]))
+    out.append("\n" + call("hirsel_core_runtime_archives", name="core-llvm-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_llvm_runtime_fixture.a"))
+    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-runtime", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**"])'), selection=["core::tests::aarch64_memory_custody_and_calls_match_the_evaluator", "--exact", "--ignored", "--nocapture"], runtime="//:core-llvm-runtime-fixtures[aarch64]"))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-observed", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["standalone", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))

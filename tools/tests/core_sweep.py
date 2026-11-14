@@ -83,9 +83,9 @@ class Sweep(unittest.TestCase):
                      contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(main(), int(red))
                 report = json.loads(Path(path).read_text())
-                self.assertEqual({row['suite'] for row in report['suites']}, {'core-driver-native', 'test-land'})
+                self.assertEqual({row['suite'] for row in report['suites']}, {'core-driver-native', 'core-llvm-aarch64-runtime', 'test-land'})
                 self.assertEqual(report['status'], 'failed' if red else 'passed')
-                self.assertEqual(report['bodies'], 2)
+                self.assertEqual(report['bodies'], 3)
                 self.assertEqual(report['source'], 'main')
 
 

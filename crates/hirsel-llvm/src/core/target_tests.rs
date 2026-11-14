@@ -225,3 +225,81 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn checked_arithmetic_preserves_status_context_and_cause_copies() {
+    let module =
+        hirsel_core_ir::text::parse(include_str!("../../../hirsel-core-ir/samples/arith.core"))
+            .unwrap();
+    let add = symbol(&module, FuncId(1));
+    let divide = symbol(&module, FuncId(7));
+    let c = format!(
+        r#"
+#include <stdint.h>
+#include <assert.h>
+#include "hirsel_core_rt.h"
+static unsigned raised, kind;
+void hirsel_core_raise(HirselCoreContext *context, HirselCoreCause cause) {{
+    assert((uintptr_t)context == UINT64_C(0x12345678));
+    ++raised; kind=hirsel_core_cause_kind(&cause);
+    /* Force writes to the C callee's private copy, even at O0. */
+    volatile HirselCoreCause *copy=&cause;
+    copy->site=123; copy->message.capacity=0;
+}}
+typedef struct {{ int32_t value; uint8_t status; }} Add;
+typedef struct {{ int64_t quotient, remainder; uint8_t status; }} Divide;
+extern Add {add}(HirselCoreContext *, int32_t, int32_t);
+extern Divide {divide}(HirselCoreContext *, int64_t, int64_t);
+int main(void) {{
+    HirselCoreContext *context=(void *)(uintptr_t)0x12345678;
+    Add a={add}(context,2,3); assert(a.value==5 && a.status==0 && raised==0);
+    a={add}(context,INT32_MAX,1); assert(a.status==1 && raised==1 && kind==0);
+    a={add}(context,INT32_MIN,-1); assert(a.status==1 && raised==2 && kind==0);
+    Divide d={divide}(context,-7,2); assert(d.quotient==-3 && d.remainder==-1 && d.status==0 && raised==2);
+    d={divide}(context,1,0); assert(d.status==1 && raised==3 && kind==2);
+    d={divide}(context,INT64_MIN,-1); assert(d.status==1 && raised==4 && kind==0);
+    return 0;
+}}
+"#
+    );
+    let dir =
+        std::env::temp_dir().join(format!("hirsel-core-target-failure-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("probe.c"), c).unwrap();
+    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let include = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include");
+    for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+        for speed in [false, true] {
+            for facts in [false, true] {
+                let ir = emit_ir_target_with_facts(&module, target, false, facts).unwrap();
+                let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
+                std::fs::write(dir.join("probe.o"), object).unwrap();
+                let compiler = match target {
+                    Target::X86_64Linux => prefix.join("bin/clang"),
+                    Target::Aarch64Linux => {
+                        PathBuf::from(std::env::var_os("HIRSEL_AARCH64_CC").unwrap())
+                    }
+                };
+                run(Command::new(compiler)
+                    .arg("-O0")
+                    .arg("-I")
+                    .arg(&include)
+                    .arg(dir.join("probe.c"))
+                    .arg(dir.join("probe.o"))
+                    .arg("-lm")
+                    .arg("-o")
+                    .arg(dir.join("probe")));
+                match target {
+                    Target::X86_64Linux => run(&mut Command::new(dir.join("probe"))),
+                    Target::Aarch64Linux => run(Command::new(
+                        std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap(),
+                    )
+                    .arg("-L")
+                    .arg(std::env::var_os("HIRSEL_AARCH64_SYSROOT").unwrap())
+                    .arg(dir.join("probe"))),
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -291,7 +291,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -353,6 +353,10 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                         'core-form-883')
                     save_row(rows, row, output)
                     continue
+                if target:
+                    command.extend(['--target', target])
+                if emulator:
+                    command.extend(['--emulator', str(emulator), '--sysroot', str(sysroot)])
                 if engine == 'llvm':
                     command.append('--release')
                 if case.package == 'core':
@@ -396,8 +400,13 @@ def main():
     parser.add_argument('--filter', action='append', default=[])
     parser.add_argument('--report', type=Path)
     parser.add_argument('--cc', type=Path)
+    parser.add_argument('--target')
+    parser.add_argument('--emulator', type=Path)
+    parser.add_argument('--sysroot', type=Path)
     parser.add_argument('--timeout', type=int, default=30, help='native execution bound; never bounds a build')
     args = parser.parse_args()
+    if bool(args.emulator) != bool(args.sysroot):
+        parser.error("--emulator and --sysroot must be supplied together")
     root = args.root.resolve()
     contracts = discover(root, args.filter)
     owners = json.loads(Path(__file__).with_name('std_native_owners.json').read_text())
@@ -405,7 +414,8 @@ def main():
     if args.backend != 'evaluator' and (args.compiler is None or args.runtime is None):
         parser.error('native backends require --compiler and --runtime')
     rows = run(root, args.compiler.resolve() if args.compiler else None, args.runtime.resolve() if args.runtime else None, contracts, engines,
-               args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None)
+               args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None, args.target,
+               args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None)
     return int(any(r['applicable'] and not r['passed'] for r in rows))
 
 

@@ -12,7 +12,7 @@ mod reachability;
 mod test_run;
 pub use native::{Backend, BuildProduct, NativeOptions, NativeStop, ObjectProduct, grant_kind};
 pub use reachability::{GapStop, Reachable};
-pub use test_run::TestOutcome;
+pub use test_run::{Runner, TestOutcome};
 mod meter;
 pub use diagnostics::{Diagnostic, IncompleteDiagnostic, SourceSite};
 pub use image::{CoreImage, LibraryInput};

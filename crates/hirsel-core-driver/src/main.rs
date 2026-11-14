@@ -81,6 +81,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut logical_charge_report = None;
     let mut output_path = None;
     let mut root_limit = 64 * 1024 * 1024;
+    let mut emulator = None;
+    let mut sysroot = None;
     let mut target = "x86_64-unknown-linux-gnu".to_owned();
     let mut cc = std::env::var_os("LLVM_SYS_231_PREFIX")
         .map(|p| PathBuf::from(p).join("bin/clang"))
@@ -125,6 +127,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             }
             Opt::Cc => cc = PathBuf::from(value),
             Opt::Target => target = value,
+            Opt::Emulator => emulator = Some(PathBuf::from(value)),
+            Opt::Sysroot => sysroot = Some(PathBuf::from(value)),
             Opt::Limit => {
                 explicit_limit = true;
                 root_limit = value.parse()?;
@@ -142,6 +146,14 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             Opt::Help | Opt::Lib => unreachable!("CLI early command option"),
         }
     }
+    let runner = match (emulator, sysroot) {
+        (None, None) => hirsel_core_driver::Runner::Native,
+        (Some(emulator), Some(sysroot)) => hirsel_core_driver::Runner::Qemu {
+            emulator: std::fs::canonicalize(emulator)?,
+            sysroot: std::fs::canonicalize(sysroot)?,
+        },
+        _ => return Err("--emulator and --sysroot must be supplied together".into()),
+    };
     if test_command && !explicit_limit {
         return Err("test requires an explicit --limit <bytes> for each run".into());
     }
@@ -340,7 +352,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             options.output = output_dir.join(hex(hirsel_core_ids::ContentHash::of_bytes(
                 test.to_string().as_bytes(),
             )));
-            let row = match product.run_test_with_timeout(test, options, test_timeout) {
+            let row = match product.run_test_with_runner(test, options, test_timeout, &runner) {
                 Ok(outcome) => {
                     let passed = outcome.passed();
                     failed |= !passed;
@@ -479,7 +491,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         if let Some(native) = &output.native {
             let path = std::fs::canonicalize(&native.executable)?;
             Some(
-                std::process::Command::new(path)
+                runner
+                    .command(&path)
                     .args(run_args)
                     .status()?
                     .code()

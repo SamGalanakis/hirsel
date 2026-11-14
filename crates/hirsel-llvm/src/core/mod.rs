@@ -82,6 +82,11 @@ pub fn facts_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("HIRSEL_LLVM_NO_FACTS").is_none())
 }
 
+/// Whether this engine implements the requested target's native ABI.
+pub fn supports_target(triple: &str) -> bool {
+    Target::from_triple(triple).is_some()
+}
+
 /// Emit x86-64 System V LLVM IR directly from CoreIR.
 ///
 /// Functions take FORM v1a's hidden task context before the destination.

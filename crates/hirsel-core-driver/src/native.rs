@@ -20,6 +20,14 @@ pub enum Backend {
     Cranelift,
     Llvm,
 }
+impl Backend {
+    pub fn supports_target(self, triple: &str) -> bool {
+        match self {
+            Self::Cranelift => hirsel_cranelift::core::supports_target(triple),
+            Self::Llvm => hirsel_llvm_lazy::core::supports_target(triple),
+        }
+    }
+}
 impl std::str::FromStr for Backend {
     type Err = &'static str;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -179,9 +187,10 @@ impl CheckProduct {
         materialized: &crate::instances::InstanceSet,
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
-        if options.target != TARGET {
+        if !options.backend.supports_target(&options.target) {
             return Err(NativeStop::Entry(format!(
-                "native engines currently target {TARGET}"
+                "{:?} engine does not support target {}",
+                options.backend, options.target
             )));
         }
         let runtime = ContentHash::of_parts(

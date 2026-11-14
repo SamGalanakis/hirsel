@@ -18,6 +18,8 @@ pub enum OptionId {
     LogicalChargeReport,
     Cc,
     Target,
+    Emulator,
+    Sysroot,
     Limit,
     Output,
     Entry,
@@ -177,6 +179,20 @@ static OPTIONS: &[OptionSpec] = &[
         Some("TRIPLE"),
         ["build", "run", "test"],
         "Select the full native target triple."
+    ),
+    option!(
+        Emulator,
+        ["--emulator"],
+        Some("FILE"),
+        ["run", "test"],
+        "Run through this explicit QEMU user executable."
+    ),
+    option!(
+        Sysroot,
+        ["--sysroot"],
+        Some("DIR"),
+        ["run", "test"],
+        "Use this QEMU runtime sysroot with --emulator."
     ),
     option!(
         Limit,

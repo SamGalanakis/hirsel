@@ -6,6 +6,30 @@ use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+/// Execution inputs are separate from the target-independent checking products
+/// and target-specific object/link products. Cross execution is always explicit.
+#[derive(Clone, Debug, Default)]
+pub enum Runner {
+    #[default]
+    Native,
+    Qemu {
+        emulator: std::path::PathBuf,
+        sysroot: std::path::PathBuf,
+    },
+}
+impl Runner {
+    pub fn command(&self, executable: &std::path::Path) -> Command {
+        match self {
+            Self::Native => Command::new(executable),
+            Self::Qemu { emulator, sysroot } => {
+                let mut command = Command::new(emulator);
+                command.arg("-L").arg(sysroot).arg(executable);
+                command
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct TestOutcome {
     pub definition: DefPath,
@@ -44,6 +68,17 @@ impl CheckProduct {
         options: &NativeOptions,
         timeout: Option<Duration>,
     ) -> Result<TestOutcome, NativeStop> {
+        self.run_test_with_runner(test, options, timeout, &Runner::Native)
+    }
+
+    /// Run a checked test with explicit native or emulator execution inputs.
+    pub fn run_test_with_runner(
+        &self,
+        test: &DefPath,
+        options: &NativeOptions,
+        timeout: Option<Duration>,
+        runner: &Runner,
+    ) -> Result<TestOutcome, NativeStop> {
         if !self.test_entries.contains_key(test) {
             return Err(NativeStop::Entry(format!(
                 "{test} is not a discovered @test"
@@ -51,7 +86,7 @@ impl CheckProduct {
         }
         let built = self.build(test, options)?;
         let (output, timed_out) = execute(
-            &mut Command::new(std::fs::canonicalize(&built.executable)?),
+            &mut runner.command(&std::fs::canonicalize(&built.executable)?),
             timeout,
         )?;
         Ok(TestOutcome {

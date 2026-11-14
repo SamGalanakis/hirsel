@@ -48,6 +48,14 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 type Result<T> = std::result::Result<T, Error>;
 
+/// Whether this engine implements the requested target's native ABI.
+pub fn supports_target(triple: &str) -> bool {
+    matches!(
+        hirsel_core_layout::Target::from_triple(triple),
+        Some(hirsel_core_layout::Target::X86_64Linux)
+    )
+}
+
 /// Target and optimization policy for CoreIR emission.
 pub struct Options<'a> {
     pub target: &'a str,
@@ -203,7 +211,7 @@ fn emit(
 ) -> Result<Object> {
     let setup = observer.enter("module_setup");
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
-    if !options.target.starts_with("x86_64") || !options.target.contains("linux") {
+    if !supports_target(options.target) {
         return Err(refuse(
             "CoreIR entry currently implements the x86-64 Linux C ABI".into(),
         ));

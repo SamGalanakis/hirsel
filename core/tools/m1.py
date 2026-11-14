@@ -142,7 +142,7 @@ class IncompleteWorkload(AssertionError):
     """The artifact did not demonstrate execution of the selected workload."""
 
 
-def compare_case(binary, directory, case, scratch, timeout=None):
+def compare_case(binary, directory, case, scratch, timeout=None, runner=()):
     """Each run owns an isolated directory. Only explicit outputs may remain."""
     work = scratch / case['name']
     work.mkdir()
@@ -157,7 +157,7 @@ def compare_case(binary, directory, case, scratch, timeout=None):
         shutil.copyfile(directory / source, destination)
     before = files_below(work)
     try:
-        result = subprocess.run([str(binary), case['input'], case['variant']], cwd=work,
+        result = subprocess.run([*runner, str(binary), case['input'], case['variant']], cwd=work,
                                 env={**os.environ, **case.get('env', {})}, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as error:
         return f'hang after {timeout:g}s: stdout {error.stdout or b""!r}, stderr {error.stderr or b""!r}'
@@ -183,7 +183,8 @@ def compare_case(binary, directory, case, scratch, timeout=None):
     return None
 
 
-def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None, case_timeouts=None, include_libraries=True):
+def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None, case_timeouts=None, include_libraries=True, target=None, emulator=None, sysroot=None):
+    runner = [str(emulator), "-L", str(sysroot)] if emulator else []
     manifest = json.loads(manifest_path.read_text())
     entries = [e for e in manifest['entries'] if not only or e['workload'] in only]
     if not entries:
@@ -221,6 +222,8 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                            str(store / entry['workload'] / entry['variant']), '--json', '-o', str(binary)]
                 if engine == 'llvm':
                     command.append('--release')
+                if target:
+                    command.extend(['--target', target])
                 if cc:
                     command.extend(['--cc', str(cc)])
                 build = subprocess.run(command, cwd=root, capture_output=True)
@@ -256,7 +259,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 for case in cases:
                     try:
                         failure = compare_case(binary, corpus, case, scratch,
-                                               (case_timeouts or {}).get(entry['workload'] + '/' + case['name']))
+                                               (case_timeouts or {}).get(entry['workload'] + '/' + case['name']), runner)
                     except IncompleteWorkload as error:
                         row['built'] = False
                         row['passed'] = 0
@@ -371,11 +374,16 @@ def main():
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--store', type=Path)
     parser.add_argument('--cc', type=Path, default=(Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang') if 'LLVM_SYS_231_PREFIX' in os.environ else None)
+    parser.add_argument('--target')
+    parser.add_argument('--emulator', type=Path)
+    parser.add_argument('--sysroot', type=Path)
     parser.add_argument('--only', nargs='+')
     parser.add_argument('--programs-only', action='store_true')
     parser.add_argument('--report', type=Path)
     parser.add_argument('--timeout-case', action='append', default=[], metavar='PROGRAM/CASE=SECONDS')
     args = parser.parse_args()
+    if bool(args.emulator) != bool(args.sysroot):
+        parser.error("--emulator and --sysroot must be supplied together")
     case_timeouts = {}
     for specification in args.timeout_case:
         name, seconds = specification.rsplit('=', 1)
@@ -386,7 +394,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hirsel-m1-store-') as store:
         rows = run(args.compiler.resolve(), args.runtime.resolve(), engines, args.manifest.resolve(),
                    args.root.resolve(), args.store.resolve() if args.store else Path(store),
-                   args.cc.resolve() if args.cc else None, args.only, case_timeouts, not args.programs_only)
+                   args.cc.resolve() if args.cc else None, args.only, case_timeouts, not args.programs_only,
+                   args.target, args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None)
     print(report(rows))
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')

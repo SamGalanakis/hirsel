@@ -92,3 +92,11 @@ pub fn serve_case() -> u64 {
     }
 }
 // expect: run serve_case() = 0
+
+fn region_double[in r](b: u64) -> u64 { b * 2 }
+pub fn region_case() -> u64 {
+    let s = code.describe(region_double)
+    let g = code.callable(s)
+    g(9)
+}
+// expect: run region_case() = 18

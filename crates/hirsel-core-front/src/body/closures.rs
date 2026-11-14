@@ -200,6 +200,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         scratch.found.resize(g.generics.len(), None);
         scratch.checked.clear();
         scratch.checked.resize(g.generics.len(), false);
+        // PROG-9 permits region-generic function items. Region arguments have no
+        // runtime layout and are erased by Emitter::instance; seed their symbolic
+        // roots so a StaticFn item does not require an expected callable type merely
+        // to close a lifetime binder.
+        for (i, generic) in g.generics.iter().enumerate() {
+            if generic.region {
+                scratch.found[i] = Some(self.t.mk(TyKind::Region(Root::Generic(i as u32))));
+            }
+        }
         if let Some(w) = want.filter(|w| w.payload == 0) {
             if let TyKind::Fn(ps, r, _, _) = self.t.kind(w.ty) {
                 let (len, r) = (ps.len(), *r);

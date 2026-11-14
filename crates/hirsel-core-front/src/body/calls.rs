@@ -78,7 +78,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             && let Some(argument) = args.first()
             && let Some(Target::Definition(id)) = p.target(self.at, *argument)
             && let Some(Def::Fn(item)) = p.by_definition[id.0 as usize]
-            && !p.fns[item as usize].generics.is_empty()
+            && p.fns[item as usize]
+                .generics
+                .iter()
+                .any(|generic| !generic.region)
         {
             self.refuse(
                 "PROG-9",

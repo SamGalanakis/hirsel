@@ -1,0 +1,11 @@
+// PROG-9 permits a region generic that is named in neither parameters nor result;
+// its direct call leaves the erased region argument unconstrained.
+fn u1[in a](x: u64) -> u64 {
+    x
+}
+
+pub fn unfixed_region_call() -> u64 {
+    u1(7u64)
+}
+
+// expect: run unfixed_region_call() = 7

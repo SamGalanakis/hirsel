@@ -332,10 +332,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
-        tys.extend(found.iter().map(|s| s.unwrap_or(ERROR)));
+        // Region generics are erased from the instance identity and may remain
+        // unconstrained when they occur in neither a parameter nor the result.
+        // Preserve their generic roots for the signature while refusing only open
+        // type generics (LANG-12).
+        tys.extend(found.iter().enumerate().map(|(i, s)| {
+            s.or_else(|| {
+                g.generics[i]
+                    .region
+                    .then(|| self.t.mk(generic_arg(g, i)))
+            })
+            .unwrap_or(ERROR)
+        }));
         // An undetermined type argument is refused once; the call's type is then the
-        // refused type, so nothing built from it is refused again.
-        let undetermined = found.iter().any(Option::is_none);
+        // refused type, so nothing built from it is refused again. Unfixed region
+        // generics are legal PROG-9 headers and are erased by instance formation.
+        let undetermined = found
+            .iter()
+            .enumerate()
+            .any(|(i, t)| t.is_none() && !g.generics[i].region);
         if undetermined && !self.broken {
             self.refuse("LANG-12", n, "a type parameter of the callee is still open");
         }

@@ -1911,13 +1911,13 @@ fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
 #[test]
 fn small_unaligned_copies_preserve_every_byte_and_both_canaries() {
     let mut source = String::from(
-        "core v1\ntype t0 = own \"Buffer\" { data: array 19 u8 }\nstatic d0 = align 1 hex fe0102030405060708090a0b0c0d0e0f1011ef\nsig g0 = (u64) -> (u64, u8, u8)\n",
+        "core v1\ntype t0 = own \"Buffer\" { data: array 35 u8 }\nstatic d0 = align 1 hex fe0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021ef\nsig g0 = (u64) -> (u64, u8, u8)\n",
     );
-    for size in 0..=18 {
+    for size in 0..=34 {
         writeln!(source, "inst n{size} = test@0/small_copy/f{size} [] []").unwrap();
     }
-    for size in 0..=18 {
-        let length = if size == 18 {
+    for size in 0..=34 {
+        let length = if size == 34 {
             "wrapping_add v0, v2".into()
         } else {
             format!("const {size}")
@@ -1937,8 +1937,8 @@ b0(v0: u64):
   v2: u64 = const 0
   v1: u64 = {length}
   v3: u64 = const 1
-  v4: u64 = const 18
-  v5: u64 = const 19
+  v4: u64 = const 34
+  v5: u64 = const 35
   v6: u8 = const 0
   v7: ptr = static d0
   jump b1(v2)
@@ -1987,17 +1987,17 @@ b6:
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
     let mut runs = Vec::new();
-    for size in 0..=17u32 {
-        let mut bytes = [0u8; 19];
+    for size in 0..=33u32 {
+        let mut bytes = [0u8; 35];
         bytes[0] = 97;
-        bytes[18] = 101;
+        bytes[34] = 101;
         for i in 0..size as usize {
             bytes[i + 1] = i as u8 + 1;
         }
         let hash = bytes
             .into_iter()
             .fold(0u64, |h, b| h.wrapping_mul(257).wrapping_add(u64::from(b)));
-        for function in [FuncId(size), FuncId(18)] {
+        for function in [FuncId(size), FuncId(34)] {
             let report = eval::run(&module, function, &[u64::from(size)], 1000);
             assert_eq!(report.outcome, Outcome::Returned(vec![hash, 97, 101]));
             runs.push((function, vec![u64::from(size)]));

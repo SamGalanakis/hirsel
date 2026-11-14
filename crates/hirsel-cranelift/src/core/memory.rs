@@ -18,12 +18,12 @@ impl Function<'_, '_, '_> {
             return false;
         };
         let size = imm.bits();
-        if !(0..=16).contains(&size) {
+        if !(0..=32).contains(&size) {
             return false;
         }
         // Unaligned, exact-width accesses. Keep all source bytes in registers
-        // before storing, including the odd tails of 9, 13 and 15-byte copies.
-        let mut loaded = [None; 4];
+        // before storing, including odd tails and the 24-byte sequence carrier.
+        let mut loaded = [None; 6];
         let mut offset = 0;
         for chunk in &mut loaded {
             let remaining = size - i64::from(offset);

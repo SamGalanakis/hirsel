@@ -666,7 +666,25 @@ impl Glue<'_, '_, '_> {
         let n = self.b.ins().iadd_imm_s(n, 7);
         self.b.ins().band_imm_s(n, -8)
     }
+    fn element_needs_drop(&self, e: &FieldTy) -> bool {
+        match e {
+            FieldTy::Inline(t) => self.tables.layouts[t.index()].drop.is_some(),
+            FieldTy::Array(e, n) => *n != 0 && self.element_needs_drop(e),
+            FieldTy::Scalar(_)
+            | FieldTy::Stable(_)
+            | FieldTy::Fn
+            | FieldTy::Borrow
+            | FieldTy::View(_)
+            | FieldTy::Locator(_) => false,
+            _ => true,
+        }
+    }
     fn array(&mut self, base: Value, e: &FieldTy, len: Value) -> Result<()> {
+        // Buffer ownership still requires its free/refund, but an element
+        // without a drop operation needs no visit in an unoptimized loop.
+        if !self.element_needs_drop(e) {
+            return Ok(());
+        }
         let head = self.b.create_block();
         let body = self.b.create_block();
         let done = self.b.create_block();

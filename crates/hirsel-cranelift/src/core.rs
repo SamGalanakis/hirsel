@@ -23,6 +23,7 @@ mod drop;
 mod failure;
 mod fast;
 mod function;
+mod loops;
 mod memory;
 mod place;
 pub mod profile;

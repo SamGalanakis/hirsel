@@ -76,11 +76,66 @@ pub(super) fn emit(
             values[id.index()] = value;
         }
     }
+    let fills = super::loops::byte_fills(body);
     let mut definitions = vec![0u32; body.addresses.len()];
-    for inst in &body.insts {
-        if let Inst::Address { address, .. } = inst {
-            definitions[address.index()] += 1;
+    let mut defined_in = vec![usize::MAX; body.addresses.len()];
+    for (block, row) in body.blocks.iter().enumerate() {
+        for inst in row.insts.get(&body.insts).unwrap() {
+            if let Inst::Address { address, .. } = *inst {
+                definitions[address.index()] += 1;
+                defined_in[address.index()] = block;
+            }
         }
+    }
+    for (block, row) in body.blocks.iter().enumerate() {
+        let mut used = |address: AddressId| {
+            // Entry definitions dominate every use. A later evaluated address
+            // used outside its block can be a loop's last snapshot; it is not
+            // necessarily a dominating SSA definition, even with one emitter.
+            let definition = defined_in[address.index()];
+            if definition != 0 && definition != block {
+                definitions[address.index()] = 2;
+            }
+        };
+        for inst in row.insts.get(&body.insts).unwrap() {
+            match *inst {
+                Inst::Address { address, .. } => {
+                    if let AddressBase::Address(parent) = body.addresses[address.index()].base {
+                        used(parent);
+                    }
+                }
+                Inst::Read { address, .. }
+                | Inst::Store { address, .. }
+                | Inst::Pointer { address, .. }
+                | Inst::Case { address, .. }
+                | Inst::SetCase { address, .. }
+                | Inst::Drop { address, .. } => used(address),
+                Inst::Copy { to, from, .. } => {
+                    used(to);
+                    used(from);
+                }
+                Inst::Call { call } => {
+                    for arg in body.calls[call.index()].args.get(&body.pools.args).unwrap() {
+                        if let Arg::Address(address) = *arg {
+                            used(address);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Terminator::Raise {
+            cause: RaiseCause::Fail(address),
+            ..
+        } = body.terminators[block]
+        {
+            used(address);
+        }
+    }
+    // A fused loop publishes its last evaluated address, which may be read
+    // after a guarded exit even though the body does not dominate that read.
+    for fill in fills.iter().flatten() {
+        definitions[fill.store.index()] = 2;
     }
     let addresses = definitions
         .into_iter()
@@ -151,8 +206,38 @@ pub(super) fn emit(
     for i in order(body) {
         let block = &body.blocks[i];
         f.b.switch_to_block(f.blocks[i]);
+        let fill = fills.get(i).copied().flatten();
+        let original_index = if let Some(fill) = fill {
+            let index = f.get(fill.index);
+            let bound = f.get(fill.bound);
+            let base = f.get(fill.base);
+            let to = f.b.ins().iadd(base, index);
+            let bytes = f.b.ins().isub(bound, index);
+            let byte = f.get(fill.byte);
+            let byte = f.resize(byte, types::I32, false);
+            f.c_call(
+                "memset",
+                &[Ty::Ptr, Ty::Scalar(Scalar::U32), Ty::Scalar(Scalar::U64)],
+                &[Ty::Ptr],
+                &[to, byte, bytes],
+            )?;
+            // This block is entered only for index < bound. Preserve its
+            // evaluated address snapshot and scalar definitions as the last
+            // iteration; its existing backedge then carries bound to the test.
+            let last = f.b.ins().iadd_imm_s(bound, -1);
+            f.set(fill.index, last);
+            Some(index)
+        } else {
+            None
+        };
         for inst in block.insts.get(&body.insts).unwrap() {
-            f.instruction(inst)?;
+            if !matches!((fill, inst), (Some(fill), Inst::Store { address, .. }) if fill.store == *address)
+            {
+                f.instruction(inst)?;
+            }
+        }
+        if let (Some(fill), Some(index)) = (fill, original_index) {
+            f.set(fill.index, index);
         }
         match &body.terminators[i] {
             Terminator::Return(range) => {

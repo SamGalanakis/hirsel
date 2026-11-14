@@ -2066,3 +2066,125 @@ b2:
         execute_cases(&module, optimize, &cases);
     }
 }
+
+#[test]
+fn byte_fill_ranges_keep_canaries_counter_and_last_address_snapshot() {
+    let module = text::parse(
+        r#"core v1
+type t0 = own "Buffer" { data: array 35 u8 }
+sig g0 = (u64, u64, u8) -> (u64, u64, u8, u8, u8)
+inst n0 = test@0/fill/range [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = s0 byte v6 : u8
+  addr a1 = s0 byte v3 : u8
+  addr a2 = v9 byte v12 : u8
+  addr a3 = s0 byte v16 : u8
+  addr a4 = s0 byte v4 : u8
+  addr a5 = s0 byte v5 : u8
+b0(v0: u64, v1: u64, v2: u8):
+  live s0
+  v3: u64 = const 0
+  v4: u64 = const 1
+  v5: u64 = const 34
+  v7: u64 = const 35
+  v8: u8 = const 0
+  v14: u64 = const 0
+  v15: u64 = const 0
+  jump b1(v3)
+b1(v6: u64):
+  v18: bool = lt v6, v7
+  branch v18, b2, b3
+b2:
+  address a0
+  store a0, v8
+  v19: u64 = wrapping_add v6, v4
+  jump b1(v19)
+b3:
+  address a1
+  address a5
+  v20: u8 = const 97
+  v21: u8 = const 101
+  store a1, v20
+  store a5, v21
+  address a4
+  v9: ptr = pointer a4
+  jump b4(v0)
+b4(v10: u64):
+  v11: bool = lt v10, v1
+  branch v11, b5, b6
+b5:
+  v12: u64 = wrapping_mul v10, v4
+  address a2
+  store a2, v2
+  v13: u64 = wrapping_add v10, v4
+  jump b4(v13)
+b6:
+  v22: bool = lt v0, v1
+  branch v22, b7, b8
+b7:
+  v23: u8 = read a2
+  jump b9(v23)
+b8:
+  jump b9(v8)
+b9(v24: u8):
+  jump b10(v3, v3)
+b10(v16: u64, v17: u64):
+  v25: bool = lt v16, v7
+  branch v25, b11, b12
+b11:
+  address a3
+  v26: u8 = read a3
+  v27: u64 = widen v26
+  v28: u64 = const 257
+  v29: u64 = wrapping_mul v17, v28
+  v30: u64 = wrapping_add v29, v27
+  v31: u64 = wrapping_add v16, v4
+  jump b10(v31, v30)
+b12:
+  address a1
+  address a5
+  v32: u8 = read a1
+  v33: u8 = read a5
+  dead s0
+  return v10, v17, v24, v32, v33
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    let runs: Vec<_> = [0, 1, 3, 16, 32]
+        .into_iter()
+        .flat_map(|start| {
+            [0, 1, 3, 16, 32].into_iter().flat_map(move |end| {
+                [0, 7, 255].map(move |byte| (FuncId(0), vec![start, end, byte]))
+            })
+        })
+        .collect();
+    for optimize in [false, true] {
+        execute(&module, &runs, optimize);
+    }
+    // Similar loops must keep their ordinary stores: non-unit stride, an
+    // inclusive bound, and an extra observable store are different operations.
+    let source = text::print(&module);
+    let non_unit = source
+        .replace("wrapping_mul v10, v4", "wrapping_mul v10, v14")
+        .replace("v14: u64 = const 0", "v14: u64 = const 2");
+    let inclusive = source.replace("lt v10, v1", "le v10, v1");
+    let effectful = source.replace("store a2, v2", "store a2, v2\n  store a5, v2");
+    let short: Vec<_> = [0, 1, 3]
+        .into_iter()
+        .flat_map(|start| {
+            [0, 1, 3].into_iter().flat_map(move |end| {
+                [0, 7, 255].map(move |byte| (FuncId(0), vec![start, end, byte]))
+            })
+        })
+        .collect();
+    for source in [non_unit, inclusive, effectful] {
+        let module = text::parse(&source).unwrap();
+        wf::module(&module).unwrap();
+        for optimize in [false, true] {
+            execute(&module, &short, optimize);
+        }
+    }
+}

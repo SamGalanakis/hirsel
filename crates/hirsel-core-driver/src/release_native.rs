@@ -118,7 +118,7 @@ impl CheckProduct {
             let text = modules
                 .iter()
                 .map(|ir| {
-                    hirsel_llvm_lazy::core::emit_ir_for_target(
+                    hirsel_llvm_lazy::core::emit_ir_relocatable_for_target(
                         ir,
                         hirsel_core_layout::Target::from_triple(&options.target)
                             .expect("supported native target"),

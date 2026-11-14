@@ -143,7 +143,7 @@ fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String
         )
         .map(|o| o.bytes)
         .map_err(|e| e.to_string()),
-        Backend::Llvm => hirsel_llvm_lazy::core::emit_object_for_target(
+        Backend::Llvm => hirsel_llvm_lazy::core::emit_object_relocatable_for_target(
             module,
             hirsel_core_layout::Target::from_triple(&options.target)
                 .ok_or_else(|| format!("unsupported LLVM target {}", options.target))?,

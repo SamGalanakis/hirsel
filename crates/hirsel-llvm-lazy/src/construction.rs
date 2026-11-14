@@ -60,6 +60,7 @@ pub(crate) struct Api {
     unit_new: unsafe extern "C" fn(Raw, *const c_char, usize) -> Raw,
     unit_drop: unsafe extern "C" fn(Raw),
     unit_take: unsafe extern "C" fn(Raw) -> Raw,
+    unit_bitcode: unsafe extern "C" fn(Raw, *mut Output),
     print: unsafe extern "C" fn(Raw, *mut Output),
     print_text: unsafe extern "C" fn(*const c_char, usize, *mut Output),
     integer_type: unsafe extern "C" fn(Raw, u32) -> Raw,
@@ -197,6 +198,14 @@ fn output(out: Output) -> Result<String, String> {
     if out.failed == 0 { Ok(text) } else { Err(text) }
 }
 impl<'c> Unit<'c> {
+    pub fn bitcode(&self) -> Result<Vec<u8>, String> {
+        let mut out=Output::default();
+        // SAFETY: the component serializes the live module synchronously.
+        unsafe {(self.api.unit_bitcode)(self.raw,&mut out)}
+        let bytes=unsafe {std::slice::from_raw_parts(out.data,out.len).to_vec()};
+        unsafe {crate::loader::free_construction_output(out.data)};
+        if out.failed==0 {Ok(bytes)} else {Err(String::from_utf8_lossy(&bytes).into_owned())}
+    }
     pub fn print(&self) -> Result<String, String> {
         let mut out = Output::default();
         // SAFETY: this live unit owns the module throughout its synchronous print.

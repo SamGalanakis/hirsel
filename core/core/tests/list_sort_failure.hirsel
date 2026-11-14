@@ -91,3 +91,136 @@ fn scratch_capacity_atomic(out: Stdout) -> bool {
     for x in audit.values { ids = ids * 10 + x.id }
     refused && calls == 0 && ids == 1234
 }
+
+// n=7 keys [3,2,1,0,3,2,1], stable ids [3,2,6,1,5,0,4].
+// Width1 takes3comparisons, width2 takes3, width4 takes6:12 total.
+// Call6 is scratch->xs in the second pair, after the first4elements merged.
+resource type SevenAudit { out: Stdout, values: List[SortItem] }
+  drop(t) {
+    let mut valid = list.len(t.values) == 7 && list.capacity(t.values) == 8
+    let mut mask: u64 = 0
+    for x in t.values {
+        if x.id >= 7 { valid = false } else {
+            let bit = 1u64 << x.id
+            if (mask & bit) != 0 { valid = false }
+            mask |= bit
+            let key:u64 = if x.id < 4 { 3 - x.id } else { 7 - x.id }
+            if x.key != key { valid = false }
+        }
+    }
+    let _ = stdout.write(t.out, if valid && mask == 127 { "ok" } else { "bad" })
+  }
+fn seven_fail_at(out: Stdout, failure: u64) -> u64 {
+    let mut xs: List[SortItem] = list.new()
+    for i in 0u64 .. 7 {
+        let key:u64 = if i < 4 { 3 - i } else { 7 - i }
+        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out:out,id:i,key:key))))
+    }
+    let mut audit = result.unwrap(SevenAudit(out:out,values:take xs))
+    let mut calls:u64 = 0
+    result.unwrap(list.sort_stable(mut audit.values, fn(a:SortItem,b:SortItem)->Order {
+        calls += 1
+        if calls == failure { let none: Option[u64] = None; let _ = option.unwrap(none) }
+        if a.key < b.key { Less } else if a.key > b.key { Greater } else { Equal }
+    }))
+    let mut ids:u64 = 0
+    for x in audit.values { ids = ids * 10 + x.id }
+    if ids != 3261504 { return 99 }
+    calls
+}
+
+// Host-free twin of the same seven keys/call sequence. The evaluator checks
+// every scratch/source live slot on failure and returns root admission to0.
+fn seven_plain_fail_at(failure:u64) -> u64 {
+    let mut xs:List[u64] = list.new()
+    for i in 0u64 .. 7 {
+        let key:u64 = if i < 4 { 3 - i } else { 7 - i }
+        result.unwrap(list.push(mut xs, key))
+    }
+    let mut calls:u64 = 0
+    result.unwrap(list.sort_stable(mut xs, fn(a:u64,b:u64)->Order {
+        calls += 1
+        if calls == failure { let none: Option[u64] = None; let _ = option.unwrap(none) }
+        if a < b { Less } else if a > b { Greater } else { Equal }
+    }))
+    if xs[0] != 0 || xs[1] != 1 || xs[2] != 1 || xs[3] != 2 || xs[4] != 2 || xs[5] != 3 || xs[6] != 3 { return 99 }
+    calls
+}
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_complete(out) = 12
+fn seven_complete(out:Stdout) -> u64 { seven_fail_at(out, 0) }
+// expect: run seven_plain_complete() = 12
+fn seven_plain_complete() -> u64 { seven_plain_fail_at(0) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_1(out) = fail Unwrap
+fn seven_failure_1(out:Stdout) -> u64 { seven_fail_at(out, 1) }
+// expect: run seven_plain_failure_1() = fail Unwrap
+fn seven_plain_failure_1() -> u64 { seven_plain_fail_at(1) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_2(out) = fail Unwrap
+fn seven_failure_2(out:Stdout) -> u64 { seven_fail_at(out, 2) }
+// expect: run seven_plain_failure_2() = fail Unwrap
+fn seven_plain_failure_2() -> u64 { seven_plain_fail_at(2) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_3(out) = fail Unwrap
+fn seven_failure_3(out:Stdout) -> u64 { seven_fail_at(out, 3) }
+// expect: run seven_plain_failure_3() = fail Unwrap
+fn seven_plain_failure_3() -> u64 { seven_plain_fail_at(3) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_4(out) = fail Unwrap
+fn seven_failure_4(out:Stdout) -> u64 { seven_fail_at(out, 4) }
+// expect: run seven_plain_failure_4() = fail Unwrap
+fn seven_plain_failure_4() -> u64 { seven_plain_fail_at(4) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_5(out) = fail Unwrap
+fn seven_failure_5(out:Stdout) -> u64 { seven_fail_at(out, 5) }
+// expect: run seven_plain_failure_5() = fail Unwrap
+fn seven_plain_failure_5() -> u64 { seven_plain_fail_at(5) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_6(out) = fail Unwrap
+fn seven_failure_6(out:Stdout) -> u64 { seven_fail_at(out, 6) }
+// expect: run seven_plain_failure_6() = fail Unwrap
+fn seven_plain_failure_6() -> u64 { seven_plain_fail_at(6) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_7(out) = fail Unwrap
+fn seven_failure_7(out:Stdout) -> u64 { seven_fail_at(out, 7) }
+// expect: run seven_plain_failure_7() = fail Unwrap
+fn seven_plain_failure_7() -> u64 { seven_plain_fail_at(7) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_8(out) = fail Unwrap
+fn seven_failure_8(out:Stdout) -> u64 { seven_fail_at(out, 8) }
+// expect: run seven_plain_failure_8() = fail Unwrap
+fn seven_plain_failure_8() -> u64 { seven_plain_fail_at(8) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_9(out) = fail Unwrap
+fn seven_failure_9(out:Stdout) -> u64 { seven_fail_at(out, 9) }
+// expect: run seven_plain_failure_9() = fail Unwrap
+fn seven_plain_failure_9() -> u64 { seven_plain_fail_at(9) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_10(out) = fail Unwrap
+fn seven_failure_10(out:Stdout) -> u64 { seven_fail_at(out, 10) }
+// expect: run seven_plain_failure_10() = fail Unwrap
+fn seven_plain_failure_10() -> u64 { seven_plain_fail_at(10) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_11(out) = fail Unwrap
+fn seven_failure_11(out:Stdout) -> u64 { seven_fail_at(out, 11) }
+// expect: run seven_plain_failure_11() = fail Unwrap
+fn seven_plain_failure_11() -> u64 { seven_plain_fail_at(11) }
+
+// expect: stdout "okXXXXXXX"
+// expect: run seven_failure_12(out) = fail Unwrap
+fn seven_failure_12(out:Stdout) -> u64 { seven_fail_at(out, 12) }
+// expect: run seven_plain_failure_12() = fail Unwrap
+fn seven_plain_failure_12() -> u64 { seven_plain_fail_at(12) }

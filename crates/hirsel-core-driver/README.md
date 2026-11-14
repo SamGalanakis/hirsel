@@ -20,7 +20,12 @@ root node, rows, tombstones and maps together. A request reads the whole index,
 never a whole product, and writes only the records that changed. Disk reads check
 version, length and digest. Lookups treat a tombstone as not found.
 Resolver scratch is not retained or encoded; definition keys retain its observed
-lookup fingerprint and one hash of the transitive signature components.
+lookup fingerprint and one hash of the transitive signature components. A body's
+own part of its key is its item's source bytes: record sites and IR anchors are
+offsets from the item start, which includes a leading comment, so a comment or
+layout edit inside an item rechecks it, while a moved item keeps its bytes and its
+record. Signatures are keyed by header tokens; a resolved body's record cites no
+other item.
 No old std products, old requests, TIR or independent checker enter this path.
 
 A warm in-memory snapshot performs no source checking. Requests reuse unchanged

@@ -621,6 +621,7 @@ impl Driver {
                 }));
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
+            let mut fresh: Vec<(DefPath, ContentHash)> = Vec::new();
             for f in p.fns.base_len()..p.fns.len() {
                 let fd = &p.fns[f];
                 if fd.body.is_none() {
@@ -664,6 +665,13 @@ impl Driver {
                     prior_definition(&store, &prior, &fd.path, &key, key_hash)?.map(Arc::new)
                 };
                 let product = if let Some(product) = cached {
+                    publication.rows.insert(
+                        fd.path.clone(),
+                        check_index::Row::Live {
+                            key: key_hash,
+                            body: product.record,
+                        },
+                    );
                     product
                 } else {
                     let mut emitter = Emitter::new();
@@ -688,7 +696,7 @@ impl Driver {
                         .collect();
                     let anchors = keys.capture_anchors(&check, &incomplete);
                     result.rechecked.push(fd.path.clone());
-                    let mut product = DefinitionProduct {
+                    let product = DefinitionProduct {
                         definition: fd.path.clone(),
                         check,
                         ir: emitter.module,
@@ -698,18 +706,10 @@ impl Driver {
                         incomplete,
                         record: ContentHash::default(),
                     };
-                    let (record, bytes) = Store::frame(&encode(&DiskCheckRef::of(&product)?)?);
-                    product.record = record;
-                    publication.bodies.push((record, bytes));
+                    // Framed below, as publication work, once checking is done.
+                    fresh.push((fd.path.clone(), key_hash));
                     Arc::new(product)
                 };
-                publication.rows.insert(
-                    fd.path.clone(),
-                    check_index::Row::Live {
-                        key: key_hash,
-                        body: product.record,
-                    },
-                );
                 if product.resolved {
                     for r in &product.check.refusals {
                         let mut r = r.clone();
@@ -727,6 +727,29 @@ impl Driver {
                 }
                 result.definitions.insert(fd.path.clone(), product);
             }
+            meter.finish("check/lower");
+            for (path, key_hash) in fresh {
+                let product = result
+                    .definitions
+                    .get_mut(&path)
+                    .and_then(Arc::get_mut)
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "internal error: the checked body `{path}` is shared before its record is framed"
+                        ))
+                    })?;
+                let (record, bytes) = Store::frame(&encode(&DiskCheckRef::of(product)?)?);
+                product.record = record;
+                publication.bodies.push((record, bytes));
+                publication.rows.insert(
+                    path,
+                    check_index::Row::Live {
+                        key: key_hash,
+                        body: record,
+                    },
+                );
+            }
+            meter.finish("publish/body records");
             result.native_entry = request
                 .entry
                 .as_ref()

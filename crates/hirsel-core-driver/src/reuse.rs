@@ -445,7 +445,10 @@ impl Keys {
             }
             components.sort_unstable();
             components.dedup();
-            ContentHash::of_parts("hirsel.signature-closure.v1", [&encode(&components)?[..]])
+            ContentHash::of_parts(
+                "hirsel.signature-closure.v2",
+                components.iter().map(|c| &c.0[..]),
+            )
         };
         let lookups: Vec<_> = {
             hirsel_core_front::cost_scope!("key work", "lookup rows");

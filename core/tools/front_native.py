@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 NAMES = ['args-empty', 'args-len', 'args-print', 'args-returned-views', 'args-values',
-         'clocks', 'host-close-cancel', 'host-read', 'host-wait-cancel', 'host',
+         'clocks', 'host-close-cancel', 'host-read', 'host-wait-cancel', 'host', 'host-rename-sleep',
          'mkdtemp-bounds', 'mkdtemp', 'stderr-cancel', 'stderr-closed', 'stdout-cancel',
          'stdout-closed', 'streams', 'string-growth-refusal', 'string-growth', 'string-shorten']
 

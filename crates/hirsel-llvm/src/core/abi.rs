@@ -227,6 +227,26 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         } else {
             Return::on_target(self.abi.target, &sig.results)
         };
+        if !has_status && sig.dest.is_none() && sig.results.len() == 1
+            && site.args.get(&self.body.pools.args).unwrap().iter().all(|a| matches!(a, Arg::Value(_)))
+        {
+            let mut params = vec![sink::Parameter::plain(sink::Type::Ptr)];
+            let mut values = vec![sink::Value::Local(sink::Local::Context)];
+            for arg in site.args.get(&self.body.pools.args).unwrap() {
+                let Arg::Value(value) = *arg else { unreachable!() };
+                let ty = self.vty(value); params.push(sink::Parameter::plain(super::ir_type(ty)));
+                let numeric = self.numeric(value);
+                values.push(self.operand(&numeric));
+            }
+            params.push(sink::Parameter::plain(sink::Type::I64));
+            let call_site = self.call_site_word(site.callee);
+            values.push(self.operand(&call_site));
+            let name = match site.callee { Callee::Direct(f) => format!("{}.infallible", symbol(self.module, f)), _ => return false };
+            let signature = sink::Signature { result: super::ir_type(sig.results[0]), extension: sink::Extension::None, params };
+            let result = self.typed(sink::Operation::Call(&signature, &sink::Value::Global(name), &values, &sink::CallAttrs::default()));
+            for value in site.results.get(&self.body.pools.values).unwrap() { self.put(*value, &result); }
+            return true;
+        }
         if has_status && !self.has_status {
             return false;
         }

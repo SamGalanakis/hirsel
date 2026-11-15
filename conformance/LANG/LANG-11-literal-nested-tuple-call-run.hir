@@ -4,7 +4,7 @@ fn nested_value[T](value: ((T, T), T), x: T) -> u64 {
   0u64
 }
 
-pub fn main() -> Result[(), ()] {
+pub fn main() -> Result[(), String] {
   let _ = nested_value(((1, 2), 3), 4u64)
   Ok(())
 }

@@ -13,6 +13,9 @@ conformance/DROP/DROP-2-moved-storage-failure-mixed.hir
 conformance/DROP/DROP-2-moved-storage-failure-strict.hir
 conformance/DROP/DROP-2-replace-resource-run.hir
 conformance/FAIL/FAIL-2-isolate-catches.hir
+conformance/LANG/LANG-11-literal-array-call-run.hir
+conformance/LANG/LANG-11-literal-nested-tuple-call-run.hir
+conformance/LANG/LANG-11-literal-tuple-call-run.hir
 conformance/LANG/LANG-13-loop-tuple-payload-part-run.hir
 conformance/LANG/LANG-13-nested-variant-payload-drop-run.hir
 conformance/LANG/LANG-2-generic-callable-owned-run.hir

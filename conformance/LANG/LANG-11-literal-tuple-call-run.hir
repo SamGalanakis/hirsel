@@ -8,7 +8,7 @@ fn transfer(take value: (u64, u64, u64)) -> u64 {
   7u64
 }
 
-pub fn main() -> Result[(), ()] {
+pub fn main() -> Result[(), String] {
   let _ = apply((1, 2, 5), transfer)
   Ok(())
 }

@@ -644,19 +644,22 @@ fn fill(
             let Some(&(ty, logical)) = sizes.get(result) else {
                 continue;
             };
-            *bits = if s.module.types[ty.index()].repr == LRepr::Resource {
-                hirsel_core_layout::POINTER
-            } else if logical {
-                recipes[ty.index()]
+            // A resource's or stable value's holder is its block pointer; a stable
+            // holder counts as a `Stable` field in a logical size (MEM-24), as in
+            // `layout_size`.
+            *bits = match s.module.types[ty.index()].repr {
+                LRepr::Resource => hirsel_core_layout::POINTER,
+                LRepr::Stable if logical => 16,
+                LRepr::Stable => hirsel_core_layout::POINTER,
+                _ if logical => recipes[ty.index()]
                     .logical_size
-                    .ok_or("logical size of a compact generic value is not built")?
-            } else {
-                match &recipes[ty.index()].layout {
+                    .ok_or("logical size of a compact generic value is not built")?,
+                _ => match &recipes[ty.index()].layout {
                     Layout::Fixed(f) => f.size,
                     Layout::Compact(_) => {
                         return Err("copying a compact generic value is not built".into());
                     }
-                }
+                },
             };
         }
     }

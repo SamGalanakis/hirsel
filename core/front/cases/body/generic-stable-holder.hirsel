@@ -1,0 +1,53 @@
+// MEM-5, MEM-24: a stable value is held as its block's pointer, so a generic body
+// instantiated at a stable T copies the 8-byte holder, and a logical size counts
+// the holder as a `Stable` field (16), exactly as the same body written at the
+// concrete type does (stable-placement.hirsel, widened()).
+// expect: accept
+// expect: run kept() = 15
+// expect: run widened() = 64
+stable type Span2 {
+    start: u64,
+    end: u64
+}
+
+stable type Span3 {
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+fn keep[T](take x: T) -> T {
+    let y = x
+    y
+}
+
+fn kept() -> u64 {
+    region r {
+        match Span2(start: 5, end: 10) in r {
+            Ok(s) => {
+                let t = keep(s)
+                t.start + t.end
+            },
+            Error(_) => 0
+        }
+    }
+}
+
+// budgets.md: a reference to a stable value counts 16, so reserving 4 requests
+// 4 * 16 bytes, not 4 * 24.
+fn asked[T](mut xs: List[T]) -> u64 {
+    let got = bound bytes 0 {
+        list.reserve(mut xs, 4)
+    }
+    match got {
+        Ok(Error(e)) => e.requested,
+        _ => 0
+    }
+}
+
+fn widened() -> u64 {
+    region r {
+        let mut xs: List[Span3 in r] = list.new()
+        asked(mut xs)
+    }
+}

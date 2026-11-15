@@ -104,6 +104,76 @@ pub mod crash {
     }
 }
 
+#[cfg(feature = "testing")]
+pub mod lock_spool {
+    use std::collections::{BTreeMap, VecDeque};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum LockResult {
+        Acquired,
+        Held,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct Message {
+        pub turn: u64,
+        pub run: u64,
+        pub position: u64,
+        pub bytes: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    pub struct Provider {
+        locks: BTreeMap<String, u64>,
+        spool: BTreeMap<String, VecDeque<Message>>,
+        next_turn: u64,
+        last_position: BTreeMap<(u64, String), u64>,
+    }
+
+    impl Provider {
+        pub fn try_lock(&mut self, run: u64, name: &str) -> LockResult {
+            match self.locks.get(name) {
+                Some(&owner) if owner != run => LockResult::Held,
+                _ => {
+                    self.locks.insert(name.into(), run);
+                    LockResult::Acquired
+                }
+            }
+        }
+
+        pub fn unlock(&mut self, run: u64, name: &str) {
+            assert_eq!(self.locks.get(name), Some(&run));
+            self.locks.remove(name);
+        }
+
+        pub fn append(&mut self, run: u64, stream: &str, position: u64, bytes: &[u8]) {
+            let key = (run, stream.to_owned());
+            let expected = self.last_position.get(&key).map_or(0, |p| p + 1);
+            assert_eq!(position, expected, "spool positions must be consecutive");
+            self.last_position.insert(key, position);
+            let turn = self.next_turn;
+            self.spool
+                .entry(stream.into())
+                .or_default()
+                .push_back(Message {
+                    turn,
+                    run,
+                    position,
+                    bytes: bytes.to_vec(),
+                });
+            self.next_turn += 1;
+        }
+
+        pub fn receive(&mut self, stream: &str) -> Option<Message> {
+            self.spool.get_mut(stream)?.pop_front()
+        }
+
+        pub fn pending(&self, stream: &str) -> usize {
+            self.spool.get(stream).map_or(0, VecDeque::len)
+        }
+    }
+}
+
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::crash::{FileSystem, Op, run_until_restart};
@@ -143,5 +213,33 @@ mod tests {
         let second = run_until_restart(&ops, ops.len()).snapshot();
         assert_eq!(first, second);
         assert_eq!(first.data.len(), 1);
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod lock_spool_tests {
+    use super::lock_spool::{LockResult, Provider};
+
+    #[test]
+    fn two_runs_share_one_lock_and_one_deterministic_spool() {
+        let mut provider = Provider::default();
+        assert_eq!(provider.try_lock(1, "store"), LockResult::Acquired);
+        assert_eq!(provider.try_lock(2, "store"), LockResult::Held);
+        provider.unlock(1, "store");
+        assert_eq!(provider.try_lock(2, "store"), LockResult::Acquired);
+
+        provider.append(1, "reply", 0, b"one");
+        provider.append(2, "reply", 0, b"two");
+        assert_eq!(provider.pending("reply"), 2);
+        assert_eq!(provider.receive("reply").unwrap().bytes, b"one");
+        assert_eq!(provider.receive("reply").unwrap().bytes, b"two");
+        assert_eq!(provider.receive("reply"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "spool positions must be consecutive")]
+    fn spool_rejects_a_position_gap() {
+        let mut provider = Provider::default();
+        provider.append(1, "reply", 1, b"gap");
     }
 }

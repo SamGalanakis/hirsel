@@ -2,12 +2,12 @@
 
 The Cranelift engine, for fast development builds: CoreIR modules emitted as relocatable
 ELF objects through Cranelift 0.136.3 (`cranelift-codegen`, `-frontend`, `-module`,
-`-object`, pinned `=0.136.3`) and `gimli` 0.33 for DWARF. It links with the same runtime
+`-object`, pinned `=0.136.3`). It links with the same runtime
 archive and calls at the same ABI as `hirsel-llvm`. Development builds use it by default;
 `hirsel build --backend cranelift` selects it explicitly.
 
 Dependencies: `hirsel-core-ids`, `hirsel-core-layout` and `hirsel-core-ir`, the four
-Cranelift crates and `gimli`. No other implementation crate.
+Cranelift crates. No other implementation crate.
 
 Interface (`core`):
 

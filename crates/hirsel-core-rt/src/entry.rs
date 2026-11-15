@@ -165,7 +165,7 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
 enum StartupError {
     Io(io::Error),
     MissingGrant(usize),
-    UnsupportedHostOpenat2(usize, io::Error),
+    UnsupportedHostOpenat2(io::Error),
 }
 impl From<io::Error> for StartupError {
     fn from(error: io::Error) -> Self {
@@ -175,7 +175,7 @@ impl From<io::Error> for StartupError {
 impl StartupError {
     fn into_io(self) -> io::Error {
         match self {
-            Self::Io(error) | Self::UnsupportedHostOpenat2(_, error) => error,
+            Self::Io(error) | Self::UnsupportedHostOpenat2(error) => error,
             Self::MissingGrant(_) => io::Error::from_raw_os_error(libc::EACCES),
         }
     }
@@ -280,7 +280,7 @@ impl OsProcess {
                     if let Some(probe) = probe.take() {
                         let designation = process._metadata[(handle - 1) as usize].handle;
                         probe(process.os.as_ref().unwrap(), designation)
-                            .map_err(|error| StartupError::UnsupportedHostOpenat2(n, error))?;
+                            .map_err(|error| StartupError::UnsupportedHostOpenat2(error))?;
                     }
                 }
                 process.grants.push(handle);
@@ -423,7 +423,7 @@ unsafe fn run_with_sources_and_probe(
                     line.extend_from_slice(unsafe { bytes(*names.add(index)) });
                     line.extend_from_slice(b"` is not in the run's configuration\n");
                 }
-                StartupError::UnsupportedHostOpenat2(_, _) => {
+                StartupError::UnsupportedHostOpenat2(_) => {
                     line.extend_from_slice(
                         b"Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
                     );

@@ -86,11 +86,6 @@ impl Return {
         }
     }
 
-    #[cfg(all(test, not(hirsel_lazy_core)))]
-    pub fn new(fields: &[Ty]) -> Self {
-        Self::on_target(hirsel_core_layout::Target::X86_64Linux, fields)
-    }
-
     pub fn on_target(target: hirsel_core_layout::Target, fields: &[Ty]) -> Self {
         let mut offsets = vec![];
         let mut end = 0u64;

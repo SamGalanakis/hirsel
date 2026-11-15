@@ -70,7 +70,6 @@ fn declare_functions(source: &mut String, module: &c::Module) {
     }
     for f in &module.functions {
         let s = &module.signatures[f.signature.index()];
-        let indirect = result_layout(s).0;
         // Declare aggregate returns as aggregates even when Cranelift lowers
         // them through a hidden sret pointer.  On AArch64 this makes the C
         // compiler place that hidden pointer in x8, matching the platform ABI;
@@ -982,18 +981,6 @@ fn c_compiler() -> PathBuf {
         input_path("HIRSEL_TOOLCHAIN_ARM").join("bin/aarch64-none-linux-gnu-gcc")
     } else {
         PathBuf::from("cc")
-    }
-}
-fn native_command(binary: &std::path::Path) -> Command {
-    if NATIVE_TARGET == "aarch64-unknown-linux-gnu" {
-        let mut command = Command::new(input_path("HIRSEL_TOOLCHAIN_QEMU").join("qemu-aarch64"));
-        command
-            .arg("-L")
-            .arg(input_path("HIRSEL_TOOLCHAIN_ARM").join("aarch64-none-linux-gnu/libc"))
-            .arg(binary);
-        command
-    } else {
-        Command::new(binary)
     }
 }
 

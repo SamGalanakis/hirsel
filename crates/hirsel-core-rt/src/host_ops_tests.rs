@@ -400,16 +400,14 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                 0
             }
             Scenario::SleepCancelDuring => {
-                let context_address = (ctx as usize);
+                let context_address = ctx as usize;
                 let canceller = std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     // SAFETY: the child thread only flips the atomic cancellation
                     // flag while the run's entry remains synchronously active.
-                    unsafe {
-                        (*(context_address as *mut Context))
-                            .cancel_requested
-                            .store(true, std::sync::atomic::Ordering::Release);
-                    }
+                    (*(context_address as *mut Context))
+                        .cancel_requested
+                        .store(true, std::sync::atomic::Ordering::Release);
                 });
                 let start = std::time::Instant::now();
                 let out = hirsel_core_host_sleep_until(ctx, 2, u64::MAX / 2, 125);

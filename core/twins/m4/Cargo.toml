@@ -1,0 +1,13 @@
+[package]
+name = "m4"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "m4-durable-commit"
+path = "durable_commit.rs"
+
+[[bin]]
+name = "m4-isolate"
+path = "isolate.rs"

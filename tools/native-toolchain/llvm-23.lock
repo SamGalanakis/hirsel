@@ -5,6 +5,10 @@
 #   deb <package> <arch> <sha256> <size> <asset>
 #   static_lld <sha256> <size> <asset>   the image's bin/ld.lld, built from source_url
 #                                        by build-static-lld (README.md)
+#   engine_llvm <sha256> <size> <asset>  the compiler's libLLVM.so.23.1 (the tree's engine/),
+#                                        built from source_url by build-libllvm (README.md)
+#   engine_llvm_guard <ratio>            that library's warm build cost geomean against the
+#                                        deb's; the next engine_llvm may not be worse
 # The debs and source archive match the signed apt.llvm.org Packages/Sources
 # indexes (llvm-toolchain-noble-23) checked on 2026-11-03. GitHub release assets
 # retain those exact bytes independently of the rotating apt pool.
@@ -23,6 +27,8 @@ source_sha256 51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5
 deb_pool https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5
 apt_version 1:23.1.5~++20261028083854+a738f2737189-1~exp1~20261028203912.92
 static_lld 489d53bcce4038f070453dbcf4eb251d1492e5e7bd04787ced7f79ef4529833d 77075264 ld.lld-23.1.5-static-pie-x86_64
+engine_llvm 7cdd9a4d59f3f4efa35e17427fecefd80d53cbc3bedd4b7f1c49e3676a154312 95114608 libLLVM-23.1.5-engine-x86_64.so
+engine_llvm_guard 0.6470
 
 deb libllvm23 amd64 3ac14e55c6349f3d7bf7ebc5fc6f753404c9fc592339306c1ddaa5683ca228a5 33737044 libllvm23_23.1.5.++20261028083854+a738f2737189-1.exp1.20261028203912.92_amd64.deb
 deb llvm-23 amd64 0d54d928926170e9e1fb1bf27b83f8bc5969117296795ffc0817da559b1dce85 21332486 llvm-23_23.1.5.++20261028083854+a738f2737189-1.exp1.20261028203912.92_amd64.deb

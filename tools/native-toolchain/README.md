@@ -28,7 +28,7 @@ https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
 - `build-static-lld DIR`, `static-lld-elf-only.patch`: build the toolchain image's
   `bin/ld.lld` (the lock's `static_lld` record). See below.
 - `build-libllvm DIR ARTIFACTS`, `engine_llvm.py`: build the compiler's engine libLLVM
-  (the lock's `engine_llvm` record, not yet pinned) and guard it. See below.
+  (the lock's `engine_llvm` record) and guard it. See below.
 
 ## Static ld.lld
 
@@ -74,6 +74,13 @@ It takes about 2.7 CPU-hours at 12 jobs. Then upload `DIR/libLLVM.so.23.1` under
 printed asset name and write both printed records into `llvm-23.lock`. Nothing rebuilds
 it per land. `build-libllvm DIR ARTIFACTS plain` builds the same configuration without
 profile or ThinLTO (about 0.88 warm): the fallback if a profile build fails its guard.
+
+`tools/buck2/bootstrap_llvm.py` places the locked library as the tree's
+`engine/libLLVM.so.23.1`. First-party binaries search `engine/` before `lib/` (their
+RPATH, `tools/buck2/defs.bzl`), so the compiler loads it while clang and the other tools
+keep the deb library, which libclang-cpp needs. The library carries no search path of
+its own: the executable's RPATH finds its libz. `hirsel std-product --install` copies it, and
+nothing else of the tree, into the prefix's `lib/`.
 
 ## Pool execution inputs
 

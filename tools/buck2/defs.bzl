@@ -60,15 +60,16 @@ def _cargo_env(package_name, crate, version):
         "CLIPPY_CONF_DIR": ".",
     }
 
-# A first-party binary finds libLLVM (and the libraries bundled for it) in the
-# pinned tree's source directory, from its own buck-out location
-# (buck-out/v2/<art|gen>/<cell>/<configuration>/__<target>__/<binary>), also
-# when a test runs it with a cleared environment. DT_RPATH, unlike DT_RUNPATH,
-# also serves libLLVM's own dependencies. Tests on the pool carry the
-# directory (toolchains//:llvm-libraries).
+# A first-party binary finds the engine libLLVM (llvm-files/engine, the lock's
+# `engine_llvm`) and then the libraries bundled for the pinned tree
+# (llvm-files/lib: the engine's libz) in the tree's source directory, from its
+# own buck-out location (buck-out/v2/<art|gen>/<cell>/<configuration>/__<target>__/<binary>),
+# also when a test runs it with a cleared environment. DT_RPATH, unlike
+# DT_RUNPATH, also serves libLLVM's own dependencies. Tests on the pool carry
+# both directories (toolchains//:llvm-libraries).
 LLVM_RPATH = [
     "-Clink-arg=-Wl,--disable-new-dtags",
-    "-Clink-arg=-Wl,-rpath,$ORIGIN/../../../../../../tools/buck2/toolchains/llvm-files/lib",
+    "-Clink-arg=-Wl,-rpath,$ORIGIN/../../../../../../tools/buck2/toolchains/llvm-files/engine:$ORIGIN/../../../../../../tools/buck2/toolchains/llvm-files/lib",
 ]
 
 # Line tables were 61% of a whole-compiler executable (128 of 210 MB), which

@@ -193,12 +193,14 @@ def main():
                 for directory in [root, decoy, home, work / 'data', work / 'empty']:
                     directory.mkdir()
                 installed = root / 'hirsel'
-                shutil.copy2(compiler, installed)
                 found = work / 'path-tool.log'
                 for tool in ['cc', 'gcc', 'clang', 'ld', 'ld.lld']:
                     (decoy / tool).write_text('#!/bin/sh\necho ' + tool + ' >> ' + repr(str(found)) + '\nexit 1\n')
                     (decoy / tool).chmod(0o755)
-                install = subprocess.run([str(installed), 'std-product', '--install', str(root), '--runtime', str(runtime)],
+                # The built compiler installs itself: a copy elsewhere would find the
+                # test environment's LD_LIBRARY_PATH (the pinned tree's lib/, the deb
+                # libLLVM) before its RPATH's engine library.
+                install = subprocess.run([str(compiler), 'std-product', '--install', str(root), '--runtime', str(runtime)],
                                          cwd=work, capture_output=True, text=True)
                 self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
                 clean = {'PATH': str(decoy) + ':/usr/bin:/bin', 'HOME': str(home)}
@@ -231,6 +233,19 @@ def main():
                         # The granted directory is the one the program reads.
                         invoke('run', str(app), *flags, '--dir', str(work / 'empty'), expected=3)
                         invoke('test', str(app), *flags, '--limit', '67108864')
+                # An LLVM build in a fresh store loads the prefix's engine libLLVM, and
+                # with it none of the deb library's z3, ICU, libxml2, libedit, libffi,
+                # zstd or libbsd: the loader's own record of what it initialised.
+                trace = work / 'loader'
+                traced = subprocess.run([str(installed), 'build', str(app), '--backend', 'llvm', '--release',
+                                         '--store', str(work / 'traced-store'), '-o', str(work / 'traced'), '--json'],
+                                        cwd=work, env=clean | {'LD_DEBUG': 'libs', 'LD_DEBUG_OUTPUT': str(trace)},
+                                        capture_output=True, text=True)
+                self.assertEqual(traced.returncode, 0, traced.stdout + traced.stderr)
+                loaded = {Path(line.split('calling init: ', 1)[1].strip()).resolve()
+                          for log in work.glob('loader.*') for line in log.read_text().splitlines() if 'calling init: ' in line}
+                self.assertIn((root / 'lib/libLLVM.so.23.1').resolve(), loaded)
+                self.assertEqual([p for p in loaded if re.match(r'lib(z3|icu|xml2|edit|ffi|zstd|bsd)', p.name)], [])
                 # Another target links through the cross C driver it names, with
                 # the prefix's own ld.lld: never one that driver finds on PATH.
                 arm = Path(os.environ['HIRSEL_TOOLCHAIN_ARM']).resolve()

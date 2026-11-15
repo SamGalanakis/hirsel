@@ -45,11 +45,12 @@ llvm_tree(
     visibility = ["PUBLIC"],
 )
 
-# The shared libraries first-party binaries load (libLLVM and the libraries
-# bundled for it), for tests on the pool to carry at their source paths.
+# The shared libraries first-party binaries load (the engine libLLVM and the
+# libraries bundled for the tree), for tests on the pool to carry at their
+# source paths.
 source_files(
     name = "llvm-libraries",
-    srcs = glob(["llvm-files/lib/*.so*"]),
+    srcs = glob(["llvm-files/engine/*.so*", "llvm-files/lib/*.so*"]),
     visibility = ["PUBLIC"],
 )
 

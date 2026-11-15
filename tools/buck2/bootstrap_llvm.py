@@ -15,6 +15,9 @@ symbolic links (Buck2 hashes a link, not its target):
     lib/                 libLLVM, libclang-cpp, the clang resource directory, and
                          the libraries they load that a minimal worker image lacks
                          (llvm-runtime-lock.json)
+    engine/              libLLVM.so.23.1: the compiler's own LLVM (`engine_llvm`, built
+                         by build-libllvm), which first-party binaries load first
+                         (tools/buck2/defs.bzl LLVM_RPATH); clang and the tools keep lib/'s
     include/llvm{,-c}/   the LLVM headers
 
 The static LLVM component archives are left out: llvm-sys links libLLVM
@@ -45,7 +48,7 @@ RUNTIME_LOCK = pathlib.Path(__file__).with_name("llvm-runtime-lock.json")
 INSTALL = ROOT / "tools/native-toolchain/install"
 DEFAULT_OUTPUT = pathlib.Path(__file__).with_name("toolchains") / "llvm-files"
 RECEIPT = ".hirsel-llvm.json"
-LAYOUT = 7
+LAYOUT = 8
 REQUIRED = (
     "sysroot/usr/include/c++/13/vector",
     "sysroot/usr/include/features.h",
@@ -55,6 +58,7 @@ REQUIRED = (
     "bin/ld.lld",
     "lib/libLLVM.so.23.1",
     "lib/libLLVM-23.so",
+    "engine/libLLVM.so.23.1",
     "lib/libclang-cpp.so.23.1",
     "lib/clang/23/include/stddef.h",
     "include/llvm-c/Core.h",
@@ -124,19 +128,18 @@ def fetch_deb(deb: dict, directory: pathlib.Path) -> pathlib.Path:
     raise SystemExit(f"could not fetch a verified {deb['name']}")
 
 
-def fetch_static_lld(directory: pathlib.Path) -> pathlib.Path:
-    """The locked static-PIE ld.lld (`static_lld` in llvm-23.lock, built by
-    tools/native-toolchain/build-static-lld); it replaces the deb's ld.lld."""
+def fetch_built(record: str, directory: pathlib.Path) -> pathlib.Path:
+    """A locked asset built from the source archive: `static_lld`, the static-PIE
+    ld.lld that replaces the deb's (build-static-lld), or `engine_llvm`, the
+    compiler's libLLVM (build-libllvm)."""
     records = {}
     for line in LOCK.read_text(encoding="utf-8").splitlines():
         fields = line.split()
         if fields and not fields[0].startswith("#"):
             records[fields[0]] = fields[1:]
-    sha256, size, asset = records["static_lld"]
+    sha256, size, asset = records[record]
     pool = records["deb_pool"][0]
-    path = fetch_deb({"name": asset, "urls": [f"{pool}/{asset}"], "size": int(size), "sha256": sha256}, directory)
-    path.chmod(0o755)
-    return path
+    return fetch_deb({"name": asset, "urls": [f"{pool}/{asset}"], "size": int(size), "sha256": sha256}, directory)
 
 
 def place_runtime_libraries(stage: pathlib.Path, scratch: pathlib.Path) -> None:
@@ -160,7 +163,10 @@ def build(stage: pathlib.Path, wanted: dict) -> None:
         prefix = unpacked / "usr/lib/llvm-23"
         for path in sorted((prefix / "bin").iterdir()):
             place(path, stage / "bin" / path.name)
-        place(fetch_static_lld(pathlib.Path(raw)), stage / "bin/ld.lld")
+        linker = fetch_built("static_lld", pathlib.Path(raw))
+        linker.chmod(0o755)
+        place(linker, stage / "bin/ld.lld")
+        place(fetch_built("engine_llvm", pathlib.Path(raw)), stage / "engine/libLLVM.so.23.1")
         for name in ("libLLVM.so.23.1", "libLLVM-23.so", "libclang-cpp.so.23.1"):
             place(prefix / "lib" / name, stage / "lib" / name)
         place_tree(prefix / "lib/clang", stage / "lib/clang")

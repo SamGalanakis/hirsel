@@ -20,10 +20,10 @@ store. Cold is build 1, which also compiles core and std into the cache. Warm is
 core and std cached, which is an installed compiler's ordinary build. One sample each:
 process-tree instructions:u on one CPU (HIRSEL_MEASURE_CPU, default 16).
 
-The compiler finds libLLVM through its RPATH, which precedes LD_LIBRARY_PATH, so each
-library is loaded through a shadow tree. The tree holds a copy of the compiler six
-directories deep, beside a llvm-files/lib view in which only the libLLVM files are the
-given library's.
+The compiler finds libLLVM through its RPATH (llvm-files/engine, then llvm-files/lib),
+which precedes LD_LIBRARY_PATH, so each library is loaded through a shadow tree. The
+tree holds a copy of the compiler six directories deep, beside an llvm-files view whose
+engine/ holds the given library and whose lib/ is the pinned tree's.
 """
 import argparse
 import hashlib
@@ -112,16 +112,11 @@ def held_out(out):
 
 
 def shadow(library, compiler, out):
-    """A compiler copy whose RPATH resolves to a lib view holding LIBRARY's libLLVM."""
-    if library.resolve() == PIN.resolve():
-        return compiler
-    lib = out / 'tools/buck2/toolchains/llvm-files/lib'
-    lib.mkdir(parents=True)
-    for f in PIN.iterdir():
-        if f.name.startswith('libLLVM'):
-            shutil.copyfile(library / 'libLLVM.so.23.1', lib / f.name)
-        else:
-            (lib / f.name).symlink_to(f.resolve())
+    """A compiler copy whose RPATH resolves to LIBRARY's libLLVM.so.23.1."""
+    tree = out / 'tools/buck2/toolchains/llvm-files'
+    (tree / 'engine').mkdir(parents=True)
+    shutil.copyfile(library / 'libLLVM.so.23.1', tree / 'engine/libLLVM.so.23.1')
+    (tree / 'lib').symlink_to(PIN.resolve())
     copy = out / 'a/b/c/d/e/f/hirsel'
     copy.parent.mkdir(parents=True)
     shutil.copy2(compiler, copy)

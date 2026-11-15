@@ -19,7 +19,7 @@
         "costs": {
           "parse": 28822805,
           "index": 510931,
-          "resolve": 11052922,
+          "resolve": 10720112,
           "input counts": 586539,
           "declarations": 10781487,
           "body keys/new": 5707299,
@@ -61,7 +61,7 @@
       "instructions_per_token": {
         "parse": 424.75274290255004,
         "index": 7.530159647475259,
-        "resolve": 162.8837679693708,
+        "resolve": 157.90948213615226,
         "input counts": 8.639745719858412,
         "declarations": 158.88463483348986,
         "body keys/new": 84.10749115076212,
@@ -91,7 +91,7 @@
         "costs": {
           "parse": 15868658,
           "index": 354803,
-          "resolve": 5172831,
+          "resolve": 5054217,
           "input counts": 304386,
           "declarations": 7578354,
           "body keys/new": 3602127,
@@ -133,7 +133,7 @@
       "instructions_per_token": {
         "parse": 460.5369362089569,
         "index": 10.28851078358846,
-        "resolve": 150.125192055995,
+        "resolve": 146.55598828780168,
         "input counts": 8.826039947646958,
         "declarations": 219.9396801912024,
         "body keys/new": 104.54105730381836,
@@ -163,7 +163,7 @@
         "costs": {
           "parse": 16063120,
           "index": 600147,
-          "resolve": 12651080,
+          "resolve": 8969198,
           "input counts": 296471,
           "declarations": 4691372,
           "body keys/new": 2538700,
@@ -205,7 +205,7 @@
       "instructions_per_token": {
         "parse": 458.8820165242963,
         "index": 17.146057975073518,
-        "resolve": 361.4115670074219,
+        "resolve": 256.2274191289735,
         "input counts": 8.46380058815292,
         "declarations": 134.0204453157821,
         "body keys/new": 72.52485646268029,
@@ -595,6 +595,22 @@
           }
         }
       }
+    },
+    {
+      "reason": "Hold borrowed Definition and Module rows across resolver filtering/selection; retain the caller package ID. No new cache, output or image representation. Only resolve ceilings lowered; suite 7M target remains MISSED.",
+      "revision": "bdb0af272254..35577c50",
+      "resolve_before": {
+        "m1": 11018890,
+        "std": 5160123,
+        "suite-edit": 9229589
+      },
+      "resolve_after": {
+        "m1": 10720112,
+        "std": 5054217,
+        "suite-edit": 8969198
+      },
+      "compiler_sha256": "4e3e139b77a4701304bf873c3397f9dd7d47714630104701bea902a4a9b1ce84",
+      "evidence": "core-syntax-891/row-reads/{baseline-gate,candidate-cost,differential-complete}.log"
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

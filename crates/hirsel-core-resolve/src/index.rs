@@ -258,7 +258,9 @@ impl NameIndex {
         self.modules[module.0 as usize].package
     }
     pub fn reachable(&self, from: ModuleId, package: PackageKey) -> bool {
-        let own = self.module_package(from);
+        self.reachable_from(self.module_package(from), package)
+    }
+    pub(crate) fn reachable_from(&self, own: PackageKey, package: PackageKey) -> bool {
         package == own
             || Some(package) == self.core
             || self.packages[own.0 as usize]
@@ -270,7 +272,10 @@ impl NameIndex {
         self.child(self.packages[self.core?.0 as usize].root, name)
     }
     pub fn module_head(&self, from: ModuleId, name: Symbol) -> Option<ModuleId> {
-        let p = &self.packages[self.module_package(from).0 as usize];
+        self.module_head_from(self.module_package(from), name)
+    }
+    pub(crate) fn module_head_from(&self, package: PackageKey, name: Symbol) -> Option<ModuleId> {
+        let p = &self.packages[package.0 as usize];
         self.child(p.root, name)
             .or_else(|| {
                 p.dependencies
@@ -299,15 +304,33 @@ impl NameIndex {
         ns: Namespace,
         constructor: bool,
     ) -> Option<DefinitionId> {
+        self.member_row(module, name, ns, constructor)
+            .map(|(id, _)| id)
+    }
+    pub(crate) fn member_row(
+        &self,
+        module: ModuleId,
+        name: Symbol,
+        ns: Namespace,
+        constructor: bool,
+    ) -> Option<(DefinitionId, &Definition)> {
         let id = *self.members.get(&(module, name))?;
         let d = self.get(id);
         (match ns {
             Namespace::Type => d.kind == DefinitionKind::Type,
             Namespace::Value => d.kind != DefinitionKind::Type || constructor,
         })
-        .then_some(id)
+        .then_some((id, d))
     }
     pub fn prelude(&self, name: Symbol, ns: Namespace, constructor: bool) -> Option<DefinitionId> {
+        self.prelude_row(name, ns, constructor).map(|(id, _)| id)
+    }
+    pub(crate) fn prelude_row(
+        &self,
+        name: Symbol,
+        ns: Namespace,
+        constructor: bool,
+    ) -> Option<(DefinitionId, &Definition)> {
         let id = *self.prelude.get(&name)?;
         let d = self.get(id);
         (match ns {
@@ -316,7 +339,7 @@ impl NameIndex {
                 d.kind == DefinitionKind::Function || constructor && d.kind == DefinitionKind::Type
             }
         })
-        .then_some(id)
+        .then_some((id, d))
     }
     pub fn field_names(&self, d: DefinitionId) -> &[Symbol] {
         self.get(d).fields.slice(&self.member_names)
@@ -343,15 +366,19 @@ impl NameIndex {
         from: ModuleId,
         name: Symbol,
     ) -> impl Iterator<Item = DefinitionId> + '_ {
+        let own = self.module_package(from);
         let variants = self.variants(name).filter(move |&id| {
             let d = self.get(id);
             d.site.module == from
-                || d.public && !d.opaque && self.reachable(from, self.module_package(d.site.module))
+                || d.public
+                    && !d.opaque
+                    && self.reachable_from(own, self.module_package(d.site.module))
         });
         let record = self
-            .member(from, name, Namespace::Type, true)
-            .or_else(|| self.prelude(name, Namespace::Type, true))
-            .filter(|&id| self.get(id).variants.start == self.get(id).variants.end);
+            .member_row(from, name, Namespace::Type, true)
+            .or_else(|| self.prelude_row(name, Namespace::Type, true))
+            .filter(|&(_, d)| d.variants.start == d.variants.end)
+            .map(|(id, _)| id);
         variants.chain(record)
     }
     pub fn members_named(
@@ -362,19 +389,47 @@ impl NameIndex {
         ns: Namespace,
         constructor: bool,
     ) -> impl Iterator<Item = DefinitionId> + '_ {
-        let merge = self.modules[module.0 as usize].merge;
-        let single = (merge.start == merge.end).then_some(module);
+        self.member_rows_from(
+            from,
+            self.module_package(from),
+            module,
+            name,
+            ns,
+            constructor,
+        )
+        .map(|(id, _)| id)
+    }
+    pub(crate) fn member_rows_from(
+        &self,
+        from: ModuleId,
+        own: PackageKey,
+        module: ModuleId,
+        name: Symbol,
+        ns: Namespace,
+        constructor: bool,
+    ) -> impl Iterator<Item = (DefinitionId, &Definition)> + '_ {
+        let module_row = &self.modules[module.0 as usize];
+        let merge = module_row.merge;
+        let single = (merge.start == merge.end).then_some((module, module_row));
         single
             .into_iter()
-            .chain(merge.slice(&self.extensions).iter().copied())
-            .filter(move |&m| self.reachable(from, self.module_package(m)))
-            .filter_map(move |m| self.member(m, name, ns, constructor))
-            .filter(move |&id| {
-                let d = self.get(id);
-                merge.start == merge.end
+            .chain(
+                merge
+                    .slice(&self.extensions)
+                    .iter()
+                    .map(|&m| (m, &self.modules[m.0 as usize])),
+            )
+            .filter_map(move |(m, module)| {
+                let package = module.package;
+                if !self.reachable_from(own, package) {
+                    return None;
+                }
+                let (id, d) = self.member_row(m, name, ns, constructor)?;
+                (merge.start == merge.end
                     || d.site.module == from
                     || d.public
-                    || Some(self.module_package(d.site.module)) == self.core
+                    || Some(package) == self.core)
+                    .then_some((id, d))
             })
     }
     pub fn configure_core(&mut self, package: PackageKey) {

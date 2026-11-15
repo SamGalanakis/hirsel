@@ -167,16 +167,18 @@ impl ResolutionScratch {
         if self.seen.generation == 1 {
             self.recorded.fill([0; 10]);
         }
+        let package = index.module_package(module);
         let mut r = Resolver {
             index,
             module,
+            package,
             item,
             ordinal,
             scratch: self,
             label_base: 0,
             loop_base: 0,
             numeric_parameter: false,
-            numeric_declaration: Some(index.module_package(module)) == index.core
+            numeric_declaration: Some(package) == index.core
                 && matches!(
                     item.tree.node(item.root).kind,
                     NodeKind::Function
@@ -198,7 +200,7 @@ impl ResolutionScratch {
                 ..Resolution::default()
             },
         };
-        if Some(index.module_package(module)) != index.core
+        if Some(package) != index.core
             && item.tree.node(item.root).kind == NodeKind::Function
             && !item
                 .tree
@@ -235,6 +237,7 @@ impl ResolutionScratch {
 struct Resolver<'a, 's> {
     index: &'a NameIndex,
     module: ModuleId,
+    package: PackageKey,
     item: Item<'a>,
     ordinal: u32,
     scratch: &'s mut ResolutionScratch,
@@ -426,13 +429,12 @@ impl<'a> Resolver<'a, '_> {
         name: Symbol,
         ns: Namespace,
         construct: bool,
-        id: Option<DefinitionId>,
+        candidate: Option<(DefinitionId, &Definition)>,
     ) -> Option<Target> {
-        let Some(id) = id else {
+        let Some((id, d)) = candidate else {
             self.record(n, ns, scope, name, construct, LookupResult::Missing);
             return None;
         };
-        let d = self.index.get(id);
         let result = if d.site.module != self.module && !d.public {
             LookupResult::Private(id)
         } else if construct && d.site.module != self.module && d.opaque {
@@ -473,13 +475,11 @@ impl<'a> Resolver<'a, '_> {
     ) -> Option<Target> {
         let candidate = self
             .index
-            .member(module, name, ns, construct)
-            .filter(|&id| {
-                !construct
-                    || self.index.get(id).kind != DefinitionKind::Type
-                    || self.index.variant_names(id).is_empty()
+            .member_row(module, name, ns, construct)
+            .filter(|&(_, d)| {
+                !construct || d.kind != DefinitionKind::Type || d.variants.start == d.variants.end
             });
-        let target = candidate.map(Target::Definition);
+        let target = candidate.map(|(id, _)| Target::Definition(id));
         // This is a direct member of the current module. Cross-module visibility
         // is handled by qualified_member, whose candidate can be an extension.
         self.record(
@@ -500,11 +500,12 @@ impl<'a> Resolver<'a, '_> {
         construct: bool,
     ) -> Option<Target> {
         let core = self.index.core?;
-        let candidate = self.index.prelude(name, ns, construct).filter(|&id| {
-            !construct
-                || self.index.get(id).kind != DefinitionKind::Type
-                || self.index.variant_names(id).is_empty()
-        });
+        let candidate = self
+            .index
+            .prelude_row(name, ns, construct)
+            .filter(|&(_, d)| {
+                !construct || d.kind != DefinitionKind::Type || d.variants.start == d.variants.end
+            });
         self.selected(
             n,
             LookupScope::Prelude(core),
@@ -515,11 +516,11 @@ impl<'a> Resolver<'a, '_> {
         )
     }
     fn head_lookup(&mut self, n: NodeId, name: Symbol) -> Option<Target> {
-        let m = self.index.module_head(self.module, name);
+        let m = self.index.module_head_from(self.package, name);
         self.record(
             n,
             Namespace::Value,
-            LookupScope::Modules(self.index.module_package(self.module)),
+            LookupScope::Modules(self.package),
             name,
             false,
             m.map_or(LookupResult::Missing, |m| {
@@ -536,7 +537,7 @@ impl<'a> Resolver<'a, '_> {
                     && !d.opaque
                     && self
                         .index
-                        .reachable(self.module, self.index.module_package(d.site.module))
+                        .reachable_from(self.package, self.index.module_package(d.site.module))
         })
     }
     fn constructor(&mut self, n: NodeId, name: Symbol) -> Target {
@@ -587,15 +588,20 @@ impl<'a> Resolver<'a, '_> {
         construct: bool,
     ) -> Option<Target> {
         let name = self.name(token);
-        let mut candidates = self
-            .index
-            .members_named(self.module, module, name, ns, false);
+        let mut candidates =
+            self.index
+                .member_rows_from(self.module, self.package, module, name, ns, false);
         let mut first = candidates.next();
         let mut second = candidates.next();
         if first.is_none() && construct {
-            let mut cs = self
-                .index
-                .members_named(self.module, module, name, Namespace::Type, true);
+            let mut cs = self.index.member_rows_from(
+                self.module,
+                self.package,
+                module,
+                name,
+                Namespace::Type,
+                true,
+            );
             first = cs.next();
             second = cs.next();
         }
@@ -615,8 +621,8 @@ impl<'a> Resolver<'a, '_> {
             );
             d.causal.extend(
                 self.index
-                    .members_named(self.module, module, name, ns, construct)
-                    .map(|id| self.index.get(id).site),
+                    .member_rows_from(self.module, self.package, module, name, ns, construct)
+                    .map(|(_, d)| d.site),
             );
             self.out.diagnostics.push(d);
             Some(Target::Missing)
@@ -834,8 +840,7 @@ impl<'a> Resolver<'a, '_> {
                         t
                     }
                     None => {
-                        let package = self.index.module_package(self.module);
-                        let message = if self.index.packages[package.0 as usize].name == name {
+                        let message = if self.index.packages[self.package.0 as usize].name == name {
                             let bare = rest
                                 .map(|t| self.index.symbols.text(self.name(t)))
                                 .collect::<Vec<_>>()

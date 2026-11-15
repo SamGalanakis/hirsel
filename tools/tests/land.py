@@ -88,8 +88,8 @@ if [ "$1" = test ]; then
   case "$*" in
     *land-core-cranelift-custody*|*hirsel-cranelift-test-core_native*)
       if [ -f broken-custody ]; then echo 'custody native agreement failed' >&2; exit 1; fi ;;
-    *land-audit-runtime-schema*)
-      if [ -f broken-runtime-header ]; then echo 'runtime declarations disagree with C header' >&2; exit 1; fi ;;
+    *land-audit-workspace-layering*)
+      if [ -f broken-layering ]; then echo 'crate layering: a lower crate depends on a higher one' >&2; exit 1; fi ;;
     *) [ -z "$FAKE_SLOW_TEST" ] || sleep "$FAKE_SLOW_TEST" ;;
   esac
 fi
@@ -303,26 +303,26 @@ class Land(unittest.TestCase):
         self.assertEqual(log.count('EXIT 1'), 1)
         self.assertEqual(self.main_log(), ['base'])
 
-    def test_a_ticket_breaking_the_runtime_header_audit_is_refused_at_screen(self):
-        # The existing schema audit supplies the oracle; this test pins only
-        # the queue's admission rule, before any workspace build can run.
-        (self.lane / 'broken-runtime-header').write_text('wrong declaration\n')
-        self.git(self.lane, 'add', 'broken-runtime-header')
-        self.git(self.lane, 'commit', '-qm', 'break runtime declaration agreement')
+    def test_a_ticket_breaking_a_source_audit_is_refused_at_screen(self):
+        # The layering audit supplies the oracle; this test pins only the
+        # queue's admission rule, before any workspace build can run.
+        (self.lane / 'broken-layering').write_text('wrong dependency\n')
+        self.git(self.lane, 'add', 'broken-layering')
+        self.git(self.lane, 'commit', '-qm', 'break crate layering')
         builds = self.top / 'builds'
         refused = self.land(FAKE_BUILD_LOG=str(builds))
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn('FAIL  screen: source audits', refused.stdout)
-        self.assertIn('runtime declarations disagree with C header', refused.stdout)
+        self.assertIn('crate layering: a lower crate depends on a higher one', refused.stdout)
         self.assertFalse(builds.exists(), refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 
-    def test_std_compile_failure_refuses_the_push(self):
+    def test_core_acceptance_input_build_failure_refuses_the_push(self):
         events = self.lane / 'tools/buck2/event_logs.py'
         with events.open('a') as script:
-            script.write("\nif __name__ == '__main__':\n import sys\n assert '//:hirsel-std-products' in sys.argv\n print('LANG-4')\n sys.exit(1)\n")
+            script.write("\nif __name__ == '__main__':\n import sys\n assert '//:land-core-library-modes[inputs]' in sys.argv\n print('LANG-4')\n sys.exit(1)\n")
         self.git(self.lane, 'add', str(events.relative_to(self.lane)))
-        self.git(self.lane, 'commit', '-qm', 'std production refuses')
+        self.git(self.lane, 'commit', '-qm', 'core acceptance inputs refuse')
         refused = self.land()
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn('workspace build', refused.stdout)

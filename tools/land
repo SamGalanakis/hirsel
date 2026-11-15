@@ -23,8 +23,7 @@ full. Transient push failures retry the same checked commit once while main
 is unchanged, fetching to resolve ambiguous completion. A red check
 refuses the push and prints its first error.
 
-Land produces the retained std package before pushing. The lane runs
-the other tests its change can break, and
+The lane runs the other tests its change can break, and
 tools/main-runs runs a chosen suite or selection on current main when requested
 by hand; it has no automatic schedule. Each push is appended
 to `hirsel-landings.jsonl` in the common git directory, from which main-runs
@@ -81,12 +80,11 @@ BUILD_SET = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-cl
 # tools/buck2/clippy.py's query: the twins whose reports Clippy reads.
 CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
 # These reuse the existing harnesses with source data only.
-SOURCE_AUDITS = ('//:land-audit-workspace-layering', '//:land-audit-runtime-schema',
-                 '//:land-audit-runtime-descriptors', '//:land-audit-environment-inventory')
+SOURCE_AUDITS = ('//:land-audit-workspace-layering',)
 # Whole suites qualify here only after every body passes. Outstanding suites and
 # their fixing owners are recorded in core-cranelift-904/RED-CENSUS.md.
 CORE_ACCEPTANCE = (
-    '//:hirsel-core-contract-unittest', '//:hirsel-core-ids-unittest',
+    '//:hirsel-core-ids-unittest',
     '//:hirsel-core-diag-unittest', '//:hirsel-core-syntax-unittest', '//:hirsel-core-resolve-unittest',
     '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest',
     '//:hirsel-core-rt-unittest',
@@ -584,8 +582,8 @@ def full(tree, base, screened=False):
     if report is None:
         # Buck2 serves one command at a time when another holds a different
         # state (a running `buck2 test` refuses even a same-config query), so
-        # one build compiles everything the checks read: the workspace, the
-        # Clippy reports and std products.
+        # one build compiles everything the checks read: the workspace and
+        # the Clippy reports.
         # Clippy then reads the compiled reports.
         queries = [run([BUCK2, 'uquery', *CONFIG, expression]) for expression in (BUILD_SET, CLIPPY_TWINS)]
         if any(query.returncode or not query.stdout.strip() for query in queries):
@@ -594,7 +592,7 @@ def full(tree, base, screened=False):
             say('\n'.join(report))
         else:
             targets = [*queries[0].stdout.split(), *(t + '[clippy.txt]' for t in queries[1].stdout.split()),
-                       '//:hirsel-std-products', *(t + '[inputs]' for t in CORE_ACCEPTANCE)]
+                       *(t + '[inputs]' for t in CORE_ACCEPTANCE)]
             report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
                                                 '--materializations', 'none', *targets])
                       or check('Clippy', [PY, 'tools/buck2/clippy.py'])

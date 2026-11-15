@@ -967,6 +967,41 @@ fn a_dependency_package_is_a_head_before_a_same_named_function() {
 }
 
 #[test]
+fn lang_7_current_package_head_names_the_bare_module_path() {
+    let (index, files) = packages(
+        &[
+            ("m2b", "table", "pub type Table { value: u64 }"),
+            (
+                "m2b",
+                "main",
+                "fn bad(x: m2b.table.Table) {}\nfn good(x: table.Table) {}",
+            ),
+        ],
+        Symbols::default(),
+    );
+    let bad = run(&index, &files, 1, 0);
+    assert_eq!(bad.diagnostics.len(), 1);
+    let diagnostic = &bad.diagnostics[0];
+    assert_eq!(diagnostic.rule, "LANG-7");
+    assert_eq!(
+        diagnostic.message,
+        "`m2b` is this package; name its module bare: `table.Table`"
+    );
+    let item = files[1].1.item(0);
+    let start = item.file_offset + diagnostic.primary.span.start;
+    let end = item.file_offset + diagnostic.primary.span.end;
+    assert_eq!(&item.text[start as usize..end as usize], "m2b");
+    assert!(bad.names.iter().any(|use_| use_.target == Target::Missing));
+    let good = run(&index, &files, 1, 1);
+    assert!(good.diagnostics.is_empty(), "{:?}", good.diagnostics);
+    assert!(
+        good.names
+            .iter()
+            .any(|use_| use_.target == Target::Definition(def(&index, files[0].0, "Table")))
+    );
+}
+
+#[test]
 fn an_unknown_dotted_head_is_refused_at_the_head() {
     let (index, files) = fixture(&[("m", "fn f() { unknown.member() }")]);
     let result = run(&index, &files, 0, 0);

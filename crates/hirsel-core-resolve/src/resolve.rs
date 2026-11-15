@@ -834,14 +834,23 @@ impl<'a> Resolver<'a, '_> {
                         t
                     }
                     None => {
-                        let mut diagnostic = Refusal::new(
-                            "LANG-7",
-                            self.site(n),
+                        let package = self.index.module_package(self.module);
+                        let message = if self.index.packages[package.0 as usize].name == name {
+                            let bare = rest
+                                .map(|t| self.index.symbols.text(self.name(t)))
+                                .collect::<Vec<_>>()
+                                .join(".");
+                            format!(
+                                "`{}` is this package; name its module bare: `{bare}`",
+                                self.index.symbols.text(name)
+                            )
+                        } else {
                             format!(
                                 "`{}` is not a local, module, package or constant",
                                 self.index.symbols.text(name)
-                            ),
-                        );
+                            )
+                        };
+                        let mut diagnostic = Refusal::new("LANG-7", self.site(n), message);
                         diagnostic.primary.span = self.item.token_span(head_token);
                         self.out.diagnostics.push(diagnostic);
                         Target::Missing

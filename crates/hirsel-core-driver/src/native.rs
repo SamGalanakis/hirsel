@@ -401,9 +401,10 @@ impl Table {
 /// rows failed their check and were removed.
 enum Linked {
     Built(BuildProduct),
-    /// A stored object of this instance failed its check; how many objects
-    /// this pass compiled.
-    Damaged(Identity, usize),
+    /// The stored objects (or debug rows) of these instances failed their
+    /// check: the instances, how many objects this pass compiled, and its
+    /// work counters.
+    Damaged(Vec<Identity>, usize, crate::reach::ReachCounters),
 }
 
 impl CheckProduct {
@@ -653,33 +654,47 @@ impl CheckProduct {
     }
     /// Build `reached`, which `reachable_for` collected for `options`. A stored
     /// object whose bytes fail their check at the link is removed, and the
-    /// build walks again with that instance rebuilt.
+    /// build walks again with the instances refused by that link rebuilt; an
+    /// instance rebuilt by an earlier pass is reused like any other, and the
+    /// link checks it again. The product's work counters are every pass's.
     pub fn build_reachable(
         &self,
         entry: &DefPath,
         reached: &Reachable<'_>,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
-        let mut damaged = BTreeSet::new();
+        let mut refused = BTreeSet::new();
+        let mut rebuild = BTreeSet::new();
         let mut compiled = 0;
-        let mut linked = self.build_once(entry, reached, options, &damaged)?;
+        let mut work = crate::reach::ReachCounters::default();
+        let mut linked = self.build_once(entry, reached, options, &rebuild)?;
         loop {
             match linked {
                 Linked::Built(mut product) => {
-                    product.reach.objects_refused = damaged.len() as u64;
                     product.compiled += compiled;
+                    let reach = &mut product.reach;
+                    reach.expanded += work.expanded;
+                    reach.instance_path += work.instance_path;
+                    reach.objects_verified += work.objects_verified;
+                    reach.objects_refused = refused.len() as u64;
                     return Ok(product);
                 }
-                Linked::Damaged(instance, before) => {
+                Linked::Damaged(instances, before, counters) => {
                     compiled += before;
-                    if !damaged.insert(instance.clone()) {
-                        return Err(NativeStop::Link(format!(
-                            "rebuilt object of {} failed its check",
-                            instance.definition
-                        )));
+                    work.expanded += counters.expanded;
+                    work.instance_path += counters.instance_path;
+                    work.objects_verified += counters.objects_verified;
+                    for instance in &instances {
+                        if !refused.insert(instance.clone()) {
+                            return Err(NativeStop::Link(format!(
+                                "rebuilt object of {} failed its check",
+                                instance.definition
+                            )));
+                        }
                     }
-                    let again = self.reachable_rebuilding(entry, options, &damaged)?;
-                    linked = self.build_once(entry, &again, options, &damaged)?;
+                    rebuild = instances.into_iter().collect();
+                    let again = self.reachable_rebuilding(entry, options, &rebuild)?;
+                    linked = self.build_once(entry, &again, options, &rebuild)?;
                 }
             }
         }
@@ -1185,11 +1200,12 @@ thread_local! {
 /// stored object named by a record is opened once and checked through that
 /// descriptor. The linker names each by `/proc/<pid>/fd/N` of this process,
 /// which resolves to that inode, so no store path is reopened after a check.
-/// A stored object that fails its check is removed.
+/// Every stored object is checked; each that fails is removed, and the
+/// instances of all of them are returned.
 fn open_objects(
     objects: &[ObjectProduct],
     counters: &mut crate::reach::ReachCounters,
-) -> Result<Result<Vec<std::fs::File>, Identity>, NativeStop> {
+) -> Result<Result<Vec<std::fs::File>, Vec<Identity>>, NativeStop> {
     use std::io::Read;
     let limit = descriptor_limit();
     if objects.len() as u64 + 64 > limit {
@@ -1205,6 +1221,7 @@ fn open_objects(
         }
     });
     let mut files = Vec::with_capacity(objects.len());
+    let mut refused = Vec::new();
     let mut bytes = Vec::new();
     for object in objects {
         if let Some(held) = &object.held {
@@ -1214,7 +1231,8 @@ fn open_objects(
         let mut file = match std::fs::File::open(&object.path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(Err(object.instance.clone()));
+                refused.push(object.instance.clone());
+                continue;
             }
             Err(e) => return Err(e.into()),
         };
@@ -1228,9 +1246,13 @@ fn open_objects(
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            return Ok(Err(object.instance.clone()));
+            refused.push(object.instance.clone());
+            continue;
         }
         files.push(file);
+    }
+    if !refused.is_empty() {
+        return Ok(Err(refused));
     }
     #[cfg(test)]
     AFTER_CHECK.with(|hook| {
@@ -1291,24 +1313,24 @@ fn link_objects(
             .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
+        let compiled = objects.iter().filter(|o| o.compiled).count();
         let debug = if options.debug_lines {
             let mut rows = Vec::with_capacity(objects.len());
+            let mut refused = Vec::new();
             for object in objects {
                 match (&object.debug, &object.debug_record) {
                     (Some(debug), _) => rows.push(Cow::Borrowed(debug)),
                     (None, Some((store, address))) => {
                         match crate::native_object::load_debug(store, *address)? {
                             Some(debug) => rows.push(Cow::Owned(debug)),
-                            None => {
-                                return Ok(Linked::Damaged(
-                                    object.instance.clone(),
-                                    objects.iter().filter(|o| o.compiled).count(),
-                                ));
-                            }
+                            None => refused.push(object.instance.clone()),
                         }
                     }
                     (None, None) => {}
                 }
+            }
+            if !refused.is_empty() {
+                return Ok(Linked::Damaged(refused, compiled, counters));
             }
             let debug = crate::native_debug::bind_side_products(
                 rows.iter().map(|d| &**d),
@@ -1322,12 +1344,7 @@ fn link_objects(
         };
         let files = match open_objects(objects, &mut counters)? {
             Ok(files) => files,
-            Err(instance) => {
-                return Ok(Linked::Damaged(
-                    instance,
-                    objects.iter().filter(|o| o.compiled).count(),
-                ));
-            }
+            Err(refused) => return Ok(Linked::Damaged(refused, compiled, counters)),
         };
         // The linker opens each checked object through this process's
         // descriptor table, so it reads the inode that was checked and inherits

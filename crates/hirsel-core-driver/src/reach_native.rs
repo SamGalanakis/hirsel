@@ -230,7 +230,13 @@ fn reach_damaged_record_walks_again() {
 
 /// R12 (replace): every stored object is replaced by another valid object,
 /// then one body is edited: each replaced object fails its check, is
-/// rebuilt, and the executable is a fresh store's.
+/// rebuilt, and the executable is a fresh store's. Of the n stored objects
+/// the n - 1 not of `base` are linked: the first link checks and refuses
+/// each, and one retry rebuilds them all, so the request compiles n (the
+/// edited `base` and each refused object once) and checks n objects (the
+/// n - 1, and `base`'s, which the retry reuses from its record). Bug caught (red at d0d1ee55): the link stopped at the first
+/// refusal and each retry rebuilt every instance refused so far, compiling
+/// 1 + 2 + ... and dropping the earlier attempts' counts.
 #[test]
 #[ignore = "explicit native integration target"]
 fn reach_replaced_objects_build_a_fresh_stores_executable() {
@@ -256,7 +262,12 @@ fn reach_replaced_objects_build_a_fresh_stores_executable() {
     );
     assert_eq!(status, Some(7));
     assert!(rebuilt == fresh.1, "a fresh store's executable");
-    assert!(built.reach.objects_refused > 0, "a replaced object is refused");
+    let n = objects.len();
+    assert_eq!(
+        (built.compiled, built.reach.objects_refused, built.reach.objects_verified),
+        (n, n as u64 - 1, n as u64),
+        "compiled, refused and checked objects"
+    );
 }
 
 /// R12b: after the link checks the objects, another valid object is renamed

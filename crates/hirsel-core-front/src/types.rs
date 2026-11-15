@@ -505,14 +505,7 @@ pub fn reroot(t: &mut impl TyRead, ty: TyId, from: Root, to: TyId) -> TyId {
 
 /// Close a function/closure declaration's formal roots over its callable binder.
 pub fn bind_callable_roots(t: &mut impl TyRead, ty: TyId) -> TyId {
-    let TyKind::Fn(mut ps, r, w, k) = t.kind(ty).clone() else {
-        unreachable!()
-    };
-    for (_, p) in &mut ps {
-        *p = callable_roots(t, *p, 0, RootSubstitution::Bind);
-    }
-    let r = callable_roots(t, r, 0, RootSubstitution::Bind);
-    t.mk(TyKind::Fn(ps, r, w, k))
+    callable_signature_roots(t, ty, 0, RootSubstitution::Bind)
 }
 
 /// Open only the invoked callable binder. Lexical roots and roots bound by a
@@ -537,64 +530,121 @@ fn callable_roots(
     depth: u32,
     operation: RootSubstitution<'_>,
 ) -> TyId {
-    match t.kind(ty).clone() {
+    match t.kind(ty) {
         TyKind::Region(Root::Parameter(index)) if matches!(operation, RootSubstitution::Bind) => {
+            let index = *index;
             t.mk(TyKind::Region(Root::CallableParameter { depth, index }))
         }
         TyKind::Region(Root::CallableParameter {
             depth: bound,
             index,
         }) => match operation {
-            RootSubstitution::Open(roots) if bound == depth => {
-                let value = roots.get(index as usize).copied().flatten().unwrap_or(ty);
+            RootSubstitution::Open(roots) if *bound == depth => {
+                let value = roots.get(*index as usize).copied().flatten().unwrap_or(ty);
                 if depth == 0 {
                     value
                 } else {
                     callable_roots(t, value, 0, RootSubstitution::Shift(depth))
                 }
             }
-            RootSubstitution::Shift(amount) if bound >= depth => {
-                t.mk(TyKind::Region(Root::CallableParameter {
+            RootSubstitution::Shift(amount) if *bound >= depth => {
+                let root = Root::CallableParameter {
                     depth: bound + amount,
-                    index,
-                }))
+                    index: *index,
+                };
+                t.mk(TyKind::Region(root))
             }
             _ => ty,
         },
         TyKind::Anchored(x, r) => {
-            let x = callable_roots(t, x, depth, operation);
-            let r = callable_roots(t, r, depth, operation);
-            t.mk(TyKind::Anchored(x, r))
-        }
-        TyKind::Tuple(mut xs) => {
-            for x in &mut xs {
-                *x = callable_roots(t, *x, depth, operation);
+            let (x, r) = (*x, *r);
+            let new_x = callable_roots(t, x, depth, operation);
+            let new_r = callable_roots(t, r, depth, operation);
+            if (new_x, new_r) == (x, r) {
+                ty
+            } else {
+                t.mk(TyKind::Anchored(new_x, new_r))
             }
-            t.mk(TyKind::Tuple(xs))
         }
-        TyKind::Adt(d, mut xs) => {
-            for x in &mut xs {
-                *x = callable_roots(t, *x, depth, operation);
+        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => {
+            let len = xs.len();
+            let mut changed: Option<TyKind> = None;
+            for i in 0..len {
+                let original = match t.kind(ty) {
+                    TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs[i],
+                    _ => unreachable!(),
+                };
+                let new = callable_roots(t, original, depth, operation);
+                if new != original {
+                    match changed.get_or_insert_with(|| t.kind(ty).clone()) {
+                        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs[i] = new,
+                        _ => unreachable!(),
+                    }
+                }
             }
-            t.mk(TyKind::Adt(d, xs))
+            changed.map_or(ty, |k| t.mk(k))
         }
         TyKind::Array(x, n) => {
-            let x = callable_roots(t, x, depth, operation);
-            t.mk(TyKind::Array(x, n))
+            let (x, n) = (*x, *n);
+            let new = callable_roots(t, x, depth, operation);
+            if new == x {
+                ty
+            } else {
+                t.mk(TyKind::Array(new, n))
+            }
         }
         TyKind::View(x) => {
-            let x = callable_roots(t, x, depth, operation);
-            t.mk(TyKind::View(x))
-        }
-        TyKind::Fn(mut ps, r, w, k) => {
-            for (_, p) in &mut ps {
-                *p = callable_roots(t, *p, depth + 1, operation);
+            let x = *x;
+            let new = callable_roots(t, x, depth, operation);
+            if new == x {
+                ty
+            } else {
+                t.mk(TyKind::View(new))
             }
-            let r = callable_roots(t, r, depth + 1, operation);
-            t.mk(TyKind::Fn(ps, r, w, k))
         }
+        TyKind::Fn(..) => callable_signature_roots(t, ty, depth + 1, operation),
         _ => ty,
     }
+}
+
+fn callable_signature_roots(
+    t: &mut impl TyRead,
+    ty: TyId,
+    depth: u32,
+    operation: RootSubstitution<'_>,
+) -> TyId {
+    let TyKind::Fn(ps, r, w, k) = t.kind(ty) else {
+        unreachable!()
+    };
+    let (len, r, w, k) = (ps.len(), *r, *w, *k);
+    let mut changed: Option<Vec<(Mode, TyId)>> = None;
+    for i in 0..len {
+        let TyKind::Fn(ps, ..) = t.kind(ty) else {
+            unreachable!()
+        };
+        let original = ps[i].1;
+        let new = callable_roots(t, original, depth, operation);
+        if new != original {
+            let ps = changed.get_or_insert_with(|| {
+                let TyKind::Fn(ps, ..) = t.kind(ty) else {
+                    unreachable!()
+                };
+                ps.clone()
+            });
+            ps[i].1 = new;
+        }
+    }
+    let new_r = callable_roots(t, r, depth, operation);
+    if changed.is_none() && new_r == r {
+        return ty;
+    }
+    let ps = changed.unwrap_or_else(|| {
+        let TyKind::Fn(ps, ..) = t.kind(ty) else {
+            unreachable!()
+        };
+        ps.clone()
+    });
+    t.mk(TyKind::Fn(ps, new_r, w, k))
 }
 
 /// Whether `ty` names a type parameter anywhere.
@@ -836,6 +886,44 @@ mod interner_tests {
 #[cfg(test)]
 mod callable_roots_tests {
     use super::*;
+    #[test]
+    fn unchanged_callable_roots_do_not_reintern_composites() {
+        struct Existing<'a>(&'a Types);
+        impl TyRead for Existing<'_> {
+            fn kind(&self, ty: TyId) -> &TyKind {
+                self.0.kind(ty)
+            }
+            fn mk(&mut self, _: TyKind) -> TyId {
+                panic!("unchanged root substitution must reuse the interned type")
+            }
+        }
+        let mut t = Types::new();
+        let region = t.intern(TyKind::Region(Root::Generic(0)));
+        let anchored = t.intern(TyKind::Anchored(UNIT, region));
+        let view = t.intern(TyKind::View(anchored));
+        let array = t.intern(TyKind::Array(view, 2));
+        let tuple = t.intern(TyKind::Tuple(vec![array, scalar(Scalar::U64)]));
+        let nominal = t.intern(TyKind::Adt(DeclId(0), vec![tuple]));
+        let nested = t.intern(TyKind::Fn(
+            vec![(Mode::View, nominal)],
+            tuple,
+            false,
+            Callable::Scoped,
+        ));
+        let outer = t.intern(TyKind::Fn(
+            vec![(Mode::Mut, nested)],
+            nominal,
+            true,
+            Callable::Plain,
+        ));
+        let mut existing = Existing(&t);
+        assert_eq!(bind_callable_roots(&mut existing, outer), outer);
+        assert_eq!(
+            open_callable_roots(&mut existing, outer, &[Some(region)]),
+            outer
+        );
+    }
+
     #[test]
     fn opening_a_callable_preserves_a_nested_binder() {
         let mut t = Types::new();

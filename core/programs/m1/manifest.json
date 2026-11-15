@@ -223,9 +223,23 @@
       },
       "sources": [
         {
+          "file": "core/std/arena.hirsel",
+          "modules": [
+            "arena"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/std/char.hirsel",
           "modules": [
             "char"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/clock.hirsel",
+          "modules": [
+            "clock"
           ],
           "signatures": true
         },
@@ -254,6 +268,13 @@
           "file": "core/std/int.hirsel",
           "modules": [
             "int"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/std/io.hirsel",
+          "modules": [
+            "io"
           ],
           "signatures": true
         },

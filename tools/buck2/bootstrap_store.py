@@ -12,6 +12,12 @@ otherwise a hardlink, otherwise a copy. Hardlinks stay bounded, one per live
 checkout and never more than LINK_CAP to an inode. Only a directory that Buck2
 ignores (`vendor`) is a symlink into the store.
 
+A `private` tree is never hardlinked: a hardlink is one inode for every checkout,
+so creating, syncing or deleting any checkout moves that inode's ctime and link
+count under all the others. The LLVM tree is private, because the compiler
+trusts its files by stat (crates/hirsel-core-driver/src/tool_inputs.rs) and a
+moved ctime sends each one back to be re-read in every checkout that shares it.
+
 `HIRSEL_BUCK2_STORE` names the store directory, or `off`. It defaults to
 `$XDG_CACHE_HOME/hirsel-buck2`, and to `off` under CI. Callers keep their
 per-checkout installation for a store that is off or unusable.
@@ -230,9 +236,9 @@ def _reflink(source: str, target: str) -> None:
 class _Placer:
     """Place one stored file in a checkout by the cheapest mechanism that works."""
 
-    def __init__(self) -> None:
+    def __init__(self, hardlink: bool) -> None:
         self.reflink = True
-        self.hardlink = True
+        self.hardlink = hardlink
 
     def place(self, source: str, target: str, mode: int, links: int) -> None:
         if self.reflink:
@@ -256,11 +262,11 @@ class _Placer:
         os.chmod(target, mode)
 
 
-def _clone(top: pathlib.Path, manifest: dict, links: dict[str, int], destination: pathlib.Path) -> None:
+def _clone(top: pathlib.Path, manifest: dict, links: dict[str, int], destination: pathlib.Path, private: bool) -> None:
     os.mkdir(destination)
     for name in manifest["directories"]:
         os.mkdir(os.path.join(destination, name))
-    placer = _Placer()
+    placer = _Placer(hardlink=not private)
 
     def place(item) -> None:
         name, (_, _, mode, _) = item
@@ -336,11 +342,13 @@ def _referenced(root: pathlib.Path) -> set[str]:
     return live
 
 
-def materialize(checkout: pathlib.Path, slot: str, identity, build, destination: pathlib.Path, symlink: bool = False) -> bool:
+def materialize(checkout: pathlib.Path, slot: str, identity, build, destination: pathlib.Path, symlink: bool = False,
+                private: bool = False) -> bool:
     """Give `destination` the tree pinned by `identity`, building it at most once for all checkouts.
 
     `build(tree)` must create the directory `tree`; its parent is private
     scratch space. `destination` must not exist, unless `symlink` replaces it.
+    A `private` destination gets inodes of its own (reflinks or copies).
     Returns False, having done nothing, when there is no usable store.
     """
     root = usable()
@@ -358,7 +366,7 @@ def materialize(checkout: pathlib.Path, slot: str, identity, build, destination:
                 if symlink:
                     _point(entry / "tree", destination)
                 else:
-                    _clone(entry / "tree", manifest, links, destination)
+                    _clone(entry / "tree", manifest, links, destination, private)
                 return True
         with _lock(root, name, exclusive=True):
             if _inspect(entry) is None:

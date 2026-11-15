@@ -112,5 +112,32 @@ class BuckClient(unittest.TestCase):
         self.assertFalse(self.called.exists())
 
 
+class PrivateLlvmTree(unittest.TestCase):
+    """The compiler trusts the LLVM tree's files by stat, so another checkout's install must move none of it."""
+
+    def test_another_checkout_installing_the_same_pin_moves_no_stat_of_this_tree(self):
+        import bootstrap_llvm
+
+        def build(stage, wanted):
+            (stage / 'lib').mkdir(parents=True)
+            (stage / 'lib/libLLVM.so.23.1').write_bytes(b'llvm')
+
+        def status(path):
+            s = os.stat(path)
+            return s.st_dev, s.st_ino, s.st_nlink, s.st_size, s.st_mode, s.st_mtime_ns, s.st_ctime_ns
+
+        with tempfile.TemporaryDirectory() as raw, patch.dict(os.environ, HIRSEL_BUCK2_STORE=str(Path(raw) / 'store')), \
+                patch.object(bootstrap_llvm, 'build', build):
+            first, second = Path(raw) / 'one/llvm-files', Path(raw) / 'two/llvm-files'
+            bootstrap_llvm.install(first, {'pin': 1})
+            before = status(first / 'lib/libLLVM.so.23.1')
+            bootstrap_llvm.install(second, {'pin': 1})
+            self.assertEqual(status(first / 'lib/libLLVM.so.23.1'), before)
+            self.assertTrue(bootstrap_llvm.private(first))
+            # A tree that already shares an inode with another checkout is stale.
+            os.link(second / 'lib/libLLVM.so.23.1', Path(raw) / 'shared')
+            self.assertFalse(bootstrap_llvm.private(second))
+
+
 if __name__ == '__main__':
     unittest.main()

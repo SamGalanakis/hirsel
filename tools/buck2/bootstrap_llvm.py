@@ -23,6 +23,10 @@ symbolic links (Buck2 hashes a link, not its target):
 The static LLVM component archives are left out: llvm-sys links libLLVM
 dynamically (`force-dynamic`). Remote workers receive the tree as an action
 input, so they need no LLVM installed.
+
+Every file of the tree is this checkout's own inode (bootstrap_store `private`):
+the compiler trusts these files by stat, so no other checkout may share one, and
+a tree that does is stale.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -93,7 +98,17 @@ def current(output: pathlib.Path, wanted: dict) -> bool:
         installed = json.loads((output / RECEIPT).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    return installed == wanted and all((output / path).exists() for path in REQUIRED)
+    return installed == wanted and all((output / path).exists() for path in REQUIRED) and private(output)
+
+
+def private(output: pathlib.Path) -> bool:
+    """Whether no file of the tree shares its inode: a tree hardlinked with another checkout is stale."""
+    for directory, _, names in os.walk(output):
+        for name in names:
+            status = os.lstat(os.path.join(directory, name))
+            if stat.S_ISREG(status.st_mode) and status.st_nlink != 1:
+                return False
+    return True
 
 
 def place(source: pathlib.Path, target: pathlib.Path) -> None:
@@ -191,7 +206,8 @@ def install(output: pathlib.Path, wanted: dict) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".hirsel-llvm-", dir=output.parent) as raw:
         stage = pathlib.Path(raw) / "llvm-files"
-        if not bootstrap_store.materialize(ROOT, "llvm", wanted, lambda tree: build(tree, wanted), stage):
+        if not bootstrap_store.materialize(ROOT, "llvm", wanted, lambda tree: build(tree, wanted), stage,
+                                           private=True):
             build(stage, wanted)
         old = output.with_name(output.name + ".old")
         if old.exists():

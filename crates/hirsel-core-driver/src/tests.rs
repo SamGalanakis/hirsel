@@ -1913,16 +1913,9 @@ fn program_request(kind: &str, dir: &Path, store: &Path) -> CheckRequest {
     }
     req
 }
-fn store_files(store: &Path) -> std::collections::BTreeSet<std::ffi::OsString> {
-    std::fs::read_dir(store)
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect()
-}
-
 /// §2d edit-kind gate. Law: an incremental build publishes the live rows and
 /// file records of a fresh build of the same sources, and a tombstoned path
-/// never resolves by path, by name or by anchor. Oracle: the fresh build.
+/// never resolves by path. Oracle: the fresh build.
 #[test]
 fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
     for kind in [
@@ -1963,11 +1956,10 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
         );
         let open = |store: &Path| {
             let store = Store::new(store).unwrap();
-            let index = check_index::ProgramIndex::open(&store).unwrap();
-            (store, index)
+            check_index::ProgramIndex::open(&store).unwrap()
         };
-        let (store, index) = open(&incremental);
-        let (fresh_store, fresh_index) = open(&dir.path().join("fresh"));
+        let index = open(&incremental);
+        let fresh_index = open(&dir.path().join("fresh"));
         let live = |index: &check_index::ProgramIndex| -> BTreeMap<DefPath, check_index::Row> {
             index
                 .rows()
@@ -1983,8 +1975,8 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
             .collect();
         for module in &modules {
             assert_eq!(
-                index.file(&store, module).unwrap(),
-                fresh_index.file(&fresh_store, module).unwrap(),
+                index.files().into_iter().find(|(m, _)| m == module),
+                fresh_index.files().into_iter().find(|(m, _)| m == module),
                 "{kind}: file record {module:?}"
             );
         }
@@ -2001,12 +1993,6 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
         for path in &tombstones {
             assert!(index.live(path).is_none());
             assert!(!built.definitions.contains_key(path));
-            let module = check_index::module_key(path);
-            assert_eq!(index.by_name(&store, &module, &path.0.name).unwrap(), None);
-            for ordinal in 0..8 {
-                let anchored = index.by_anchor(&store, &module, ordinal).unwrap();
-                assert!(anchored.is_none_or(|(p, _)| p != *path), "{kind}: {path:?}");
-            }
         }
         // Hand-derived fan-out. A signature edit of `helper.config` rechecks
         // config and its four readers; a comment or whitespace edit above
@@ -2924,15 +2910,6 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
             assert_eq!(names(&built), expect, "{case}: rechecked");
         }
     }
-}
-
-fn answer_of(product: &CheckProduct) -> eval::Outcome {
-    let d = product
-        .definitions
-        .values()
-        .find(|d| d.definition.0.name == "answer")
-        .unwrap();
-    eval::run(d.ir().unwrap(), d.check.function.unwrap(), &[], 1_000_000).outcome
 }
 
 /// FORM #111: the growth arm's calls stay cold through every rebuild between the

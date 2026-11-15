@@ -10,7 +10,7 @@
 //! - The **root node** is the trie's top node plus the file records. One
 //!   selection rename publishes root, rows, tombstones and maps together.
 //!
-//! Every lookup (by DefPath, by name, by anchor) treats a tombstone as not found.
+//! Lookup by DefPath treats a tombstone as not found.
 //! A record that fails its digest or decode is a miss, never a hit.
 use crate::store::Store;
 use crate::{decode, encode};
@@ -134,36 +134,6 @@ impl ProgramIndex {
     }
     pub fn rows(&self) -> impl Iterator<Item = (&DefPath, &Row)> {
         self.rows.iter()
-    }
-    pub fn file(&self, store: &Store, module: &ModuleKey) -> io::Result<Option<FileRecord>> {
-        let Some(&hash) = self.files.get(module) else {
-            return Ok(None);
-        };
-        Ok(store.get(hash)?.and_then(|b| decode(&b)))
-    }
-    /// A name in a module's namespace, resolved to its live row.
-    pub fn by_name(
-        &self,
-        store: &Store,
-        module: &ModuleKey,
-        name: &str,
-    ) -> io::Result<Option<DefPath>> {
-        Ok(self
-            .file(store, module)?
-            .and_then(|f| f.names.get(name).cloned())
-            .filter(|p| self.live(p).is_some()))
-    }
-    /// An item ordinal of a module, resolved to its live row and line base.
-    pub fn by_anchor(
-        &self,
-        store: &Store,
-        module: &ModuleKey,
-        ordinal: u32,
-    ) -> io::Result<Option<(DefPath, u32)>> {
-        Ok(self
-            .file(store, module)?
-            .and_then(|f| f.anchors.get(&ordinal).cloned())
-            .filter(|(p, _)| self.live(p).is_some()))
     }
 }
 

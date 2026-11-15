@@ -243,14 +243,6 @@ run_harness() (
 test_binary="${HIRSEL_TEST_BINARY:-}"
 unset HIRSEL_TEST_TMPDIR HIRSEL_TEST_CWD HIRSEL_TEST_BIN_EXES HIRSEL_TEST_BIN_EXE_DIR HIRSEL_TEST_POOL
 unset HIRSEL_TEST_BINARY
-full_gate=false
-ignored=false
-for argument in "$@"; do
-  [ "$argument" != full_gate_ ] || full_gate=true
-  [ "$argument" != --ignored ] || ignored=true
-done
-inventory=false
-if "$full_gate" && "$ignored" && [ -n "$test_binary" ]; then inventory=true; fi
 set -f # Rust case names and declared patterns are words, never shell globs.
 list_cases() (
   remaining=$#
@@ -317,8 +309,8 @@ for argument in "$@"; do
     *) filtered=true ;;
   esac
 done
-if "$discovery" && ! "$inventory" && [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then run_harness "$@"; exit $?; fi
-if [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && ! "$inventory" && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
+if "$discovery" && [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then run_harness "$@"; exit $?; fi
+if [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
   if [ -n "$test_binary" ] && { "$filtered" || "$restricted"; }; then
     cases="$(list_cases "$@")"
     if [ -z "$cases" ] && ! selection_exists "$@"; then
@@ -342,14 +334,6 @@ if [ -n "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
   unset HIRSEL_TEST_HOST_CASES
 fi
 unset HIRSEL_TEST_DEDICATED_CASE
-if "$inventory"; then
-  printf 'HIRSEL_FULL_GATE_BINARY %s\n' "$test_binary"
-  if [ -n "$cases" ]; then
-    for test_case in $cases; do
-      printf 'HIRSEL_FULL_GATE_EXPECT %s %s\n' "$test_binary" "$test_case"
-    done
-  fi
-fi
 # Host requirements remain physical ownership under positive filters as well.
 if [ -n "${HIRSEL_TEST_HOST_CASES:-}" ]; then
   cases="$(printf '%s\n' "$cases" | awk -v isolated="$HIRSEL_TEST_HOST_CASES" '

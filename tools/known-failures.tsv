@@ -4,6 +4,4 @@
 # (hirsel-core-driver-unittest::native::tests::scalar_core_instances_match_closed_bodies). A lane that
 # meets a red it did not cause adds a row itself and pushes it straight to main; the lane that fixes a
 # red removes its row.
-hirsel-core-ids-unittest	core-memory-900 requested form gate: target runs 0 tests and test_launcher rejects zero executed bodies; core-ids currently declares no unit tests. Incomplete qualification, not a pass. Evidence /workspace/code/hirsel-briefs/core-memory-900/gate.log; FOR FORM core-form-883, ticket core-memory-900/ids-zero-body-gate.	hirsellang-24	2026-11-13
-test-land::Land.test_equal_date_failure_rows_choose_the_incoming_ticket	land-priority-838 at db45d4b5: test-land ran 69 bodies, 68 passed; scratch origin copies tools/main-runs but omits tools/buck2/conformance.py, so the real check-hot-files fails with ModuleNotFoundError: conformance. Source-localized fixture gap; no base execution. Evidence /tmp/land-priority-838-buck-land-tests.log.	hirsellang-24	2026-11-12
 hirsel-core-driver-unittest::native::tests::scalar_core_instances_match_closed_bodies	Census904: sum materialized slots7 vs closed3 after implied-dictionary fixture repair; RED-CENSUS.md	core-check-calls-910	2026-11-13

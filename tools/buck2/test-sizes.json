@@ -56,31 +56,6 @@
       1792519814
     ]
   },
-  "hirsel-intern-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "guard_limit_kb": 4194304,
-    "mean_cores": 0.67,
-    "mean_wall_seconds": 1.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.58,
-    "parallel_fraction": 0.0,
-    "pss_peak_mib": 17,
-    "pss_runs": 11,
-    "requested": [
-      "1/131072",
-      "1/2097152",
-      "2/2097152"
-    ],
-    "runs": 24,
-    "timed_runs": 7,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792447225,
-      1792532223
-    ]
-  },
   "hirsel-llvm-unittest": {
     "cpu_class": "",
     "cpu_count": 1,

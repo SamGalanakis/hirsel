@@ -662,13 +662,6 @@ class LauncherSelection(LauncherFixture):
             self.assertIn(value, result['argv'])
         self.assertEqual(set(result['cases']), {name for name in CASES if 'full_gate_' in name})
 
-    def test_list_and_full_gate_inventory_agree(self):
-        _, output = self.run_cases('full_gate_', '--ignored', '--list')
-        listed = [line[:-6] for line in output.splitlines() if line.endswith(': test')]
-        self.assertEqual(set(listed), {name for name in CASES if 'full_gate_' in name})
-        expected = [line.split(' ', 2)[2] for line in output.splitlines()
-                    if line.startswith('HIRSEL_FULL_GATE_EXPECT fixture-test-it ')]
-        self.assertEqual(set(expected), {name for name in CASES if 'full_gate_' in name})
 
     def test_end_of_options_and_equals_skip_preserve_selection(self):
         result, _ = self.run_cases('--ignored', '--skip=prefix', '--', 'full_gate_')

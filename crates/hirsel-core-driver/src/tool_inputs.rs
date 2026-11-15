@@ -1,5 +1,7 @@
-//! Identity of host tools selected for linking. Selection is repeated on every
-//! request, so a newly installed earlier PATH candidate cannot reuse a later one.
+//! Identity of host tools selected for linking. The link editor is selected
+//! on every request, so a request whose PATH names another ld.lld (an earlier
+//! candidate installed since, a test's private LLVM copy) never links through
+//! a recipe another request captured with its own.
 use crate::native::Link;
 use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
@@ -9,12 +11,6 @@ use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-#[derive(Serialize)]
-pub(crate) struct Tool {
-    pub(crate) path: PathBuf,
-    content: ContentHash,
-}
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
 const LINK_RECIPE_SCHEMA: u32 = 5;
@@ -88,7 +84,7 @@ fn selected(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
 /// The C driver a request names, resolved once at the command line: a bare
 /// name such as the default `cc` is looked up on `PATH`, like the shell does.
 pub fn link_driver(program: &Path) -> io::Result<PathBuf> {
-    selected(program, &std::env::var_os("PATH").unwrap_or_default())
+    selected(program, &search())
 }
 
 /// Where the driver's link recipe and toolchain manifest live: beside its
@@ -107,11 +103,6 @@ fn recipe_directory(driver: &Path) -> io::Result<PathBuf> {
     Ok(cache)
 }
 
-fn identity(program: &Path, search: &OsStr, store: &Store) -> io::Result<Tool> {
-    let path = selected(program, search)?;
-    let content = recorded(&path, store)?.content;
-    Ok(Tool { path, content })
-}
 /// One host file's content under its own record: the stat rule decides
 /// whether the bytes are read again.
 fn recorded(path: &Path, store: &Store) -> io::Result<RecipeFile> {
@@ -166,39 +157,11 @@ pub(crate) fn llvm_library() -> io::Result<ContentHash> {
         .copied()
         .map_err(|e| io::Error::new(e.kind(), e.to_string()))
 }
-pub(crate) fn link_tools(cc: &Path) -> io::Result<(Tool, Tool)> {
-    let search = std::env::var_os("PATH").unwrap_or_default();
-    let store = host_tools()?;
-    let driver = identity(cc, &search, &store)?;
-    // Resolve the pinned LLVM link editor rather than the host `ld`.  The
-    // absolute path is part of the tool identity and is passed back to clang
-    // at link time, so a host linker cannot silently enter the cache.
-    let result = Command::new(&driver.path)
-        .arg("-print-prog-name=ld.lld")
-        .output()?;
-    if !result.status.success() {
-        return Err(io::Error::other(format!(
-            "cannot select pinned link editor through {}: {}",
-            driver.path.display(),
-            String::from_utf8_lossy(&result.stderr)
-        )));
-    }
-    let linker = std::str::from_utf8(&result.stdout)
-        .map_err(io::Error::other)?
-        .trim();
-    if linker.is_empty() || linker.contains('\n') {
-        return Err(io::Error::other(
-            "C driver did not name one pinned link editor",
-        ));
-    }
-    Ok((driver, identity(Path::new(linker), &search, &store)?))
-}
-
 /// Capture the link editor command once beside the selected toolchain. The
 /// capture is the only C-driver use in the direct-link path; subsequent builds
 /// invoke the recorded lld argv themselves.
 pub(crate) fn link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
-    capture_link_recipe(cc, target, false)
+    capture_link_recipe(cc, target, false, &search())
 }
 
 /// Recapture is reserved for a recipe whose previously recorded toolchain
@@ -206,7 +169,7 @@ pub(crate) fn link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
 /// installation has no driver to recapture through: its recipe is its own.
 pub(crate) fn recapture_link_recipe(link: &Link, target: &str) -> io::Result<LinkRecipe> {
     match link {
-        Link::Driver(cc) => capture_link_recipe(cc, target, true),
+        Link::Driver(cc) => capture_link_recipe(cc, target, true, &search()),
         Link::Installed(recipe) => Err(io::Error::other(format!(
             "the installation's link recipe {} names inputs that are gone; reinstall the toolchain",
             recipe.display()
@@ -239,7 +202,7 @@ pub(crate) fn install_recipe(
     root: &Path,
 ) -> io::Result<(PathBuf, PathBuf)> {
     let cc = link_driver(cc)?;
-    let recipe = capture_link_recipe(&cc, target, false)?;
+    let recipe = capture_link_recipe(&cc, target, false, &search())?;
     if !recipe.source_files.is_empty() {
         return Err(io::Error::other(format!(
             "the link recipe through {} compiles link sources ({}); an installation carries none",
@@ -466,40 +429,103 @@ fn installed_linker() -> Option<PathBuf> {
     Some(installed.root.join(INSTALLED_LINKER)).filter(|linker| linker.is_file())
 }
 
-fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkRecipe> {
+/// The name a C driver gives its link editor, as a capture learnt it: a path
+/// the driver chose itself, or a bare name it leaves to `PATH` (gcc names
+/// `ld.lld` bare when its own tree has none). It is the driver's, so one
+/// record serves every request through that driver; the `PATH` lookup of a
+/// bare name is each request's own.
+#[derive(Serialize, serde::Deserialize)]
+struct EditorName {
+    schema: u32,
+    name: PathBuf,
+}
+const EDITOR_NAME_SCHEMA: u32 = 1;
+
+fn editor_name_path(directory: &Path, target: &str, driver: &Path) -> io::Result<PathBuf> {
+    Ok(directory.join(format!("editor-{target}-{}.json", driver_file_key(driver)?)))
+}
+
+/// The recipe file of `driver` linking through `linker`. The link editor is
+/// part of the key: two requests whose `PATH`s select different link editors
+/// through one driver (a test that puts a private LLVM copy first) never share
+/// a recipe, and a recipe captured outside an installation, whose own ld.lld
+/// links, is never reused inside one or from a moved one.
+fn recipe_path(
+    directory: &Path,
+    target: &str,
+    driver: &Path,
+    linker: &Path,
+) -> io::Result<(PathBuf, String)> {
+    let hash = ContentHash::of_parts(
+        "hirsel.link-recipe-key.v1",
+        [
+            driver_file_key(driver)?.as_bytes(),
+            crate::encode(&linker)?.as_slice(),
+        ],
+    );
+    let key: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
+    Ok((directory.join(format!("{target}-{key}.json")), key))
+}
+
+/// The link editor this request links with: the installation's own, else the
+/// one the driver's recorded name selects on this request's `PATH`. `None`
+/// when no capture has recorded the driver's name yet.
+fn selected_editor(
+    directory: &Path,
+    target: &str,
+    driver: &Path,
+    installed: Option<&Path>,
+    search: &OsStr,
+) -> io::Result<Option<PathBuf>> {
+    if let Some(installed) = installed {
+        return Ok(Some(installed.to_owned()));
+    }
+    let recorded = std::fs::read(editor_name_path(directory, target, driver)?)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<EditorName>(&bytes).ok())
+        .filter(|record| record.schema == EDITOR_NAME_SCHEMA);
+    Ok(recorded.and_then(|record| selected(&record.name, search).ok()))
+}
+
+/// This request's `PATH`, which selects a link editor the driver names bare.
+fn search() -> std::ffi::OsString {
+    std::env::var_os("PATH").unwrap_or_default()
+}
+
+fn capture_link_recipe(
+    cc: &Path,
+    target: &str,
+    force: bool,
+    search: &OsStr,
+) -> io::Result<LinkRecipe> {
     let driver = cc.to_owned();
     let directory = recipe_directory(&driver)?;
     let installed_linker = installed_linker();
-    // The prefix's link editor is part of the recipe's key: a recipe captured
-    // outside an installation is never reused inside one, or from a moved one.
-    let driver_key = match &installed_linker {
-        None => driver_file_key(&driver)?,
-        Some(linker) => {
-            let hash = ContentHash::of_parts(
-                "hirsel.link-driver-installed.v1",
-                [
-                    driver_file_key(&driver)?.as_bytes(),
-                    crate::encode(linker)?.as_slice(),
-                ],
-            );
-            hash.0.iter().map(|b| format!("{b:02x}")).collect()
-        }
-    };
-    let path = directory.join(format!("{target}-{driver_key}.json"));
     if !force
-        && let Ok(bytes) = std::fs::read(&path)
-        && let Ok(mut recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
-        && recipe.schema == LINK_RECIPE_SCHEMA
-        && recipe.target == target
-        && recipe.linker.is_file()
+        && let Some(linker) = selected_editor(
+            &directory,
+            target,
+            &driver,
+            installed_linker.as_deref(),
+            search,
+        )?
     {
-        match refresh_recipe_inputs(&mut recipe)? {
-            RecipeInputs::Current => return Ok(recipe),
-            RecipeInputs::Restated => {
-                publish(&directory, &path, &recipe)?;
-                return Ok(recipe);
+        let (path, _) = recipe_path(&directory, target, &driver, &linker)?;
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(mut recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
+            && recipe.schema == LINK_RECIPE_SCHEMA
+            && recipe.target == target
+            && recipe.linker == linker
+            && recipe.linker.is_file()
+        {
+            match refresh_recipe_inputs(&mut recipe)? {
+                RecipeInputs::Current => return Ok(recipe),
+                RecipeInputs::Restated => {
+                    publish(&directory, &path, &recipe)?;
+                    return Ok(recipe);
+                }
+                RecipeInputs::Changed => {}
             }
-            RecipeInputs::Changed => {}
         }
     }
     // A driver that names a link editor which does not exist must not be
@@ -552,6 +578,47 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         .last()
         .ok_or_else(|| io::Error::other("link recipe capture emitted no link editor argv"))?;
     let mut argv = shell_words(line)?;
+    // The driver's name for its link editor. gcc's line starts with collect2,
+    // so its answer to -print-prog-name is the name; a clang line starts with
+    // the editor clang chose.
+    let collect2 = argv[0].contains("collect2");
+    let first = PathBuf::from(argv.remove(0));
+    let name = if collect2 {
+        let answer = String::from_utf8_lossy(&selection.stdout).trim().to_owned();
+        if !selection.status.success() || answer.is_empty() || answer.contains('\n') {
+            return Err(io::Error::other(format!(
+                "C driver {} did not name one link editor",
+                driver.display()
+            )));
+        }
+        PathBuf::from(answer)
+    } else {
+        first
+    };
+    if name.components().count() > 1 && !name.is_file() {
+        return Err(io::Error::other(format!(
+            "missing link editor input: {}",
+            name.display()
+        )));
+    }
+    let linker = match &installed_linker {
+        Some(installed) => installed.clone(),
+        None => selected(&name, search)?,
+    };
+    // clang looks beside itself, then on PATH: an editor it found on PATH is
+    // PATH's choice, so the record keeps it bare and each request selects its own.
+    let name = match name.file_name() {
+        Some(file)
+            if !collect2
+                && name.is_absolute()
+                && linker.parent() != driver.canonicalize()?.parent()
+                && selected(Path::new(file), search).ok().as_ref() == Some(&linker) =>
+        {
+            PathBuf::from(file)
+        }
+        _ => name,
+    };
+    let (path, driver_key) = recipe_path(&directory, target, &driver, &linker)?;
     let mut source_files = Vec::new();
     let mut compiled_objects = std::collections::HashMap::new();
     for (index, line) in stderr.lines().enumerate() {
@@ -594,8 +661,7 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         let source = PathBuf::from(source);
         source_files.push(recipe_file(&source)?);
     }
-    let linker = if argv.first().is_some_and(|arg| arg.contains("collect2")) {
-        argv.remove(0);
+    if collect2 {
         let mut filtered = Vec::with_capacity(argv.len());
         let mut skip = false;
         for arg in argv {
@@ -612,25 +678,7 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
             }
         }
         argv = filtered;
-        match installed_linker {
-            Some(linker) => linker,
-            None => link_tools(cc)?.1.path,
-        }
-    } else {
-        let linker = PathBuf::from(argv.remove(0));
-        if let Some(installed) = installed_linker {
-            installed
-        } else if linker.is_file() {
-            linker
-        } else if linker.is_absolute() || linker.components().count() > 1 {
-            return Err(io::Error::other(format!(
-                "missing link editor input: {}",
-                linker.display()
-            )));
-        } else {
-            link_tools(cc)?.1.path
-        }
-    };
+    }
     let mut args = Vec::with_capacity(argv.len() + 1);
     let mut marker = false;
     let mut i = 0;
@@ -692,6 +740,17 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         identity,
     };
     publish(&directory, &path, &recipe)?;
+    if installed_linker.is_none() {
+        let record = EditorName {
+            schema: EDITOR_NAME_SCHEMA,
+            name,
+        };
+        publish(
+            &directory,
+            &editor_name_path(&directory, target, &driver)?,
+            &record,
+        )?;
+    }
     Ok(recipe)
 }
 
@@ -1109,34 +1168,6 @@ mod tests {
     }
 
     #[test]
-    fn earlier_path_candidate_and_replaced_tool_change_selection() {
-        let work = tempfile::tempdir().unwrap();
-        let store = Store::new(&work.path().join("cache")).unwrap();
-        let first = work.path().join("first");
-        let second = work.path().join("second");
-        std::fs::create_dir(&first).unwrap();
-        std::fs::create_dir(&second).unwrap();
-        let write = |p: &Path| {
-            std::fs::write(p, b"tool").unwrap();
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        write(&second.join("cc"));
-        let search = std::env::join_paths([&first, &second]).unwrap();
-        let initial = identity(Path::new("cc"), &search, &store).unwrap();
-        assert_eq!(initial.path, second.join("cc"));
-        write(&first.join("cc"));
-        let earlier = identity(Path::new("cc"), &search, &store).unwrap();
-        assert_eq!(earlier.path, first.join("cc"));
-        let replacement = first.join("new-cc");
-        write(&replacement);
-        std::fs::write(&replacement, b"changed").unwrap();
-        std::fs::rename(replacement, first.join("cc")).unwrap();
-        let replaced = identity(Path::new("cc"), &search, &store).unwrap();
-        assert_eq!(earlier.path, replaced.path);
-        assert_ne!(earlier.content, replaced.content);
-    }
-
-    #[test]
     fn a_driver_whose_toolchain_tree_is_read_only_still_links() {
         // A system driver (/usr/bin/cc) has a toolchain root nobody but root may write.
         let work = tempfile::tempdir().unwrap();
@@ -1306,6 +1337,63 @@ mod tests {
         std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
         let refused = link_recipe(&cc, "x86_64-unknown-linux-gnu").unwrap_err();
         assert!(refused.to_string().contains("cannot replay"), "{refused}");
+    }
+
+    #[test]
+    fn a_recipe_links_with_the_editor_its_own_path_selects() {
+        // gcc names ld.lld bare, so each request's PATH picks the editor. In 4838 a
+        // test whose PATH put a private LLVM copy first captured the one recipe of
+        // the ARM gcc; the next request linked through that copy, then relinked
+        // through its own once the copy was gone.
+        let work = tempfile::tempdir().unwrap();
+        let bin = work.path().join("tree/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let (first, second) = (work.path().join("first"), work.path().join("second"));
+        for (directory, bytes) in [(&first, b"first".as_slice()), (&second, b"second")] {
+            std::fs::create_dir(directory).unwrap();
+            std::fs::write(directory.join("ld.lld"), bytes).unwrap();
+            std::fs::set_permissions(
+                directory.join("ld.lld"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let crt = work.path().join("crt1.o");
+        std::fs::write(&crt, b"crt").unwrap();
+        let runs = work.path().join("driver-runs");
+        let cc = bin.join("cc");
+        std::fs::write(
+            &cc,
+            format!(
+                "#!/bin/sh\necho run >> '{}'\ncase \"$1\" in -print-prog-name=*) echo ld.lld; exit 0;; esac\necho '\"/gcc/collect2\" \"-pie\" \"-o\" \"out\" \"{}\" \"{}\" \"-lc\"' >&2\n",
+                runs.display(),
+                crt.display(),
+                work.path().join("transient.o").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let target = "x86_64-unknown-linux-gnu";
+        let linker = |search: &[&PathBuf]| {
+            capture_link_recipe(&cc, target, false, &std::env::join_paths(search).unwrap())
+                .unwrap()
+                .linker
+        };
+        let editor = |directory: &Path| directory.join("ld.lld").canonicalize().unwrap();
+        let driver_runs = || std::fs::read_to_string(&runs).map_or(0, |runs| runs.lines().count());
+        assert_eq!(linker(&[&second]), editor(&second));
+        assert_eq!(
+            linker(&[&first, &second]),
+            editor(&first),
+            "an earlier PATH candidate is this request's editor"
+        );
+        let before = driver_runs();
+        assert_eq!(linker(&[&second]), editor(&second));
+        assert_eq!(
+            driver_runs(),
+            before,
+            "each selection keeps its own recipe; neither request captures again"
+        );
     }
 
     fn recipe(input: &Path) -> LinkRecipe {

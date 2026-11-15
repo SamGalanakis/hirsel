@@ -158,6 +158,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             args,
             results,
             fail: None,
+            cold: false,
         });
         self.inst(Inst::Call { call }, n);
         Some(result)
@@ -728,6 +729,7 @@ impl Derive<'_> {
             args,
             results,
             fail: None,
+            cold: false,
         });
         c.inst(Inst::Call { call });
         result
@@ -751,6 +753,7 @@ impl Derive<'_> {
             args,
             results,
             fail: None,
+            cold: false,
         });
         c.inst(Inst::Call { call });
         result

@@ -392,6 +392,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.if_let(n, want);
         }
         let cv = self.condition(c[0]);
+        let full = self.is_full_test(cv);
         let join = self.new_join();
         let mut no_block = None;
         if self.live()
@@ -413,9 +414,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         // The arms join by OWN-16; an arm that leaves contributes nothing.
         let (was_dead, mark) = (self.dead, self.log.len());
+        let outer = self.growth.cold;
+        self.growth.cold |= full;
         let Some(&other) = c.get(2) else {
             // Without `else` the type is unit (LANG-11).
             let (_, _) = self.expr(c[1], expect(UNIT));
+            self.growth.cold = outer;
             let yes = self.arm_edge(mark);
             self.goto(join, UNIT, None, c[1]);
             if let Some(no) = no_block {
@@ -428,6 +432,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (UNIT, None);
         };
         let (yt, yv) = self.expr(c[1], want);
+        self.growth.cold = outer;
         let yes = self.arm_edge(mark);
         self.goto(join, yt, yv, c[1]);
         if let Some(no) = no_block {

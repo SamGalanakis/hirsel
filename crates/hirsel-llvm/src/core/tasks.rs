@@ -49,7 +49,12 @@ impl FunctionEmitter<'_> {
         params.extend(args.iter().map(|(p, _)| p.clone()));
         self.items
             .declare(name, abi.signature(params), FnAttrs::default());
-        self.invoke(&abi, &Value::global(name.to_owned()), args)
+        self.invoke(
+            &abi,
+            &Value::global(name.to_owned()),
+            args,
+            &CallAttrs::default(),
+        )
     }
     fn host_call(&mut self, op: HostOp, args: &[Value]) -> Vec<Value> {
         let operand = args.get(1).cloned().unwrap_or(Value::Null);

@@ -480,6 +480,7 @@ impl Cx<'_, '_, '_> {
             args,
             results,
             fail: None,
+            cold: false,
         });
         self.inst(Inst::Call { call }, n);
         Some(())

@@ -603,7 +603,11 @@ impl FunctionEmitter<'_> {
                     &Value::global(format!("core_drop_{}", ty.0)),
                     &[CONTEXT, p, site],
                     &CallAttrs {
-                        always_inline,
+                        inline: if always_inline {
+                            Inline::Always
+                        } else {
+                            Inline::Default
+                        },
                         ..CallAttrs::default()
                     },
                 );

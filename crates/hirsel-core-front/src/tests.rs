@@ -1020,6 +1020,73 @@ fn list_growth() {
     }
 }
 
+/// The growth path is cold (body/growth.rs): a call is cold exactly when it is
+/// lowered in the true arm of an `if` testing the used word against the capacity
+/// word of one place. Hand-derived from the source: grow and mark(2) only.
+#[test]
+fn growth_arm_calls_are_cold() {
+    let (index, modules) = program_inputs(
+        "fn grow(mut xs:List[u64])->u64 { 1 }\n\
+         fn mark(x:u64)->u64 { x }\n\
+         fn push(mut xs:List[u64],ys:List[u64])->u64 {\n\
+           let mut n:u64=0\n\
+           if list.len(xs)==list.capacity(xs) { n+=grow(mut xs) }\n\
+           if list.len(xs)==list.capacity(ys) { n+=mark(1) }\n\
+           let cap=list.capacity(xs)\n\
+           if cap==list.len(xs) { n+=mark(2) } else { n+=mark(3) }\n\
+           if list.len(xs)==list.len(xs) { n+=mark(5) }\n\
+           n+mark(4)\n\
+         }",
+    );
+    let p = Program::declare(&index, &modules);
+    let mut emitter = Emitter::new();
+    let mut names = HashMap::new();
+    let mut push = None;
+    for (f, fd) in p.fns.iter().enumerate() {
+        if fd.body.is_none() || !fd.path.package_is("app", "1") {
+            continue;
+        }
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        let id = check.function.unwrap();
+        names.insert(id, fd.path.0.name.clone());
+        if fd.path.0.name == "push" {
+            push = Some(id);
+        }
+    }
+    let body = emitter.module.functions[push.unwrap().index()]
+        .body
+        .as_ref()
+        .unwrap();
+    let constant = |v: hirsel_core_ir::ValueId| {
+        body.insts.iter().find_map(|i| match i {
+            hirsel_core_ir::Inst::Const { result, bits } if *result == v => Some(*bits),
+            _ => None,
+        })
+    };
+    let mut cold = vec![];
+    for c in &body.calls {
+        let hirsel_core_ir::Callee::Direct(f) = c.callee else {
+            continue;
+        };
+        let name = &names[&f];
+        let label = match c.args.get(&body.pools.args).unwrap_or_default() {
+            [hirsel_core_ir::Arg::Value(v)] if name == "mark" => {
+                format!("mark({})", constant(*v).unwrap())
+            }
+            _ => name.clone(),
+        };
+        if c.cold {
+            cold.push(label);
+        }
+    }
+    cold.sort();
+    assert_eq!(cold, ["grow", "mark(2)"]);
+}
+
 #[test]
 fn list_lookup() {
     let failures = run_case(&root().join("cases/body/list-get.hirsel"));

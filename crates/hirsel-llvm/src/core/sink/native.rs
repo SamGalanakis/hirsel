@@ -573,8 +573,10 @@ impl Sink for NativeSink {
                         u8::from(attrs.tail),
                     );
                     self.signature_attributes(call, sig);
-                    if attrs.always_inline {
-                        self.attribute(call, FUNCTION, ALWAYS_INLINE, None, 0);
+                    match attrs.inline {
+                        Inline::Default => {}
+                        Inline::Always => self.attribute(call, FUNCTION, ALWAYS_INLINE, None, 0),
+                        Inline::Never => self.attribute(call, FUNCTION, NO_INLINE, None, 0),
                     }
                     if attrs.cold {
                         self.attribute(call, FUNCTION, COLD, None, 0);

@@ -345,6 +345,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             args,
             results,
             fail,
+            cold: false,
         });
         self.inst(Inst::Call { call }, n);
         if result == NEVER {

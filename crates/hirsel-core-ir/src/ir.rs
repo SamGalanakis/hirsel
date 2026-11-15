@@ -994,6 +994,10 @@ pub struct CallSite {
     /// Where a failure of the callee continues; None propagates it
     /// out of this function with no cleanup here.
     pub fail: Option<BlockId>,
+    /// The call is on a path the front knows is rarely taken: the arm of a
+    /// growth check that runs only when a sequence or map is full. A hint
+    /// with no behaviour; an engine may ignore it.
+    pub cold: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]

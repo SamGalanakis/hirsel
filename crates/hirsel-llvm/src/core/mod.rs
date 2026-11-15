@@ -1324,6 +1324,18 @@ impl FunctionEmitter<'_> {
         }
         Label::block(e.target.0)
     }
+    /// Whether `edge` enters a block that makes a call the front marked cold
+    /// (core-ir CallSite::cold: the true arm of a growth check).
+    fn cold_edge(&self, edge: EdgeId) -> bool {
+        let target = self.body.edges[edge.index()].target;
+        let block = &self.body.blocks[target.index()];
+        block
+            .insts
+            .get(&self.body.insts)
+            .unwrap()
+            .iter()
+            .any(|i| matches!(i, Inst::Call { call } if self.body.calls[call.index()].cold))
+    }
     fn edge_label(&mut self, edge: EdgeId) -> Label {
         let e = &self.body.edges[edge.index()];
         if e.args.len == 0 {
@@ -1350,10 +1362,23 @@ impl FunctionEmitter<'_> {
             }
             Terminator::Branch { condition, yes, no } => {
                 let c = self.numeric(condition);
-                let c = self.cmp(Predicate::Ne, &Type::I8, &c, &int(0));
                 let y = self.edge_label(yes);
                 let n = self.edge_label(no);
-                self.cond(&c, y, n);
+                // An edge into a block that makes a cold call is unlikely.
+                match (self.cold_edge(yes), self.cold_edge(no)) {
+                    (true, false) => {
+                        let c = self.cmp(Predicate::Eq, &Type::I8, &c, &int(0));
+                        self.likely(&c, n, y);
+                    }
+                    (false, true) => {
+                        let c = self.cmp(Predicate::Ne, &Type::I8, &c, &int(0));
+                        self.likely(&c, y, n);
+                    }
+                    _ => {
+                        let c = self.cmp(Predicate::Ne, &Type::I8, &c, &int(0));
+                        self.cond(&c, y, n);
+                    }
+                }
                 self.emit_edge(y, yes);
                 self.emit_edge(n, no);
             }

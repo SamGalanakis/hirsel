@@ -73,14 +73,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return Some(self.list_with_capacity(item, vals[0]?, result, n));
             }
             "len" | "capacity" => {
-                let value = vals[0]?;
-                let offset = if name == "len" { 8 } else { 16 };
-                return Some(Some(self.read_sequence_word(
-                    value,
-                    offset,
-                    Ty::Scalar(Scalar::U64),
-                    n,
-                )));
+                let word = if name == "len" {
+                    growth::FillWord::Used
+                } else {
+                    growth::FillWord::Capacity
+                };
+                return Some(Some(self.fill_word(vals[0]?, word, n)));
             }
             _ => {}
         }

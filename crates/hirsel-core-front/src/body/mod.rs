@@ -51,6 +51,7 @@ mod compare;
 mod constants;
 mod control;
 pub(crate) mod core_ops;
+mod growth;
 mod key_glue;
 mod lists;
 mod maps;
@@ -1000,6 +1001,8 @@ struct Cx<'c, 'a, 'e> {
     /// Function references produced in this body, used by the PROG-9 descriptor
     /// kernels to recover the single front-end identity encoder's source item.
     function_values: HashMap<ValueId, FuncId>,
+    /// The growth path is cold (growth.rs).
+    growth: growth::Growth,
     /// Open StaticFn item admission is demanded only after code.describe produced
     /// a known item in this body; ordinary calls need no parameter walk.
     has_static_item_value: bool,
@@ -1145,6 +1148,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             b: Body::default(),
             func: None,
             function_values: HashMap::default(),
+            growth: growth::Growth::default(),
             has_static_item_value: false,
             emitted: None,
             ir_item,
@@ -1538,6 +1542,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.open_anchors.push(Some(self.anchor(n)));
                 return;
             }
+            if let Inst::Call { call } = i
+                && self.growth.cold
+            {
+                self.b.calls[call.index()].cold = true;
+            }
             self.open.push(i);
             self.open_anchors.push(Some(self.anchor(n)));
         }
@@ -1608,6 +1617,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn pointer(&mut self, address: AddressId, n: NodeId) -> ValueId {
         let result = self.value(Ty::Ptr);
         self.inst(Inst::Pointer { result, address }, n);
+        self.note_pointer(result, address);
         result
     }
     /// A held value's native stride or portable logical size. Rigid parameters

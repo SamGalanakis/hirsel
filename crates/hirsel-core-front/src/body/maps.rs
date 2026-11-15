@@ -76,12 +76,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
             "hash" => Some(self.key_operation(key_glue::KeyOp::Hash, types[0], &[vals[0]], n)),
-            "slots" | "capacity" => Some(Some(self.read_sequence_word(
-                vals[0]?,
-                if name == "slots" { 8 } else { 16 },
-                Ty::Scalar(Scalar::U64),
-                n,
-            ))),
+            "slots" | "capacity" => {
+                let word = if name == "slots" {
+                    growth::FillWord::Used
+                } else {
+                    growth::FillWord::Capacity
+                };
+                Some(Some(self.fill_word(vals[0]?, word, n)))
+            }
             "slot_hash" | "slot_live" | "slot_key" | "slot_value" => {
                 let collection = self.map_type(types)?;
                 let entry = self.map_entry_at(vals[0]?, collection, vals[1]?, n)?;

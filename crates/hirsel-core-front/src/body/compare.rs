@@ -330,6 +330,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             args,
             results,
             fail: None,
+            cold: false,
         });
         let call = CallId(self.b.calls.len() as u32 - 1);
         self.inst(Inst::Call { call }, n);

@@ -537,9 +537,10 @@ impl Printer {
                                 Arg::Address(a) => format!("&a{}", a.0),
                             });
                         format!(
-                            "{lhs}call {callee} g{} ({args}){}",
+                            "{lhs}call {callee} g{} ({args}){}{}",
                             c.signature.0,
-                            fail(c.fail)
+                            fail(c.fail),
+                            if c.cold { " cold" } else { "" }
                         )
                     }
                     Inst::Alloc {
@@ -1632,6 +1633,7 @@ impl BodyParser {
             args,
             results,
             fail: l.fail()?,
+            cold: l.eat("cold"),
         });
         Ok(Inst::Call {
             call: CallId(self.body.calls.len() as u32 - 1),

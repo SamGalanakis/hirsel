@@ -527,8 +527,9 @@ impl FnSig {
         Self::new(result, params.into_iter().map(Parameter::plain).collect())
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Inline {
+    #[default]
     Default,
     Always,
     Never,
@@ -537,7 +538,7 @@ pub(super) enum Inline {
 pub(super) struct CallAttrs {
     pub cold: bool,
     pub tail: bool,
-    pub always_inline: bool,
+    pub inline: Inline,
     pub scopes: Option<Scoped>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1065,8 +1066,10 @@ impl Sink for TextSink {
                     write!(out, " {arg}").unwrap();
                 }
                 out.push(')');
-                if attrs.always_inline {
-                    out.push_str(" alwaysinline");
+                match attrs.inline {
+                    Inline::Default => {}
+                    Inline::Always => out.push_str(" alwaysinline"),
+                    Inline::Never => out.push_str(" noinline"),
                 }
                 if attrs.cold {
                     out.push_str(" cold");

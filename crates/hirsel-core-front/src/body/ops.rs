@@ -250,6 +250,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             },
                             n,
                         );
+                        if cop == CompareOp::Eq {
+                            self.note_equal(result, left, right);
+                        }
                         Some(result)
                     }
                     _ => None,

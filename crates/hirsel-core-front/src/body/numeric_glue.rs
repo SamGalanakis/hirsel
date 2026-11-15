@@ -161,6 +161,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             args,
             results: PoolRange::EMPTY,
             fail,
+            cold: false,
         });
         self.numeric_sites.push(scalar_abi::NumericSite {
             call,

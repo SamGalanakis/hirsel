@@ -121,7 +121,7 @@ pub(super) fn emit(
             Carried::Nothing => {}
         }
         args.push(word(int(0)));
-        let values = e.invoke(&abi, &code, args);
+        let values = e.invoke(&abi, &code, args, &CallAttrs::default());
         let status = values.last().unwrap().clone();
         if let Carried::Value(t) = rc {
             let success = e.cmp(Predicate::Eq, &Type::I8, &status, &int(0));

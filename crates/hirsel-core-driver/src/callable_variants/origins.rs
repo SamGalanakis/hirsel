@@ -338,6 +338,7 @@ fn f3 = n3 g1 extern
             args,
             results: PoolRange::EMPTY,
             fail: None,
+            cold: false,
         });
         b.insts.insert(4, Inst::Call { call: CallId(0) });
         let b = m.functions[0].body.as_ref().unwrap();

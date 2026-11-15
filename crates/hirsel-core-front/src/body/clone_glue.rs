@@ -117,6 +117,7 @@ impl Derive<'_> {
                 args,
                 results,
                 fail: None,
+                cold: false,
             });
             c.inst(Inst::Call { call });
             ret(c, &[requested, available]);
@@ -530,6 +531,7 @@ impl Derive<'_> {
             args,
             results,
             fail: None,
+            cold: false,
         });
         c.inst(Inst::Call { call });
         let zero = c.constant(0);
@@ -924,6 +926,7 @@ impl Derive<'_> {
                     args,
                     results,
                     fail: None,
+                    cold: false,
                 });
                 c.inst(Inst::Call { call });
                 let zero = c.constant(0);
@@ -1201,6 +1204,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             args,
             results,
             fail: None,
+            cold: false,
         });
         self.inst(Inst::Call { call }, n);
         let zero = self.u64k(0, n)?;
@@ -1296,6 +1300,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             args,
             results,
             fail: None,
+            cold: false,
         });
         self.inst(Inst::Call { call }, n);
         let zero = self.u64k(0, n)?;

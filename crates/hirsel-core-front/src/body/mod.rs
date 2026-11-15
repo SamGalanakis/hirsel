@@ -606,13 +606,14 @@ impl Emitter {
         }
         false
     }
-    /// The byte size of a value of row `id`, whose recipe exists: a resource's or a
-    /// stable value's holder is its block pointer.
+    /// The byte size of a value of row `id` where it is held, whose recipe exists.
     fn size(&self, id: TypeId) -> u64 {
-        if self.by_block(id) {
-            return hirsel_core_layout::POINTER;
-        }
-        self.block(id).0
+        held_size(
+            self.module.types[id.index()].repr,
+            &self.recipes[id.index()],
+            false,
+        )
+        .expect("only fixed layouts are carried")
     }
     /// The size and alignment of row `id`'s fields laid out together (a resource's
     /// block).
@@ -1629,20 +1630,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             Ok(Rep::Scalar(Ty::Ptr)) => (None, hirsel_core_layout::POINTER),
             Ok(Rep::None) => (None, 0),
             Ok(Rep::Place(id)) => {
-                let bits = if self.e.is_resource(id) {
-                    hirsel_core_layout::POINTER
-                } else if self.e.by_block(id) {
-                    // A stable value's holder counts as a `Stable` field (MEM-24).
-                    if logical {
-                        16
-                    } else {
-                        hirsel_core_layout::POINTER
-                    }
-                } else if logical {
-                    self.e.recipes[id.index()].logical_size.unwrap()
-                } else {
-                    self.e.size(id)
-                };
+                let bits = held_size(
+                    self.e.module.types[id.index()].repr,
+                    &self.e.recipes[id.index()],
+                    logical,
+                )
+                .expect("only fixed layouts are carried");
                 (Some(id), bits)
             }
             Err(what) => {
@@ -2494,6 +2487,27 @@ fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
         | TyKind::Hole
         | TyKind::Region(_) => false,
     }
+}
+
+/// The bytes a value of a row with `repr` and `recipe` takes where it is held (a
+/// local, a field, an element, a copy), or with `logical` what it counts in a
+/// portable size (FORM #116). A resource's or a stable value's holder is its block
+/// pointer, and a stable holder counts as a `Stable` field, 16 (MEM-24); only
+/// allocating the value takes its block. The emitter and the generic materialiser
+/// both ask here, so a rigid `T` and its instance cannot disagree.
+pub(super) fn held_size(repr: LRepr, recipe: &Recipe, logical: bool) -> Result<u64, &'static str> {
+    Ok(match repr {
+        LRepr::Resource => hirsel_core_layout::POINTER,
+        LRepr::Stable if logical => 16,
+        LRepr::Stable => hirsel_core_layout::POINTER,
+        _ if logical => recipe
+            .logical_size
+            .ok_or("logical size of a compact generic value is not built")?,
+        _ => match &recipe.layout {
+            Layout::Fixed(f) => f.size,
+            Layout::Compact(_) => return Err("copying a compact generic value is not built"),
+        },
+    })
 }
 
 #[cfg(test)]

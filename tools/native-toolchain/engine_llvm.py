@@ -129,7 +129,7 @@ def shadow(library, compiler, out):
 
 
 def build(compiler, runtime, args, out, xdg, sample):
-    out.mkdir()
+    out.mkdir(parents=True)
     env = os.environ | dict(HIRSEL_MEMORY_LIMIT='2G', HIRSEL_JOBS='1', LD_LIBRARY_PATH=str(PIN),
                             XDG_CACHE_HOME=str(xdg / 'cache'), XDG_DATA_HOME=str(xdg / 'data'))
     pre = ['taskset', '-c', CPU, 'perf', 'stat', '-x', ';', '-e', 'instructions:u', '-o', str(out / 'perf'), '--'] if sample else []

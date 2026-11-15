@@ -4,7 +4,7 @@ use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
 use serde::Serialize;
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,13 +16,22 @@ pub(crate) struct Tool {
 }
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
-const LINK_RECIPE_SCHEMA: u32 = 4;
-const TOOLCHAIN_SCHEMA: u32 = 1;
+const LINK_RECIPE_SCHEMA: u32 = 5;
+const TOOLCHAIN_SCHEMA: u32 = 2;
 #[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct RecipeFile {
     pub(crate) path: PathBuf,
     pub(crate) content: ContentHash,
     pub(crate) stat: RecipeStat,
+    pub(crate) trust: Trust,
+}
+/// Whether a record's stat may stand for its bytes without a read.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) enum Trust {
+    /// First seen at `at` nanoseconds of `clock`'s count; every request re-hashes.
+    Sighted { clock: String, at: u64 },
+    /// Seen with equal bytes twice, a window apart: the stat stands for the bytes.
+    Settled,
 }
 #[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct RecipeStat {
@@ -99,51 +108,30 @@ fn recipe_directory(driver: &Path) -> io::Result<PathBuf> {
 
 fn identity(program: &Path, search: &OsStr, store: &Store) -> io::Result<Tool> {
     let path = selected(program, search)?;
-    let m = recipe_stat(&path)?;
-    let revision = (
-        &path,
-        m.dev,
-        m.ino,
-        m.len,
-        m.mode,
-        m.mtime,
-        m.mtime_nsec,
-        m.ctime,
-        m.ctime_nsec,
-    );
     let key = ContentHash::of_parts(
-        "hirsel.host-tool-revision.v1",
-        [crate::encode(&revision)?.as_slice()],
+        "hirsel.host-tool-revision.v2",
+        [crate::encode(&path)?.as_slice()],
     );
     let selection = format!(
         "tool-{}",
         key.0.iter().map(|b| format!("{b:02x}")).collect::<String>()
     );
-    let cached = store
+    let previous = store
         .selection(&selection)?
         .map(|hash| store.get(hash))
         .transpose()?
-        .flatten();
-    let content = if let Some(bytes) = cached.filter(|bytes| bytes.len() == 32) {
-        ContentHash(
-            bytes
-                .as_slice()
-                .try_into()
-                .expect("external digest length checked"),
-        )
-    } else {
-        let content = ContentHash::of_parts(
-            "hirsel.host-tool-content.v1",
-            [std::fs::read(&path)?.as_slice()],
-        );
-        // An unsettled revision may name another content later in its tick.
-        if settled(&m) {
-            let hash = store.put(&content.0)?;
-            store.select(&selection, hash)?;
-        }
-        content
-    };
-    Ok(Tool { path, content })
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<RecipeFile>(&bytes).ok())
+        .filter(|record| record.path == path);
+    let seen = observe(&path, previous.as_ref())?;
+    if previous.as_ref() != Some(&seen) {
+        let hash = store.put(&serde_json::to_vec(&seen).map_err(io::Error::other)?)?;
+        store.select(&selection, hash)?;
+    }
+    Ok(Tool {
+        path,
+        content: seen.content,
+    })
 }
 pub(crate) fn link_tools(cc: &Path) -> io::Result<(Tool, Tool)> {
     let search = std::env::var_os("PATH").unwrap_or_default();
@@ -218,16 +206,10 @@ pub(crate) fn toolchain(cc: &Path, target: &str, runtime: &Path) -> io::Result<T
         .filter(|manifest| manifest.schema == TOOLCHAIN_SCHEMA && manifest.target == target);
     let mut files = Vec::with_capacity(paths.len());
     for file in paths {
-        if let Some(previous) = old
+        let previous = old
             .as_ref()
-            .and_then(|manifest| manifest.files.iter().find(|entry| entry.path == file))
-        {
-            if recipe_stat(&file)? == previous.stat {
-                files.push(previous.clone());
-                continue;
-            }
-        }
-        files.push(recipe_file(&file)?);
+            .and_then(|manifest| manifest.files.iter().find(|entry| entry.path == file));
+        files.push(observe(&file, previous)?);
     }
     let identity = ContentHash::of_parts(
         "hirsel.toolchain-image.v2",
@@ -568,21 +550,14 @@ enum RecipeInputs {
 fn refresh_recipe_inputs(recipe: &mut LinkRecipe) -> io::Result<RecipeInputs> {
     let mut inputs = RecipeInputs::Current;
     for input in recipe.files.iter_mut().chain(&mut recipe.source_files) {
-        let Ok(stat) = recipe_stat(&input.path) else {
+        let Ok(seen) = observe(&input.path, Some(input)) else {
             return Ok(RecipeInputs::Changed);
         };
-        if stat == input.stat {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&input.path) else {
-            return Ok(RecipeInputs::Changed);
-        };
-        if ContentHash::of_bytes(&bytes) != input.content {
+        if seen.content != input.content {
             return Ok(RecipeInputs::Changed);
         }
-        let stat = recorded(stat);
-        if stat != input.stat {
-            input.stat = stat;
+        if seen != *input {
+            *input = seen;
             inputs = RecipeInputs::Restated;
         }
     }
@@ -597,55 +572,142 @@ fn publish(directory: &Path, path: &Path, value: &impl Serialize) -> io::Result<
 }
 
 fn recipe_file(path: &Path) -> io::Result<RecipeFile> {
-    // Stat before reading: a change after the stat moves the stat again.
-    let stat = recorded(recipe_stat(path)?);
-    let bytes = std::fs::read(path)?;
+    observe(path, None)
+}
+
+/// The rule that lets a stat stand for a file's bytes:
+///
+/// 1. A revision is recorded `Sighted` the first time it is seen, with the
+///    time of that sighting on our own clock; a sighted record is re-hashed on
+///    every request and never vouches for bytes.
+/// 2. A later request that finds the same stat re-hashes; equal bytes and at
+///    least `WINDOW` between the two sightings promote it to `Settled`.
+/// 3. A settled record whose stat equals the live one is trusted unread.
+/// 4. Stat and bytes come from one opened file. The promoting sighting's time
+///    is taken before its stat, the first sighting's after, so the window is a
+///    lower bound on real time between the file's last change and the read.
+/// 5. Durations are measured on CLOCK_BOOTTIME (/proc/uptime), compared only
+///    between sightings of one boot and one time namespace; file times are
+///    never compared with our clock.
+///
+/// What this does not defend, by contract: a write through an already
+/// writable shared mapping that moves no timestamp until writeback; a
+/// filesystem whose timestamp granularity exceeds `WINDOW`; and a file clock
+/// set back so that a later edit repeats an earlier timestamp exactly.
+const WINDOW: u64 = 2_000_000_000;
+
+/// Observe a file against its previous record: trust a settled stat, else
+/// re-hash and record the sighting.
+fn observe(path: &Path, previous: Option<&RecipeFile>) -> io::Result<RecipeFile> {
+    if let Some(previous) = previous.filter(|record| record.trust == Trust::Settled)
+        && recipe_stat(path)? == previous.stat
+    {
+        return Ok(previous.clone());
+    }
+    let before = clock();
+    let mut file = std::fs::File::open(path)?;
+    let stat = stat_of(&file.metadata()?);
+    let after = clock();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    #[cfg(test)]
+    {
+        READS.set(READS.get() + 1);
+        if let Some(mut after_read) = AFTER_READ.take() {
+            after_read();
+        }
+    }
+    let content = ContentHash::of_bytes(&bytes);
+    let same = previous.filter(|record| record.stat == stat && record.content == content);
+    let trust = match (same.map(|record| &record.trust), &before) {
+        (Some(Trust::Settled), _) => Trust::Settled,
+        (Some(sighted @ Trust::Sighted { clock, at }), Some(now)) if *clock == now.clock => {
+            if now.earliest.saturating_sub(*at) >= WINDOW {
+                Trust::Settled
+            } else {
+                sighted.clone()
+            }
+        }
+        _ => match after {
+            Some(now) => Trust::Sighted {
+                clock: now.clock,
+                at: now.latest,
+            },
+            None => Trust::Sighted {
+                clock: String::new(),
+                at: u64::MAX,
+            },
+        },
+    };
     Ok(RecipeFile {
         path: path.to_owned(),
-        content: ContentHash::of_bytes(&bytes),
+        content,
         stat,
+        trust,
     })
 }
 
-/// How long after a file's last change its stat stays untrusted. Filesystems
-/// stamp changes from a coarse clock (a kernel tick, a whole second on some),
-/// so an equal-length rewrite inside one tick keeps every stat field (Git's
-/// "racily clean" entry). Two seconds covers every Linux filesystem's stamp.
-const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+/// One reading of our own clock: the true time lies in `earliest..=latest`.
+struct Reading {
+    /// Which count this is: the boot and the time namespace.
+    clock: String,
+    earliest: u64,
+    latest: u64,
+}
 
 #[cfg(test)]
 thread_local! {
-    /// The time a test says the request runs at; real time when unset.
-    pub(crate) static CLOCK: std::cell::Cell<Option<std::time::SystemTime>> =
+    /// A test's clock, in nanoseconds of one count; the real clock when unset.
+    pub(crate) static CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// A test's (seconds, nanoseconds) for every observed mtime and ctime, so a
+    /// test makes two stats collide on purpose.
+    pub(crate) static TIMES: std::cell::Cell<Option<(i64, i64)>> =
         const { std::cell::Cell::new(None) };
+    /// Runs between a sighting's read and its classification.
+    pub(crate) static AFTER_READ: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// How many files this thread has read for their bytes.
+    pub(crate) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn now() -> std::time::SystemTime {
+/// CLOCK_BOOTTIME through /proc/uptime (10 ms resolution): never stepped,
+/// counts suspend, restarts at boot. `None` when it cannot be read, and then
+/// no record is ever promoted.
+fn clock() -> Option<Reading> {
+    static COUNT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let count = COUNT
+        .get_or_init(|| {
+            let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+            let namespace = std::fs::read_link("/proc/self/ns/time").ok()?;
+            Some(format!("{} {}", boot.trim(), namespace.display()))
+        })
+        .clone()?;
     #[cfg(test)]
     if let Some(now) = CLOCK.get() {
-        return now;
+        return Some(Reading {
+            clock: count,
+            earliest: now,
+            latest: now,
+        });
     }
-    std::time::SystemTime::now()
-}
-
-fn settled(stat: &RecipeStat) -> bool {
-    let changed = std::time::UNIX_EPOCH
-        + std::time::Duration::new(stat.ctime.max(0) as u64, stat.ctime_nsec.max(0) as u32);
-    now().duration_since(changed).is_ok_and(|age| age > SETTLE)
-}
-
-/// The stat a record keeps. An unsettled one is marked so that no live stat
-/// equals it: the next request re-hashes the file instead of trusting it.
-fn recorded(mut stat: RecipeStat) -> RecipeStat {
-    if !settled(&stat) {
-        stat.ctime_nsec = -1;
-    }
-    stat
+    let uptime = std::fs::read_to_string("/proc/uptime").ok()?;
+    let (seconds, hundredths) = uptime.split_whitespace().next()?.split_once('.')?;
+    let at =
+        seconds.parse::<u64>().ok()? * 1_000_000_000 + hundredths.parse::<u64>().ok()? * 10_000_000;
+    Some(Reading {
+        clock: count,
+        earliest: at,
+        latest: at + 10_000_000,
+    })
 }
 
 fn recipe_stat(path: &Path) -> io::Result<RecipeStat> {
-    let metadata = path.metadata()?;
-    Ok(RecipeStat {
+    Ok(stat_of(&path.metadata()?))
+}
+
+fn stat_of(metadata: &std::fs::Metadata) -> RecipeStat {
+    #[allow(unused_mut)]
+    let mut stat = RecipeStat {
         dev: metadata.dev(),
         ino: metadata.ino(),
         len: metadata.len(),
@@ -654,7 +716,13 @@ fn recipe_stat(path: &Path) -> io::Result<RecipeStat> {
         mtime_nsec: metadata.mtime_nsec(),
         ctime: metadata.ctime(),
         ctime_nsec: metadata.ctime_nsec(),
-    })
+    };
+    #[cfg(test)]
+    if let Some((seconds, nanoseconds)) = TIMES.get() {
+        (stat.mtime, stat.mtime_nsec, stat.ctime, stat.ctime_nsec) =
+            (seconds, nanoseconds, seconds, nanoseconds);
+    }
+    stat
 }
 
 fn driver_file_key(path: &Path) -> io::Result<String> {
@@ -845,34 +913,25 @@ mod tests {
         let runtime = work.path().join("runtime.a");
         std::fs::write(&runtime, b"runtime").unwrap();
         let target = "x86_64-unknown-linux-gnu";
+        CLOCK.set(Some(0));
         let identity = toolchain(&cc, target, &runtime).unwrap();
         for file in [&linker, &crt, &runtime] {
             let copy = file.with_extension("rematerialised");
             std::fs::copy(file, &copy).unwrap();
             std::fs::rename(&copy, file).unwrap();
         }
-        // Every file changed just now; a request two seconds on may trust its stat.
-        CLOCK.set(Some(std::time::SystemTime::now() + SETTLE + SETTLE));
+        // The new stats are sighted, then settled by a sighting a window later.
+        CLOCK.set(Some(1));
+        assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
+        CLOCK.set(Some(1 + WINDOW));
         assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
         let directory = recipe_directory(&cc).unwrap();
         let key = driver_file_key(&cc).unwrap();
-        let recipe: LinkRecipe = serde_json::from_slice(
-            &std::fs::read(directory.join(format!("{target}-{key}.json"))).unwrap(),
-        )
-        .unwrap();
         let manifest_path = directory.join(format!("toolchain-{target}-{key}.json"));
-        let manifest: ToolchainManifest =
-            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-        for file in recipe.files.iter().chain(&manifest.files) {
-            assert_eq!(
-                file.stat,
-                recipe_stat(&file.path).unwrap(),
-                "{} keeps a stat the next request must re-hash",
-                file.path.display()
-            );
-        }
         let written = std::fs::metadata(&manifest_path).unwrap().ino();
+        READS.set(0);
         assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
+        assert_eq!(READS.get(), 0, "settled toolchain files are not read again");
         assert_eq!(
             std::fs::metadata(&manifest_path).unwrap().ino(),
             written,
@@ -934,62 +993,196 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recipe_input_stat_change_rehashes_only_when_content_changes() {
-        // Times are set explicitly: each write gets its own mtime, and the clock
-        // stands past every change's settle window.
+    /// One step of a stat-trust case: at `at` on the test clock, the file holds
+    /// `bytes` stamped `time` (mtime and ctime), and a request asks for the
+    /// recipe's inputs; `during` runs between that request's read and its
+    /// classification.
+    struct Step {
+        at: u64,
+        time: (i64, i64),
+        bytes: &'static [u8],
+        during: Option<(&'static [u8], u64)>,
+        expect: RecipeInputs,
+        reads: usize,
+    }
+
+    fn step(
+        at: u64,
+        time: (i64, i64),
+        bytes: &'static [u8],
+        expect: RecipeInputs,
+        reads: usize,
+    ) -> Step {
+        Step {
+            at,
+            time,
+            bytes,
+            during: None,
+            expect,
+            reads,
+        }
+    }
+
+    /// Record the file as `first` bytes at clock 0 and `time`, then run `steps`
+    /// in order. A step stamped like the record asserts that its stat really
+    /// collides with the recorded one.
+    fn stat_trust(case: &str, time: (i64, i64), first: &'static [u8], steps: Vec<Step>) {
         let work = tempfile::tempdir().unwrap();
         let input = work.path().join("crt.o");
-        let start = std::time::SystemTime::now();
-        let write = |bytes: &[u8], age: u64| {
-            std::fs::write(&input, bytes).unwrap();
-            std::fs::File::options()
-                .write(true)
-                .open(&input)
-                .unwrap()
-                .set_modified(start - std::time::Duration::from_secs(age))
-                .unwrap();
-        };
-        CLOCK.set(Some(start + SETTLE + SETTLE));
-        write(b"same bytes", 30);
+        std::fs::write(&input, first).unwrap();
+        CLOCK.set(Some(0));
+        TIMES.set(Some(time));
         let mut recipe = recipe(&input);
-        let refresh = |recipe: &mut LinkRecipe| refresh_recipe_inputs(recipe).unwrap();
-        assert_eq!(refresh(&mut recipe), RecipeInputs::Current);
-        write(b"same bytes", 20);
-        assert_eq!(
-            refresh(&mut recipe),
-            RecipeInputs::Restated,
-            "touch-only replacement must reuse"
-        );
-        assert_eq!(
-            refresh(&mut recipe),
-            RecipeInputs::Current,
-            "a restated record is not restated again"
-        );
-        write(b"diff bytes", 10);
-        assert_eq!(
-            refresh(&mut recipe),
-            RecipeInputs::Changed,
-            "changed content must miss"
-        );
+        let recorded = recipe.files[0].stat.clone();
+        for (index, step) in steps.into_iter().enumerate() {
+            std::fs::write(&input, step.bytes).unwrap();
+            TIMES.set(Some(step.time));
+            if step.time == time {
+                assert_eq!(
+                    recipe_stat(&input).unwrap(),
+                    recorded,
+                    "{case} step {index}: no collision"
+                );
+            }
+            CLOCK.set(Some(step.at));
+            if let Some((bytes, at)) = step.during {
+                let input = input.clone();
+                AFTER_READ.set(Some(Box::new(move || {
+                    std::fs::write(&input, bytes).unwrap();
+                    CLOCK.set(Some(at));
+                })));
+            }
+            READS.set(0);
+            let inputs = refresh_recipe_inputs(&mut recipe).unwrap();
+            AFTER_READ.set(None);
+            assert_eq!(
+                (inputs, READS.get()),
+                (step.expect, step.reads),
+                "{case} step {index}"
+            );
+        }
         CLOCK.set(None);
+        TIMES.set(None);
     }
 
     #[test]
-    fn an_edit_inside_the_recorded_stats_tick_is_changed() {
-        // Filesystems stamp changes from a coarse clock: an equal-length rewrite
-        // right after a stat was recorded keeps every stat field. The record must
-        // not vouch for content it cannot tell apart.
+    fn a_stat_stands_for_bytes_only_after_two_sightings_a_window_apart() {
+        use RecipeInputs::{Changed, Current, Restated};
+        let tick = (1_700_000_000, 4_000_000);
+        let later = (1_700_000_001, 4_000_000);
+        let future = (4_102_444_800, 0); // 2100-01-01, ahead of any clock here
+        let ms = 1_000_000;
+        stat_trust(
+            "same-tick equal-length edit",
+            tick,
+            b"first",
+            vec![step(ms, tick, b"later", Changed, 1)],
+        );
+        stat_trust(
+            "edit after promotion in a later tick",
+            tick,
+            b"first",
+            vec![
+                step(WINDOW, tick, b"first", Restated, 1),
+                step(WINDOW + ms, tick, b"first", Current, 0),
+                step(WINDOW + 2 * ms, later, b"later", Changed, 1),
+            ],
+        );
+        stat_trust(
+            "sightings exactly a window apart",
+            tick,
+            b"first",
+            vec![
+                step(WINDOW, tick, b"first", Restated, 1),
+                step(WINDOW + ms, tick, b"first", Current, 0),
+            ],
+        );
+        stat_trust(
+            "sightings just under a window apart",
+            tick,
+            b"first",
+            vec![
+                step(WINDOW - 1, tick, b"first", Current, 1),
+                step(WINDOW + 5 * ms, tick, b"later", Changed, 1),
+            ],
+        );
+        stat_trust(
+            "an edit between sightings in the recorded tick",
+            tick,
+            b"first",
+            vec![step(WINDOW, tick, b"later", Changed, 1)],
+        );
+        stat_trust(
+            "a ctime in the future",
+            future,
+            b"first",
+            vec![step(ms, future, b"later", Changed, 1)],
+        );
+        stat_trust(
+            "an edit after the promoting read",
+            tick,
+            b"first",
+            vec![
+                Step {
+                    during: Some((b"later", WINDOW + 10 * ms)),
+                    ..step(WINDOW - 1, tick, b"first", Current, 1)
+                },
+                step(WINDOW + 20 * ms, tick, b"later", Changed, 1),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_record_written_by_the_earlier_stat_rule_is_not_read() {
+        // e4b65f6c recorded stats it could not trust. A manifest it wrote names
+        // runtime bytes that the file no longer holds, under the live stat.
         let work = tempfile::tempdir().unwrap();
-        let input = work.path().join("crt.o");
-        for _ in 0..20 {
-            std::fs::write(&input, b"first").unwrap();
-            let mut recipe = recipe(&input);
-            std::fs::write(&input, b"later").unwrap();
-            assert_eq!(
-                refresh_recipe_inputs(&mut recipe).unwrap(),
-                RecipeInputs::Changed
-            );
-        }
+        let bin = work.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let linker = bin.join("ld.lld");
+        let crt = work.path().join("crt1.o");
+        std::fs::write(&linker, b"linker").unwrap();
+        std::fs::write(&crt, b"crt").unwrap();
+        let cc = bin.join("cc");
+        std::fs::write(
+            &cc,
+            format!(
+                "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"-lc\"' >&2\n",
+                linker.display(),
+                crt.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime = work.path().join("runtime.a");
+        std::fs::write(&runtime, b"runtime").unwrap();
+        let target = "x86_64-unknown-linux-gnu";
+        let directory = recipe_directory(&cc).unwrap();
+        let key = driver_file_key(&cc).unwrap();
+        let stale = |path: &Path| {
+            serde_json::json!({
+                "path": path,
+                "content": ContentHash::of_bytes(b"bytes the file held before"),
+                "stat": recipe_stat(path).unwrap(),
+            })
+        };
+        let manifest = serde_json::json!({
+            "schema": 1,
+            "target": target,
+            "files": [stale(&cc.canonicalize().unwrap()), stale(&runtime), stale(&linker), stale(&crt)],
+            "identity": ContentHash::of_bytes(b"identity"),
+        });
+        std::fs::write(
+            directory.join(format!("toolchain-{target}-{key}.json")),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            toolchain(&cc, target, &runtime).unwrap().runtime,
+            ContentHash::of_parts(
+                "hirsel.core-runtime.v2",
+                [ContentHash::of_bytes(b"runtime").0.as_slice()]
+            ),
+        );
     }
 }

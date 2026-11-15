@@ -400,7 +400,12 @@ def main():
                 self.assertTrue(any(d['rule'] == 'LANG-11' and d['primary']['module'] == 'std@1/user_refused'
                                     for d in product['diagnostics']), product)
 
-    result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(LibraryModes))
+    # The gate runs on the host (openat2), so without this every case would
+    # share the user's real default store and host-tool records with every
+    # other process on the machine. Each run gets its own.
+    with tempfile.TemporaryDirectory(prefix='hirsel-library-modes-cache-') as cache:
+        os.environ['XDG_CACHE_HOME'] = cache
+        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(LibraryModes))
     return int(not result.wasSuccessful())
 
 

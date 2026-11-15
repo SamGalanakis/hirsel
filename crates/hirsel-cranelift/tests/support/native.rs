@@ -1507,4 +1507,64 @@ fn check_growth_shadow_words() {
     }
 }
 
+#[test]
+fn cancelled_cold_word_call_isolate_refunds_on_both_cranelift_targets() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
+    let template = r#"
+fn grow_then_check(mut xs: List[u64]) {
+    for n in 0u64 .. 100 { result.unwrap(list.push(mut xs, n)) }
+    task.check_cancel()
+}
+fn isolated_body() {
+    let mut xs: List[u64] = list.new()
+    if list.len(xs) == list.capacity(xs) { grow_then_check(mut xs) }
+}
+fn child(take x: u64) -> u64 { CALL_BODY; x }
+fn cancelled(tasks: Tasks) -> u64 waits {
+    let mut h = result.unwrap(task.spawn(tasks, bytes 65536, 41u64, child))
+    task.cancel(mut h)
+    match task.join(take h) {
+        Ok(n) => n,
+        Error(Cancelled(take c)) => { let _ = take c; 1 }
+        Error(Failed(take c)) => { let _ = take c; 2 }
+    }
+}
+"#;
+    for with_isolate in [false, true] {
+        let source = template.replace(
+            "CALL_BODY",
+            if with_isolate {
+                "let _ = isolate(fn() -> () { isolated_body() })"
+            } else {
+                "isolated_body()"
+            },
+        );
+        let (module, names) = front::lower(&root, &source);
+        let evaluator = eval::run(&module, names["cancelled"], &[0], 1_000_000);
+        assert_eq!(evaluator.used, 0);
+        let expected = eval::Report {
+            outcome: Outcome::Returned(vec![1]),
+            used: 0,
+            peak_reserved: 0,
+            trace: Vec::new(),
+            admissions: if with_isolate { 8 } else { 7 },
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            sites: Vec::new(),
+        };
+        execute_reports(
+            &module,
+            &[(names["cancelled"], vec![0])],
+            true,
+            1_000_000,
+            None,
+            Some(&[expected]),
+        );
+        println!(
+            "cranelift cancelled cold word call isolate={with_isolate}: used=0 evaluator_used={}",
+            evaluator.used
+        );
+    }
+}
+
 include!("copy.rs");

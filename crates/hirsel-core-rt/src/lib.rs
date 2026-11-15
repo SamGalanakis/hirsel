@@ -108,7 +108,12 @@ impl Context {
     }
 
     pub(crate) fn mark_startup_primary(&mut self) {
-        if let Some(primary) = self.primary.as_mut().filter(|cell| !cell.reserved) {
+        // Child task contexts carry a prepaid primary from their spawn payer;
+        // only the root task owns the process-startup primary outside the run
+        // allowance.  Child teardown must refund its primary on cancellation.
+        if self.task_record.is_some()
+            && let Some(primary) = self.primary.as_mut().filter(|cell| !cell.reserved)
+        {
             primary.startup = true;
         }
     }

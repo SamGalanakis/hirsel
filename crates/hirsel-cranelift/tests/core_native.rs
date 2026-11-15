@@ -920,10 +920,9 @@ int main(void) {{
   struct R result={{0}};
   if(hirsel_core_test_run(ctx,entry,0,&result,0,sizeof result)) return 5;
   if(result.native_status || result.status!=2) return 1;
-  /* The input Tok (40) and the cancellation cause cell (32) are the only
-     non-isolate charges left after the child is joined.  A leaked isolate
-     reservation would add another 32 here. */
-  if(hirsel_core_test_available(ctx)!=before-72) return 2;
+  /* The input Tok (40) is the only non-isolate charge left after the child is
+     joined; its Cancelled cause cell is refunded with the child context. */
+  if(hirsel_core_test_available(ctx)!=before-40) return 2;
   hirsel_core_context_free(ctx);
   return 0;
 }}

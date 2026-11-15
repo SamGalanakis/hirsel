@@ -1821,7 +1821,7 @@ fn carrier_ir(
 /// frees the live block, not the empty one it lent, so join reports Cancelled (1) and
 /// every byte is refunded. The evaluator runs a child at its spawn, before any
 /// cancel, so the expected run is derived by hand.
-fn cancelled_cold_word_call(target: Target) {
+fn cancelled_cold_word_call(target: Target, with_isolate: bool) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
     let source = r#"
 fn grow_then_check(mut xs: List[u64]) {
@@ -1831,12 +1831,16 @@ fn grow_then_check(mut xs: List[u64]) {
     task.check_cancel()
 }
 
-fn child(take x: u64) -> u64 {
+fn isolated_body() {
     let mut xs: List[u64] = list.new()
     if list.len(xs) == list.capacity(xs) {
         grow_then_check(mut xs)
     }
-    list.len(xs) + x
+}
+
+fn child(take x: u64) -> u64 {
+    CALL_BODY
+    x
 }
 
 fn cancelled(tasks: Tasks) -> u64 waits {
@@ -1855,7 +1859,15 @@ fn cancelled(tasks: Tasks) -> u64 waits {
     }
 }
 "#;
-    let (module, names) = front::lower(source, &root.join("../core"), "main").unwrap();
+    let source = if with_isolate {
+        source.replace(
+            "CALL_BODY",
+            "let _ = isolate(fn() -> () { isolated_body() })",
+        )
+    } else {
+        source.replace("CALL_BODY", "isolated_body()")
+    };
+    let (module, names) = front::lower(&source, &root.join("../core"), "main").unwrap();
     let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
     let ir = carrier_ir(&module, &facts[0], target, false);
     let object = hirsel_llvm_lazy::emit_program_for_target(
@@ -1878,6 +1890,8 @@ fn cancelled(tasks: Tasks) -> u64 waits {
         limit: u64::MAX,
         injection: None,
     };
+    let expected = eval::run(&module, case.function, &case.args, case.limit);
+    assert_eq!(expected.used, 0, "evaluator used bytes");
     let report = execute_target_object(
         &module,
         std::slice::from_ref(&case),
@@ -1889,7 +1903,11 @@ fn cancelled(tasks: Tasks) -> u64 waits {
     )
     .remove(0);
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![1]));
-    assert_eq!(report.used, 0);
+    println!(
+        "cancelled cold word call target={target:?} isolate={with_isolate}: used={} evaluator_used={}",
+        report.used, expected.used
+    );
+    assert_eq!(report.used, expected.used);
 }
 
 /// A carrier callee from a cached library: the program's private copy of the import
@@ -2039,7 +2057,8 @@ b3:
 fn carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_program_cases(Target::X86_64Linux);
     carrier_sret_case(Target::X86_64Linux);
-    cancelled_cold_word_call(Target::X86_64Linux);
+    cancelled_cold_word_call(Target::X86_64Linux, false);
+    cancelled_cold_word_call(Target::X86_64Linux, true);
     imported_carrier_callee(Target::X86_64Linux);
 }
 
@@ -2048,7 +2067,8 @@ fn carrier_twins_match_the_evaluator_in_program_builds() {
 fn aarch64_carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_program_cases(Target::Aarch64Linux);
     carrier_sret_case(Target::Aarch64Linux);
-    cancelled_cold_word_call(Target::Aarch64Linux);
+    cancelled_cold_word_call(Target::Aarch64Linux, false);
+    cancelled_cold_word_call(Target::Aarch64Linux, true);
     imported_carrier_callee(Target::Aarch64Linux);
 }
 
@@ -2768,7 +2788,7 @@ int main(void) {{
   struct R result={{0}};
   if(hirsel_core_test_run(ctx,entry,0,&result,0,sizeof result)) return 5;
   if(result.native_status || result.status!=2) return 1;
-  if(hirsel_core_test_available(ctx)!=before-72) return 2;
+  if(hirsel_core_test_available(ctx)!=before-40) return 2;
   hirsel_core_task_bind(NULL);
   hirsel_core_context_free(ctx);
   return 0;

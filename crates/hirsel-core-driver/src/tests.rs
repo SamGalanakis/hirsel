@@ -1891,7 +1891,17 @@ fn program_sources(kind: &str) -> [(&'static str, String); 4] {
         "rename" => m = m.replace("pub fn main(", "pub fn main_renamed("),
         "reorder" => m = format!("{}{}{}", &m[e..u], &m[d..e], &m[u..]),
         "comment" => m = format!("// a comment line above dispatch\n{m}"),
+        "between" => m = m.replace("}\npub fn main", "}\n\n\npub fn main"),
+        "trailing" => m.push_str("\n\n"),
+        "same_line_comment" => m = m.replace("}\npub fn main", "} // trailing\npub fn main"),
+        "body_blank" => {
+            m = m.replace(
+                "    let total = helper.config(n)\n    total",
+                "    let total = helper.config(n)\n\n    total",
+            )
+        }
         "whitespace" => m = format!("\n\n{m}"),
+        "insert" => m = format!("pub fn inserted() -> u64 {{ 0u64 }}\n{m}"),
         _ => unreachable!("{kind}"),
     }
     [("helper", h), ("shapes", s), ("main", m), ("other", o)]
@@ -1927,7 +1937,12 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
         "rename",
         "reorder",
         "comment",
+        "between",
+        "trailing",
+        "same_line_comment",
+        "body_blank",
         "whitespace",
+        "insert",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let incremental = dir.path().join("incremental");
@@ -1995,13 +2010,14 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
             assert!(!built.definitions.contains_key(path));
         }
         // Hand-derived fan-out. A signature edit of `helper.config` rechecks
-        // config and its four readers; a comment or whitespace edit above
-        // `dispatch` is inside its item, so its body key moves (land 4's
-        // deviation). Changed file records: the edited modules.
+        // config and its four readers. Trivia before an item changes only its
+        // file record; trivia inside or on the end of an item changes its key.
         let (rechecked, files): (&[&str], usize) = match kind {
-            "body" | "import" | "comment" | "whitespace" => (&["dispatch"], 1),
+            "body" | "import" | "same_line_comment" | "body_blank" => (&["dispatch"], 1),
+            "comment" | "between" | "trailing" | "whitespace" => (&[], 1),
             "signature" => (&["config", "dispatch", "main", "more", "other"], 3),
             "add" => (&["extra_item"], 1),
+            "insert" => (&["inserted"], 1),
             "rename" => (&["main_renamed"], 1),
             "remove" | "reorder" => (&[], 1),
             _ => unreachable!(),

@@ -138,7 +138,8 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
         }
         let start = p.pos;
         let diagnostic_start = p.diagnostics.len();
-        p.base = byte_owned;
+        let file_offset = p.tokens[p.current_index].span.start;
+        p.base = file_offset;
         let nodes_start = p.tree.nodes.len() as u32;
         p.resolution_size = ResolutionSize::default();
         let root = match p.item() {
@@ -174,14 +175,15 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
         let has_errors = p.resource.is_some()
             || p.diagnostics.len() != diagnostic_start
             || p.diagnostics[..lexical_diagnostics].iter().any(|d| {
-                d.primary.start >= p.base
+                d.primary.start >= byte_owned
                     && (d.primary.start < byte_end
                         || byte_end as usize == text.len() && d.primary.start == byte_end)
             });
         syntax.items.push(ItemRange {
             resolution_size: p.resolution_size,
             has_errors,
-            file_offset: p.base,
+            owned: byte_owned..byte_end,
+            file_offset,
             end: byte_end,
             tokens: owned as u32..end as u32,
             nodes: nodes_start..p.tree.nodes.len() as u32,

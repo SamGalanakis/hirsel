@@ -296,6 +296,11 @@ pub struct ItemRange {
     pub resolution_size: ResolutionSize,
     /// Syntax-refused items retain text but skip semantic passes.
     pub has_errors: bool,
+    /// The bytes owned by this item, including leading trivia and the first
+    /// line break after its last token. The formatter and lexical diagnostics
+    /// use this range; semantic anchors start at `file_offset` below.
+    pub owned: Range<u32>,
+    /// Absolute byte offset of the first significant token.
     pub file_offset: u32,
     pub end: u32,
     pub tokens: Range<u32>,

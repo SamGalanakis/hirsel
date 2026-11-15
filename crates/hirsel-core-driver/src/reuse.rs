@@ -45,12 +45,11 @@ fn token_identity(item: Item<'_>, end: usize, domain: &str) -> ContentHash {
     .expect("semantic token hash")
 }
 
-/// A body's identity is its item's source bytes from the item start. The
-/// record's sites and IR anchors are byte offsets from that start, so a
-/// leading comment or layout inside the item is part of what a reuse must
-/// match. A moved item keeps its bytes, so moved-line reuse holds.
+/// A body's identity is its item's source bytes from its first significant
+/// token. Leading trivia remains owned by the item for formatting and lexical
+/// diagnostics, but it is outside the body key and its item-relative anchors.
 fn body_identity(item: Item<'_>) -> ContentHash {
-    ContentHash::of_parts("hirsel.item-source.v1", [item.source_text().as_bytes()])
+    ContentHash::of_parts("hirsel.item-source.v2", [item.source_text().as_bytes()])
 }
 
 /// A signature's identity is its header tokens: a reader's reported sites are
@@ -840,9 +839,9 @@ mod tests {
             )
             .syntax
         };
-        // Item 1 is `main`. Moving it (item 0 gains lines) keeps its bytes; a
-        // comment line above it is part of its bytes and shifts every site in
-        // it, but leaves the header tokens its readers depend on.
+        // Item 1 is `main`. Moving it (item 0 gains lines) keeps its bytes and
+        // a comment line above it is owned trivia outside its body key, while
+        // the item-relative sites continue to bind from the first token.
         let original = parse("fn a() -> u64 { 1 }\nfn main() -> u64 {\n    7u64\n}\n");
         let moved = parse("fn a() -> u64 {\n    1\n}\nfn main() -> u64 {\n    7u64\n}\n");
         let commented =
@@ -857,7 +856,7 @@ mod tests {
         assert_eq!(header_identity(o), header_identity(m));
         assert_eq!(body_identity(o), body_identity(m));
         assert_eq!(header_identity(o), header_identity(c));
-        assert_ne!(body_identity(o), body_identity(c));
+        assert_eq!(body_identity(o), body_identity(c));
         assert_eq!(header_identity(o), header_identity(x));
         assert_ne!(body_identity(o), body_identity(x));
     }

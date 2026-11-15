@@ -64,6 +64,33 @@ fn formatted(text: &str, mode: ParseMode) -> String {
 }
 
 #[test]
+fn item_source_and_anchor_start_at_the_first_significant_token() {
+    let parsed = parse(
+        "// before\n\nfn first() -> u64 { 1 }\n\n// attached\nfn second() -> u64 { 2 }\n",
+        ParseMode::Source,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let first = parsed.syntax.item(0);
+    let second = parsed.syntax.item(1);
+    assert_eq!(first.source_text(), "fn first() -> u64 { 1 }\n");
+    assert_eq!(second.source_text(), "fn second() -> u64 { 2 }\n");
+    assert_eq!(
+        first.file_offset as usize,
+        parsed.syntax.source.find("fn first").unwrap()
+    );
+    assert_eq!(
+        second.file_offset as usize,
+        parsed.syntax.source.find("fn second").unwrap()
+    );
+    assert_eq!(first.range.owned.start, 0);
+    assert_eq!(second.range.owned.start, first.range.owned.end);
+    assert!(
+        (second.range.owned.start as usize) < parsed.syntax.source.find("// attached").unwrap()
+    );
+    assert!(second.range.owned.start < second.file_offset);
+}
+
+#[test]
 fn formatter_canonical_blocks_lists_and_attributes() {
     let text = "@twin( B ) type A{x:u64,y: (u64,u64)}\nfn f [T](x:T)->T{let mut y:T=x; if true {y}else{ x }}";
     assert_eq!(

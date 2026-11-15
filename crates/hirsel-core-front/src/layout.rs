@@ -69,7 +69,7 @@ impl<T: TyRead> Shapes<'_, T> {
             held: None,
         });
         self.of.insert(name, r);
-        let (repr, body, finalizer) = match self.types.kind(ty).clone() {
+        let (repr, body, finalizer, held) = match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => (
                 LRepr::Own,
                 Body::Record(vec![Field {
@@ -77,6 +77,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     ty: FieldTy::Scalar(s),
                 }]),
                 None,
+                Some(FieldTy::Scalar(s)),
             ),
             // A rigid parameter is an opaque owned place until materialization.
             // A non-plain placeholder keeps every potential owner/drop edge alive;
@@ -88,26 +89,33 @@ impl<T: TyRead> Shapes<'_, T> {
                     FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
                 )]),
                 None,
+                None,
             ),
             // `Never` has size 0 (core.md, built-in types), as unit does.
-            TyKind::Unit | TyKind::Never => (LRepr::Own, Body::Record(vec![]), None),
-            TyKind::Fn(_, _, _, callable) => (
-                if callable == Callable::Scoped {
-                    LRepr::Scoped
-                } else {
-                    LRepr::Own
-                },
-                record(vec![("callable", self.field(ty)?)]),
-                None,
-            ),
-            TyKind::Array(x, n) => (
-                LRepr::Own,
-                Body::Record(vec![Field {
+            TyKind::Unit | TyKind::Never => (LRepr::Own, Body::Record(vec![]), None, None),
+            TyKind::Fn(_, _, _, callable) => {
+                let callable_field = self.field(ty)?;
+                (
+                    if callable == Callable::Scoped {
+                        LRepr::Scoped
+                    } else {
+                        LRepr::Own
+                    },
+                    record(vec![("callable", callable_field.clone())]),
+                    None,
+                    Some(callable_field),
+                )
+            }
+            // A holder writes an array of a plain or owned element as the array; of
+            // any other element, nothing (`field`'s rule), so ask it.
+            TyKind::Array(x, n) => {
+                let array = FieldTy::Array(Box::new(self.field(x)?), n);
+                let body = Body::Record(vec![Field {
                     name: "0".into(),
-                    ty: FieldTy::Array(Box::new(self.field(x)?), n),
-                }]),
-                None,
-            ),
+                    ty: array,
+                }]);
+                (LRepr::Own, body, None, self.field(ty))
+            }
             TyKind::Tuple(xs) => {
                 let mut fields = vec![];
                 for (i, x) in xs.into_iter().enumerate() {
@@ -123,6 +131,7 @@ impl<T: TyRead> Shapes<'_, T> {
                         LRepr::Own
                     },
                     Body::Record(fields),
+                    None,
                     None,
                 )
             }
@@ -143,11 +152,15 @@ impl<T: TyRead> Shapes<'_, T> {
                     // The core collections' carriers (message.core: `own "String"`).
                     Some(Role::String) => {
                         let bytes = FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8)));
-                        return self.fill(r, ty, LRepr::Own, record(vec![("bytes", bytes)]), None);
+                        let held = Some(bytes.clone());
+                        let body = record(vec![("bytes", bytes)]);
+                        return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     Some(Role::List) => {
                         let items = FieldTy::Seq(Box::new(self.field(args[0])?));
-                        return self.fill(r, ty, LRepr::Own, record(vec![("items", items)]), None);
+                        let held = Some(items.clone());
+                        let body = record(vec![("items", items)]);
+                        return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     Some(Role::Map) => {
                         let entries = self.map_field(&args)?;
@@ -156,6 +169,7 @@ impl<T: TyRead> Shapes<'_, T> {
                             ty,
                             LRepr::Own,
                             record(vec![("entries", entries)]),
+                            None,
                             None,
                         );
                     }
@@ -170,7 +184,9 @@ impl<T: TyRead> Shapes<'_, T> {
                             .map(|d| crate::types::DeclId(d as u32))?;
                         let list = self.types.mk(TyKind::Adt(list, vec![args[0]]));
                         let node = FieldTy::Box(self.shape(list)?);
-                        return self.fill(r, ty, LRepr::Own, record(vec![("node", node)]), None);
+                        let body = record(vec![("node", node)]);
+                        let held = Some(FieldTy::Scalar(Scalar::U64));
+                        return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     // Compact text or a span held as a value: a stable reference to
                     // compact data in its region (core.md), plain. The locator names
@@ -183,7 +199,8 @@ impl<T: TyRead> Shapes<'_, T> {
                         | Role::SeqIndex,
                     ) => {
                         let at = self.field(ty)?;
-                        return self.fill(r, ty, LRepr::Own, record(vec![("at", at)]), None);
+                        let held = Some(at.clone());
+                        return self.fill(r, ty, LRepr::Own, record(vec![("at", at)]), None, held);
                     }
                     // A span builder held as a value: its region blob and its region
                     // (MEM-3); the blob lives in the region, so cleaning does nothing.
@@ -194,12 +211,14 @@ impl<T: TyRead> Shapes<'_, T> {
                     // (MEM-4), scoped and never cleaned.
                     Some(Role::Writer | Role::Dest) => {
                         let body = record(vec![("frame", FieldTy::Borrow)]);
-                        return self.fill(r, ty, LRepr::Scoped, body, None);
+                        return self.fill(r, ty, LRepr::Scoped, body, None, Some(FieldTy::Borrow));
                     }
                     Some(role @ (Role::SpanBuilder | Role::Builder | Role::Child)) => {
                         let k = if role == Role::Builder { 5 } else { 2 };
                         let words = FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), k);
-                        return self.fill(r, ty, LRepr::Own, record(vec![("words", words)]), None);
+                        let held = Some(words.clone());
+                        let body = record(vec![("words", words)]);
+                        return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     // A box or counted reference held as a value: its one pointer field,
                     // cleaned by the recipe (freed, or released, MEM-15/16).
@@ -210,8 +229,9 @@ impl<T: TyRead> Shapes<'_, T> {
                             Role::Rc => FieldTy::Rc(to),
                             _ => FieldTy::Arc(to),
                         };
+                        let held = Some(field.clone());
                         let body = record(vec![("node", field)]);
-                        return self.fill(r, ty, LRepr::Own, body, None);
+                        return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     // A provider handle's carrier: its one handle field, cleaned by the
                     // runtime (closing a channel side, abandoning a task, MEM-24).
@@ -230,7 +250,8 @@ impl<T: TyRead> Shapes<'_, T> {
                             _ => Handle::Causes,
                         };
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
-                        return self.fill(r, ty, LRepr::Own, body, None);
+                        let held = Some(FieldTy::Handle(handle));
+                        return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     // A capability, Args, Unique, Site or StaticFn: one plain word,
                     // never cleaned by the holder. StaticFn is carried in CoreIR as a
@@ -243,7 +264,8 @@ impl<T: TyRead> Shapes<'_, T> {
                         ) =>
                     {
                         let body = record(vec![("handle", FieldTy::Scalar(Scalar::U64))]);
-                        return self.fill(r, ty, LRepr::Own, body, None);
+                        let held = Some(FieldTy::Scalar(Scalar::U64));
+                        return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     Some(_) => return None,
                     None => {}
@@ -255,7 +277,8 @@ impl<T: TyRead> Shapes<'_, T> {
                 // compact row (FORM #65), which every compact context names instead.
                 if decl.repr == Repr::Stable && decl.compact.is_some() {
                     let at = FieldTy::Locator(Box::new(FieldTy::Inline(self.compact(ty)?)));
-                    return self.fill(r, ty, LRepr::Own, record(vec![("at", at)]), None);
+                    let held = Some(at.clone());
+                    return self.fill(r, ty, LRepr::Own, record(vec![("at", at)]), None, held);
                 }
                 let repr = match decl.repr {
                     // Option and Result follow their arguments' kind (OWN-3): over a
@@ -286,11 +309,12 @@ impl<T: TyRead> Shapes<'_, T> {
                 };
                 let finalizer = hook(Hook::Finalizer, decl.finalizer);
                 self.shapes[r.index()].grant = decl.grant;
-                (repr, body, finalizer)
+                let held = (decl.repr == Repr::Stable).then_some(FieldTy::Stable(r));
+                (repr, body, finalizer, held)
             }
             _ => return None,
         };
-        self.fill(r, ty, repr, body, finalizer)
+        self.fill(r, ty, repr, body, finalizer, held)
     }
     /// The compact row of the compact stable type `ty` (FORM #65), named
     /// `compact <canonical>`: its fields encoded in the blob (MEM-9).
@@ -376,8 +400,10 @@ impl<T: TyRead> Shapes<'_, T> {
             DeclBody::Alias(_) => return None,
         })
     }
-    /// Finish `ty`'s row `r`, with how a holder writes a field of `ty` when that is
-    /// not `Inline(r)`: a substituted generic row writes the same (FORM #109).
+    /// Finish `ty`'s row `r`. `held` is how a holder writes a field of `ty` when that
+    /// is not `Inline(r)`, which a substituted generic row writes the same (FORM #109).
+    /// Each branch of [`Self::shape`] states it from the field it built, so it is not
+    /// derived again per row: it is [`Self::field`] of `ty` (asserted in checked builds).
     fn fill(
         &mut self,
         r: TypeRef,
@@ -385,16 +411,26 @@ impl<T: TyRead> Shapes<'_, T> {
         repr: LRepr,
         body: Body,
         finalizer: Option<FuncRef>,
+        held: Option<FieldTy>,
     ) -> Option<TypeRef> {
         let shape = &mut self.shapes[r.index()];
         shape.repr = repr;
         shape.body = body;
         shape.finalizer = finalizer;
         word_carriage(self.shapes, r.index());
-        self.shapes[r.index()].held = match self.field(ty) {
-            Some(FieldTy::Inline(x)) if x == r => None,
-            held => held,
-        };
+        #[cfg(debug_assertions)]
+        {
+            let rows = self.shapes.len();
+            let derived = match self.field(ty) {
+                Some(FieldTy::Inline(x)) if x == r => None,
+                derived => derived,
+            };
+            assert_eq!(held, derived, "held of {}", self.shapes[r.index()].name);
+            assert_eq!(rows, self.shapes.len(), "deriving held adds no row");
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = ty;
+        self.shapes[r.index()].held = held;
         Some(r)
     }
     /// Forget the rows from `mark` on: a type whose parts do not all map leaves no

@@ -21,7 +21,7 @@
 # The stage compiler is the pinned tree's clang, lld, llvm-tblgen and llvm-profdata, so the
 # profile format and the library version match the pin. Configuration: Release without
 # assertions; targets X86 and AArch64, the only ones the compiler initialises (engine.c);
-# a dylib; -fno-semantic-interposition; zlib on; zstd, libxml2, libedit, terminfo, ffi, z3
+# a dylib without RPATH or RUNPATH; -fno-semantic-interposition; zlib on; zstd, libxml2, libedit, terminfo, ffi, z3
 # and libpfm off. The result loads only libz, libstdc++, libm, libgcc_s and libc.
 #
 # Each compile stage runs under tools/capped (16G) at nice 19 with JOBS jobs (default 12),
@@ -84,7 +84,7 @@ configure() {  # configure BUILD EXTRA...
     -DLLVM_ENABLE_ZLIB=FORCE_ON -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_LIBEDIT=OFF \
     -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_FFI=OFF -DLLVM_ENABLE_Z3_SOLVER=OFF -DLLVM_ENABLE_LIBPFM=OFF \
     -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_INCLUDE_DOCS=OFF \
-    -DLLVM_PARALLEL_LINK_JOBS=1 "$@" > "$build.cmake.log"
+    -DLLVM_PARALLEL_LINK_JOBS=1 -DCMAKE_SKIP_RPATH=ON "$@" > "$build.cmake.log"
 }
 
 library() {  # library BUILD
@@ -119,6 +119,9 @@ opt() {
   needed="$(readelf -d "$dir/libLLVM.so.23.1" | awk '/\(NEEDED\)/ { print $NF }' | sort | tr '\n' ' ')"
   [[ "$needed" == '[ld-linux-x86-64.so.2] [libc.so.6] [libgcc_s.so.1] [libm.so.6] [libstdc++.so.6] [libz.so.1] ' ]] \
     || fail "the library loads more than libz, libstdc++, libm, libgcc_s and libc: $needed"
+  # No search path of its own: the loading executable's RPATH finds libz, never the
+  # build tree's lib/ or, through an empty entry, the working directory.
+  ! readelf -d "$dir/libLLVM.so.23.1" | grep -qE '\((RPATH|RUNPATH)\)' || fail "the library carries a search path"
 }
 
 guard() {

@@ -73,7 +73,14 @@ failure, and the sender's cleanup drops `x` ([T7.2, T7.3](ownership.md#own-26-th
 `channel.try_send(tx, take x) -> Result[(), SendError[T]]` never waits and returns
 `Full(x)` or `Closed(x)`; its decision is an event (CONC-10).
 `channel.receive(rx) -> Result[T, Closed[()]] waits` waits for an item and is a cancellation
-point; it returns `Closed` once the channel is closed and empty. The queue is first in,
+point; it returns `Closed` once the channel is closed and empty.
+`channel.try_receive(rx) -> Result[T, ReceiveError]`, where `type ReceiveError = Empty |
+Closed`, never waits and is not a cancellation point: it delivers the front item as
+`receive` would, and with the queue empty returns `Closed` once the last sender is cleaned
+and `Empty` while a sender remains. Its decision is an event (CONC-10), so it finds an item
+exactly when one was published before it in the event order and not yet taken, and a
+replay decides as recorded. With one receiver, `receive` and `try_receive` take items from the one front in
+the receiving task's program order, whichever it calls. The queue is first in,
 first out by publication order; positions are logical, so how an engine stores the queue
 is not observable. The blocks of a sent value stay charged to the limit that admitted them
 ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
@@ -144,7 +151,7 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 ### CONC-10: Event order
 
 A run has one total order of **events**: spawn, task end, cancellation requests and their
-observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every
+observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every `try_receive` decision, every
 change of a channel's sender count, `join`, channel close, every charge or refund that
 crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), every `Arc`
 creation, share, release and `try_unwrap`, and every admission that returns `Capacity`
@@ -154,7 +161,7 @@ The order is chosen by the scheduler provider at the replay point
 recorded choices, every task behaves identically on every engine.
 
 A **poll** is a non-waiting operation that returns without effect because of another
-task's state: a `try_send` that returns `Full`, a `task.check_cancel()` that finds no
+task's state: a `try_send` that returns `Full`, a `try_receive` that returns `Empty`, a `task.check_cancel()` that finds no
 request, a `try_unwrap` that returns the `Arc`, and an admission that returns `Capacity`;
 any later operation of that kind is a poll too. Every event is a point where the scheduler
 may run another task, and every scheduler provider is fair: no task performs unboundedly

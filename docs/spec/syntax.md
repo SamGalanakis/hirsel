@@ -35,8 +35,9 @@ pub opaque const where true false bytes
 ```
 
 A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
-are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key`, `ordered`, `integer`, `float`, `packed` and
-`streamable` in a bound list; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
+are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key`, `ordered`, `integer`, `float`, `packed`,
+`streamable` and `codec` in a bound list; `via` after a bound list, and `to` and `from` in
+its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
 
 ```hirsel
@@ -168,14 +169,15 @@ bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" | "integer" | "
             | "packed" | "streamable" | "codec" ;
 outlives    = "where", name, ":", name, { ",", name, ":", name } ;
 type-def    = [ "stable" | "resource" | "scoped" ], "type", name, [ generics ],
-              [ ":", bounds ], [ "grant", "bytes", integer ],
+              [ ":", bounds, [ via ] ], [ "grant", "bytes", integer ],
               ( fields | "=", type-rhs | empty ), [ drop ] ;
 fields      = "{", [ field, { entry-sep, field }, [ entry-sep ] ], "}" ;
-field       = name, ":", type, [ "=", scalar ] ;
+via         = "via", type, "(", "to", ":", name, ",", "from", ":", name, ")" ;
+field       = name, ":", type, [ "=", scalar ] | "removed", name, ":", type ;
 type-rhs    = variant, "|", variant, { "|", variant }
             | name, "(", list(payload), ")"
             | type ;
-variant     = name, [ "(", list(payload), ")" ] ;
+variant     = [ "removed" ], name, [ "(", list(payload), ")" ] ;
 payload     = [ name, ":" ], type ;
 drop        = "drop", "(", name, ")", block ;
 

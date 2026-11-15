@@ -248,7 +248,10 @@ format, the framing of a value among others and the encoding of a schema are the
 this rule fixes what every codec does, and how scalars are encoded: integers at their
 width, a float as its IEEE bits and a `char` as its scalar value in a `u32`, all
 little-endian, as compact layout fixes them ([MEM-9](memory.md#mem-9-compact-types)). A
-float round-trips exactly, since SEM-2 has one NaN.
+float round-trips exactly, since SEM-2 has one NaN. A variant's **tag** is its position
+among its declaration's variants, removed ones included, counting from 0, encoded as a
+`u32` whatever the number of variants, so a variant appended later leaves every earlier
+tag, and the bytes that carry it, unchanged.
 
 **Defaults.** A field of a record whose definition declares `codec` may give a **default**
 after its type, `pinned: bool = false`: a literal, or `-` and an integer literal
@@ -257,19 +260,62 @@ after its type, `pinned: bool = false`: a literal, or `-` and an integer literal
 of a definition that does not declare `codec` is refused, at the default. Construction
 never reads a default ([LANG-9](language.md#lang-9-nominal-types)); only decoding does.
 
+**Override.** The one way to replace a generated codec is `via`, written in the declaration
+after its bounds: `pub opaque type Email: codec via String (to: text, from: parse) { text:
+String }`. So only the declaring module can write it, as only it can declare the bound.
+`R`, the type after `via`, must be `codec`, checked as a field's type is against the
+declaration's bounds ([OWN-4](ownership.md#own-4-bounds)); the fields are then not encoded
+and need not be `codec`, though the kinds that never have the bound are still refused.
+`to` and `from` name functions of the declaring module: `to` takes the value as a view and
+returns a view of an `R` it holds, `fn text(e: Email) -> View[String] in e`, and `from` is
+`fn(take R) -> Result[T, E]` for some `E`. Encoding writes `to`'s `R` with R's codec, so a
+value's bytes are its `R`'s bytes. Decoding decodes an `R` under R's contract (below), then
+calls `from` once; on an `Error` it drops the error and returns `Value(i)`, `i` being where
+the `R` began. The schema is the type's definition path ([PROG-1](programs.md#prog-1-packages))
+over R's schema: resolution requires the writer's path to equal the reader's and then
+resolves R's, so a changed `R` is a schema change of `R`, and a changed path needs a
+migration program. No other codec form exists, and no owner writes bytes. A type that
+validates after a derived decode is written `via` a private record that derives its codec,
+as `Range` below.
+
 **Old data.** Bytes are decoded against the **writer's schema**, the schema of the
 declaration that encoded them, which the library keeps with them. Decoding resolves the
-writer's schema against the reading declaration's, matching fields by name, so their order
-may differ, and resolving each matched field's type in the same way at every depth. A field
-the writer's schema lacks takes its default. A field without a default that the writer
-lacks, a writer's field the reader lacks, and every other difference are `Schema`. So adding
-a field with a default is the one change that old data survives; removing, renaming or
-retyping a field, or changing the variants of a type, needs an explicit migration program
-that decodes with the old declaration and builds values of the new one.
+writer's schema against the reading declaration's, matching fields and variants by name,
+so the order of fields may differ, and resolving each matched type in the same way at every
+depth. Exactly three changes survive old data:
+
+- a field added with a default: a field the writer's schema lacks takes its default;
+- a field or variant removed by a **tombstone**, `removed note: String` among the fields or
+  `removed Old(u64)` among the variants, written in place of what it removes: a writer's
+  field that matches a removed field is skipped, and a writer's variant that matches a
+  removed variant resolves, while a value that actually holds it is `Schema`;
+- a variant appended after the last: old bytes carry only earlier tags, which are
+  unchanged.
+
+Every other difference is `Schema`: a field without a default that the writer lacks, a
+writer's field or variant that the reader neither has nor removed, a matched variant at
+another position, and a matched type that does not resolve. So renaming or retyping a
+field, removing one without a tombstone, and reordering variants or inserting one before
+the last need an explicit migration program that decodes with the old declaration and
+builds values of the new one.
+
+A removed field or variant is not a field or variant of the type: construction, patterns,
+field access and layout never see it, and it keeps its name taken. At the declaration the
+checker verifies that `removed` appears only in a definition that declares `codec` without
+`via`, that a tombstone's name is the name of no field, variant or other tombstone of the
+declaration, so a field of that name is refused there, that a removed field has no
+default, and that a tombstone's types are `codec`. The checker sees one declaration, so a
+tombstone stays for as long as old data may hold what it removed; deleting it frees the
+name. At resolution the reader verifies what the writer's schema shows: each writer's field
+and variant matches a field, variant or tombstone of the reader by name, the writer's types
+resolve against the matched ones, a tombstone's included, each matched variant has the
+writer's tag, and each field the writer lacks has a default. A schema records its
+tombstones, so data whose writer removed a variant resolves against a reader that still has
+it.
 
 **Decoding.** A decode returns `Result[Result[T, DecodeError], Capacity]`, where
 `DecodeError = Truncated(u64) | Invalid(u64) | Utf8(u64) | Duplicate(u64) | Trailing(u64) |
-Schema(u64)`. Each `u64` is a byte offset, into the writer's schema for `Schema` and into
+Schema(u64) | Value(u64)`. Each `u64` is a byte offset, into the writer's schema for `Schema` and into
 the decoded bytes otherwise:
 
 - `Truncated(i)`: the item that starts at `i` runs past the end of the bytes;
@@ -280,17 +326,21 @@ the decoded bytes otherwise:
   scalar;
 - `Duplicate(i)`: the `Map` key that starts at `i` equals an earlier key of the same map;
 - `Trailing(i)`: the value ends at `i`, before the bytes do;
-- `Schema(i)`: the part of the writer's schema at `i` does not resolve, as above.
+- `Schema(i)`: the part of the writer's schema at `i` does not resolve, or is a removed
+  variant that the value holds, as above;
+- `Value(i)`: the owner's `from` refused the `R` that starts at `i`, as above.
 
 Decoding accepts exactly the bytes that encoding produces: against one schema, bytes that
 no value encodes to are an error, and no two accepted byte strings decode to the same
 value. So a decoder never canonicalizes, and `Invalid`, `Utf8`, `Duplicate` and `Trailing`
-are each a way that bytes fall outside that image.
+are each a way that bytes fall outside that image. For a `via` type the image is the `R`s
+that `from` accepts, and the law holds when `from` accepts exactly the `R`s that `to`
+returns and inverts it; the checker cannot verify that, so it is the owner's obligation.
 
 Every decode, whatever its bytes:
 
-- never fails ([FAIL-1](failure.md#fail-1-errors-failures-and-run-stops)): every malformed
-  input is a `DecodeError`;
+- never fails ([FAIL-1](failure.md#fail-1-errors-failures-and-run-stops)) unless an owner's
+  `from` does: every malformed input is a `DecodeError`;
 - has no fixed limit on nesting: it keeps the values still being built on a work stack in
   storage it admits from the current limit ([MEM-21](budgets.md#mem-21-admission)), never
   on the call stack, so depth costs storage and never exhausts the stack
@@ -311,4 +361,24 @@ fn files() -> codec.Codec[Pair[HostFile]] { codec.of() }   // refused: LANG-12, 
 ```
 ```hirsel unbuilt
 type Note { pinned: bool = false }                    // refused: SEM-10, Note does not declare codec
+```
+```hirsel unbuilt
+pub opaque type Email: codec via String (to: text, from: parse) { text: String }
+fn text(e: Email) -> View[String] in e { view e.text }
+fn parse(take s: String) -> Result[Email, String] {
+  match string.next_scalar(s, 0) { Some(_) => Ok(Email(text: s)), None => Error(s) }   // "" is Value(i)
+}
+```
+```hirsel unbuilt
+type RangeWire: codec { lo: u64, hi: u64 }
+pub opaque type Range: codec via RangeWire (to: wire, from: check) { w: RangeWire }
+fn wire(r: Range) -> View[RangeWire] in r { view r.w }
+fn check(take w: RangeWire) -> Result[Range, ()] { if w.lo <= w.hi { Ok(Range(w: w)) } else { Error(()) } }
+```
+```hirsel unbuilt
+pub type Row: codec { id: u64, removed note: String, name: String, pinned: bool = false }
+pub type Shape: codec = Circle(u64) | removed Square(u64) | Line(u64, u64)   // Line has tag 2
+```
+```hirsel unbuilt
+pub type Tag: codec { id: u64, removed note: String, note: u64 }   // refused: SEM-10, note is removed
 ```

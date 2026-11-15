@@ -8,8 +8,9 @@ guarantee it asks of v1 binds v1.
 ## Reservation clauses
 
 Each clause is numbered as in the risk audit it comes from; R25 and R26 come from the
-review of compact sequences. Clauses R3, R5, R8, R11, R13,
-R14, R15, R18, R19, R21 and R23 are quoted from that audit; the line after each says where
+review of compact sequences. Clauses R3, R5, R8, R11,
+R14, R15, R18, R19, R21 and R23 are quoted from that audit, and R13 restates its clause
+with registration; the line after each says where
 v1 meets it.
 
 **R1.** `send` is checked from declarations and capture lists; `Rc`, scoped and stable
@@ -95,7 +96,8 @@ dictionary, `Codec[T]` from `codec.of()` for a type with the `codec` bound (OWN-
 decode returns `Result[Result[T, DecodeError], Capacity]` into fresh ownership holding no
 authority; its schema and the writer's are explicit, resolved by field name. No stable type
 is `codec`, so there is no stable decoding. Eq, Hash and Format dictionaries are not in v1,
-and SEM-5 fixes one equality and hash per key type.
+and SEM-5 fixes one equality and hash per key type. An owner replaces a generated codec
+only by `via` a codec type, and no owner writes bytes.
 
 **R12.** Later derivation will be opt-in, owner-local, keep field order and opacity, and
 produce ordinary checked code; adding a derive never gives a generic body a new
@@ -106,15 +108,23 @@ its owner declares `codec` on the definition, which is checked once against the 
 declared bounds; it is generated in field order as ordinary checked code; an opaque type's
 fields stay private, and only its owner's declaration lets decoding build one; and a
 generic body that has not written `T: codec` cannot ask for a codec, so declaring it gives
-no body a new obligation.
+no body a new obligation. With `via`, decoding passes the owner's `from`, so an opaque
+type's values are still built only through code its owner wrote.
 
-**R13.** "Selected entry descriptors carry a versioned nominal path/signature and semantic
-code/runtime-contract identity; generic identity includes type/size/dictionary/generator
-dependencies, never backend addresses/clone numbers. Start with closed named monomorphic
-wrappers. Requests resolve only to registered typed decode/call/encode adapters; IDs grant
-no code execution authority and serialize no closure captures." *v1:* PROG-5, PROG-6,
-PROG-9, SEM-8: closed named functions without type parameters have identity bytes; the
-revision is later.
+**R13.** Selected entry descriptors carry a versioned nominal path and signature and a
+semantic code and runtime-contract identity; a generic identity includes its type, size,
+dictionary and generator dependencies, never backend addresses or clone numbers. An entry
+is made by library code at registration, never declared:
+`runner.register[A: codec, R: codec](mut r, f: StaticFn[fn(take A) -> Result[R, Capacity]])`
+keys it by `f`'s identity bytes together with the schema fingerprints of `A` and `R`, so a
+changed codec schema changes the key, and its call path is one generic adapter that decodes
+an `A`, calls `f`, encodes the `R` and turns `Capacity` into the request's fault. There is
+no `derive wire` form and no hand-written adapter: the key and the adapter come from the
+one `f`, and the `codec` bounds exclude `mut` parameters, view results and capabilities.
+Requests resolve only to registered entries; an ID grants no code execution authority and
+serializes no closure captures. *v1:* PROG-5, PROG-6, PROG-9, SEM-8: closed named functions
+without type parameters have identity bytes; runners are not in v1, and hook D lists what
+`register` needs; the revision is later.
 
 **R14.** "Callable and erased-value signatures carry independent invocation-allocation and
 cleanup-allocation summaries; omission conservatively permits allocation. `noalloc_drop`
@@ -209,10 +219,10 @@ allocator chunk size becomes a logical capacity (MEM-28).
 |---|---|---|
 | O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits; authority only through arguments | open: authority facades (R19), static brands (R24) and callable results anchored to a place ([LANG-13](language.md#lang-13-callables)) |
 | F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; `isolate` (FAIL-16) | open: a single `Result[R, Causes]` form, which needs a per-boundary cause cell; a form that moves owned state into the body and back; `shield` |
-| C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the content hash of a declaration for stored data |
-| D, code descriptors | code identity; identity bytes of closed named functions (PROG-9); no address or order dependence | open: `code.revision(s) -> Option[Bytes]`, never part of equality; instance identities |
+| C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, the `via` override, tombstones, appended variants and the `u32` tag, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the schema fingerprint that keys a registered entry (R13) and the content hash of a declaration for stored data |
+| D, code descriptors | code identity; identity bytes of closed named functions (PROG-9); no address or order dependence | open: `code.revision(s) -> Option[Bytes]`, never part of equality; for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them, and for a `StaticFn` described into a generic parameter, which PROG-9 already accepts and the built checker reports as "static function identity dispatch is not built for this callable item" |
 | L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
-| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; `WriteError`; the sync barriers `host.sync` and `host.sync_dir` ([core](core.md#contracts-the-signatures-do-not-state)) | open: providers for `Net`, `Random`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
+| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, and `host.random` ([core](core.md#contracts-the-signatures-do-not-state)) | open: providers for `Net`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1; selection, shared limits, mutexes and atomics later |
 
 ## Not in v1

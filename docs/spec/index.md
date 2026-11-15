@@ -80,6 +80,7 @@ built `hirsel` does not implement yet; the mark is removed when it does.
 | anchor | [OWN-19](ownership.md#own-19-scoped-values) |
 | blob | [MEM-9](memory.md#mem-9-compact-types) |
 | codec | [SEM-10](semantics.md#sem-10-codecs) |
+| tombstone | [SEM-10](semantics.md#sem-10-codecs) |
 | cancellation point | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | capability | [CAP-1](capabilities.md#cap-1-authority-is-explicit) |
 | commit point | [FAIL-3](failure.md#fail-3-commit-points) |

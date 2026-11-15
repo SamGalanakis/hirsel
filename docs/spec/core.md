@@ -289,7 +289,13 @@ operations it names; nothing else about them may be inferred from an implementat
   library code over it. No host operation admits; every byte it returns
   lands in capacity the caller already holds. `HostFile` is a mechanical resource
   ([MEM-24](budgets.md#mem-24-logical-charges)): its finalizer closes it and ignores the
-  outcome. `Net`, `Random`, `Stdin`, `Env` and `Process` have no operations in v1.
+  outcome. `host.random(r: Random, mut buf: Bytes)`, not yet in the core source, appends to
+  `buf` exactly its spare capacity of bytes from the host's cryptographic source, never
+  changes its capacity, and never waits or fails. The bytes are unpredictable and
+  independent of every other value the run observes; like every provider result they pass
+  the replay point at issue and at delivery ([CAP-8](capabilities.md#cap-8-the-replay-point)),
+  so a replay delivers the recorded bytes and a simulation supplies its own. `Net`,
+  `Stdin`, `Env` and `Process` have no operations in v1.
 - **Other results.** `box.unbox` returns the payload and refunds the node. `ParseError`'s
   `Invalid` holds a byte position. A
   `Box`, `Rc` or `Arc` is read through its payload where its own type does not fit

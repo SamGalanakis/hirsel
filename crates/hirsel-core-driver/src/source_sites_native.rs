@@ -116,7 +116,7 @@ fn failure_sites_dynamic_relocation_is_refused() {
     let input = dir.path().join("site.o"); let output = dir.path().join("site.so");
     std::fs::write(&input,object.write().unwrap()).unwrap();
     let options = native_options(Backend::Cranelift,dir.path());
-    let linked = Command::new(&options.cc).args(["-shared","-nostdlib"]).arg(input).arg("-o").arg(&output).output().unwrap();
+    let linked = Command::new(options.link.driver()).args(["-shared","-nostdlib"]).arg(input).arg("-o").arg(&output).output().unwrap();
     assert!(linked.status.success(),"{linked:?}");
     let error = crate::native_entry::check_linked_sites(&std::fs::read(output).unwrap()).unwrap_err();
     assert!(error.contains("dynamic relocation against site symbol"),"{error}");

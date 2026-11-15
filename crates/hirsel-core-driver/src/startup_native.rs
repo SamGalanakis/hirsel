@@ -79,7 +79,7 @@ fn startup_refusals(backend: Backend) {
     let launcher = dir.path().join("host");
     std::fs::write(&launcher_source, include_str!("deny_openat2.c")).unwrap();
     command(
-        Command::new(&options.cc)
+        Command::new(options.link.driver())
             .args(["-std=c11", "-O0"])
             .arg(&launcher_source)
             .arg("-o")

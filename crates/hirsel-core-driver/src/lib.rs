@@ -23,7 +23,9 @@ mod native_sources;
 mod reachability;
 mod test_run;
 mod tool_inputs;
-pub use native::{Backend, BuildProduct, NativeOptions, NativeStop, ObjectProduct, grant_kind};
+pub use native::{
+    Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, grant_kind,
+};
 pub use reachability::{GapStop, Reachable};
 pub use test_run::{Runner, TestOutcome};
 mod meter;

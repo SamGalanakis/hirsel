@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             target: "x86_64-unknown-linux-gnu".into(),
             runtime: PathBuf::from(&args[2]),
             include: PathBuf::from(&args[3]),
-            cc: PathBuf::from(&args[4]),
+            link: hirsel_core_driver::Link::Driver(PathBuf::from(&args[4])),
             store: out.join("native"),
             output: out.join("unused"),
             root_limit: 1 << 30,

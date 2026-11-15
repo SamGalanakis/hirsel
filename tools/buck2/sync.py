@@ -1320,7 +1320,8 @@ def first_party(meta: dict) -> str:
                                          **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
     out.append("\n" + call("hirsel_script_test", name="test-core-m1-runner", script="core/tools/test_m1.py", full=False,
                             data=["core/tools/m1.py"]))
-    out.append("\n" + call("hirsel_script_test", name="land-core-library-modes", script="core/tools/gate_library_modes.py", full=False,
+    # host: the installed-prefix case runs a program that opens a Dir, which needs the host's openat2.
+    out.append("\n" + call("hirsel_script_test", name="land-core-library-modes", script="core/tools/gate_library_modes.py", full=False, host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/land-core-library-modes/hirsel-core"],
                             bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",

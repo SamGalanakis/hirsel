@@ -1,5 +1,6 @@
 //! Identity of host tools selected for linking. Selection is repeated on every
 //! request, so a newly installed earlier PATH candidate cannot reuse a later one.
+use crate::native::Link;
 use crate::{PackageProduct, Store};
 use hirsel_core_ids::ContentHash;
 use serde::Serialize;
@@ -201,9 +202,84 @@ pub(crate) fn link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
 }
 
 /// Recapture is reserved for a recipe whose previously recorded toolchain
-/// input disappeared.  Ordinary builds never invoke the C driver.
-pub(crate) fn recapture_link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
-    capture_link_recipe(cc, target, true)
+/// input disappeared.  Ordinary builds never invoke the C driver. An
+/// installation has no driver to recapture through: its recipe is its own.
+pub(crate) fn recapture_link_recipe(link: &Link, target: &str) -> io::Result<LinkRecipe> {
+    match link {
+        Link::Driver(cc) => capture_link_recipe(cc, target, true),
+        Link::Installed(recipe) => Err(io::Error::other(format!(
+            "the installation's link recipe {} names inputs that are gone; reinstall the toolchain",
+            recipe.display()
+        ))),
+    }
+}
+
+/// The argv an installation links with, captured at install through the
+/// install's C driver. Its link editor is the installation's own
+/// [`INSTALLED_LINKER`]; every other path it names is a system file.
+#[derive(Serialize, serde::Deserialize)]
+struct InstalledRecipe {
+    schema: u32,
+    target: String,
+    args: Vec<String>,
+}
+const INSTALLED_RECIPE_SCHEMA: u32 = 1;
+/// The link editor's place in an installation.
+pub(crate) const INSTALLED_LINKER: &str = "bin/ld.lld";
+
+/// Capture `target`'s link recipe through `cc` for the installation at
+/// `root` and write it there. Returns the recipe's path relative to `root`
+/// and the link editor the recipe ran, which the installation copies to
+/// [`INSTALLED_LINKER`]. A recipe that needs anything from the driver's own
+/// tree besides that link editor, or compiles link sources, is refused: the
+/// installation would still depend on the tree it was made from.
+pub(crate) fn install_recipe(
+    cc: &Path,
+    target: &str,
+    root: &Path,
+) -> io::Result<(PathBuf, PathBuf)> {
+    let cc = link_driver(cc)?;
+    let recipe = capture_link_recipe(&cc, target, false)?;
+    if !recipe.source_files.is_empty() {
+        return Err(io::Error::other(format!(
+            "the link recipe through {} compiles link sources ({}); an installation carries none",
+            cc.display(),
+            recipe
+                .source_files
+                .iter()
+                .map(|file| file.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    if let Some(tree) = cc.parent().and_then(Path::parent) {
+        let named = recipe
+            .args
+            .iter()
+            .map(|arg| arg.strip_prefix("-L").unwrap_or(arg))
+            .filter(|arg| arg.contains('/'))
+            .filter_map(|arg| Path::new(arg).canonicalize().ok())
+            .filter(|path| path.starts_with(tree))
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        if !named.is_empty() {
+            return Err(io::Error::other(format!(
+                "the link recipe through {} names {} inside the driver's own tree, which an installation does not carry",
+                cc.display(),
+                named.join(", ")
+            )));
+        }
+    }
+    let relative = Path::new("link").join(format!("{target}.json"));
+    let directory = root.join("link");
+    std::fs::create_dir_all(&directory)?;
+    let installed = InstalledRecipe {
+        schema: INSTALLED_RECIPE_SCHEMA,
+        target: target.into(),
+        args: recipe.args,
+    };
+    publish(&directory, &root.join(&relative), &installed)?;
+    Ok((relative, recipe.linker))
 }
 
 /// What native products are keyed by, besides the Hirsel compiler itself.
@@ -225,6 +301,92 @@ pub(crate) struct Toolchain {
 /// each file once: the recipe's files are recorded here as the recipe saw
 /// them, and the link uses this recipe rather than observing them again.
 pub(crate) fn toolchain(
+    link: &Link,
+    target: &str,
+    runtime: &Path,
+) -> io::Result<(Toolchain, LinkRecipe)> {
+    match link {
+        Link::Driver(cc) => driver_toolchain(cc, target, runtime),
+        Link::Installed(recipe) => installed_toolchain(recipe, target, runtime),
+    }
+}
+
+/// An installation's toolchain: its recipe's argv, its own link editor and
+/// the system files the argv names, each under its own host-tool record (the
+/// installation is not written by requests), and the request's runtime.
+fn installed_toolchain(
+    path: &Path,
+    target: &str,
+    runtime: &Path,
+) -> io::Result<(Toolchain, LinkRecipe)> {
+    let refused = |what: String| {
+        io::Error::other(format!(
+            "the installation's link recipe {} {what}; reinstall the toolchain",
+            path.display()
+        ))
+    };
+    let bytes = std::fs::read(path).map_err(|error| refused(format!("cannot be read: {error}")))?;
+    let installed: InstalledRecipe =
+        serde_json::from_slice(&bytes).map_err(|error| refused(format!("is damaged: {error}")))?;
+    if installed.schema != INSTALLED_RECIPE_SCHEMA || installed.target != target {
+        return Err(refused(format!(
+            "is not a {target} recipe of this compiler"
+        )));
+    }
+    let root = path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| refused("has no installation around it".into()))?;
+    let linker = root.join(INSTALLED_LINKER);
+    let paths = recipe_paths(&linker, &installed.args);
+    let missing = paths
+        .iter()
+        .filter(|path| !path.is_file())
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(refused(format!(
+            "names missing inputs: {}",
+            missing.join(", ")
+        )));
+    }
+    let store = host_tools()?;
+    let files = paths
+        .iter()
+        .map(|path| recorded(path, &store))
+        .collect::<io::Result<Vec<_>>>()?;
+    let archive = recorded(runtime, &store)?;
+    let identity = ContentHash::of_parts(
+        "hirsel.installed-link-recipe.v1",
+        [crate::encode(&(
+            INSTALLED_RECIPE_SCHEMA,
+            target,
+            &linker,
+            &installed.args,
+            image(&files),
+        ))?
+        .as_slice()],
+    );
+    let toolchain = Toolchain {
+        image: ContentHash::of_parts(
+            "hirsel.installed-toolchain-image.v1",
+            [crate::encode(&(identity, &archive.path, &archive.content))?.as_slice()],
+        ),
+        runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.content.0.as_slice()]),
+    };
+    let recipe = LinkRecipe {
+        schema: LINK_RECIPE_SCHEMA,
+        target: target.into(),
+        linker,
+        args: installed.args,
+        files,
+        source_files: Vec::new(),
+        identity,
+    };
+    Ok((toolchain, recipe))
+}
+
+fn driver_toolchain(
     cc: &Path,
     target: &str,
     runtime: &Path,
@@ -504,7 +666,8 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
     Ok(recipe)
 }
 
-fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<RecipeFile>> {
+/// The link editor and every file the argv names, sorted.
+fn recipe_paths(linker: &Path, args: &[String]) -> Vec<PathBuf> {
     let mut paths = vec![linker.to_owned()];
     let mut skip_dynamic_linker = false;
     for arg in args {
@@ -522,6 +685,11 @@ fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<RecipeFile>> {
     }
     paths.sort();
     paths.dedup();
+    paths
+}
+
+fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<RecipeFile>> {
+    let paths = recipe_paths(linker, args);
     let missing = paths
         .iter()
         .filter(|path| !path.is_file())
@@ -968,7 +1136,7 @@ mod tests {
         read_only(0o555).unwrap();
         let target = "x86_64-unknown-linux-gnu";
         let key = driver_file_key(&cc).unwrap();
-        let identity = toolchain(&cc, target, &runtime);
+        let identity = driver_toolchain(&cc, target, &runtime);
         let recipe = link_recipe(&cc, target);
         read_only(0o755).unwrap();
         let cache = PackageProduct::default_cache().join("link-recipes");
@@ -1009,7 +1177,7 @@ mod tests {
         std::fs::write(&runtime, b"runtime").unwrap();
         let target = "x86_64-unknown-linux-gnu";
         CLOCK.set(Some(0));
-        let identity = toolchain(&cc, target, &runtime).unwrap().0;
+        let identity = driver_toolchain(&cc, target, &runtime).unwrap().0;
         for file in [&linker, &crt, &runtime] {
             let copy = file.with_extension("rematerialised");
             std::fs::copy(file, &copy).unwrap();
@@ -1020,16 +1188,16 @@ mod tests {
         // toolchain record name the linker and the CRT.
         CLOCK.set(Some(1));
         READS.set(0);
-        assert_eq!(toolchain(&cc, target, &runtime).unwrap().0, identity);
+        assert_eq!(driver_toolchain(&cc, target, &runtime).unwrap().0, identity);
         assert_eq!(READS.get(), 4, "cc, linker, CRT and runtime, once each");
         CLOCK.set(Some(1 + WINDOW));
-        assert_eq!(toolchain(&cc, target, &runtime).unwrap().0, identity);
+        assert_eq!(driver_toolchain(&cc, target, &runtime).unwrap().0, identity);
         let directory = recipe_directory(&cc).unwrap();
         let key = driver_file_key(&cc).unwrap();
         let manifest_path = directory.join(format!("toolchain-{target}-{key}.json"));
         let written = std::fs::metadata(&manifest_path).unwrap().ino();
         READS.set(0);
-        assert_eq!(toolchain(&cc, target, &runtime).unwrap().0, identity);
+        assert_eq!(driver_toolchain(&cc, target, &runtime).unwrap().0, identity);
         assert_eq!(READS.get(), 0, "settled toolchain files are not read again");
         assert_eq!(
             std::fs::metadata(&manifest_path).unwrap().ino(),
@@ -1065,19 +1233,22 @@ mod tests {
         let (first, second) = (work.path().join("first.a"), work.path().join("second.a"));
         std::fs::write(&first, b"first runtime").unwrap();
         std::fs::write(&second, b"second runtime").unwrap();
-        let first_identity = toolchain(&cc, target, &first).unwrap().0;
-        let second_identity = toolchain(&cc, target, &second).unwrap().0;
+        let first_identity = driver_toolchain(&cc, target, &first).unwrap().0;
+        let second_identity = driver_toolchain(&cc, target, &second).unwrap().0;
         assert_ne!(
             first_identity, second_identity,
             "different runtime bytes link differently"
         );
         std::fs::write(&second, b"second runtime, rebuilt").unwrap();
         assert_ne!(
-            toolchain(&cc, target, &second).unwrap().0,
+            driver_toolchain(&cc, target, &second).unwrap().0,
             second_identity,
             "a rebuilt runtime archive must miss every object keyed by the old one"
         );
-        assert_eq!(toolchain(&cc, target, &first).unwrap().0, first_identity);
+        assert_eq!(
+            driver_toolchain(&cc, target, &first).unwrap().0,
+            first_identity
+        );
     }
 
     #[test]
@@ -1415,7 +1586,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            toolchain(&cc, target, &runtime).unwrap().0.runtime,
+            driver_toolchain(&cc, target, &runtime).unwrap().0.runtime,
             ContentHash::of_parts(
                 "hirsel.core-runtime.v2",
                 [ContentHash::of_bytes(b"runtime").0.as_slice()]

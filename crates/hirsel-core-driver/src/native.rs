@@ -39,6 +39,26 @@ impl std::str::FromStr for Backend {
         }
     }
 }
+/// Where a native link's link editor and its argv come from.
+#[derive(Clone, Debug)]
+pub enum Link {
+    /// Capture the link recipe through this C driver (`--cc`, or the pinned
+    /// LLVM's clang for a compiler that is not installed).
+    Driver(PathBuf),
+    /// The recipe an installation captured at install: its own `bin/ld.lld`
+    /// and the system's CRT files. No C driver runs.
+    Installed(PathBuf),
+}
+impl Link {
+    /// Tests drive the C driver they link through directly.
+    #[cfg(test)]
+    pub(crate) fn driver(&self) -> &Path {
+        match self {
+            Link::Driver(driver) => driver,
+            Link::Installed(_) => panic!("tests link through a C driver"),
+        }
+    }
+}
 /// Runtime and linker inputs are explicit, independently produced artifacts.
 pub struct NativeOptions {
     pub backend: Backend,
@@ -48,8 +68,7 @@ pub struct NativeOptions {
     pub target: String,
     pub runtime: PathBuf,
     pub include: PathBuf,
-    /// The C driver's path; [`crate::link_driver`] resolves a bare name on `PATH`.
-    pub cc: PathBuf,
+    pub link: Link,
     pub store: PathBuf,
     pub output: PathBuf,
     pub root_limit: u64,
@@ -193,7 +212,7 @@ impl CheckProduct {
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable(entry, options.instance_limit)?;
         let (toolchain, _) =
-            crate::tool_inputs::toolchain(&options.cc, &options.target, &options.runtime)?;
+            crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?;
         self.emit_instances(
             entry,
             reached.require()?,
@@ -335,7 +354,7 @@ impl CheckProduct {
         let sources = self.native_sources(&items)?;
         let entry_plan = self.process_entry(entry, options, &sources)?;
         let (toolchain, recipe) =
-            crate::tool_inputs::toolchain(&options.cc, &options.target, &options.runtime)?;
+            crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?;
         let mut objects =
             self.emit_instances(entry, instances, &reached.materialized, options, toolchain)?;
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
@@ -658,7 +677,7 @@ fn link(
         let mut recipe = recipe;
         let mut missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
         if !missing.is_empty() {
-            recipe = crate::tool_inputs::recapture_link_recipe(&options.cc, &options.target)
+            recipe = crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
                 .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
             missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
         }
@@ -683,8 +702,9 @@ fn link(
             if missing.is_empty() {
                 return Err(first);
             }
-            let refreshed = crate::tool_inputs::recapture_link_recipe(&options.cc, &options.target)
-                .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            let refreshed =
+                crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
+                    .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
             let remaining = crate::tool_inputs::missing_recipe_inputs(&refreshed);
             if !remaining.is_empty() {
                 return Err(NativeStop::Link(format!(
@@ -795,7 +815,9 @@ mod tests {
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
             include: root.join("crates/hirsel-core-rt/include"),
-            cc: PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+            link: Link::Driver(
+                PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+            ),
             store: dir.join("native"),
             output: dir.join("program"),
             root_limit: 1_048_576,

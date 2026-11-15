@@ -20,8 +20,8 @@ fn record_inputs(backend: Backend) {
     let edited=product.build(&entry,&options).unwrap();assert_eq!(edited.compiled,2);assert!(edited.linked);run_clean(&edited.executable,8);
 
     fn quote(path:&Path)->String {format!("'{}'",path.display().to_string().replace('\'',"'\\''"))}
-    let original=options.cc.clone();
-    let selected=command(Command::new(&original).arg("-print-prog-name=ld.lld")).unwrap();
+    let original=options.link.clone();
+    let selected=command(Command::new(original.driver()).arg("-print-prog-name=ld.lld")).unwrap();
     let selected=String::from_utf8(selected).unwrap();
     let original_ld=if selected.trim().contains('/') {PathBuf::from(selected.trim())} else {
         let paths=std::env::var_os("PATH").unwrap();
@@ -32,11 +32,11 @@ fn record_inputs(backend: Backend) {
     let ld_script=format!("#!/bin/sh\nexec {} \"$@\"\n",quote(&original_ld));
     std::fs::write(&ld,&ld_script).unwrap();std::fs::set_permissions(&ld,std::fs::Permissions::from_mode(0o755)).unwrap();
     let cc=dir.path().join("cc");
-    let script=format!("#!/bin/sh\nif [ \"$1\" = -print-prog-name=ld.lld ]; then printf '%s\\n' {}; exit; fi\nexec {} -B{} \"$@\"\n",quote(&ld),quote(&original),quote(&bin));
+    let script=format!("#!/bin/sh\nif [ \"$1\" = -print-prog-name=ld.lld ]; then printf '%s\\n' {}; exit; fi\nexec {} -B{} \"$@\"\n",quote(&ld),quote(original.driver()),quote(&bin));
     std::fs::write(&cc,&script).unwrap();std::fs::set_permissions(&cc,std::fs::Permissions::from_mode(0o755)).unwrap();
     let version=command(Command::new(&cc).arg("--version")).unwrap();
-    assert_eq!(version,command(Command::new(&original).arg("--version")).unwrap());
-    options.cc=cc.clone();
+    assert_eq!(version,command(Command::new(original.driver()).arg("--version")).unwrap());
+    options.link=crate::native::Link::Driver(cc.clone());
     let changed=product.build(&entry,&options).unwrap();assert_eq!(changed.compiled,0);assert!(changed.linked,"different C driver, same version");
     assert!(!product.build(&entry,&options).unwrap().linked);
     let new_cc=dir.path().join("replacement-cc");std::fs::write(&new_cc,format!("{script}# replacement\n")).unwrap();std::fs::set_permissions(&new_cc,std::fs::Permissions::from_mode(0o755)).unwrap();std::fs::rename(new_cc,&cc).unwrap();
@@ -48,10 +48,10 @@ fn record_inputs(backend: Backend) {
     let changed=product.build(&entry,&options).unwrap();assert_eq!(changed.compiled,0);assert!(changed.linked,"replaced link editor");run_clean(&changed.executable,8);
     std::fs::remove_file(ld).unwrap();
     let refused=match product.build(&entry,&options) { Ok(b) => panic!("unexpected success after linker removal: linked={}",b.linked), Err(e) => e.to_string() };assert!(refused.contains("tool selection") || refused.contains("missing link editor"),"{refused}");
-    options.cc=original.clone();
+    options.link=original.clone();
     let runtime=dir.path().join("runtime.a");std::fs::write(&runtime,std::fs::read(&options.runtime).unwrap()).unwrap();options.runtime=runtime.clone();
     let c=dir.path().join("extra.c");let object=dir.path().join("extra.o");std::fs::write(&c,"void hirsel_driver_cache_probe(void) {}\n").unwrap();
-    command(Command::new(&original).arg("-c").arg(c).arg("-o").arg(&object)).unwrap();
+    command(Command::new(original.driver()).arg("-c").arg(c).arg("-o").arg(&object)).unwrap();
     command(Command::new("ar").arg("rcs").arg(runtime).arg(object)).unwrap();
     let changed=product.build(&entry,&options).unwrap();assert_eq!(changed.compiled,2);assert!(changed.linked,"changed runtime bytes");run_clean(&changed.executable,8);
 }

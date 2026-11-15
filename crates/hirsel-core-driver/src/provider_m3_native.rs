@@ -48,7 +48,7 @@ mod provider_m3 {
         drop(script);
         std::fs::set_permissions(&linker, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut options = native_options(backend, dir.path());
-        options.cc = linker;
+        options.link = crate::native::Link::Driver(linker);
         options.root_limit = 1 << 20;
         options.grant_mask = (1 << 9) | (1 << 10);
         let entry = DefPath::from_full("app@1/main/main").unwrap();

@@ -143,9 +143,11 @@ facts read by their emitter.
 `--backend cranelift|llvm` selects an engine. Development builds and runs default
 to Cranelift; `--release` defaults to LLVM with optimization. `--cc`, `--target`
 and `--limit` name the C linker driver, target and root logical limit. Without
-`--cc` a request links through the driver its installation recorded, else the
-pinned LLVM's `$LLVM_SYS_231_PREFIX/bin/clang`; it never looks for `cc` on PATH.
-A recorded driver that is gone, or no driver at all, is a named refusal. The current
+`--cc` an installed compiler links its host target through the recipe and link
+editor in its prefix and runs no C driver; another target refuses until `--cc`
+names one. A compiler that is not installed uses the pinned LLVM's
+`$LLVM_SYS_231_PREFIX/bin/clang`, and with that unset refuses. No request looks
+for `cc` on PATH. The current
 native targets are x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu;
 cross execution requires explicit --emulator and --sysroot inputs. `--json` includes the executable,
 compiled-object count, link count and explicit stage stop.
@@ -185,8 +187,8 @@ The driver emits the fresh entry/link object directly on x86-64 and AArch64,
 using Cranelift's C ABI and the same Object ELF writer on both program engines.
 It contains startup, the Result/cleanup callback and static argument, grant and
 source descriptors. There is no generated C translation unit or C compilation
-step. The selected `--cc` runs only as a linker driver for CRT, sysroot and
-library selection. Runtime headers remain embedded ABI/cache inputs. Entry code
+step. A C driver runs only to capture the link recipe (CRT, sysroot and
+library selection), at install or for an explicit `--cc`. Runtime headers remain embedded ABI/cache inputs. Entry code
 generation runs only on a link-cache miss.
 The shipping runtime archive has its Rust debug metadata removed once at
 publication, preserving code, public symbols and unwind data. All profiles
@@ -247,7 +249,8 @@ gap to be closed later.
   length and content digest check is used as written. The digest catches damage,
   not intent: a record crafted to carry a matching digest is outside the threat
   model. A store is as trusted as the user account that writes it.
-- **Tool inputs are trusted by the two-sighting stat rule.** The link driver, link
+- **Tool inputs are trusted by the two-sighting stat rule.** The link driver or
+  installed recipe, link
   editor, runtime archive and every file the link recipe names are hashed when
   first seen. A file seen again with the same stat and bytes at least two seconds
   later (boot clock) is settled, and a settled file whose stat still matches is
@@ -379,16 +382,30 @@ cache and actual product roots, target and selected runtime. Explicit
 `--core-product`, `--runtime` and `--target` take precedence over installed defaults.
 With no registered runtime, env reports null and native commands require --runtime.
 
-`std-product --install ROOT --runtime ARCHIVE [--target TRIPLE]` publishes the
-ordinary new package image under ROOT/core-packages and registers it beside the
-future copied compiler in hirsel-core-toolchain.json. `core-product` has the same
-registration option. The install records its link driver, `--cc` or the pinned
-LLVM's clang, canonically; that driver is the installation's, and later requests
-use it whatever PATH holds. Runtime bytes are stored under a content-derived relative
-path; the small selection file commits last. A failed publication preserves the
-previous registration. --store and --image cannot combine with --install;
-product --runtime/--target require --install. The future distribution assembler
-uses this same producer. It does not switch the currently installed old CLI.
+`std-product --install ROOT --runtime ARCHIVE [--target TRIPLE] [--cc DRIVER]`
+makes ROOT a self-contained installation and `core-product` takes the same
+options. A request from ROOT/hirsel loads nothing outside ROOT and the system:
+no environment variable, no checkout and no C driver.
+
+    ROOT/hirsel                      this compiler, its RPATH patched to $ORIGIN/lib
+    ROOT/lib/                        libLLVM.so.23.1 and the libraries it loads from the pinned tree
+    ROOT/bin/ld.lld                  the link editor
+    ROOT/link/<target>.json          the link recipe captured at install
+    ROOT/runtime/<target>/<hash>/    runtime archives, by content
+    ROOT/core-packages/              the core and std images
+    ROOT/hirsel-core-toolchain.json  the selection, committed last
+
+glibc, libstdc++, libgcc_s and the CRT files the recipe names stay the
+system's. Installing the host target's runtime installs the native toolchain
+with it: the recipe is captured once, through `--cc` or the pinned clang, and
+an install with neither refuses. Another target's runtime is registered without
+a recipe; its links take `--cc` and `--sysroot`. Every outside input is read
+and checked before anything is written, so a failed publication preserves the
+previous registration. A missing piece of the prefix is a named refusal at the
+request that needs it; nothing falls back. --store and --image cannot combine
+with --install; product --runtime/--target require --install. The distribution
+assembler uses this same producer. It does not switch the currently installed
+old CLI.
 A copied new compiler beside the registration uses these products/runtime from
 any working directory; moving the entire installation preserves relative paths.
 

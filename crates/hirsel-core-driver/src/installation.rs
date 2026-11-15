@@ -1,5 +1,22 @@
-//! Installed selection is a small relocatable configuration, published last.
-//! Package bytes retain the ordinary image/store format and cache-miss rules.
+//! An installation is a self-contained prefix: the compiler, every native
+//! tool and library a request loads, the runtimes and the core/std images,
+//! found relative to the installed executable. Its selection is a small
+//! relocatable configuration, published last. Package bytes retain the
+//! ordinary image/store format and cache-miss rules.
+//!
+//! ```text
+//! ROOT/hirsel                       the compiler, RPATH $ORIGIN/lib
+//! ROOT/lib/libLLVM.so.23.1 ...      the LLVM engine and the libraries it loads
+//! ROOT/bin/ld.lld                   the link editor
+//! ROOT/link/<target>.json           the link recipe captured at install
+//! ROOT/runtime/<target>/<hash>/     runtime archives
+//! ROOT/core-packages/               core and std images
+//! ROOT/hirsel-core-toolchain.json   this selection
+//! ```
+//!
+//! A request finds all of it from the executable alone: no environment
+//! variable, no C driver and no checkout. Libraries the system provides
+//! (glibc, libstdc++, libgcc_s) stay the system's.
 use crate::{CoreImage, Meter, PackageProduct};
 use hirsel_core_ids::ContentHash;
 use serde::{Deserialize, Serialize};
@@ -8,15 +25,23 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "hirsel-core-toolchain.json";
+const VERSION: u32 = 2;
+/// The installed compiler's name in its prefix.
+const EXECUTABLE: &str = "hirsel";
+/// The host this compiler runs on: the one target an installation links
+/// itself. Another target's runtime is installed; its link takes `--cc`.
+const HOST: &str = if cfg!(target_arch = "aarch64") {
+    "aarch64-unknown-linux-gnu"
+} else {
+    "x86_64-unknown-linux-gnu"
+};
 #[derive(Default, Serialize, Deserialize)]
 struct Registration {
     version: u32,
     products: BTreeMap<String, PathBuf>,
     runtimes: BTreeMap<String, PathBuf>,
-    /// The C link driver this installation was made with, canonical. A
-    /// request without `--cc` links through it, never a `cc` found on PATH.
-    #[serde(default)]
-    driver: Option<PathBuf>,
+    /// Each linked target's recipe, relative to the root.
+    links: BTreeMap<String, PathBuf>,
 }
 pub struct Installed {
     pub root: PathBuf,
@@ -32,7 +57,7 @@ impl Installed {
         };
         let registration: Registration =
             serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        if registration.version != 1 {
+        if registration.version != VERSION {
             return Err(io::Error::other(
                 "unsupported core toolchain registration version",
             ));
@@ -58,22 +83,13 @@ impl Installed {
             .get(target)
             .map(|path| self.root.join(path))
     }
-    /// The link driver recorded at install. A recorded driver that is gone
-    /// is this installation's error, never a reason to look on PATH.
-    pub fn driver(&self) -> io::Result<Option<PathBuf>> {
-        let Some(driver) = &self.registration.driver else {
-            return Ok(None);
-        };
-        if !driver.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "the installed link driver {} is missing; reinstall the toolchain or pass --cc",
-                    driver.display()
-                ),
-            ));
-        }
-        Ok(Some(driver.clone()))
+    /// The link recipe this installation captured for `target`. A target
+    /// without one links only through an explicit `--cc`.
+    pub fn link(&self, target: &str) -> Option<PathBuf> {
+        self.registration
+            .links
+            .get(target)
+            .map(|path| self.root.join(path))
     }
     /// Open a registered library product by its package identity. A registered
     /// path that is missing or damaged is an installation error; callers must
@@ -109,14 +125,14 @@ pub fn register(
     root: &Path,
     name: &str,
     image: &CoreImage,
-    runtime: Option<(&Path, &str)>,
-    driver: Option<&Path>,
+    runtime: Option<(&[u8], &str)>,
+    link: Option<(&str, &Path)>,
 ) -> io::Result<()> {
     let root = crate::product::normalized(root);
     std::fs::create_dir_all(&root)?;
     let mut registration = Installed::at(&root)?
         .map_or_else(Registration::default, |installed| installed.registration);
-    registration.version = 1;
+    registration.version = VERSION;
     let image_path = crate::product::normalized(&image.store_root());
     registration.products.insert(
         name.to_owned(),
@@ -125,12 +141,8 @@ pub fn register(
             .map_err(io::Error::other)?
             .to_owned(),
     );
-    if let Some((runtime, target)) = runtime {
-        if !["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"].contains(&target) {
-            return Err(io::Error::other("unsupported installed runtime target"));
-        }
-        let bytes = std::fs::read(runtime)?;
-        let hash = hex(ContentHash::of_bytes(&bytes));
+    if let Some((bytes, target)) = runtime {
+        let hash = hex(ContentHash::of_bytes(bytes));
         let relative = Path::new("runtime")
             .join(target)
             .join(hash)
@@ -139,12 +151,14 @@ pub fn register(
         let parent = path.parent().expect("runtime path has a parent");
         std::fs::create_dir_all(parent)?;
         let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(&bytes)?;
+        file.write_all(bytes)?;
         file.persist(path)?;
         registration.runtimes.insert(target.to_owned(), relative);
     }
-    if let Some(driver) = driver {
-        registration.driver = Some(driver.to_owned());
+    if let Some((target, recipe)) = link {
+        registration
+            .links
+            .insert(target.to_owned(), recipe.to_owned());
     }
     let mut file = tempfile::NamedTempFile::new_in(&root)?;
     serde_json::to_writer_pretty(&mut file, &registration).map_err(io::Error::other)?;
@@ -213,7 +227,13 @@ pub fn environment(
         runtime: runtime.map(Path::to_owned),
     })
 }
-/// The same producer used by the CLI and the future distribution assembler.
+/// The same producer used by the CLI and the distribution assembler. Every
+/// outside input is read and checked before anything is written; the
+/// selection is written last, so a failed install keeps the previous one.
+///
+/// Installing the host's runtime installs the native toolchain with it: the
+/// LLVM engine the compiler loads, and the link editor and recipe captured
+/// through `cc`, which runs only here.
 pub fn publish(
     root: &Path,
     std: bool,
@@ -221,35 +241,238 @@ pub fn publish(
     cc: Option<&Path>,
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
-    // The driver is pinned before anything is published: one that cannot be
-    // resolved refuses the install rather than leaving requests to guess.
-    let driver = cc.map(crate::tool_inputs::link_driver).transpose()?;
-    let cache = crate::product::normalized(root).join("core-packages");
+    let root = crate::product::normalized(root);
+    let runtime = runtime
+        .map(|(path, target)| {
+            if !["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"].contains(&target) {
+                return Err(io::Error::other("unsupported installed runtime target"));
+            }
+            Ok((std::fs::read(path)?, target))
+        })
+        .transpose()?;
+    let linked = runtime
+        .as_ref()
+        .map(|(_, target)| *target)
+        .filter(|target| *target == HOST);
+    let driver = linked
+        .map(|target| {
+            cc.ok_or_else(|| {
+                io::Error::other(format!(
+                    "installing the {target} toolchain captures its link recipe through a C driver: pass --cc"
+                ))
+            })
+        })
+        .transpose()?;
+    std::fs::create_dir_all(&root)?;
+    install_executable(&root)?;
+    let cache = root.join("core-packages");
     let product = if std {
         PackageProduct::bundled_std(&cache, meter)?
     } else {
         PackageProduct::bundled(&cache, meter)?
     };
+    let link = match (linked, driver) {
+        (Some(target), Some(driver)) => {
+            let library = hirsel_llvm_lazy::llvm_library().map_err(|error| {
+                io::Error::other(format!("cannot install the LLVM engine: {error}"))
+            })?;
+            install_libraries(library, &root.join("lib"))?;
+            let (recipe, linker) = crate::tool_inputs::install_recipe(driver, target, &root)?;
+            let installed = root.join(crate::tool_inputs::INSTALLED_LINKER);
+            install_file(&std::fs::read(&linker)?, &installed, 0o755)?;
+            install_dependencies(&installed, &root.join("lib"))?;
+            meter.finish("install/native toolchain");
+            Some((target, recipe))
+        }
+        _ => None,
+    };
     register(
-        root,
+        &root,
         if std { "std" } else { "core" },
         &product.image,
-        runtime,
-        driver.as_deref(),
+        runtime
+            .as_ref()
+            .map(|(bytes, target)| (bytes.as_slice(), *target)),
+        link.as_ref()
+            .map(|(target, recipe)| (*target, recipe.as_path())),
     )?;
-    // Sight the registered runtime's toolchain inputs now, as a request
-    // would find them (the compiler beside the registration, canonical), so
-    // the first request a window after the install promotes them instead of
-    // sighting them itself. A toolchain that cannot be read here is a build's
-    // error to report, not the install's.
-    if let Some((_, target)) = runtime
-        && let Some(installed) = Installed::at(&crate::product::normalized(root))?
-        && let Some(archive) = installed.runtime(target)
-        && let Some(cc) = &driver
-        && let Ok(archive) = archive.canonicalize()
+    // Sight the installed toolchain's inputs now, as a request finds them,
+    // so the first request a window after the install promotes them instead
+    // of sighting them itself. A toolchain that cannot be read here is a
+    // build's error to report, not the install's.
+    if let Some((target, _)) = link
+        && let Some(installed) = Installed::at(&root)?
+        && let (Some(recipe), Some(archive)) = (installed.link(target), installed.runtime(target))
     {
-        let _ = crate::tool_inputs::toolchain(cc, target, &archive);
+        let _ = crate::tool_inputs::toolchain(
+            &crate::native::Link::Installed(recipe),
+            target,
+            &archive,
+        );
         meter.finish("install/tool input sighting");
     }
     Ok(product)
+}
+
+/// Copy this compiler into the prefix with its RPATH set to `$ORIGIN/lib`,
+/// so the installed copy loads the installed libraries and nothing of the
+/// tree it was built in. A compiler already copied to its place is patched
+/// there; one already patched is left as it is.
+fn install_executable(root: &Path) -> io::Result<()> {
+    let source = std::env::current_exe()?;
+    let installed = root.join(EXECUTABLE);
+    let mut bytes = std::fs::read(&source)?;
+    let rpath = dynamic_strings(&bytes)?
+        .into_iter()
+        .find(|entry| entry.tag == object::elf::DT_RPATH)
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "the compiler {} carries no RPATH for its installed libraries",
+                source.display()
+            ))
+        })?;
+    const ORIGIN_LIB: &[u8] = b"$ORIGIN/lib";
+    if rpath.value.len() < ORIGIN_LIB.len() {
+        return Err(io::Error::other(format!(
+            "the compiler {}'s RPATH is too short to name $ORIGIN/lib",
+            source.display()
+        )));
+    }
+    let field = &mut bytes[rpath.offset..rpath.offset + rpath.value.len()];
+    field.fill(0);
+    field[..ORIGIN_LIB.len()].copy_from_slice(ORIGIN_LIB);
+    install_file(&bytes, &installed, 0o755)
+}
+
+/// Copy a shared library and every library it loads from its own directory
+/// or its RUNPATH into `directory`, under the names they are loaded by.
+fn install_libraries(library: &Path, directory: &Path) -> io::Result<()> {
+    let name = library
+        .file_name()
+        .ok_or_else(|| io::Error::other(format!("{} names no library", library.display())))?;
+    let installed = directory.join(name);
+    install_file(&std::fs::read(library)?, &installed, 0o644)?;
+    install_dependencies_from(library, &installed, directory)
+}
+
+/// Copy the libraries an installed object loads that its source's
+/// directories provide; the rest are the system's.
+fn install_dependencies(installed: &Path, directory: &Path) -> io::Result<()> {
+    install_dependencies_from(installed, installed, directory)
+}
+
+fn install_dependencies_from(source: &Path, installed: &Path, directory: &Path) -> io::Result<()> {
+    let home = source
+        .canonicalize()?
+        .parent()
+        .map(Path::to_owned)
+        .unwrap_or_default();
+    let mut done = std::collections::BTreeSet::new();
+    let mut pending = vec![(source.canonicalize()?, std::fs::read(installed)?)];
+    while let Some((path, bytes)) = pending.pop() {
+        let origin = path.parent().unwrap_or(Path::new("/"));
+        let entries = dynamic_strings(&bytes)?;
+        // Where this object's loader looks besides the system: its own
+        // RUNPATH or RPATH, and the directory the first object came from
+        // (the executable's RPATH serves libraries that name none).
+        let mut search = entries
+            .iter()
+            .filter(|entry| [object::elf::DT_RUNPATH, object::elf::DT_RPATH].contains(&entry.tag))
+            .flat_map(|entry| {
+                String::from_utf8_lossy(&entry.value)
+                    .split(':')
+                    .map(|dir| PathBuf::from(dir.replace("$ORIGIN", &origin.to_string_lossy())))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        search.push(home.clone());
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.tag == object::elf::DT_NEEDED)
+        {
+            let name = String::from_utf8_lossy(&entry.value).into_owned();
+            if !done.insert(name.clone()) {
+                continue;
+            }
+            let Some(found) = search
+                .iter()
+                .map(|dir| dir.join(&name))
+                .find(|path| path.is_file())
+            else {
+                continue;
+            };
+            let bytes = std::fs::read(&found)?;
+            install_file(&bytes, &directory.join(&name), 0o644)?;
+            pending.push((found.canonicalize()?, bytes));
+        }
+    }
+    Ok(())
+}
+
+/// Write `bytes` at `path` atomically, unless the file already holds them.
+fn install_file(bytes: &[u8], path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::read(path).is_ok_and(|existing| existing == bytes) {
+        return Ok(());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other(format!("{} has no directory", path.display())))?;
+    std::fs::create_dir_all(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(bytes)?;
+    file.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(mode))?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+/// One string-valued entry of an ELF object's dynamic section.
+struct DynamicString {
+    tag: object::elf::DynamicTag,
+    /// The string's file offset.
+    offset: usize,
+    value: Vec<u8>,
+}
+
+/// The NEEDED, RPATH and RUNPATH strings of a 64-bit little-endian ELF.
+fn dynamic_strings(bytes: &[u8]) -> io::Result<Vec<DynamicString>> {
+    use object::read::elf::{Dyn as _, FileHeader as _, SectionHeader as _};
+    let malformed = |error: object::Error| io::Error::other(format!("malformed ELF: {error}"));
+    let header =
+        object::elf::FileHeader64::<object::LittleEndian>::parse(bytes).map_err(malformed)?;
+    let endian = header.endian().map_err(malformed)?;
+    let sections = header.sections(endian, bytes).map_err(malformed)?;
+    let mut strings = Vec::new();
+    for section in sections.iter() {
+        let Some((entries, link)) = section.dynamic(endian, bytes).map_err(malformed)? else {
+            continue;
+        };
+        let table = sections.section(link).map_err(malformed)?;
+        let base = table.sh_offset(endian) as usize;
+        let data = table.data(endian, bytes).map_err(malformed)?;
+        for entry in entries {
+            let tag = entry.d_tag(endian);
+            if ![
+                object::elf::DT_NEEDED,
+                object::elf::DT_RPATH,
+                object::elf::DT_RUNPATH,
+            ]
+            .contains(&tag)
+            {
+                continue;
+            }
+            let start = entry.d_val(endian) as usize;
+            let value = data
+                .get(start..)
+                .and_then(|rest| rest.split(|b| *b == 0).next())
+                .ok_or_else(|| io::Error::other("malformed ELF: dynamic string out of range"))?;
+            strings.push(DynamicString {
+                tag,
+                offset: base + start,
+                value: value.to_vec(),
+            });
+        }
+    }
+    Ok(strings)
 }

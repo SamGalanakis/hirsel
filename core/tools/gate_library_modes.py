@@ -182,46 +182,60 @@ def main():
                 invoke(installed, 'std-product', '--install', str(moved), '--runtime', str(work / 'missing.a'), expected=2)
                 self.assertEqual(selection.read_bytes(), previous)
 
-        def test_an_installed_compiler_links_through_its_recorded_driver_never_cc_on_path(self):
-            # Ruling 6: the install pins the driver; a request never looks
-            # for `cc` on PATH, and a recorded driver that is gone refuses.
+        def test_a_copied_install_runs_in_a_clean_environment_with_nothing_outside_its_prefix(self):
+            # Attack 984: an install copied into an empty prefix must load
+            # every native tool and library from that prefix or the system,
+            # with no environment variable, no checkout and no cc on PATH.
             runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
-            real_cc = Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
-            with tempfile.TemporaryDirectory(prefix='hirsel-driver-') as temporary:
+            with tempfile.TemporaryDirectory(prefix='hirsel-prefix-') as temporary:
                 work = Path(temporary)
-                root, app, decoy = work / 'toolchain', work / 'app', work / 'path-bin'
-                root.mkdir()
-                decoy.mkdir()
+                root, decoy, home = work / 'toolchain', work / 'path-bin', work / 'home'
+                for directory in [root, decoy, home, work / 'data', work / 'empty']:
+                    directory.mkdir()
                 installed = root / 'hirsel'
                 shutil.copy2(compiler, installed)
-                pinned, used = work / 'pinned' / 'bin' / 'clang', work / 'pinned.log'
-                pinned.parent.mkdir(parents=True)
-                pinned.write_text('#!/bin/sh\necho x >> ' + repr(str(used)) + '\nexec ' + repr(str(real_cc)) + ' "$@"\n')
-                pinned.chmod(0o755)
-                found = work / 'path-cc.log'
-                (decoy / 'cc').write_text('#!/bin/sh\necho x >> ' + repr(str(found)) + '\nexit 1\n')
-                (decoy / 'cc').chmod(0o755)
-                plain = {k: v for k, v in os.environ.items() if k != 'LLVM_SYS_231_PREFIX'}
-                plain['PATH'] = str(decoy) + os.pathsep + plain.get('PATH', '')
-                plain['XDG_CACHE_HOME'] = str(work / 'cache')
-                def invoke(*arguments, env, expected=0):
-                    result = subprocess.run([str(installed), *arguments], cwd=work, env=env, capture_output=True, text=True)
+                found = work / 'path-tool.log'
+                for tool in ['cc', 'gcc', 'clang', 'ld', 'ld.lld']:
+                    (decoy / tool).write_text('#!/bin/sh\necho ' + tool + ' >> ' + repr(str(found)) + '\nexit 1\n')
+                    (decoy / tool).chmod(0o755)
+                install = subprocess.run([str(installed), 'std-product', '--install', str(root), '--runtime', str(runtime)],
+                                         cwd=work, capture_output=True, text=True)
+                self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
+                clean = {'PATH': str(decoy) + ':/usr/bin:/bin', 'HOME': str(home)}
+                def invoke(*arguments, expected=0, cwd=work):
+                    result = subprocess.run([str(installed), *arguments], cwd=cwd, env=clean, capture_output=True, text=True)
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                     return result
-                invoke('std-product', '--install', str(root), '--runtime', str(runtime),
-                       env={**plain, 'LLVM_SYS_231_PREFIX': str(pinned.parent.parent)})
-                invoke('new', str(app), env=plain)
-                built = json.loads(invoke('build', str(app), '--json', '-o', str(work / 'program'), env=plain).stdout)
-                self.assertTrue(built['native']['linked'])
-                ran = subprocess.run([str(work / 'program')], capture_output=True)
-                self.assertEqual((ran.returncode, ran.stdout, ran.stderr), (0, b'', b''))
-                self.assertTrue(used.exists())
-                self.assertFalse(found.exists())
-                recorded = pinned.resolve()
-                pinned.unlink()
-                refused = invoke('build', str(app), '--json', '-o', str(work / 'program'), env=plain, expected=2)
-                self.assertIn(f'the installed link driver {recorded} is missing', refused.stderr)
-                self.assertFalse(found.exists())
+                app = work / 'app'
+                invoke('new', str(app))
+                (app / 'main.hirsel').write_text(
+                    'pub fn main(d: Dir) -> Result[(), Exit] waits {\n'
+                    '    match std.file.read_string(d, "input.txt") {\n'
+                    '        Ok(_) => Ok(()),\n'
+                    '        Error(_) => Error(Exit(status: 3)),\n'
+                    '    }\n'
+                    '}\n\n'
+                    '@test\n'
+                    'fn passes() -> Result[(), Exit] {\n'
+                    '    Ok(())\n'
+                    '}\n')
+                (work / 'data' / 'input.txt').write_text('granted\n')
+                invoke('fmt', '--check', str(app))
+                self.assertTrue(json.loads(invoke('check', str(app), '--json').stdout)['accepted'])
+                for engine in ['cranelift', 'llvm']:
+                    for profile in [[], ['--release']]:
+                        flags = ['--backend', engine, *profile]
+                        program = work / ('program-' + engine + ''.join(profile))
+                        self.assertTrue(json.loads(invoke('build', str(app), *flags, '-o', str(program), '--json').stdout)['native']['linked'])
+                        invoke('run', str(app), *flags, '--dir', str(work / 'data'))
+                        # The granted directory is the one the program reads.
+                        invoke('run', str(app), *flags, '--dir', str(work / 'empty'), expected=3)
+                        invoke('test', str(app), *flags, '--limit', '67108864')
+                self.assertFalse(found.exists(), found.read_text() if found.exists() else '')
+                linker = root / 'bin' / 'ld.lld'
+                linker.unlink()
+                refused = invoke('build', str(app), '--release', '-o', str(work / 'gone'), expected=2)
+                self.assertIn(str(linker), refused.stderr)
 
         def test_fmt_checks_writes_and_refuses_without_partial_changes(self):
             with tempfile.TemporaryDirectory(prefix='hirsel-fmt-') as temporary:

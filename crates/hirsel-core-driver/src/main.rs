@@ -1,5 +1,6 @@
 use hirsel_core_driver::{
-    Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Meter, NativeOptions,
+    Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
+    NativeOptions,
 };
 use hirsel_core_resolve::CorpusManifest;
 use serde::Serialize;
@@ -113,8 +114,9 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut emulator = None;
     let mut sysroot = None;
     let mut target = "x86_64-unknown-linux-gnu".to_owned();
-    // The C link driver: --cc, else the one an installation recorded, else
-    // the pinned LLVM's clang. Never a `cc` found on PATH.
+    // How a native request links: --cc, else the recipe the installation
+    // captured, else (uninstalled) the pinned LLVM's clang. Never a `cc`
+    // found on PATH.
     let mut cc = None;
     let pinned =
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
@@ -460,21 +462,18 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             }),
             optimize: release,
             debug_lines: debug_lines.unwrap_or(false),
-            target,
+            target: target.clone(),
             runtime: runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
             include: headers.path().to_owned(),
-            cc: hirsel_core_driver::link_driver(&match cc {
-                Some(cc) => cc,
-                None => installed
-                    .as_ref()
-                    .map(|installed| installed.driver())
-                    .transpose()?
-                    .flatten()
-                    .or_else(pinned)
-                    .ok_or(
-                        "no link driver: this compiler's installation records none and LLVM_SYS_231_PREFIX is unset; pass --cc",
-                    )?,
-            })?,
+            link: match (cc, &installed) {
+                (Some(cc), _) => Link::Driver(hirsel_core_driver::link_driver(&cc)?),
+                (None, Some(installed)) => Link::Installed(installed.link(&target).ok_or_else(
+                    || format!("this installation links its host target only, not {target}; pass --cc"),
+                )?),
+                (None, None) => Link::Driver(hirsel_core_driver::link_driver(&pinned().ok_or(
+                    "no link driver: this compiler is not installed and LLVM_SYS_231_PREFIX is unset; pass --cc",
+                )?)?),
+            },
             store: native_store,
             output: output_path.unwrap_or(default_output),
             root_limit,

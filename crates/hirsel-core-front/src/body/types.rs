@@ -95,6 +95,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let c = self.kids(n);
         match self.kind(n) {
             NodeKind::CallableType | NodeKind::OwnCallableType | NodeKind::ScopedCallableType => {
+                let callable = match crate::decls::callable_kind(self.item, n) {
+                    Ok(k) => k,
+                    Err((bound, message)) => {
+                        self.refuse("LANG-13", bound, message);
+                        return ERROR;
+                    }
+                };
                 self.callable_type_depth += 1;
                 let mut params = vec![];
                 let mut result = UNIT;
@@ -118,6 +125,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         NodeKind::ResultType => {
                             let node = self.kids(child)[0];
                             result = self.ty_result(node, true);
+                            if callable == Callable::ScopedView
+                                && crate::decls::view_result_reserved(
+                                    &self.p.decls,
+                                    &self.t,
+                                    result,
+                                )
+                            {
+                                self.refuse("LANG-13", node, crate::decls::VIEW_RESULT_RESERVED);
+                                self.callable_type_depth -= 1;
+                                return ERROR;
+                            }
                             if kind(&self.p.decls, &self.t, result, &self.params) == Kind::Scoped {
                                 let region = |root| {
                                     let Some(Target::Binder(b)) =
@@ -161,17 +179,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         _ => {}
                     }
                 }
-                let callable = match crate::decls::callable_kind(self.item, n) {
-                    Ok(k) => k,
-                    Err(bound) => {
-                        self.refuse(
-                            "LANG-13",
-                            bound,
-                            "an owning callable bracket contains only send",
-                        );
-                        return ERROR;
-                    }
-                };
                 self.callable_type_depth -= 1;
                 self.t.mk(TyKind::Fn(params, result, waits, callable))
             }

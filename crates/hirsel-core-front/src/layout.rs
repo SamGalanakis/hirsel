@@ -96,7 +96,7 @@ impl<T: TyRead> Shapes<'_, T> {
             TyKind::Fn(_, _, _, callable) => {
                 let callable_field = self.field(ty)?;
                 (
-                    if callable == Callable::Scoped {
+                    if matches!(callable, Callable::Scoped | Callable::ScopedView) {
                         LRepr::Scoped
                     } else {
                         LRepr::Own
@@ -591,7 +591,7 @@ impl<T: TyRead> Shapes<'_, T> {
             TyKind::Fn(_, _, _, callable) => match callable {
                 Callable::Plain => FieldTy::Fn,
                 Callable::Own | Callable::OwnSend => FieldTy::OwnFn,
-                Callable::Scoped => FieldTy::Borrow,
+                Callable::Scoped | Callable::ScopedView => FieldTy::Borrow,
             },
             _ => return None,
         })

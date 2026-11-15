@@ -1,0 +1,8 @@
+fn run(r: Region) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 {
+        match clone_in(r, 7u64) { Ok(_) => 1u64, Error(_) => 0u64 }
+    })
+}
+pub fn main() -> Result[(), ()] { Ok(()) }
+
+// expect: refuse LANG-12 at 3:15

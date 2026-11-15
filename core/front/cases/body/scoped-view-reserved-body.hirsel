@@ -1,0 +1,7 @@
+fn query[R](f: scoped[view] fn() -> R) -> R { f() }
+fn bad(xs: List[String]) -> u64 {
+ let _ = query(fn() -> Option[View[String]] in xs { list.get(xs, 0) })
+ 0
+}
+
+// expect: refuse LANG-13 at 3:24

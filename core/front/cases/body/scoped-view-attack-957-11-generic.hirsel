@@ -1,0 +1,17 @@
+fn generic[T](x: T) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 {
+        1u64
+    })
+}
+
+pub fn main() -> Result[(), ()] {
+    Ok(())
+}
+
+pub fn oracle() -> u64 {
+    match generic(9u64) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+// expect: run oracle() = 1

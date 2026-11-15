@@ -1,0 +1,9 @@
+fn bad() -> u64 {
+ let mut n: u64 = 0
+ let inner = scoped fn() -> u64 { n += 1; n }
+ let middle = scoped fn() -> u64 { inner() }
+ let f: scoped[view] fn() -> u64 = fn() -> u64 { middle() }
+ 0
+}
+
+// expect: refuse LANG-13 at 3:35

@@ -1,0 +1,9 @@
+fn run(mut ts: Tasks, xs: List[u64]) -> Result[Result[u64, Causes], Capacity] waits {
+    isolate(fn() -> u64 { let _ = task.spawn(ts, 32u64, 1u64, fn(take x: u64) -> u64 waits { x }); 0u64 })
+}
+pub fn main() -> Result[(), ()] { Ok(()) }
+
+// expect: refuse OWN-7 at 2:50
+// expect: refuse LANG-8 at 2:86
+// expect: compared OWN-7 at 2:50 | unmarked | bytes
+// expect: compared LANG-8 at 2:86 | waits | not waits

@@ -1,0 +1,20 @@
+fn takes_scoped(f: scoped fn() -> u64) -> u64 {
+    f()
+}
+
+fn make(mut xs: List[u64]) -> u64 {
+    takes_scoped(scoped fn() -> u64 {
+        list.len(xs)
+    })
+}
+
+pub fn main() -> Result[(), ()] {
+    Ok(())
+}
+
+pub fn oracle() -> u64 {
+    let mut xs: List[u64] = list.new();
+    let _ = list.push(mut xs, 7u64);
+    make(mut xs)
+}
+// expect: run oracle() = 1

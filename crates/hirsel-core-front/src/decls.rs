@@ -1078,6 +1078,14 @@ impl Program<'_> {
                 }
             }
             NodeKind::CallableType | NodeKind::OwnCallableType | NodeKind::ScopedCallableType => {
+                let callable = match callable_kind(item, n) {
+                    Ok(k) => k,
+                    Err((bound, message)) => {
+                        self.refusals
+                            .push(refusal("LANG-13", self.site(at, bound), message));
+                        return ERROR;
+                    }
+                };
                 let mut params = vec![];
                 let mut result = UNIT;
                 let mut waits = false;
@@ -1100,6 +1108,16 @@ impl Program<'_> {
                         NodeKind::ResultType => {
                             let node = item.tree.children(c)[0];
                             result = self.lower_ty_result(at, node, generics, true);
+                            if callable == Callable::ScopedView
+                                && view_result_reserved(&self.decls, &self.types, result)
+                            {
+                                self.refusals.push(refusal(
+                                    "LANG-13",
+                                    self.site(at, node),
+                                    VIEW_RESULT_RESERVED,
+                                ));
+                                return ERROR;
+                            }
                             if scoped_payload(&self.decls, &self.types, result)
                                 && written_missing_anchor(self, at, node)
                             {
@@ -1124,17 +1142,6 @@ impl Program<'_> {
                         _ => {}
                     }
                 }
-                let callable = match callable_kind(item, n) {
-                    Ok(k) => k,
-                    Err(bound) => {
-                        self.refusals.push(refusal(
-                            "LANG-13",
-                            self.site(at, bound),
-                            "an owning callable bracket contains only send",
-                        ));
-                        return ERROR;
-                    }
-                };
                 self.types
                     .intern(TyKind::Fn(params, result, waits, callable))
             }
@@ -2338,7 +2345,7 @@ fn walk_holds(
             }
         }
         TyKind::Anchored(x, _) | TyKind::Array(x, _) => walk_holds(decls, t, *x, h, params, refs),
-        TyKind::Fn(_, _, _, Callable::Scoped) => *h |= H_SCOPED,
+        TyKind::Fn(_, _, _, Callable::Scoped | Callable::ScopedView) => *h |= H_SCOPED,
         TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend) => *h |= H_OPAQUE,
         TyKind::View(x) => {
             *h |= H_SCOPED;
@@ -2431,7 +2438,7 @@ pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[
         TyKind::Fn(_, _, _, callable) => match callable {
             Callable::Plain => Kind::Plain,
             Callable::Own | Callable::OwnSend => Kind::Own,
-            Callable::Scoped => Kind::Scoped,
+            Callable::Scoped | Callable::ScopedView => Kind::Scoped,
         },
         TyKind::Tuple(xs) => xs
             .iter()
@@ -2532,7 +2539,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
             TyKind::Fn(_, _, _, callable) => match callable {
                 Callable::Plain => PLAIN | SHAREABLE | SEND,
                 Callable::OwnSend => SEND,
-                Callable::Own | Callable::Scoped => 0,
+                Callable::Own | Callable::Scoped | Callable::ScopedView => 0,
             },
             TyKind::Tuple(xs) => meet(xs) | encoding_bounds(decls, t, ty, params) & ENCODED,
             TyKind::Region(_) => 0,
@@ -2719,6 +2726,7 @@ fn write_canonical<const LAYOUT: bool>(
                 Callable::Own => "own fn(",
                 Callable::OwnSend => "own[send] fn(",
                 Callable::Scoped => "scoped fn(",
+                Callable::ScopedView => "scoped[view] fn(",
             });
             for (i, (m, p)) in ps.iter().enumerate() {
                 if i > 0 {
@@ -2879,7 +2887,7 @@ pub(crate) fn written_result_missing_anchor(
 pub(crate) fn scoped_payload(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Anchored(x, _) => scoped_payload(decls, t, *x),
-        TyKind::View(_) | TyKind::Fn(_, _, _, Callable::Scoped) => true,
+        TyKind::View(_) | TyKind::Fn(_, _, _, Callable::Scoped | Callable::ScopedView) => true,
         TyKind::Tuple(xs) => xs.iter().any(|&x| scoped_payload(decls, t, x)),
         TyKind::Adt(d, xs) => {
             let decl = &decls[d.index()];
@@ -3137,14 +3145,32 @@ fn unrooted_stable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> 
     }
 }
 
-/// Read the callable kind and enforce LANG-13's owning bracket at its bound name.
+pub(crate) const VIEW_RESULT_RESERVED: &str = "scoped[view] fn results with anchors are reserved";
+
+/// The view-only form reserves any result carrying a lexical or region anchor.
+pub(crate) fn view_result_reserved(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+) -> bool {
+    match t.kind(ty) {
+        TyKind::Anchored(..) | TyKind::View(_) => true,
+        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => {
+            scoped_payload(decls, t, ty) || xs.iter().any(|&x| view_result_reserved(decls, t, x))
+        }
+        TyKind::Array(x, _) => view_result_reserved(decls, t, *x),
+        _ => scoped_payload(decls, t, ty),
+    }
+}
+
+/// Read the callable promise and refuse a bracket at its first offending name.
 pub(crate) fn callable_kind(
     item: hirsel_core_syntax::Item<'_>,
     n: NodeId,
-) -> Result<Callable, NodeId> {
+) -> Result<Callable, (NodeId, &'static str)> {
     Ok(match item.tree.node(n).kind {
-        NodeKind::ScopedCallableType => Callable::Scoped,
-        NodeKind::OwnCallableType => {
+        NodeKind::ScopedCallableType | NodeKind::OwnCallableType => {
+            let scoped = item.tree.node(n).kind == NodeKind::ScopedCallableType;
             if let Some(&bounds) = item
                 .tree
                 .children(n)
@@ -3157,12 +3183,25 @@ pub(crate) fn callable_kind(
                         || item
                             .tree
                             .token_text(item.text, item.tree.node(bound).token.unwrap())
-                            != "send"
+                            != if scoped { "view" } else { "send" }
                     {
-                        return Err(bound);
+                        return Err((
+                            bound,
+                            if scoped {
+                                "a scoped callable bracket contains only view"
+                            } else {
+                                "an owning callable bracket contains only send"
+                            },
+                        ));
                     }
                 }
-                Callable::OwnSend
+                if scoped {
+                    Callable::ScopedView
+                } else {
+                    Callable::OwnSend
+                }
+            } else if scoped {
+                Callable::Scoped
             } else {
                 Callable::Own
             }

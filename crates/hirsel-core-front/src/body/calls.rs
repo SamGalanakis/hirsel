@@ -516,14 +516,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                     _,
                                     _,
                                     _,
-                                    Callable::Plain | Callable::Own | Callable::OwnSend
+                                    Callable::Plain
+                                        | Callable::Own
+                                        | Callable::OwnSend
+                                        | Callable::ScopedView
                                 )
                             )
                             && let Some(expected) = self.known_rooted(pt, found, roots)
                             && (self.plain_callable_fit(at.ty, expected)
                                 || matches!(
                                     self.t.kind(self.bare(at.ty)),
-                                    TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend)
+                                    TyKind::Fn(
+                                        _,
+                                        _,
+                                        _,
+                                        Callable::Own | Callable::OwnSend | Callable::ScopedView
+                                    )
                                 ) && self.scoped_callable_view(at.ty, expected))
                         {
                             self.refuse(
@@ -913,8 +921,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
                 if (ak == bk
+                    || ak == Callable::Scoped && bk == Callable::ScopedView
                     || bk == Callable::Plain
-                        && matches!(ak, Callable::Own | Callable::OwnSend | Callable::Scoped))
+                        && matches!(
+                            ak,
+                            Callable::Own
+                                | Callable::OwnSend
+                                | Callable::Scoped
+                                | Callable::ScopedView
+                        ))
                     && a.len() == b.len()
                     && (!bw || aw) =>
             {

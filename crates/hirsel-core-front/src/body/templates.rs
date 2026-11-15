@@ -107,6 +107,7 @@ impl NameRecipe {
                     Callable::Own => "own fn(",
                     Callable::OwnSend => "own[send] fn(",
                     Callable::Scoped => "scoped fn(",
+                    Callable::ScopedView => "scoped[view] fn(",
                 });
                 for (i, &(mode, ty)) in ps.iter().enumerate() {
                     if i > 0 {

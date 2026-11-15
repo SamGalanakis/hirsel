@@ -74,6 +74,8 @@ pub enum Callable {
     Own,
     OwnSend,
     Scoped,
+    /// Scoped captures are transitively views (LANG-13); representation is unchanged.
+    ScopedView,
 }
 
 #[derive(

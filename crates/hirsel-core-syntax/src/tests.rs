@@ -823,3 +823,18 @@ fn formatter_preserves_tokens_and_ast_across_the_live_source_corpus() {
     assert!(count > 0);
     eprintln!("{count} source files preserve tokens, AST shape and canonical idempotence");
 }
+
+#[test]
+fn view_keyword_is_a_callable_bound_only() {
+    formatted(
+        "fn f(g: scoped[view] fn(mut u64) -> u64) {}",
+        ParseMode::Source,
+    );
+    // LANG-13, rather than the grammar, decides which callable bound fits.
+    formatted("fn f(g: own[view] fn() -> u64) {}", ParseMode::Source);
+    assert!(
+        !parse("fn f[T: view](x: T) {}", ParseMode::Source)
+            .diagnostics
+            .is_empty()
+    );
+}

@@ -1127,6 +1127,7 @@ struct Cx<'c, 'a, 'e> {
     pending: Option<(AddressBase, TypeId)>,
     out: CoreCheck,
     capture_frame: Option<closures::CaptureFrame>,
+    has_callback_parameters: bool,
     frame_level: u32,
     descriptors: closures::Descriptors,
     anchors: anchors::Anchors,
@@ -1246,6 +1247,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             pending: None,
             out: CoreCheck::default(),
             capture_frame: None,
+            has_callback_parameters: false,
             frame_level: 0,
             descriptors: closures::Descriptors::default(),
             anchors: anchors::Anchors::new(info.resolution.binders.len()),
@@ -1487,7 +1489,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let scoped_callable = self.scoped_callable_view(t, w.ty);
         let callable = matches!((self.t.kind(t), self.t.kind(w.ty)),
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
-                if a == b && ar == br && (ak == bk || matches!((ak,bk), (Callable::OwnSend, Callable::Own))) && (!aw || *bw))
+                if a == b && ar == br && (ak == bk || matches!((ak,bk), (Callable::OwnSend, Callable::Own) | (Callable::ScopedView, Callable::Scoped))) && (!aw || *bw))
             || scoped_callable
             || self.plain_callable_fit(t, w.ty);
         if !callable
@@ -2113,6 +2115,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     _ => Binding::Value(v),
                 };
                 self.declare(b.id, pd.ty, binding, origin, body);
+                self.has_callback_parameters |= self.contains_callback(pd.ty);
                 self.parameter_anchors(b.id, pd.ty, pd.mode, parameter_index as u32);
                 self.own(b.id, body);
             }
@@ -2257,6 +2260,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if let Some(w) = want.filter(|w| w.payload == 0)
             && self.scoped_callable_view(t, w.ty)
         {
+            self.fit_scoped_descriptor(t, v, n);
             // The owning code/environment pair is already a scoped carrier. Its
             // owner, including a reached temporary, stays frozen while it is viewed.
             self.anchor_payload(n, w.ty, v);
@@ -2397,7 +2401,10 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         match self.place(n) {
             Ok(Some(at)) => {
                 if self.var(at.place.slot).origin == Origin::MutParam
-                    && matches!(self.t.kind(at.ty), TyKind::Fn(_, _, _, Callable::Scoped))
+                    && matches!(
+                        self.t.kind(at.ty),
+                        TyKind::Fn(_, _, _, Callable::Scoped | Callable::ScopedView)
+                    )
                     && want.is_some_and(|w| w.payload == 0 && w.ty == at.ty)
                     && self
                         .freezes
@@ -2421,7 +2428,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     && self.scoped_callable_view(at.ty, w.ty)
                 {
                     self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
-                    return (w.ty, self.place_ptr(at, n));
+                    let value = self.place_ptr(at, n);
+                    self.fit_scoped_descriptor(at.ty, value, n);
+                    return (w.ty, value);
                 }
                 if let Some(w) = want.filter(|w| w.payload == 0)
                     && let Some(payload) = self.payload_view_at(at, w.ty)

@@ -57,8 +57,7 @@ fn seen(tx: m2b.tx.Tx[m2b.table.Account], k: u64) -> Result[i64, m2b.tx.Abort] {
 }
 
 // Moves `amount` from one account to another; returns the payer's new balance.
-fn transfer(mut tx: m2b.tx.Tx[m2b.table.Account], arg: (u64, u64, i64)) -> Result[u64, m2b.tx.Abort] {
-    let (from, to, amount) = arg
+fn transfer(mut tx: m2b.tx.Tx[m2b.table.Account], from: u64, to: u64, amount: i64) -> Result[u64, m2b.tx.Abort] {
     let paid = seen(tx, from)?
     let got = seen(tx, to)?
     if paid < amount {
@@ -144,7 +143,9 @@ fn digits[R](o: m2b.tx.Outcome[R], take reads: Log[u64]) -> u64 {
 // leaving 2 with `paid`.
 fn continues(mut t: m2b.table.Table[m2b.table.Account], paid: u64) -> Result[u64, Capacity] {
     let reads: Log[u64] = log.new()?
-    match m2b.tx.run(mut t, reads, (2u64, 1u64, 1i64), transfer)? {
+    match m2b.tx.run(mut t, reads, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        transfer(mut tx, 2, 1, 1)
+    })? {
         Committed(r) => if r == paid {
             Ok(1)
         } else {
@@ -155,52 +156,66 @@ fn continues(mut t: m2b.table.Table[m2b.table.Account], paid: u64) -> Result[u64
 }
 
 // Runs body on t: the outcome's digits, then whether the table was left as b1/b2.
-fn case_of[A](mut t: m2b.table.Table[m2b.table.Account], arg: A, body: fn(mut m2b.tx.Tx[m2b.table.Account], A) -> Result[u64, m2b.tx.Abort], b1: i64, b2: i64) -> Result[u64, Capacity] {
+fn case_of(mut t: m2b.table.Table[m2b.table.Account], body: scoped[view] fn(mut m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort], b1: i64, b2: i64) -> Result[u64, Capacity] {
     let reads: Log[u64] = log.new()?
-    let o = m2b.tx.run(mut t, reads, arg, body)?
+    let o = m2b.tx.run(mut t, reads, body)?
     let v = digits(o, take reads)
     Ok(v * 10 + holds(t, b1, b2))
 }
 
 pub fn commit() -> Result[u64, Capacity] {
     let mut t = bank()?
-    let v = case_of(mut t, (1u64, 2u64, 5i64), transfer, 5, 25)?
+    let v = case_of(mut t, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        transfer(mut tx, 1, 2, 5)
+    }, 5, 25)?
     Ok(v * 10 + continues(mut t, 24)?)
 }
 
 pub fn insufficient() -> Result[u64, Capacity] {
     let mut t = bank()?
-    let v = case_of(mut t, (1u64, 2u64, 50i64), transfer, 10, 20)?
+    let v = case_of(mut t, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        transfer(mut tx, 1, 2, 50)
+    }, 10, 20)?
     Ok(v * 10 + continues(mut t, 19)?)
 }
 
 pub fn overflow() -> Result[u64, Capacity] {
     let mut t = bank()?
-    let v = case_of(mut t, (1u64, 3u64, 5i64), transfer, 10, 20)?
+    let v = case_of(mut t, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        transfer(mut tx, 1, 3, 5)
+    }, 10, 20)?
     Ok(v * 10 + continues(mut t, 19)?)
 }
 
 pub fn bounds() -> Result[u64, Capacity] {
     let mut t = bank()?
-    let v = case_of(mut t, 0u64, out_of_bounds, 10, 20)?
+    let v = case_of(mut t, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        out_of_bounds(mut tx, 0)
+    }, 10, 20)?
     Ok(v * 10 + continues(mut t, 19)?)
 }
 
 pub fn unwrap() -> Result[u64, Capacity] {
     let mut t = bank()?
-    let v = case_of(mut t, 9u64, unwrap_absent, 10, 20)?
+    let v = case_of(mut t, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        unwrap_absent(mut tx, 9)
+    }, 10, 20)?
     Ok(v * 10 + continues(mut t, 19)?)
 }
 
 pub fn explicit_fail() -> Result[u64, Capacity] {
     let mut t = bank()?
-    let v = case_of(mut t, 7i64, explicit, 10, 20)?
+    let v = case_of(mut t, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        explicit(mut tx, 7)
+    }, 10, 20)?
     Ok(v * 10 + continues(mut t, 19)?)
 }
 
 pub fn refused_alloc() -> Result[u64, Capacity] {
     let mut t = bank()?
-    let v = case_of(mut t, 8u64, starved, 10, 20)?
+    let v = case_of(mut t, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        starved(mut tx, 8)
+    }, 10, 20)?
     Ok(v * 10 + continues(mut t, 19)?)
 }
 
@@ -209,7 +224,9 @@ pub fn refused_alloc() -> Result[u64, Capacity] {
 fn full_in_bound() -> Result[u64, Capacity] {
     let mut t = bank()?
     let reads: Log[u64] = log.new()?
-    let o = m2b.tx.run(mut t, reads, 5i64, open)?
+    let o = m2b.tx.run(mut t, reads, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+        open(mut tx, 5)
+    })?
     let c = match o {
         Refused(c) => c,
         _ => return Ok(1),
@@ -233,8 +250,7 @@ pub fn full() -> Result[u64, Capacity] {
 }
 
 // Reads both accounts, then overflows: the bench's failing body.
-fn poison(mut tx: m2b.tx.Tx[m2b.table.Account], arg: (u64, u64, i64)) -> Result[u64, m2b.tx.Abort] {
-    let (from, to, amount) = arg
+fn poison(mut tx: m2b.tx.Tx[m2b.table.Account], from: u64, to: u64, amount: i64) -> Result[u64, m2b.tx.Abort] {
     let paid = seen(tx, from)?
     let got = seen(tx, to)?
     Ok(int.truncate(paid + got + amount + 9223372036854775807))
@@ -252,12 +268,17 @@ pub fn bench(n: u64) -> Result[u64, Capacity] {
     let mut sum: u64 = 0
     let mut i: u64 = 0
     while i < n {
-        let arg = (i % 1000 + 1, (i * 7 + 3) % 1000 + 1, 1i64)
+        let from = i % 1000 + 1
+        let to = (i * 7 + 3) % 1000 + 1
         let reads: Log[u64] = log.new()?
         let o = if i % 10 == 9 {
-            m2b.tx.run(mut t, reads, arg, poison)?
+            m2b.tx.run(mut t, reads, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+                poison(mut tx, from, to, 1)
+            })?
         } else {
-            m2b.tx.run(mut t, reads, arg, transfer)?
+            m2b.tx.run(mut t, reads, fn(mut tx: m2b.tx.Tx[m2b.table.Account]) -> Result[u64, m2b.tx.Abort] {
+                transfer(mut tx, from, to, 1)
+            })?
         }
         match o {
             Committed(r) => {

@@ -1,0 +1,21 @@
+fn run(mut xs: List[u64]) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 {
+        list.len(xs)
+    })
+}
+
+pub fn case() -> Result[u64, Capacity] {
+    let mut xs: List[u64] = list.new()
+    match run(mut xs)? {
+        Ok(n) => Ok(n),
+        Error(_) => Ok(0u64)
+    }
+}
+
+pub fn oracle() -> u64 {
+    match case() {
+        Ok(n) => n,
+        _ => 99
+    }
+}
+// expect: run oracle() = 0

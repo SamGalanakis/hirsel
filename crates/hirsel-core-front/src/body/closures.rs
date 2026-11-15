@@ -14,72 +14,120 @@ pub(super) struct CallableAbi {
 impl<'c, 'a> Cx<'c, 'a, '_> {
     #[inline(always)]
     pub(super) fn isolate_descriptor_forbidden(&mut self, value: Option<ValueId>) -> bool {
-        let Some(id) = self.descriptors.of(value) else {
-            return false;
-        };
-        self.isolate_descriptor_forbidden_at(id, None, &mut Vec::new())
+        value.is_some() && self.view_descriptor_offender(value).is_some()
     }
 
-    /// A projected capture only carries the projected type's descriptor.  Keep a
-    /// callback sibling in a tuple from poisoning an isolate that reads another
-    /// field (FAIL-16); a projected callback field still refuses.
-    fn isolate_descriptor_forbidden_at(
-        &mut self,
-        id: u32,
-        projected: Option<TyId>,
-        seen: &mut Vec<u32>,
-    ) -> bool {
+    fn view_descriptor_offender(&mut self, value: Option<ValueId>) -> Option<NodeId> {
+        let value = value?;
+        let Some(id) = self.descriptors.of(Some(value)) else {
+            return Some(self.node);
+        };
+        self.view_descriptor_offender_at(id, &mut Vec::new())
+    }
+
+    /// Inspect projected types and follow the finite descriptor graph once. A
+    /// received unqualified callback is unknown, including through an alias.
+    fn view_descriptor_offender_at(&mut self, id: u32, seen: &mut Vec<u32>) -> Option<NodeId> {
         if seen.contains(&id) {
-            return false;
+            return None;
         }
         seen.push(id);
         let range = self.descriptors.ranges[id as usize];
-        let captures = self
-            .descriptors
-            .projected
-            .get(&id)
-            .cloned()
-            .filter(|captures| !captures.is_empty())
-            .unwrap_or_else(|| range.get(&self.descriptors.captures).unwrap().to_vec());
-        if captures.iter().any(|capture| capture.mode == Mode::Mut) {
-            return true;
+        let mut captures = range.get(&self.descriptors.captures).unwrap().to_vec();
+        if let Some(projected) = self.descriptors.projected.get(&id) {
+            // Replace only the viewed root covered by a precise projection.
+            // An unrelated capture, or a mut capture of that root, still applies.
+            captures.retain(|capture| {
+                capture.mode != Mode::View
+                    || capture.path.is_some()
+                    || !projected.iter().any(|p| p.slot == capture.slot)
+            });
+            captures.extend_from_slice(projected);
+        }
+        if let Some(capture) = captures.iter().find(|c| c.mode != Mode::View) {
+            return Some(capture.site);
         }
         let fields = self.descriptors.fields[id as usize]
             .get(&self.descriptors.parts)
             .unwrap()
             .to_vec();
         if fields.is_empty() {
-            let projected_path = captures.iter().any(|capture| capture.path.is_some());
-            return captures.iter().any(|capture| {
-                if projected_path && capture.path.is_none() {
-                    return false;
-                }
+            for capture in captures {
                 let var = self.var(capture.slot);
-                let ty = projected
-                    .or_else(|| self.descriptor_capture_type(*capture, var.ty))
+                let ty = self
+                    .descriptor_capture_type(capture, var.ty)
                     .unwrap_or(var.ty);
-                if matches!(var.origin, Origin::ViewParam | Origin::MutParam)
-                    && self.contains_callback(ty)
-                {
-                    return true;
+                if !self.contains_callback(ty) {
+                    continue;
                 }
-                self.descriptors
-                    .slots
-                    .get(&capture.slot)
-                    .copied()
-                    .is_some_and(|child| {
-                        self.contains_callback(ty)
-                            && self.isolate_descriptor_forbidden_at(child, Some(ty), seen)
-                    })
-            });
+                let unknown = self.contains_callback_kind::<true>(ty);
+                if unknown
+                    && matches!(
+                        var.origin,
+                        Origin::ViewParam | Origin::MutParam | Origin::TakeParam
+                    )
+                {
+                    return Some(capture.site);
+                }
+                if let Some(&child) = self.descriptors.slots.get(&capture.slot) {
+                    let mut child = Some(child);
+                    let mut path = Vec::new();
+                    let mut at = capture.path.unwrap_or(0);
+                    while at != 0 {
+                        let step = self.descriptors.paths[at as usize - 1];
+                        path.push(step.field);
+                        at = step.parent;
+                    }
+                    for field in path.into_iter().rev() {
+                        child = self
+                            .descriptors
+                            .project(child, anchors::Component::Field(field));
+                    }
+                    if let Some(child) = child
+                        && let Some(site) = self.view_descriptor_offender_at(child, seen)
+                    {
+                        return Some(site);
+                    }
+                } else if unknown {
+                    return Some(capture.site);
+                }
+            }
+            return None;
         }
-        fields.iter().any(|(component, child)| {
-            let ty = projected.and_then(|ty| match component {
-                anchors::Component::Field(i) => self.field_ty(ty, *i),
-                _ => None,
-            });
-            self.isolate_descriptor_forbidden_at(*child, ty, seen)
-        })
+        for (_, child) in fields {
+            if let Some(site) = self.view_descriptor_offender_at(child, seen) {
+                return Some(site);
+            }
+        }
+        None
+    }
+
+    fn guarantee_view_descriptor(&mut self, value: Option<ValueId>, site: NodeId) {
+        if let Some(value) = value
+            && self.descriptors.of(Some(value)).is_none()
+        {
+            let id = self.descriptors.empty(site);
+            self.descriptors.values.insert(value, id);
+        }
+    }
+
+    pub(super) fn fit_scoped_descriptor(
+        &mut self,
+        from: TyId,
+        value: Option<ValueId>,
+        site: NodeId,
+    ) {
+        if matches!(
+            self.t.kind(self.bare(from)),
+            TyKind::Fn(
+                _,
+                _,
+                _,
+                Callable::Own | Callable::OwnSend | Callable::ScopedView
+            )
+        ) {
+            self.guarantee_view_descriptor(value, site);
+        }
     }
 
     fn descriptor_capture_type(&mut self, capture: Capture, root: TyId) -> Option<TyId> {
@@ -106,14 +154,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) {
             return false;
         }
-        let TyKind::Fn(b, br, bw, Callable::Scoped) = self.t.kind(self.bare(to)) else {
+        let TyKind::Fn(b, br, bw, target @ (Callable::Scoped | Callable::ScopedView)) =
+            self.t.kind(self.bare(to))
+        else {
             return false;
         };
         matches!(self.t.kind(self.bare(from)),
             TyKind::Fn(a, ar, aw, kind)
                 if a == b && ar == br && (!aw || *bw)
                     && (matches!(kind, Callable::Own | Callable::OwnSend)
-                        || *kind == Callable::Scoped && self.is_view(from)))
+                        || *kind == Callable::Scoped && *target == Callable::Scoped && self.is_view(from)
+                        || *kind == Callable::ScopedView && (*target == Callable::Scoped || self.is_view(from))))
     }
 
     #[inline(always)]
@@ -127,13 +178,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _,
                 _,
                 _,
-                Callable::Own | Callable::OwnSend | Callable::Scoped
+                Callable::Own | Callable::OwnSend | Callable::Scoped | Callable::ScopedView
             )
         ) {
             return false;
         }
         matches!((self.t.kind(self.bare(from)), self.t.kind(to)),
-            (TyKind::Fn(a, ar, aw, Callable::Plain), TyKind::Fn(b, br, bw, Callable::Own | Callable::OwnSend | Callable::Scoped))
+            (TyKind::Fn(a, ar, aw, Callable::Plain), TyKind::Fn(b, br, bw, Callable::Own | Callable::OwnSend | Callable::Scoped | Callable::ScopedView))
                 if a == b && ar == br && (!aw || *bw))
     }
 
@@ -144,6 +195,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let value = value.and_then(|code| self.captureless_callable(code, n));
+        if matches!(
+            self.t.kind(to),
+            TyKind::Fn(_, _, _, Callable::Scoped | Callable::ScopedView)
+        ) {
+            self.guarantee_view_descriptor(value, n);
+        }
         if matches!(
             self.t.kind(to),
             TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend)
@@ -776,6 +833,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n.0 - self.item.range.nodes.start
         );
         fd.site = self.p.site(self.at, n);
+        let expected = want
+            .filter(|w| w.payload == 0)
+            .map(|w| w.ty)
+            .and_then(|ty| {
+                if matches!(self.t.kind(ty), TyKind::Fn(..)) {
+                    Some(ty)
+                } else {
+                    self.result_parts(ty).map(|(_, ok, _)| ok)
+                }
+            });
+        let expected_kind = expected.and_then(|ty| match self.t.kind(ty) {
+            TyKind::Fn(_, _, _, k) => Some(*k),
+            _ => None,
+        });
         self.closure_header_params.clear();
         let mut written_result = false;
         let mut callable_result = UNIT;
@@ -812,6 +883,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     written_result = true;
                     let node = self.kids(child)[0];
                     callable_result = self.ty_result(node, true);
+                    if expected_kind == Some(Callable::ScopedView)
+                        && crate::decls::view_result_reserved(
+                            &self.p.decls,
+                            &self.t,
+                            callable_result,
+                        )
+                    {
+                        self.refuse("LANG-13", node, crate::decls::VIEW_RESULT_RESERVED);
+                        return (ERROR, None);
+                    }
                     if crate::decls::scoped_payload(&self.p.decls, &self.t, callable_result)
                         && crate::decls::written_result_missing_anchor(
                             self.p,
@@ -844,16 +925,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (ERROR, None);
         }
-        let expected = want
-            .filter(|w| w.payload == 0)
-            .map(|w| w.ty)
-            .and_then(|ty| {
-                if matches!(self.t.kind(ty), TyKind::Fn(..)) {
-                    Some(ty)
-                } else {
-                    self.result_parts(ty).map(|(_, ok, _)| ok)
-                }
-            });
         if !written_result
             && let Some(ty) = expected
             && let TyKind::Fn(_, result, _, _) = self.t.kind(ty)
@@ -869,12 +940,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 "scoped callable result region anchors are not represented",
             );
         }
-        let expected_kind = expected.and_then(|ty| match self.t.kind(ty) {
-            TyKind::Fn(_, _, _, k) => Some(*k),
-            _ => None,
-        });
-        let scoped =
-            self.kind(n) == NodeKind::ScopedClosure || expected_kind == Some(Callable::Scoped);
+        let scoped = self.kind(n) == NodeKind::ScopedClosure
+            || matches!(expected_kind, Some(Callable::Scoped | Callable::ScopedView));
         let environment =
             scoped || matches!(expected_kind, Some(Callable::Own | Callable::OwnSend));
         let ty = self.t.mk(TyKind::Fn(
@@ -885,7 +952,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             callable_result,
             fd.waits,
             if scoped {
-                Callable::Scoped
+                expected_kind
+                    .filter(|k| matches!(k, Callable::Scoped | Callable::ScopedView))
+                    .unwrap_or(Callable::Scoped)
             } else {
                 Callable::Plain
             },
@@ -938,7 +1007,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         child.header = n;
         child.frame_level = self.frame_level + 1;
         child.entry = false;
+        let view_only = expected_kind == Some(Callable::ScopedView);
         child.capture_frame = Some(CaptureFrame {
+            view_only,
             outer: self.vars.clone(),
             outer_descriptors: std::mem::take(&mut self.descriptors),
             written_anchors: vec![None; self.vars.len()],
@@ -1009,7 +1080,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             None
         };
         if scoped {
-            return (ty, code.and_then(|code| self.scoped_value(code, &frame, n)));
+            let value = code.and_then(|code| self.scoped_value(code, &frame, n));
+            if !refused
+                && expected_kind == Some(Callable::ScopedView)
+                && let Some(site) = self.view_descriptor_offender(value)
+            {
+                self.refuse(
+                    "LANG-13",
+                    site,
+                    "scoped[view] fn captures only views, transitively",
+                );
+                return (ERROR, None);
+            }
+            return (ty, value);
         }
         if frame.captures.is_empty() {
             if environment {
@@ -1104,6 +1187,7 @@ pub(super) struct CaptureFrame {
     environments: Vec<CapturedEnvironment>,
     pub(super) environment: Option<ValueId>,
     owning: bool,
+    view_only: bool,
     physical: u64,
     logical: u64,
     send: bool,
@@ -1202,6 +1286,14 @@ impl Descriptors {
         self.fields.push(PoolRange::EMPTY);
         Some(id)
     }
+    fn empty(&mut self, site: NodeId) -> u32 {
+        let id = self.ranges.len() as u32;
+        self.ranges.push(PoolRange::EMPTY);
+        self.environments
+            .push(EnvironmentOrigin { site, local: false });
+        self.fields.push(PoolRange::EMPTY);
+        id
+    }
     fn add(&mut self, frame: &CaptureFrame, site: NodeId) -> Option<u32> {
         let start = self.captures.len();
         self.captures.extend(
@@ -1219,7 +1311,7 @@ impl Descriptors {
             }
         }
         if self.captures.len() == start {
-            return None;
+            return Some(self.empty(site));
         }
         let id = self.ranges.len() as u32;
         self.ranges.push(PoolRange::new(
@@ -1684,7 +1776,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .filter(|(i, _)| summary.holds_params & (1 << i) != 0)
                     .fold(summary.holds, |h, (_, &x)| h | self.capture_holds(x))
             }
-            TyKind::Fn(_, _, _, Callable::Scoped) => crate::H_SCOPED,
+            TyKind::Fn(_, _, _, Callable::Scoped | Callable::ScopedView) => crate::H_SCOPED,
             TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend) => crate::H_OPAQUE,
             _ => 0,
         }
@@ -1763,7 +1855,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn scoped_value(&mut self, code: ValueId, frame: &CaptureFrame, n: NodeId) -> Option<ValueId> {
         let captures = &frame.captures;
         if captures.is_empty() && frame.environments.is_empty() {
-            return self.captureless_callable(code, n);
+            let value = self.captureless_callable(code, n);
+            self.guarantee_view_descriptor(value, n);
+            return value;
         }
         for capture in captures {
             self.capture_slot_source(capture.slot, n, capture.synthetic);
@@ -1842,6 +1936,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     pub(super) fn read_descriptor(&mut self, at: At, value: Option<ValueId>, n: NodeId) {
+        if self.descriptors.slots.is_empty()
+            && !self.has_callback_parameters
+            && self.capture_frame.is_none()
+        {
+            return;
+        }
+        if self.capture_frame.as_ref().is_some_and(|f| f.view_only) {
+            let var = self.var(at.place.slot);
+            let origin = self
+                .capture_frame
+                .as_ref()
+                .and_then(|f| f.outer.get(at.place.slot as usize).copied().flatten())
+                .map_or(var.origin, |v| v.origin);
+            if matches!(
+                origin,
+                Origin::ViewParam | Origin::MutParam | Origin::TakeParam
+            ) && self.contains_callback_kind::<true>(at.ty)
+            {
+                self.refuse(
+                    "LANG-13",
+                    n,
+                    "scoped[view] fn cannot use a received unqualified scoped callback",
+                );
+                return;
+            }
+        }
         if self
             .capture_frame
             .as_ref()
@@ -1905,6 +2025,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return;
         }
         let mut id = self.descriptors.slots.get(&at.place.slot).copied();
+        if id.is_none()
+            && self.has_callback_parameters
+            && matches!(
+                self.var(at.place.slot).origin,
+                Origin::ViewParam | Origin::MutParam | Origin::TakeParam
+            )
+            && self.contains_callback(at.ty)
+        {
+            id = Some(self.descriptors.reference(at.place.slot, 0, n));
+        }
         if id.is_none() || !self.contains_callback(at.ty) {
             return;
         }
@@ -2183,24 +2313,36 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// Walk only inline scoped structure; ordinary type arguments cannot be scoped.
     pub(super) fn contains_callback(&self, ty: TyId) -> bool {
+        self.contains_callback_kind::<false>(ty)
+    }
+    pub(super) fn contains_callback_kind<const UNKNOWN: bool>(&self, ty: TyId) -> bool {
         match self.t.kind(ty) {
             TyKind::Fn(_, _, _, Callable::Scoped) => true,
-            TyKind::Tuple(xs) => xs.iter().any(|&x| self.contains_callback(x)),
-            TyKind::View(x) | TyKind::Anchored(x, _) => self.contains_callback(*x),
+            TyKind::Fn(_, _, _, Callable::ScopedView) => !UNKNOWN,
+            TyKind::Tuple(xs) => xs
+                .iter()
+                .any(|&x| self.contains_callback_kind::<UNKNOWN>(x)),
+            TyKind::View(x) | TyKind::Anchored(x, _) => self.contains_callback_kind::<UNKNOWN>(*x),
             TyKind::Adt(d, args) => {
                 let decl = &self.p.decls[d.index()];
                 if decl.structural {
-                    return args.iter().any(|&x| self.contains_callback(x));
+                    return args
+                        .iter()
+                        .any(|&x| self.contains_callback_kind::<UNKNOWN>(x));
                 }
                 if decl.repr != Repr::Scoped || decl.summary.cycle {
                     return false;
                 }
                 match &decl.body {
-                    DeclBody::Record(fs) => fs.iter().any(|f| self.contains_callback(f.ty)),
-                    DeclBody::Variant(cs) => cs
+                    DeclBody::Record(fs) => fs
                         .iter()
-                        .any(|c| c.fields.iter().any(|f| self.contains_callback(f.ty))),
-                    DeclBody::Alias(x) => self.contains_callback(*x),
+                        .any(|f| self.contains_callback_kind::<UNKNOWN>(f.ty)),
+                    DeclBody::Variant(cs) => cs.iter().any(|c| {
+                        c.fields
+                            .iter()
+                            .any(|f| self.contains_callback_kind::<UNKNOWN>(f.ty))
+                    }),
+                    DeclBody::Alias(x) => self.contains_callback_kind::<UNKNOWN>(*x),
                 }
             }
             _ => false,

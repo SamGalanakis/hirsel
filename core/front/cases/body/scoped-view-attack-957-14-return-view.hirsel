@@ -1,0 +1,7 @@
+fn run(mut xs: List[String]) -> Result[Result[Option[View[String]], Causes], Capacity] {
+    isolate(fn() -> Option[View[String]] in xs { list.get(xs, 0) })
+}
+pub fn main() -> Result[(), ()] { Ok(()) }
+
+// expect: refuse OWN-20 at 1:33
+// expect: refuse LANG-13 at 2:13

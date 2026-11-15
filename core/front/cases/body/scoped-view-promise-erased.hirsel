@@ -1,0 +1,6 @@
+fn erased(g: scoped fn() -> u64) -> u64 {
+ match isolate(fn() -> u64 { g() }) { Ok(Ok(n)) => n, _ => 99 }
+}
+fn forward(g: scoped[view] fn() -> u64) -> u64 { erased(g) }
+
+// expect: refuse FAIL-16 at 2:16

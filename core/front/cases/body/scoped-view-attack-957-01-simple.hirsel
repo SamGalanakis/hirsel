@@ -1,0 +1,11 @@
+pub fn main() -> Result[(), ()] {
+    Ok(())
+}
+
+pub fn oracle() -> u64 {
+    match main() {
+        Ok(()) => 0,
+        Error(()) => 1,
+    }
+}
+// expect: run oracle() = 0

@@ -1,0 +1,10 @@
+resource R { n: u64 }
+fn run(mut r: R) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 { r.n })
+}
+pub fn main() -> Result[(), ()] { Ok(()) }
+
+// expect: refuse LANG-5 at 1:10
+// expect: refuse LANG-7 at 2:15
+// expect: compared LANG-5 at 1:10 | R | type
+// expect: gap values of this type are not built

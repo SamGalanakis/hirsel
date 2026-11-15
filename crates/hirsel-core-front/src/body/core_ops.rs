@@ -353,7 +353,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 Target::Binder(slot) => {
                                     let var = self.var(*slot);
                                     matches!(var.origin, Origin::ViewParam | Origin::MutParam)
-                                        && self.contains_callback(var.ty)
+                                        && self.contains_callback_kind::<true>(var.ty)
                                 }
                                 _ => false,
                             })

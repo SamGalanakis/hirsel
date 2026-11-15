@@ -35,13 +35,13 @@ pub fn write[T](mut tx: Tx[T], k: u64, take v: T) -> Result[(), Abort] {
     }
 }
 
-// Runs body(tx, arg) once against db and commits its writes only when it returns Ok.
+// Runs body(tx) once against db and commits its writes only when it returns Ok.
 // Error(c) is the one case where isolate could not reserve its cause cell; then the body
 // did not run. Every read the body made, whatever its outcome, is in `reads`.
-pub fn run[T, A, R](mut db: table.Table[T], reads: Log[u64], arg: A, body: fn(mut Tx[T], A) -> Result[R, Abort]) -> Result[Outcome[R], Capacity] {
+pub fn run[T, R](mut db: table.Table[T], reads: Log[u64], body: scoped[view] fn(mut Tx[T]) -> Result[R, Abort]) -> Result[Outcome[R], Capacity] {
     let caught = isolate(fn() -> Result[(R, Map[u64, T]), Abort] {
         let mut tx = Tx(base: view db, writes: map.new(), reads: view reads)
-        let r = body(mut tx, arg)
+        let r = body(mut tx)
         let Tx(base: _, writes: take w, reads: _) = tx
         match take r {
             Ok(take x) => Ok((take x, take w)),

@@ -1,0 +1,3 @@
+fn bad(f: scoped[view + view] fn() -> u64) {}
+
+// expect: refuse LANG-13 at 1:25

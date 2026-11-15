@@ -1,0 +1,20 @@
+fn run(n: u64) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 {
+        n + 1u64
+    })
+}
+
+pub fn case() -> Result[u64, Capacity] {
+    match run(4u64)? {
+        Ok(v) => Ok(v),
+        Error(_) => Ok(0u64)
+    }
+}
+
+pub fn oracle() -> u64 {
+    match case() {
+        Ok(n) => n,
+        _ => 99
+    }
+}
+// expect: run oracle() = 5

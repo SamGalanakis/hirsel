@@ -1,0 +1,12 @@
+fn direct(pair: (scoped fn() -> u64, u64)) -> u64 {
+    let mut n: u64 = 0
+    match isolate(fn() -> u64 { n += 1; n + pair.1 }) { Ok(Ok(v)) => v, _ => 0 }
+}
+
+fn transitive(pair: (scoped fn() -> u64, u64)) -> u64 {
+    let mut n: u64 = 0
+    let change = scoped fn() -> u64 { n += 1; n }
+    match isolate(fn() -> u64 { change() + pair.1 }) { Ok(Ok(v)) => v, _ => 0 }
+}
+// expect: refuse FAIL-16 at 3:19
+// expect: refuse FAIL-16 at 9:19

@@ -1,0 +1,8 @@
+fn body(mut xs: List[u64]) -> u64 { list.push(mut xs, 1u64); list.len(xs) }
+fn run(mut xs: List[u64]) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 { body(mut xs) })
+}
+pub fn main() -> Result[(), ()] { let mut xs: List[u64] = list.new(); let _ = run(mut xs); Ok(()) }
+
+// expect: refuse LANG-18 at 1:37
+// expect: refuse FAIL-16 at 3:13

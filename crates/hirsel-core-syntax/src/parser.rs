@@ -550,7 +550,7 @@ impl Parser<'_> {
             c.push(self.generics()?);
         }
         if self.eat(sym::COLON) {
-            c.push(self.bounds()?);
+            c.push(self.bounds(false)?);
         }
         if self.eat(sym::GRANT) {
             let st = self.pos - 1;
@@ -656,7 +656,7 @@ impl Parser<'_> {
             let n = p.name()?;
             let mut c: Nodes = smallvec![];
             if p.eat(sym::COLON) {
-                c.push(p.bounds()?);
+                c.push(p.bounds(false)?);
             }
             Ok(p.node(
                 st,
@@ -674,12 +674,12 @@ impl Parser<'_> {
         }
         Ok(self.node(s, NodeKind::Generics, None, &c))
     }
-    fn bounds(&mut self) -> Parsed<NodeId> {
+    fn bounds(&mut self, callable: bool) -> Parsed<NodeId> {
         let s = self.pos;
         let mut c: Nodes = smallvec![];
         loop {
             let st = self.pos;
-            if !BOUNDS.contains(&self.word(0)) {
+            if !BOUNDS.contains(&self.word(0)) && !(callable && self.at(sym::VIEW)) {
                 let required = BOUNDS
                     .iter()
                     .map(|&b| self.symbols.text(b))
@@ -769,8 +769,8 @@ impl Parser<'_> {
             let scoped = self.eat(sym::SCOPED);
             let own = self.eat(sym::OWN);
             let mut c: Nodes = smallvec![];
-            if own && self.eat(sym::LBRACKET) {
-                c.push(self.bounds()?);
+            if (own || scoped) && self.eat(sym::LBRACKET) {
+                c.push(self.bounds(true)?);
                 self.expect(sym::RBRACKET)?;
             }
             self.expect(sym::FN)?;

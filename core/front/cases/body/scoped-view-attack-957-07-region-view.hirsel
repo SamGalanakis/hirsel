@@ -1,0 +1,7 @@
+fn run(r: Region) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 { let _ = region.clone_in(r, 7u64); 0u64 })
+}
+pub fn main() -> Result[(), ()] { Ok(()) }
+
+// expect: refuse LANG-5 at 2:41
+// expect: compared LANG-5 at 2:41 | . | non-keyword identifier

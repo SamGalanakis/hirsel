@@ -1,0 +1,126 @@
+fn run(f: scoped[view] fn() -> u64) -> u64 {
+    match isolate(fn() -> u64 {
+        f()
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+fn plain() -> u64 {
+    7
+}
+
+fn ordinary(f: scoped fn() -> u64) -> u64 {
+    f()
+}
+
+fn forward(f: scoped[view] fn() -> u64) -> u64 {
+    run(fn() -> u64 {
+        ordinary(f)
+    })
+}
+
+fn with_mut(f: scoped[view] fn(mut u64) -> u64) -> u64 {
+    match isolate(fn() -> u64 {
+        let mut n: u64 = 4;
+        f(mut n)
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+fn with_take(f: scoped[view] fn(take String) -> u64) -> u64 {
+    match isolate(fn() -> u64 {
+        let s: String = "ok";
+        f(take s)
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+fn generic[T](x: T) -> u64 {
+    run(fn() -> u64 {
+        1
+    })
+}
+
+pub fn direct() -> u64 {
+    let n: u64 = 5;
+    run(fn() -> u64 {
+        n + 1
+    })
+}
+
+pub fn item() -> u64 {
+    run(plain)
+}
+
+pub fn nested() -> u64 {
+    let n: u64 = 8;
+    forward(fn() -> u64 {
+        n
+    })
+}
+
+pub fn formal_mut() -> u64 {
+    with_mut(fn(mut n: u64) -> u64 {
+        n += 1;
+        n
+    })
+}
+
+pub fn formal_take() -> u64 {
+    with_take(fn(take s: String) -> u64 {
+        string.byte_len(s)
+    })
+}
+
+pub fn make_generic() -> u64 {
+    generic(3u64)
+}
+
+pub fn list_view() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let _ = list.push(mut xs, 9u64)
+    let pure = scoped fn() -> u64 {
+        list.len(xs)
+    }
+    run(fn() -> u64 {
+        pure()
+    })
+}
+
+pub fn promised_alias() -> u64 {
+    let n: u64 = 9
+    let f: scoped[view] fn() -> u64 = fn() -> u64 {
+        n
+    }
+    let g: scoped fn() -> u64 = f
+    run(fn() -> u64 {
+        g()
+    })
+}
+
+// expect: run direct() = 6
+// expect: run item() = 7
+// expect: run nested() = 8
+// expect: run formal_mut() = 5
+// expect: run formal_take() = 2
+// expect: run make_generic() = 1
+// expect: run list_view() = 1
+// expect: run promised_alias() = 9
+// A local ordinary callback checks its own parameters; the promise is not lexical.
+pub fn nested_formal() -> u64 {
+    run(fn() -> u64 {
+        let inner = scoped fn(g: scoped fn() -> u64) -> u64 {
+            g()
+        }
+        inner(fn() -> u64 {
+            4
+        })
+    })
+}
+// expect: run nested_formal() = 4

@@ -1,0 +1,90 @@
+stable type Stamp {
+    n: u64
+}
+
+scoped type Callbacks {
+    f: scoped[view] fn() -> u64,
+    n: u64
+}
+
+fn run(f: scoped[view] fn() -> u64) -> u64 {
+    match isolate(fn() -> u64 {
+        f()
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+fn field(x: Callbacks) -> u64 {
+    run(fn() -> u64 {
+        (x.f)() + x.n
+    })
+}
+
+fn scalar(pair: (scoped fn() -> u64, u64)) -> u64 {
+    run(fn() -> u64 {
+        pair.1
+    })
+}
+
+pub fn fields() -> u64 {
+    let n: u64 = 5
+    field(Callbacks(f: fn() -> u64 {
+        n
+    }, n: 2))
+}
+
+pub fn projection() -> u64 {
+    scalar((scoped fn() -> u64 {
+        7
+    }, 3u64))
+}
+
+pub fn map_string() -> u64 {
+    let mut m: Map[String, String] = map.new()
+    let _ = map.insert(mut m, "key", "value")
+    let s: String = "hi"
+    run(fn() -> u64 {
+        match map.get(m, "key") {
+            Some(v) => string.byte_len(v) + string.byte_len(s),
+            None => 0
+        }
+    })
+}
+
+pub fn hidden_log() -> u64 {
+    let l: Log[u64] = result.unwrap(log.new())
+    let n = run(fn() -> u64 {
+        let _ = log.append(l, 7u64);
+        2
+    })
+    n + list.len(log.finish(take l))
+}
+
+pub fn region_view() -> u64 {
+    region r {
+        run(fn() -> u64 {
+            match (Stamp(n: 7) in r) {
+                Ok(_) => 1,
+                Error(_) => 0
+            }
+        })
+    }
+}
+
+// expect: run fields() = 7
+// expect: run projection() = 3
+// expect: run map_string() = 7
+// expect: run hidden_log() = 3
+// expect: run region_view() = 1
+// FAIL-16 permits the Log's hidden append to survive the caught failure.
+pub fn fail_log() -> u64 {
+    let l: Log[u64] = result.unwrap(log.new())
+    let n = run(fn() -> u64 {
+        let _ = log.append(l, 7u64);
+        fail("x")
+    })
+    n + list.len(log.finish(take l))
+}
+// expect: run fail_log() = 100 used 32

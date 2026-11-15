@@ -1,0 +1,19 @@
+fn run(mut xs: List[String], s: String) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 {
+        list.len(xs) + string.byte_len(s)
+    })
+}
+
+pub fn main() -> Result[(), ()] {
+    Ok(())
+}
+
+pub fn oracle() -> u64 {
+    let mut xs: List[String] = list.new();
+    let _ = list.push(mut xs, "a");
+    match run(mut xs, "xy") {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+// expect: run oracle() = 3

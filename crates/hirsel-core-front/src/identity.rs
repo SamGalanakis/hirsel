@@ -238,6 +238,12 @@ impl Words<'_> {
                         self.punct("]");
                     }
                     Callable::Scoped => self.word("scoped"),
+                    Callable::ScopedView => {
+                        self.word("scoped");
+                        self.punct("[");
+                        self.word("view");
+                        self.punct("]");
+                    }
                 }
                 self.word("fn");
                 self.callable(t, &ps, r, w)?;

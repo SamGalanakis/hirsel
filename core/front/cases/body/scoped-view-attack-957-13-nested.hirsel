@@ -1,0 +1,23 @@
+fn inner(mut xs: List[u64]) -> Result[Result[u64, Causes], Capacity] {
+    isolate(fn() -> u64 {
+        list.len(xs)
+    })
+}
+
+fn outer(mut xs: List[u64]) -> Result[Result[u64, Causes], Capacity] {
+    inner(mut xs)
+}
+
+pub fn main() -> Result[(), ()] {
+    Ok(())
+}
+
+pub fn oracle() -> u64 {
+    let mut xs: List[u64] = list.new();
+    let _ = list.push(mut xs, 7u64);
+    match outer(mut xs) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+// expect: run oracle() = 1

@@ -35,7 +35,8 @@ def manifest(module):
     generated = ([{'file': str(Path(__file__).with_name('graph_inputs.hirsel')), 'modules': ['graph_inputs'], 'signatures': False}] if module == 'graph' else [])
     return {'core': core, 'packages': [
         {'package': core, 'sources': sources(ROOT / 'core/core', True), 'dependencies': []},
-        {'package': std, 'sources': sources(ROOT / 'core/std', False), 'dependencies': [core]},
+        # std by signature, like core: an installed build takes both from the package product.
+        {'package': std, 'sources': sources(ROOT / 'core/std', True), 'dependencies': [core]},
         {'package': app, 'sources': [{'file': str(Path(__file__).with_name(module + '.hirsel')),
                                     'modules': [module], 'signatures': False}, *generated], 'dependencies': [core, std]}]}
 

@@ -20,8 +20,9 @@ def inputs(root, module, source=None):
     app = {'name': 'langarena', 'version': '1'}
     def files(directory):
         return [{'file': str(p.resolve()), 'modules': list(p.relative_to(directory).with_suffix('').parts),
-                 'signatures': directory.name == 'core'}
+                 'signatures': directory.name in ('core', 'std')}
                 for p in sorted(directory.rglob('*.hirsel')) if 'tests' not in p.relative_to(directory).parts or directory.name == 'langarena']
+    # core and std by signature: both come from the package product, as an installed build gets them.
     libraries = files(root / 'core/std')
     ports = files(root / 'core/langarena')
     if source:

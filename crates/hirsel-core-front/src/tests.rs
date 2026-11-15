@@ -212,7 +212,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         if fd.body.is_none()
             || (index.module_package(fd.site.module) != index.module_package(main)
                 && !(fd.path.package_is("core", "1")
-                    && (fd.path.0.modules == ["map"] || fd.path.0.modules == ["string"])))
+                    && matches!(fd.path.0.modules.as_slice(), [m] if matches!(m.as_str(), "map" | "string" | "list"))))
         {
             continue;
         }
@@ -3396,7 +3396,7 @@ fn terminal_prefix_is_derived_after_generic_substitution() {
     for (f, decl) in program.fns.iter().enumerate() {
         if !decl.path.package_is("app", "1")
             && !(decl.path.package_is("core", "1")
-                && decl.path.0.modules == ["string"]
+                && matches!(decl.path.0.modules.as_slice(), [m] if matches!(m.as_str(), "string" | "list"))
                 && decl.body.is_some())
         {
             continue;

@@ -722,70 +722,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    pub(super) fn list_push(
+    /// `put_last`: the element goes in at `len` and `len` grows by one. The source
+    /// `push` calls it only after a full test (growth.rs), so `len < capacity` holds.
+    pub(super) fn list_put_last(
         &mut self,
         item: TyId,
         header: ValueId,
         value: Option<ValueId>,
-        result: TyId,
         n: NodeId,
-    ) -> Option<ValueId> {
+    ) -> Option<()> {
         let carrier = self.list_carrier(item, n)?;
-        let cap_ty = self
-            .t
-            .mk(TyKind::Adt(self.p.core_decl("Capacity")?, vec![]));
-        let reserve_ty = self
-            .t
-            .mk(TyKind::Adt(self.p.core_decl("Result")?, vec![UNIT, cap_ty]));
-        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-        // The taken element stays live while admission can still fail, including
-        // a finalizer-grant failure; either value result transfers it exactly once.
-        let reserved = self.list_reserve(item, header, one, reserve_ty, n)?;
-        let reserve_id = match self.rep(reserve_ty) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
-        let cap_id = match self.rep(cap_ty) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
-        let out_id = match self.rep(result) {
-            Ok(Rep::Place(id)) => id,
-            Err(what) => {
-                self.gap(n, what);
-                return None;
-            }
-            _ => return None,
-        };
-        let error_ty = match self.t.kind(result) {
-            TyKind::Adt(_, args) => args[1],
-            _ => unreachable!(),
-        };
-        let error_id = match self.rep(error_ty) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
-        let to = self.new_slot(PlaceTy::Declared(out_id), n);
-        let from = self.address(
-            AddressBase::Value(reserved),
-            &[],
-            PlaceTy::Declared(reserve_id),
-            n,
-        );
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: from,
-            },
-            n,
-        );
-        let zero = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
-        let ok = self.list_compare(CompareOp::Eq, tag, zero, n);
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let done = self.new_block(&[]);
-        self.list_branch(ok, yes, no, n);
         let rep = match self.rep(item) {
             Ok(rep) => rep,
             Err(what) => {
@@ -793,7 +739,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        self.start(yes);
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let element = self.list_element(item, header, len, n)?;
         if let Some(place) = rep.stored() {
@@ -802,51 +748,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
         self.set_carrier_word(header, carrier, SeqWord::Len, new_len, n);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        self.jump(done, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        let error = self.address(
-            AddressBase::Address(to),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(error_id),
-            n,
-        );
-        let cap = self.address(
-            AddressBase::Address(error),
-            &[Step::Field(0)],
-            PlaceTy::Declared(cap_id),
-            n,
-        );
-        let old_cap = self.address(
-            AddressBase::Address(from),
-            &[Step::CaseField { case: 1, field: 0 }],
-            PlaceTy::Declared(cap_id),
-            n,
-        );
-        let source = self.pointer(old_cap, n);
-        self.copy_to(cap, source, cap_id, n);
-        if let Some(place) = rep.stored() {
-            let at = self.address(AddressBase::Address(error), &[Step::Field(1)], place, n);
-            self.install(at, rep, value, n);
-        }
-        self.jump(done, &[], n);
-        self.start(done);
-        let value = self.pointer(to, n);
-        self.temp(result, Some(value));
-        Some(value)
+        Some(())
     }
 
     pub(super) fn list_append(

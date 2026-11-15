@@ -15,7 +15,26 @@ pub fn slice[T](xs: List[T], lo: u64, hi: u64) -> View[List[T]] in xs
 
 pub fn word_le(b: Bytes, at: u64) -> u64
 
-pub fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)]
+// Growth is a call out of the full arm (MEM-24 from needed = len + 1), so the
+// ordinary push writes within capacity and holds nothing across a call.
+pub fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)] {
+    if len(xs) == capacity(xs) {
+        if let Error(c) = grow(mut xs) {
+            return Error((c, take x))
+        }
+    }
+    put_last(mut xs, take x)
+    Ok(())
+}
+
+// Requires len(xs) < capacity(xs).
+fn put_last[T](mut xs: List[T], take x: T)
+
+// The full arm's growth as a function of its own: reserve is expanded where it
+// is called, so only a call keeps it out of the caller.
+fn grow[T](mut xs: List[T]) -> Result[(), Capacity] {
+    reserve(mut xs, 1)
+}
 
 pub fn pop[T](mut xs: List[T]) -> Option[T]
 

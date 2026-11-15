@@ -59,7 +59,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.list_clear(item, vals[0]?, n);
                 return Some(None);
             }
-            "push" => return Some(self.list_push(item, vals[0]?, vals[1], result, n)),
+            "put_last" => {
+                self.list_put_last(item, vals[0]?, vals[1], n)?;
+                return Some(None);
+            }
             "fill" => return Some(self.list_fill(item, vals[0]?, vals[1]?, vals[2], result, n)),
             "append" => return Some(self.list_append(item, vals[0]?, vals[1]?, result, n)),
             "reserve" => return Some(self.list_reserve(item, vals[0]?, vals[1]?, result, n)),

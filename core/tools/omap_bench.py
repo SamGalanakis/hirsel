@@ -74,7 +74,7 @@ def rust_build(registry, directory, profile, env):
 
 def refusal(compiler, directory, env):
     manifest = directory / 'refused-inputs.json'
-    manifest.write_text(json.dumps(inputs(ROOT / 'core/std/tests/omap_resource_refused.hirsel')))
+    manifest.write_text(json.dumps(inputs(ROOT / 'core/programs/omap/resource_refused.hirsel')))
     result = subprocess.run([str(compiler), 'check', '--inputs', str(manifest), '--json',
                              '--store', str(directory / 'store')], env=env, capture_output=True, text=True)
     (directory / 'resource-refusal.json').write_text(result.stdout)

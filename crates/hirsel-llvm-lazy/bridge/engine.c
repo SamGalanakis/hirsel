@@ -658,7 +658,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
     if (!machine) { error(out, "LLVM could not create the target machine"); return; }
     LLVMContextRef context = NULL;
-    int own_context = 1;
+    int own_context = 1, discard_names = 0;
     for (size_t i = 0; i < count; ++i) if (units[i].module) { context = LLVMGetModuleContext(units[i].module); own_context = 0; break; }
     if (!context) context = LLVMContextCreate();
     // Standalone emission keeps the original module and symbol order exactly.
@@ -742,6 +742,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     }
     hirsel_llvm_composer_free(composer);
     composer = NULL;
+    // Local value names only label printed IR. Every unit is parsed, so the
+    // optimizer and code generator stop naming the values they create.
+    discard_names = !LLVMContextShouldDiscardValueNames(context);
+    if (discard_names) LLVMContextSetDiscardValueNames(context, 1);
     // IRLinker may discard an unreferenced available_externally definition
     // before a later unit supplies its callers. Keep definitions until every
     // unit is linked, then restore their non-emitting inline-import linkage.
@@ -828,6 +832,8 @@ done:
     for (size_t i = 0; i < imports_len; ++i) free(imports[i]);
     free(imports);
     if (module) LLVMDisposeModule(module);
+    // A caller's context parses text units again in its next program.
+    if (discard_names && !own_context) LLVMContextSetDiscardValueNames(context, 0);
     if (own_context) LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
 __attribute__((visibility("default")))

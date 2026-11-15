@@ -159,21 +159,67 @@ impl<T> Sparse<T> {
     }
 }
 
-// Lookup keys use the existing fixed-width codec, written once into their owned
-// memo key. serialize() would walk the value once to size it and again to write.
-#[inline(never)]
-fn encode_lookup_key(key: &(impl Serialize + ?Sized)) -> Vec<u8> {
-    #[cfg(feature = "front-observer")]
-    if OBSERVE.with_borrow(|active| active.is_some()) {
-        return observed(|| encode_lookup_key_plain(key));
+// Lookup keys use the existing fixed-width codec, written once into a reused
+// per-thread buffer. serialize() would walk the value once to size it and again
+// to write. A lookup allocates no key.
+/// A key's lookup bytes, as the image writer stores them and a lookup probes.
+pub fn with_lookup_key<R>(key: &(impl Serialize + ?Sized), f: impl FnOnce(&[u8]) -> R) -> R {
+    thread_local! {
+        static KEY: std::cell::Cell<Vec<u8>> = const { std::cell::Cell::new(Vec::new()) };
     }
-    encode_lookup_key_plain(key)
-}
-#[inline(always)]
-fn encode_lookup_key_plain(key: &(impl Serialize + ?Sized)) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(64);
+    // Taken, not borrowed: a lookup inside `f` gets its own buffer.
+    let mut bytes = KEY.take();
+    bytes.clear();
     bincode::serialize_into(&mut bytes, key).expect("published lookup key encoding");
-    bytes
+    let result = f(&bytes);
+    KEY.set(bytes);
+    result
+}
+#[cfg(test)]
+fn encode_lookup_key(key: &(impl Serialize + ?Sized)) -> Vec<u8> {
+    with_lookup_key(key, <[u8]>::to_vec)
+}
+
+/// A published table's decoded rows, one slot per row, allocated on the table's
+/// first row demand: a hit is one index, never a walk.
+struct Rows<T> {
+    slots: OnceLock<Box<[OnceLock<Box<T>>]>>,
+    loaded: Mutex<Vec<u64>>,
+}
+impl<T> Rows<T> {
+    fn new() -> Self {
+        Self {
+            slots: OnceLock::new(),
+            loaded: Mutex::new(vec![]),
+        }
+    }
+    #[inline]
+    fn get_or_try_init(
+        &self,
+        len: u32,
+        index: usize,
+        f: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<&T> {
+        let slots = self
+            .slots
+            .get_or_init(|| (0..len).map(|_| OnceLock::new()).collect());
+        let cell = slots
+            .get(index)
+            .ok_or_else(|| io::Error::other("published row outside its table"))?;
+        if let Some(value) = cell.get() {
+            return Ok(value);
+        }
+        let value = Box::new(f()?);
+        let mut loaded = self.loaded.lock().unwrap();
+        if cell.set(value).is_ok() {
+            loaded.push(index as u64);
+        }
+        drop(loaded);
+        Ok(cell.get().unwrap())
+    }
+    fn loaded(&self) -> Vec<u64> {
+        self.loaded.lock().unwrap().clone()
+    }
 }
 
 pub struct Published<T> {
@@ -181,8 +227,12 @@ pub struct Published<T> {
     observed: bool,
     descriptor: Descriptor,
     provider: Arc<dyn Provider<T>>,
-    cache: Sparse<T>,
+    cache: Rows<T>,
     ranges: Sparse<Vec<T>>,
+    // The source's answer for exact key bytes. It trusts nothing and guards
+    // nothing, and it is measured, not redundant: without it the suite edit
+    // probes 13,698 times instead of 3,424 and its image index costs 10.58 M
+    // instead of 8.75 M (959 hit path).
     lookups: Mutex<rustc_hash::FxHashMap<Vec<u8>, Option<u32>>>,
 }
 impl<T> Published<T> {
@@ -196,10 +246,12 @@ impl<T> Published<T> {
     #[inline(always)]
     fn row_plain(&self, index: usize) -> &T {
         self.cache
-            .get_or_try_init(index as u64, || self.provider.row(index as u32))
+            .get_or_try_init(self.descriptor.len, index, || {
+                self.provider.row(index as u32)
+            })
             .unwrap_or_else(|e| miss(e))
     }
-    fn find(&self, key: Vec<u8>) -> Option<u32> {
+    fn find(&self, key: &(impl Serialize + ?Sized)) -> Option<u32> {
         #[cfg(feature = "front-observer")]
         if self.observed {
             return observed(|| self.find_plain(key));
@@ -207,13 +259,15 @@ impl<T> Published<T> {
         self.find_plain(key)
     }
     #[inline(always)]
-    fn find_plain(&self, key: Vec<u8>) -> Option<u32> {
-        if let Some(index) = self.lookups.lock().unwrap().get(key.as_slice()) {
-            return *index;
-        }
-        let index = self.provider.find(&key).unwrap_or_else(|e| miss(e));
-        self.lookups.lock().unwrap().insert(key, index);
-        index
+    fn find_plain(&self, key: &(impl Serialize + ?Sized)) -> Option<u32> {
+        with_lookup_key(key, |key| {
+            if let Some(index) = self.lookups.lock().unwrap().get(key) {
+                return *index;
+            }
+            let index = self.provider.find(key).unwrap_or_else(|e| miss(e));
+            self.lookups.lock().unwrap().insert(key.to_vec(), index);
+            index
+        })
     }
 }
 type Registry = BTreeMap<ContentHash, BTreeMap<(u32, TypeId), Weak<dyn Any + Send + Sync>>>;
@@ -232,7 +286,7 @@ pub fn bind<T: Send + Sync + 'static>(
         observed: OBSERVE.with_borrow(|active| active.is_some()),
         descriptor,
         provider,
-        cache: Sparse::default(),
+        cache: Rows::new(),
         ranges: Sparse::default(),
         lookups: Mutex::default(),
     });
@@ -487,14 +541,12 @@ impl<'de, T: serde::de::DeserializeOwned + Send + Sync + 'static> Deserialize<'d
 #[derive(Clone)]
 pub struct Map<K: Ord + std::hash::Hash, V> {
     prefix: Option<Arc<Published<(K, V)>>>,
-    cached: Option<Arc<Mutex<rustc_hash::FxHashMap<K, u32>>>>,
     own: rustc_hash::FxHashMap<K, V>,
 }
 impl<K: Ord + std::hash::Hash, V> Default for Map<K, V> {
     fn default() -> Self {
         Self {
             prefix: None,
-            cached: None,
             own: rustc_hash::FxHashMap::default(),
         }
     }
@@ -527,15 +579,11 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
                     + self.own.keys().position(|k| k.borrow() == key).unwrap(),
             );
         }
-        self.prefix
-            .as_ref()?
-            .find(encode_lookup_key(key))
-            .map(|i| i as usize)
+        self.prefix.as_ref()?.find(key).map(|i| i as usize)
     }
     pub fn published(prefix: Arc<Published<(K, V)>>) -> Self {
         Self {
             prefix: Some(prefix),
-            cached: Some(Arc::new(Mutex::default())),
             own: rustc_hash::FxHashMap::default(),
         }
     }
@@ -569,18 +617,10 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
     where
         K: Borrow<Q> + Clone,
     {
+        // One probe of the resident sections; the row's decoded value is kept.
         let prefix = self.prefix.as_ref().unwrap();
-        let cached = self.cached.as_ref().unwrap();
-        let hit = cached.lock().unwrap().get(key).copied();
-        if let Some(i) = hit {
-            return Some(&prefix.row(i as usize).1);
-        }
-        let i = prefix.find(encode_lookup_key(key))?;
-        let row = prefix.row(i as usize);
-        if row.0.borrow() == key {
-            cached.lock().unwrap().insert(row.0.clone(), i);
-        }
-        Some(&row.1)
+        let i = prefix.find(key)?;
+        Some(&prefix.row(i as usize).1)
     }
     pub fn contains_key<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> bool
     where
@@ -641,7 +681,6 @@ impl<K: Ord + std::hash::Hash, V> FromIterator<(K, V)> for Map<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(i: I) -> Self {
         Self {
             prefix: None,
-            cached: None,
             own: i.into_iter().collect(),
         }
     }
@@ -664,12 +703,7 @@ impl<
             .map(binding)
             .transpose()
             .map_err(serde::de::Error::custom)?;
-        let cached = prefix.as_ref().map(|_| Arc::new(Mutex::default()));
-        Ok(Self {
-            prefix,
-            cached,
-            own,
-        })
+        Ok(Self { prefix, own })
     }
 }
 
@@ -754,47 +788,51 @@ mod tests {
         );
     }
     #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-    struct CountedKey(u32);
-    static KEY_ENCODINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    impl Serialize for CountedKey {
-        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            KEY_ENCODINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.0.serialize(s)
+    struct Prefix;
+    impl Provider<u32> for Prefix {
+        fn row(&self, index: u32) -> io::Result<u32> {
+            assert!(index < 2, "row {index} is past the published prefix");
+            Ok(10 + index)
         }
     }
-    struct KeyRows;
-    impl Provider<(CountedKey, u32)> for KeyRows {
-        fn row(&self, index: u32) -> io::Result<(CountedKey, u32)> {
+    impl Provider<(u32, u32)> for Prefix {
+        fn row(&self, index: u32) -> io::Result<(u32, u32)> {
             assert_eq!(index, 0);
-            Ok((CountedKey(7), 42))
+            Ok((7, 42))
         }
         fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
             Ok((key == [7, 0, 0, 0]).then_some(0))
         }
     }
+    /// Law: an id at or past the published prefix is a local row, and a local
+    /// entry wins in the map that holds it, never in a clone made before it.
     #[test]
-    fn published_hot_keys_skip_encoding_and_owned_overrides_win() {
+    fn ids_past_the_prefix_and_owned_entries_stay_local() {
         let descriptor = Descriptor {
-            namespace: ContentHash::of_bytes(b"counted-key"),
+            namespace: ContentHash::of_bytes(b"prefix-rows"),
             table: 0,
-            len: 1,
+            len: 2,
         };
-        let map = Map::published(bind(descriptor, Arc::new(KeyRows)));
-        assert_eq!(map.get(&CountedKey(7)), Some(&42));
-        let cold = KEY_ENCODINGS.load(std::sync::atomic::Ordering::Relaxed);
-        assert!(cold > 0);
-        assert_eq!(map.get(&CountedKey(7)), Some(&42));
+        let provider: Arc<dyn Provider<u32>> = Arc::new(Prefix);
+        let mut rows = Table::published(bind(descriptor, provider));
+        rows.push(20);
+        rows.push(21);
+        let got: Vec<_> = (0..5).map(|i| rows.get(i).copied()).collect();
+        assert_eq!(got, [Some(10), Some(11), Some(20), Some(21), None]);
+        let provider: Arc<dyn Provider<(u32, u32)>> = Arc::new(Prefix);
+        let map = Map::published(bind(
+            Descriptor {
+                table: 1,
+                len: 1,
+                ..descriptor
+            },
+            provider,
+        ));
         let mut other = map.clone();
-        assert_eq!(other.get(&CountedKey(7)), Some(&42));
-        other.insert(CountedKey(7), 99);
-        assert_eq!(other.get(&CountedKey(7)), Some(&99));
-        assert_eq!(map.get(&CountedKey(7)), Some(&42));
-        assert_eq!(
-            KEY_ENCODINGS.load(std::sync::atomic::Ordering::Relaxed),
-            cold
-        );
-        assert_eq!(map.get(&CountedKey(8)), None);
-        assert_eq!(map.get(&CountedKey(8)), None);
+        other.insert(7, 99);
+        other.insert(8, 1);
+        assert_eq!((other.get(&7), other.get(&8)), (Some(&99), Some(&1)));
+        assert_eq!((map.get(&7), map.get(&8)), (Some(&42), None));
     }
     struct Missing;
     impl Provider<u64> for Missing {

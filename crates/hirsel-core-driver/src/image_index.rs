@@ -160,7 +160,7 @@ impl Publisher for Writer {
         let mut keys = Vec::with_capacity(entries.len());
         for (key, value) in entries {
             // A row is its key's lookup bytes followed by its value's.
-            let mut row = encode(key)?;
+            let mut row = hirsel_core_ids::published::with_lookup_key(key, <[u8]>::to_vec);
             keys.push(row.len());
             row.extend_from_slice(&encode(value)?);
             rows.push(row);
@@ -268,6 +268,25 @@ impl DiskIndex {
         }
         Ok(())
     }
+    /// Whether the bytes at `at` begin with `key`, compared in place.
+    fn starts_with(&self, pages: &Pages, at: u64, key: &[u8]) -> io::Result<bool> {
+        let mut at = usize::try_from(at).map_err(|_| damaged(pages))?;
+        let mut done = 0;
+        while done < key.len() {
+            let page = self.page(pages, at / PAGE)?;
+            let bytes = page.get(at % PAGE..).ok_or_else(|| damaged(pages))?;
+            let n = bytes.len().min(key.len() - done);
+            if n == 0 {
+                return Err(damaged(pages));
+            }
+            if bytes[..n] != key[done..done + n] {
+                return Ok(false);
+            }
+            done += n;
+            at += n;
+        }
+        Ok(true)
+    }
     fn u32(&self, pages: &Pages, at: u64) -> io::Result<u32> {
         let mut bytes = [0; 4];
         self.read(pages, at, &mut bytes)?;
@@ -330,7 +349,6 @@ impl Source for DiskIndex {
             .ok_or_else(|| io::Error::other("published table has no key index"))?;
         let hash = key_hash(key);
         let mut i = hash as u32 & mask;
-        let mut candidate = vec![0; key.len()];
         for _ in 0..=mask {
             let slot = self.u64(pages, slots + 8 * u64::from(i))?;
             if slot == 0 {
@@ -342,11 +360,8 @@ impl Source for DiskIndex {
                     return Err(damaged(pages));
                 }
                 let (at, len) = self.span(pages, section, row)?;
-                if len >= key.len() {
-                    self.read(pages, at, &mut candidate)?;
-                    if candidate == key {
-                        return Ok(Some(row));
-                    }
+                if len >= key.len() && self.starts_with(pages, at, key)? {
+                    return Ok(Some(row));
                 }
             }
             i = (i + 1) & mask;
@@ -372,6 +387,32 @@ mod tests {
             }
         }
         unreachable!()
+    }
+
+    /// Law: a query encodes as the stored key it names, for every published
+    /// key type and the type it is queried by; a new pair belongs here.
+    #[test]
+    fn queries_encode_as_their_stored_keys() {
+        use hirsel_core_front::{TyId, TyKind};
+        use hirsel_core_ids::published::with_lookup_key;
+        use hirsel_core_resolve::ModuleId;
+        use hirsel_core_syntax::Symbol;
+        fn same<K: Serialize, Q: Serialize + ?Sized>(stored: &K, query: &Q) {
+            let bytes = bincode::serialize(stored).unwrap();
+            assert_eq!(with_lookup_key(stored, <[u8]>::to_vec), bytes);
+            assert_eq!(with_lookup_key(query, <[u8]>::to_vec), bytes);
+        }
+        let text: Arc<str> = Arc::from("library\0é");
+        same(&text, &*text);
+        let path = DefPath::from_full("library@1/parent/child").unwrap();
+        same(&path, &path);
+        same(&ModuleId(3), &ModuleId(3));
+        same(&Symbol(9), &Symbol(9));
+        same(&(ModuleId(3), Symbol(9)), &(ModuleId(3), Symbol(9)));
+        same(&(ModuleId(3), 4u32), &(ModuleId(3), 4u32));
+        same(&(Symbol(1), Symbol(2)), &(Symbol(1), Symbol(2)));
+        let kind = TyKind::Tuple(vec![TyId(1), TyId(2)]);
+        same(&kind, &kind);
     }
 
     /// Law: every query against the published sections answers what a linear
@@ -466,5 +507,45 @@ mod tests {
             assert_eq!(index.row(d(6), i as u32).unwrap(), encode(row).unwrap());
         }
         assert_eq!(index.row(d(7), 0).unwrap(), encode(&big).unwrap());
+    }
+
+    /// Law: lookups racing from several threads on a cold image answer what
+    /// the published rows say, the first decode of a row winning for all.
+    #[test]
+    fn concurrent_lookups_on_a_cold_image_answer_as_the_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::image(dir.path()).unwrap();
+        let namespace = ContentHash::of_bytes(b"concurrent-lookup-law");
+        let index = Arc::new(DiskIndex::new(dir.path()).unwrap());
+        hirsel_core_ids::published::bind_source(namespace, index.clone());
+        let numbers: Vec<(u64, u64)> = (0..3000).map(|i| (i * 7919, i * i)).collect();
+        let names: Vec<String> = (0..500).map(|i| format!("name {i}")).collect();
+        let mut writer = Writer::new(namespace);
+        let map = writer
+            .map(&numbers.iter().cloned().collect::<Map<_, _>>())
+            .unwrap();
+        let table = writer.table(&Table::from(names.clone())).unwrap();
+        let (sections, _) = writer.finish(&store).unwrap();
+        let hash = store.put(&encode(&sections).unwrap()).unwrap();
+        index.open(hash, hash);
+        let expected: Vec<Option<u64>> = (0..3000 * 7919)
+            .step_by(7919 / 3)
+            .map(|k| numbers.iter().find(|(n, _)| *n == k).map(|(_, v)| *v))
+            .collect();
+        std::thread::scope(|scope| {
+            for t in 0..8 {
+                let (map, table, expected, names) = (&map, &table, &expected, &names);
+                scope.spawn(move || {
+                    let keys: Vec<u64> = (0..3000 * 7919).step_by(7919 / 3).collect();
+                    for n in 0..keys.len() {
+                        let i = (n + t * 997) % keys.len();
+                        assert_eq!(map.get(&keys[i]).copied(), expected[i], "key {}", keys[i]);
+                        let row = (n * 7 + t) % names.len();
+                        assert_eq!(table[row], names[row]);
+                    }
+                });
+            }
+        });
+        assert!(expected.iter().any(Option::is_some) && expected.iter().any(Option::is_none));
     }
 }

@@ -49,6 +49,28 @@ fn sync_sequence(d:Dir)->bool waits {
         _ => false
     }
 }
+fn crash_read(d:Dir)->bool waits {
+    match host.open(d,"b",Read) {
+        Error(NotFound) => true,
+        Ok(take h) => {
+            let mut f=take h
+            let mut b:Bytes=result.unwrap(list.with_capacity(2))
+            let ok=result.unwrap(host.read(mut f,mut b))==1 && b[0]==b'x'
+            result.unwrap(host.close(take f))
+            ok
+        }
+        _ => false
+    }
+}
+fn crash_write(d:Dir)->bool waits {
+    let mut f=result.unwrap(host.open(d,"a",Write))
+    result.unwrap(host.write(mut f,string.as_bytes("x")))
+    result.unwrap(host.sync(mut f))
+    result.unwrap(host.close(take f))
+    result.unwrap(host.rename(d,"a","b"))
+    result.unwrap(host.sync_dir(d))
+    true
+}
 type IssueInput:send { f:HostFile, tx:Sender[u64], write:bool }
 fn issued(take input:IssueInput)->u64 waits {
     let mut x=take input
@@ -97,7 +119,7 @@ fn cancel_blocked(tasks:Tasks,sending:bool)->bool waits {
 }
 pub fn main(d:Dir,tasks:Tasks,a:Args)->Result[(),Exit] {
     let mode=option.unwrap(args.get(a,0))
-    let ok=if mode=="read" {read_sequence(d)} else if mode=="errors" {errors(d)}
+    let ok=if mode=="read" {read_sequence(d)} else if mode=="crash-read" {crash_read(d)} else if mode=="crash0" || mode=="crash1" || mode=="crash2" || mode=="crash3" || mode=="crash4" || mode=="crash5" {crash_write(d)} else if mode=="errors" {errors(d)}
       else if mode=="append0" {append_sequence(d,0)} else if mode=="append1" {append_sequence(d,1)} else if mode=="append3" {append_sequence(d,3)}
       else if mode=="sync" || mode=="sync-fail" {sync_sequence(d)}
       else if mode=="before-read" {cancelled_at_provider(d,tasks,true,false)}

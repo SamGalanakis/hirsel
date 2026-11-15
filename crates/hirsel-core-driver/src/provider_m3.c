@@ -9,6 +9,9 @@
 static struct {
     char mode[32];
     unsigned opens, reads, writes, syncs, sync_dirs, live, cancels, blocked;
+    unsigned crash_cut, crash_events, crash_pending, crashed;
+    unsigned char crash_file[32]; size_t crash_length;
+    char live_name, durable_name;
     unsigned char file[32]; size_t length, cursor;
     HirselCoreContext *root, *active, *waiting;
     HirselCoreTask *child;
@@ -17,6 +20,10 @@ static struct {
 } s;
 #define CHECK(c) do { if (!(c)) { dprintf(2,"provider fixture: line %u: %s\n",__LINE__,#c); _exit(120); } } while(0)
 static int is(const char *m) { return !strcmp(s.mode,m); }
+static int crash_mode(void) { return !strncmp(s.mode,"crash",5); }
+static void crash_mark_cut(void) {
+    if(crash_mode() && !s.crashed && s.crash_events++==s.crash_cut) s.crash_pending=1;
+}
 static int issued(void) { return !strncmp(s.mode,"issue-",6) || !strncmp(s.mode,"delivery-",9); }
 static int blocked(void) { return !strncmp(s.mode,"blocked-",8); }
 extern void __real_hirsel_core_cancel(HirselCoreContext*,HirselCoreTask*);
@@ -56,11 +63,24 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_op(HirselCoreContext *ctx,uint8_t 
 }
 static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
     (void)state; HirselCoreHostOutcome out={0};
+    if(crash_mode() && s.crash_pending && !s.crashed) {
+        s.crashed=1; s.crash_pending=0; out.error.tag=5; out.error.code=125; return out;
+    }
     if(issued() && r->operation==(!strstr(s.mode,"write")?1:2) && !strncmp(s.mode,"issue-",6)) {
         CHECK(s.active && s.active!=s.root && s.child);__real_hirsel_core_cancel(s.active,s.child);
     }
     switch(r->operation) {
     case 0:
+        if(crash_mode()) {
+            CHECK(r->handle==7 && r->path_len==1);
+            if(r->mode==1 && r->path[0]=='a') {
+                s.live_name='a'; s.length=0; s.live=1; out.value=17; crash_mark_cut(); return out;
+            }
+            if(r->mode==0 && ((r->path[0]=='a' && s.live_name=='a') || (r->path[0]=='b' && s.live_name=='b'))) {
+                s.live=1; out.value=17; return out;
+            }
+            out.error.tag=1; return out;
+        }
         if(is("sync") || is("sync-fail")) {
             CHECK(r->handle==7 && ((r->path_len==6 && !memcmp(r->path,"sync-a",6) && r->mode==1) || (r->path_len==6 && !memcmp(r->path,"sync-b",6) && r->mode==0)));
             s.opens++; CHECK(!s.live || (r->path_len==6 && !memcmp(r->path,"sync-b",6)));
@@ -75,6 +95,12 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         if(!strncmp(s.mode,"append",6) || strstr(s.mode,"write")) CHECK(r->mode==(s.opens==1?2:0));
         return out;
     case 1: {
+        if(crash_mode()) {
+            CHECK(r->handle==17 && s.live);
+            size_t count=s.length;
+            if(count>r->buffer.capacity-r->buffer.len) count=r->buffer.capacity-r->buffer.len;
+            memcpy(r->buffer.data+r->buffer.len,s.file,count); r->buffer.len+=count; out.value=count; return out;
+        }
         CHECK(r->handle==17 && s.live);
         unsigned n=s.reads++;
         if(is("read") && (n==0 || n==2)) {out.error.tag=n==0?5:1;out.error.code=n==0?5:0;return out;}
@@ -88,6 +114,10 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         r->buffer.len+=count;s.cursor+=count;out.value=count;return out;
     }
     case 2: {
+        if(crash_mode()) {
+            CHECK(r->handle==17 && s.live && r->buffer.len==1);
+            s.file[0]=r->buffer.data[0]; s.length=1; crash_mark_cut(); return out;
+        }
         CHECK(r->handle==17 && s.live);
         unsigned n=s.writes++;size_t count=r->buffer.len;
         if(issued()) {CHECK(n==0 && count==3);count=1;out.error.tag=5;out.error.code=5;}
@@ -100,17 +130,20 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         if(count) memcpy(s.file+s.length,r->buffer.data,count);
         s.length+=count;out.written=count;return out;
     }
-    case 3: CHECK(r->handle==17 && s.live);s.live=0;return out;
+    case 3: CHECK(r->handle==17 && s.live);s.live=0;if(crash_mode()) crash_mark_cut();return out;
     case 16:
+        if(crash_mode()) { CHECK(r->handle==17 && s.live); memcpy(s.crash_file,s.file,s.length); s.crash_length=s.length; s.syncs++; crash_mark_cut(); return out; }
         CHECK(r->handle==17 && s.live);
         s.syncs++;
         if(is("sync-fail")) { out.error.tag=5; out.error.code=5; }
         return out;
     case 17:
+        if(crash_mode()) { CHECK(r->handle==7); s.durable_name=s.live_name; s.sync_dirs++; crash_mark_cut(); return out; }
         CHECK(r->handle==7);
         s.sync_dirs++;
         return out;
     case 14:
+        if(crash_mode()) { CHECK(r->handle==7 && r->path_len==3 && r->path[0]=='a' && r->path[1]==0 && r->path[2]=='b'); s.live_name='b'; crash_mark_cut(); return out; }
         CHECK(r->handle==7 && r->path_len==13 && !memcmp(r->path,"sync-a\0sync-b",13));
         return out;
     default: CHECK(0);
@@ -124,7 +157,7 @@ static HirselCoreHostOutcome deliver(void *state,HirselCoreHostRequest *r,Hirsel
     }
     return out;
 }
-static void diagnostic(void *state,const uint8_t *data,size_t len) {(void)state;CHECK(write(2,data,len)==(ssize_t)len);}
+static void diagnostic(void *state,const uint8_t *data,size_t len) {if(crash_mode() && s.crashed)return;(void)state;CHECK(write(2,data,len)==(ssize_t)len);}
 static void event(void *state,HirselCoreEvent e) {(void)state;if(e.kind==3)s.cancels++;}
 static uint8_t entry(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {s.root=ctx;return s.entry(ctx,cfg,out);}
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry main) {
@@ -138,7 +171,13 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,c
     HirselCoreProcessConfig cfg={0};cfg.root_limit=input->root_limit;cfg.args=args;cfg.args_len=1;
     cfg.grants=grants;cfg.grants_len=3;cfg.provider=&provider;cfg.state=&s;cfg.diagnostic=diagnostic;
     cfg.scheduler=(HirselCoreSchedulerProvider){&s,event,0};cfg.stop_fd=2;cfg.capabilities=caps;cfg.capabilities_len=3;
+    if(crash_mode()) { s.crash_cut=(unsigned)strtoul(s.mode+5,NULL,10); s.crash_pending=s.crash_cut==0; }
     uint8_t status=hirsel_core_run(&cfg,entry);
+    if(crash_mode() && s.crashed) {
+        s.live=0; s.live_name=s.durable_name; memcpy(s.file,s.crash_file,s.crash_length); s.length=s.crash_length;
+        args[0].data=(uint8_t*)"crash-read"; args[0].len=10;
+        status=hirsel_core_run(&cfg,entry);
+    }
     CHECK(status==0 && !s.live && !s.wait_active);
     if(is("before-read"))CHECK(s.reads==0 && s.cancels==1);
     if(issued())CHECK(s.cancels==1 && (strstr(s.mode,"write")?s.writes:s.reads)==1);

@@ -307,6 +307,11 @@ impl Default for Symbols {
     }
 }
 impl Symbols {
+    pub fn reserve_for_source(&mut self, bytes: usize) {
+        let additional = (bytes / 32).max(64);
+        let needed = self.index.len().saturating_add(additional);
+        if self.index.capacity() < needed { self.index.reserve(needed - self.index.len()); }
+    }
     pub fn publish(
         &self,
         writer: &mut impl hirsel_core_ids::published::Publisher,
@@ -335,6 +340,9 @@ impl Symbols {
             if self.single[b] != sym::NONE {
                 return self.single[b];
             }
+        }
+        if let Some(id) = fixed_symbol(text) {
+            return id;
         }
         let id = if let Some(&id) = self.index.get(text) {
             id
@@ -376,6 +384,13 @@ impl Symbols {
         self.strings.is_empty()
     }
 }
+#[inline(always)]
+fn fixed_symbol(text: &str) -> Option<Symbol> {
+    Some(match text {
+        "fn"=>sym::FN,"let"=>sym::LET,"mut"=>sym::MUT,"match"=>sym::MATCH,"if"=>sym::IF,"else"=>sym::ELSE,"loop"=>sym::LOOP,"while"=>sym::WHILE,"for"=>sym::FOR,"in"=>sym::IN,"break"=>sym::BREAK,"continue"=>sym::CONTINUE,"return"=>sym::RETURN,"take"=>sym::TAKE,"copy"=>sym::COPY,"view"=>sym::VIEW,"type"=>sym::TYPE,"stable"=>sym::STABLE,"resource"=>sym::RESOURCE,"scoped"=>sym::SCOPED,"region"=>sym::REGION,"bound"=>sym::BOUND,"pub"=>sym::PUB,"opaque"=>sym::OPAQUE,"const"=>sym::CONST,"where"=>sym::WHERE,"true"=>sym::TRUE,"false"=>sym::FALSE,"bytes"=>sym::BYTES,"drop"=>sym::DROP,"compact"=>sym::COMPACT,"twin"=>sym::TWIN,"test"=>sym::TEST,"grant"=>sym::GRANT,"own"=>sym::OWN,"send"=>sym::SEND,"waits"=>sym::WAITS,"plain"=>sym::PLAIN,"shareable"=>sym::SHAREABLE,"key"=>sym::KEY,"ordered"=>sym::ORDERED,"integer"=>sym::INTEGER,"float"=>sym::FLOAT,"Inline"=>sym::INLINE,"bool"=>sym::BOOL,"char"=>sym::CHAR,"u8"=>sym::U8,"u16"=>sym::U16,"u32"=>sym::U32,"u64"=>sym::U64,"i8"=>sym::I8,"i16"=>sym::I16,"i32"=>sym::I32,"i64"=>sym::I64,"f32"=>sym::F32,"f64"=>sym::F64,"None"=>sym::NONE_VARIANT,"Some"=>sym::SOME_VARIANT,"Ok"=>sym::OK_VARIANT,"Error"=>sym::ERROR_VARIANT,"packed"=>sym::PACKED,"streamable"=>sym::STREAMABLE,"clone"=>sym::CLONE,_=>return None,
+    })
+}
+
 pub fn keyword_symbol(s: Symbol) -> bool {
     matches!(
         s,

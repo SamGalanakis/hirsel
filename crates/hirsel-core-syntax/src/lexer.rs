@@ -11,6 +11,7 @@ pub struct LexOutput {
     pub canonical_offsets: Vec<u32>,
 }
 pub fn lex(text: &str, symbols: &mut Symbols) -> LexOutput {
+    symbols.reserve_for_source(text.len());
     let mut scanner = Scanner::new(text, symbols);
     while scanner.pos < text.len() {
         scanner.next();
@@ -24,6 +25,35 @@ struct Scanner<'a> {
     output: LexOutput,
     symbols: &'a mut Symbols,
     newline: bool,
+}
+const BYTE_OTHER: u8 = 0;
+const BYTE_IDENT: u8 = 1;
+const BYTE_DIGIT: u8 = 2;
+const BYTE_SPACE: u8 = 3;
+const BYTE_NEWLINE: u8 = 4;
+const BYTE_CLASS: [u8; 256] = byte_classes();
+
+const fn byte_classes() -> [u8; 256] {
+    let mut classes = [BYTE_OTHER; 256];
+    let mut b = 0;
+    while b < 256 {
+        classes[b] = if b == b' ' as usize || b == b'\t' as usize {
+            BYTE_SPACE
+        } else if b == b'\n' as usize || b == b'\r' as usize {
+            BYTE_NEWLINE
+        } else if b >= b'0' as usize && b <= b'9' as usize {
+            BYTE_DIGIT
+        } else if (b >= b'a' as usize && b <= b'z' as usize)
+            || (b >= b'A' as usize && b <= b'Z' as usize)
+            || b == b'_' as usize
+        {
+            BYTE_IDENT
+        } else {
+            BYTE_OTHER
+        };
+        b += 1;
+    }
+    classes
 }
 impl<'a> Scanner<'a> {
     fn new(text: &'a str, symbols: &'a mut Symbols) -> Self {
@@ -245,6 +275,13 @@ impl<'a> Scanner<'a> {
     // Validate a source scalar while traversing a comment, including bare CR.
     fn comment_scalar(&mut self) {
         let start = self.pos;
+        if self.bytes[start].is_ascii() {
+            self.pos += 1;
+            if self.bytes[start] == b'\r' && self.bytes.get(self.pos) != Some(&b'\n') {
+                self.error("LANG-1", start, self.pos, "forbidden character in comment");
+            }
+            return;
+        }
         let (ch, len) = scalar(&self.bytes[start..]);
         self.pos += len;
         if ch.is_none()
@@ -412,6 +449,18 @@ impl<'a> Scanner<'a> {
                 };
             }
             let at = self.pos;
+            if self.bytes[at].is_ascii() {
+                if self.bytes[at] == b'\r' {
+                    self.error(
+                        "LANG-1",
+                        at,
+                        at + 1,
+                        "raw literal newlines must be LF; CR and CRLF are forbidden",
+                    );
+                }
+                self.pos += 1;
+                continue;
+            }
             let (ch, len) = scalar(&self.bytes[at..]);
             self.pos += len;
             if ch == Some('\r') {
@@ -490,6 +539,14 @@ impl<'a> Scanner<'a> {
             return;
         }
         let at = self.pos;
+        if self.bytes[at].is_ascii() {
+            let byte = self.bytes[at];
+            self.pos += 1;
+            if byte <= 0x1f || byte == 0x7f {
+                self.error("LANG-3", at, self.pos, "forbidden literal character");
+            }
+            return;
+        }
         let (ch, len) = scalar(&self.bytes[at..]);
         self.pos += len;
         if ch.is_none()
@@ -580,10 +637,10 @@ impl<'a> Scanner<'a> {
     }
 }
 fn letter(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || byte == b'_'
+    BYTE_CLASS[byte as usize] == BYTE_IDENT
 }
 fn name_byte(byte: u8) -> bool {
-    letter(byte) || byte.is_ascii_digit()
+    matches!(BYTE_CLASS[byte as usize], BYTE_IDENT | BYTE_DIGIT)
 }
 fn digit_value(byte: u8) -> Option<u32> {
     match byte {

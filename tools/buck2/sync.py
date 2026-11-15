@@ -187,7 +187,11 @@ RUNTIME_DATA = {
 # invalidate another binary's passing verdicts. A source change still reruns
 # every test whose harness it changes.
 TEST_DATA = {
-    "hirsel-core-syntax-unittest": ["core/core/**", "core/std/**", "core/front/cases/**", "core/programs/m1/**", "core/langarena/**/*.hirsel"],
+    "hirsel-core-syntax-unittest": [
+        "core/core/**", "core/std/**", "core/front/cases/**", "core/front/fixtures/**",
+        "core/programs/m1/**", "core/programs/m2b/**", "core/corpus/m2b/**",
+        "core/langarena/**/*.hirsel", "core/twins/**/*.hirsel",
+    ],
     "hirsel-core-diag-unittest": ["docs/spec/**", "crates/hirsel-core-syntax/src/**", "crates/hirsel-core-resolve/src/**", "crates/hirsel-core-front/src/**"],
     "hirsel-core-resolve-unittest": ["docs/spec/**", "core/core/**"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],

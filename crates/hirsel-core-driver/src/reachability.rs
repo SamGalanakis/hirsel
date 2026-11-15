@@ -120,7 +120,7 @@ impl CheckProduct {
                 }
                 let product = self.demand_body(&path)?;
                 if let Some(function) = product.check.function {
-                    let ir = &product.ir;
+                    let ir = product.ir();
                     let functions = crate::instances::external_functions(ir, function);
                     pending.extend(functions.into_iter().map(|f| {
                         (

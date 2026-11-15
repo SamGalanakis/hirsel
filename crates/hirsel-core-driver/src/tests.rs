@@ -33,7 +33,7 @@ fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
         .unwrap();
     assert!(product.accepted(), "{:?}", product.diagnostics);
     let d = product.definitions.values().next().unwrap();
-    let value = eval::run(&d.ir, d.check.function.unwrap(), &[], 1_000_000).outcome;
+    let value = eval::run(d.ir(), d.check.function.unwrap(), &[], 1_000_000).outcome;
     assert_eq!(value, eval::Outcome::Returned(vec![42]));
     let store = Store::new(&dir.path().join("store")).unwrap();
     let index = check_index::ProgramIndex::open(&store).unwrap();
@@ -122,7 +122,7 @@ fn prog8_unrelated_parse_failure_does_not_suppress_other_results() {
     let answer = DefPath::from_full("app@1/main/answer").unwrap();
     let d = product.demand(&answer).unwrap();
     assert_eq!(
-        eval::run(&d.ir, d.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::run(d.ir(), d.check.function.unwrap(), &[], 1_000_000).outcome,
         eval::Outcome::Returned(vec![42])
     );
 }
@@ -170,7 +170,7 @@ fn warm_and_body_edits_reuse_signature_readers_in_memory_and_on_disk() {
         .find(|d| d.definition.0.name == "callee")
         .unwrap();
     assert_eq!(
-        eval::run(&callee.ir, callee.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::run(callee.ir(), callee.check.function.unwrap(), &[], 1_000_000).outcome,
         eval::Outcome::Returned(vec![2])
     );
     let old_caller = first
@@ -400,9 +400,9 @@ fn native_ir_tables_round_trip_without_text_reconstruction() {
     assert!(second.rechecked.is_empty());
     let a = first.definitions.values().next().unwrap();
     let b = second.definitions.values().next().unwrap();
-    assert_eq!(a.ir, b.ir);
+    assert_eq!(a.ir(), b.ir());
     assert_eq!(
-        eval::run(&b.ir, b.check.function.unwrap(), &[17], 1_000_000).outcome,
+        eval::run(b.ir(), b.check.function.unwrap(), &[17], 1_000_000).outcome,
         eval::Outcome::Returned(vec![17])
     );
 }
@@ -477,7 +477,7 @@ fn image_signature_use_skips_source_and_body_decoding() {
     let answer = DefPath::from_full("core@1/lib/answer").unwrap();
     let body = checked.demand_body(&answer).unwrap();
     assert_eq!(
-        eval::run(&body.ir, body.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::run(body.ir(), body.check.function.unwrap(), &[], 1_000_000).outcome,
         eval::Outcome::Returned(vec![42])
     );
     assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 1));
@@ -813,7 +813,7 @@ fn directory_source_file_symlinks_are_checked_instead_of_skipped() {
     assert_eq!(names(&product), ["answer"]);
     let body = product.definitions.values().next().unwrap();
     assert_eq!(
-        eval::run(&body.ir, body.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::run(body.ir(), body.check.function.unwrap(), &[], 1_000_000).outcome,
         eval::Outcome::Returned(vec![42])
     );
 }
@@ -1177,7 +1177,7 @@ fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
         .demand(&DefPath::from_full("app@1/main/discard").unwrap())
         .unwrap();
     assert!(
-        discard.ir.functions[discard.check.function.unwrap().index()]
+        discard.ir().functions[discard.check.function.unwrap().index()]
             .body
             .as_ref()
             .unwrap()
@@ -1286,7 +1286,7 @@ fn scalar_constants_survive_installed_images_and_invalidate_body_reuse() {
     );
     let body = product.definitions.values().next().unwrap();
     assert_eq!(
-        eval::run(&body.ir, body.check.function.unwrap(), &[], 1000).outcome,
+        eval::run(body.ir(), body.check.function.unwrap(), &[], 1000).outcome,
         eval::Outcome::Returned(vec![42])
     );
 
@@ -1304,7 +1304,7 @@ fn scalar_constants_survive_installed_images_and_invalidate_body_reuse() {
     assert_eq!(names(&after), ["answer"]);
     let body = after.definitions.values().next().unwrap();
     assert_eq!(
-        eval::run(&body.ir, body.check.function.unwrap(), &[], 1000).outcome,
+        eval::run(body.ir(), body.check.function.unwrap(), &[], 1000).outcome,
         eval::Outcome::Returned(vec![9])
     );
 }
@@ -1355,7 +1355,7 @@ fn lowered_runtime_operation_needs_no_outside_body() {
     let definition = &product.definitions[&entry];
     assert_eq!(
         eval::run(
-            &definition.ir,
+            definition.ir(),
             definition.check.function.unwrap(),
             &[],
             1024
@@ -1416,7 +1416,7 @@ fn aggregate_constants_in_an_image_need_no_source_or_body_decode() {
     let path = DefPath::from_full("app@1/main/answer").unwrap();
     let body = checked.demand_body(&path).unwrap();
     assert_eq!(
-        eval::run(&body.ir, body.check.function.unwrap(), &[1], 1_000_000).outcome,
+        eval::run(body.ir(), body.check.function.unwrap(), &[1], 1_000_000).outcome,
         eval::Outcome::Returned(vec![51])
     );
     assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 0));
@@ -2591,7 +2591,7 @@ fn answer_of(product: &CheckProduct) -> eval::Outcome {
         .values()
         .find(|d| d.definition.0.name == "answer")
         .unwrap();
-    eval::run(&d.ir, d.check.function.unwrap(), &[], 1_000_000).outcome
+    eval::run(d.ir(), d.check.function.unwrap(), &[], 1_000_000).outcome
 }
 
 /// FORM #111: the growth arm's calls stay cold through every rebuild between the

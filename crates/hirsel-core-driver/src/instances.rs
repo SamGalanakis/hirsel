@@ -54,7 +54,15 @@ pub(crate) struct InstanceBody {
 }
 impl InstanceBody {
     pub fn ir(&self) -> &Module {
-        self.module.as_ref().unwrap_or(&self.product.ir)
+        self.module.as_ref().unwrap_or(self.product.ir())
+    }
+    /// A published body's module is hashed in its record; a materialized
+    /// one is hashed here, by the same rule, through the caller's `scratch`.
+    pub fn ir_hash(&self, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {
+        match &self.module {
+            Some(module) => crate::body::ir_hash(module, scratch),
+            None => Ok(self.product.ir_hash()),
+        }
     }
 }
 impl InstanceSet {
@@ -159,7 +167,7 @@ impl CheckProduct {
                     })
                     .collect::<Result<Vec<_>, InstanceStop>>()?;
                 let (ir, row) = hirsel_core_front::materialize(
-                    &product.ir,
+                    product.ir(),
                     function,
                     template,
                     key,

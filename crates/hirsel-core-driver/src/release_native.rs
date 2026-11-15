@@ -41,7 +41,10 @@ impl CheckProduct {
         let mut emitted = HashSet::new();
         let mut modules: Vec<_> = reached
             .iter()
-            .map(|instance| define_once(materialized.get(instance).ir(), &mut emitted))
+            .map(|instance| {
+                let module = materialized.get(instance).ir();
+                without(module, &dropped(module, &mut emitted))
+            })
             .collect();
         let mut imported: Vec<_> = reached
             .iter()

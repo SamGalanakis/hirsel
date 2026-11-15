@@ -183,18 +183,100 @@ pub struct ResourceRefusal {
     pub message: String,
 }
 
-/// A body and its result are kept together: CoreIR ids refer only to this module.
-/// Callee rows are signature-only imports, so a callee-body edit does not alter it.
-pub struct DefinitionProduct {
-    pub definition: DefPath,
-    pub check: CoreCheck,
-    pub ir: Module,
-    pub resolved: bool,
-    pub key: DefinitionKey,
-    pub anchors: BTreeMap<(ModuleId, u32), DefPath>,
-    pub incomplete: Vec<Incomplete>,
-    /// The body record's address: the content hash of this product as published.
-    pub record: ContentHash,
+pub use body::DefinitionProduct;
+mod body {
+    use super::*;
+    /// The domain of a core module's hash: its canonical serialization, framed
+    /// as one part, exactly the bytes a body record carries for it.
+    const IR: &str = "hirsel.core-ir.v1";
+    /// A body and its result are kept together: CoreIR ids refer only to this module.
+    /// Callee rows are signature-only imports, so a callee-body edit does not alter it.
+    pub struct DefinitionProduct {
+        pub definition: DefPath,
+        pub check: CoreCheck,
+        ir: Module,
+        ir_hash: ContentHash,
+        pub resolved: bool,
+        pub key: DefinitionKey,
+        pub anchors: BTreeMap<(ModuleId, u32), DefPath>,
+        pub incomplete: Vec<Incomplete>,
+        /// The body record's address: the content hash of this product as published.
+        pub record: ContentHash,
+    }
+    /// The hash of a module no record carries: an instance's materialized body,
+    /// serialized into `scratch`, which a caller reuses across modules. A
+    /// stream into the hasher costs a dispatched write per encoded field.
+    pub(crate) fn ir_hash(module: &Module, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {
+        scratch.clear();
+        bincode::serialize_into(&mut *scratch, module).map_err(io::Error::other)?;
+        Ok(ContentHash::of_parts(IR, [&scratch[..]]))
+    }
+    impl DefinitionProduct {
+        /// A freshly checked body, with the serialization of its module that
+        /// its record frames: the hash is of these bytes.
+        #[allow(clippy::too_many_arguments)]
+        pub(crate) fn fresh(
+            definition: DefPath,
+            check: CoreCheck,
+            ir: Module,
+            resolved: bool,
+            key: DefinitionKey,
+            anchors: BTreeMap<(ModuleId, u32), DefPath>,
+            incomplete: Vec<Incomplete>,
+        ) -> io::Result<(Self, Vec<u8>)> {
+            let bytes = encode(&ir)?;
+            let product = Self {
+                definition,
+                check,
+                ir_hash: ContentHash::of_parts(IR, [&bytes[..]]),
+                ir,
+                resolved,
+                key,
+                anchors,
+                incomplete,
+                record: ContentHash::default(),
+            };
+            Ok((product, bytes))
+        }
+        /// A published body record, read back under its address.
+        pub(crate) fn from_disk(disk: DiskCheck, record: ContentHash) -> Self {
+            let [nodes, uses, places, calls, types, bytes] = disk.counts;
+            Self {
+                record,
+                definition: disk.definition,
+                anchors: (0u32..)
+                    .zip(disk.anchors)
+                    .map(|(i, path)| ((ANCHORED, i), path))
+                    .collect(),
+                key: disk.key,
+                incomplete: disk.incomplete,
+                resolved: disk.resolved,
+                ir: disk.ir,
+                ir_hash: disk.ir_hash,
+                check: CoreCheck {
+                    refusals: disk.refusals,
+                    gaps: vec![],
+                    function: disk.function.map(hirsel_core_ir::FuncId),
+                    template: disk.template,
+                    counts: hirsel_core_front::Counts {
+                        nodes,
+                        uses,
+                        places,
+                        calls,
+                        types,
+                        bytes,
+                    },
+                },
+            }
+        }
+        pub fn ir(&self) -> &Module {
+            &self.ir
+        }
+        /// The hash of `ir` as its record frames it.
+        pub fn ir_hash(&self) -> ContentHash {
+            self.ir_hash
+        }
+    }
 }
 #[derive(Clone)]
 pub struct CheckProduct {
@@ -283,7 +365,6 @@ struct DiskCheckRef<'a> {
     counts: [u64; 6],
     template: &'a Option<hirsel_core_front::GenericTemplate>,
     function: Option<u32>,
-    ir: &'a Module,
     resolved: bool,
 }
 impl<'a> DiskCheckRef<'a> {
@@ -328,7 +409,6 @@ impl<'a> DiskCheckRef<'a> {
             counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
             template: &d.check.template,
             function: d.check.function.map(|f| f.0),
-            ir: &d.ir,
             resolved: d.resolved,
         })
     }
@@ -343,8 +423,9 @@ struct DiskCheck {
     counts: [u64; 6],
     template: Option<hirsel_core_front::GenericTemplate>,
     function: Option<u32>,
-    ir: Module,
     resolved: bool,
+    ir: Module,
+    ir_hash: ContentHash,
 }
 impl Driver {
     pub fn check(
@@ -661,7 +742,7 @@ impl Driver {
                 }));
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
-            let mut fresh: Vec<(DefPath, ContentHash)> = Vec::new();
+            let mut fresh: Vec<(DefPath, ContentHash, Vec<u8>)> = Vec::new();
             for f in p.fns.base_len()..p.fns.len() {
                 let fd = &p.fns[f];
                 if fd.body.is_none() {
@@ -750,18 +831,17 @@ impl Driver {
                         .collect();
                     let anchors = keys.capture_anchors(&check, &incomplete);
                     result.rechecked.push(fd.path.clone());
-                    let product = DefinitionProduct {
-                        definition: fd.path.clone(),
+                    let (product, ir) = DefinitionProduct::fresh(
+                        fd.path.clone(),
                         check,
-                        ir: emitter.module,
-                        resolved: resolution.diagnostics.is_empty(),
+                        emitter.module,
+                        resolution.diagnostics.is_empty(),
                         key,
                         anchors,
                         incomplete,
-                        record: ContentHash::default(),
-                    };
+                    )?;
                     // Framed below, as publication work, once checking is done.
-                    fresh.push((fd.path.clone(), key_hash));
+                    fresh.push((fd.path.clone(), key_hash, ir));
                     Arc::new(product)
                 };
                 if product.resolved {
@@ -785,7 +865,7 @@ impl Driver {
             if MEASURE {
                 meter.finish_front();
             }
-            for (path, key_hash) in fresh {
+            for (path, key_hash, ir) in fresh {
                 let product = result
                     .definitions
                     .get_mut(&path)
@@ -795,7 +875,11 @@ impl Driver {
                             "internal error: the checked body `{path}` is shared before its record is framed"
                         ))
                     })?;
-                let (record, bytes) = Store::frame(&encode(&DiskCheckRef::of(product)?)?);
+                // The record ends with the module's bytes and their hash (`DiskCheck`).
+                let mut payload = encode(&DiskCheckRef::of(product)?)?;
+                payload.extend_from_slice(&ir);
+                payload.extend_from_slice(&encode(&product.ir_hash())?);
+                let (record, bytes) = Store::frame(&payload);
                 product.record = record;
                 publication.bodies.push((record, bytes));
                 publication.rows.insert(
@@ -907,7 +991,8 @@ fn prior_definition(
     let Some(disk) = store.get(record)?.and_then(|b| decode::<DiskCheck>(&b)) else {
         return Ok(None);
     };
-    Ok((disk.definition == *path && disk.key == *key).then(|| from_disk(disk, record)))
+    Ok((disk.definition == *path && disk.key == *key)
+        .then(|| DefinitionProduct::from_disk(disk, record)))
 }
 /// The file record: namespace map and anchor map (item ordinal, line base).
 fn file_record(
@@ -969,35 +1054,6 @@ fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) 
         .into_values()
         .filter_map(|path| Some((headers.get(&path)?.anchor, path)))
         .collect();
-}
-fn from_disk(disk: DiskCheck, record: ContentHash) -> DefinitionProduct {
-    let [nodes, uses, places, calls, types, bytes] = disk.counts;
-    DefinitionProduct {
-        record,
-        definition: disk.definition,
-        anchors: (0u32..)
-            .zip(disk.anchors)
-            .map(|(i, path)| ((ANCHORED, i), path))
-            .collect(),
-        key: disk.key,
-        incomplete: disk.incomplete,
-        resolved: disk.resolved,
-        ir: disk.ir,
-        check: CoreCheck {
-            refusals: disk.refusals,
-            gaps: vec![],
-            function: disk.function.map(hirsel_core_ir::FuncId),
-            template: disk.template,
-            counts: hirsel_core_front::Counts {
-                nodes,
-                uses,
-                places,
-                calls,
-                types,
-                bytes,
-            },
-        },
-    }
 }
 
 #[cfg(test)]

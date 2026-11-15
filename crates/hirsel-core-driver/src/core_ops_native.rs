@@ -319,7 +319,7 @@ pub fn proof_moves() -> u64 {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let mut options = native_options(backend,dir.path());
     options.root_limit = 296; // 288 main + round8(4); the carrier moves admit nothing.
-    let built = product.build(&entry,&options).unwrap_or_else(|error| panic!("{error:?}\n{}",hirsel_core_ir::text::print(&product.demand(&entry).unwrap().ir)));
+    let built = product.build(&entry,&options).unwrap_or_else(|error| panic!("{error:?}\n{}",hirsel_core_ir::text::print(product.demand(&entry).unwrap().ir())));
     run_clean(&built.executable,0);
 }
 #[test]

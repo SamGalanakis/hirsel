@@ -89,8 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let item = file.syntax.item(definition.site.item as usize);
         let mut instance_refs = Vec::new();
         let mut instance_bodies = Vec::new();
-        for function in &d.ir.functions {
-            let key = &d.ir.instances[function.instance.index()];
+        for function in &d.ir().functions {
+            let key = &d.ir().instances[function.instance.index()];
             instance_refs.push(format!("{key:?}"));
             if function.body.is_some() { instance_bodies.push(format!("{key:?}")); }
         }
@@ -110,8 +110,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "places": d.check.counts.places,
             "types": d.check.counts.types,
             "ir_bytes": d.check.counts.bytes,
-            "publication_payload_bytes": bincode::serialized_size(&(&d.ir, &d.check.template)).unwrap(),
-            "publication_payload_hash": format!("{:?}", hirsel_core_ids::ContentHash::of_bytes(&bincode::serialize(&(&d.ir, &d.check.template)).unwrap())),
+            "publication_payload_bytes": bincode::serialized_size(&(d.ir(), &d.check.template)).unwrap(),
+            "publication_payload_hash": format!("{:?}", hirsel_core_ids::ContentHash::of_bytes(&bincode::serialize(&(d.ir(), &d.check.template)).unwrap())),
             "template": d.check.template.is_some(),
             "key": {
                 "body":d.key.body, "lookups":d.key.lookups,
@@ -119,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             "instance_references": instance_refs,
             "instance_bodies": instance_bodies,
-            "ir": hirsel_core_ir::text::print(&d.ir),
+            "ir": hirsel_core_ir::text::print(d.ir()),
         })
     }).collect();
     std::fs::write(

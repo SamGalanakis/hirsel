@@ -177,14 +177,22 @@ fn emit_unit(
 
 /// Recipe glue may be present in several independent definition products. Its
 /// instance identity names one symbol; later units import the first definition.
-fn define_once<'a>(module: &'a Module, emitted: &mut HashSet<InstanceKey>) -> Cow<'a, Module> {
-    let mut result = Cow::Borrowed(module);
+/// The bodies a unit leaves to an earlier one, by ascending function index.
+fn dropped(module: &Module, emitted: &mut HashSet<InstanceKey>) -> Vec<u32> {
+    let mut dropped = Vec::new();
     for (i, function) in module.functions.iter().enumerate() {
         if function.body.is_some()
             && !emitted.insert(module.instances[function.instance.index()].clone())
         {
-            result.to_mut().functions[i].body = None;
+            dropped.push(i as u32);
         }
+    }
+    dropped
+}
+fn without<'a>(module: &'a Module, dropped: &[u32]) -> Cow<'a, Module> {
+    let mut result = Cow::Borrowed(module);
+    for &i in dropped {
+        result.to_mut().functions[i as usize].body = None;
     }
     result
 }
@@ -243,6 +251,7 @@ impl CheckProduct {
         }
         let mut objects = Vec::new();
         let mut emitted = HashSet::new();
+        let mut scratch = Vec::new();
         for instance in reached {
             let store = if !self.definitions.contains_key(&instance.definition) {
                 library_store.as_ref().unwrap_or(&store)
@@ -251,9 +260,13 @@ impl CheckProduct {
             };
             let instance_body = materialized.get(instance);
             let body = &instance_body.product;
-            let ir = define_once(instance_body.ir(), &mut emitted);
+            let module = instance_body.ir();
+            let dropped = dropped(module, &mut emitted);
+            // The unit is the module, less the dropped bodies: its hash and
+            // that set name it. A published body's hit encodes nothing; a
+            // materialized one encodes its module once, into `scratch`.
             let object_key = key(
-                "hirsel.core-object.v2",
+                "hirsel.core-object.v3",
                 &(
                     crate::native_object::SCHEMA,
                     compiler_identity()?,
@@ -267,25 +280,25 @@ impl CheckProduct {
                         && !hirsel_llvm_lazy::core::facts_enabled(),
                     &instance,
                     &body.key,
-                    &*ir,
+                    instance_body.ir_hash(&mut scratch)?,
+                    &dropped,
                 ),
             )?;
-            let (identity, object, compiled) = if let Some((hash, object)) =
-                crate::native_object::load(store, object_key)?
-            {
-                (hash, object, false)
-            } else {
-                let object =
-                    emit_unit(&ir, options, object_key).map_err(|message| NativeStop::Emit {
-                        definition: instance.definition.clone(),
-                        message,
-                    })?;
-                (
-                    crate::native_object::publish(store, object_key, &object)?,
-                    object,
-                    true,
-                )
-            };
+            let (identity, object, compiled) =
+                if let Some((hash, object)) = crate::native_object::load(store, object_key)? {
+                    (hash, object, false)
+                } else {
+                    let object = emit_unit(&without(module, &dropped), options, object_key)
+                        .map_err(|message| NativeStop::Emit {
+                            definition: instance.definition.clone(),
+                            message,
+                        })?;
+                    (
+                        crate::native_object::publish(store, object_key, &object)?,
+                        object,
+                        true,
+                    )
+                };
             objects.push(ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),
@@ -336,7 +349,7 @@ impl CheckProduct {
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
             let store = Store::new(&options.store)?;
             let object_key = key(
-                "hirsel.core-entry-cleanup.v2",
+                "hirsel.core-entry-cleanup.v3",
                 &(
                     crate::native_object::SCHEMA,
                     compiler_identity()?,
@@ -348,7 +361,7 @@ impl CheckProduct {
                     options.logical_charge_report.is_some(),
                     matches!(options.backend, Backend::Llvm)
                         && !hirsel_llvm_lazy::core::facts_enabled(),
-                    module,
+                    crate::body::ir_hash(module, &mut Vec::new())?,
                 ),
             )?;
             let (identity, object, compiled) = if let Some((identity, object)) =
@@ -455,7 +468,7 @@ pub(crate) fn bind_entry(
             .check
             .function
             .ok_or("entry body is not fully lowered")?;
-        let module = &product.ir;
+        let module = product.ir();
         let signature = &module.signatures[module.functions[function.index()].signature.index()];
         let dest = signature
             .dest
@@ -767,8 +780,8 @@ b0:
         let a = unit("a");
         let b = unit("b");
         let mut emitted = HashSet::new();
-        assert!(matches!(define_once(&a, &mut emitted), Cow::Borrowed(_)));
-        let selected = define_once(&b, &mut emitted);
+        assert!(dropped(&a, &mut emitted).is_empty());
+        let selected = without(&b, &dropped(&b, &mut emitted));
         assert!(selected.functions[0].body.is_some());
         assert!(selected.functions[1].body.is_none());
         assert!(
@@ -809,6 +822,7 @@ b0:
     include!("record_native.rs");
     include!("source_sites_native.rs");
     include!("facts_native.rs");
+    include!("object_key_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

@@ -91,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let body = checked.demand_body(&observed.definition)?;
             row["library"] = (!checked.definitions.contains_key(&observed.definition)).into();
             row["generic"] = body.check.template.is_some().into();
-            row["ir_bytes"] = serde_json::to_vec(&body.ir)?.len().into();
+            row["ir_bytes"] = serde_json::to_vec(body.ir())?.len().into();
         }
         std::fs::write(&args[6], serde_json::to_vec_pretty(&instance_details)?)?;
         meter.finish("instance/report");

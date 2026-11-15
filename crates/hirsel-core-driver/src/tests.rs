@@ -22,28 +22,146 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
         entry: None,
     }
 }
+/// A body record runs like the checked body, and every product's module hash
+/// is the `hirsel.core-ir.v1` hash of its module's whole serialization: fresh, reopened from
+/// the store, demanded from an image, and the helper for modules no record
+/// carries, with a scratch buffer left holding another module's bytes.
+/// Oracle: an independent encode and digest.
 #[test]
 fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
+    let full = |ir: &Module| {
+        ContentHash::of_parts("hirsel.core-ir.v1", [&bincode::serialize(ir).unwrap()[..]])
+    };
     let dir = tempfile::tempdir().unwrap();
-    let product = Driver::default()
-        .check(
-            request("fn answer() -> u64 { 6 * 7 }\n", dir.path()),
-            &mut Meter::new(false),
-        )
-        .unwrap();
-    assert!(product.accepted(), "{:?}", product.diagnostics);
-    let d = product.definitions.values().next().unwrap();
+    let source = "fn answer() -> u64 { 6 * 7 }\nfn wider(a: u64, b: u64) -> u64 { if a > b { a * b } else { a + b + 1 } }\n";
+    let check = || {
+        let product = Driver::default()
+            .check(request(source, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        assert!(product.accepted(), "{:?}", product.diagnostics);
+        product
+    };
+    let product = check();
+    let answer = DefPath::from_full("app@1/main/answer").unwrap();
+    let d = &product.definitions[&answer];
     let value = eval::run(d.ir(), d.check.function.unwrap(), &[], 1_000_000).outcome;
     assert_eq!(value, eval::Outcome::Returned(vec![42]));
     let store = Store::new(&dir.path().join("store")).unwrap();
     let index = check_index::ProgramIndex::open(&store).unwrap();
     assert_eq!(index.root, Some(product.root));
     let (_, record) = index.live(&d.definition).unwrap();
-    let disk: DiskCheck = decode(&store.get(record).unwrap().unwrap()).unwrap();
+    let body = store.get_body(record).unwrap().unwrap();
+    let disk: DiskCheck = decode(body.head()).unwrap();
+    let ir: Module = decode(body.ir()).unwrap();
     assert_eq!(
-        eval::run(&disk.ir, FuncId(disk.function.unwrap()), &[], 1_000_000).outcome,
+        eval::run(&ir, FuncId(disk.function.unwrap()), &[], 1_000_000).outcome,
         value
     );
+    let reopened = check();
+    assert!(reopened.rechecked.is_empty());
+    let mut scratch = Vec::new();
+    for d in product.definitions.values() {
+        let expected = full(d.ir());
+        assert_eq!(d.ir_hash(), expected, "fresh {}", d.definition);
+        assert_eq!(
+            reopened.definitions[&d.definition].ir_hash(),
+            expected,
+            "reopened"
+        );
+        assert_eq!(full(reopened.definitions[&d.definition].ir()), expected);
+        // The scratch holds the previous, unequal module's bytes.
+        assert_eq!(
+            crate::body::ir_hash(d.ir(), &mut scratch).unwrap(),
+            expected
+        );
+    }
+    let image_dir = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default()
+        .produce_image(
+            library_request("pub fn answer() -> u64 { 7u64 }", image_dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let image = CoreImage::open(&image.unwrap().store_root())
+        .unwrap()
+        .unwrap();
+    let demanded = image
+        .demand(&DefPath::from_full("core@1/lib/answer").unwrap())
+        .unwrap();
+    assert_eq!(demanded.ir_hash(), full(demanded.ir()), "image");
+}
+/// The body frame, against a hand-built envelope: `HBODY VERSION head_len
+/// ir_len head ir_hash ir address`, the address the SHA-256 of everything
+/// before the IR. Any changed byte, a truncation, a trailing byte or an
+/// impossible length reads as nothing; a changed IR byte keeps the address,
+/// so only the IR hash refuses it. An ordinary read refuses a body frame and
+/// a body read an ordinary one, and neither accepts VERSION 28.
+#[test]
+fn a_body_record_reads_back_only_whole() {
+    use sha2::Digest;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path()).unwrap();
+    let (head, ir) = (b"a head".as_slice(), b"the module bytes".as_slice());
+    let ir_hash = ContentHash::of_parts("hirsel.core-ir.v1", [ir]);
+    let mut expected = b"HBODY\0\0\0".to_vec();
+    expected.extend(29u32.to_le_bytes());
+    expected.extend((head.len() as u64).to_le_bytes());
+    expected.extend((ir.len() as u64).to_le_bytes());
+    expected.extend(head);
+    expected.extend(ir_hash.0);
+    let address = ContentHash(sha2::Sha256::digest(&expected).into());
+    expected.extend(ir);
+    expected.extend(address.0);
+    let framed = Store::frame_body(head, |b| {
+        b.extend_from_slice(ir);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(framed, (address, ir_hash, expected.clone()));
+    let read = |bytes: &[u8]| {
+        std::fs::write(store.path(address), bytes).unwrap();
+        store.get_body(address).unwrap()
+    };
+    let whole = read(&expected).unwrap();
+    assert_eq!(
+        (whole.head(), whole.ir(), whole.ir_hash),
+        (head, ir, ir_hash)
+    );
+    for at in 0..expected.len() {
+        let mut flipped = expected.clone();
+        flipped[at] ^= 1;
+        assert!(read(&flipped).is_none(), "byte {at}");
+    }
+    for len in 0..expected.len() {
+        assert!(read(&expected[..len]).is_none(), "{len} bytes");
+    }
+    assert!(
+        read(&[&expected[..], &[0]].concat()).is_none(),
+        "trailing byte"
+    );
+    for at in [12, 20] {
+        let mut long = expected.clone();
+        long[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(read(&long).is_none(), "length at {at}");
+    }
+    let mut old = expected.clone();
+    old[8..12].copy_from_slice(&28u32.to_le_bytes());
+    assert!(read(&old).is_none(), "VERSION 28 body");
+    std::fs::write(store.path(address), &expected).unwrap();
+    assert_eq!(
+        store.get(address).unwrap(),
+        None,
+        "an ordinary read of a body"
+    );
+    let ordinary = store.put(b"an ordinary payload").unwrap();
+    assert!(
+        store.get_body(ordinary).unwrap().is_none(),
+        "a body read of an ordinary record"
+    );
+    let mut bytes = std::fs::read(store.path(ordinary)).unwrap();
+    bytes[8..12].copy_from_slice(&28u32.to_le_bytes());
+    std::fs::write(store.path(ordinary), bytes).unwrap();
+    assert_eq!(store.get(ordinary).unwrap(), None, "VERSION 28 record");
 }
 #[test]
 fn refused_body_is_published_and_unreached_demand_is_explicit() {
@@ -512,43 +630,57 @@ fn image_signature_use_skips_source_and_body_decoding() {
 }
 #[test]
 fn corrupt_unused_image_body_is_a_miss_on_demand_only() {
-    let dir = tempfile::tempdir().unwrap();
-    let (_, image) = Driver::default()
-        .produce_image(
-            library_request("pub fn answer() -> u64 { 42 }\n", dir.path()),
-            &mut Meter::new(false),
-        )
-        .unwrap();
-    let image = image.unwrap();
-    let answer = DefPath::from_full("core@1/lib/answer").unwrap();
-    let hash = image.directory().unwrap().definitions[&answer];
-    let store = Store::new(&dir.path().join("store")).unwrap();
-    std::fs::write(store.path(hash), b"damaged").unwrap();
-    let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
-    let app = tempfile::tempdir().unwrap();
-    let mut req = request("fn caller() -> u64 { 42 }\n", app.path());
-    req.library = LibraryInput::Image(Arc::clone(&opened));
-    let checked = Driver::default()
-        .check(req, &mut Meter::new(false))
-        .unwrap();
-    assert!(checked.accepted(), "{:?}", checked.diagnostics);
-    assert!(
-        opened
-            .demand(&answer)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("cache miss")
-    );
-    let missing = DefPath::from_full("core@1/absent/absent").unwrap();
-    assert!(
-        opened
-            .demand(&missing)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("outside reached")
-    );
+    // The whole record, then only its module part under a valid address.
+    for damage in ["record", "module part"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, image) = Driver::default()
+            .produce_image(
+                library_request("pub fn answer() -> u64 { 42 }\n", dir.path()),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        let image = image.unwrap();
+        let answer = DefPath::from_full("core@1/lib/answer").unwrap();
+        let hash = image.directory().unwrap().definitions[&answer];
+        let store = Store::new(&dir.path().join("store")).unwrap();
+        if damage == "record" {
+            std::fs::write(store.path(hash), b"damaged").unwrap();
+        } else {
+            let mut bytes = std::fs::read(store.path(hash)).unwrap();
+            let last = bytes.len() - 33;
+            bytes[last] ^= 1;
+            std::fs::write(store.path(hash), bytes).unwrap();
+        }
+        let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let mut req = request("fn caller() -> u64 { 42 }\n", app.path());
+        req.library = LibraryInput::Image(Arc::clone(&opened));
+        let checked = Driver::default()
+            .check(req, &mut Meter::new(false))
+            .unwrap();
+        assert!(checked.accepted(), "{:?}", checked.diagnostics);
+        assert!(
+            opened
+                .demand(&answer)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains(&format!(
+                    "{} is missing or damaged",
+                    store.path(hash).display()
+                )),
+            "{damage}"
+        );
+        let missing = DefPath::from_full("core@1/absent/absent").unwrap();
+        assert!(
+            opened
+                .demand(&missing)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("outside reached")
+        );
+    }
 }
 #[test]
 fn refused_library_never_publishes_an_image() {
@@ -1962,6 +2094,7 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
     for case in [
         "torn root",
         "torn body",
+        "corrupted module part, valid address",
         "truncated leaf, valid envelope",
         "swapped body records",
         "corrupted body payload, valid envelope",
@@ -1993,6 +2126,15 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
             "torn body" => {
                 let bytes = std::fs::read(body(&dispatch)).unwrap();
                 std::fs::write(body(&dispatch), &bytes[..bytes.len() / 2]).unwrap();
+                vec!["dispatch"]
+            }
+            // The address covers the head and the module part's recorded
+            // hash, both intact; only that hash tells the part is damaged.
+            "corrupted module part, valid address" => {
+                let mut bytes = std::fs::read(body(&dispatch)).unwrap();
+                let last = bytes.len() - 33;
+                bytes[last] ^= 1;
+                std::fs::write(body(&dispatch), bytes).unwrap();
                 vec!["dispatch"]
             }
             "truncated leaf, valid envelope" => {
@@ -2028,12 +2170,11 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                 std::fs::copy(body(&main), body(&dispatch)).unwrap();
                 vec!["dispatch"]
             }
+            // A head byte, under the old address and lengths.
             "corrupted body payload, valid envelope" => {
-                let bytes = std::fs::read(body(&dispatch)).unwrap();
-                let mut payload = bytes[12..bytes.len() - 40].to_vec();
-                let last = payload.len() - 1;
-                payload[last] ^= 1;
-                std::fs::write(body(&dispatch), under_old_address(&bytes, &payload)).unwrap();
+                let mut bytes = std::fs::read(body(&dispatch)).unwrap();
+                bytes[20] ^= 1;
+                std::fs::write(body(&dispatch), bytes).unwrap();
                 vec!["dispatch"]
             }
             "another toolchain" => names(&fresh),

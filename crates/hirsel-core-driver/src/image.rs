@@ -215,8 +215,16 @@ impl CoreImage {
                 ))
             })?;
             self.bodies.get_or_try_init(id as u64, || {
-                let disk = self.read::<DiskCheck>(directory.definitions[path])?;
-                let mut body = DefinitionProduct::from_disk(disk, directory.definitions[path]);
+                let record = directory.definitions[path];
+                let body = self
+                    .store
+                    .get_body(record)?
+                    .ok_or_else(|| self.body_miss(record))?;
+                let mut body = DefinitionProduct::from_disk(&body, record, |body| {
+                    self.reader
+                        .decode(|| Some((decode(body.head())?, decode(body.ir())?)))
+                })
+                .ok_or_else(|| self.body_miss(record))?;
                 bind_record_sites(&mut body, &directory.headers);
                 Ok(Arc::new(body))
             })
@@ -235,6 +243,15 @@ impl CoreImage {
         let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         let bytes = self.store.get(record)?.ok_or_else(miss)?;
         self.reader.decode(|| decode(&bytes)).ok_or_else(miss)
+    }
+}
+impl CoreImage {
+    /// A body record the image names that is missing or damaged.
+    fn body_miss(&self, record: ContentHash) -> io::Error {
+        io::Error::other(format!(
+            "core image cache miss: the body record {} is missing or damaged; rebuild the image",
+            self.store.path(record).display()
+        ))
     }
 }
 fn miss() -> io::Error {

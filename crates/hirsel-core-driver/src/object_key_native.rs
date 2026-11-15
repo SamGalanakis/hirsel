@@ -70,10 +70,11 @@ const SHAPE: &str = "type P { a: u8 }\nfn id[T](take x: T) -> T { x }\nfn get(p:
 
 /// A request served from the store builds exactly the fresh request's
 /// objects, a generic and a non-generic instance among them, on both
-/// development engines, with debug lines off and on, under this process's
-/// LLVM facts setting (a key input). The second request changes a field of
-/// the shape `id[P]` is materialised with: its instance key and its generic
-/// body's key stay equal, so only its module's hash can miss.
+/// development engines. One native store serves debug lines off, on and off
+/// again: a changed setting misses every object, the same setting hits.
+/// A last request changes a field of the shape `id[P]` is materialised with:
+/// its instance key and its generic body's key stay equal, so only its
+/// module's hash can miss.
 #[test]
 #[ignore = "explicit native integration target"]
 fn dev_objects_served_from_the_store_are_fresh_emissions() {
@@ -81,44 +82,48 @@ fn dev_objects_served_from_the_store_are_fresh_emissions() {
         .replace("{ a: u8 }", "{ a: u8, b: u64 }")
         .replace("P(a: 7u8)", "P(a: 7u8, b: 1u64)");
     for backend in [Backend::Cranelift, Backend::Llvm] {
-        for debug_lines in [false, true] {
-            let case = format!("{backend:?} debug lines {debug_lines}");
-            let dir = tempfile::tempdir().unwrap();
-            let options = NativeOptions {
-                debug_lines,
-                ..native_options(backend, dir.path())
-            };
-            let check = |source: &str| {
-                let product = Driver::default()
-                    .check(
-                        object_request(source, dir.path(), "store"),
-                        &mut Meter::new(false),
-                    )
-                    .unwrap();
-                assert!(product.accepted(), "{case}: {:?}", product.diagnostics);
-                product
-            };
-            let cold = objects_of(&check(SHAPE), &options);
-            let fresh = fresh_objects(SHAPE, dir.path(), &options, 0);
-            assert_eq!(without_compiled(&cold), fresh, "{case}: cold");
-            let generic = cold.keys().find(|i| i.contains("name: \"id\"")).unwrap();
-            assert!(cold.keys().any(|i| i.contains("name: \"get\"")), "{case}");
-            let served = check(SHAPE);
-            assert!(served.rechecked.is_empty(), "{case}");
-            let hit = objects_of(&served, &options);
-            assert_eq!(compiled_names(&hit), Vec::<&str>::new(), "{case}: hit");
-            assert_eq!(without_compiled(&hit), fresh, "{case}: hit");
-            let edited = objects_of(&check(&shaped), &options);
-            assert!(
-                compiled_names(&edited).contains(&generic.as_str()),
-                "{case}: the reshaped generic misses"
-            );
-            assert_eq!(
-                without_compiled(&edited),
-                fresh_objects(&shaped, dir.path(), &options, 1),
-                "{case}: edited"
-            );
+        let dir = tempfile::tempdir().unwrap();
+        let check = |source: &str| {
+            let product = Driver::default()
+                .check(
+                    object_request(source, dir.path(), "store"),
+                    &mut Meter::new(false),
+                )
+                .unwrap();
+            assert!(product.accepted(), "{backend:?}: {:?}", product.diagnostics);
+            product
+        };
+        let options = |debug_lines| NativeOptions {
+            debug_lines,
+            ..native_options(backend, dir.path())
+        };
+        let mut generic = String::new();
+        for (n, debug_lines) in [false, true, false].into_iter().enumerate() {
+            let case = format!("{backend:?} request {n}, debug lines {debug_lines}");
+            let product = check(SHAPE);
+            assert_eq!(product.rechecked.is_empty(), n > 0, "{case}");
+            let objects = objects_of(&product, &options(debug_lines));
+            let compiled = compiled_names(&objects);
+            if n < 2 {
+                assert_eq!(compiled.len(), objects.len(), "{case}: misses");
+            } else {
+                assert_eq!(compiled, Vec::<&str>::new(), "{case}: hits");
+            }
+            let fresh = fresh_objects(SHAPE, dir.path(), &options(debug_lines), n);
+            assert_eq!(without_compiled(&objects), fresh, "{case}");
+            generic = objects.keys().find(|i| i.contains("name: \"id\"")).unwrap().clone();
+            assert!(objects.keys().any(|i| i.contains("name: \"get\"")), "{case}");
         }
+        let edited = objects_of(&check(&shaped), &options(false));
+        assert!(
+            compiled_names(&edited).contains(&generic.as_str()),
+            "{backend:?}: the reshaped generic misses"
+        );
+        assert_eq!(
+            without_compiled(&edited),
+            fresh_objects(&shaped, dir.path(), &options(false), 3),
+            "{backend:?}: edited"
+        );
     }
 }
 
@@ -188,58 +193,129 @@ fn another_libllvm_misses_every_llvm_object() {
     );
 }
 
-/// A valid body record whose stored module hash differs, behind the live
-/// row: the next request takes the record and misses that body's object.
+/// The child half of `llvm_facts_setting_misses_and_hits_across_processes`:
+/// with `OBJECT_KEY_FACTS_CHILD` naming a directory, emit SHAPE on LLVM
+/// development through that directory's stores under this process's facts
+/// setting and write the objects to `objects-<n>`.
 #[test]
 #[ignore = "explicit native integration target"]
-fn a_record_with_another_ir_hash_misses_its_object() {
-    let dir = tempfile::tempdir().unwrap();
-    let options = native_options(Backend::Cranelift, dir.path());
-    let check = || {
-        Driver::default()
-            .check(
-                object_request(SHAPE, dir.path(), "store"),
-                &mut Meter::new(false),
-            )
-            .unwrap()
+fn llvm_facts_child() {
+    let Some(dir) = std::env::var_os("OBJECT_KEY_FACTS_CHILD") else {
+        return;
     };
-    let cold = objects_of(&check(), &options);
-    assert_eq!(compiled_names(&cold).len(), cold.len());
-    let path = DefPath::from_full("app@1/main/get").unwrap();
-    let store = Store::new(&dir.path().join("store")).unwrap();
-    let (key, record) = check_index::ProgramIndex::open(&store)
-        .unwrap()
-        .live(&path)
+    let dir = PathBuf::from(dir);
+    let n = std::env::var("OBJECT_KEY_FACTS_RUN").unwrap();
+    let product = Driver::default()
+        .check(object_request(SHAPE, &dir, "store"), &mut Meter::new(false))
         .unwrap();
-    // The record ends with the hash of its module.
-    let mut payload = store.get(record).unwrap().unwrap();
-    *payload.last_mut().unwrap() ^= 1;
-    let disk = decode::<DiskCheck>(&payload).unwrap();
-    assert_eq!(disk.definition, path);
-    let (forged, bytes) = Store::frame(&payload);
-    store.write_framed(forged, &bytes).unwrap();
-    check_index::forge(&store, |_, leaves| {
-        for (_, rows) in leaves {
-            for (p, row) in rows {
-                if *p == path {
-                    *row = check_index::Row::Live { key, body: forged };
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let objects = objects_of(&product, &native_options(Backend::Llvm, &dir));
+    std::fs::write(dir.join(format!("objects-{n}")), encode(&objects).unwrap()).unwrap();
+}
+
+/// The LLVM facts setting is read once per process, so three child
+/// processes share one store with facts on, off and on: the changed setting
+/// misses every object, the same setting hits the first process's objects.
+#[test]
+#[ignore = "explicit native integration target"]
+fn llvm_facts_setting_misses_and_hits_across_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut runs = vec![];
+    for (n, facts) in [true, false, true].into_iter().enumerate() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--ignored", "--exact", "native::tests::llvm_facts_child"])
+            .env("OBJECT_KEY_FACTS_CHILD", dir.path())
+            .env("OBJECT_KEY_FACTS_RUN", n.to_string());
+        if facts {
+            child.env_remove("HIRSEL_LLVM_NO_FACTS");
+        } else {
+            child.env("HIRSEL_LLVM_NO_FACTS", "1");
+        }
+        let output = child.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        let objects: BTreeMap<String, (bool, Vec<u8>, Vec<u8>)> =
+            decode(&std::fs::read(dir.path().join(format!("objects-{n}"))).unwrap()).unwrap();
+        runs.push(objects);
+    }
+    for (n, objects) in runs.iter().enumerate() {
+        let compiled = compiled_names(objects).len();
+        assert_eq!(compiled, if n < 2 { objects.len() } else { 0 }, "run {n}");
+    }
+    assert_eq!(without_compiled(&runs[2]), without_compiled(&runs[0]));
+}
+
+/// A valid body record whose module part is another module, behind the live
+/// row: the module `get` was checked to in a variant program, under `get`'s
+/// own head. The next request takes the record and misses exactly that
+/// body's object, on both development engines, and the objects it builds are
+/// the same product's emissions into an empty native store.
+#[test]
+#[ignore = "explicit native integration target"]
+fn a_body_record_with_another_module_part_misses_its_object() {
+    let path = DefPath::from_full("app@1/main/get").unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let dir = tempfile::tempdir().unwrap();
+        let options = native_options(backend, dir.path());
+        let check = |source: &str, store: &str| {
+            let product = Driver::default()
+                .check(
+                    object_request(source, dir.path(), store),
+                    &mut Meter::new(false),
+                )
+                .unwrap();
+            assert!(product.accepted(), "{:?}", product.diagnostics);
+            product
+        };
+        let cold = objects_of(&check(SHAPE, "store"), &options);
+        assert_eq!(compiled_names(&cold).len(), cold.len());
+        let variant = check(&SHAPE.replace("{ p.a }", "{ p.a + 0u8 }"), "variant");
+        let other = encode(variant.definitions[&path].ir()).unwrap();
+        let store = Store::new(&dir.path().join("store")).unwrap();
+        let (key, record) = check_index::ProgramIndex::open(&store)
+            .unwrap()
+            .live(&path)
+            .unwrap();
+        let head = store.get_body(record).unwrap().unwrap().head().to_vec();
+        let (forged, part, bytes) = Store::frame_body(&head, |b| {
+            b.extend_from_slice(&other);
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(part, check(SHAPE, "store").definitions[&path].ir_hash());
+        store.write_framed(forged, &bytes).unwrap();
+        check_index::forge(&store, |_, leaves| {
+            for (_, rows) in leaves {
+                for (p, row) in rows {
+                    if *p == path {
+                        *row = check_index::Row::Live { key, body: forged };
+                    }
                 }
             }
-        }
-    });
-    let served = check();
-    assert!(served.rechecked.is_empty());
-    assert_eq!(served.demand(&path).unwrap().record, forged);
-    let names = objects_of(&served, &options);
-    let compiled = compiled_names(&names);
-    assert_eq!(compiled.len(), 1, "{compiled:?}");
-    assert!(compiled[0].contains("name: \"get\""), "{compiled:?}");
+        });
+        let served = check(SHAPE, "store");
+        assert!(served.rechecked.is_empty());
+        assert_eq!(served.demand(&path).unwrap().record, forged);
+        let names = objects_of(&served, &options);
+        let compiled = compiled_names(&names);
+        assert_eq!(compiled.len(), 1, "{backend:?}: {compiled:?}");
+        assert!(compiled[0].contains("name: \"get\""), "{compiled:?}");
+        let empty = NativeOptions {
+            store: dir.path().join("empty-native"),
+            ..native_options(backend, dir.path())
+        };
+        assert_eq!(
+            without_compiled(&names),
+            without_compiled(&objects_of(&served, &empty)),
+            "{backend:?}"
+        );
+    }
 }
 
 /// A newly reached instance that sorts first takes over the key glue
 /// (`$key_hash`, `$key_fold`, `$key_equal`) `map.insert` defined: `map.get`
 /// now defines it, and `map.insert`'s object, its module and key unchanged,
-/// must be the one that leaves it out.
+/// must be the one that leaves it out, on both development engines.
 #[test]
 #[ignore = "explicit native integration target"]
 fn glue_taken_over_by_a_first_sorting_instance_leaves_the_old_owner() {
@@ -255,8 +331,9 @@ fn glue_taken_over_by_a_first_sorting_instance_leaves_the_old_owner() {
     let both = format!(
         "fn a() -> u64 {{\n  let m: Map[String, u64] = map.new()\n  match map.get(m, \"k\") {{ Some(v) => v, None => 0 }}\n}}\n{b}pub fn main() -> Result[(), Exit] {{ if b() + a() == 1 {{ Ok(()) }} else {{ Error(Exit(status: 3)) }} }}\n"
     );
+    for backend in [Backend::Cranelift, Backend::Llvm] {
     let dir = tempfile::tempdir().unwrap();
-    let options = native_options(Backend::Cranelift, dir.path());
+    let options = native_options(backend, dir.path());
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let check = |source: &str| {
         let product = Driver::default()
@@ -276,10 +353,11 @@ fn glue_taken_over_by_a_first_sorting_instance_leaves_the_old_owner() {
         .iter()
         .find(|(i, _)| i.contains("name: \"insert\""))
         .unwrap();
-    assert!(insert.1.0, "the old owner's object misses");
+    assert!(insert.1.0, "{backend:?}: the old owner's object misses");
     assert_eq!(
         without_compiled(&edited),
         fresh_objects(&both, dir.path(), &options, 0)
     );
     run_clean(&product.build(&entry, &options).unwrap().executable, 0);
+    }
 }

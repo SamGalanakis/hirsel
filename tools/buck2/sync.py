@@ -31,9 +31,7 @@ Either part writes an output only when its bytes change.
 
 Without flags, sync.py regenerates both parts. `--if-stale` regenerates only
 the parts whose outputs are missing or edited or whose inputs read differently
-since they were generated. `--check` does that, then lists the sharded test
-binaries on the pool for their test-cost coverage (`--files-only` skips the
-listing, which runs Buck2).
+since they were generated. `--check` also regenerates stale parts.
 """
 
 from __future__ import annotations
@@ -43,7 +41,6 @@ import ast
 import collections
 import functools
 import json
-import math
 import os
 import pathlib
 import re
@@ -135,120 +132,6 @@ def _seeded_text(text: str) -> bool:
 
 def seeded(source_dir: pathlib.Path, crate_root: pathlib.Path) -> bool:
     return any(_seeded_text(READS.text(source)) for source in sorted(set(READS.glob(source_dir, "**/*.rs")) | {crate_root}))
-
-
-# Test binaries whose cases are split over parallel targets. Each has a table of
-# measured seconds per case on the pool (test-costs/<binary>.tsv, written by
-# test_costs.py). A binary gets enough shards that its total over its granted CPUs
-# concurrent cases is at most SHARD_SECONDS per shard, and test_launcher.sh
-# deals the table's cases out longest first. SHARD_SECONDS leaves room for the slow
-# worker class, for pool load (the same case measured up to 4x slower on a
-# loaded pool than alone on the host), for a shard's longest case, and for cases
-# that run their own worker threads, which oversubscribe a shard's CPUs: on
-# 2026-10-16 the stdlib binary in three shards (75 s each by its table) ran
-# 173-188 s per shard on the pool, and in six shards at most 86 s. The gate
-# keeps every test target near two minutes.
-SHARDED = []
-# Example and Free matrix cases each build and exercise programs. Keep one
-# compiled test case per shard, using the launcher's existing equal-cost
-# assignment by name.
-CASE_SHARDED = {}
-SHARD_SECONDS = 40
-COSTS = HERE / "test-costs"
-# Sharded binaries whose missing cost rows fail the check rather than warn.
-REQUIRED_COSTS = set()
-
-
-def case_cpus() -> dict[str, dict[str, int]]:
-    """EXACT_CASE_CPUS from test_requirements.bzl: binary -> case -> physical width."""
-    def fail(message):
-        raise SystemExit(f"tools/buck2/test_requirements.bzl: {message}")
-    scope = {"fail": fail}
-    exec(READS.text(HERE / "test_requirements.bzl"), scope)
-    return scope["EXACT_CASE_CPUS"]
-
-
-def shards(binary: str) -> tuple[int, str | None, dict[int, int]]:
-    """A test binary's measured shard count, cost table and exact shard count per
-    declared case width (unsharded: 1, None, {}).
-
-    Declared cases (EXACT_CASE_CPUS) leave the measured shards. Each width
-    group gets its own shards at SHARD_SECONDS per exact CPU; a declared case
-    without a cost row counts the mean, as the launcher deals it.
-    """
-    if binary in CASE_SHARDED:
-        source = READS.text(ROOT / CASE_SHARDED[binary])
-        # This harness declares top-level tests and example!(...) test cases;
-        # the indented #[test] inside the macro is its template, not a case.
-        count = len(re.findall(r"(?m)^#\[test\]$|^example!\(", source))
-        # One case a shard here too: declared cases fill their width groups.
-        declared = case_cpus().get(binary, {})
-        groups = collections.Counter(declared.values())
-        return max(1, count - len(declared)), None, dict(sorted(groups.items()))
-    if binary not in SHARDED:
-        if binary in case_cpus():
-            raise SystemExit(f"{binary} declares case widths but is not sharded by cost; add it to SHARDED")
-        return 1, None, {}
-    table = COSTS / f"{binary}.tsv"
-    if not READS.is_file(table):
-        raise SystemExit(f"{binary} is sharded but has no {relative(table)}; measure it (tools/buck2/test_costs.py)")
-    costs = {case: float(seconds) for case, seconds in (line.split("\t")[:2] for line in READS.text(table).splitlines())}
-    declared = case_cpus().get(binary, {})
-    mean = sum(costs.values()) / len(costs) if costs else 1.0
-    groups: dict[int, list[float]] = {}
-    for case, width in declared.items():
-        groups.setdefault(width, []).append(costs.get(case, mean))
-    case_shards = {width: max(1, min(len(group), math.ceil(sum(group) / (width * SHARD_SECONDS))))
-                   for width, group in sorted(groups.items())}
-    rows = [seconds for case, seconds in costs.items() if case not in declared]
-    total = sum(rows)
-    sizes = json.loads(READS.text(HERE / "test-sizes.json"))
-    cpu = sizes[binary]["cpu_count"]
-    if type(cpu) is not int or not 1 <= cpu <= 4:
-        raise ValueError(f"{binary}: cpu_count must be in 1..4 (test launcher's thread ceiling)")
-    # A case is indivisible: once each measured case has its own partition,
-    # more shards cannot reduce its wall time. Refreshed CLI costs can exceed
-    # the work budget individually; do not create thousands of empty actions.
-    count = max(1, min(len(rows), math.ceil(total / (cpu * SHARD_SECONDS))))
-    return count, f"//tools/buck2:{table.relative_to(HERE)}", case_shards
-
-
-def cost_coverage(inventories: dict[str, set[str]]) -> list[str]:
-    """Only live cases count toward coverage; stale cost rows cannot hide gaps."""
-    errors = []
-    for binary in SHARDED:
-        cases = inventories.get(binary, set())
-        measured = {line.split("\t")[0] for line in (COSTS / f"{binary}.tsv").read_text().splitlines()}
-        missing = cases - measured
-        message = None
-        if not cases:
-            message = f"{binary}: no case inventory returned"
-        elif len(missing) * 100 > len(cases) * 5:
-            message = (f"{binary}: {len(missing)}/{len(cases)} cases ({len(missing) / len(cases):.1%}) "
-                       f"have no cost row; re-measure with tools/buck2/test_costs.py: " + ", ".join(sorted(missing)))
-        if message:
-            if binary in REQUIRED_COSTS:
-                errors.append(message)
-            else:
-                print(f"warning: {message}", file=sys.stderr)
-    return errors
-
-
-def check_cost_coverage() -> list[str]:
-    """Ask libtest on the pool, including macro-generated and ignored cases.
-
-    Each unsharded inventory target lists the whole binary, including every
-    CPU width. This runs no bodies and does not bypass execution sharding.
-    """
-    from test_costs import inventory
-
-    targets = [f"//:{binary}-inventory" for binary in SHARDED]
-    command = [str(ROOT / ".buck2/bin/buck2"), "test", "-c", "hirsel.tests=focus", *targets]
-    result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if result.returncode:
-        return ["cost inventory failed:\n" + result.stdout]
-    return cost_coverage(inventory(result.stdout.splitlines()))
-
 
 
 INCLUDE = re.compile(r'\binclude(?:_str|_bytes)?!\(\s*"([^"]+)"\s*\)')
@@ -685,9 +568,7 @@ def first_party(meta: dict) -> str:
                 out.append("\n" + static_archive_rule(package, packages, attrs))
             if lib.get("test", True) and f"{name}-unittest" not in EMPTY_UNIT_HARNESSES:
                 binary = f"{name}-unittest"
-                count, costs, case_shards = shards(binary)
                 out.append("\n" + call("hirsel_test", name=binary, deps=test_deps,
-                                        shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                         **test_attrs(binary, src), **attrs))
         own = [f"//:{name}"] if lib else []
         if lib and lib.get("test", True) and not guarded(pathlib.Path(lib["src_path"])):
@@ -718,10 +599,8 @@ def first_party(meta: dict) -> str:
                     t["name"]: f"//:{name}-bin-{t['name']}"
                     for t in package["targets"] if t["kind"] == ["bin"]
                 }
-                count, costs, case_shards = shards(f"{name}-test-{target['name']}")
                 out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
-                                         shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
-                                         **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
+                                          **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
     out.append("\n" + call("hirsel_script_test", name="test-core-m1-runner", script="core/tools/test_m1.py", full=False,
                             data=["core/tools/m1.py"]))
     # host: the installed-prefix case runs a program that opens a Dir, which needs the host's openat2.
@@ -1067,8 +946,7 @@ def main() -> int:
     parser.add_argument("--if-stale", action="store_true",
                         help="regenerate only the parts whose outputs or inputs changed since they were generated")
     parser.add_argument("--check", action="store_true",
-                        help="regenerate when stale, then check the sharded test binaries' test-cost coverage on the pool")
-    parser.add_argument("--files-only", action="store_true", help="with --check, skip the pool's test-cost inventory")
+                        help="regenerate when stale")
     parser.add_argument("--strict-production-features", action="store_true",
                         help="fail on every production test feature, including the explicitly recorded baseline leaks")
     args = parser.parse_args()
@@ -1082,9 +960,6 @@ def main() -> int:
     if args.strict_production_features:
         check_production_features((ROOT / "BUCK").read_text(),
                                   json.loads((HERE / "production-features.json").read_text()), strict=True)
-    if args.check and not args.files_only and (errors := check_cost_coverage()):
-        print("\n".join(errors), file=sys.stderr)
-        return 1
     return 0
 
 

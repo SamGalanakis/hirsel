@@ -6,14 +6,6 @@ declare_platforms(
     constraints = ["prelude//os:linux", "prelude//cpu:x86_64"],
 )
 
-constraint_setting(name = "sanitizer", visibility = ["PUBLIC"])
-constraint_value(name = "sanitizer_thread", constraint_setting = ":sanitizer", visibility = ["PUBLIC"])
-platform(
-    name = "thread",
-    constraint_values = ["prelude//os/constraints:linux", "prelude//cpu/constraints:x86_64", ":profile_dev", ":sanitizer_thread"],
-    visibility = ["PUBLIC"],
-)
-
 constraint_setting(name = "profile")
 
 constraint_value(name = "profile_dev", constraint_setting = ":profile", visibility = ["PUBLIC"])
@@ -65,7 +57,6 @@ platform(
 
 host_transition(
     name = "test_tool_transition",
-    preserve_sanitizer = True,
     configuration_name = "root//tools/buck2:checked",
     budget = ":budget",
     panic = ":panic",
@@ -155,8 +146,6 @@ export_file(name = "consumer_results.py", mode = "reference", visibility = ["PUB
 export_file(name = "action_sizes_from_log.py", src = "action_sizes_from_log.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "test_sizes_from_usage.py", src = "test_sizes_from_usage.py", mode = "reference", visibility = ["PUBLIC"])
 
-# Measured seconds per case of each sharded test binary (sync.py, test_costs.py).
-[export_file(name = table, src = table, visibility = ["PUBLIC"]) for table in glob(["test-costs/*.tsv"])]
 
 # One identity for host code, independent of the caller's execution reservation.
 host_transition(

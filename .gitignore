@@ -40,4 +40,3 @@ __pycache__/
 /bench/**/reports/
 /bench/**/results/
 /bench/**/RESULTS-*
-/tools/buck2/toolchains/tsan-files/

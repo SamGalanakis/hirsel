@@ -1,9 +1,5 @@
 """Semantic CPU requirements of the surviving test harnesses."""
 
-EXACT_TEST_CPUS = {}
-EXACT_CASE_CPUS = {}
-ISOLATED_TEST_CASES = {}
-
 # These bodies use the real Linux OS Dir provider. Compile on the pool, execute
 # only on the invoking host; each body executes the shared fail-loud precondition.
 OPENAT2_TEST_CASES = {

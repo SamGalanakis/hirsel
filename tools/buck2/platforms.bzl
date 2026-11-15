@@ -32,7 +32,6 @@ merge rule above); the batch's own combinations are new digests.
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS", "POOL_BUDGETS", "SPECIAL_REQUESTS")
 load(":priorities.bzl", "LAND_PRIORITY")
 load(":test_sizes.bzl", "TEST_REQUESTS", "TEST_GUARD_LIMITS")
-load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS")
 
 PRIORITY = int(read_root_config("hirsel", "priority", "50"))
 if (PRIORITY < 0 or PRIORITY > 99) and PRIORITY != LAND_PRIORITY:
@@ -44,47 +43,39 @@ if (PRIORITY < 0 or PRIORITY > 99) and PRIORITY != LAND_PRIORITY:
 # The test launcher runs as many test threads as the request's whole CPUs.
 # A binary with no measurement yet runs as a single-threaded one with room.
 DEFAULT_TEST_REQUEST = [1, 2097152, ""]
-# Focus uses one CPU unless the binary declares a semantic exact requirement.
+# Focus uses one CPU.
 TEST_MODE = read_root_config("hirsel", "tests", "pool")
 FOCUS = TEST_MODE == "focus"
 
-def _test_request(cpu, memory_kb, cpu_class, exact_cpus = 0):
+def _test_request(cpu, memory_kb, cpu_class):
     """A test request's budget name and effective `[cpu, memory_kb, cpu_class]`."""
-    if exact_cpus:
-        if exact_cpus < 1:
-            fail("exact test CPUs must be positive")
-        return "pool_test_exact_" + pool_budget_name(exact_cpus, memory_kb, cpu_class).removeprefix("pool_"), [exact_cpus, memory_kb, cpu_class]
     if FOCUS:
         return "pool_focus_" + pool_budget_name(1, memory_kb, cpu_class).removeprefix("pool_"), [1, memory_kb, cpu_class]
     return "pool_test_" + pool_budget_name(cpu, memory_kb, cpu_class).removeprefix("pool_"), [cpu, memory_kb, cpu_class]
 
-def _binary_test_request(binary, exact_cpus = 0):
+def _binary_test_request(binary):
     cpu, memory_kb, cpu_class = TEST_REQUESTS.get(binary, DEFAULT_TEST_REQUEST)
-    return _test_request(cpu, memory_kb, cpu_class, exact_cpus or EXACT_TEST_CPUS.get(binary, 0))
+    return _test_request(cpu, memory_kb, cpu_class)
 
-def test_budget_name(binary, exact_cpus = 0):
-    return _binary_test_request(binary, exact_cpus)[0]
+def test_budget_name(binary):
+    return _binary_test_request(binary)[0]
 
-def test_request(binary, exact_cpus = 0):
-    """A test action's effective pool request `[cpu, memory_kb, cpu_class]`.
-
-    `exact_cpus` is the width its selected cases declare (EXACT_CASE_CPUS);
-    without one the binary's declared width or its measured request applies.
-    """
-    return _binary_test_request(binary, exact_cpus)[1]
+def test_request(binary):
+    """A test action's effective pool request `[cpu, memory_kb, cpu_class]`."""
+    return _binary_test_request(binary)[1]
 
 def test_memory_limit(binary, memory_kb):
     # The data/address-space guard includes unused thread stacks; it is not
     # the process group's enforced PSS, which alone sets the reservation.
     return max(1048576, 2 * memory_kb, TEST_GUARD_LIMITS.get(binary, 0))
 
-def test_executor(cpu, memory_kb, cpu_class, exact_cpus = 0):
+def test_executor(cpu, memory_kb, cpu_class):
     """A pool test run's executor: Buck2 runs a test with its own executor, not its platform's."""
     return CommandExecutorConfig(
         local_enabled = LOCAL,
         remote_enabled = not LOCAL,
         priority = PRIORITY,
-        remote_execution_properties = pool_properties(cpu, memory_kb, cpu_class, exact_cpus = exact_cpus),
+        remote_execution_properties = pool_properties(cpu, memory_kb, cpu_class),
         remote_execution_use_case = "hirsel",
     )
 
@@ -155,7 +146,7 @@ def budget_constraint(name):
 # the gitignored `.buckconfig.local` (tools/buck2/prepare.py).
 REMOTE_PROPERTIES = read_root_config("hirsel", "remote_properties", "")
 
-def pool_properties(cpu, memory_kb, cpu_class = "", exact_cpus = 0):
+def pool_properties(cpu, memory_kb, cpu_class = ""):
     properties = {
         "cpu_count": str(cpu),
         "memory_kb": str(memory_kb),
@@ -170,11 +161,6 @@ def pool_properties(cpu, memory_kb, cpu_class = "", exact_cpus = 0):
             properties[key.strip()] = value.strip()
     if cpu_class:
         properties["cpu_class"] = cpu_class
-    if exact_cpus:
-        if int(cpu) != exact_cpus:
-            fail("exact CPU request differs from scheduler reservation")
-        properties["cpu_affinity"] = "exact-v1"
-        properties["exact_cpus"] = str(exact_cpus)
     return properties
 
 def _platforms(ctx):
@@ -198,7 +184,7 @@ def _platforms(ctx):
                 priority = PRIORITY,
                 # Fixture build actions use the same exact-CPU platform as their
                 # consuming tests; only tests have an explicit executor override.
-                remote_execution_properties = pool_properties(cpu, memory_kb, cpu_class, exact_cpus = int(cpu) if name.startswith("pool_test_exact_") else 0),
+                remote_execution_properties = pool_properties(cpu, memory_kb, cpu_class),
                 remote_execution_use_case = "hirsel",
                 remote_output_paths = "output_paths",
             ),
@@ -254,13 +240,6 @@ def declare_platforms(name, constraints):
     for request in [DEFAULT_TEST_REQUEST] + TEST_REQUESTS.values():
         test, effective = _test_request(*request)
         tests[test] = effective
-    for binary in EXACT_TEST_CPUS:
-        test, effective = _binary_test_request(binary)
-        tests[test] = effective
-    for binary, cases in EXACT_CASE_CPUS.items():
-        for exact_cpus in cases.values():
-            test, effective = _binary_test_request(binary, exact_cpus)
-            tests[test] = effective
     for test, (cpu, memory_kb, cpu_class) in sorted(tests.items()):
         native.constraint_value(name = test, constraint_setting = ":budget", visibility = ["PUBLIC"])
         budgets["{}|{}|{}|{}".format(test, cpu, memory_kb, cpu_class)] = ":" + test

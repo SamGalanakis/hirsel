@@ -39,7 +39,6 @@ def graph_for(binaries, config):
     command = [str(ROOT / '.buck2/bin/buck2'), 'uquery', *query_config,
                f'kind("_rust_test", attrregexfilter(name, "{pattern}", //:))',
                '--output-attribute', '^test_binary$', '--output-attribute', '^shard',
-               '--output-attribute', '^costs$', '--output-attribute', '^exact_cpus$',
                '--output-attribute', '^extra_env$', '--output-attribute', '^labels$']
     result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
     graph = json.loads(result.stdout)
@@ -87,8 +86,8 @@ def listing(binary, graph, config, arguments):
     return {m[1] for line in details.splitlines() if (m := re.fullmatch(r'(\S+): test', line))}
 
 
-def owners(graph, inventories, widths=None):
-    result = CONSUMERS['assignments'](ROOT, graph, inventories, widths, overrides=False)
+def owners(graph, inventories):
+    result = CONSUMERS['assignments'](ROOT, graph, inventories, overrides=False)
     # Host requirements are physical ownership, not optional proof overrides.
     for target, attrs in graph.items():
         if 'requires-openat2' in attrs.get('labels', []):

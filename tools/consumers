@@ -18,9 +18,6 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 100
-# Sharded test binaries whose case names are read from their sources: binary -> test source.
-BIG = {}
-PROOF_HOMES = {}
 RUNTIME = re.compile(r'(?:^|/)(?:startup[^/]*|scheduler[^/]*|pool[^/]*|cpu[^/]*|managed_cores|ordered|launch)(?:[./]|$)')
 # Startup also lives in native entry emission and link construction.
 STARTUP_PREFIXES = (
@@ -48,9 +45,8 @@ def buck(root, *args):
 def test_graph(root, seeds):
     selection = f'rdeps(//:, {" + ".join(seeds)})' if seeds else '//:'
     graph = json.loads(buck(root, 'uquery', selection,
-                           '--output-attribute', '^test_binary$', '--output-attribute', '^shard',
-                           '--output-attribute', '^costs$', '--output-attribute', '^extra_env$',
-                           '--output-attribute', '^args$', '--output-attribute', '^exact_cpus$',
+                           '--output-attribute', '^test_binary$', '--output-attribute', '^extra_env$',
+                           '--output-attribute', '^args$',
                            '--output-attribute', '^script$', '--output-attribute', '^harness$',
                            '--output-attribute', r'^buck\.deps$'))
     # A test's data edge can be affected while its executable is independent.
@@ -63,230 +59,20 @@ def test_graph(root, seeds):
     return graph
 
 
-def static_cases(root, binary, table=None):
-    """A big binary's case names without building it: its cost table's rows and
-    each `#[test]` function by module path (a case-sharded binary: its
-    top-level tests and `example!` cases, as sync.py counts them). An extra
-    name selects at most one more shard; a measured case is never missed."""
-    names = set()
-    if table and table.is_file():
-        names |= {line.split('\t')[0] for line in table.read_text().splitlines() if line.strip()}
-    source = root / BIG[binary]
-    if source.is_file():
-        text = source.read_text()
-        names |= set(re.findall(r'(?m)^#\[test\]\n(?:#\[[^\n]*\]\n)*(?:pub(?:\([^)]*\))? )?fn (\w+)', text))
-        names |= set(re.findall(r'(?m)^example!\(\s*(\w+)', text))
-        return names
-    for file in sorted(source.rglob('*.rs')):
-        parts = list(file.relative_to(source).with_suffix('').parts)
-        if parts[-1] in ('main', 'mod', 'lib'):
-            parts = parts[:-1]
-        text = RUST_LITERAL.sub(lambda match: ' ' * len(match[0]), file.read_text())
-        for match in re.finditer(r'#\[test\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)', text):
-            inner = re.findall(r'\bmod\s+(\w+)\s*\{', text[:match.start()])
-            names.add('::'.join(parts + ([inner[-1]] if inner and inner[-1] == 'tests' else []) + [match[1]]))
-    return names
-
-
-def listings(root, graph):
-    """Case names of the big binaries present in the graph, read from sources
-    and cost tables; nothing is built (test_launcher.sh deals each measured
-    case by its table alone)."""
+def assignments(root, graph, inventories, *, overrides=True):
+    """Each live binary has one pool target, plus its host-only bodies."""
     result = {}
-    for target, attrs in graph.items():
-        binary = attrs.get('test_binary')
-        if binary in BIG and binary not in result:
-            costs = attrs.get('costs')
-            table = root / costs.removeprefix('root//').replace(':', '/').lstrip('/') if costs else None
-            result[binary] = static_cases(root, binary, table)
-    return result
-
-
-def case_widths(root=ROOT):
-    """EXACT_CASE_CPUS (tools/buck2/test_requirements.bzl): binary -> case -> CPUs."""
-    def fail(message):
-        raise ValueError(f'test_requirements.bzl: {message}')
-    scope = {'fail': fail}
-    exec((root / 'tools/buck2/test_requirements.bzl').read_text(), scope)
-    return scope['EXACT_CASE_CPUS']
-
-
-def assignments(root, graph, inventories, widths=None, *, overrides=True):
-    """Match test_launcher.sh's longest-first greedy assignment, including mean
-    costs. A binary with per-case widths deals each width group's cases over that
-    group's shards (`exact_cpus`), and its undeclared cases over the measured ones."""
-    result = {}
-    widths = case_widths(root) if widths is None else widths
     for binary, cases in inventories.items():
-        groups = {}
+        target = 'root//:' + binary
+        if target not in graph or not graph[target].get('test_binary'):
+            target += '-shard-1'
+        result.update({(binary, case): target for case in cases})
+    if overrides:
         for target, attrs in graph.items():
-            if attrs.get('test_binary') == binary and attrs.get('shards', 0) > 0:
-                groups.setdefault(attrs.get('exact_cpus', 0), {})[attrs.get('shard_index', 0)] = (target, attrs)
-        if not groups:
-            target = 'root//:' + binary
-            if target in graph:
-                result.update({(binary, case): target for case in cases})
-            continue
-        declared = widths.get(binary, {})
-        for case in cases:
-            if declared.get(case, 0) not in groups:
-                raise ValueError(f'{binary}: {case} declares {declared[case]} CPUs but the graph has no '
-                                 f'{binary}-cpus-{declared[case]} shards; run tools/buck2/sync.py')
-        for width, targets in groups.items():
-            deal(root, binary, [case for case in cases if declared.get(case, 0) == width], targets, result, declared, width)
-    if not overrides:
-        return result
-    for target, attrs in graph.items():
-        case = attrs.get('extra_env', {}).get('HIRSEL_TEST_DEDICATED_CASE')
-        if case and attrs.get('test_binary') in inventories:
-            if case not in inventories[attrs['test_binary']]:
-                raise ValueError(f'{target}: dedicated selector {case} is absent from the case listing')
-            result[attrs['test_binary'], case] = target
-    for key, target in PROOF_HOMES.items():
-        if key[1] in inventories.get(key[0], set()):
-            result[key] = target
+            case = attrs.get('extra_env', {}).get('HIRSEL_TEST_DEDICATED_CASE')
+            if case in inventories.get(attrs.get('test_binary'), set()):
+                result[attrs['test_binary'], case] = target
     return result
-
-
-def case_hash(name):
-    """test_launcher.sh's shard hash of a case without a cost row."""
-    h = 0
-    for byte in name.encode():
-        h = (h * 31 + byte) % 2147483647
-    return h
-
-
-def deal(root, binary, cases, targets, result, declared=None, width=0):
-    """One shard set's assignment, as test_launcher.sh deals it: the cost
-    table's rows of this width group longest first, other cases by name hash;
-    without a table, the cases in name order."""
-    _, attrs = targets[0]
-    count = attrs['shards']
-    declared = declared or {}
-    if not attrs.get('costs'):
-        for position, name in enumerate(sorted(cases)):
-            result[binary, name] = targets[position % count][0]
-        return
-    table = root / attrs['costs'].removeprefix('root//').replace(':', '/').lstrip('/')
-    rows = [line.split('\t') for line in table.read_text().splitlines() if line.strip()]
-    weights = {row[0]: float(f'{float(row[1]):.3f}') for row in rows if declared.get(row[0], 0) == width}
-    loads, owner = [0.0] * count, {}
-    for name in sorted(weights, key=lambda name: (-weights[name], name)):
-        shard = min(range(count), key=loads.__getitem__)
-        loads[shard] += weights[name]
-        owner[name] = shard
-    measured = {row[0] for row in rows}
-    for name in cases:
-        if name in measured:
-            if name in owner:
-                result[binary, name] = targets[owner[name]][0]
-        else:
-            result[binary, name] = targets[case_hash(name) % count][0]
-
-
-# Rust strings and comments may contain braces and fake function declarations.
-# Keep offsets while masking them before extracting function extents.
-RUST_LITERAL = re.compile(r'//[^\n]*|/\*.*?\*/|(?:b?r)(?P<hashes>\#*)".*?"(?P=hashes)|b?"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'', re.S)
-
-
-class Sources:
-    def __init__(self, root, path):
-        self.root = root
-        path = root / path
-        files = sorted(path.rglob('*.rs')) if path.is_dir() else [path]
-        support = (path if path.is_dir() else path.parent).parent / 'support'
-        files = sorted(set(files) | set(support.rglob('*.rs')))
-        self.files = {file: file.read_text() for file in files}
-        self.functions = {}
-        self.by_name = {}
-        for file in files:
-            source = file.read_text()
-            masked = RUST_LITERAL.sub(lambda match: ' ' * len(match[0]), source)
-            imports = '\n'.join(re.findall(r'(?m)^use [^;]+;', source))
-            for match in re.finditer(r'\bfn\s+(\w+)\s*(?:<[^;{]*>)?\s*\(', masked):
-                start = masked.find('{', match.end())
-                if start < 0:
-                    continue
-                depth, end = 1, start + 1
-                while depth and end < len(masked):
-                    depth += (masked[end] == '{') - (masked[end] == '}')
-                    end += 1
-                key = file, match[1]
-                body = imports + '\n' + source[match.start():end]
-                if key in self.functions:
-                    self.functions[key] += '\n' + body
-                else:
-                    self.functions[key] = body
-                    self.by_name.setdefault(match[1], []).append(key)
-
-    def matching(self, names, pattern):
-        """Walk each helper graph using cached match facts, rather than copying
-        the same fixture and helper source into every case's expanded text."""
-        direct, calls, files = {}, {}, {}
-
-        def references(origin, text):
-            for literal in re.findall(r'"([^"\n]+\.(?:hir|json))"', text):
-                for file in (origin.parent / literal, self.root / literal):
-                    file = file.resolve()
-                    if file.is_file() and file.is_relative_to(self.root):
-                        yield file
-                        break
-
-        def file_matches(first):
-            if first in files:
-                return files[first]
-            pending, seen = [first], set()
-            while pending:
-                file = pending.pop()
-                if file in seen:
-                    continue
-                seen.add(file)
-                if files.get(file):
-                    files[first] = True
-                    return True
-                text = file.read_text()
-                if pattern.search(file.relative_to(self.root).as_posix()) or pattern.search(text):
-                    files[first] = True
-                    return True
-                pending.extend(references(file, text))
-            files[first] = False
-            return False
-
-        def text_matches(file, text):
-            return bool(pattern.search(file.relative_to(self.root).as_posix()) or pattern.search(text)
-                        or any(file_matches(loaded) for loaded in references(file, text)))
-
-        matched = set()
-        for name in names:
-            parts = name.split('::')
-            candidates = self.by_name.get(parts[-1], [])
-            matching = [key for key in candidates if len(parts) == 1 or parts[-2] in key[0].parts
-                        or key[0].stem == parts[-2]]
-            pending = list(matching or candidates)
-            if not pending and len(parts) > 1:
-                # Macro-generated cases share their declaring module's inputs.
-                if any(text_matches(file, text) for file, text in self.files.items()
-                       if file.stem == parts[-2]):
-                    matched.add(name)
-            seen = set()
-            while pending:
-                key = pending.pop()
-                if key in seen:
-                    continue
-                seen.add(key)
-                if key not in direct:
-                    text = self.functions[key]
-                    direct[key] = text_matches(key[0], text)
-                    calls[key] = [] if direct[key] else [called_key
-                                  for qualifier, called in re.findall(
-                                      r'(?:(\w+)::)?\b(\w+)\s*\(', RUST_LITERAL.sub('', text))
-                                  for called_key in self.by_name.get(called, [])
-                                  if called_key[0] == key[0] or qualifier and called_key[0].stem == qualifier]
-                if direct[key]:
-                    matched.add(name)
-                    break
-                pending.extend(calls[key])
-        return matched
 
 
 def direct_owners(root, paths):
@@ -329,52 +115,30 @@ def distances(graph, owners):
 def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIMIT, cut=None):
     """Affected targets, nearest owner first; the first `limit` (0: all) are kept.
     `cut` receives the targets past the limit."""
-    mapped = assignments(root, graph, inventories)
-    def homes(binary, case):
-        return {mapped[binary, case]}
-
-    ordinary, shards = set(), set()
-    runtime = runtime_change(paths)
+    ordinary = set()
     tooling = all(path.startswith('tools/') for path in paths)
     scripts = {target: attrs['harness'] for target, attrs in graph.items()
                if graph.get(attrs.get('harness'), {}).get('script')}
     crates = {Path(path).parts[1].replace('-', '_') for path in paths if path.startswith('crates/')}
-    loaded_crates = crates | {target.split(':')[-1].replace('-', '_') for target in graph
-                             if crates and (root / 'crates' / target.split(':')[-1] / 'Cargo.toml').is_file()}
     for target, attrs in graph.items():
         binary = attrs.get('test_binary', '')
         if tooling and target in scripts:
             ordinary.add(target)
-        elif crates and binary and binary not in BIG:
+        elif crates and binary:
             ordinary.add(target)
-    expressions = [re.escape(crate) for crate in loaded_crates] + [re.escape(path) for path in paths]
-    pattern = re.compile('|'.join(expressions))
-    direct_cases = set()
-    test_paths = [path for path in paths if '/tests/' in path]
-    test_pattern = re.compile('|'.join(map(re.escape, test_paths))) if test_paths else None
-    for binary, names in inventories.items():
-        sources = Sources(root, BIG[binary])
-        affected = sources.matching(names, pattern)
-        if test_pattern:
-            direct_cases |= {mapped[binary, name] for name in sources.matching(names, test_pattern)}
-        for name in names:
-            if name in affected or runtime and re.search(r'pool|ordered|scheduler|cpu|tasks', name):
-                shards |= homes(binary, name)
     # Ownership is established by Buck's source graph, never by test status.
+    test_paths = [path for path in paths if "/tests/" in path]
     direct = {}
     for target, attrs in graph.items():
         binary = attrs.get('test_binary', '')
-        if binary in BIG:
-            if target in direct_cases:
-                direct[target] = 'direct test owner'
-        elif owners and (binary or target in scripts):
+        if owners and (binary or target in scripts):
             harness = scripts.get(target, 'root//:' + binary + '-harness')
             if target not in owners and harness not in owners:
                 continue
             owner = target if target in owners else harness
             direct[target] = (owners[owner] if isinstance(owners, dict) else
                               'direct test owner' if test_paths else 'direct source owner')
-    limit = limit or len(graph) + len(ordinary | shards | direct.keys())
+    limit = limit or len(graph) + len(ordinary | direct.keys())
     distance = distances(graph, owners or {})
 
     # Harnesses declare their crate dependencies flat, so most tests sit two
@@ -387,7 +151,7 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
     # Direct owners precede broad shards; each transitive binary gets a turn
     # before the bound is spent on a large unit-test family.
     groups = {}
-    for target in ordinary | shards:
+    for target in ordinary:
         if target not in direct:
             family = graph.get(target, {}).get('test_binary', target)
             groups.setdefault(family, []).append(target)
@@ -458,7 +222,7 @@ def main():
                 raise ValueError('Buck2 preparation failed')
         generated.require(ROOT)
         graph = test_graph(ROOT, sorted(seeds))
-        inventories = listings(ROOT, graph)
+        inventories = {}
         reasons, cut = {}, []
         selected = select(ROOT, paths, graph, inventories, direct_owners(ROOT, paths), reasons, args.limit, cut)
         if not selected:

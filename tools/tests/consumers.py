@@ -21,10 +21,6 @@ sys.path.insert(0, str(ROOT / 'tools/buck2'))
 import consumer_results  # noqa: E402
 
 
-def graph_for(inventories):
-    return {f'root//:{binary}-shard-{index + 1}':
-            dict(test_binary=binary, shard_index=index, shards=3, costs=None)
-            for binary in inventories for index in range(3)}
 
 
 class Consumers(unittest.TestCase):
@@ -85,51 +81,8 @@ class Consumers(unittest.TestCase):
                                     {'root//:lib': 'direct source owner'}, {}, 1, cut)
         self.assertEqual((selected, cut), (['root//:z-near'], ['root//:a-far']))
 
-    def test_case_source_follows_helpers_and_loaded_corpus_without_string_braces(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'loaded.hir').write_text('toml.document("a=1")')
-            (root / 'main.rs').write_text('''
-fn unrelated() { let text = "fn regression() { }"; }
-fn fixture() { let text = r###" } { "###; include_str!("loaded.hir"); }
-#[test]
-fn regression() { fixture(); }
-''')
-            source = consumers.Sources(root, 'main.rs')
-            self.assertEqual(source.matching({'regression', 'unrelated'}, re.compile(r'\btoml\.')),
-                             {'regression'})
 
-    def test_isolated_body_selects_its_dedicated_target_after_balancing(self):
-        binary = 'hirsel-cli-test-cli'
-        inventories = {binary: {'isolated', 'ordinary'}}
-        graph = graph_for(inventories)
-        before = consumers.assignments(ROOT, graph, inventories)
-        graph['dedicated'] = dict(test_binary=binary, extra_env={'HIRSEL_TEST_DEDICATED_CASE': 'isolated'})
-        after = consumers.assignments(ROOT, graph, inventories)
-        self.assertEqual(after[binary, 'isolated'], 'dedicated')
-        self.assertEqual(after[binary, 'ordinary'], before[binary, 'ordinary'])
 
-    def test_cost_assignment_matches_the_existing_launcher_vector(self):
-        # Same rule as buck2_launcher's behavioral test: table rows longest
-        # first (heap, then smoke and prefix on the lighter shard 2); other
-        # and host by name hash, both even: shard 1.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / 'costs').write_text('heap\t9\nprefix\t1\nsmoke\t2\n')
-            binary = 'fixture'
-            graph = {f'shard-{index + 1}': dict(test_binary=binary, shard_index=index,
-                                              shards=2, costs='root//:costs') for index in range(2)}
-            result = consumers.assignments(root, graph, {binary: {'heap', 'prefix', 'smoke', 'other', 'host'}}, widths={})
-            self.assertEqual({case: target for (_, case), target in result.items()},
-                             dict(heap='shard-1', prefix='shard-2', smoke='shard-2',
-                                  other='shard-1', host='shard-1'))
-            # A declared width group leaves the measured deal; it has its own shards.
-            graph['wide-shard-1'] = dict(test_binary=binary, shard_index=0, shards=1, exact_cpus=4, costs='root//:costs')
-            result = consumers.assignments(root, graph, {binary: {'heap', 'prefix', 'smoke', 'other', 'host'}},
-                                           widths={binary: {'heap': 4}})
-            self.assertEqual({case: target for (_, case), target in result.items()},
-                             dict(heap='wide-shard-1', host='shard-1', other='shard-1',
-                                  smoke='shard-1', prefix='shard-2'))
 
 
 class ConsumerResults(unittest.TestCase):

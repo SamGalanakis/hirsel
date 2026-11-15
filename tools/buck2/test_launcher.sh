@@ -3,11 +3,7 @@
 # package directory (HIRSEL_TEST_CWD), with an existing CARGO_TARGET_TMPDIR,
 # the pinned LLVM as LLVM_SYS_231_PREFIX (its bin first on PATH, for tests that
 # run `clang` by name, and its lib on the loader path), and test threads and campaign workers bounded by the action's CPU share (at
-# most 4 unless the target declares an exact CPU requirement).
-#
-# TEST_SHARD_INDEX=<i> of TEST_TOTAL_SHARDS=<n> (Bazel's variables, i from 0)
-# runs the i-th of n cost-balanced parts of the listed cases, weighted by
-# HIRSEL_TEST_COSTS when it names a cost table. Filters intersect that deal.
+# most 4).
 set -eu
 if [ -n "${HIRSEL_TEST_REPORTER:-}" ] && [ -z "${HIRSEL_TEST_REPORT_ACTIVE:-}" ]; then
   exec python3 "$HIRSEL_TEST_REPORTER" sh "$0" "$@"
@@ -124,28 +120,7 @@ case "$jobs" in
   *[!0-9]* | 0) echo "test_launcher.sh: invalid HIRSEL_TEST_CPUS=$jobs" >&2; exit 2 ;;
 esac
 # A visible, tighter cgroup quota and caller settings can only reduce it.
-exact_cpus="${HIRSEL_TEST_EXACT_CPUS:-}"
-if [ -n "$exact_cpus" ]; then
-  if [ "$exact_cpus" != "$jobs" ]; then
-    echo "test_launcher.sh: exact CPU request differs from reservation" >&2
-    exit 2
-  fi
-  # Validate inherited visibility, never expand it. The worker owns affinity.
-  visible=$(awk '/^Cpus_allowed_list:/ {
-    n=split($2, parts, ","); total=0
-    for (i=1; i<=n; i++) {
-      k=split(parts[i], ends, "-")
-      total += k == 1 ? 1 : ends[2]-ends[1]+1
-    }
-    print total
-  }' /proc/self/status)
-  if [ "$visible" != "$exact_cpus" ]; then
-    echo "test_launcher.sh: exact CPU request $exact_cpus has affinity width $visible" >&2
-    exit 2
-  fi
-else
-  [ "$jobs" -le 4 ] || jobs=4
-fi
+[ "$jobs" -le 4 ] || jobs=4
 cgroup="$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)" || cgroup=""
 while :; do
   if read -r quota period 2>/dev/null < "/sys/fs/cgroup${cgroup%/}/cpu.max" && [ "$quota" != max ]; then
@@ -156,10 +131,6 @@ while :; do
   [ -n "$cgroup" ] && [ "$cgroup" != / ] || break
   cgroup="${cgroup%/*}"
 done
-if [ -n "$exact_cpus" ] && [ "$jobs" != "$exact_cpus" ]; then
-  echo "test_launcher.sh: exact CPU request $exact_cpus exceeds inherited quota ($jobs)" >&2
-  exit 2
-fi
 # The run's memory grant (defs.bzl) caps its data before anything runs, so
 # scripts and the native programs a test launches are capped too; hirsel
 # binaries set the same limit again and name it when they reach it. The limit
@@ -269,22 +240,8 @@ run_harness() (
   fi
   "$harness" "$@"
 )
-shard=""
-if [ -n "${TEST_TOTAL_SHARDS:-}" ]; then shard="$((TEST_SHARD_INDEX + 1))/$TEST_TOTAL_SHARDS"; fi
-costs="${HIRSEL_TEST_COSTS:-}"
-case "$costs" in "" | /*) ;; *) costs="$root/$costs" ;; esac
-# Keep per-case costs in ordinary gate output, including an unsharded binary
-# that has a cost table. Libtest times each case, not the surrounding launcher.
-if [ -n "$costs" ]; then
-  export RUSTC_BOOTSTRAP=1
-  report_time=false
-  for argument in "$@"; do
-    case "$argument" in --report-time | --report-time=*) report_time=true ;; esac
-  done
-  if ! "$report_time"; then set -- "$@" -Zunstable-options --report-time; fi
-fi
 test_binary="${HIRSEL_TEST_BINARY:-}"
-unset HIRSEL_TEST_TMPDIR HIRSEL_TEST_CWD HIRSEL_TEST_BIN_EXES HIRSEL_TEST_BIN_EXE_DIR HIRSEL_TEST_COSTS HIRSEL_TEST_POOL
+unset HIRSEL_TEST_TMPDIR HIRSEL_TEST_CWD HIRSEL_TEST_BIN_EXES HIRSEL_TEST_BIN_EXE_DIR HIRSEL_TEST_POOL
 unset HIRSEL_TEST_BINARY
 full_gate=false
 ignored=false
@@ -360,32 +317,14 @@ for argument in "$@"; do
     *) filtered=true ;;
   esac
 done
-if "$discovery" && ! "$inventory" && [ -z "$shard" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then run_harness "$@"; exit $?; fi
-# Per-case physical widths (EXACT_CASE_CPUS, as `case=N` words). A case that
-# declares more CPUs than this action holds cannot prove its width: refuse it.
-case_cpus="${HIRSEL_TEST_CASE_CPUS:-}"
-cpu_group="${HIRSEL_TEST_CPU_GROUP:-}"
-unset HIRSEL_TEST_CASE_CPUS HIRSEL_TEST_CPU_GROUP
-check_case_cpus() {
-  [ -n "$case_cpus" ] || return 0
-  narrow="$(printf '%s\n' "$1" | awk -v declared="$case_cpus" -v jobs="$jobs" '
-    BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
-    ($0 in width) && width[$0] + 0 > jobs + 0 { printf "  %s declares %s CPUs\n", $0, width[$0] }')"
-  if [ -n "$narrow" ]; then
-    printf 'test_launcher.sh: this action holds %s CPUs; run these cases on their <binary>-cpus-N shards:\n%s\n' "$jobs" "$narrow" >&2
-    exit 2
-  fi
-}
-if [ -z "$shard" ] && ! "$inventory" && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
+if "$discovery" && ! "$inventory" && [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then run_harness "$@"; exit $?; fi
+if [ -z "${HIRSEL_TEST_HOST_CASES:-}" ] && ! "$inventory" && [ -z "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
   if [ -n "$test_binary" ] && { "$filtered" || "$restricted"; }; then
     cases="$(list_cases "$@")"
     if [ -z "$cases" ] && ! selection_exists "$@"; then
       printf 'test_launcher.sh: selector [%s] matched no test bodies\n' "$*" >&2
       exit 2
     fi
-    check_case_cpus "$cases"
-  elif [ -n "$case_cpus" ]; then
-    check_case_cpus "$(list_cases "$@")"
   fi
   materialize_native_inputs "$@"; run_harness "$@"; exit $?
 fi
@@ -400,6 +339,7 @@ if [ -n "${HIRSEL_TEST_DEDICATED_CASE:-}" ]; then
     exit 2
   fi
   cases="$(printf '%s\n' "$cases" | awk -v selected="$HIRSEL_TEST_DEDICATED_CASE" '$0 == selected')"
+  unset HIRSEL_TEST_HOST_CASES
 fi
 unset HIRSEL_TEST_DEDICATED_CASE
 if "$inventory"; then
@@ -410,96 +350,17 @@ if "$inventory"; then
     done
   fi
 fi
-# A binary with per-case widths has one shard set per width group, and the
-# measured shards (empty group) for its undeclared cases. Every shard deals
-# only its own group's cases, including when filters are present.
-owners="$action_cache/owners"
-: > "$owners"
-if [ -n "$case_cpus" ] && [ -n "$shard" ]; then
-  printf '%s\n' "$cases" | awk -v declared="$case_cpus" -v group="$cpu_group" -v binary="$test_binary" '
-    BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
-    NF && ($0 in width) && width[$0] != group { printf "  %s -> %s-cpus-%s shards\n", $0, binary, width[$0] }' >> "$owners"
-  cases="$(printf '%s\n' "$cases" | awk -v declared="$case_cpus" -v group="$cpu_group" '
-    BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
-    NF && (($0 in width) ? width[$0] : "") == group')"
-fi
-if [ -n "$shard" ]; then
-  index="${shard%/*}"
-  count="${shard#*/}"
-  # Deal only the bodies this run executes. A case ignored in this mode
-  # would leave a shard holding only it running nothing, and the reporter
-  # refuses a zero-body run that is not an empty partition.
-  if ! "$filtered"; then
-    case " $* " in
-    *" --ignored "* | *" --include-ignored "*) ;;
-    *)
-      ignored="$(list_cases --ignored "$@")"
-      if [ -n "$ignored" ]; then
-        cases="$(printf '%s\n' "$cases" | awk -v ignored="$ignored" '
-          BEGIN { n = split(ignored, rows, "\n"); for (i = 1; i <= n; i++) skip[rows[i]] = 1 }
-          NF && !($0 in skip)')"
-      fi ;;
-    esac
-  fi
-  # Longest-first greedy assignment of the cost table's rows
-  # (HIRSEL_TEST_COSTS: `case<TAB>seconds`, tools/buck2/test_costs.py) in
-  # this shard set's width group; a listed case without a row goes to the
-  # shard its name hashes to. A case's shard depends only on the table and
-  # its name, never on which other cases are live, so tools/consumers maps a
-  # case to its shard without building the harness. A binary without a
-  # table deals the live cases at equal cost in name order.
-  if [ -n "$costs" ]; then
-    awk -F '\t' -v declared="$case_cpus" -v group="$cpu_group" '
-      BEGIN { n = split(declared, rows, " "); for (i = 1; i <= n; i++) { split(rows[i], f, "="); width[f[1]] = f[2] } }
-      NF && (($1 in width) ? width[$1] : "") == group { printf "%.3f\t%s\n", $2 + 0, $1 }' "$costs" |
-      LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 |
-      awk -F '\t' -v index_="$index" -v count="$count" '{
-        best = 1; for (s = 2; s <= count; s++) if (load[s] < load[best]) best = s
-        load[best] += $1; print $2 "\t" best }' > "$action_cache/assigned"
-    cases="$(printf '%s\n' "$cases" | awk -F '\t' -v costs="$costs" -v assigned="$action_cache/assigned" -v index_="$index" -v count="$count" -v owners="$owners" '
-      BEGIN {
-        for (i = 1; i < 256; i++) code[sprintf("%c", i)] = i
-        while ((getline row < costs) > 0) { split(row, f, "\t"); measured[f[1]] = 1 }
-        while ((getline row < assigned) > 0) { split(row, f, "\t"); owner[f[1]] = f[2] }
-      }
-      NF {
-        if ($0 in measured) { home = owner[$0] }
-        else {
-          h = 0; for (i = 1; i <= length($0); i++) h = (h * 31 + code[substr($0, i, 1)]) % 2147483647
-          home = h % count + 1
-        }
-        printf "  %s -> shard %s/%s\n", $0, home, count >> owners
-        if (home == index_) print
-      }' | LC_ALL=C sort)"
-  else
-    cases="$(printf '%s\n' "$cases" | awk 'NF' | LC_ALL=C sort |
-      awk -v index_="$index" -v count="$count" -v owners="$owners" '{
-        home = (NR - 1) % count + 1
-        printf "  %s -> shard %s/%s\n", $0, home, count >> owners
-        if (home == index_) print }')"
-  fi
-fi
-# Deal every original case before removing isolated bodies, so unrelated
-# partitions keep their cases. Explicit selections still run the named body.
-if [ -n "${HIRSEL_TEST_ISOLATED_CASES:-}" ] && [ -n "$shard" ] && ! "$filtered"; then
-  cases="$(printf '%s\n' "$cases" | awk -v isolated="$HIRSEL_TEST_ISOLATED_CASES" '
-    BEGIN { n = split(isolated, names, " "); for (i = 1; i <= n; i++) excluded[names[i]] = 1 }
-    !($0 in excluded)')"
-fi
-unset HIRSEL_TEST_ISOLATED_CASES
 # Host requirements remain physical ownership under positive filters as well.
-if [ -n "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -n "$shard" ]; then
+if [ -n "${HIRSEL_TEST_HOST_CASES:-}" ]; then
   cases="$(printf '%s\n' "$cases" | awk -v isolated="$HIRSEL_TEST_HOST_CASES" '
     BEGIN { n = split(isolated, names, " "); for (i = 1; i <= n; i++) excluded[names[i]] = 1 }
     !($0 in excluded)')"
 fi
 unset HIRSEL_TEST_HOST_CASES
 if [ -z "$cases" ] && "$filtered" && ! "$discovery"; then
-  printf 'test_launcher.sh: selector [%s] matched no test bodies on %s shard %s\n' "$*" "$test_binary" "${shard:-dedicated}" >&2
-  cat "$owners" >&2
+  printf 'test_launcher.sh: selector [%s] matched no test bodies on %s\n' "$*" "$test_binary" >&2
   exit 2
 fi
-"$discovery" || check_case_cpus "$cases"
 # The caller's positive filters already shaped the listing. Replace them with
 # the exact selected names, preserving flags and paired values. In particular,
 # an empty partition must use an empty exact filter: no filters would run all.

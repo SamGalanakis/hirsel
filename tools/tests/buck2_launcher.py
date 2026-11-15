@@ -134,19 +134,6 @@ class CpuRequests(unittest.TestCase):
             with self.subTest(priority=priority), self.assertRaisesRegex(ValueError, '0 to 99.*150'):
                 self.platforms('pool', priority)
 
-    def test_exact_requirements_override_measurement_and_focus(self):
-        for mode in ('pool', 'focus'):
-            module = self.platforms(mode)
-            # Physical widths of two per-case groups and a whole binary.
-            for binary, group, cpu in [('hirsel-cli-test-free', 8, 8),
-                                       ('hirsel-cli-test-cli', 4, 4), ('hirsel-cli-test-cpu_pool_8', 0, 8)]:
-                measured = module['TEST_REQUESTS'].get(binary, module['DEFAULT_TEST_REQUEST'])
-                request = module['test_request'](binary, group)
-                self.assertEqual(request, [cpu, *measured[1:]])
-                props = module['test_executor'](*request, exact_cpus=cpu)['remote_execution_properties']
-                self.assertEqual((props['cpu_count'], props['exact_cpus'], props['cpu_affinity']),
-                                 (str(cpu), str(cpu), 'exact-v1'))
-                self.assertEqual(props['kiln_executor_runtime'], 'fixture-runtime')
 
     def test_ordinary_targets_keep_measured_and_focus_defaults(self):
         for mode in ('pool', 'focus'):
@@ -389,38 +376,7 @@ class LauncherReporting(LauncherFixture):
                 self.assertRegex(result.stderr, 'executed zero test bodies|matched no test bodies')
         self.assertCountEqual(statuses, [2, 2])
 
-    def test_an_unfiltered_shard_deals_only_the_bodies_its_run_executes(self):
-        # A shard whose deal held only a body ignored outside the full gate ran
-        # nothing and failed (hirsel-driver-test-it-shard-564).
-        self.env['CASES'] = json.dumps({'pool::full_gate_heap': True, 'pool::smoke': False})
-        for args, expected in [((), ['pool::smoke']),
-                               (('--include-ignored',), ['pool::full_gate_heap', 'pool::smoke'])]:
-            ran = []
-            for index in ('0', '1'):
-                with self.subTest(args=args, shard=index):
-                    self.env.update(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX=index)
-                    result = self.run_report(args)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    ran += json.loads(self.observed.read_text())['cases']
-            self.assertCountEqual(ran, expected)
 
-    def test_empty_partitions_and_discovery_keep_their_status(self):
-        self.env['CASES'] = json.dumps({'pool::only': False})
-        self.env.update(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX='1')
-        result = self.run_report()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        selected = json.loads(self.observed.read_text())
-        self.assertEqual(selected['cases'], [])
-        index = selected['argv'].index('--exact')
-        self.assertEqual(selected['argv'][index:index + 2], ['--exact', ''])
-        result = self.run_report(('pool::only',))
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn('pool::only -> shard 1/2', result.stderr)
-        self.env.pop('TEST_TOTAL_SHARDS')
-        self.env.pop('TEST_SHARD_INDEX')
-        self.env['CASES'] = '{}'
-        result = self.run_report(('--list',))
-        self.assertEqual(result.returncode, 0, result.stderr)
 
     def fixture(self):
         # Same started/result JSON events emitted by pinned libtest. The Rust
@@ -472,14 +428,6 @@ while True: signal.pause()
         result = self.run_report(('--exact', 'b_fail'))
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn('fixture-test-it executed zero test bodies', result.stderr)
-        costs = self.root / 'costs.tsv'
-        costs.write_text('a_pass\t1\n')
-        self.env['HIRSEL_TEST_COSTS'] = str(costs)
-        for unstable in ((), ('-Z', 'unstable-options')):
-            result = self.run_report(unstable)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertRegex(result.stdout, r'test a_pass \.\.\. ok <[0-9.]+s>')
-            self.assertIn('test result: ok. 1 passed; 0 failed; 1 ignored;', result.stdout)
     def test_executor_process_group_is_preserved_and_orphans_are_reaped(self):
         self.env['EXPECTED_PGID'] = str(os.getpgrp())
         (self.root / 'harness').write_text(r'''#!/usr/bin/env python3
@@ -548,38 +496,7 @@ class LauncherSelection(LauncherFixture):
                     self.assertIn(args[-1], run.stderr)
                     self.assertFalse(self.observed.exists())
 
-    def test_filtered_nonowner_fails_and_owner_and_unfiltered_shards_run(self):
-        # The independent longest-first deal assigns other to 1 and smoke to 2.
-        # Without costs, the one selected name goes to 1. Neither assignment changes.
-        self.env['CASES'] = json.dumps({'pool::other': False, 'pool::smoke': False})
-        costs = self.root / 'costs.tsv'
-        costs.write_text('pool::other\t9\npool::smoke\t1\n')
-        for table, owner in [('', 1), (str(costs), 2)]:
-            self.env['HIRSEL_TEST_COSTS'] = table
-            for index in (1, 2):
-                with self.subTest(table=bool(table), shard=index):
-                    result, diagnostic = self.run_cases('--exact', 'pool::smoke', shard=f'{index}/2',
-                                                       expected_status=0 if index == owner else 2)
-                    if index == owner:
-                        self.assertEqual(result['cases'], ['pool::smoke'])
-                    else:
-                        self.assertIn('selector [--exact pool::smoke', diagnostic)
-                        self.assertIn(f'pool::smoke -> shard {owner}/2', diagnostic)
-                        self.assertFalse(self.observed.exists())
-                    self.run_cases(shard=f'{index}/2')
 
-    def test_large_cost_table_does_not_become_one_process_argument(self):
-        # Driver's real cost table exceeds Linux's 128 KiB per-argument bound.
-        # The only positive weight goes to shard 1; zero-cost rows stay on 2.
-        costs = self.root / 'costs.tsv'
-        costs.write_text('pool::smoke\t9\n' + ''.join(
-            f'archived::{index:05}::' + 'x' * 64 + '\t0\n' for index in range(2000)))
-        self.assertGreater(costs.stat().st_size, 128 * 1024)
-        self.env['HIRSEL_TEST_COSTS'] = str(costs)
-        selected, _ = self.run_cases('--exact', 'pool::smoke', shard='1/2')
-        self.assertEqual(selected['cases'], ['pool::smoke'])
-        _, diagnostic = self.run_cases('--exact', 'pool::smoke', shard='2/2', expected_status=2)
-        self.assertIn('pool::smoke -> shard 1/2', diagnostic)
 
     def test_stale_dedicated_case_cannot_turn_into_an_empty_partition(self):
         self.env['HIRSEL_TEST_DEDICATED_CASE'] = 'removed_body'
@@ -597,26 +514,6 @@ class LauncherSelection(LauncherFixture):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual(run.stdout, '')
 
-    def test_isolation_preserves_other_partitions_and_explicit_selection(self):
-        before = [self.run_cases(shard=f'{i}/2')[0]['cases'] for i in (1, 2)]
-        self.env['HIRSEL_TEST_ISOLATED_CASES'] = 'pool::smoke'
-        after = [self.run_cases(shard=f'{i}/2')[0]['cases'] for i in (1, 2)]
-        for original, selected in zip(before, after):
-            self.assertEqual(selected, [case for case in original if case != 'pool::smoke'])
-        explicit = [case for i in (1, 2)
-                    for case in self.run_cases('--exact', 'pool::smoke', shard=f'{i}/2',
-                                               expected_status=0 if i == 1 else 2)[0]['cases']]
-        self.assertEqual(explicit, ['pool::smoke'])
-        self.env.pop('HIRSEL_TEST_ISOLATED_CASES')
-        dedicated, _ = self.run_cases('--exact', 'pool::smoke')
-        combined = [case for part in after for case in part] + dedicated['cases']
-        self.assertCountEqual(combined, [case for part in before for case in part])
-        self.env['HIRSEL_TEST_DEDICATED_CASE'] = 'pool::smoke'
-        dedicated, _ = self.run_cases('--exact', 'pool::smoke', 'pool::other')
-        self.assertEqual(dedicated['cases'], ['pool::smoke'])
-        self.env['HIRSEL_TEST_BINARY'] = 'fixture'
-        dedicated, _ = self.run_cases('--exact', 'pool::smoke', 'full_gate_', '--ignored', expected_status=2)
-        self.assertEqual(dedicated['cases'], [])
 
     def test_dedicated_exact_target_accepts_an_exact_caller_selection(self):
         self.env['HIRSEL_TEST_DEDICATED_CASE'] = 'pool::smoke'
@@ -625,49 +522,17 @@ class LauncherSelection(LauncherFixture):
         self.assertEqual(observed['argv'].count('--exact'), 1)
 
     def test_host_required_cases_never_run_on_a_pool_shard_even_with_positive_filters(self):
-        before = [case for i in (1, 2) for case in self.run_cases(shard=f'{i}/2')[0]['cases']]
+        before = self.run_cases()[0]['cases']
         self.env['HIRSEL_TEST_HOST_CASES'] = 'pool::smoke'
-        after = [case for i in (1, 2) for case in self.run_cases(shard=f'{i}/2')[0]['cases']]
+        after = self.run_cases()[0]['cases']
         self.assertCountEqual(after, [case for case in before if case != 'pool::smoke'])
-        explicit = [case for i in (1, 2)
-                    for case in self.run_cases('pool::', shard=f'{i}/2', expected_status=0)[0]['cases']]
+        explicit = self.run_cases('pool::')[0]['cases']
         self.assertNotIn('pool::smoke', explicit)
         self.assertIn('pool::other', explicit)
         self.env['HIRSEL_TEST_DEDICATED_CASE'] = 'pool::smoke'
         dedicated, _ = self.run_cases('--exact', 'pool::smoke')
         self.assertEqual(dedicated['cases'], ['pool::smoke'])
 
-    def test_width_groups_partition_cases_and_refuse_a_narrower_action(self):
-        # pool::smoke declares two CPUs. The measured shards deal the other
-        # cases as if it were absent; its group's own shard runs it alone.
-        everything = [case for i in (1, 2) for case in self.run_cases(shard=f'{i}/2')[0]['cases']]
-        self.env['HIRSEL_TEST_CASE_CPUS'] = 'pool::smoke=2 pool::unlisted=8'
-        self.env['HIRSEL_TEST_CPUS'] = '1'
-        measured = [self.run_cases(shard=f'{i}/2')[0]['cases'] for i in (1, 2)]
-        self.assertNotIn('pool::smoke', [case for part in measured for case in part])
-        self.env |= dict(HIRSEL_TEST_CPU_GROUP='2', HIRSEL_TEST_CPUS='2')
-        wide, _ = self.run_cases(shard='1/1')
-        self.assertEqual(wide['cases'], ['pool::smoke'])
-        self.assertCountEqual([case for part in measured for case in part] + wide['cases'], everything)
-        # Filters on a narrow shard leave a wide case to its owning group.
-        self.env |= dict(HIRSEL_TEST_CPU_GROUP='', HIRSEL_TEST_CPUS='1')
-        selected, diagnostic = self.run_cases('--exact', 'pool::smoke', shard='1/2', expected_status=2)
-        self.assertIn('fixture-test-it-cpus-2 shards', diagnostic)
-        self.assertEqual(selected['cases'], [])
-        self.env |= dict(HIRSEL_TEST_CPU_GROUP='2', HIRSEL_TEST_CPUS='2')
-        selected, _ = self.run_cases('--exact', 'pool::smoke', shard='1/1')
-        self.assertEqual(selected['cases'], ['pool::smoke'])
-        # An unpartitioned selection still refuses insufficient physical width.
-        self.env |= dict(HIRSEL_TEST_CPU_GROUP='', HIRSEL_TEST_CPUS='1')
-        for args, shard in [(('pool::smoke',), ''), ((), '')]:
-            self.observed.unlink(missing_ok=True)
-            env = self.env | ({'TEST_SHARD_INDEX': '0', 'TEST_TOTAL_SHARDS': '2'} if shard else {})
-            run = subprocess.run(['sh', str(LAUNCHER), 'harness', *args], cwd=self.root, env=env, capture_output=True, text=True)
-            self.assertEqual(run.returncode, 2, (args, run.stderr))
-            self.assertIn('pool::smoke declares 2 CPUs', run.stderr)
-            self.assertFalse(self.observed.exists())
-        _, listed = self.run_cases('--list')
-        self.assertIn('pool::smoke: test', listed)
 
     def launcher_with_quota(self, quota):
         # Keep the real launcher's quota logic, with deterministic kernel files.
@@ -727,46 +592,8 @@ class LauncherSelection(LauncherFixture):
         self.assertEqual(result['threads'], '2')
         self.assertEqual(result['jobs'], '2')
 
-    @unittest.skipUnless(len(os.sched_getaffinity(0)) >= 8, 'requires eight inherited CPUs')
-    def test_exact_eight_cpu_request_preserves_width_or_refuses_a_tighter_quota(self):
-        self.env.update(HIRSEL_TEST_CPUS='8', HIRSEL_TEST_EXACT_CPUS='8',
-                        RUST_TEST_THREADS='8', HIRSEL_JOBS='8')
-        cpus = ','.join(map(str, sorted(os.sched_getaffinity(0))[:8]))
-        for quota in ('max', '400000', '100000'):
-            with self.subTest(quota=quota):
-                self.observed.unlink(missing_ok=True)
-                launcher = self.launcher_with_quota(quota)
-                run = subprocess.run(['taskset', '-c', cpus, 'sh', str(launcher), 'harness'],
-                                     cwd=self.root, env=self.env, capture_output=True, text=True)
-                if quota != 'max':
-                    self.assertEqual(run.returncode, 2, run.stderr)
-                    self.assertIn(f'exceeds inherited quota ({int(quota) // 100000})', run.stderr)
-                    self.assertFalse(self.observed.exists())
-                else:
-                    self.assertEqual(run.returncode, 0, run.stderr)
-                    result = json.loads(self.observed.read_text())
-                    self.assertEqual((result['threads'], result['jobs']), ('8', '8'))
 
-    @unittest.skipUnless(len(os.sched_getaffinity(0)) >= 2, 'requires two inherited CPUs')
-    def test_exact_two_cpu_request_preserves_the_inherited_mask(self):
-        self.env.update(HIRSEL_TEST_CPUS='2', HIRSEL_TEST_EXACT_CPUS='2',
-                        RUST_TEST_THREADS='2', HIRSEL_JOBS='2')
-        cpus = ','.join(map(str, sorted(os.sched_getaffinity(0))[:2]))
-        launcher = self.launcher_with_quota('max')
-        run = subprocess.run(['taskset', '-c', cpus, 'sh', str(launcher), 'harness'],
-                             cwd=self.root, env=self.env, capture_output=True, text=True)
-        self.assertEqual(run.returncode, 0, run.stderr)
-        result = json.loads(self.observed.read_text())
-        self.assertEqual((result['threads'], result['jobs']), ('2', '2'))
 
-    def test_exact_request_refuses_a_smaller_inherited_affinity(self):
-        self.env.update(HIRSEL_TEST_CPUS='8', HIRSEL_TEST_EXACT_CPUS='8')
-        cpu = str(min(os.sched_getaffinity(0)))
-        run = subprocess.run(['taskset', '-c', cpu, 'sh', str(LAUNCHER), 'harness'],
-                             cwd=self.root, env=self.env, capture_output=True, text=True)
-        self.assertEqual(run.returncode, 2, run.stderr)
-        self.assertIn('exact CPU request', run.stderr)
-        self.assertFalse(self.observed.exists())
 
     def test_pool_without_a_reservation_fails_before_running_the_harness(self):
         run = subprocess.run(['sh', str(LAUNCHER), 'harness'], cwd=self.root,
@@ -813,75 +640,18 @@ class LauncherSelection(LauncherFixture):
 
     def test_every_native_case_runs_once_on_the_pool_even_under_exact(self):
         for case in CASES:
-            actual = [name for i in (1, 2, 3) for name in
-                      self.run_cases(case, '--exact', '--include-ignored', shard=f'{i}/3',
-                                     expected_status=0 if i == 1 else 2)[0]['cases']]
+            actual = self.run_cases(case, '--exact', '--include-ignored')[0]['cases']
             self.assertEqual(actual, [case])
 
-    def test_shards_cover_all_selected_cases_once(self):
-        actual = []
-        for shard in ('1/3', '2/3', '3/3'):
-            result, _ = self.run_cases('--include-ignored', shard=shard)
-            actual.extend(result['cases'])
-        self.assertCountEqual(actual, CASES)
 
-    def test_costs_balance_shards_longest_first(self):
-        costs = self.root / 'costs.tsv'
-        # The table's rows deal longest first (heap 9 to shard 1; smoke 2,
-        # then prefix 1, to the lighter shard 2). Unmeasured cases go by name
-        # hash (h = h * 31 + byte mod 2^31 - 1): pool::other and
-        # pool::full_gate_prefix_host are both odd, shard 2.
-        costs.write_text('pool::full_gate_heap\t9\npool::full_gate_prefix\t1\npool::smoke\t2\n')
-        shards = {}
-        for shard in ('1/2', '2/2'):
-            self.env['HIRSEL_TEST_COSTS'] = str(costs)
-            result, _ = self.run_cases('--include-ignored', '--skip=host::', shard=shard)
-            shards[shard] = set(result['cases'])
-        self.assertEqual(shards, {'1/2': {'pool::full_gate_heap'},
-                                  '2/2': {'pool::full_gate_prefix', 'pool::full_gate_prefix_host',
-                                          'pool::other', 'pool::smoke'}})
 
-    def test_cost_tables_enable_timing_once_including_unsharded_binaries(self):
-        costs = self.root / 'costs.tsv'
-        costs.write_text('pool::smoke\t1\n')
-        self.env['HIRSEL_TEST_COSTS'] = str(costs)
-        for shard in ('', '1/2'):
-            result, _ = self.run_cases(shard=shard)
-            self.assertIn('--report-time', result['argv'])
-            self.assertIn('-Zunstable-options', result['argv'])
-            self.assertEqual(result['bootstrap'], '1')
-        result, _ = self.run_cases('-Z', 'unstable-options', '--report-time')
-        self.assertEqual(result['argv'].count('--report-time'), 1)
 
     def test_flags_and_values_do_not_select_cases(self):
-        actual = []
-        for shard in ('1/3', '2/3', '3/3'):
-            result, _ = self.run_cases('-Z', 'unstable-options', '--test-threads', '2',
-                                       '--include-ignored', shard=shard)
-            actual.extend(result['cases'])
-        self.assertCountEqual(actual, CASES)
+        result, _ = self.run_cases('-Z', 'unstable-options', '--test-threads', '2',
+                                   '--include-ignored')
+        self.assertCountEqual(result['cases'], CASES)
 
-    def test_filtered_cases_keep_their_cost_table_owner(self):
-        costs = self.root / 'costs.tsv'
-        costs.write_text('pool::full_gate_heap\t9\npool::full_gate_prefix\t1\npool::smoke\t2\n')
-        self.env['HIRSEL_TEST_COSTS'] = str(costs)
-        for shard in ('1/2', '2/2'):
-            baseline, _ = self.run_cases('--include-ignored', shard=shard)
-            selected, _ = self.run_cases('pool::', '--include-ignored', shard=shard)
-            self.assertEqual(selected['cases'], [name for name in baseline['cases'] if name.startswith('pool::')])
-            for name in selected['cases']:
-                exact, _ = self.run_cases('--exact', name, '--include-ignored', shard=shard)
-                self.assertEqual(exact['cases'], [name])
-        self.assertTrue(self.run_cases('full_gate_', '--ignored', shard='2/2')[0]['cases'])
 
-    def test_shard_listing_names_the_same_cases_as_shard_execution(self):
-        for shard in ('1/2', '2/2'):
-            executed, _ = self.run_cases('--include-ignored', shard=shard)
-            _, output = self.run_cases('--list', '--include-ignored', shard=shard)
-            listed = [line.removesuffix(': test') for line in output.splitlines() if line.endswith(': test')]
-            self.assertCountEqual(listed, executed['cases'])
-        _, output = self.run_cases('--list', 'missing_case', shard='1/2')
-        self.assertEqual(output, '')
 
     def test_values_and_spaces_survive_selection(self):
         args = ('--test-threads', '2', '--logfile', 'a path with spaces', '--color=never',
@@ -972,7 +742,7 @@ print(json.dumps(dict(cache=str(cache), data=os.environ['XDG_DATA_HOME'])))
             self.assertEqual(blocked.read_text(), 'not a directory')
 
     def test_failure_and_filtered_empty_shard_clean_up_and_preserve_exit(self):
-        for args, env in [((), {}), (('only-this',), dict(TEST_TOTAL_SHARDS='2', TEST_SHARD_INDEX='1'))]:
+        for args, env in [((), {}), (('only-this',), dict(HIRSEL_TEST_DEDICATED_CASE='removed'))]:
             run = self.launch_probe("import os, sys\nif '--list' in sys.argv:\n    print('only-this: test'); sys.exit(0)\nif '' in sys.argv: sys.exit(0)\nprint(os.environ['XDG_CACHE_HOME'])\nsys.exit(17)\n",
                                     args=args, env=self.env | env)
             if not args:

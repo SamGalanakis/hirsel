@@ -13,7 +13,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
-load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES", "OPENAT2_TEST_CASES")
+load(":test_requirements.bzl", "OPENAT2_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "runtime_profile_flags", "workspace_profile_flags")
 load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "MergedLinkInfo")
@@ -38,12 +38,12 @@ TESTS_ON_HOST = read_root_config("hirsel", "tests", "pool") == "host"
 # same seed; a run under `-c hirsel.test_seed=N` draws another.
 TEST_SEED = read_root_config("hirsel", "test_seed", "1")
 
-def _request(binary, exact_cpus = 0):
-    return [str(field) for field in test_request(binary, exact_cpus)]
+def _request(binary):
+    return [str(field) for field in test_request(binary)]
 
-def _test_platform(binary, exact_cpus = 0):
-    """The invoking host, or the pool request for `binary` (measured, or `exact_cpus` wide)."""
-    return [budget_constraint("host" if TESTS_ON_HOST else test_budget_name(binary, exact_cpus))]
+def _test_platform(binary):
+    """The invoking host, or the measured pool request for `binary`."""
+    return [budget_constraint("host" if TESTS_ON_HOST else test_budget_name(binary))]
 
 def _from_package(manifest_dir, path):
     """`path`, relative to the repository root, as seen from `manifest_dir`."""
@@ -192,7 +192,6 @@ def hirsel_library(name, crate, crate_root, srcs, features, deps, manifest_dir, 
 def hirsel_binary(name, bin_name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None):
     env = _compile_env(package_name, crate, version, build_script)
     env["CARGO_BIN_NAME"] = bin_name
-    env["HIRSEL_SANITIZER"] = select({"root//tools/buck2:sanitizer_thread": "thread", "DEFAULT": ""})
     _rust(
         native.rust_binary,
         name = name,
@@ -226,16 +225,11 @@ def _test_crate_flags(crate_root):
         return []
     return select({"root//tools/buck2:profile_checked": ["-Copt-level=0"], "DEFAULT": []})
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, native_tools = False, shards = 1, case_shards = {}, costs = None, seeded = False):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, native_tools = False, seeded = False):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
-    `data` are the files the test reads at run time. `shards` splits
-    the cases over that many test targets `<name>-shard-<i>`, run in parallel,
-    balanced by the measured seconds per case in the `costs` table.
-    A binary with per-case widths (EXACT_CASE_CPUS) runs its undeclared cases on
-    those measured shards and each width N's cases on `case_shards[N]` exact
-    targets `<name>-cpus-<N>-shard-<i>`.
+    `data` are the files the test reads at run time.
     `seeded` binaries draw random cases and run under `TEST_SEED`.
     """
     harness = name + "-harness"
@@ -291,59 +285,24 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         visibility = ["PUBLIC"],
     )
     host_cases = OPENAT2_TEST_CASES.get(name, [])
-    isolated = ISOLATED_TEST_CASES.get(name, [])
-    selection_env = {}
-    if isolated:
-        selection_env["HIRSEL_TEST_ISOLATED_CASES"] = " ".join(isolated)
-    if host_cases:
-        selection_env["HIRSEL_TEST_HOST_CASES"] = " ".join(host_cases)
-    case_cpus = EXACT_CASE_CPUS.get(name, {})
-    widths = sorted({width: True for width in case_cpus.values()}.keys())
-    if sorted(case_shards.keys()) != widths:
-        fail("{}: case_shards {} do not cover the EXACT_CASE_CPUS widths {}; run tools/buck2/sync.py".format(name, case_shards, widths))
-    sharded = shards > 1 or bool(case_cpus) or bool(host_cases)
-    # Measured shards, then one exact shard set per declared width.
-    groups = [(0, shards, name)] + [(width, case_shards[width], "{}-cpus-{}".format(name, width)) for width in widths]
-    common = {key: value for key, value in common.items() if key != "request"}
-    for exact_cpus, count, prefix in groups:
-        for shard in range(count):
-            _rust_test(
-                name = prefix if not sharded else "{}-shard-{}".format(prefix, shard + 1),
-                shard_index = shard,
-                shards = count if sharded else 0,
-                costs = costs,
-                labels = [],
-                exec_compatible_with = _test_platform(name, exact_cpus),
-                request = _request(name, exact_cpus),
-                exact_cpus = exact_cpus,
-                pool = not TESTS_ON_HOST,
-                extra_env = selection_env,
-                **common
-            )
+    selection_env = {"HIRSEL_TEST_HOST_CASES": " ".join(host_cases)} if host_cases else {}
+    _rust_test(
+        name = name + "-shard-1" if host_cases else name,
+        labels = [],
+        exec_compatible_with = _test_platform(name),
+        pool = not TESTS_ON_HOST,
+        extra_env = selection_env,
+        **common
+    )
     isolated_common = {key: value for key, value in common.items() if key != "args"}
-    if costs or sharded or name in EXACT_TEST_CPUS:
+    if host_cases:
         _rust_test(
             name = name + "-inventory",
-            args = common["args"] + ["--list"],
+            args = ["--list"],
             labels = [],
             exec_compatible_with = _test_platform(name),
-            request = _request(name),
             pool = not TESTS_ON_HOST,
-            # --list cannot run a body or assert a physical CPU width.
             **{key: value for key, value in isolated_common.items() if key != "test_binary"}
-        )
-    for index, case in enumerate(ISOLATED_TEST_CASES.get(name, [])):
-        _rust_test(
-            name = "{}-isolated-{}".format(name, index + 1),
-            args = common["args"] + ["--exact", case],
-            costs = costs,
-            labels = [],
-            exec_compatible_with = _test_platform(name, case_cpus.get(case, 0)),
-            request = _request(name, case_cpus.get(case, 0)),
-            exact_cpus = case_cpus.get(case, 0),
-            pool = not TESTS_ON_HOST,
-            extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
-            **isolated_common
         )
     host_targets = []
     for index, case in enumerate(host_cases):
@@ -354,17 +313,14 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             args = common["args"] + ["--exact", case],
             labels = ["local-execution", "requires-openat2"],
             exec_compatible_with = [budget_constraint("host")],
-            request = _request(name),
             pool = False,
             extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
             **isolated_common
         )
     if host_cases:
         _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
-        _suite(name = name, tests = host_targets + [
-            ":{}-shard-{}".format(prefix, shard + 1)
-            for _, count, prefix in groups for shard in range(count)
-        ])
+        _suite(name = name, tests = host_targets + [":" + name + "-shard-1"])
+
 def hirsel_source_audit(name, binary, cwd, data, args = []):
     """Run existing source-audit bodies without native execution inputs."""
     _rust_test(
@@ -429,15 +385,6 @@ def _rust_test_impl(ctx):
         inputs += ctx.attrs.llvm_libraries[DefaultInfo].default_outputs
         env["LLVM_SYS_231_PREFIX"] = cmd_args(llvm)
     env.update(ctx.attrs.extra_env)
-    exact_cpus = ctx.attrs.exact_cpus or EXACT_TEST_CPUS.get(ctx.attrs.test_binary, 0)
-    if exact_cpus:
-        env["HIRSEL_TEST_EXACT_CPUS"] = str(exact_cpus)
-    case_cpus = EXACT_CASE_CPUS.get(ctx.attrs.test_binary, {})
-    if case_cpus:
-        # Every action of the binary refuses a case wider than its CPUs; a
-        # sharded one deals only its width group (empty: the measured cases).
-        env["HIRSEL_TEST_CASE_CPUS"] = " ".join(["{}={}".format(case, width) for case, width in sorted(case_cpus.items())])
-        env["HIRSEL_TEST_CPU_GROUP"] = str(ctx.attrs.exact_cpus) if ctx.attrs.exact_cpus else ""
     env.update({name: cmd_args(tree) for name, tree in tools.items()})
     if tools:
         inputs.append(ctx.attrs._private_native_inputs)
@@ -449,13 +396,6 @@ def _rust_test_impl(ctx):
         env["HIRSEL_TEST_BIN_EXES"] = cmd_args([cmd_args(bin, "=", exe, delimiter = "") for bin, exe in sorted(exes.items())], delimiter = " ")
     if ctx.attrs.test_binary:
         env["HIRSEL_TEST_BINARY"] = ctx.attrs.test_binary
-    if ctx.attrs.shards:
-        # Bazel's sharding variables: the 0-based shard of TEST_TOTAL_SHARDS.
-        env["TEST_SHARD_INDEX"] = str(ctx.attrs.shard_index)
-        env["TEST_TOTAL_SHARDS"] = str(ctx.attrs.shards)
-    if ctx.attrs.costs:
-        inputs.append(ctx.attrs.costs)
-        env["HIRSEL_TEST_COSTS"] = cmd_args(ctx.attrs.costs)
     for name, file in ctx.attrs.files_env.items():
         inputs.append(file)
         env[name] = cmd_args(file)
@@ -488,7 +428,7 @@ def _rust_test_impl(ctx):
             # environment and inputs), so a rerun on unchanged inputs does not
             # execute; a failure is never cached. The host platform has no cache.
             supports_test_execution_caching = ctx.attrs.pool,
-            default_executor = test_executor(int(ctx.attrs.request[0]), int(ctx.attrs.request[1]), ctx.attrs.request[2], exact_cpus) if ctx.attrs.pool else None,
+            default_executor = test_executor(int(ctx.attrs.request[0]), int(ctx.attrs.request[1]), ctx.attrs.request[2]) if ctx.attrs.pool else None,
         ),
     ]
 
@@ -500,11 +440,9 @@ _rust_test = rule(
         "bin_exes": attrs.dict(attrs.string(), attrs.transition_dep(cfg = "root//tools/buck2:test_tool_transition"), default = {}),
         "front_observer_bin_exes": attrs.dict(attrs.string(), attrs.transition_dep(cfg = "root//tools/buck2:front_observer_tool_transition"), default = {}),
         "release_bin_exes": attrs.dict(attrs.string(), attrs.transition_dep(cfg = "root//tools/buck2:release_tool_transition"), default = {}),
-        "costs": attrs.option(attrs.source(), default = None),
         "cwd": attrs.string(),
         # Environment variables naming input files.
         "files_env": attrs.dict(attrs.string(), attrs.source(), default = {}),
-        "exact_cpus": attrs.int(default = 0),
         "extra_env": attrs.dict(attrs.string(), attrs.string(), default = {}),
         "fixture_output": attrs.bool(default = False),
         "data": attrs.list(attrs.source(), default = []),
@@ -517,8 +455,6 @@ _rust_test = rule(
         # A pool run's `[cpu, memory_kb, cpu_class]`, for its executor (platforms.bzl).
         "request": attrs.list(attrs.string(), default = []),
         "seed": attrs.string(default = ""),
-        "shard_index": attrs.int(default = 0),
-        "shards": attrs.int(default = 0),
         "test_binary": attrs.string(default = ""),
         "_launcher": attrs.source(default = "root//tools/buck2:test_launcher.sh"),
         "_scratch_owner": attrs.source(default = "root//tools/buck2:scratch.py"),
@@ -557,42 +493,29 @@ def hirsel_test_suite(name, tests):
     """A name that runs exactly `tests`: a target name main's tools/land still lists."""
     _suite(name = name, tests = tests, visibility = ["PUBLIC"])
 
-def hirsel_script_test(name, script, data, full = True, args = [], bin_exes = {}, front_observer_bin_exes = {}, production = False, files_env = {}, sanitizer = None, host = False, shards = 1, native_tools = False):
+def hirsel_script_test(name, script, data, full = True, args = [], bin_exes = {}, front_observer_bin_exes = {}, production = False, files_env = {}, host = False, native_tools = False):
     """A script harness with the same hermetic inputs as native Rust tests.
     `files_env` names further input files as environment variables. `host`
     runs it on the invoking host, never the pool: for a tool built there.
-    `shards` > 1 makes targets `<name>-shard-<i>`, each running the script
-    with `--shard <i>/<shards>` appended (the script deals its own work), and
-    `<name>` the suite of exactly those shards, so `buck2 test :<name>` still
-    runs the whole check."""
+    """
     if full and not FULL_GATE:
-        return
-    if sanitizer and read_root_config("hirsel", "sanitizer", "") != sanitizer:
         return
     binary = name + "-script"
     _script_binary(name = binary, script = script)
-    for shard in range(1, shards + 1):
-        _rust_test(
-            name = name if shards == 1 else "{}-shard-{}".format(name, shard), harness = ":" + binary,
-            args = args if shards == 1 else args + ["--shard", "{}/{}".format(shard, shards)], data = data, cwd = ".",
-            bin_exes = {} if production else bin_exes, release_bin_exes = bin_exes if production else {}, front_observer_bin_exes = front_observer_bin_exes,
-            bin_exe_dir = BIN_EXE_DIR + "/" + name, files_env = files_env,
-            llvm = "root//tools/buck2/native-toolchain:llvm",
-            llvm_libraries = "toolchains//:llvm-libraries",
-            native_tools = native_tool_inputs() if native_tools else {},
-            labels = ["gate"],
-            exec_compatible_with = [budget_constraint("host")] if host else _test_platform(name),
-            pool = not (TESTS_ON_HOST or host),
-            request = _request(name),
-            visibility = ["PUBLIC"],
-        )
-    if shards > 1:
-        _suite(
-            name = name,
-            tests = [":{}-shard-{}".format(name, shard) for shard in range(1, shards + 1)],
-            labels = ["gate"],
-            visibility = ["PUBLIC"],
-        )
+    _rust_test(
+        name = name, harness = ":" + binary,
+        args = args, data = data, cwd = ".",
+        bin_exes = {} if production else bin_exes, release_bin_exes = bin_exes if production else {}, front_observer_bin_exes = front_observer_bin_exes,
+        bin_exe_dir = BIN_EXE_DIR + "/" + name, files_env = files_env,
+        llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
+        native_tools = native_tool_inputs() if native_tools else {},
+        labels = ["gate"],
+        exec_compatible_with = [budget_constraint("host")] if host else _test_platform(name),
+        pool = not (TESTS_ON_HOST or host),
+        request = _request(name),
+        visibility = ["PUBLIC"],
+    )
 
 PRODUCT_MEMORY_LIMIT = "2G"
 

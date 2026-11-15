@@ -7,8 +7,6 @@ the same serde metadata can be loaded by compiles using different reservations.
 def _host_transition_impl(ctx):
     budget = ctx.attrs.budget[ConstraintSettingInfo]
     panic = ctx.attrs.panic[ConstraintSettingInfo]
-    sanitizer = ctx.attrs.sanitizer[ConstraintSettingInfo]
-    preserve_sanitizer = ctx.attrs.preserve_sanitizer
     profile = ctx.attrs.profile[ConstraintValueInfo]
     cpu = ctx.attrs.cpu[ConstraintValueInfo]
     configuration_name = ctx.attrs.configuration_name
@@ -17,8 +15,6 @@ def _host_transition_impl(ctx):
         constraints = dict(platform.configuration.constraints)
         constraints.pop(budget.label, None)
         constraints.pop(panic.label, None)
-        if not preserve_sanitizer:
-            constraints.pop(sanitizer.label, None)
         for value in [profile, cpu] + extra_constraints:
             constraints[value.setting.label] = value
         return PlatformInfo(
@@ -31,8 +27,6 @@ host_transition = rule(
     impl = _host_transition_impl,
     attrs = {
         "extra_constraints": attrs.list(attrs.dep(providers = [ConstraintValueInfo]), default = []),
-        "sanitizer": attrs.dep(default = "root//tools/buck2:sanitizer", providers = [ConstraintSettingInfo]),
-        "preserve_sanitizer": attrs.bool(default = False),
         "configuration_name": attrs.string(default = "hirsel-rust-host"),
         "budget": attrs.dep(providers = [ConstraintSettingInfo]),
         "panic": attrs.dep(providers = [ConstraintSettingInfo]),

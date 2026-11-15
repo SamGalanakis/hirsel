@@ -208,7 +208,7 @@ command, or for escaping a stuck daemon; anything it builds starts cold.
 
 `-c hirsel.tests=focus` is for running one test or a few by name: each test
 run books one CPU, with its binary's measured memory, instead of the binary's
-whole-shard request. The pool
+whole-binary request. The pool
 reserves nothing for a multi-CPU action, so a four-CPU run of one case waited
 for one worker to free four CPUs at once: over twelve alternated edits its
 queue had a median of 43 s and a maximum of 353 s, against 0.4 s and 6 s in
@@ -225,35 +225,25 @@ repository executor passes it to the stock runner because this pin ignores
 executor's absolute checkout path; no Buck patch or per-target override is used.
 
 Arguments after `--` go to Buck2's test runner: `--test-arg=<a>` passes one
-libtest argument. Test commands use the shared outer bound without overrides. A case filter intersects each shard's cost-table assignment and CPU-width group.
-Use `tools/test-filter BINARY -- FILTER [LIBTEST FLAGS...]` to select compiled
-cases and compute their owners with `tools/consumers`' assignment. It preserves
-substring, exact, skip and ignored selection and requires every selected body
-once. `--list` prints the selection without running it. Select the owning shards
-from `tools/consumers` when constructing a Buck command by hand. A filtered run on a shard that owns
-none of the selected cases fails and names the owning shard or CPU-width group. Every test runs on the pool by default, including
-native and full-gate cases. `-c hirsel.tests=host` explicitly opts into host
-execution; it still uses the pinned tool inputs. There are no implicit host
-partitions. Target names come from Cargo; `-unittest` and `-test-it` run unit
-and integration tests, and the library target runs declared doctests. For an
-unfiltered sharded binary, select every `-shard-<i>` target.
+libtest argument. Use `tools/test-filter BINARY -- FILTER [LIBTEST FLAGS...]`
+to select compiled cases and compute their owners. It preserves substring,
+exact, skip and ignored selection and requires every selected body once.
+`--list` prints the selection without running it. Tests run on the pool with
+their measured requests, except the explicitly declared openat2 bodies in
+`test_requirements.bzl`, which run on the invoking host. `-c hirsel.tests=host`
+opts into host execution for other tests, with the same pinned tool inputs.
+Target names come from Cargo; `-unittest` and `-test-it` run unit and integration
+tests, and the library target runs declared doctests.
 
-`tools/consumers <path>...` prints affected test targets, one per line, using
-Buck reverse dependencies, real harness case listings, source helpers and loaded
-corpus files. Run them with `tools/consumers <path>... | xargs .buck2/bin/buck2 test`.
-The selection includes native HTTP/HTTPS/gRPC launches, replay and cpu_pool_*
-when startup, scheduler, pool or Ordered code changes. Native HTTP targets run
-the existing full-gate bodies explicitly. Output keeps the 100 targets nearest
-the changed owners (fewest reverse-dependency steps, the changed crate's own tests
-first; `--limit N` changes the cap, `--limit 0` keeps all) and prints `consumers:
-CAPPED` on stderr with each cut target or `cut <n> of <family>`; a capped list is
-partial consumer coverage. Discovery
-runs no bodies. A libtest selector that matches no bodies fails before dispatch,
-including names that exist only on other shards.
-A Rust target that completes no test bodies fails at result classification and
-names the target, including empty binaries and ignored-only runs. Intentional
-empty shard partitions in unfiltered runs use `--exact ""` and keep their
-success; discovery keeps its status.
+`tools/consumers <path>...` prints affected test targets using Buck reverse
+dependencies and direct source ownership. Run them with
+`tools/consumers <path>... | xargs .buck2/bin/buck2 test`. Output keeps the 100
+targets nearest the changed owners, with direct owners first. `--limit N`
+changes the cap and `--limit 0` keeps all. A capped list reports what it cut
+and proves only partial consumer coverage. Discovery runs no bodies. A stale
+libtest selector fails before dispatch. A Rust target that completes no test
+bodies fails at result classification, including empty binaries and ignored-only
+runs. A host-only partition with no selected bodies keeps its empty status.
 
 `test_report.py` streams libtest JSON start/result events without an inner
 deadline. Ordinary result lines, summaries and per-case timings remain available
@@ -429,14 +419,6 @@ the aggregate holds both for the workspace build and the toolchain bundle.
   parallelism while enabling O3.
   Canonicalizing test harnesses on entry also keeps the workspace build and
   tests from compiling the same harness under different reservations.
-
-## Test shards and exact CPU widths
-
-`sync.py` can split a binary (`SHARDED`, by a measured cost table under
-`test-costs/`) or give one shard per declared case (`CASE_SHARDED`), and
-`test_requirements.bzl` can declare exact CPU widths per binary or case
-(`EXACT_TEST_CPUS`, `EXACT_CASE_CPUS`). All four tables are empty: every test
-binary runs as one target with its measured request.
 
 ## Prelude overlay
 

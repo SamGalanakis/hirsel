@@ -1,14 +1,10 @@
-load("@prelude//rust:rust_toolchain.bzl", "PanicRuntime", "RustSanitizer", "RustToolchainInfo")
+load("@prelude//rust:rust_toolchain.bzl", "PanicRuntime", "RustToolchainInfo")
 
 def _rust(ctx):
-    core_prefix = "lib/rustlib/{}/lib/libcore-".format(ctx.attrs.target_triple)
-    if ctx.attrs.sanitizer and not any([p.startswith(core_prefix) and p.endswith(".rlib") for p in ctx.attrs.srcs]):
-        fail("ThreadSanitizer needs its instrumented std: run python3 tools/buck2/prepare_tsan.py")
     tree = ctx.actions.copied_dir("rust", ctx.attrs.srcs)
     return [
         DefaultInfo(),
         RustToolchainInfo(
-            sanitizer = RustSanitizer(ctx.attrs.sanitizer) if ctx.attrs.sanitizer else None,
             compiler = RunInfo(args = cmd_args(tree.project("bin/rustc"), hidden = tree)),
             rustdoc = RunInfo(args = cmd_args(tree.project("bin/rustdoc"), hidden = tree)),
             clippy_driver = RunInfo(args = cmd_args(tree.project("bin/clippy-driver"), hidden = tree)),
@@ -26,7 +22,7 @@ def _rust(ctx):
                 "-Coverflow-checks=yes",
                 "-Cembed-bitcode=no",
                 "-Cstrip=none",
-            ] + (["-Crelocation-model=pic"] if ctx.attrs.sanitizer else []),
+            ],
             extra_rustc_flags = [],
             # The prelude gates -Zno-codegen metadata pipelining on this field;
             # stable rustc runs it under RUSTC_BOOTSTRAP.
@@ -40,7 +36,6 @@ def _rust(ctx):
 rust_toolchain = rule(
     impl = _rust,
     attrs = {
-        "sanitizer": attrs.option(attrs.string(), default = None),
         "srcs": attrs.dict(attrs.string(), attrs.source()),
         "target_triple": attrs.string(),
     },

@@ -229,7 +229,7 @@ INFRA_FAILURE = 11
 
 def test_results(event_log, *, history=None, all_results=False):
     """Each test's TestResult event from a `buck2 test` event log, by short
-    name; the per-case costs go to the test history (test_costs.py).
+    name; per-case timings go to the test history.
 
     all_results retains repeated results and TestRuns missing their result.
     Provenance is unknown unless one owning TestRun supplies execution/cache

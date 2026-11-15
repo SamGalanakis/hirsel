@@ -330,8 +330,7 @@ class GeneratedParts(unittest.TestCase):
         subprocess.run(['tar', '-x', '-C', str(cls.root)], input=archive, check=True)
         cls.addClassCleanup(cls.temp.cleanup)
         cls.patches = [patch.object(sync, 'ROOT', cls.root), patch.object(sync, 'HERE', cls.root / 'tools/buck2'),
-                       patch.object(sync, 'THIRD_PARTY', cls.root / 'third-party'),
-                       patch.object(sync, 'COSTS', cls.root / 'tools/buck2/test-costs')]
+                       patch.object(sync, 'THIRD_PARTY', cls.root / 'third-party')]
         for active in cls.patches:
             active.start()
             cls.addClassCleanup(active.stop)
@@ -449,70 +448,6 @@ class SeededTests(unittest.TestCase):
         self.assertNotIn('hirsel-core-driver-unittest', seeded)
 
 
-class ShardSizing(unittest.TestCase):
-    def test_check_fails_on_cost_coverage_even_with_fresh_generated_files(self):
-        with patch.object(sys, 'argv', ['sync.py', '--check']), \
-             patch.object(sync, 'REINDEER', Path(__file__)), patch.object(sync.generated, 'stale', return_value=[]), \
-             patch.object(sync, 'generate') as generate, \
-             patch.object(sync, 'check_cost_coverage', return_value=['costs missing']), \
-             contextlib.redirect_stderr(io.StringIO()) as errors:
-            self.assertEqual(sync.main(), 1)
-        self.assertIn('costs missing', errors.getvalue())
-        generate.assert_not_called()
-
-
-    def test_granted_cpus_determine_shards(self):
-        with tempfile.TemporaryDirectory() as scratch:
-            here = Path(scratch)
-            binary = 'binary'
-            (here / 'test-costs').mkdir()
-            (here / f'test-costs/{binary}.tsv').write_text(''.join(f'case{i}\t40.0\n' for i in range(16)))
-            for cpus, expected in [(1, 16), (2, 8), (4, 4)]:
-                (here / 'test-sizes.json').write_text(json.dumps({binary: {'cpu_count': cpus}}))
-                with patch.object(sync, 'HERE', here), patch.object(sync, 'COSTS', here / 'test-costs'), \
-                     patch.object(sync, 'SHARDED', [binary]), patch.object(sync, 'case_cpus', return_value={}):
-                    self.assertEqual(sync.shards(binary)[0], expected)
-            # Declared cases leave the measured shards for their width's own,
-            # sized at SHARD_SECONDS per exact CPU; an unmeasured one costs the mean.
-            (here / 'test-sizes.json').write_text(json.dumps({binary: {'cpu_count': 1}}))
-            declared = {binary: {'case0': 4, 'case1': 4, 'case2': 4, 'case3': 4, 'case4': 4, 'unmeasured': 4, 'case5': 2}}
-            with patch.object(sync, 'HERE', here), patch.object(sync, 'COSTS', here / 'test-costs'), \
-                 patch.object(sync, 'SHARDED', [binary]), patch.object(sync, 'case_cpus', return_value=declared):
-                count, _, groups = sync.shards(binary)
-            self.assertEqual((count, groups), (10, {2: 1, 4: 2}))
-
-    def test_expensive_cases_do_not_create_more_shards_than_measured_cases(self):
-        # Each case already exceeds the shard work budget; extra partitions
-        # cannot split it and only add empty remote actions to the main run.
-        with tempfile.TemporaryDirectory() as scratch:
-            here = Path(scratch)
-            binary = 'binary'
-            (here / 'test-costs').mkdir()
-            (here / f'test-costs/{binary}.tsv').write_text('native_a\t1700.0\nnative_b\t650.0\n')
-            (here / 'test-sizes.json').write_text(json.dumps({binary: {'cpu_count': 2}}))
-            with patch.object(sync, 'HERE', here), patch.object(sync, 'COSTS', here / 'test-costs'), \
-                 patch.object(sync, 'SHARDED', [binary]), patch.object(sync, 'case_cpus', return_value={}):
-                self.assertEqual(sync.shards(binary)[0], 2)
-
-    def test_exactly_five_percent_missing_is_allowed_but_stale_rows_do_not_help(self):
-        with tempfile.TemporaryDirectory() as scratch, patch.object(sync, 'SHARDED', ['binary']), \
-             patch.object(sync, 'REQUIRED_COSTS', {'binary'}):
-            table = Path(scratch) / 'binary.tsv'
-            table.write_text(''.join(f'case{i}\t1\n' for i in range(19)) + 'deleted\t10000\n')
-            with patch.object(sync, 'COSTS', Path(scratch)):
-                self.assertEqual(sync.cost_coverage({'binary': {f'case{i}' for i in range(20)}}), [])
-                errors = sync.cost_coverage({'binary': {f'case{i}' for i in range(21)}})
-                self.assertIn('2/21 cases', errors[0])
-                self.assertIn('case20', errors[0])
-                self.assertIn('no case inventory', sync.cost_coverage({})[0])
-
-    def test_unrefreshed_binary_warns_without_blocking_the_gate(self):
-        binary = 'binary'
-        with tempfile.TemporaryDirectory() as scratch, patch.object(sync, 'SHARDED', [binary]), \
-                patch.object(sync, 'COSTS', Path(scratch)), contextlib.redirect_stderr(io.StringIO()) as output:
-            (Path(scratch) / f'{binary}.tsv').write_text('old::case\t1\n')
-            self.assertEqual(sync.cost_coverage({binary: {'new::case'}}), [])
-        self.assertIn(f'warning: {binary}: 1/1 cases', output.getvalue())
 
 
 if __name__ == '__main__':

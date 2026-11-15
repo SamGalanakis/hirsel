@@ -5,7 +5,9 @@
 // on an empty `e`, which is always true, so the cold call runs. These runs catch a twin that loses a
 // written word, writes back a stale one, skips the write-back on a failure edge, or takes
 // the word path for a parameter whose address can leave the body or whose layout is not
-// three whole words. Each is hand-derived; every returning run refunds every byte.
+// three whole words. Each is hand-derived; every returning run refunds every byte. A
+// `// words:` line names a callee whose cold call must take the word path (its `.words`
+// twin exists), so a case cannot pass by staying on pointers.
 // expect: run grown_refused() = 110004950
 // expect: run grown_trap(0) = 1105951
 // expect: run grown_trap(2) = fail Bounds
@@ -29,6 +31,11 @@
 // expect: run self_recursion() = 20210
 // expect: run mutual_recursion() = 11112210
 // expect: run tail_call() = 4912
+// expect: run grown_unit_trap() = fail Bounds
+// expect: run replaced_unit_trap() = fail Bounds
+// expect: run unit_caught_twice() = 2 used 32
+// expect: run cold_mut_anchor() = 1082
+// words: fill_unit_then_trap replace_unit_then_trap push_unit_then_fail mut_identity
 fn sum(xs: List[u64]) -> u64 {
     let mut s: u64 = 0
     for x in xs {
@@ -523,4 +530,86 @@ fn tail_call() -> u64 {
         0
     }
     sum(xs) * 100 + r
+}
+
+// The runs above whose callee returns a status and a `mut` header (more than four
+// words) stay on pointers; these return only a status, so the header comes back as
+// words. A failure after the callee grew or replaced the header must still store
+// the new words: the caller then drops the live block, not the stale one. 100
+// pushes from empty, then an index past a one-element array.
+fn fill_unit_then_trap(mut xs: List[u64], i: u64) {
+    for n in 0u64 .. 100 {
+        result.unwrap(list.push(mut xs, n))
+    }
+    let a =[1u64];
+    let _ = a[i]
+}
+
+fn grown_unit_trap() -> u64 {
+    let mut xs: List[u64] = list.new()
+    if list.len(xs) == list.capacity(xs) {
+        fill_unit_then_trap(mut xs, 1)
+    }
+    list.len(xs)
+}
+
+// [0 .. 3] fills its four slots, then is replaced by [37] before the trap.
+fn replace_unit_then_trap(mut xs: List[u64], i: u64) {
+    let mut ys: List[u64] = list.new()
+    result.unwrap(list.push(mut ys, 37))
+    xs = take ys
+    let a =[1u64];
+    let _ = a[i]
+}
+
+fn replaced_unit_trap() -> u64 {
+    let mut xs = counted(4)
+    if list.len(xs) == list.capacity(xs) {
+        replace_unit_then_trap(mut xs, 1)
+    }
+    list.len(xs)
+}
+
+// As caught_twice, with a unit callee: each catch returns 1 and the last cause cell
+// is kept.
+fn push_unit_then_fail(mut xs: List[u64]) {
+    result.unwrap(list.push(mut xs, 7))
+    fail(result.unwrap(string.from("busy")))
+}
+
+fn unit_caught() -> u64 {
+    match isolate(fn() -> u64 {
+        let mut xs: List[u64] = list.new()
+        if list.len(xs) == list.capacity(xs) {
+            push_unit_then_fail(mut xs)
+        }
+        0
+    }) {
+        Ok(Error(_)) => 1,
+        _ => 0,
+    }
+}
+
+fn unit_caught_twice() -> u64 {
+    let a = unit_caught()
+    let b = unit_caught()
+    a + b
+}
+
+// A result anchored to a `mut` loan, used inside the cold arm: [27] has length 1 and
+// element 0 is 27, and churn(10) is 1 + ... + 10 = 55.
+fn mut_identity(mut xs: List[u64]) -> View[List[u64]] in xs {
+    result.unwrap(list.push(mut xs, 27))
+    view xs
+}
+
+fn cold_mut_anchor() -> u64 {
+    let mut xs: List[u64] = list.new()
+    if list.len(xs) == list.capacity(xs) {
+        let v = mut_identity(mut xs)
+        let z = churn(10)
+        list.len(v) * 1000 + v[0] + z
+    } else {
+        0
+    }
 }

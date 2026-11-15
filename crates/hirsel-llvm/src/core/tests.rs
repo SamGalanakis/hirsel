@@ -1615,18 +1615,7 @@ fn carrier_program_cases(target: Target) {
             })
             .collect::<Vec<_>>();
         let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
-        let ir = emit_ir_target_with_role_facts(
-            &module,
-            target,
-            false,
-            facts_enabled(),
-            SourceEmission {
-                relocatable_sites: false,
-                debug_lines: false,
-            },
-            Some(&facts[0]),
-        )
-        .unwrap();
+        let ir = carrier_ir(&module, &facts[0], target, false);
         let mut exports = cases
             .iter()
             .map(|case| symbol(&module, case.function))
@@ -1641,6 +1630,17 @@ fn carrier_program_cases(target: Target) {
             target,
         )
         .unwrap();
+        for callee in source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("// words: "))
+            .flat_map(str::split_whitespace)
+        {
+            let twin = format!("{}.words", symbol(&module, names[callee]));
+            assert!(
+                object.windows(twin.len()).any(|w| w == twin.as_bytes()),
+                "{name}: {callee} takes no word path"
+            );
+        }
         let reports = execute_target_object(
             &module,
             &cases,
@@ -1659,14 +1659,16 @@ fn carrier_program_cases(target: Target) {
     }
 }
 
-/// A `mut` carrier beside three results with no status: the results return through
-/// `sret`, which must return void, so the twin takes the words in and the caller keeps
-/// the place in memory (an `sret` twin returning words is invalid IR). f0 empties the
-/// list it is lent and returns its old length, capacity and first element: [5, 6] has
-/// length 2 and capacity 4, so f1 returns 2 + 40 + 500 + 1000 * (length after, 0).
+/// A carrier beside three results with no status, on a cold call: the results return
+/// through `sret`, which must return void. A `mut` header therefore stays in memory (an
+/// `sret` twin returning words is invalid IR); a view header goes as words, and the word
+/// call keeps the `sret`. f0 returns the old length, capacity and first element of the
+/// list it is lent, and the `mut` f0 also empties it: [5, 6] has length 2 and capacity
+/// 4, so f1 returns 2 + 40 + 500 + 1000 * (length after: 0 lent `mut`, 2 as a view).
 fn carrier_sret_case(target: Target) {
-    let module = text::parse(
-        r#"core v1
+    for (lent, emptied, expected) in [("&mut t0", "  store a2, v1\n", 542), ("&view t0", "", 2542)]
+    {
+        let source = r#"core v1
 type t0 = own "List[u64]" { items: seq u64 }
 sig g0 = (&mut t0) -> (u64, u64, u64)
 sig g1 = () -> (u64)
@@ -1744,40 +1746,138 @@ b1:
 b2:
   return v0
 }
-"#,
-    )
-    .unwrap();
-    wf::module(&module).unwrap();
-    let case = Case {
-        function: FuncId(1),
-        args: vec![],
-        limit: u64::MAX,
-        injection: None,
-    };
-    let expected = eval::run(&module, case.function, &case.args, case.limit);
-    assert_eq!(expected.outcome, eval::Outcome::Returned(vec![542]));
-    let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
-    let ir = emit_ir_target_with_role_facts(
-        &module,
+"#
+        .replace("&mut t0", lent)
+        .replace("  store a2, v1\n", emptied)
+        .replace("call f0 g0 (&a0)", "call f0 g0 (&a0) cold");
+        let module = text::parse(&source).unwrap();
+        wf::module(&module).unwrap();
+        let case = Case {
+            function: FuncId(1),
+            args: vec![],
+            limit: u64::MAX,
+            injection: None,
+        };
+        let oracle = eval::run(&module, case.function, &case.args, case.limit);
+        assert_eq!(oracle.outcome, eval::Outcome::Returned(vec![expected]));
+        let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
+        let ir = carrier_ir(&module, &facts[0], target, false);
+        let object = hirsel_llvm_lazy::emit_program_for_target(
+            &[hirsel_llvm_lazy::Unit::Text {
+                ir: &ir,
+                imported: false,
+            }],
+            &[symbol(&module, case.function)],
+            target,
+        )
+        .unwrap();
+        // f0 is infallible, so its body and twin carry the `.infallible` name.
+        let twin = format!("{}.infallible.words", symbol(&module, FuncId(0)));
+        assert_eq!(
+            object.windows(twin.len()).any(|w| w == twin.as_bytes()),
+            lent == "&view t0",
+            "{lent}: the word path"
+        );
+        let report = execute_target_object(
+            &module,
+            std::slice::from_ref(&case),
+            "",
+            "",
+            Optimization::Speed,
+            Some(object),
+            target,
+        )
+        .remove(0);
+        assert_eq!(report.outcome, oracle.outcome, "{lent}");
+        assert_eq!(report.used, oracle.used, "{lent}");
+    }
+}
+
+/// The release IR of `module` with its program role facts, `relocatable` as a cached
+/// library's sites are.
+fn carrier_ir(
+    module: &Module,
+    facts: &hirsel_core_ir::roles::Facts,
+    target: Target,
+    relocatable: bool,
+) -> String {
+    emit_ir_target_with_role_facts(
+        module,
         target,
         false,
         facts_enabled(),
         SourceEmission {
-            relocatable_sites: false,
+            relocatable_sites: relocatable,
             debug_lines: false,
         },
-        Some(&facts[0]),
+        Some(facts),
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// A task cancelled before it runs observes the cancel inside a cold call that took
+/// its `mut` header as words, after the callee grew it by 100 pushes. The Cancelled
+/// edge out of the twin must store the grown header back: the child's cleanup then
+/// frees the live block, not the empty one it lent, so join reports Cancelled (1) and
+/// every byte is refunded. The evaluator runs a child at its spawn, before any
+/// cancel, so the expected run is derived by hand.
+fn cancelled_cold_word_call(target: Target) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
+    let source = r#"
+fn grow_then_check(mut xs: List[u64]) {
+    for n in 0u64 .. 100 {
+        result.unwrap(list.push(mut xs, n))
+    }
+    task.check_cancel()
+}
+
+fn child(take x: u64) -> u64 {
+    let mut xs: List[u64] = list.new()
+    if list.len(xs) == list.capacity(xs) {
+        grow_then_check(mut xs)
+    }
+    list.len(xs) + x
+}
+
+fn cancelled(tasks: Tasks) -> u64 waits {
+    let mut h = result.unwrap(task.spawn(tasks, bytes 65536, 41u64, child))
+    task.cancel(mut h)
+    match task.join(take h) {
+        Ok(n) => n,
+        Error(Cancelled(take c)) => {
+            let _ = take c
+            1
+        }
+        Error(Failed(take c)) => {
+            let _ = take c
+            2
+        }
+    }
+}
+"#;
+    let (module, names) = front::lower(source, &root.join("../core"), "main").unwrap();
+    let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
+    let ir = carrier_ir(&module, &facts[0], target, false);
     let object = hirsel_llvm_lazy::emit_program_for_target(
         &[hirsel_llvm_lazy::Unit::Text {
             ir: &ir,
             imported: false,
         }],
-        &[symbol(&module, case.function)],
+        &[symbol(&module, names["cancelled"])],
         target,
     )
     .unwrap();
+    let twin = format!("{}.words", symbol(&module, names["grow_then_check"]));
+    assert!(
+        object.windows(twin.len()).any(|w| w == twin.as_bytes()),
+        "no {twin}"
+    );
+    let case = Case {
+        function: names["cancelled"],
+        args: vec![0],
+        limit: u64::MAX,
+        injection: None,
+    };
     let report = execute_target_object(
         &module,
         std::slice::from_ref(&case),
@@ -1788,14 +1888,159 @@ b2:
         target,
     )
     .remove(0);
-    assert_eq!(report.outcome, expected.outcome);
-    assert_eq!(report.used, expected.used);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![1]));
+    assert_eq!(report.used, 0);
+}
+
+/// A carrier callee from a cached library: the program's private copy of the import
+/// (`.local`) gets the word twin, and the caller sees the header the import wrote. f0
+/// stores 9 at element 0 of [5, 6] and sets the length to 1, so f1 returns 1 * 100 + 9.
+/// f0 can fail (on a null block), so its body is its public entry, not an
+/// `.infallible` split behind it.
+fn imported_carrier_callee(target: Target) {
+    let library = text::parse(
+        r#"core v1
+type t0 = own "List[u64]" { items: seq u64 }
+sig g0 = (&mut t0) -> ()
+inst n0 = samples@1/import_words/reset [] []
+fn f0 = n0 g0 {
+  addr a0 = v0 : t0
+  addr a1 = a0 field 0 byte v1 : ptr
+  addr a2 = a0 field 0 byte v2 : u64
+  addr a3 = v3 byte v1 : u64
+b0(v0: ptr):
+  v1: u64 = const 0
+  v2: u64 = const 8
+  address a0
+  address a1
+  address a2
+  v3: ptr = read a1
+  v6: ptr = const 0x0
+  v7: bool = eq v3, v6
+  branch v7, b2, b1
+b1:
+  address a3
+  v4: u64 = const 9
+  store a3, v4
+  v5: u64 = const 1
+  store a2, v5
+  return
+b2:
+  raise unwrap
+}
+"#,
+    )
+    .unwrap();
+    let caller = text::parse(
+        r#"core v1
+type t0 = own "List[u64]" { items: seq u64 }
+sig g0 = (&mut t0) -> ()
+sig g1 = () -> (u64)
+inst n0 = samples@1/import_words/reset [] []
+inst n1 = samples@1/import_words/entry [] []
+fn f0 = n0 g0 extern
+fn f1 = n1 g1 {
+  slot s0 = t0
+  addr a0 = s0 : t0
+  addr a1 = s0 field 0 byte v0 : ptr
+  addr a2 = s0 field 0 byte v1 : u64
+  addr a3 = s0 field 0 byte v2 : u64
+  addr a4 = v4 byte v0 : u64
+  addr a5 = v4 byte v1 : u64
+b0:
+  v0: u64 = const 0
+  v1: u64 = const 8
+  v2: u64 = const 16
+  v3: u64 = const 32
+  v4: ptr, v5: u64 = alloc for seq u64 v3 align 8 charge v3
+  v6: ptr = const 0x0
+  v7: bool = ne v4, v6
+  branch v7, b1, b2
+b1:
+  live s0
+  address a0
+  address a1
+  address a2
+  address a3
+  address a4
+  address a5
+  v8: u64 = const 5
+  v9: u64 = const 6
+  store a4, v8
+  store a5, v9
+  v10: u64 = const 2
+  v11: u64 = const 4
+  store a1, v4
+  store a2, v10
+  store a3, v11
+  call f0 g0 (&a0) fail b3 cold
+  v12: u64 = read a2
+  v13: u64 = read a4
+  v14: u64 = const 100
+  v15: u64 = mul v12, v14
+  v16: u64 = add v15, v13
+  drop a0 t0
+  return v16
+b2:
+  return v0
+b3:
+  drop a0 t0
+  propagate
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&library).unwrap();
+    wf::module(&caller).unwrap();
+    let facts = hirsel_core_ir::roles::Facts::program(&[&library, &caller], &[]);
+    let library_ir = carrier_ir(&library, &facts[0], target, true);
+    let caller_ir = carrier_ir(&caller, &facts[1], target, false);
+    let object = hirsel_llvm_lazy::emit_program_for_target(
+        &[
+            hirsel_llvm_lazy::Unit::Text {
+                ir: &library_ir,
+                imported: true,
+            },
+            hirsel_llvm_lazy::Unit::Text {
+                ir: &caller_ir,
+                imported: false,
+            },
+        ],
+        &[symbol(&caller, FuncId(1))],
+        target,
+    )
+    .unwrap();
+    let twin = format!("{}.local.words", symbol(&library, FuncId(0)));
+    assert!(
+        object.windows(twin.len()).any(|w| w == twin.as_bytes()),
+        "no {twin}"
+    );
+    let case = Case {
+        function: FuncId(1),
+        args: vec![],
+        limit: u64::MAX,
+        injection: None,
+    };
+    let report = execute_target_object(
+        &caller,
+        std::slice::from_ref(&case),
+        "",
+        "",
+        Optimization::Speed,
+        Some(object),
+        target,
+    )
+    .remove(0);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![109]));
+    assert_eq!(report.used, 0);
 }
 
 #[test]
 fn carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_program_cases(Target::X86_64Linux);
     carrier_sret_case(Target::X86_64Linux);
+    cancelled_cold_word_call(Target::X86_64Linux);
+    imported_carrier_callee(Target::X86_64Linux);
 }
 
 #[test]
@@ -1803,6 +2048,8 @@ fn carrier_twins_match_the_evaluator_in_program_builds() {
 fn aarch64_carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_program_cases(Target::Aarch64Linux);
     carrier_sret_case(Target::Aarch64Linux);
+    cancelled_cold_word_call(Target::Aarch64Linux);
+    imported_carrier_callee(Target::Aarch64Linux);
 }
 
 #[test]

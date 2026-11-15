@@ -159,6 +159,21 @@ static unsigned return_words(LLVMTypeRef t) {
     }
 }
 
+// The attributes `f` gives its index `from` (a parameter's is its number plus
+// one, the result's LLVMAttributeReturnIndex), added at index `to` of `target`:
+// a call site's when `site`, else a function's.
+static void copy_attributes(LLVMValueRef f, unsigned from, LLVMValueRef target, unsigned to,
+                            int site) {
+    unsigned na = LLVMGetAttributeCountAtIndex(f, from);
+    LLVMAttributeRef *attrs = malloc((na + 1) * sizeof(*attrs));
+    LLVMGetAttributesAtIndex(f, from, attrs);
+    for (unsigned j = 0; j < na; ++j) {
+        if (site) LLVMAddCallSiteAttribute(target, to, attrs[j]);
+        else LLVMAddAttributeAtIndex(target, to, attrs[j]);
+    }
+    free(attrs);
+}
+
 // One call of a carrier twin: each carried header's words are loaded from its
 // pointer, and a `mut` header's words are stored back before anything reads the
 // call's status. Returns the call's original result (or the call when void).
@@ -188,6 +203,10 @@ static LLVMValueRef call_twin(LLVMBuilderRef builder, LLVMContextRef context,
     }
     LLVMValueRef r = LLVMBuildCall2(builder, new_ty, twin, new_args, np, "");
     LLVMSetInstructionCallConv(r, LLVMGetFunctionCallConv(twin));
+    // The call states the twin's parameter ABI (extensions, `sret`, word
+    // ranges), and its result's while the result is the definition's.
+    for (unsigned j = 0; j < np; ++j) copy_attributes(twin, j + 1, r, j + 1, 1);
+    if (!outs) copy_attributes(twin, LLVMAttributeReturnIndex, r, LLVMAttributeReturnIndex, 1);
     if (!outs) return r;
     unsigned at = has_ret ? 1 : 0;
     for (unsigned b = 0; b < nb; ++b)
@@ -297,12 +316,7 @@ static void register_carriers(LLVMModuleRef module, LLVMContextRef context,
         unsigned range = LLVMGetEnumAttributeKindForName("range", 5), at = 0;
         for (unsigned i = 0; i < count; ++i) {
             if (!carried[i]) {
-                unsigned na = LLVMGetAttributeCountAtIndex(f, i + 1);
-                LLVMAttributeRef *attrs = malloc((na + 1) * sizeof(*attrs));
-                LLVMGetAttributesAtIndex(f, i + 1, attrs);
-                for (unsigned j = 0; j < na; ++j) LLVMAddAttributeAtIndex(twin, at + 1, attrs[j]);
-                free(attrs);
-                ++at;
+                copy_attributes(f, i + 1, twin, ++at, 0);
                 continue;
             }
             for (unsigned w = 1; w < 3 && bounds[i]; ++w) {
@@ -312,6 +326,7 @@ static void register_carriers(LLVMModuleRef module, LLVMContextRef context,
             }
             at += 3;
         }
+        if (!outs) copy_attributes(f, LLVMAttributeReturnIndex, twin, LLVMAttributeReturnIndex, 0);
         // The twin's body: the words into fresh places, the definition's call,
         // the `mut` words back out.
         LLVMMetadataRef scope = worker_scope(module, &debug, twin, LLVMGetSubprogram(f));
@@ -337,6 +352,10 @@ static void register_carriers(LLVMModuleRef module, LLVMContextRef context,
         }
         LLVMValueRef inner = LLVMBuildCall2(builder, old_ty, f, args, count, "");
         LLVMSetInstructionCallConv(inner, LLVMGetFunctionCallConv(f));
+        // The call states the definition's parameter and result ABI; a carried
+        // parameter is the twin's own place, which meets its pointer facts.
+        for (unsigned i = 0; i < count; ++i) copy_attributes(f, i + 1, inner, i + 1, 1);
+        copy_attributes(f, LLVMAttributeReturnIndex, inner, LLVMAttributeReturnIndex, 1);
         // A call's tail kind starts as none, and LLVM marks no call `tail` that
         // is passed a caller's alloca, so the copy-back reads the places after f.
         if (!outs) {

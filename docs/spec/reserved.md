@@ -212,7 +212,7 @@ allocator chunk size becomes a logical capacity (MEM-28).
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the content hash of a declaration for stored data |
 | D, code descriptors | code identity; identity bytes of closed named functions (PROG-9); no address or order dependence | open: `code.revision(s) -> Option[Bytes]`, never part of equality; instance identities |
 | L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
-| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; `WriteError`; the sync barriers `host.sync` and `host.sync_dir` ([core](core.md#contracts-the-signatures-do-not-state)), not yet in the core source | open: providers for `Net`, `Random`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
+| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; `WriteError`; the sync barriers `host.sync` and `host.sync_dir` ([core](core.md#contracts-the-signatures-do-not-state)) | open: providers for `Net`, `Random`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1; selection, shared limits, mutexes and atomics later |
 
 ## Not in v1

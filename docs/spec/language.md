@@ -132,7 +132,10 @@ A type definition declares a record (`type P { x: i64, y: i64 }`), a variant typ
 transparent alias (`type Ids = List[u64]`), as LANG-5 tells them apart. An alias is its
 right-hand side; a chain of aliases that reaches itself is refused, at the reference that
 continues the chain in the member whose definition identity is least, as
-[OWN-2](ownership.md#own-2-type-summaries) reports a cycle. Payloads are all
+[OWN-2](ownership.md#own-2-type-summaries) reports a cycle. A variant
+needs its parentheses: `type Unit = Unit` has a type on its right, so it is an alias of
+itself and refused by that rule, and a one-variant type named like its variant is
+`type Unit = Unit()`. Payloads are all
 labelled or all positional. A record is constructed with every field labelled, in
 declaration order, `P(x: 1, y: 2)`, a field with a default
 ([SEM-10](semantics.md#sem-10-codecs)) included; a variant with labels exactly when its payloads are
@@ -146,6 +149,9 @@ type Shape = Circle(f64) | Rect(w: f64, h: f64)
 ```
 ```hirsel
 type Bad = A(x: u64, u64)                                 // refused: LANG-9, mixed payload labels
+```
+```hirsel
+pub type OutOfScope = OutOfScope                          // refused: LANG-9, an alias of itself
 ```
 
 ### LANG-10: Built-in types

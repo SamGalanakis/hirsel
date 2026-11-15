@@ -168,8 +168,8 @@ The bounds are:
   ([reserved](reserved.md#not-in-v1)). Each implies every bound that all the types it admits
   have, so a body may rely on those and an instance needs no further check: `T: integer` is
   also `plain`, `shareable`, `send`, `key`, `ordered`, `codec`, `packed` and `streamable`, and `T:
-  float` is `plain`, `shareable`, `send`, `packed` and `streamable` but not `key`, `ordered`
-  or `codec`. So a core body `fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a }
+  float` is `plain`, `shareable`, `send`, `codec`, `packed` and `streamable` but neither
+  `key` nor `ordered`. So a core body `fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a }
   }` copies and compares, and `fn same[T: float](a: T, b: T) -> bool { a == b }` is refused
   by [LANG-21](language.md#lang-21-operators).
 - `packed`, `streamable`: compact encodings

@@ -47,8 +47,8 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 
 | type | kind | bounds | size | holds |
 |---|---|---|---|---|
-| integers, floats | plain | `shareable`, `send`; integers `key`, `ordered`, `codec` | width | nothing |
-| `bool`, `char`, `()` | plain | `shareable`, `send`, `key`, `ordered`; `bool` and `()` `codec` | 1, 4, 0 | nothing |
+| integers, floats | plain | `shareable`, `send`, `codec`; integers `key`, `ordered` | width | nothing |
+| `bool`, `char`, `()` | plain | `shareable`, `send`, `key`, `ordered`, `codec` | 1, 4, 0 | nothing |
 | tuples, `Option[T]`, `Result[T, E]` | OWN-3 | `shareable`, `send`, `key`, `ordered`, `codec` when T | tuple: sum; variant rule (MEM-24) | T's |
 | `Inline[T, n]` | T's kind (plain or own) | `shareable`, `send`, `key`, `ordered` when T | n × size(T) | T's |
 | `Never` | plain | `shareable`, `send`, `key`, `ordered` | 0 | nothing |
@@ -271,9 +271,7 @@ operations it names; nothing else about them may be inferred from an implementat
   and changes nothing. Its atomicity is visibility only: an `open` of `to` finds the old
   file or the new one, never neither, and `rename` makes nothing durable, so after a host
   crash either name may hold the file unless a later `host.sync_dir(d)` returned `Ok(())`.
-  The two sync barriers, `host.sync(f: HostFile) -> Result[(), IoError] waits` and
-  `host.sync_dir(d: Dir) -> Result[(), IoError] waits`, are provider operations not yet in
-  the core source. `host.sync(f)` returns `Ok(())` once every byte of `f`'s file written
+  `host.sync(mut f)` and `host.sync_dir(d)` are the two sync barriers. `host.sync(f)` returns `Ok(())` once every byte of `f`'s file written
   before its issue, through any handle, survives a host crash, with the file's length and
   whatever else reading those bytes back needs; it makes no name durable. `host.sync_dir(d)`
   returns `Ok(())` once every name in the directory `d` is rooted at that was created,

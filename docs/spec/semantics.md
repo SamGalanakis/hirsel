@@ -245,7 +245,10 @@ admits nothing, and a call at a type without the bound is refused at that call
 codec`. A nominal type's codec is generated from its declaration as ordinary checked code,
 which visits its fields in declaration order and its variants in declared order. The byte
 format, the framing of a value among others and the encoding of a schema are the library's;
-this rule fixes what every codec does.
+this rule fixes what every codec does, and how scalars are encoded: integers at their
+width, a float as its IEEE bits and a `char` as its scalar value in a `u32`, all
+little-endian, as compact layout fixes them ([MEM-9](memory.md#mem-9-compact-types)). A
+float round-trips exactly, since SEM-2 has one NaN.
 
 **Defaults.** A field of a record whose definition declares `codec` may give a **default**
 after its type, `pinned: bool = false`: a literal, or `-` and an integer literal
@@ -265,17 +268,24 @@ retyping a field, or changing the variants of a type, needs an explicit migratio
 that decodes with the old declaration and builds values of the new one.
 
 **Decoding.** A decode returns `Result[Result[T, DecodeError], Capacity]`, where
-`DecodeError = Truncated(u64) | Tag(u64) | Utf8(u64) | Duplicate(u64) | Trailing(u64) |
+`DecodeError = Truncated(u64) | Invalid(u64) | Utf8(u64) | Duplicate(u64) | Trailing(u64) |
 Schema(u64)`. Each `u64` is a byte offset, into the writer's schema for `Schema` and into
 the decoded bytes otherwise:
 
 - `Truncated(i)`: the item that starts at `i` runs past the end of the bytes;
-- `Tag(i)`: the variant tag or `bool` at `i` names no value of its type;
+- `Invalid(i)`: the item at `i` encodes no value of its type: a variant tag or `bool` past
+  its values, a float NaN other than SEM-2's canonical one, or a `u32` that is not a
+  Unicode scalar, so not a `char` (`char.from_u32`);
 - `Utf8(i)`: a `String`'s bytes stop being UTF-8 at `i`, the first byte not part of a
   scalar;
 - `Duplicate(i)`: the `Map` key that starts at `i` equals an earlier key of the same map;
 - `Trailing(i)`: the value ends at `i`, before the bytes do;
 - `Schema(i)`: the part of the writer's schema at `i` does not resolve, as above.
+
+Decoding accepts exactly the bytes that encoding produces: against one schema, bytes that
+no value encodes to are an error, and no two accepted byte strings decode to the same
+value. So a decoder never canonicalizes, and `Invalid`, `Utf8`, `Duplicate` and `Trailing`
+are each a way that bytes fall outside that image.
 
 Every decode, whatever its bytes:
 

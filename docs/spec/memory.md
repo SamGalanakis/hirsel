@@ -485,7 +485,9 @@ fn own_copy(take h: Rc[Node]) -> Result[Node, Capacity] {
 `clone(x)` and `clone_in(r, x)` are built-in typing forms. The expected type selects
 their result `U` and what is copied: first `x`'s own type, if it is `U` or `U`'s declared
 **twin**; otherwise the payloads through `Box`, `Rc` and `Arc`, outermost first, the first
-that is `U` or its twin. No match is refused. `clone(x) -> Result[U, Capacity]` makes a
+that is `U` or its twin. No match is refused. With no expected type `U` is open, and the
+call is refused ([LANG-12](language.md#lang-12-generics)): `let k = clone(key)?` is,
+`let k: Bytes = clone(key)?` is not. `clone(x) -> Result[U, Capacity]` makes a
 plain, own or counted `U`: it deep-copies the own parts of the selected value into new
 blocks charged to the current limit and shares its counted edges, a counted root selected
 as `U` included, and keeps the regions of its stable fields. A stable reference (`S in r`),
@@ -535,6 +537,10 @@ type Row { name: String, n: u64 }
 ```hirsel
 fn dup(r: Region, b: SpanBuilder[u8, in r]) -> Result[SpanBuilder[u8, in r], Capacity] { clone(b) }
                                                             // refused: MEM-17, an opaque owner
+```
+```hirsel
+fn size(key: Bytes) -> Result[u64, Capacity] { let k = clone(key)?; Ok(list.len(k)) }
+                                                            // refused: LANG-12, U is open
 ```
 
 ## Pools

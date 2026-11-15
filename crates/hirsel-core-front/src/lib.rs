@@ -23,8 +23,8 @@ mod test_functions;
 mod types;
 
 pub use body::{
-    CoreCheck, Counts, Emitter, GenericTemplate, import_instance, is_glue, materialize,
-    materialize_glue,
+    CoreCheck, Counts, Emitter, GLUE_OPERATIONS, GenericTemplate, NamePart, import_instance,
+    is_glue, materialize, materialize_glue,
 };
 pub use decls::*;
 pub use types::*;

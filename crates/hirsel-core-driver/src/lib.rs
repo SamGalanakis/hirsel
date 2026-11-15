@@ -21,10 +21,12 @@ mod native_object;
 mod native_sources;
 mod prebuild;
 pub use prebuild::Prebuilt;
+mod core_inventory;
 mod reach;
 mod reachability;
 mod test_run;
 mod tool_inputs;
+pub use core_inventory::{allowlist, core_declarations, core_inventory};
 pub use native::{
     Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, grant_kind,
 };

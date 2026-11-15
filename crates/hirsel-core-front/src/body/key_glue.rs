@@ -296,6 +296,24 @@ fn signature_id(module: &mut Module, sig: Signature) -> SigId {
     SigId(module.signatures.len() as u32 - 1)
 }
 
+/// The core path (module, name) of every glue operation [`KeyOp::named`] reads:
+/// the core operations a body reaches without a declaration (W5's inventory).
+pub const GLUE_OPERATIONS: [(&str, &str); 13] = [
+    ("map", "$key_hash"),
+    ("map", "$key_fold"),
+    ("map", "$key_equal"),
+    ("order", "$compare"),
+    ("order", "$lt"),
+    ("order", "$le"),
+    ("order", "$gt"),
+    ("order", "$ge"),
+    ("core", "$clone"),
+    ("core", "$clone_in"),
+    ("core", "$clone_twin"),
+    ("span", "$encode"),
+    ("core", "$needs_drop"),
+];
+
 impl KeyOp {
     /// The glue operation instance row `key` names, if it is glue: its argument rows
     /// are the operation's type and, for a clone into another type, that type.

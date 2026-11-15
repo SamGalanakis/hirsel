@@ -149,9 +149,10 @@ pub struct ObjectProduct {
     pub path: PathBuf,
     /// The object's read check (`Bare::check`).
     pub(crate) check: u64,
-    /// Whether the link checks its bytes through the descriptor it hands the
-    /// linker: a stored object this request neither wrote nor read.
-    pub(crate) verify: bool,
+    /// The descriptor this request checked or wrote the object's bytes
+    /// through, which the link hands the linker. None: a stored object named
+    /// by a record, which the link opens and checks through that descriptor.
+    pub(crate) held: Option<std::fs::File>,
     pub debug: Option<hirsel_core_ir::source::NativeDebug>,
     /// Stored debug rows: their store and address. A link with debug lines
     /// reads them when `debug` is not in hand.
@@ -167,17 +168,18 @@ impl ObjectProduct {
             identity: object.address,
             path: crate::native_object::path(store, object.address),
             check: object.check,
-            verify: true,
+            held: None,
             debug: None,
             debug_record: debug.map(|d| (store.clone(), d)),
             compiled: false,
         }
     }
-    /// An object this request read and checked, or emitted and wrote.
-    fn fresh(
+    /// An object this request read and checked, or emitted and wrote,
+    /// through `held`.
+    fn held(
         instance: Identity,
         store: &Store,
-        object: Bare,
+        (object, held): (Bare, std::fs::File),
         native: hirsel_core_ir::source::NativeObject,
         debug: Option<ContentHash>,
         compiled: bool,
@@ -188,7 +190,7 @@ impl ObjectProduct {
             identity: object.address,
             path: crate::native_object::path(store, object.address),
             check: object.check,
-            verify: false,
+            held: Some(held),
             debug: native.debug,
             debug_record: debug.map(|d| (store.clone(), d)),
             compiled,
@@ -558,7 +560,7 @@ impl CheckProduct {
                     items: module.items.clone(),
                     closures: fields.closures.clone(),
                 };
-                let (bare, debug) =
+                let (bare, debug, held) =
                     crate::native_object::publish_instance(store, object_key, &object, record)?;
                 if let Some(table) = &mut table {
                     table.push(
@@ -573,10 +575,10 @@ impl CheckProduct {
                         &fields.closures,
                     );
                 }
-                objects.push(ObjectProduct::fresh(
+                objects.push(ObjectProduct::held(
                     instance.clone(),
                     store,
-                    bare,
+                    (bare, held),
                     object,
                     debug,
                     true,
@@ -609,28 +611,29 @@ impl CheckProduct {
                     instance_body.ir_hash(&mut scratch)?,
                 ),
             )?;
-            let (bare, object, compiled) =
-                if let Some((bare, object)) = crate::native_object::load(store, object_key)? {
-                    (bare, object, false)
-                } else {
-                    let symbols = materialized.link_symbols(instance, &mut names)?;
-                    let object =
-                        emit_unit(module, || symbols, options, object_key).map_err(|message| {
-                            NativeStop::Emit {
-                                definition: instance.definition.clone(),
-                                message,
-                            }
-                        })?;
-                    (
-                        crate::native_object::publish(store, object_key, &object)?,
-                        object,
-                        true,
-                    )
-                };
-            objects.push(ObjectProduct::fresh(
+            let (held, object, compiled) = if let Some((bare, object, file)) =
+                crate::native_object::load(store, object_key)?
+            {
+                ((bare, file), object, false)
+            } else {
+                let symbols = materialized.link_symbols(instance, &mut names)?;
+                let object =
+                    emit_unit(module, || symbols, options, object_key).map_err(|message| {
+                        NativeStop::Emit {
+                            definition: instance.definition.clone(),
+                            message,
+                        }
+                    })?;
+                (
+                    crate::native_object::publish(store, object_key, &object)?,
+                    object,
+                    true,
+                )
+            };
+            objects.push(ObjectProduct::held(
                 instance.clone(),
                 store,
-                bare,
+                held,
                 object,
                 None,
                 compiled,
@@ -821,25 +824,26 @@ impl CheckProduct {
                 &env,
                 &crate::body::ir_hash(&module, &mut Vec::new())?,
             )?;
-            let (bare, object, compiled) =
-                if let Some((bare, object)) = crate::native_object::load(&store, object_key)? {
-                    (bare, object, false)
-                } else {
-                    let object = emit_unit(&module, || module.link_symbols(), options, object_key)
-                        .map_err(|message| NativeStop::Emit {
-                            definition: entry.clone(),
-                            message,
-                        })?;
-                    (
-                        crate::native_object::publish(&store, object_key, &object)?,
-                        object,
-                        true,
-                    )
-                };
-            let object = ObjectProduct::fresh(
+            let (held, object, compiled) = if let Some((bare, object, file)) =
+                crate::native_object::load(&store, object_key)?
+            {
+                ((bare, file), object, false)
+            } else {
+                let object = emit_unit(&module, || module.link_symbols(), options, object_key)
+                    .map_err(|message| NativeStop::Emit {
+                        definition: entry.clone(),
+                        message,
+                    })?;
+                (
+                    crate::native_object::publish(&store, object_key, &object)?,
+                    object,
+                    true,
+                )
+            };
+            let object = ObjectProduct::held(
                 cleanup_identity(&module),
                 &store,
-                bare,
+                held,
                 object,
                 None,
                 compiled,
@@ -937,12 +941,17 @@ impl CheckProduct {
             items: module.items.clone(),
             closures: vec![],
         };
-        let (bare, debug) =
+        let (bare, debug, held) =
             crate::native_object::publish_instance(&store, object_key, &object, record)?;
         Ok((
             abi,
-            Some(ObjectProduct::fresh(
-                identity, &store, bare, object, debug, true,
+            Some(ObjectProduct::held(
+                identity,
+                &store,
+                (bare, held),
+                object,
+                debug,
+                true,
             )),
         ))
     }
@@ -1162,15 +1171,21 @@ fn descriptor_limit() -> u64 {
 
 #[cfg(test)]
 thread_local! {
+    /// Runs when the link starts, before it opens or checks any object, with
+    /// the objects' paths.
+    pub(crate) static BEFORE_OPEN: std::cell::RefCell<Option<Box<dyn FnMut(&[PathBuf])>>> =
+        const { std::cell::RefCell::new(None) };
     /// Runs between the objects' check and the linker's spawn, with their paths.
     pub(crate) static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn FnMut(&[PathBuf])>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Open each object once and check a stored one's bytes through its
+/// One descriptor per object, through which its bytes were checked or
+/// written: an object this request read or emitted brings its own, and a
+/// stored object named by a record is opened once and checked through that
 /// descriptor. The linker names each by `/proc/<pid>/fd/N` of this process,
-/// which resolves to the checked inode, so no store path is reopened. A stored
-/// object that fails its check is removed.
+/// which resolves to that inode, so no store path is reopened after a check.
+/// A stored object that fails its check is removed.
 fn open_objects(
     objects: &[ObjectProduct],
     counters: &mut crate::reach::ReachCounters,
@@ -1183,29 +1198,37 @@ fn open_objects(
             objects.len()
         )));
     }
+    #[cfg(test)]
+    BEFORE_OPEN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(&objects.iter().map(|o| o.path.clone()).collect::<Vec<_>>());
+        }
+    });
     let mut files = Vec::with_capacity(objects.len());
     let mut bytes = Vec::new();
     for object in objects {
+        if let Some(held) = &object.held {
+            files.push(held.try_clone()?);
+            continue;
+        }
         let mut file = match std::fs::File::open(&object.path) {
             Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound && object.verify => {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Ok(Err(object.instance.clone()));
             }
             Err(e) => return Err(e.into()),
         };
-        if object.verify {
-            bytes.clear();
-            file.read_to_end(&mut bytes)?;
-            counters.objects_verified += 1;
-            if crate::store::checksum(&bytes) != object.check {
-                drop(file);
-                match std::fs::remove_file(&object.path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
-                return Ok(Err(object.instance.clone()));
+        bytes.clear();
+        file.read_to_end(&mut bytes)?;
+        counters.objects_verified += 1;
+        if crate::store::checksum(&bytes) != object.check {
+            drop(file);
+            match std::fs::remove_file(&object.path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
+            return Ok(Err(object.instance.clone()));
         }
         files.push(file);
     }

@@ -66,8 +66,8 @@ impl CheckProduct {
             &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
         )?;
         let (identity, object, compiled) =
-            if let Some((hash, object)) = crate::native_object::load(store, object_key)? {
-                (hash, object, false)
+            if let Some((bare, object, file)) = crate::native_object::load(store, object_key)? {
+                ((bare, file), object, false)
             } else {
                 let units = modules
                     .iter()
@@ -115,10 +115,10 @@ impl CheckProduct {
                 })
                 .sum(),
             instance: instance.clone(),
-            path: crate::native_object::path(store, identity.address),
-            identity: identity.address,
-            check: identity.check,
-            verify: false,
+            path: crate::native_object::path(store, identity.0.address),
+            identity: identity.0.address,
+            check: identity.0.check,
+            held: Some(identity.1),
             debug: object.debug,
             debug_record: None,
             compiled,

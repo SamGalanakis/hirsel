@@ -4,6 +4,7 @@ use crate::{Store, decode, encode, native};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::source::NativeObject;
 use serde::{Deserialize, Serialize};
+use std::fs::File;
 use std::io;
 
 pub(crate) const SCHEMA: u32 = 2;
@@ -14,8 +15,14 @@ struct Root {
     debug: Option<ContentHash>,
 }
 
-pub(crate) fn publish(store: &Store, key: ContentHash, native: &NativeObject) -> io::Result<Bare> {
-    let object = store.put_bare(&native.bytes)?;
+/// Publish an emitted object and its debug rows and select them under `key`:
+/// the object, and the descriptor its bytes were written through.
+pub(crate) fn publish(
+    store: &Store,
+    key: ContentHash,
+    native: &NativeObject,
+) -> io::Result<(Bare, File)> {
+    let (object, file) = store.put_bare(&native.bytes)?;
     let debug = native
         .debug
         .as_ref()
@@ -27,14 +34,20 @@ pub(crate) fn publish(store: &Store, key: ContentHash, native: &NativeObject) ->
         debug,
     })?)?;
     store.select(&native::selection(key), root)?;
-    Ok(object)
+    Ok((object, file))
 }
 
 pub(crate) fn path(store: &Store, identity: ContentHash) -> std::path::PathBuf {
     store.path(identity)
 }
 
-pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, NativeObject)>> {
+/// The object selected under `key` when every part checks, with the
+/// descriptor its bytes were checked through; the link hands that descriptor
+/// to the linker.
+pub(crate) fn load(
+    store: &Store,
+    key: ContentHash,
+) -> io::Result<Option<(Bare, NativeObject, File)>> {
     let Some(identity) = store.selection(&native::selection(key))? else {
         return Ok(None);
     };
@@ -47,7 +60,7 @@ pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, 
     if root.schema != SCHEMA {
         return Ok(None);
     }
-    let Some(bytes) = store.get_bare(root.object)? else {
+    let Some((bytes, file)) = store.get_bare(root.object)? else {
         return Ok(None);
     };
     let debug = match root.debug {
@@ -62,7 +75,7 @@ pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, 
         }
         None => None,
     };
-    Ok(Some((root.object, NativeObject { bytes, debug })))
+    Ok(Some((root.object, NativeObject { bytes, debug }, file)))
 }
 
 /// A Cranelift development instance's record, under its instance key
@@ -90,14 +103,16 @@ pub(crate) struct Instance {
 pub(crate) const INSTANCE_SCHEMA: u32 = 1;
 
 /// Publish an emitted instance's object, debug rows and record, and select the
-/// record under its key; the object and the debug rows' address.
+/// record under its key; the object, the debug rows' address and the
+/// descriptor the object's bytes were written through.
 pub(crate) fn publish_instance(
     store: &Store,
     key: ContentHash,
     object: &NativeObject,
     mut record: Instance,
-) -> io::Result<(Bare, Option<ContentHash>)> {
-    record.object = store.put_bare(&object.bytes)?;
+) -> io::Result<(Bare, Option<ContentHash>, File)> {
+    let (bare, file) = store.put_bare(&object.bytes)?;
+    record.object = bare;
     record.debug = object
         .debug
         .as_ref()
@@ -105,7 +120,7 @@ pub(crate) fn publish_instance(
         .transpose()?;
     let address = store.put(&encode(&record)?)?;
     store.select(&native::selection(key), address)?;
-    Ok((record.object, record.debug))
+    Ok((record.object, record.debug, file))
 }
 
 /// The record selected under `key`, when it decodes and every closure's hash
@@ -168,8 +183,8 @@ mod tests {
                     scopes: vec![],
                 }),
             };
-            let identity = publish(&store, key, &object).unwrap();
-            let (loaded, warm) = load(&store, key).unwrap().unwrap();
+            let (identity, _) = publish(&store, key, &object).unwrap();
+            let (loaded, warm, _) = load(&store, key).unwrap().unwrap();
             assert_eq!(identity, loaded);
             assert_eq!(object, warm);
             let bytes = std::fs::read(path(&store, loaded.address)).unwrap();

@@ -247,7 +247,7 @@ fn damaged_disk_bytes_are_a_miss() {
     store.select("live", key).unwrap();
     assert_eq!(std::fs::read(dir.path().join("live")).unwrap(), selection);
     let object = b"\x7fELF object bytes".as_slice();
-    let bare = store.put_bare(object).unwrap();
+    let (bare, _) = store.put_bare(object).unwrap();
     assert_eq!(bare.check, XxHash3_64::oneshot(object));
     let kinds: [(&str, PathBuf, &[u8], &dyn Fn() -> bool); 3] = [
         ("record", store.path(key), &record, &|| {
@@ -280,7 +280,7 @@ fn damaged_disk_bytes_are_a_miss() {
         assert!(reads(), "{kind}: whole");
     }
     assert_eq!(store.get(key).unwrap().unwrap(), payload);
-    assert_eq!(store.get_bare(bare).unwrap().unwrap(), object);
+    assert_eq!(store.get_bare(bare).unwrap().unwrap().0, object);
 }
 
 #[test]

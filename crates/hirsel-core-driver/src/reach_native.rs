@@ -294,3 +294,67 @@ fn reach_inode_swap_after_the_check_links_the_checked_object() {
     assert_eq!(status, Some(7));
     assert!(swapped == fresh.1, "the checked inodes were linked");
 }
+
+/// R12c: between emission and the link's first open, a valid object of the
+/// same program with `leaf` returning 42 is renamed over the stored object
+/// the build will link (a cached one on a development engine, the program's
+/// one object on release). On every engine and mode the linker reads the
+/// bytes the build checked or wrote, so the executable is a fresh store's,
+/// and so is the next request's: no wrong executable was published under the
+/// right objects. Bug caught (red at f488cd81): LLVM checked a cached object
+/// in `native_object::load` and the link opened its path again unchecked,
+/// linking the swapped inode (exit 42) and caching that executable.
+#[test]
+#[ignore = "explicit native integration target"]
+fn reach_object_swapped_before_the_link_opens_it_links_the_checked_bytes() {
+    const A: &str = "fn leaf() -> u8 { 41u8 }\npub fn main() -> Result[(), Exit] { Error(Exit(status: leaf())) }\n";
+    let core = core_sources();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let leaf = DefPath::from_full("app@1/main/leaf").unwrap();
+    for (backend, optimize) in [(Backend::Cranelift, false), (Backend::Llvm, false), (Backend::Llvm, true)] {
+        let how = format!("{backend:?} optimize={optimize}");
+        let dir = tempfile::tempdir().unwrap();
+        let base = || NativeOptions { optimize, ..native_options(backend, dir.path()) };
+        let options = base();
+        let at = |name: &str| NativeOptions {
+            store: dir.path().join(format!("{name}-native")),
+            output: dir.path().join(format!("{name}-program")),
+            ..base()
+        };
+        let target = |objects: Vec<ObjectProduct>| {
+            let mut objects = objects.into_iter();
+            if optimize {
+                objects.next().unwrap()
+            } else {
+                objects.find(|o| o.instance.definition == leaf).unwrap()
+            }
+        };
+        assert_eq!(reach_build(&record_check(A, &core, dir.path(), "store"), &options).2, Some(41), "{how}: prime");
+        // B forces a link; its target object is stored before the build.
+        let source = format!("{A}\n");
+        let b = record_check(&source, &core, dir.path(), "store");
+        let path = target(b.emit_reachable(&entry, &options).unwrap()).path;
+        let donor = record_check(&A.replace("41u8", "42u8"), &core, dir.path(), "donor");
+        let donor = std::fs::read(target(donor.emit_reachable(&entry, &at("donor")).unwrap()).path).unwrap();
+        let swap = dir.path().join("swap");
+        let mut once = true;
+        BEFORE_OPEN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |paths: &[PathBuf]| {
+                if once && paths.contains(&path) {
+                    once = false;
+                    std::fs::write(&swap, &donor).unwrap();
+                    std::fs::rename(&swap, &path).unwrap();
+                }
+            }))
+        });
+        let (_, swapped, status) = reach_build(&b, &options);
+        BEFORE_OPEN.with(|hook| *hook.borrow_mut() = None);
+        let fresh = reach_build(&record_check(&source, &core, dir.path(), "fresh"), &at("fresh"));
+        assert_eq!(fresh.2, Some(41), "{how}: fresh");
+        assert_eq!(status, Some(41), "{how}: the checked bytes were linked");
+        assert!(swapped == fresh.1, "{how}: a fresh store's executable");
+        let (_, again, status) = reach_build(&b, &options);
+        assert_eq!(status, Some(41), "{how}: next request");
+        assert!(again == fresh.1, "{how}: the next request's executable is a fresh store's");
+    }
+}

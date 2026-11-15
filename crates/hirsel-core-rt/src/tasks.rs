@@ -152,7 +152,10 @@ pub struct Task {
 struct Scheduler {
     deferred: *mut Task,
     deferred_tail: *mut Task,
-    host: Stack,
+    // The guarded foreign-call stack is needed only when a run issues a host
+    // operation. Keeping it lazy avoids committing its startup pages for the
+    // ordinary, host-free path.
+    host: Option<Stack>,
     idle: *mut u8,
     head: *mut Task,
     tail: *mut Task,
@@ -161,6 +164,7 @@ struct Scheduler {
     next: u64,
     provider: SchedulerProvider,
 }
+const HOST_STACK_BYTES: usize = 64 << 10;
 impl Scheduler {
     fn id(&mut self) -> u64 {
         let next = self.next;
@@ -569,7 +573,7 @@ pub unsafe fn run_root(
     let mut run = Scheduler {
         deferred: ptr::null_mut(),
         deferred_tail: ptr::null_mut(),
-        host: Stack::with_bytes(8 << 20),
+        host: None,
         idle: ptr::null_mut(),
         head: ptr::null_mut(),
         tail: ptr::null_mut(),
@@ -895,10 +899,11 @@ pub(crate) unsafe fn host_operation(
             saved: ptr::null_mut(),
             result: std::mem::MaybeUninit::uninit(),
         };
-        let target = (*run)
+        let host = (*run)
             .host
-            .prepare(invoke, (&mut call as *mut Call).cast(), ptr::null_mut());
-        crate::fiber::guard((*run).host.bounds());
+            .get_or_insert_with(|| Stack::with_bytes(HOST_STACK_BYTES));
+        let target = host.prepare(invoke, (&mut call as *mut Call).cast(), ptr::null_mut());
+        crate::fiber::guard(host.bounds());
         hirsel_stack::switch(&mut call.saved, target);
         crate::fiber::guard((*task).stack.bounds());
         call.result.assume_init()

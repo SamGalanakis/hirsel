@@ -61,18 +61,6 @@ pub fn accounts() -> Table[Account] {
     new(Codec(encode: encode_account, decode: decode_account))
 }
 
-// Little-endian u64, eight bytes: eight sets into an 8-byte scratch, then one append,
-// which LLVM folds into one capacity test and one 8-byte store (std-seed-api-889 CODEC.md).
-fn put_u64(x: u64, mut scratch: Bytes, mut out: Bytes) -> Result[(), Capacity] {
-    let mut i: u64 = 0
-    while i < 8 {
-        let byte: u8 = int.truncate(x >> (i * 8))
-        let _ = list.set(mut scratch, i, byte)
-        i += 1
-    }
-    list.append(mut out, scratch)
-}
-
 fn get_u64(b: Bytes, mut at: u64) -> Option[u64] {
     if at > list.len(b) || list.len(b) - at < 8 {
         return None
@@ -82,14 +70,12 @@ fn get_u64(b: Bytes, mut at: u64) -> Option[u64] {
     Some(x)
 }
 
-// Layout: id, balance (two's complement), owner byte length, owner UTF-8 bytes.
+// Layout: id, balance (two's complement), owner byte length, owner UTF-8 bytes;
+// each integer is eight little-endian bytes.
 fn encode_account(a: Account, mut out: Bytes) -> Result[(), Capacity] {
-    // One scratch per row: Codec.encode has no place to keep one across rows.
-    let mut scratch: Bytes = list.new()
-    list.fill(mut scratch, 8, 0u8)?
-    put_u64(a.id, mut scratch, mut out)?
-    put_u64(int.truncate(a.balance), mut scratch, mut out)?
-    put_u64(string.byte_len(a.owner), mut scratch, mut out)?
+    list.put_word_le(mut out, a.id)?
+    list.put_word_le(mut out, int.truncate(a.balance))?
+    list.put_word_le(mut out, string.byte_len(a.owner))?
     list.append(mut out, string.as_bytes(a.owner))
 }
 

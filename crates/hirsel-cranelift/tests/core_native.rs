@@ -78,6 +78,45 @@ fn integer_modes_and_float_conversion_boundaries_match_evaluator() {
                 id += 1;
             }
         }
+        // A rotate that drops the wrapped bits, rotates right, or reads the count
+        // signed or unreduced would place Map keys in other buckets without changing
+        // any program output; Rust's `rotate_left` is the oracle for the evaluator.
+        writeln!(
+            declarations,
+            "sig g{id} = ({kind}, {kind}) -> ({kind})\ninst n{id} = test@0/numeric/f{id} [] []"
+        )
+        .unwrap();
+        writeln!(bodies,"fn f{id} = n{id} g{id} {{\nb0(v0: {kind}, v1: {kind}):\n  v2: {kind} = rotl v0, v1\n  return v2\n}}").unwrap();
+        for x in [min | 1, 0xa5c3_0f96_5a3c_f069 & mask] {
+            for count in [
+                0,
+                1,
+                u64::from(width) - 1,
+                width.into(),
+                u64::from(width) + 3,
+                mask,
+            ] {
+                let rotated = match width {
+                    8 => u64::from((x as u8).rotate_left(count as u32)),
+                    16 => u64::from((x as u16).rotate_left(count as u32)),
+                    32 => u64::from((x as u32).rotate_left(count as u32)),
+                    _ => x.rotate_left(count as u32),
+                };
+                let eval::Outcome::Returned(got) = eval::run(
+                    &text::parse(&format!("{declarations}{bodies}")).unwrap(),
+                    FuncId(id),
+                    &[x, count],
+                    u64::MAX,
+                )
+                .outcome
+                else {
+                    panic!("rotl {kind} {x:#x} {count}");
+                };
+                assert_eq!(got[0] & mask, rotated, "rotl {kind} {x:#x} by {count}");
+                runs.push((FuncId(id), vec![x, count]));
+            }
+        }
+        id += 1;
         writeln!(
             declarations,
             "sig g{id} = (f64) -> ({kind}, u8)\ninst n{id} = test@0/numeric/f{id} [] []"

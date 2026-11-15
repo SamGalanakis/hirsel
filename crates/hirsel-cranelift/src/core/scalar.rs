@@ -79,6 +79,7 @@ impl Function<'_, '_, '_> {
             BitAnd => self.b.ins().band(l, r),
             BitOr => self.b.ins().bor(l, r),
             BitXor => self.b.ins().bxor(l, r),
+            Rotl => self.b.ins().rotl(l, r),
             Min | Max | MinNumber | MaxNumber => {
                 let signed = t.int().is_some_and(|(s, _)| s);
                 let cc = if signed {

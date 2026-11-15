@@ -2522,6 +2522,10 @@ fn int_binary(t: Ty, op: BinaryOp, a: u64, c: u64) -> Option<u64> {
         BinaryOp::BitAnd => Some(a & c),
         BinaryOp::BitOr => Some(a | c),
         BinaryOp::BitXor => Some(a ^ c),
+        BinaryOp::Rotl => {
+            let (x, n) = (mask(t, a), mask(t, c) % u64::from(w));
+            Some(mask(t, x << n | x.checked_shr(w - n as u32).unwrap_or(0)))
+        }
         BinaryOp::Min => Some(if x <= y { a } else { c }),
         BinaryOp::Max => Some(if x >= y { a } else { c }),
         BinaryOp::MinNumber | BinaryOp::MaxNumber => unreachable!("float only"),

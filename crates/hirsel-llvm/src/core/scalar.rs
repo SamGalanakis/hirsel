@@ -197,6 +197,15 @@ impl FunctionEmitter<'_> {
                 };
                 self.bin(bit, &tt, a, b)
             }
+            BinaryOp::Rotl => self.intrinsic(
+                &format!("llvm.fshl.{tt}"),
+                tt.clone(),
+                &[
+                    arg(tt.clone(), a.clone()),
+                    arg(tt.clone(), a.clone()),
+                    arg(tt.clone(), b.clone()),
+                ],
+            ),
             BinaryOp::Min | BinaryOp::Max => {
                 let predicate = match (op == BinaryOp::Min, signed) {
                     (true, true) => Predicate::Slt,

@@ -860,6 +860,37 @@ fn infallible_arithmetic_sample_matches_evaluator() {
     agree(&module, &cases);
 }
 
+/// A rotate that drops the wrapped bits, rotates right, or reads the count signed or
+/// unreduced places Map keys in other buckets without changing any program output.
+/// The evaluator's `rotl` is checked against Rust's `rotate_left` in the Cranelift
+/// integer differential.
+#[test]
+fn rotl_matches_evaluator_at_every_width() {
+    let mut text = String::from("core v0\n");
+    let kinds = ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"];
+    for (id, kind) in kinds.iter().enumerate() {
+        text += &format!(
+            "sig g{id} = ({kind}, {kind}) -> ({kind})\ninst n{id} = test@0/rotl/f{id} [] []\n"
+        );
+    }
+    let mut cases = Vec::new();
+    for (id, kind) in kinds.iter().enumerate() {
+        text += &format!(
+            "fn f{id} = n{id} g{id} {{\nb0(v0: {kind}, v1: {kind}):\n  v2: {kind} = rotl v0, v1\n  return v2\n}}\n"
+        );
+        let width = 8u64 << (id / 2);
+        let mask = u64::MAX >> (64 - width);
+        for x in [1 << (width - 1) | 1, 0xa5c3_0f96_5a3c_f069 & mask] {
+            for count in [0, 1, width - 1, width, width + 3, mask] {
+                cases.push((FuncId(id as u32), vec![x, count]));
+            }
+        }
+    }
+    let module = text::parse(&text).unwrap();
+    wf::module(&module).unwrap();
+    agree(&module, &cases);
+}
+
 #[test]
 fn c_results_and_indirect_calls_match_evaluator() {
     let module = text::parse(

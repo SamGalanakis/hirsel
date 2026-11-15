@@ -463,27 +463,12 @@ fn inline_word_hash(body: &mut Body, word: ValueId, result: ValueId) {
         left: word,
         right: factor,
     });
-    let left = value(body, |result| Inst::Const { result, bits: 26 });
-    let right = value(body, |result| Inst::Const { result, bits: 38 });
-    let lo = value(body, |result| Inst::Binary {
-        result,
-        op: BinaryOp::Shl,
-        left: product,
-        right: left,
-        fail: None,
-    });
-    let hi = value(body, |result| Inst::Binary {
-        result,
-        op: BinaryOp::Shr,
-        left: product,
-        right,
-        fail: None,
-    });
+    let count = value(body, |result| Inst::Const { result, bits: 26 });
     let hash = value(body, |result| Inst::Binary {
         result,
-        op: BinaryOp::BitOr,
-        left: lo,
-        right: hi,
+        op: BinaryOp::Rotl,
+        left: product,
+        right: count,
         fail: None,
     });
     let shift = value(body, |result| Inst::Const { result, bits: 32 });
@@ -2134,11 +2119,8 @@ impl Code {
         let x = self.binary(BinaryOp::BitXor, h, w);
         let factor = self.constant(0x9e3779b97f4a7c15);
         let x = self.mul(x, factor);
-        let left = self.constant(26);
-        let right = self.constant(38);
-        let a = self.binary(BinaryOp::Shl, x, left);
-        let b = self.binary(BinaryOp::Shr, x, right);
-        self.binary(BinaryOp::BitOr, a, b)
+        let count = self.constant(26);
+        self.binary(BinaryOp::Rotl, x, count)
     }
 }
 

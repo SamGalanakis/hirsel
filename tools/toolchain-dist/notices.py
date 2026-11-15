@@ -325,6 +325,29 @@ def recorded(root):
     return json.loads(match[1]), text
 
 
+ADAPTED = 'third-party/NOTICES.md'
+
+
+def citations(text):
+    """Each adapted-source row of third-party/NOTICES.md and the repository files it
+    cites: every backticked span under "Where in this tree", and each backticked
+    path under "License". `{a,b}` expands and a trailing `:lines` is dropped."""
+    def expand(span):
+        match = re.search(r'\{([^{}]*)\}', span)
+        if not match:
+            return [span]
+        return [path for choice in match[1].split(',')
+                for path in expand(span[:match.start()] + choice + span[match.end():])]
+    rows = []
+    for line in text.split('\n'):
+        cells = [cell.strip() for cell in line.strip().strip('|').split('|')]
+        if not line.startswith('| ') or len(cells) != 5 or cells[0] == 'Source':
+            continue
+        spans = re.findall(r'`([^`]+)`', cells[2]) + [span for span in re.findall(r'`([^`]+)`', cells[4]) if '/' in span]
+        rows.append((cells[0], [re.sub(r':[0-9][0-9,-]*$', '', path) for span in spans for path in expand(span)]))
+    return rows
+
+
 def check_bundle(bundle, sources, inventory):
     """Every shipped file is in exactly one `files` class, and each native file is its pin."""
     allowed = set(sources['bundle_entries']) | OPTIONAL_ENTRIES | {'notices', 'hirsel-build.json'}

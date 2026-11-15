@@ -453,6 +453,19 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                 library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
 
 
+def adapted_citations_present() -> list[str]:
+    """The files third-party/NOTICES.md cites that exist in the tree: the gate
+    is red on a cited file missing from them (tools/toolchain-dist/notices.py)."""
+    import importlib.util
+    path = ROOT / "tools/toolchain-dist/notices.py"
+    READS.bytes(path)
+    spec = importlib.util.spec_from_file_location("notices", path)
+    notices = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(notices)
+    cited = {cited for _, paths in notices.citations(READS.text(ROOT / notices.ADAPTED)) for cited in paths}
+    return sorted(path for path in cited if READS.is_file(ROOT / path))
+
+
 def first_party(meta: dict) -> str:
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -696,7 +709,8 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
                             runtimes="//:hirsel-core-rt-archives", visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py", full=False,
-                            data=["tools/tests/distribution_notices.py", "NOTICES.md", "Cargo.lock",
+                            args=["--present", *adapted_citations_present()],
+                            data=["tools/tests/distribution_notices.py", "NOTICES.md", "Cargo.lock", "//third-party:NOTICES.md",
                                   "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
                                   *("//tools/toolchain-dist:licenses/" + name for name in (
                                       "libc6-dev.copyright", "gcc-13-base.copyright", "common-licenses/LGPL-2.1",

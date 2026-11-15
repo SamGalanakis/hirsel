@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('notices', Path(os.environ.get('HIRSEL_DISTRIBUTION_NOTICES', ROOT / 'tools/toolchain-dist/notices.py')))
 notices = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(notices)
+# The cited files sync.py found in the tree (--present); run outside Buck, the tree itself.
+PRESENT = None
 
 
 def archive(path, files, prefix='example-1.0'):
@@ -238,6 +240,15 @@ class Notices(unittest.TestCase):
         self.assertIn('no alternative license elected', record['selection'])
 
 
+class Citations(unittest.TestCase):
+    def test_braces_and_line_ranges_name_each_file(self):
+        text = ('| Source | Adapted | Where in this tree | Upstream revision | License |\n|---|---|---|---|---|\n'
+                '| up | `src/x.rs:1-9` | `a/{b,c}.rs:3-4,8`, driver `d/e.hir` | `deadbeef` | MIT, `third-party/LICENSE.up`; `v1.0` |\n'
+                '| bare | code | the runtime | r | MIT |\n')
+        self.assertEqual(notices.citations(text), [
+            ('up', ['a/b.rs', 'a/c.rs', 'd/e.hir', 'third-party/LICENSE.up']), ('bare', [])])
+
+
 class Repository(unittest.TestCase):
     """The checked-in NOTICES.md against this tree's lock files and the built installation."""
 
@@ -251,6 +262,12 @@ class Repository(unittest.TestCase):
         self.assertEqual(notices.render(written), text)
         notices.check_bundle(Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']), sources, written)
 
+    def test_adapted_sources_cite_files_in_this_tree(self):
+        for source, paths in notices.citations((ROOT / notices.ADAPTED).read_text()):
+            present = PRESENT if PRESENT is not None else {path for path in paths if (ROOT / path).is_file()}
+            self.assertTrue(paths, f'{notices.ADAPTED}: {source} cites no file in this tree')
+            self.assertEqual(sorted(set(paths) - present), [], f'{notices.ADAPTED}: {source} cites files that do not exist')
+
 
 if __name__ == '__main__':
     import argparse
@@ -258,5 +275,8 @@ if __name__ == '__main__':
     # Land acceptance runs every suite with --test-threads 1; these tests run serially.
     parser = argparse.ArgumentParser()
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
-    _, rest = parser.parse_known_args()
+    parser.add_argument('--present', nargs='*')
+    known, rest = parser.parse_known_args()
+    if known.present is not None:
+        PRESENT = set(known.present)
     unittest.main(argv=sys.argv[:1] + rest)

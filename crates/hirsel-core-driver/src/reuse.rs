@@ -55,7 +55,9 @@ fn body_identity(item: Item<'_>) -> ContentHash {
 
 /// A signature's identity is its header tokens: a reader's reported sites are
 /// all in its own item (`DiskCheckRef::of`), so the header's layout is not
-/// part of what a reader depends on.
+/// part of what a reader depends on. An item that fails to parse anywhere,
+/// its body included, resolves nothing (`ResolutionScratch::resolve`), so its
+/// header lowers to the refused type: the same tokens are another signature.
 fn header_identity(item: Item<'_>) -> ContentHash {
     // Token spans are file offsets.
     let end = if matches!(
@@ -66,7 +68,12 @@ fn header_identity(item: Item<'_>) -> ContentHash {
     } else {
         usize::MAX
     };
-    token_identity(item, end, "hirsel.header-tokens.v2")
+    let domain = if item.range.has_errors {
+        "hirsel.header-tokens.unparsed.v1"
+    } else {
+        "hirsel.header-tokens.v2"
+    };
+    token_identity(item, end, domain)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

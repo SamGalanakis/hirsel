@@ -2317,32 +2317,60 @@ fn every_reached_shape_name_has_one_closure() {
     eprintln!("roots built {built}");
 }
 
+/// One module per file; `pkg/m` puts module `m` in package `pkg`, which the
+/// app package depends on.
 fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckRequest {
     let mut req = request("", dir);
     req.store = store.to_owned();
     req.inputs.packages[0].sources.clear();
     for (name, text) in files {
-        let file = dir.join(format!("{name}.hirsel"));
+        let (owner, module) = name.split_once('/').unwrap_or(("app", name));
+        let file = dir.join(format!("{owner}-{module}.hirsel"));
         std::fs::write(&file, text).unwrap();
-        req.inputs.packages[0]
+        let at = match req
+            .inputs
+            .packages
+            .iter()
+            .position(|p| p.package == package(owner))
+        {
+            Some(at) => at,
+            None => {
+                req.inputs.packages.insert(
+                    0,
+                    PackageManifest {
+                        package: package(owner),
+                        sources: vec![],
+                        dependencies: vec![],
+                    },
+                );
+                let app = req.inputs.packages.len() - 1;
+                req.inputs.packages[app].dependencies.push(package(owner));
+                0
+            }
+        };
+        req.inputs.packages[at]
             .sources
             .push(hirsel_core_resolve::ModuleSource {
                 file,
-                modules: vec![name.to_string()],
+                modules: vec![module.to_string()],
                 signatures: false,
             });
     }
     req
 }
 
-/// Attack 960's resolution counterexamples 1 and 6 as edit-kind cases. Law:
-/// after an edit, an incremental build reports the diagnostics, holds the
-/// products and publishes the root of a fresh build of the same sources.
-/// Oracle: the fresh build. Red before an unresolved body stopped recording
-/// the resolver's refusals: its record kept the foreign type's old span.
+/// Attack 960's resolution counterexamples 1 and 6, and attack 979's H1 both
+/// ways and across a package, as edit-kind cases. Law: after an edit, an
+/// incremental build reports the diagnostics, holds the products and publishes
+/// the root of a fresh build of the same sources. Oracle: the fresh build. Red
+/// before an unresolved body stopped recording the resolver's refusals: its
+/// record kept the foreign type's old span. Red before a header's digest
+/// covered its item's parse failure: a callee whose body fails to parse has an
+/// unresolved header, so its caller halts, and that halted record was reused
+/// once the body parsed (979 H1), or the caller's whole record once it stopped.
 #[test]
 fn resolution_edges_rebuild_like_fresh() {
-    let cases: [(&str, &[(&str, &str)], &[(&str, &str)]); 3] = [
+    let cases: [(&str, &[(&str, &str)], &[(&str, &str)]); 6] = [
         (
             "a variant added elsewhere takes over a record construction",
             &[(
@@ -2379,6 +2407,39 @@ fn resolution_edges_rebuild_like_fresh() {
                 ("b", "fn g() -> u64 { a.f() }\n"),
                 ("c", "pub fn h() -> u64 { 2 }\n"),
                 ("d", "pub fn f() -> u64 { 3 }\n"),
+            ],
+        ),
+        (
+            "a callee body that failed to parse parses",
+            &[(
+                "a",
+                "fn probe() -> u64 { 0u128 }\nfn main() -> u64 { probe() }\n",
+            )],
+            &[(
+                "a",
+                "fn probe() -> u64 { 1u64 }\nfn main() -> u64 { probe() }\n",
+            )],
+        ),
+        (
+            "a callee body stops parsing",
+            &[(
+                "a",
+                "fn probe() -> u64 { 1u64 }\nfn main() -> u64 { probe() }\n",
+            )],
+            &[(
+                "a",
+                "fn probe() -> u64 { 0u128 }\nfn main() -> u64 { probe() }\n",
+            )],
+        ),
+        (
+            "a callee body in another package that failed to parse parses",
+            &[
+                ("lib/a", "pub fn probe() -> u64 { 0u128 }\n"),
+                ("b", "fn main() -> u64 { lib.a.probe() }\n"),
+            ],
+            &[
+                ("lib/a", "pub fn probe() -> u64 { 1u64 }\n"),
+                ("b", "fn main() -> u64 { lib.a.probe() }\n"),
             ],
         ),
     ];

@@ -1506,3 +1506,5 @@ fn check_growth_shadow_words() {
         );
     }
 }
+
+include!("copy.rs");

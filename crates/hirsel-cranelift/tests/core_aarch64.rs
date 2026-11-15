@@ -133,3 +133,8 @@ fn consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
 fn growth_shadow_copies_back_data_and_capacity() {
     check_growth_shadow_words();
 }
+
+#[test]
+fn unaligned_fixed_copies_preserve_every_byte_and_both_canaries() {
+    check_unaligned_copies();
+}

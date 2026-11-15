@@ -18,19 +18,21 @@ impl Function<'_, '_, '_> {
             return false;
         };
         let size = imm.bits();
-        if !(0..=32).contains(&size) {
+        if !(0..=128).contains(&size) {
             return false;
         }
         // Unaligned, exact-width accesses. Keep all source bytes in registers
         // before storing, including odd tails and the 24-byte sequence carrier.
-        let mut loaded = [None; 6];
+        let mut loaded = [None; 11];
         let mut offset = 0;
         for chunk in &mut loaded {
             let remaining = size - i64::from(offset);
             if remaining == 0 {
                 break;
             }
-            let (width, ty) = if remaining >= 8 {
+            let (width, ty) = if size > 32 && remaining >= 16 {
+                (16, types::I8X16)
+            } else if remaining >= 8 {
                 (8, types::I64)
             } else if remaining >= 4 {
                 (4, types::I32)

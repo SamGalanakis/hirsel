@@ -2,8 +2,18 @@ use super::*;
 use cranelift_codegen::ir::{
     BlockArg, MemFlagsData as MemFlags, StackSlotData, StackSlotKind, Value,
 };
+#[derive(Clone, Copy)]
+pub(super) struct Address {
+    pub base: Value,
+    pub offset: i32,
+}
+impl From<Value> for Address {
+    fn from(base: Value) -> Self {
+        Self { base, offset: 0 }
+    }
+}
 enum AddressValue {
-    Direct(Value),
+    Direct(Address),
     // Address IDs are evaluated snapshots, unlike immutable CoreIR values.
     // A repeatedly assigned ID retains its latest snapshot across control flow.
     Snapshot(ir::StackSlot),
@@ -169,7 +179,7 @@ pub(super) fn emit(
                     3,
                 )))
             } else {
-                AddressValue::Direct(Value::from_u32(0))
+                AddressValue::Direct(Value::from_u32(0).into())
             }
         })
         .collect();
@@ -363,11 +373,37 @@ impl Function<'_, '_, '_> {
         self.values[v.index()] = value;
     }
     pub fn addr(&mut self, a: AddressId) -> Value {
+        let address = self.addr_parts(a);
+        self.materialize(address)
+    }
+    pub fn addr_parts(&mut self, a: AddressId) -> Address {
         match self.addresses[a.index()] {
             AddressValue::Direct(value) => value,
-            AddressValue::Snapshot(slot) => {
-                self.b.ins().stack_load(types::I64, types::I64, slot, 0)
+            AddressValue::Snapshot(slot) => self
+                .b
+                .ins()
+                .stack_load(types::I64, types::I64, slot, 0)
+                .into(),
+        }
+    }
+    pub fn materialize(&mut self, address: Address) -> Value {
+        if address.offset == 0 {
+            address.base
+        } else {
+            self.b
+                .ins()
+                .iadd_imm_s(address.base, i64::from(address.offset))
+        }
+    }
+    pub fn offset_address(&mut self, address: Address, offset: u64) -> Address {
+        let offset = i64::from(address.offset).wrapping_add(offset as i64);
+        if let Ok(offset) = i32::try_from(offset) {
+            Address {
+                base: address.base,
+                offset,
             }
+        } else {
+            self.b.ins().iadd_imm_s(address.base, offset).into()
         }
     }
     fn edge(&self, e: EdgeId, args: &mut Vec<BlockArg>) -> ir::Block {
@@ -534,6 +570,7 @@ impl Function<'_, '_, '_> {
                         self.addresses[address.index()] = AddressValue::Direct(v)
                     }
                     AddressValue::Snapshot(slot) => {
+                        let v = self.materialize(v);
                         self.b.ins().stack_store(types::I64, v, slot, 0);
                     }
                 }
@@ -541,17 +578,19 @@ impl Function<'_, '_, '_> {
             Inst::Read {
                 result, address, ..
             } => {
-                let a = self.addr(address);
-                let v =
-                    self.b
-                        .ins()
-                        .load(ty(self.body.values[result.index()]), MemFlags::new(), a, 0);
+                let a = self.addr_parts(address);
+                let v = self.b.ins().load(
+                    ty(self.body.values[result.index()]),
+                    MemFlags::new(),
+                    a.base,
+                    a.offset,
+                );
                 self.set(result, v);
             }
             Inst::Store { address, value } => {
-                let a = self.addr(address);
+                let a = self.addr_parts(address);
                 let v = self.get(value);
-                self.b.ins().store(MemFlags::new(), v, a, 0);
+                self.b.ins().store(MemFlags::new(), v, a.base, a.offset);
             }
             Inst::UpdateMask {
                 result,

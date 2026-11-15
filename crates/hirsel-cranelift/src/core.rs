@@ -33,6 +33,8 @@ mod scalar;
 mod sites;
 mod task_entry;
 mod tasks;
+#[cfg(test)]
+mod tests;
 
 /// Why a CoreIR module could not be emitted.
 #[derive(Debug)]

@@ -1,6 +1,6 @@
 //! Place lowering reads the producer's layout recipe. It never derives a second
 //! layout, infers ownership, or checks its producer's field/type decisions.
-use super::function::Function;
+use super::function::{Address, Function};
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData, Value};
 use hirsel_core_layout::{FieldTy, Fixed, Layout, Recipe, Repr};
@@ -115,31 +115,38 @@ impl<'c> Function<'_, '_, 'c> {
         }
         Ok(at)
     }
-    pub fn address(&mut self, id: AddressId, fail: Option<BlockId>) -> Result<Value> {
+    pub fn address(&mut self, id: AddressId, fail: Option<BlockId>) -> Result<Address> {
         let a = &self.body.addresses[id.index()];
         let mut at = self.base_at(a)?;
         let mut ptr = match a.base {
             AddressBase::Slot(s) => self
                 .b
                 .ins()
-                .stack_addr(types::I64, self.slots[s.index()], 0),
-            AddressBase::Value(v) => self.get(v),
-            AddressBase::Address(a) => self.addr(a),
+                .stack_addr(types::I64, self.slots[s.index()], 0)
+                .into(),
+            AddressBase::Value(v) => self.get(v).into(),
+            AddressBase::Address(a) => self.addr_parts(a),
         };
         for &step in a.steps.get(&self.body.pools.steps).unwrap() {
             ptr = match step {
                 Step::Byte(v) => {
                     let offset = self.get(v);
                     let offset = self.resize(offset, types::I64, false);
-                    self.b.ins().iadd(ptr, offset)
+                    Address {
+                        base: self.b.ins().iadd(ptr.base, offset),
+                        offset: ptr.offset,
+                    }
                 }
-                Step::Seq(w) => self.b.ins().iadd_imm_s(ptr, w.offset() as i64),
+                Step::Seq(w) => self.offset_address(ptr, w.offset()),
                 Step::Deref => {
-                    let p = self.b.ins().load(types::I64, MemFlagsData::new(), ptr, 0);
+                    let p =
+                        self.b
+                            .ins()
+                            .load(types::I64, MemFlagsData::new(), ptr.base, ptr.offset);
                     if matches!(at, At::Counted(_)) {
-                        self.b.ins().iadd_imm_s(p, 8)
+                        Address { base: p, offset: 8 }
                     } else {
-                        p
+                        p.into()
                     }
                 }
                 Step::Field(f) | Step::CaseField { field: f, .. } => {
@@ -151,14 +158,17 @@ impl<'c> Function<'_, '_, 'c> {
                         _ => 0,
                     };
                     let offset = fixed(self.layouts, t)?.offsets[case as usize][f as usize];
-                    self.b.ins().iadd_imm_s(ptr, offset as i64)
+                    self.offset_address(ptr, offset)
                 }
                 Step::Index(v) => {
                     let stride = storage(self.input, self.layouts, a.ty)?.0;
                     let index = self.get(v);
                     let index = self.resize(index, types::I64, false);
                     let offset = self.b.ins().imul_imm_s(index, stride as i64);
-                    self.b.ins().iadd(ptr, offset)
+                    Address {
+                        base: self.b.ins().iadd(ptr.base, offset),
+                        offset: ptr.offset,
+                    }
                 }
                 Step::Element(v) => {
                     let At::Array(e, n) = at else {
@@ -175,7 +185,10 @@ impl<'c> Function<'_, '_, 'c> {
                     );
                     self.guard(outside, 1, fail)?;
                     let off = self.b.ins().imul_imm_s(i, stride as i64);
-                    self.b.ins().iadd(ptr, off)
+                    Address {
+                        base: self.b.ins().iadd(ptr.base, off),
+                        offset: ptr.offset,
+                    }
                 }
             };
             at = self.next_at(at, step, a.ty)?;

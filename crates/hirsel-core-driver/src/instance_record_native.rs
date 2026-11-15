@@ -413,3 +413,134 @@ fn rejected_repair_cranelift() {
 fn rejected_repair_llvm() {
     rejected_repair(Backend::Llvm);
 }
+
+/// How a stored file is damaged on disk.
+#[derive(Clone, Copy, Debug)]
+enum Damage {
+    /// One flipped bit inside the object's code: a different instruction.
+    Text,
+    /// One flipped bit in the middle of the file.
+    Middle,
+    /// The second half removed.
+    Truncate,
+}
+/// The objects a native store holds: its ELF files (a record starts with the
+/// store's magic).
+fn stored_objects(root: &Path) -> Vec<PathBuf> {
+    let mut objects: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| std::fs::read(p).is_ok_and(|b| b.starts_with(b"\x7fELF")))
+        .collect();
+    objects.sort();
+    objects
+}
+fn damage(path: &Path, how: Damage) {
+    use object::{Object, ObjectSection};
+    let mut bytes = std::fs::read(path).unwrap();
+    match how {
+        Damage::Text => {
+            let at = object::File::parse(&*bytes)
+                .unwrap()
+                .sections()
+                .filter(|s| s.name().is_ok_and(|n| n.starts_with(".text")))
+                .filter_map(|s| s.file_range())
+                .find(|&(_, size)| size > 0)
+                .map(|(start, size)| (start + size / 2) as usize);
+            let Some(at) = at else { return };
+            bytes[at] ^= 1;
+        }
+        Damage::Middle => {
+            let at = bytes.len() / 2;
+            bytes[at] ^= 1;
+        }
+        Damage::Truncate => bytes.truncate(bytes.len() / 2),
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+const DAMAGE_APP: &str = "fn get(x: u8) -> u8 { x + 1u8 }\nfn base() -> u8 { 5u8 }\npub fn main() -> Result[(), Exit] { Error(Exit(status: get(base()))) }\n";
+const DAMAGE_EDIT: &str = "fn get(x: u8) -> u8 { x + 1u8 }\nfn base() -> u8 { 6u8 }\npub fn main() -> Result[(), Exit] { Error(Exit(status: get(base()))) }\n";
+
+/// Law: a stored object that fails its check is replaced by the bytes
+/// emitted again, so the link reads a fresh store's object. Every object of a
+/// primed store is damaged (a code bit, a middle bit, a truncation), then one
+/// body is edited: the executable is a fresh store's, byte for byte, and the
+/// next request is a plain hit. Bug caught (red at d9db58c8): `put_bare`
+/// kept the damaged file because its path existed, so the edit linked it,
+/// exited 0 with a wrong executable, and cached that executable; a damaged
+/// symbol table failed every later link.
+fn damaged_objects_build_a_fresh_stores_executable(backend: Backend) {
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for how in [Damage::Text, Damage::Middle, Damage::Truncate] {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_sources();
+        let options = native_options(backend, dir.path());
+        executable_bytes(&record_check(DAMAGE_APP, &core, dir.path(), "store"), &options);
+        let objects = stored_objects(&options.store);
+        assert!(!objects.is_empty());
+        for object in &objects {
+            damage(object, how);
+        }
+        let edited = record_check(DAMAGE_EDIT, &core, dir.path(), "store");
+        let built = edited
+            .build(&entry, &options)
+            .unwrap_or_else(|e| panic!("{how:?}: {e}"));
+        let status = Command::new(&built.executable).status().unwrap().code();
+        let rebuilt = (std::fs::read(&built.executable).unwrap(), status);
+        let fresh = executable_bytes(
+            &record_check(DAMAGE_EDIT, &core, dir.path(), "fresh"),
+            &NativeOptions {
+                store: dir.path().join("fresh-native"),
+                ..native_options(backend, dir.path())
+            },
+        );
+        assert_eq!(rebuilt.1, Some(7), "{how:?}");
+        assert!(rebuilt == fresh, "{how:?}: the executable is a fresh store's");
+        let again = edited.build(&entry, &options).unwrap();
+        assert_eq!((again.compiled, again.linked), (0, false), "{how:?}: a plain hit");
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn damaged_objects_build_a_fresh_stores_executable_cranelift() {
+    damaged_objects_build_a_fresh_stores_executable(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn damaged_objects_build_a_fresh_stores_executable_llvm() {
+    damaged_objects_build_a_fresh_stores_executable(Backend::Llvm);
+}
+
+/// Law: a reused executable is the store's verified record, so a damaged one
+/// is linked again on a no-change request and the result is the first
+/// build's executable. Guards the executable record's check on reuse.
+fn damaged_executable_links_again(backend: Backend) {
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_sources();
+    let options = native_options(backend, dir.path());
+    let product = record_check(DAMAGE_APP, &core, dir.path(), "store");
+    let first = executable_bytes(&product, &options);
+    let records: Vec<_> = std::fs::read_dir(&options.store)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| std::fs::read(p).is_ok_and(|b| b.get(12..16) == Some(b"\x7fELF")))
+        .collect();
+    assert_eq!(records.len(), 1, "one executable record");
+    damage(&records[0], Damage::Middle);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let again = product.build(&entry, &options).unwrap();
+    assert!(again.linked, "the damaged executable is not reused");
+    let status = Command::new(&again.executable).status().unwrap().code();
+    assert!((std::fs::read(&again.executable).unwrap(), status) == first);
+    assert!(!product.build(&entry, &options).unwrap().linked, "then a plain hit");
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn damaged_executable_links_again_cranelift() {
+    damaged_executable_links_again(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn damaged_executable_links_again_llvm() {
+    damaged_executable_links_again(Backend::Llvm);
+}

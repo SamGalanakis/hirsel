@@ -184,12 +184,12 @@ impl Store {
     }
     /// Publish an ELF/object payload under its raw content hash. Unlike an
     /// archive record, the file is passed directly to native linkers by path.
+    /// The bytes always replace the file by a rename: a file already at the
+    /// path may be one whose check just failed, and an existing name says
+    /// nothing about its bytes.
     pub(crate) fn put_bare(&self, bytes: &[u8]) -> io::Result<ContentHash> {
         let hash = ContentHash(sha2::Sha256::digest(bytes).into());
         let path = self.path(hash);
-        if path.is_file() {
-            return Ok(hash);
-        }
         let temporary = self.temporary();
         let result = (|| {
             let mut file = OpenOptions::new()

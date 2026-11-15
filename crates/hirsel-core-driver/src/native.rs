@@ -862,8 +862,10 @@ fn link(
         "development-link-O0"
     };
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
+    // v3: an executable cached under v2 may have been linked from a damaged
+    // object that `put_bare` kept; none is reused.
     let link_key = key(
-        "hirsel.core-executable.v2",
+        "hirsel.core-executable.v3",
         &(
             compiler_identity()?,
             toolchain,

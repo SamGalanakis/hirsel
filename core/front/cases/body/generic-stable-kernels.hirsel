@@ -1,0 +1,267 @@
+// FORM #115: the standing proof that a generic body at a stable T (MEM-5) carries the
+// 8-byte holder and charges it as 16 (budgets.md) through every move shape and the List
+// and Deque kernels, on the evaluator and both engines (`native: run` lines are
+// engine-only: Deque bodies are not in the evaluator's harness). Equality, order and
+// hash at a stable T are generic-stable-keys.hirsel.
+// T is instantiated at `Span3 in r` (block 24 logical), at `Holder` (a record holding
+// one: 16 + 8 = 24 logical, 16 stored) and at `Option[Span3 in r]`.
+// Oracles: values are read back from the blocks; each charge equals the charge of a
+// plain twin of the same logical size (P16 for a stable reference, P24 for Holder,
+// Option[P16] for the Option), and List's is hand-derived (reserve 5 => 5 * size).
+// A block-for-holder slip at any site shows as 24 where 16 is due, or as bytes past
+// the holder.
+// expect: accept
+// expect: run moved() = 6
+// expect: run optioned() = 6
+// expect: run celled() = 6
+// expect: run held() = 13
+// expect: run listed() = 62
+// expect: run listed_held() = 107
+// expect: run listed_option() = 15
+// expect: run list_charge() = 1
+// native: run deque_rt() = 615
+// native: run deque_charge() = 1
+stable type Span3 {
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+type Holder[in r] {
+    s: Span3 in r,
+    k: u64
+}
+
+type P16 {
+    x: u64,
+    y: u64
+}
+
+type P24 {
+    x: u64,
+    y: u64,
+    z: u64
+}
+
+type Cell[T] {
+    v: T
+}
+
+fn sum3(s: Span3) -> u64 {
+    s.a + s.b + s.c
+}
+
+fn keep[T](take x: T) -> T {
+    let y = x
+    y
+}
+
+fn wrap[T](take x: T) -> Option[T] {
+    Some(x)
+}
+
+fn cell[T](take x: T) -> T {
+    let c = Cell(v: x)
+    let Cell(v: y) = c
+    y
+}
+
+fn moved() -> u64 {
+    region r {
+        match Span3(a: 1, b: 2, c: 3) in r {
+            Ok(s) => sum3(keep(s)),
+            Error(_) => 0
+        }
+    }
+}
+
+fn optioned() -> u64 {
+    region r {
+        match Span3(a: 1, b: 2, c: 3) in r {
+            Ok(s) => match wrap(s) {
+                Some(t) => sum3(t),
+                None => 0
+            },
+            Error(_) => 0
+        }
+    }
+}
+
+fn celled() -> u64 {
+    region r {
+        match Span3(a: 1, b: 2, c: 3) in r {
+            Ok(s) => sum3(cell(s)),
+            Error(_) => 0
+        }
+    }
+}
+
+fn held() -> u64 {
+    region r {
+        match Span3(a: 1, b: 2, c: 3) in r {
+            Ok(s) => {
+                let h = keep(cell(Holder(s: s, k: 7)))
+                sum3(h.s) + h.k
+            },
+            Error(_) => 0
+        }
+    }
+}
+
+fn put[T](mut xs: List[T], take x: T) -> u64 {
+    match list.push(mut xs, take x) {
+        Ok(_) => 1,
+        Error(_) => 0
+    }
+}
+
+fn swapped[T](mut xs: List[T]) {
+    list.swap(mut xs, 0, 1)
+}
+
+fn popped[T](mut xs: List[T]) -> Option[T] {
+    list.pop(mut xs)
+}
+
+// Pushes (1, 2, 3) then (4, 5, 6), swaps, pops (1, 2, 3): 6 * 10 + 2 pushes.
+fn listed() -> u64 {
+    region r {
+        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 4, b: 5, c: 6) in r) {
+            (Ok(s), Ok(t)) => {
+                let mut xs: List[Span3 in r] = list.new()
+                let n = put(mut xs, s) + put(mut xs, t)
+                swapped(mut xs)
+                match popped(mut xs) {
+                    Some(u) => sum3(u) * 10 + n,
+                    None => 0
+                }
+            },
+            _ => 0
+        }
+    }
+}
+
+// The same through a record holding one: (1, 2, 3; k 7) then (4, 5, 6; k 9); pops the
+// first: (6 + 7) * 8 + 2 pushes + 1 left = 107.
+fn listed_held() -> u64 {
+    region r {
+        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 4, b: 5, c: 6) in r) {
+            (Ok(s), Ok(t)) => {
+                let mut xs: List[Holder[in r]] = list.new()
+                let n = put(mut xs, Holder(s: s, k: 7)) + put(mut xs, Holder(s: t, k: 9))
+                swapped(mut xs)
+                match popped(mut xs) {
+                    Some(h) => (sum3(h.s) + h.k) * 8 + n + list.len(xs),
+                    None => 0
+                }
+            },
+            _ => 0
+        }
+    }
+}
+
+// An Option of one: pushes None then Some((4, 5, 6)); pops Some: 15.
+fn listed_option() -> u64 {
+    region r {
+        match Span3(a: 4, b: 5, c: 6) in r {
+            Ok(t) => {
+                let mut xs: List[Option[Span3 in r]] = list.new()
+                let _ = put(mut xs, None) + put(mut xs, wrap(t))
+                match popped(mut xs) {
+                    Some(Some(u)) => sum3(u),
+                    _ => 0
+                }
+            },
+            Error(_) => 0
+        }
+    }
+}
+
+fn reserve_ask[T](mut xs: List[T]) -> u64 {
+    let got = bound bytes 0 {
+        list.reserve(mut xs, 5)
+    }
+    match got {
+        Ok(Error(e)) => e.requested,
+        _ => 0
+    }
+}
+
+// Generic reserve 5 at each T against its twin, and the concrete call: 5 * 16, 5 * 24.
+fn list_charge() -> u64 {
+    region r {
+        let mut xs: List[Span3 in r] = list.new()
+        let mut hs: List[Holder[in r]] = list.new()
+        let mut os: List[Option[Span3 in r]] = list.new()
+        let mut ps: List[P16] = list.new()
+        let mut qs: List[P24] = list.new()
+        let mut zs: List[Option[P16]] = list.new()
+        let concrete = match (bound bytes 0 {
+            list.reserve(mut xs, 5)
+        }) {
+            Ok(Error(e)) => e.requested,
+            _ => 0
+        }
+        let s = reserve_ask(mut xs)
+        let h = reserve_ask(mut hs)
+        let o = reserve_ask(mut os)
+        let p = reserve_ask(mut ps)
+        let q = reserve_ask(mut qs)
+        let z = reserve_ask(mut zs)
+        let ok = s == 80 && concrete == 80 && p == 80 && h == 120 && q == 120 && o != 0 && o == z
+        if ok {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+// Back is (1, 2, 3), front (4, 5, 6): 6 * 100 + 15.
+fn deque_rt() -> u64 {
+    region r {
+        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 4, b: 5, c: 6) in r) {
+            (Ok(s), Ok(t)) => {
+                let mut d: Deque[Span3 in r] = deque.new()
+                let _ = deque.push_back(mut d, s)
+                let _ = deque.push_front(mut d, t)
+                match (deque.pop_back(mut d), deque.pop_front(mut d)) {
+                    (Some(u), Some(v)) => sum3(u) * 100 + sum3(v),
+                    _ => 0
+                }
+            },
+            _ => 0
+        }
+    }
+}
+
+// A first push grows the ring from 0 to 1 slot (deque.hirsel grow): 16 at a stable
+// reference, as at P16.
+fn deque_charge() -> u64 {
+    region r {
+        match Span3(a: 1, b: 2, c: 3) in r {
+            Ok(s) => {
+                let mut d: Deque[Span3 in r] = deque.new()
+                let mut e: Deque[P16] = deque.new()
+                let x = match (bound bytes 0 {
+                    deque.push_back(mut d, s)
+                }) {
+                    Ok(Error((c, _))) => c.requested,
+                    _ => 0
+                }
+                let y = match (bound bytes 0 {
+                    deque.push_back(mut e, P16(x: 1, y: 2))
+                }) {
+                    Ok(Error((c, _))) => c.requested,
+                    _ => 0
+                }
+                if x == 16 && y == 16 {
+                    1
+                } else {
+                    0
+                }
+            },
+            Error(_) => 0
+        }
+    }
+}

@@ -555,7 +555,21 @@ impl Derive<'_> {
             self.active.pop();
             return Ok(row);
         }
-        let ps = c.params(BlockId(0));
+        let mut ps = c.params(BlockId(0));
+        // A key operation's value parameter is the place of the value as held (FORM
+        // #115): a stable value's place holds its block pointer, and its fields are in
+        // the block (MEM-5). Reading it here, not at the caller, makes a generic body's
+        // rigid `T` and a concrete caller pass the same thing.
+        if self.module.types[ty.index()].repr == LRepr::Stable {
+            let values = match op {
+                KeyOp::Fold => 1,
+                KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_) => 2,
+                _ => 0,
+            };
+            for p in ps.iter_mut().take(values) {
+                *p = c.read(*p, Ty::Ptr);
+            }
+        }
         if op == KeyOp::Clone {
             self.clone_function(&mut c, ty, ps[0], ps[1])?;
             order_instructions(&mut c.body);
@@ -1291,10 +1305,10 @@ impl Derive<'_> {
                 let at = c.address(data, PlaceTy::Declared(TypeId(t.0)));
                 self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
             }
+            // The field is the stable value's place; its Fold reads the block pointer.
             FieldTy::Stable(t) => {
-                let data = c.read(p, Ty::Ptr);
                 let f = self.function(TypeId(t.0), KeyOp::Fold)?;
-                let at = c.address(data, PlaceTy::Declared(TypeId(t.0)));
+                let at = c.address(p, PlaceTy::Declared(TypeId(t.0)));
                 self.call(c, f, &[Arg::Address(at), Arg::Value(h)])
             }
             FieldTy::View(inner) => self.fold_field(c, inner, p, h)?,

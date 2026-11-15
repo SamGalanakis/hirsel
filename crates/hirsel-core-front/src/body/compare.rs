@@ -181,81 +181,106 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let (x, y) = (self.read_bits(a, u64t, n), self.read_bits(b, u64t, n));
                 self.scalars(x, y, join, eq_only, n);
             }
-            TyKind::Adt(d, args) => match self.p.decls[d.index()].body.clone() {
-                DeclBody::Record(fs) => {
-                    for (i, f) in fs.iter().enumerate() {
-                        let x = subst(&mut self.t, f.ty, &args);
-                        self.component(a, b, Step::Field(i as u32), x, join, eq_only, n);
-                    }
+            TyKind::Adt(d, args) => {
+                // A stable value's place holds its block pointer; its fields, which
+                // SEM-7 compares, are in the block (MEM-5, FORM #115).
+                let (a, b) = match self.rep(t) {
+                    Ok(Rep::Place(id)) if self.e.by_block(id) => (
+                        self.fields_of(AddressBase::Address(a), id, n),
+                        self.fields_of(AddressBase::Address(b), id, n),
+                    ),
+                    _ => (a, b),
+                };
+                self.walk_nominal(a, b, d, &args, join, eq_only, n)
+            }
+            _ => unreachable!("refused by comparable"),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_nominal(
+        &mut self,
+        a: AddressId,
+        b: AddressId,
+        d: DeclId,
+        args: &[TyId],
+        join: BlockId,
+        eq_only: bool,
+        n: NodeId,
+    ) {
+        match self.p.decls[d.index()].body.clone() {
+            DeclBody::Record(fs) => {
+                for (i, f) in fs.iter().enumerate() {
+                    let x = subst(&mut self.t, f.ty, args);
+                    self.component(a, b, Step::Field(i as u32), x, join, eq_only, n);
                 }
-                DeclBody::Variant(cs) => {
-                    let u32t = Ty::Scalar(Scalar::U32);
-                    let (ta, tb) = (self.value(u32t), self.value(u32t));
+            }
+            DeclBody::Variant(cs) => {
+                let u32t = Ty::Scalar(Scalar::U32);
+                let (ta, tb) = (self.value(u32t), self.value(u32t));
+                self.inst(
+                    Inst::Case {
+                        result: ta,
+                        address: a,
+                    },
+                    n,
+                );
+                self.inst(
+                    Inst::Case {
+                        result: tb,
+                        address: b,
+                    },
+                    n,
+                );
+                self.scalars(ta, tb, join, eq_only, n);
+                let after = self.new_block(&[]);
+                for (k, c) in cs.iter().enumerate() {
+                    let tys: Vec<TyId> = c
+                        .fields
+                        .iter()
+                        .map(|f| subst(&mut self.t, f.ty, args))
+                        .collect();
+                    if tys.iter().all(|&x| self.place_of(x).is_none()) {
+                        continue;
+                    }
+                    let Some(kv) = self.konst(u32t, k as u64, n) else {
+                        return;
+                    };
+                    let is = self.value(Ty::Scalar(Scalar::Bool));
                     self.inst(
-                        Inst::Case {
-                            result: ta,
-                            address: a,
+                        Inst::Compare {
+                            result: is,
+                            op: CompareOp::Eq,
+                            left: ta,
+                            right: kv,
                         },
                         n,
                     );
-                    self.inst(
-                        Inst::Case {
-                            result: tb,
-                            address: b,
+                    let (yes, next) = (self.new_block(&[]), self.new_block(&[]));
+                    let (ye, ne) = (self.edge(yes, &[]), self.edge(next, &[]));
+                    self.end(
+                        Terminator::Branch {
+                            condition: is,
+                            yes: ye,
+                            no: ne,
                         },
-                        n,
+                        Some(n),
                     );
-                    self.scalars(ta, tb, join, eq_only, n);
-                    let after = self.new_block(&[]);
-                    for (k, c) in cs.iter().enumerate() {
-                        let tys: Vec<TyId> = c
-                            .fields
-                            .iter()
-                            .map(|f| subst(&mut self.t, f.ty, &args))
-                            .collect();
-                        if tys.iter().all(|&x| self.place_of(x).is_none()) {
-                            continue;
-                        }
-                        let Some(kv) = self.konst(u32t, k as u64, n) else {
-                            return;
+                    self.start(yes);
+                    for (j, x) in tys.into_iter().enumerate() {
+                        let step = Step::CaseField {
+                            case: k as u32,
+                            field: j as u32,
                         };
-                        let is = self.value(Ty::Scalar(Scalar::Bool));
-                        self.inst(
-                            Inst::Compare {
-                                result: is,
-                                op: CompareOp::Eq,
-                                left: ta,
-                                right: kv,
-                            },
-                            n,
-                        );
-                        let (yes, next) = (self.new_block(&[]), self.new_block(&[]));
-                        let (ye, ne) = (self.edge(yes, &[]), self.edge(next, &[]));
-                        self.end(
-                            Terminator::Branch {
-                                condition: is,
-                                yes: ye,
-                                no: ne,
-                            },
-                            Some(n),
-                        );
-                        self.start(yes);
-                        for (j, x) in tys.into_iter().enumerate() {
-                            let step = Step::CaseField {
-                                case: k as u32,
-                                field: j as u32,
-                            };
-                            self.component(a, b, step, x, join, eq_only, n);
-                        }
-                        self.jump(after, &[], n);
-                        self.start(next);
+                        self.component(a, b, step, x, join, eq_only, n);
                     }
                     self.jump(after, &[], n);
-                    self.start(after);
+                    self.start(next);
                 }
-                DeclBody::Alias(_) => unreachable!("refused by comparable"),
-            },
-            _ => unreachable!("refused by comparable"),
+                self.jump(after, &[], n);
+                self.start(after);
+            }
+            DeclBody::Alias(_) => unreachable!("refused by comparable"),
         }
     }
 

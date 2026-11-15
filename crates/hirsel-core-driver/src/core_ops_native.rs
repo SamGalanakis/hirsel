@@ -1244,3 +1244,23 @@ fn guarded_byte_prefix_cranelift() { guarded_byte_prefix(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn guarded_byte_prefix_llvm() { guarded_byte_prefix(Backend::Llvm); }
+
+fn generic_stable_kernels(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/generic-stable-kernels.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_stable_kernels_cranelift() { generic_stable_kernels(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_stable_kernels_llvm() { generic_stable_kernels(Backend::Llvm); }
+
+fn generic_stable_keys(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/generic-stable-keys.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_stable_keys_cranelift() { generic_stable_keys(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_stable_keys_llvm() { generic_stable_keys(Backend::Llvm); }

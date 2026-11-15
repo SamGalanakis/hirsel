@@ -1,0 +1,167 @@
+// FORM #115: equality, order and hash of a stable value read its block's fields (SEM-7),
+// never its holder's address (SEM-8), in concrete code, through a generic `T: key` or
+// `T: ordered`, and in Map and Heap at `Span3 in r`, on the evaluator and both engines.
+// Oracles: blocks are allocated so that address order is the reverse of field order,
+// and equal contents sit in different blocks; Map's charge at a stable reference equals
+// its charge at P16, the 16-byte twin (budgets.md). The kernels' moves and charges are
+// generic-stable-kernels.hirsel.
+// expect: accept
+// expect: run map_rt() = 6
+// expect: run map_charge() = 1
+// expect: run map_key() = 7
+// expect: run same() = 1
+// expect: run same_concrete() = 1
+// expect: run order_generic() = 1
+// expect: run order_concrete() = 1
+// native: run heaped() = 159
+stable type Span3: key + ordered {
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+type P16 {
+    x: u64,
+    y: u64
+}
+
+fn sum3(s: Span3) -> u64 {
+    s.a + s.b + s.c
+}
+
+fn map_rt() -> u64 {
+    region r {
+        match Span3(a: 1, b: 2, c: 3) in r {
+            Ok(s) => {
+                let mut m: Map[u64, Span3 in r] = map.new()
+                let _ = map.insert(mut m, 7, s)
+                match map.remove(mut m, 7) {
+                    Some(t) => sum3(t),
+                    None => 0
+                }
+            },
+            Error(_) => 0
+        }
+    }
+}
+
+fn map_charge() -> u64 {
+    region r {
+        let mut m: Map[u64, Span3 in r] = map.new()
+        let mut q: Map[u64, P16] = map.new()
+        let x = match (bound bytes 0 {
+            map.reserve(mut m, 3)
+        }) {
+            Ok(Error(c)) => c.requested,
+            _ => 0
+        }
+        let y = match (bound bytes 0 {
+            map.reserve(mut q, 3)
+        }) {
+            Ok(Error(c)) => c.requested,
+            _ => 0
+        }
+        if x == y && x != 0 {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+// Equal keys in different blocks hit one entry: hash and equality read the block.
+fn map_key() -> u64 {
+    region r {
+        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 3) in r) {
+            (Ok(s), Ok(t)) => {
+                let mut m: Map[Span3 in r, u64] = map.new()
+                let _ = map.insert(mut m, s, 7)
+                match map.get(m, t) {
+                    Some(v) => v,
+                    None => 1000
+                }
+            },
+            _ => 0
+        }
+    }
+}
+
+fn eqs[T: key](a: T, b: T) -> bool {
+    a == b
+}
+
+fn lt[T: ordered](a: T, b: T) -> u64 {
+    if a < b {
+        1
+    } else {
+        0
+    }
+}
+
+fn same() -> u64 {
+    region r {
+        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 3) in r) {
+            (Ok(s), Ok(t)) => if eqs(s, t) {
+                1
+            } else {
+                0
+            },
+            _ => 9
+        }
+    }
+}
+
+fn same_concrete() -> u64 {
+    region r {
+        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 3) in r) {
+            (Ok(s), Ok(t)) => if s == t && s <= t && t <= s {
+                1
+            } else {
+                0
+            },
+            _ => 9
+        }
+    }
+}
+
+// Allocated 9 then 1, so the address order is the reverse of the field order.
+fn order_generic() -> u64 {
+    region r {
+        match (Span3(a: 9, b: 0, c: 0) in r, Span3(a: 1, b: 0, c: 0) in r) {
+            (Ok(s), Ok(t)) => lt(s, t) * 10 + lt(t, s),
+            _ => 99
+        }
+    }
+}
+
+fn order_concrete() -> u64 {
+    region r {
+        match (Span3(a: 9, b: 0, c: 0) in r, Span3(a: 1, b: 0, c: 0) in r) {
+            (Ok(s), Ok(t)) => if s < t {
+                10
+            } else {
+                1
+            },
+            _ => 99
+        }
+    }
+}
+
+// Minimum first by fields; the blocks are allocated 9, 1, 5.
+fn heaped() -> u64 {
+    region r {
+        match (Span3(a: 9, b: 0, c: 0) in r, Span3(a: 1, b: 0, c: 0) in r, Span3(a: 5, b: 0, c: 0) in r) {
+            (Ok(x), Ok(y), Ok(z)) => {
+                let mut h: Heap[Span3 in r] = heap.new()
+                let _ = heap.push(mut h, x)
+                let _ = heap.push(mut h, y)
+                let _ = heap.push(mut h, z)
+                match (heap.pop(mut h), heap.pop(mut h), heap.pop(mut h)) {
+                    (Some(p), Some(q), Some(s)) => p.a * 100 + q.a * 10 + s.a,
+                    _ => 0
+                }
+            },
+            _ => 0
+        }
+    }
+}

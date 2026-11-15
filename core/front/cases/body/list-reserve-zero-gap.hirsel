@@ -6,6 +6,9 @@
 // expect: run reserve_overflow() = true
 // expect: run max_count() = true
 // expect: run generic_ops() = true
+// A concrete `list.get` of a zero-sized element is `Some` alone, with no payload to
+// install: present at 0 (1), absent at 1 (0) (stable-value-attack-966).
+// expect: run concrete_get() = 10
 fn new[T]() -> List[T] {
     list.new()
 }
@@ -107,4 +110,18 @@ fn generic_ops() -> bool {
         Ok(b) => b,
         Error(_) => false
     }
+}
+
+fn concrete_get() -> u64 {
+    let mut xs: List[()] = list.new()
+    result.unwrap(list.push(mut xs, ()))
+    let first: u64 = match list.get(xs, 0) {
+        Some(_) => 1,
+        None => 0
+    }
+    let second: u64 = match list.get(xs, 1) {
+        Some(_) => 1,
+        None => 0
+    }
+    first * 10 + second
 }

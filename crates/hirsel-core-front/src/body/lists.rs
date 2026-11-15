@@ -1268,14 +1268,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        let place = self.rep(item).ok()?.stored()?;
-        let at = self.address(
-            AddressBase::Address(out),
-            &[Step::CaseField { case: 1, field: 0 }],
-            place,
-            n,
-        );
-        self.install_view(at, item, pointer, n)?;
+        // A zero-sized element has no stored place, so `Some` is its case alone (#60).
+        if let Some(place) = self.rep(item).ok()?.stored() {
+            let at = self.address(
+                AddressBase::Address(out),
+                &[Step::CaseField { case: 1, field: 0 }],
+                place,
+                n,
+            );
+            self.install_view(at, item, pointer, n)?;
+        }
         self.jump(join, &[], n);
         self.start(join);
         let value = self.pointer(out, n);

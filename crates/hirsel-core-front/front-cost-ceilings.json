@@ -83,20 +83,20 @@
       }
     },
     "std": {
-      "source_bytes": 206367,
-      "tokens": 35146,
+      "source_bytes": 221547,
+      "tokens": 37363,
       "observation": {
-        "source_bytes": 206367,
-        "tokens": 35146,
+        "source_bytes": 221547,
+        "tokens": 37363,
         "costs": {
-          "parse": 15868658,
-          "index": 354803,
-          "resolve": 5054217,
-          "input counts": 304386,
-          "declarations": 7581015,
-          "body keys/new": 3602127,
-          "body keys/for_body": 5937975,
-          "body keys": 9540102,
+          "parse": 16959515,
+          "index": 370454,
+          "resolve": 5403253,
+          "input counts": 323140,
+          "declarations": 7823704,
+          "body keys/new": 3645741,
+          "body keys/for_body": 6473827,
+          "body keys": 10119568,
           "image read": 0,
           "image digest": 0,
           "image index": 0
@@ -127,18 +127,18 @@
             "row_demands": 0,
             "nodes_decoded": 0
           },
-          "basis": "e4b65f6c + F2, two-tool core-front-cost qualification, /tmp/core-check-cost-915-F-rebase-front.log; read/digest remain ordinary-mode observations"
+          "basis": "aad289e7 (main 2143aaae + M1 std list of 16 files), //:core-front-cost, /tmp/905-frontcost-1.log; std image work all zero"
         }
       },
       "instructions_per_token": {
-        "parse": 460.5369362089569,
-        "index": 10.28851078358846,
-        "resolve": 146.55598828780168,
-        "input counts": 8.826039947646958,
-        "declarations": 219.71759370901592,
-        "body keys/new": 104.54105730381836,
-        "body keys/for_body": 172.3325556251067,
-        "body keys": 276.87361292892507,
+        "parse": 462.9928003639965,
+        "index": 10.114284184888794,
+        "resolve": 147.50956828948424,
+        "input counts": 8.824237882397023,
+        "declarations": 213.58563284532826,
+        "body keys/new": 99.52894574846773,
+        "body keys/for_body": 176.73634344137247,
+        "body keys": 276.26261274522926,
         "image read": 0.0,
         "image digest": 0.0,
         "image index": 0.0
@@ -646,6 +646,68 @@
         "after": "21aca453d9c37f0cbdbfd2ebcab894b706c7dd62dcad5b9005333db8fde32a6c"
       },
       "evidence": "core-check-callables-913/row-reads/; /tmp/913-row-reads-{before,after}.log"
+    },
+    {
+      "reason": "Population change, not a code change: the M1 manifest lists the 16 std files the product bundles (arena, clock and io added to the 13), so the std corpus (core + std) is a new population. Every std cell is re-set from one measurement of that population with the usual 2% margin rounded up to 100 instructions; image cells stay zero. No m1 or suite-edit cell and no code changed.",
+      "commit": "aad289e7 on main 2143aaae",
+      "std_population": {
+        "before": {
+          "source_bytes": 206367,
+          "tokens": 35146
+        },
+        "after": {
+          "source_bytes": 221547,
+          "tokens": 37363
+        }
+      },
+      "std_limits": {
+        "parse": {
+          "before": 460.5369362089569,
+          "after": 462.9928003639965
+        },
+        "index": {
+          "before": 10.28851078358846,
+          "after": 10.114284184888794
+        },
+        "resolve": {
+          "before": 146.55598828780168,
+          "after": 147.50956828948424
+        },
+        "input counts": {
+          "before": 8.826039947646958,
+          "after": 8.824237882397023
+        },
+        "declarations": {
+          "before": 219.71759370901592,
+          "after": 213.58563284532826
+        },
+        "body keys/new": {
+          "before": 104.54105730381836,
+          "after": 99.52894574846773
+        },
+        "body keys/for_body": {
+          "before": 172.3325556251067,
+          "after": 176.73634344137247
+        },
+        "body keys": {
+          "before": 276.87361292892507,
+          "after": 276.26261274522926
+        },
+        "image read": {
+          "before": 0.0,
+          "after": 0.0
+        },
+        "image digest": {
+          "before": 0.0,
+          "after": 0.0
+        },
+        "image index": {
+          "before": 0.0,
+          "after": 0.0
+        }
+      },
+      "compiler_sha256": "e97de58e9c4d0960ef27e99a1b687e11e012eb6c69445519303a2d53653a001a",
+      "evidence": "/tmp/905-frontcost-1.log"
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

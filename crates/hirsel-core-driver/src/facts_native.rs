@@ -34,7 +34,7 @@ fn program_facts_source_changes(backend: Backend) {
         if matches!(backend, Backend::Llvm) {
             // The caller's rows (its body's and its declarations') in what the
             // release emitter consumed for this program.
-            let ir = checked.demand(&caller).unwrap().ir();
+            let ir = checked.demand(&caller).unwrap().ir().unwrap();
             let f = ir.functions.iter().position(|f| f.body.is_some()).unwrap();
             let code = ir.code_identity(hirsel_core_ir::FuncId(f as u32));
             let fresh: Vec<_> = facts_selections(&options.store).difference(&before).cloned().collect();

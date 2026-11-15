@@ -180,24 +180,32 @@ fn failure_sites_adapter(backend: Backend, optimize: bool, debug_lines: bool) {
     ];
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let entry = DefPath::from_full("app@1/main/main").unwrap();
+    // A second request in the same store compiles no body: the adapter its
+    // failure runs through is carried by a hit object, and reports the same site.
     for (i, (main, line, column)) in cases.into_iter().enumerate() {
         let dir = tempfile::tempdir().unwrap();
-        let mut request = source_request(&format!("{APPLY}{main}"), dir.path());
-        request.inputs.packages[1] =
-            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
-        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
-        assert!(product.accepted(), "case {i}: {:?} {:?}", product.diagnostics, product.incomplete);
-        let mut options = native_options(backend, dir.path());
-        options.optimize = optimize;
-        options.debug_lines = debug_lines;
-        let built = product.build(&entry, &options).unwrap();
-        let output = Command::new(&built.executable).output().unwrap();
-        assert_eq!(output.status.code(), Some(101), "case {i}: {output:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            format!("Unwrap at app@1/main.hirsel:{line}:{column}\n"),
-            "case {i}"
-        );
+        for request_number in 0..2 {
+            let case = format!("case {i}, request {request_number}");
+            let mut request = source_request(&format!("{APPLY}{main}"), dir.path());
+            request.inputs.packages[1] =
+                PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+            let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+            assert!(product.accepted(), "{case}: {:?} {:?}", product.diagnostics, product.incomplete);
+            let mut options = native_options(backend, dir.path());
+            options.optimize = optimize;
+            options.debug_lines = debug_lines;
+            let built = product.build(&entry, &options).unwrap();
+            if request_number == 1 {
+                assert_eq!(built.compiled, 0, "{case}: every body is a hit");
+            }
+            let output = Command::new(&built.executable).output().unwrap();
+            assert_eq!(output.status.code(), Some(101), "{case}: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                format!("Unwrap at app@1/main.hirsel:{line}:{column}\n"),
+                "{case}"
+            );
+        }
     }
 }
 

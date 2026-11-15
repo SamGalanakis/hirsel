@@ -76,14 +76,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .definitions()
         .map(|(id, definition)| (product.index.definition_path(id), definition))
         .collect();
-    let definitions: Vec<_> = product.definitions.values().map(|d| {
+    let definitions = product.definitions.values().map(|d| {
+        let ir = d.ir()?;
         let definition = definitions_by_path[&d.definition];
         let file = product.files.iter().find(|f| f.module == definition.site.module).unwrap();
         let item = file.syntax.item(definition.site.item as usize);
         let mut instance_refs = Vec::new();
         let mut instance_bodies = Vec::new();
-        for function in &d.ir().functions {
-            let key = &d.ir().instances[function.instance.index()];
+        for function in &ir.functions {
+            let key = &ir.instances[function.instance.index()];
             instance_refs.push(format!("{key:?}"));
             if function.body.is_some() { instance_bodies.push(format!("{key:?}")); }
         }
@@ -91,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for node in &item.tree.nodes[item.range.nodes.start as usize..item.range.nodes.end as usize] {
             *syntax_kinds.entry(format!("{:?}", node.kind)).or_default() += 1;
         }
-        json!({
+        Ok(json!({
             "definition": d.definition.to_string(),
             "source": item.source_text(),
             "syntax_kinds":syntax_kinds,
@@ -103,8 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "places": d.check.counts.places,
             "types": d.check.counts.types,
             "ir_bytes": d.check.counts.bytes,
-            "publication_payload_bytes": bincode::serialized_size(&(d.ir(), &d.check.template)).unwrap(),
-            "publication_payload_hash": format!("{:?}", hirsel_core_ids::ContentHash::of_bytes(&bincode::serialize(&(d.ir(), &d.check.template)).unwrap())),
+            "publication_payload_bytes": bincode::serialized_size(&(ir, &d.check.template)).unwrap(),
+            "publication_payload_hash": format!("{:?}", hirsel_core_ids::ContentHash::of_bytes(&bincode::serialize(&(ir, &d.check.template)).unwrap())),
             "template": d.check.template.is_some(),
             "key": {
                 "body":d.key.body, "lookups":d.key.lookups,
@@ -112,9 +113,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             "instance_references": instance_refs,
             "instance_bodies": instance_bodies,
-            "ir": hirsel_core_ir::text::print(d.ir()),
-        })
-    }).collect();
+            "ir": hirsel_core_ir::text::print(ir),
+        }))
+    }).collect::<std::io::Result<Vec<_>>>()?;
     std::fs::write(
         Path::new(&args[2]),
         serde_json::to_vec_pretty(&json!({

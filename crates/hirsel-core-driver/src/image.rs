@@ -216,14 +216,20 @@ impl CoreImage {
             })?;
             self.bodies.get_or_try_init(id as u64, || {
                 let record = directory.definitions[path];
-                let body = self
+                let head = self
                     .store
-                    .get_body(record)?
+                    .get_body_head(record)?
                     .ok_or_else(|| self.body_miss(record))?;
-                let mut body = DefinitionProduct::from_disk(&body, record, |body| {
-                    self.reader
-                        .decode(|| Some((decode(body.head())?, decode(body.ir())?)))
-                })
+                let source = crate::body::IrSource {
+                    store: self.store.clone(),
+                    reader: Some(Arc::clone(&self.reader)),
+                };
+                let mut body = DefinitionProduct::from_head(
+                    &head,
+                    record,
+                    |head| self.reader.decode(|| decode(head)),
+                    source,
+                )
                 .ok_or_else(|| self.body_miss(record))?;
                 bind_record_sites(&mut body, &directory.headers);
                 Ok(Arc::new(body))

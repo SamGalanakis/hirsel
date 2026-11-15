@@ -23,6 +23,8 @@ pub struct Reachable<'a> {
     pub first_stops: Vec<GapStop>,
     pub instances: Result<Vec<Identity>, InstanceStop>,
     pub(crate) materialized: crate::instances::InstanceSet,
+    /// The build's native inputs, when `reachable_for` collected this set.
+    pub(crate) native: Option<crate::native::NativeInputs>,
 }
 impl Reachable<'_> {
     pub fn accepted(&self) -> bool {
@@ -56,12 +58,34 @@ impl Reachable<'_> {
 }
 impl CheckProduct {
     pub fn reachable(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
-        hirsel_core_ids::published::catch_io(|| self.reachable_inner(entry, limit))
+        hirsel_core_ids::published::catch_io(|| self.reachable_inner(entry, limit, None))
     }
-    fn reachable_inner(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
+    /// The build's reachable set for `options`: a Cranelift development build
+    /// walks its instance records, so a hit materialises nothing.
+    pub fn reachable_for(
+        &self,
+        entry: &DefPath,
+        options: &NativeOptions,
+    ) -> io::Result<Reachable<'_>> {
+        let inputs = crate::native::native_inputs(self, options)?;
+        let mut reached = hirsel_core_ids::published::catch_io(|| {
+            self.reachable_inner(entry, options.instance_limit, inputs.records.as_ref())
+        })?;
+        reached.native = Some(inputs);
+        Ok(reached)
+    }
+    fn reachable_inner(
+        &self,
+        entry: &DefPath,
+        limit: usize,
+        records: Option<&crate::instances::Records>,
+    ) -> io::Result<Reachable<'_>> {
         let mut materialized = crate::instances::InstanceSet::default();
-        let instances =
-            self.instances_into([Identity::plain(entry.clone())], limit, &mut materialized);
+        let roots = [Identity::plain(entry.clone())];
+        let instances = match records {
+            Some(records) => self.instances_over_records(roots, limit, &mut materialized, records),
+            None => self.instances_into(roots, limit, &mut materialized),
+        };
         let image_directory = self.image.as_ref().map(|i| i.directory()).transpose()?;
         let mut bodies = BTreeSet::new();
         let mut unavailable = BTreeSet::new();
@@ -122,15 +146,18 @@ impl CheckProduct {
                 }
                 let product = self.demand_body(&path)?;
                 if let Some(function) = product.check.function {
-                    let ir = product.ir();
-                    let functions = hirsel_core_materialize::external_functions(ir, function);
-                    pending.extend(
-                        functions
-                            .into_iter()
-                            .map(|f| &ir.instances[ir.functions[f.index()].instance.index()])
-                            .filter(|key| !hirsel_core_front::is_glue(&key.definition))
-                            .map(|key| (key.definition.clone(), true)),
-                    );
+                    // A complete walk reached every callee as an instance, above;
+                    // one that stopped reaches the rest through the body's module.
+                    if instances.is_err() {
+                        let ir = product.ir()?;
+                        pending.extend(
+                            hirsel_core_materialize::external_functions(ir, function)
+                                .into_iter()
+                                .map(|f| &ir.instances[ir.functions[f.index()].instance.index()])
+                                .filter(|key| !hirsel_core_front::is_glue(&key.definition))
+                                .map(|key| (key.definition.clone(), true)),
+                        );
+                    }
                 } else if let Some(header) = self.headers.get(&path) {
                     // Failed lowering has no call graph. Keep its resolved references
                     // for diagnostics/census rather than hiding everything after its gap.
@@ -305,6 +332,7 @@ impl CheckProduct {
             first_stops: first_stops.into_values().collect(),
             instances,
             materialized,
+            native: None,
         })
     }
 }

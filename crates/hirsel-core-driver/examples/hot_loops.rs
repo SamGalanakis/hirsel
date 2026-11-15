@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let own = &checked.definitions[&entry];
         fs::write(
             out.join(format!("{name}.core")),
-            hirsel_core_ir::text::print(own.ir()),
+            hirsel_core_ir::text::print(own.ir()?),
         )?;
         println!("{name}: {} objects", objects.len());
     }

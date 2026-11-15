@@ -71,6 +71,89 @@ pub(crate) fn load(
     Ok(Some((root.object, NativeObject { bytes, debug })))
 }
 
+/// A Cranelift development instance's record, under its instance key
+/// (`hirsel.core-instance.v1` over the environment, the instance's identity
+/// and its template body record's address, or none for glue). Every field a
+/// hit reads is a function of the key: the object and its debug rows are the
+/// emission of the materialised module, and `children`, `items` and
+/// `closures` are read from that module (`hirsel_core_materialize::children`
+/// and `Module::items`).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Instance {
+    pub schema: u32,
+    pub identity: hirsel_core_ir::Identity,
+    pub own: Option<ContentHash>,
+    /// The digest of the encoded environment the key was made with.
+    pub env: ContentHash,
+    pub object: ContentHash,
+    pub debug: Option<ContentHash>,
+    /// The instances the module calls outside itself, sorted and deduplicated.
+    pub children: Vec<hirsel_core_ir::Identity>,
+    pub items: Vec<hirsel_core_ids::DefPath>,
+    /// Every closure a child's arguments name, deduplicated, by hash.
+    pub closures: Vec<std::sync::Arc<hirsel_core_ir::Closure>>,
+}
+pub(crate) const INSTANCE_SCHEMA: u32 = 1;
+
+/// Publish an emitted instance's object, debug rows and record, and select the
+/// record under its key: the same files, and so the same syncs, as `publish`.
+pub(crate) fn publish_instance(
+    store: &Store,
+    key: ContentHash,
+    object: &NativeObject,
+    mut record: Instance,
+) -> io::Result<ContentHash> {
+    record.object = store.put_bare(&object.bytes)?;
+    record.debug = object
+        .debug
+        .as_ref()
+        .map(|debug| encode(debug).and_then(|bytes| store.put(&bytes)))
+        .transpose()?;
+    let address = store.put(&encode(&record)?)?;
+    store.select(&native::selection(key), address)?;
+    Ok(record.object)
+}
+
+/// The record selected under `key`, when it decodes and every closure's hash
+/// checks against its rows. Anything else is a miss.
+pub(crate) fn load_instance(store: &Store, key: ContentHash) -> io::Result<Option<Instance>> {
+    let Some(address) = store.selection(&native::selection(key))? else {
+        return Ok(None);
+    };
+    let Some(bytes) = store.get(address)? else {
+        return Ok(None);
+    };
+    let Some(record) = decode::<Instance>(&bytes) else {
+        return Ok(None);
+    };
+    let sound = record.schema == INSTANCE_SCHEMA
+        && record
+            .closures
+            .iter()
+            .all(|c| hirsel_core_ir::Closure::new(c.rows.clone()).hash == c.hash);
+    Ok(sound.then_some(record))
+}
+
+/// An instance record's object and debug rows.
+pub(crate) fn load_object(store: &Store, record: &Instance) -> io::Result<Option<NativeObject>> {
+    let Some(bytes) = store.get_bare(record.object)? else {
+        return Ok(None);
+    };
+    let debug = match record.debug {
+        Some(identity) => {
+            let Some(bytes) = store.get(identity)? else {
+                return Ok(None);
+            };
+            let Some(debug) = decode(&bytes) else {
+                return Ok(None);
+            };
+            Some(debug)
+        }
+        None => None,
+    };
+    Ok(Some(NativeObject { bytes, debug }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

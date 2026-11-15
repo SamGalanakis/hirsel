@@ -42,11 +42,66 @@ pub fn collect_instances(
     Ok(reached.into_iter().collect())
 }
 /// Per-build instances retain their materialized modules for native emission.
-/// Nongeneric bodies keep the already-published module by reference.
+/// Nongeneric bodies keep the already-published module by reference. A walk
+/// over instance records (`Records`) materialises only its misses: a hit keeps
+/// its record instead.
 #[derive(Default)]
 pub(crate) struct InstanceSet {
     rows: std::collections::BTreeMap<Identity, usize>,
     bodies: Vec<InstanceBody>,
+    /// Each walked instance's key and the store its record lives in, when the
+    /// walk was over instance records.
+    pub keys: std::collections::BTreeMap<Identity, (ContentHash, Location)>,
+    /// The record of each instance whose record hit.
+    pub hits: std::collections::BTreeMap<
+        Identity,
+        (
+            crate::native_object::Instance,
+            hirsel_core_ir::source::NativeObject,
+        ),
+    >,
+    /// The record fields of each materialised instance, for its record.
+    pub fields: std::collections::BTreeMap<Identity, Fields>,
+}
+/// Which store an instance's object and record live in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Location {
+    /// The request's store: a program definition or a glue instance.
+    Request,
+    /// The package image's store: an image definition.
+    Library,
+}
+/// The fields of an instance record that are read from its module.
+pub(crate) struct Fields {
+    pub own: Option<ContentHash>,
+    pub children: Vec<Identity>,
+    pub closures: Vec<Arc<hirsel_core_ir::Closure>>,
+}
+/// A walk over Cranelift development instance records: the encoded
+/// environment every key starts with, and its digest.
+pub(crate) struct Records {
+    pub env: Vec<u8>,
+    pub digest: ContentHash,
+    pub store: Store,
+    pub library: Option<Store>,
+}
+impl Records {
+    /// An instance's key: `hirsel.core-instance.v1` over the encoded
+    /// `(env, identity, own)` (a tuple encodes as its fields in order).
+    pub fn key(&self, identity: &Identity, own: Option<ContentHash>) -> io::Result<ContentHash> {
+        let mut bytes = self.env.clone();
+        bytes.extend(encode(&(identity, own))?);
+        Ok(ContentHash::of_parts(
+            "hirsel.core-instance.v1",
+            [&bytes[..]],
+        ))
+    }
+    pub fn store(&self, location: Location) -> &Store {
+        match location {
+            Location::Library => self.library.as_ref().unwrap_or(&self.store),
+            Location::Request => &self.store,
+        }
+    }
 }
 pub(crate) struct InstanceBody {
     /// The published definition; None for a glue instance.
@@ -58,9 +113,9 @@ pub(crate) struct InstanceBody {
     externals: Vec<(hirsel_core_ir::FuncId, Identity)>,
 }
 impl InstanceBody {
-    pub fn ir(&self) -> &Module {
+    pub fn ir(&self) -> io::Result<&Module> {
         match (&self.module, &self.product) {
-            (Some(module), _) => module,
+            (Some(module), _) => Ok(module),
             (None, Some(product)) => product.ir(),
             (None, None) => unreachable!("a glue instance is materialised"),
         }
@@ -79,11 +134,22 @@ impl InstanceSet {
     pub fn get(&self, key: &Identity) -> &InstanceBody {
         &self.bodies[self.rows[key]]
     }
+    /// The source items `key`'s module names: its record's, on a hit.
+    pub fn items(&self, key: &Identity) -> io::Result<&[DefPath]> {
+        match self.hits.get(key) {
+            Some((record, _)) => Ok(&record.items),
+            None => Ok(&self.get(key).ir()?.items),
+        }
+    }
     /// `key`'s module's [`Module::link_symbols`]. Its root and every external row
     /// the walk reached name an instance of this set, whose symbol `names` holds
     /// once per set row, so no row's closure is taken again; a callable code
     /// variant names its variant, and any other row is named by its module.
-    pub fn link_symbols(&self, key: &Identity, names: &mut Vec<Option<String>>) -> Vec<String> {
+    pub fn link_symbols(
+        &self,
+        key: &Identity,
+        names: &mut Vec<Option<String>>,
+    ) -> io::Result<Vec<String>> {
         names.resize(self.bodies.len(), None);
         let mut name = |identity: &Identity| -> String {
             match self.rows.get(identity) {
@@ -92,8 +158,8 @@ impl InstanceSet {
             }
         };
         let body = self.get(key);
-        let module = body.ir();
-        (0..module.functions.len() as u32)
+        let module = body.ir()?;
+        Ok((0..module.functions.len() as u32)
             .map(hirsel_core_ir::FuncId)
             .map(|f| {
                 if let Some(&code) = module.code_variants.get(&f) {
@@ -106,7 +172,7 @@ impl InstanceSet {
                     hirsel_core_ir::symbol(module.code_identity(f))
                 }
             })
-            .collect()
+            .collect())
     }
     /// The materialised instance of `definition` whose type arguments' row names are
     /// `arguments`, for tests that name an instance by its source text.
@@ -114,7 +180,7 @@ impl InstanceSet {
     pub fn named(&self, definition: &DefPath, arguments: &[&str]) -> Option<Identity> {
         self.rows.iter().find_map(|(identity, &row)| {
             let body = &self.bodies[row];
-            let module = body.ir();
+            let module = body.ir().ok()?;
             let key = &module.instances[module.functions[body.function.index()].instance.index()];
             (&identity.definition == definition && module.argument_names(key) == arguments)
                 .then(|| identity.clone())
@@ -135,7 +201,20 @@ impl CheckProduct {
         limit: usize,
         instances: &mut InstanceSet,
     ) -> Result<Vec<Identity>, InstanceStop> {
-        self.instances_observed(roots, limit, instances, |_, _| {})
+        self.instances_observed(roots, limit, instances, None, |_, _| {})
+    }
+    /// Collect instances over Cranelift development instance records: a hit
+    /// takes its children and closures from its record and materialises
+    /// nothing; a miss is materialised from its template and its arguments'
+    /// closures, which the walk's records and materialised modules supply.
+    pub(crate) fn instances_over_records(
+        &self,
+        roots: impl IntoIterator<Item = Identity>,
+        limit: usize,
+        instances: &mut InstanceSet,
+        records: &Records,
+    ) -> Result<Vec<Identity>, InstanceStop> {
+        self.instances_observed(roots, limit, instances, Some(records), |_, _| {})
     }
     /// Measure library loading and mechanical specialization without changing the
     /// native collection path. The ordinary path erases the no-op observer.
@@ -145,13 +224,14 @@ impl CheckProduct {
         limit: usize,
         observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
-        self.instances_observed(roots, limit, &mut InstanceSet::default(), observe)
+        self.instances_observed(roots, limit, &mut InstanceSet::default(), None, observe)
     }
     fn instances_observed(
         &self,
         roots: impl IntoIterator<Item = Identity>,
         limit: usize,
         instances: &mut InstanceSet,
+        records: Option<&Records>,
         mut observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
         let mut resolver = Resolver::default();
@@ -161,17 +241,11 @@ impl CheckProduct {
                 definition: key.definition.clone(),
                 message,
             };
-            let arguments = resolver.arguments(key).map_err(|hash| {
-                input(format!(
-                    "no closure {} reached this instance",
-                    hirsel_core_ir::symbol(hash)
-                ))
-            })?;
-            let (product, built) = if hirsel_core_front::is_glue(&key.definition) {
-                observe(key, "load");
-                let built =
-                    hirsel_core_materialize::materialize_glue(key, &arguments).map_err(input)?;
-                (None, built)
+            let glue = hirsel_core_front::is_glue(&key.definition);
+            // A glue instance has no definition; an image definition's
+            // instance is the image's.
+            let product = if glue {
+                None
             } else {
                 let installed = self
                     .image
@@ -189,21 +263,85 @@ impl CheckProduct {
                 if !product.check.refusals.is_empty() || !product.incomplete.is_empty() {
                     return Err(InstanceStop::Incomplete(key.definition.clone()));
                 }
-                let Some(function) = product.check.function else {
+                if product.check.function.is_none() {
                     return Err(InstanceStop::Incomplete(key.definition.clone()));
+                }
+                Some(product)
+            };
+            let own = product.as_ref().map(|p| p.record);
+            if let Some(records) = records {
+                let location = if glue || self.definitions.contains_key(&key.definition) {
+                    Location::Request
+                } else {
+                    Location::Library
                 };
-                observe(key, "load");
-                let own = Published {
-                    module: product.ir(),
-                    function,
-                    template: product.check.template.as_ref(),
+                let instance_key = records.key(key, own).map_err(|e| input(e.to_string()))?;
+                instances.keys.insert(key.clone(), (instance_key, location));
+                let hit =
+                    crate::native_object::load_instance(records.store(location), instance_key)
+                        .map_err(|e| input(e.to_string()))?
+                        .filter(|r| r.identity == *key && r.own == own && r.env == records.digest);
+                let hit = match hit {
+                    Some(record) => {
+                        crate::native_object::load_object(records.store(location), &record)
+                            .map_err(|e| input(e.to_string()))?
+                            .map(|object| (record, object))
+                    }
+                    None => None,
                 };
-                let built =
-                    hirsel_core_materialize::materialize(&own, key, &arguments).map_err(input)?;
-                (Some(product), built)
+                if let Some((record, object)) = hit {
+                    observe(key, "hit");
+                    resolver.add_closures(&record.closures);
+                    let pending = record.children.clone();
+                    instances.hits.insert(key.clone(), (record, object));
+                    return Ok(pending);
+                }
+            }
+            let arguments = resolver.arguments(key).map_err(|hash| {
+                input(format!(
+                    "no closure {} reached this instance",
+                    hirsel_core_ir::symbol(hash)
+                ))
+            })?;
+            let built = match &product {
+                None => {
+                    observe(key, "load");
+                    hirsel_core_materialize::materialize_glue(key, &arguments).map_err(input)?
+                }
+                Some(product) => {
+                    let own = Published {
+                        module: product.ir().map_err(|e| input(e.to_string()))?,
+                        function: product.check.function.unwrap(),
+                        template: product.check.template.as_ref(),
+                    };
+                    observe(key, "load");
+                    hirsel_core_materialize::materialize(&own, key, &arguments).map_err(input)?
+                }
             };
             observe(key, "materialize");
             resolver.add(&built.children);
+            if records.is_some() {
+                let mut closures = std::collections::BTreeMap::new();
+                for closure in built.children.iter().flat_map(|c| &c.closures) {
+                    closures
+                        .entry(closure.hash)
+                        .or_insert_with(|| Arc::clone(closure));
+                }
+                instances.fields.insert(
+                    key.clone(),
+                    Fields {
+                        own,
+                        children: built
+                            .children
+                            .iter()
+                            .map(|c| c.identity.clone())
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect(),
+                        closures: closures.into_values().collect(),
+                    },
+                );
+            }
             let externals: Vec<_> = built
                 .children
                 .into_iter()

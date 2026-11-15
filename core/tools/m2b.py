@@ -138,6 +138,7 @@ def build(compiler, runtime, cc, manifest_file, entry, engine, scratch, spool=No
     if cc:
         command.extend(['--cc', str(cc)])
     result = subprocess.run(command, cwd=ROOT, capture_output=True)
+    (scratch / f'build-{engine}.json').write_bytes(result.stdout)
     if result.returncode:
         try:
             product = json.loads(result.stdout)
@@ -148,6 +149,59 @@ def build(compiler, runtime, cc, manifest_file, entry, engine, scratch, spool=No
             reason = result.stderr.decode(errors='replace')[-400:]
         return None, f'build failed: {reason}'
     return binary, None
+
+
+def mixed_store(args, entry, selected, scratch, cases, with_probe):
+    """One package edited between two builds in one Cranelift store: the units
+    of the other packages hit and the edited unit is emitted, so one executable
+    links hit objects with fresh ones. The entry's `mixed` names the copied
+    packages, the edit, and the bodies rechecked and units compiled; the
+    executable must be byte-equal to a fresh store's, and every case agree."""
+    spec = entry['mixed']
+    work = scratch / 'mixed'
+    shutil.rmtree(work, ignore_errors=True)
+    shared, fresh = work / 'shared', work / 'fresh'
+    for d in (work, shared, fresh):
+        d.mkdir()
+    edited = None
+    for package in selected['packages']:
+        if package['package']['name'] in spec['copy']:
+            for source in package['sources']:
+                copy = work / Path(source['file']).name
+                shutil.copyfile(source['file'], copy)
+                if Path(source['file']) == (args.root / spec['file']).resolve():
+                    edited = copy
+                source['file'] = str(copy)
+    if edited is None:
+        return [f"mixed: {spec['file']} is not a source of {spec['copy']}"]
+    manifest_file = with_probe(selected, work)
+    failures = []
+    binary, stop = build(args.compiler, args.runtime, args.cc, manifest_file, entry, 'cranelift', shared)
+    if stop:
+        return [f'mixed first build: {stop}']
+    text = edited.read_text()
+    if spec['from'] not in text:
+        return [f"mixed: the edit's text is not in {spec['file']}"]
+    edited.write_text(text.replace(spec['from'], spec['to'], 1))
+    binary, stop = build(args.compiler, args.runtime, args.cc, manifest_file, entry, 'cranelift', shared)
+    if stop:
+        return [f'mixed second build: {stop}']
+    second = json.loads((shared / 'build-cranelift.json').read_text())
+    counts = (second['rechecked'], second['native']['compiled'])
+    if counts != (spec['rechecked'], spec['compiled']):
+        failures.append(f"mixed second build rechecked {counts[0]} and compiled {counts[1]}, "
+                        f"expected {spec['rechecked']} and {spec['compiled']}")
+    oracle, stop = build(args.compiler, args.runtime, args.cc, manifest_file, entry, 'cranelift', fresh)
+    if stop:
+        return failures + [f'mixed fresh build: {stop}']
+    if binary.read_bytes() != oracle.read_bytes():
+        failures.append("mixed: the same-store executable is not the fresh store's")
+    for case in cases:
+        if 'cranelift' not in case.get('red', {}):
+            failure = native(binary, case)
+            if failure:
+                failures.append(f"mixed {case['name']}: {failure}")
+    return failures
 
 
 def empty(spool):
@@ -224,15 +278,20 @@ def main():
                                  if entry['module'] in s['modules'])
                 case_file = args.root / 'core/corpus/m2b' / workload / 'cases.json'
                 names = [c['name'] for c in json.loads(case_file.read_text())] if case_file.exists() else []
-                probe = scratch / 'probe.hirsel'
-                probe.write_text(probe_source(main_file.read_text(), entry['package']['name'], names))
-                deps = [{'name': 'core', 'version': '1'}, {'name': 'std', 'version': '1'}, entry['package']]
-                selected['packages'].append({'package': {'name': PROBE, 'version': '1'}, 'dependencies': deps,
-                                             'sources': [{'file': str(probe), 'modules': ['main'], 'signatures': False}]})
-                manifest_file = scratch / 'inputs.json'
-                manifest_file.write_text(json.dumps(selected))
-                prepared[workload] = scratch, entry, manifest_file
-            return prepared[workload]
+                probe_text = probe_source(main_file.read_text(), entry['package']['name'], names)
+
+                def with_probe(selected, scratch):
+                    probe = scratch / 'probe.hirsel'
+                    probe.write_text(probe_text)
+                    deps = [{'name': 'core', 'version': '1'}, {'name': 'std', 'version': '1'}, entry['package']]
+                    selected['packages'].append({'package': {'name': PROBE, 'version': '1'}, 'dependencies': deps,
+                                                 'sources': [{'file': str(probe), 'modules': ['main'], 'signatures': False}]})
+                    manifest_file = scratch / 'inputs.json'
+                    manifest_file.write_text(json.dumps(selected))
+                    return manifest_file
+                manifest_file = with_probe(json.loads(json.dumps(selected)), scratch)
+                prepared[workload] = scratch, entry, manifest_file, selected, with_probe
+            return prepared[workload][:3]
 
         def binary_for(workload, engine):
             if (workload, engine) not in built:
@@ -244,6 +303,13 @@ def main():
         for workload in workloads:
             scratch, entry, manifest_file = prepare(workload)
             cases = json.loads((args.root / 'core/corpus/m2b' / workload / 'cases.json').read_text())
+            if entry.get('mixed') and 'cranelift' in engines:
+                _, _, _, selected, with_probe = prepared[workload]
+                failures = mixed_store(args, entry, json.loads(json.dumps(selected)), scratch, cases, with_probe)
+                unexpected.extend(f'{workload} cranelift {f}' for f in failures)
+                if not failures:
+                    passed += 1
+                    print(f'pass {workload}/mixed-store cranelift')
             for engine in engines:
                 if entry.get('pair') and engine == 'evaluator':
                     continue

@@ -194,10 +194,15 @@ mod body {
     use super::*;
     /// A body and its result are kept together: CoreIR ids refer only to this module.
     /// Callee rows are signature-only imports, so a callee-body edit does not alter it.
+    ///
+    /// A product read back from its record holds only its head; its IR is read
+    /// through `get_body` on the first [`DefinitionProduct::ir`] demand.
     pub struct DefinitionProduct {
         pub definition: DefPath,
         pub check: CoreCheck,
-        ir: Module,
+        ir: std::sync::OnceLock<Module>,
+        /// Where a record-backed product's IR is read from on demand.
+        ir_source: Option<IrSource>,
         /// The hash of `ir`'s serialization: its body record's module part,
         /// set when the record is framed.
         ir_hash: ContentHash,
@@ -207,6 +212,12 @@ mod body {
         pub incomplete: Vec<Incomplete>,
         /// The body record's address: the content hash of this product as published.
         pub record: ContentHash,
+    }
+    /// The store a record-backed product's IR is read from, and for an image
+    /// body the reader its published descriptors decode through.
+    pub(crate) struct IrSource {
+        pub store: Store,
+        pub reader: Option<Arc<hirsel_core_ids::published::Reader>>,
     }
     /// The hash a body record's module part would have, for a module no
     /// record carries: an instance's materialized body, serialized into
@@ -233,7 +244,8 @@ mod body {
             Self {
                 definition,
                 check,
-                ir,
+                ir: ir.into(),
+                ir_source: None,
                 ir_hash: ContentHash::default(),
                 resolved,
                 key,
@@ -247,24 +259,24 @@ mod body {
         /// module part's hash is `ir_hash`.
         pub(crate) fn frame(&mut self) -> io::Result<Vec<u8>> {
             let head = encode(&DiskCheckRef::of(self)?)?;
+            let ir = self.ir.get().expect("a fresh product holds its IR");
             let (record, ir_hash, bytes) = Store::frame_body(&head, |bytes| {
                 hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
-                bincode::serialize_into(&mut *bytes, &self.ir).map_err(io::Error::other)
+                bincode::serialize_into(&mut *bytes, ir).map_err(io::Error::other)
             })?;
             self.record = record;
             self.ir_hash = ir_hash;
             Ok(bytes)
         }
-        /// A published body record read back under its address. `body` has
-        /// passed its address and IR hash checks; `decode` decodes its head
-        /// and IR, and a product exists only once both decode.
-        pub(crate) fn from_disk(
-            body: &crate::store::Body,
+        /// A published body record's head read back under its address
+        /// (`Store::get_body_head`). Its IR is read from `source` on demand.
+        pub(crate) fn from_head(
+            head: &crate::store::Head,
             record: ContentHash,
-            decode: impl FnOnce(&crate::store::Body) -> Option<(DiskCheck, Module)>,
+            decode: impl FnOnce(&[u8]) -> Option<DiskCheck>,
+            source: IrSource,
         ) -> Option<Self> {
-            let (disk, ir) = decode(body)?;
-            let ir_hash = body.ir_hash;
+            let disk = decode(head.head())?;
             let [nodes, uses, places, calls, types, bytes] = disk.counts;
             Some(Self {
                 record,
@@ -276,8 +288,9 @@ mod body {
                 key: disk.key,
                 incomplete: disk.incomplete,
                 resolved: disk.resolved,
-                ir_hash,
-                ir,
+                ir_hash: head.ir_hash,
+                ir: std::sync::OnceLock::new(),
+                ir_source: Some(source),
                 check: CoreCheck {
                     refusals: disk.refusals,
                     gaps: vec![],
@@ -294,8 +307,40 @@ mod body {
                 },
             })
         }
-        pub fn ir(&self) -> &Module {
-            &self.ir
+        /// The body's module. A record-backed product reads it once, through
+        /// `get_body`, the only IR reader. A record whose IR fails its check
+        /// behind the head this product was read from is removed, so the next
+        /// request misses it and checks the body again (a library image's needs
+        /// a rebuild); this request refuses with the record's path.
+        pub fn ir(&self) -> io::Result<&Module> {
+            if let Some(ir) = self.ir.get() {
+                return Ok(ir);
+            }
+            let source = self
+                .ir_source
+                .as_ref()
+                .expect("a product without its IR has a record");
+            let ir = source
+                .store
+                .get_body(self.record)?
+                .filter(|body| body.ir_hash == self.ir_hash)
+                .and_then(|body| match &source.reader {
+                    Some(reader) => reader.decode(|| decode::<Module>(body.ir())),
+                    None => decode::<Module>(body.ir()),
+                });
+            let Some(ir) = ir else {
+                source.store.remove_damaged(self.record)?;
+                let next = match source.reader {
+                    None => "the next request checks the body again",
+                    Some(_) => "the library image needs a rebuild",
+                };
+                return Err(io::Error::other(format!(
+                    "the body record {} of `{}` is damaged behind its head; it is removed, and {next}",
+                    source.store.path(self.record).display(),
+                    self.definition
+                )));
+            };
+            Ok(self.ir.get_or_init(|| ir))
         }
         /// The hash of `ir`'s serialization, as its record's module part.
         pub fn ir_hash(&self) -> ContentHash {
@@ -318,7 +363,7 @@ pub struct CheckProduct {
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
-    test_entries: BTreeMap<DefPath, Result<native::EntryAbi, String>>,
+    test_entries: BTreeMap<DefPath, Result<native::EntryDecl, String>>,
     headers: Arc<reuse::Headers>,
 }
 impl CheckProduct {
@@ -911,19 +956,14 @@ impl Driver {
                 );
             }
             meter.finish("publish/body records");
-            result.native_entry = request
-                .entry
-                .as_ref()
-                .map(|e| native::bind_entry(&p, e, result.definitions.get(e).map(Arc::as_ref)));
+            // Check binds an entry's declaration part; its ABI is read from
+            // the body's IR in the build.
+            result.native_entry = request.entry.as_ref().map(|e| native::bind_entry(&p, e));
             for f in p.fns.base_len()..p.fns.len() {
                 let fd = &p.fns[f];
                 if fd.is_test {
-                    let (path, abi) = native::bind_entry(
-                        &p,
-                        &fd.path,
-                        result.definitions.get(&fd.path).map(Arc::as_ref),
-                    );
-                    result.test_entries.insert(path, abi);
+                    let (path, decl) = native::bind_entry(&p, &fd.path);
+                    result.test_entries.insert(path, decl);
                 }
             }
             if produce && declarations_accepted {
@@ -993,7 +1033,8 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         .ok()
 }
 /// A body record of the prior publication, when its live row and its
-/// content both carry the current key. Anything else is a miss.
+/// content both carry the current key. Anything else is a miss. Only its head
+/// is read; its IR is read on demand.
 fn prior_definition(
     store: &Store,
     prior: &check_index::ProgramIndex,
@@ -1008,15 +1049,15 @@ fn prior_definition(
     if row_key != key_hash {
         return Ok(None);
     }
-    let Some(body) = store.get_body(record)? else {
+    let Some(head) = store.get_body_head(record)? else {
         return Ok(None);
     };
-    Ok(DefinitionProduct::from_disk(&body, record, decode_body)
+    let source = body::IrSource {
+        store: store.clone(),
+        reader: None,
+    };
+    Ok(DefinitionProduct::from_head(&head, record, decode, source)
         .filter(|product| product.definition == *path && product.key == *key))
-}
-/// A verified body record's head and IR.
-fn decode_body(body: &store::Body) -> Option<(DiskCheck, Module)> {
-    Some((decode(body.head())?, decode(body.ir())?))
 }
 /// The file record: namespace map and anchor map (item ordinal, line base).
 fn file_record(

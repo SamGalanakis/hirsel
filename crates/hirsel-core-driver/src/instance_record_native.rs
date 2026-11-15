@@ -1,0 +1,294 @@
+// Cranelift development instance and entry records (M2). Oracle for every
+// case: a build of the same sources into an empty store, from the same source
+// files (debug lines name them).
+fn record_request(app: &str, core: &Path, dir: &Path, store: &str) -> CheckRequest {
+    let mut request = source_request(app, dir);
+    request.inputs.packages[1] =
+        PackageManifest::directory(core, package("core"), true).unwrap();
+    request.store = dir.join(store);
+    request
+}
+fn record_check(app: &str, core: &Path, dir: &Path, store: &str) -> Arc<CheckProduct> {
+    let product = Driver::default()
+        .check(record_request(app, core, dir, store), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    product
+}
+fn core_sources() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core")
+}
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        // Test sources may be read-only links; the copy is a plain, writable file.
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::write(target, std::fs::read(entry.path()).unwrap()).unwrap();
+        }
+    }
+}
+/// The entry records a native store holds.
+fn entry_records(root: &Path) -> usize {
+    let store = Store::new(root).unwrap();
+    std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().into_string().ok()?;
+            let bytes = (0..32)
+                .map(|i| u8::from_str_radix(name.get(i * 2..i * 2 + 2)?, 16).ok())
+                .collect::<Option<Vec<u8>>>()?;
+            Some(ContentHash(bytes.try_into().ok()?))
+        })
+        .filter(|key| entry_record(&store, *key).unwrap().is_some())
+        .count()
+}
+fn executable_bytes(product: &CheckProduct, options: &NativeOptions) -> (Vec<u8>, Option<i32>) {
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, options).unwrap();
+    let status = Command::new(&built.executable).status().unwrap().code();
+    (std::fs::read(&built.executable).unwrap(), status)
+}
+
+/// Law: the entry record is keyed by the entry body's record address, which
+/// commits to the entry module's `Result` and `Exit` rows the ABI is read
+/// from. A source-backed core widens `Exit`'s alignment with a new field, so
+/// `Result`'s error payload, and the status in it, moves; the program's text
+/// is unchanged. In a primed store the entry record misses, the status is
+/// read at its new offset, and the executable equals a fresh store's, on both
+/// engines. Mutant: the entry key without the address, a
+/// stale exit offset, red on the status and the bytes.
+fn exit_layout_misses_the_entry_record(backend: Backend) {
+    const APP: &str = "pub fn main() -> Result[(), Exit] { Error(exit_with(7u8)) }\n";
+    const HELPER: &str = "\npub fn exit_with(status: u8) -> Exit { Exit(status: status) }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let core = dir.path().join("core-sources");
+    copy_tree(&core_sources(), &core);
+    let prelude = std::fs::read_to_string(core.join("core.hirsel")).unwrap();
+    std::fs::write(core.join("core.hirsel"), format!("{prelude}{HELPER}")).unwrap();
+    let options = native_options(backend, dir.path());
+    let primed = executable_bytes(&record_check(APP, &core, dir.path(), "store"), &options);
+    assert_eq!(primed.1, Some(7), "{backend:?}: primed");
+    let before = entry_records(&options.store);
+    let moved = prelude.replace(
+        "pub type Exit: key {\n    status: u8\n}",
+        "pub type Exit: key {\n    status: u8,\n    pad: u64\n}",
+    );
+    assert_ne!(moved, prelude, "the prelude declares Exit");
+    std::fs::write(
+        core.join("core.hirsel"),
+        format!(
+            "{moved}{}",
+            HELPER.replace("Exit(status: status)", "Exit(status: status, pad: 0u64)")
+        ),
+    )
+    .unwrap();
+    let rebuilt = executable_bytes(&record_check(APP, &core, dir.path(), "store"), &options);
+    if matches!(backend, Backend::Cranelift) {
+        assert_eq!(entry_records(&options.store), before + 1, "the entry record misses");
+    }
+    let fresh = executable_bytes(
+        &record_check(APP, &core, dir.path(), "fresh"),
+        &NativeOptions {
+            store: dir.path().join("fresh-native"),
+            ..native_options(backend, dir.path())
+        },
+    );
+    assert_eq!(rebuilt.1, Some(7), "{backend:?}: moved status");
+    assert!(rebuilt == fresh, "{backend:?}: the rebuilt executable is a fresh store's");
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn exit_layout_misses_the_entry_record_cranelift() {
+    exit_layout_misses_the_entry_record(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn exit_layout_misses_the_entry_record_llvm() {
+    exit_layout_misses_the_entry_record(Backend::Llvm);
+}
+
+/// Law: a body record whose IR is damaged at the same length keeps a valid
+/// head, so check reuses it; the first request that reads the IR refuses
+/// with an error naming the record, and removes it. The next request checks
+/// the body again and builds a fresh store's executable. Mutant: the error
+/// without the removal, red on the file and on request 2.
+#[test]
+#[ignore = "explicit native integration target"]
+fn same_length_ir_damage_refuses_once_then_builds_fresh() {
+    const APP: &str = "fn get(x: u8) -> u8 { x + 1u8 }\npub fn main() -> Result[(), Exit] { Error(Exit(status: get(6u8))) }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_sources();
+    let lines = |debug_lines| NativeOptions {
+        debug_lines,
+        ..native_options(Backend::Cranelift, dir.path())
+    };
+    executable_bytes(&record_check(APP, &core, dir.path(), "store"), &lines(false));
+    let store = Store::new(&dir.path().join("store")).unwrap();
+    let get = DefPath::from_full("app@1/main/get").unwrap();
+    let (_, record) = check_index::ProgramIndex::open(&store)
+        .unwrap()
+        .live(&get)
+        .unwrap();
+    let mut bytes = std::fs::read(store.path(record)).unwrap();
+    let last = bytes.len() - 33;
+    bytes[last] ^= 1;
+    std::fs::write(store.path(record), bytes).unwrap();
+    // Request 1: the head is intact, so check reuses `get`; debug lines on
+    // miss every instance record, so the build reads `get`'s IR.
+    let first = record_check(APP, &core, dir.path(), "store");
+    assert!(first.rechecked.is_empty(), "{:?}", first.rechecked);
+    let error = first
+        .build(&DefPath::from_full("app@1/main/main").unwrap(), &lines(true))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains(&format!(
+            "the body record {} of `{get}` is damaged behind its head",
+            store.path(record).display()
+        )),
+        "{error}"
+    );
+    assert!(!store.path(record).exists(), "request 1 removes the damaged record");
+    let second = record_check(APP, &core, dir.path(), "store");
+    assert!(second.rechecked.contains(&get), "{:?}", second.rechecked);
+    let rebuilt = executable_bytes(&second, &lines(true));
+    let fresh = executable_bytes(
+        &record_check(APP, &core, dir.path(), "fresh"),
+        &NativeOptions {
+            store: dir.path().join("fresh-native"),
+            ..lines(true)
+        },
+    );
+    assert_eq!(rebuilt.1, Some(7));
+    assert!(rebuilt == fresh, "request 2 builds a fresh store's executable");
+}
+
+/// Law (985 a): every link-plan input the environment does not cover is in
+/// the entry key's `policy` and in the plan the executable key takes: the
+/// root limit, the grant mask, the ordered directories and the charge-report
+/// path. One body, one store: each input changed in turn builds a fresh
+/// store's executable. The charge-report path needs the observed runtime, so
+/// its case is in //:core-memory-report. Mutant: a plan input left out of the plan's
+/// encoding, a stale executable, red.
+#[test]
+#[ignore = "explicit native integration target"]
+fn each_plan_input_builds_a_fresh_stores_executable() {
+    const APP: &str = "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_sources();
+    let base = || native_options(Backend::Cranelift, dir.path());
+    let [a, b] = ["a", "b"].map(|name| {
+        let path = dir.path().join(name);
+        std::fs::create_dir(&path).unwrap();
+        path.into_os_string().into_string().unwrap()
+    });
+    let variants: Vec<(&str, NativeOptions)> = vec![
+        ("base", base()),
+        ("root limit", NativeOptions { root_limit: 2_097_152, ..base() }),
+        ("grant mask", NativeOptions { grant_mask: 1 << grant_kind("Clock").unwrap(), ..base() }),
+        ("directories", NativeOptions { directories: vec![a.clone(), b.clone()], ..base() }),
+        ("directory order", NativeOptions { directories: vec![b.clone(), a.clone()], ..base() }),
+    ];
+    let shared = record_check(APP, &core, dir.path(), "store");
+    for (n, (name, options)) in variants.into_iter().enumerate() {
+        let built = executable_bytes(&shared, &options);
+        let fresh = executable_bytes(
+            &record_check(APP, &core, dir.path(), &format!("fresh{n}")),
+            &NativeOptions {
+                store: dir.path().join(format!("fresh-native{n}")),
+                ..options
+            },
+        );
+        assert_eq!(built.1, Some(7), "{name}: runs");
+        assert!(built == fresh, "{name}: the shared store's executable is a fresh store's");
+    }
+}
+
+/// The instance records a store holds, with their addresses.
+fn instance_records(store: &Store, root: &Path) -> Vec<(ContentHash, crate::native_object::Instance)> {
+    std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().into_string().ok()?;
+            let bytes = (0..32)
+                .map(|i| u8::from_str_radix(name.get(i * 2..i * 2 + 2)?, 16).ok())
+                .collect::<Option<Vec<u8>>>()?;
+            let address = ContentHash(bytes.try_into().ok()?);
+            let record = decode::<crate::native_object::Instance>(&store.get(address).ok()??)?;
+            Some((address, record))
+        })
+        .collect()
+}
+
+/// Law (§11.4, closure corruption): a hit's closures feed its children's
+/// arguments, so a record is a hit only while each closure's rows hash to the
+/// hash it is filed under. `get`'s record is forged to carry `Q`'s rows under
+/// `P`'s closure hash, re-put and selected under its key, and `echo[P]`'s
+/// record is evicted: the forged parent misses, and the build equals a fresh
+/// store's. Mutant: no rehash on decode, so `echo[P]` is materialised on
+/// `Q`'s rows, red.
+#[test]
+#[ignore = "explicit native integration target"]
+fn a_forged_closure_misses_its_parent() {
+    const APP: &str = "type P { a: u8, b: u64 }\ntype Q { a: u8, b: u32 }\nfn echo[T: plain](take x: T) -> T { x }\nfn get() -> u8 { echo(P(a: 7u8, b: 1u64)).a + echo(Q(a: 0u8, b: 2u32)).a }\npub fn main() -> Result[(), Exit] { Error(Exit(status: get())) }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_sources();
+    let options = native_options(Backend::Cranelift, dir.path());
+    let primed = record_check(APP, &core, dir.path(), "store");
+    assert_eq!(executable_bytes(&primed, &options).1, Some(7));
+    let store = Store::new(&options.store).unwrap();
+    let records = instance_records(&store, &options.store);
+    let get = DefPath::from_full("app@1/main/get").unwrap();
+    let echo = DefPath::from_full("app@1/main/echo").unwrap();
+    let (_, mut parent) = records
+        .iter()
+        .find(|(_, r)| r.identity.definition == get)
+        .map(|(a, r)| (*a, decode::<crate::native_object::Instance>(&encode(r).unwrap()).unwrap()))
+        .unwrap();
+    assert_eq!(parent.closures.len(), 2, "get argues echo with P and with Q");
+    let child = |hash: ContentHash| {
+        records
+            .iter()
+            .find(|(_, r)| r.identity.definition == echo && r.identity.closures == [hash])
+            .map(|(a, _)| *a)
+    };
+    // The closure whose child is echo[P]: P's rows are the longer layout.
+    let (p, q) = (parent.closures[0].clone(), parent.closures[1].clone());
+    let (p, q) = if child(p.hash).is_some() { (p, q) } else { (q, p) };
+    parent.closures = parent
+        .closures
+        .iter()
+        .map(|c| {
+            if c.hash == p.hash {
+                Arc::new(hirsel_core_ir::Closure { rows: q.rows.clone(), hash: p.hash })
+            } else {
+                Arc::clone(c)
+            }
+        })
+        .collect();
+    let inputs = native_inputs(&primed, &options).unwrap();
+    let key = inputs
+        .records
+        .as_ref()
+        .unwrap()
+        .key(&parent.identity, parent.own)
+        .unwrap();
+    let forged = store.put(&encode(&parent).unwrap()).unwrap();
+    store.select(&selection(key), forged).unwrap();
+    std::fs::remove_file(store.path(child(p.hash).unwrap())).unwrap();
+    let rebuilt = executable_bytes(&record_check(APP, &core, dir.path(), "store"), &options);
+    let fresh = executable_bytes(
+        &record_check(APP, &core, dir.path(), "fresh"),
+        &NativeOptions {
+            store: dir.path().join("fresh-native"),
+            ..native_options(Backend::Cranelift, dir.path())
+        },
+    );
+    assert_eq!(rebuilt.1, Some(7));
+    assert!(rebuilt == fresh, "the forged parent misses and the build is a fresh store's");
+}

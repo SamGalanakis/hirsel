@@ -272,13 +272,13 @@ fn a_body_record_with_another_module_part_misses_its_object() {
         let cold = objects_of(&check(SHAPE, "store"), &options);
         assert_eq!(compiled_names(&cold).len(), cold.len());
         let variant = check(&SHAPE.replace("{ p.a }", "{ p.a + 0u8 }"), "variant");
-        let other = encode(variant.definitions[&path].ir()).unwrap();
+        let other = encode(variant.definitions[&path].ir().unwrap()).unwrap();
         let store = Store::new(&dir.path().join("store")).unwrap();
         let (key, record) = check_index::ProgramIndex::open(&store)
             .unwrap()
             .live(&path)
             .unwrap();
-        let head = store.get_body(record).unwrap().unwrap().head().to_vec();
+        let head = store.get_body_head(record).unwrap().unwrap().head().to_vec();
         let (forged, part, bytes) = Store::frame_body(&head, |b| {
             b.extend_from_slice(&other);
             Ok(())

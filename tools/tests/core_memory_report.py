@@ -78,6 +78,31 @@ class MemoryReport(unittest.TestCase):
                             self.assertEqual([report[x] for x in ['charged_bytes', 'retained_bytes', 'slack_bytes']], [0, 0, 0])
                     self.assertEqual(outcomes[0], outcomes[1])
 
+    def test_each_report_path_is_written_from_one_store(self):
+        """The charge-report path is a link-plan input the environment does not
+        cover: two Cranelift development requests that differ only in it share
+        every instance and entry record, and each executable writes its own
+        path. A plan key without the path links the first request's executable
+        again, which writes the first path."""
+        compiler = Path(os.environ['HIRSEL_REPORT_COMPILER']).resolve()
+        cc = Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
+        archive = Path(os.environ['HIRSEL_CORE_RT_OBSERVED_ARCHIVES']).resolve() / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
+        with tempfile.TemporaryDirectory(prefix='hirsel-memory-path-') as scratch:
+            scratch = Path(scratch)
+            source = scratch / 'source'
+            source.mkdir()
+            (source / 'main.hirsel').write_text('pub fn main() -> Result[(), Exit] { Error(Exit(status:7)) }\n')
+            for name in ['one', 'two']:
+                binary, report_path = scratch / name, scratch / (name + '.json')
+                build = subprocess.run([str(compiler), 'build', str(source), '--entry', 'app@1/main/main',
+                                        '--backend', 'cranelift', '--runtime', str(archive), '--cc', str(cc),
+                                        '--store', str(scratch / 'store'), '--json', '-o', str(binary),
+                                        '--logical-charge-report', str(report_path)], capture_output=True, text=True)
+                self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+                self.assertEqual(subprocess.run([binary]).returncode, 7)
+                self.assertTrue(json.loads(report_path.read_text())['observation_mode'], name)
+            self.assertEqual(json.loads(build.stdout)['native']['compiled'], 0, 'the second request hits every unit')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

@@ -594,7 +594,7 @@ pub fn proof_moves() -> u64 {
     let built = product.build(&entry, &options).unwrap_or_else(|error| {
         panic!(
             "{error:?}\n{}",
-            hirsel_core_ir::text::print(product.demand(&entry).unwrap().ir())
+            hirsel_core_ir::text::print(product.demand(&entry).unwrap().ir().unwrap())
         )
     });
     run_clean(&built.executable, 0);

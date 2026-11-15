@@ -44,14 +44,14 @@ fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
     let product = check();
     let answer = DefPath::from_full("app@1/main/answer").unwrap();
     let d = &product.definitions[&answer];
-    let value = eval::run(d.ir(), d.check.function.unwrap(), &[], 1_000_000).outcome;
+    let value = eval::run(d.ir().unwrap(), d.check.function.unwrap(), &[], 1_000_000).outcome;
     assert_eq!(value, eval::Outcome::Returned(vec![42]));
     let store = Store::new(&dir.path().join("store")).unwrap();
     let index = check_index::ProgramIndex::open(&store).unwrap();
     assert_eq!(index.root, Some(product.root));
     let (_, record) = index.live(&d.definition).unwrap();
     let body = store.get_body(record).unwrap().unwrap();
-    let disk: DiskCheck = decode(body.head()).unwrap();
+    let disk: DiskCheck = decode(store.get_body_head(record).unwrap().unwrap().head()).unwrap();
     let ir: Module = decode(body.ir()).unwrap();
     assert_eq!(
         eval::run(&ir, FuncId(disk.function.unwrap()), &[], 1_000_000).outcome,
@@ -61,17 +61,20 @@ fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
     assert!(reopened.rechecked.is_empty());
     let mut scratch = Vec::new();
     for d in product.definitions.values() {
-        let expected = full(d.ir());
+        let expected = full(d.ir().unwrap());
         assert_eq!(d.ir_hash(), expected, "fresh {}", d.definition);
         assert_eq!(
             reopened.definitions[&d.definition].ir_hash(),
             expected,
             "reopened"
         );
-        assert_eq!(full(reopened.definitions[&d.definition].ir()), expected);
+        assert_eq!(
+            full(reopened.definitions[&d.definition].ir().unwrap()),
+            expected
+        );
         // The scratch holds the previous, unequal module's bytes.
         assert_eq!(
-            crate::body::ir_hash(d.ir(), &mut scratch).unwrap(),
+            crate::body::ir_hash(d.ir().unwrap(), &mut scratch).unwrap(),
             expected
         );
     }
@@ -88,14 +91,16 @@ fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
     let demanded = image
         .demand(&DefPath::from_full("core@1/lib/answer").unwrap())
         .unwrap();
-    assert_eq!(demanded.ir_hash(), full(demanded.ir()), "image");
+    assert_eq!(demanded.ir_hash(), full(demanded.ir().unwrap()), "image");
 }
 /// The body frame, against a hand-built envelope: `HBODY VERSION head_len
 /// ir_len head ir_hash ir address`, the address the SHA-256 of everything
 /// before the IR. Any changed byte, a truncation, a trailing byte or an
 /// impossible length reads as nothing; a changed IR byte keeps the address,
-/// so only the IR hash refuses it. An ordinary read refuses a body frame and
-/// a body read an ordinary one, and neither accepts VERSION 29.
+/// so only the IR hash refuses it. The head read (`get_body_head`) refuses the
+/// same frames except a changed IR byte, which it never reads: a same-length
+/// IR damage is found by the IR read. An ordinary read refuses a body frame
+/// and a body read an ordinary one, and neither accepts VERSION 30.
 #[test]
 fn a_body_record_reads_back_only_whole() {
     use sha2::Digest;
@@ -104,7 +109,7 @@ fn a_body_record_reads_back_only_whole() {
     let (head, ir) = (b"a head".as_slice(), b"the module bytes".as_slice());
     let ir_hash = ContentHash::of_parts("hirsel.core-ir.v1", [ir]);
     let mut expected = b"HBODY\0\0\0".to_vec();
-    expected.extend(30u32.to_le_bytes());
+    expected.extend(31u32.to_le_bytes());
     expected.extend((head.len() as u64).to_le_bytes());
     expected.extend((ir.len() as u64).to_le_bytes());
     expected.extend(head);
@@ -122,31 +127,47 @@ fn a_body_record_reads_back_only_whole() {
         std::fs::write(store.path(address), bytes).unwrap();
         store.get_body(address).unwrap()
     };
+    let read_head = |bytes: &[u8]| {
+        std::fs::write(store.path(address), bytes).unwrap();
+        store.get_body_head(address).unwrap()
+    };
+    let ir_at = expected.len() - 32 - ir.len();
     let whole = read(&expected).unwrap();
     assert_eq!(
-        (whole.head(), whole.ir(), whole.ir_hash),
+        (
+            store.get_body_head(address).unwrap().unwrap().head(),
+            whole.ir(),
+            whole.ir_hash
+        ),
         (head, ir, ir_hash)
     );
     for at in 0..expected.len() {
         let mut flipped = expected.clone();
         flipped[at] ^= 1;
         assert!(read(&flipped).is_none(), "byte {at}");
+        let in_ir = (ir_at..ir_at + ir.len()).contains(&at);
+        assert_eq!(read_head(&flipped).is_some(), in_ir, "head read, byte {at}");
     }
     for len in 0..expected.len() {
         assert!(read(&expected[..len]).is_none(), "{len} bytes");
+        assert!(
+            read_head(&expected[..len]).is_none(),
+            "head read, {len} bytes"
+        );
     }
-    assert!(
-        read(&[&expected[..], &[0]].concat()).is_none(),
-        "trailing byte"
-    );
+    let trailing = [&expected[..], &[0]].concat();
+    assert!(read(&trailing).is_none(), "trailing byte");
+    assert!(read_head(&trailing).is_none(), "head read, trailing byte");
     for at in [12, 20] {
         let mut long = expected.clone();
         long[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(read(&long).is_none(), "length at {at}");
+        assert!(read_head(&long).is_none(), "head read, length at {at}");
     }
     let mut old = expected.clone();
-    old[8..12].copy_from_slice(&29u32.to_le_bytes());
-    assert!(read(&old).is_none(), "VERSION 29 body");
+    old[8..12].copy_from_slice(&30u32.to_le_bytes());
+    assert!(read(&old).is_none(), "VERSION 30 body");
+    assert!(read_head(&old).is_none(), "head read, VERSION 30 body");
     std::fs::write(store.path(address), &expected).unwrap();
     assert_eq!(
         store.get(address).unwrap(),
@@ -240,7 +261,7 @@ fn prog8_unrelated_parse_failure_does_not_suppress_other_results() {
     let answer = DefPath::from_full("app@1/main/answer").unwrap();
     let d = product.demand(&answer).unwrap();
     assert_eq!(
-        eval::run(d.ir(), d.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::run(d.ir().unwrap(), d.check.function.unwrap(), &[], 1_000_000).outcome,
         eval::Outcome::Returned(vec![42])
     );
 }
@@ -288,7 +309,13 @@ fn warm_and_body_edits_reuse_signature_readers_in_memory_and_on_disk() {
         .find(|d| d.definition.0.name == "callee")
         .unwrap();
     assert_eq!(
-        eval::run(callee.ir(), callee.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::run(
+            callee.ir().unwrap(),
+            callee.check.function.unwrap(),
+            &[],
+            1_000_000
+        )
+        .outcome,
         eval::Outcome::Returned(vec![2])
     );
     let old_caller = first
@@ -518,9 +545,9 @@ fn native_ir_tables_round_trip_without_text_reconstruction() {
     assert!(second.rechecked.is_empty());
     let a = first.definitions.values().next().unwrap();
     let b = second.definitions.values().next().unwrap();
-    assert_eq!(a.ir(), b.ir());
+    assert_eq!(a.ir().unwrap(), b.ir().unwrap());
     assert_eq!(
-        eval::run(b.ir(), b.check.function.unwrap(), &[17], 1_000_000).outcome,
+        eval::run(b.ir().unwrap(), b.check.function.unwrap(), &[17], 1_000_000).outcome,
         eval::Outcome::Returned(vec![17])
     );
 }
@@ -595,7 +622,13 @@ fn image_signature_use_skips_source_and_body_decoding() {
     let answer = DefPath::from_full("core@1/lib/answer").unwrap();
     let body = checked.demand_body(&answer).unwrap();
     assert_eq!(
-        eval::run(body.ir(), body.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::run(
+            body.ir().unwrap(),
+            body.check.function.unwrap(),
+            &[],
+            1_000_000
+        )
+        .outcome,
         eval::Outcome::Returned(vec![42])
     );
     assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 1));
@@ -659,18 +692,25 @@ fn corrupt_unused_image_body_is_a_miss_on_demand_only() {
             .check(req, &mut Meter::new(false))
             .unwrap();
         assert!(checked.accepted(), "{:?}", checked.diagnostics);
-        assert!(
-            opened
-                .demand(&answer)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains(&format!(
-                    "{} is missing or damaged",
-                    store.path(hash).display()
-                )),
-            "{damage}"
-        );
+        // A demand reads the head alone: damage behind it refuses the first
+        // read of the module, names the record and removes it.
+        let error = match opened.demand(&answer) {
+            Err(e) => e.to_string(),
+            Ok(body) => {
+                assert_eq!(damage, "module part");
+                let error = body.ir().err().unwrap().to_string();
+                assert!(!store.path(hash).exists(), "the damaged record is removed");
+                error
+            }
+        };
+        let expected = match damage {
+            "record" => format!("{} is missing or damaged", store.path(hash).display()),
+            _ => format!(
+                "the body record {} of `{answer}` is damaged behind its head",
+                store.path(hash).display()
+            ),
+        };
+        assert!(error.contains(&expected), "{damage}: {error}");
         let missing = DefPath::from_full("core@1/absent/absent").unwrap();
         assert!(
             opened
@@ -938,7 +978,13 @@ fn directory_source_file_symlinks_are_checked_instead_of_skipped() {
     assert_eq!(names(&product), ["answer"]);
     let body = product.definitions.values().next().unwrap();
     assert_eq!(
-        eval::run(body.ir(), body.check.function.unwrap(), &[], 1_000_000).outcome,
+        eval::run(
+            body.ir().unwrap(),
+            body.check.function.unwrap(),
+            &[],
+            1_000_000
+        )
+        .outcome,
         eval::Outcome::Returned(vec![42])
     );
 }
@@ -1264,7 +1310,7 @@ fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
         let source = cached.demand(&path).unwrap();
         let template = source.check.template.as_ref().unwrap();
         assert!(!template.copies.is_empty());
-        let ir = reached.materialized.get(&key).ir();
+        let ir = reached.materialized.get(&key).ir().unwrap();
         let layouts = hirsel_core_layout::compute(&ir.types).unwrap();
         let object = hirsel_cranelift::core::emit_object_with_layouts(
             ir,
@@ -1285,7 +1331,7 @@ fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
         .demand(&DefPath::from_full("app@1/main/discard").unwrap())
         .unwrap();
     assert!(
-        discard.ir().functions[discard.check.function.unwrap().index()]
+        discard.ir().unwrap().functions[discard.check.function.unwrap().index()]
             .body
             .as_ref()
             .unwrap()
@@ -1382,7 +1428,7 @@ fn scalar_constants_survive_installed_images_and_invalidate_body_reuse() {
     );
     let body = product.definitions.values().next().unwrap();
     assert_eq!(
-        eval::run(body.ir(), body.check.function.unwrap(), &[], 1000).outcome,
+        eval::run(body.ir().unwrap(), body.check.function.unwrap(), &[], 1000).outcome,
         eval::Outcome::Returned(vec![42])
     );
 
@@ -1400,7 +1446,7 @@ fn scalar_constants_survive_installed_images_and_invalidate_body_reuse() {
     assert_eq!(names(&after), ["answer"]);
     let body = after.definitions.values().next().unwrap();
     assert_eq!(
-        eval::run(body.ir(), body.check.function.unwrap(), &[], 1000).outcome,
+        eval::run(body.ir().unwrap(), body.check.function.unwrap(), &[], 1000).outcome,
         eval::Outcome::Returned(vec![9])
     );
 }
@@ -1451,7 +1497,7 @@ fn lowered_runtime_operation_needs_no_outside_body() {
     let definition = &product.definitions[&entry];
     assert_eq!(
         eval::run(
-            definition.ir(),
+            definition.ir().unwrap(),
             definition.check.function.unwrap(),
             &[],
             1024
@@ -1512,7 +1558,13 @@ fn aggregate_constants_in_an_image_need_no_source_or_body_decode() {
     let path = DefPath::from_full("app@1/main/answer").unwrap();
     let body = checked.demand_body(&path).unwrap();
     assert_eq!(
-        eval::run(body.ir(), body.check.function.unwrap(), &[1], 1_000_000).outcome,
+        eval::run(
+            body.ir().unwrap(),
+            body.check.function.unwrap(),
+            &[1],
+            1_000_000
+        )
+        .outcome,
         eval::Outcome::Returned(vec![51])
     );
     assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 0));
@@ -2056,7 +2108,6 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
     for case in [
         "torn root",
         "torn body",
-        "corrupted module part, valid address",
         "truncated leaf, valid envelope",
         "swapped body records",
         "corrupted body payload, valid envelope",
@@ -2088,15 +2139,6 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
             "torn body" => {
                 let bytes = std::fs::read(body(&dispatch)).unwrap();
                 std::fs::write(body(&dispatch), &bytes[..bytes.len() / 2]).unwrap();
-                vec!["dispatch"]
-            }
-            // The address covers the head and the module part's recorded
-            // hash, both intact; only that hash tells the part is damaged.
-            "corrupted module part, valid address" => {
-                let mut bytes = std::fs::read(body(&dispatch)).unwrap();
-                let last = bytes.len() - 33;
-                bytes[last] ^= 1;
-                std::fs::write(body(&dispatch), bytes).unwrap();
                 vec!["dispatch"]
             }
             "truncated leaf, valid envelope" => {
@@ -2275,7 +2317,7 @@ fn every_reached_instance_imports_its_closures() {
                     built += 1;
                     for instance in reached {
                         if added.insert(instance.clone()) {
-                            carried.add(set.get(&instance).ir());
+                            carried.add(set.get(&instance).ir().unwrap());
                         }
                     }
                 }
@@ -2917,7 +2959,7 @@ fn answer_of(product: &CheckProduct) -> eval::Outcome {
         .values()
         .find(|d| d.definition.0.name == "answer")
         .unwrap();
-    eval::run(d.ir(), d.check.function.unwrap(), &[], 1_000_000).outcome
+    eval::run(d.ir().unwrap(), d.check.function.unwrap(), &[], 1_000_000).outcome
 }
 
 /// FORM #111: the growth arm's calls stay cold through every rebuild between the
@@ -2968,7 +3010,8 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
             .named(&DefPath::from_full(definition).unwrap(), &types)
             .unwrap();
         assert!(keys.contains(&key), "{definition} not reached: {keys:?}");
-        let ir = hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir()).unwrap();
+        let ir =
+            hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir().unwrap()).unwrap();
         assert!(
             ir.lines()
                 .any(|l| l.contains(" call ") && l.contains(" noinline cold")),
@@ -2976,7 +3019,7 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
         );
     }
     let key = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/lens").unwrap());
-    let ir = hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir()).unwrap();
+    let ir = hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir().unwrap()).unwrap();
     let ranges: Vec<_> = ir
         .lines()
         .filter_map(|l| l.split_once("!range "))

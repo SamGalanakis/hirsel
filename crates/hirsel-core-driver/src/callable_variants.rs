@@ -543,7 +543,7 @@ fn root() -> u64 { let delta:u64=1; forward(41u64, fn(x:u64)->u64 {x+delta}) }
         let keys = reached.require().unwrap();
         let mut modules = keys
             .iter()
-            .map(|k| Cow::Borrowed(reached.materialized.get(k).ir()))
+            .map(|k| Cow::Borrowed(reached.materialized.get(k).ir().unwrap()))
             .collect();
         let mut imported = vec![false; keys.len()];
         prepare(
@@ -595,7 +595,7 @@ fn unknown(f: fn(u64) -> u64) -> u64 { forward(41u64, f) }
             let keys = reached.require().unwrap();
             let mut modules: Vec<_> = keys
                 .iter()
-                .map(|k| Cow::Borrowed(reached.materialized.get(k).ir()))
+                .map(|k| Cow::Borrowed(reached.materialized.get(k).ir().unwrap()))
                 .collect();
             // Bodies a unit carries already have their own code identity; only the
             // collector's variants are new.

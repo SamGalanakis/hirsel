@@ -110,7 +110,7 @@ fn closure_rows_differ_in_every_layout_field_and_import_unchanged() {
         .unwrap()
         .clone();
     let body = reached.materialized.get(&key);
-    let base = body.ir().clone();
+    let base = body.ir().unwrap().clone();
     let instance = base.functions[body.function.index()].instance;
     let root = base.instances[instance.index()].arguments[0];
     let closure = base.closure(root);
@@ -268,7 +268,7 @@ fn a_generic_finalizer_binds_its_scalar_argument() {
     let keys = reached.instances.as_ref().unwrap();
     let key = keys.iter().find(|k| k.definition == keep).unwrap();
     let body = reached.materialized.get(key);
-    let module = body.ir();
+    let module = body.ir().unwrap();
     let guard = row(module, |n| n.contains("Guard[u64]"));
     let u64_row = row(module, |n| n == "u64");
     let finalizer = module.types[guard.index()].finalizer.unwrap();
@@ -307,7 +307,7 @@ fn root(take g: Guard[u64]) -> u64 { hold(take g) }\n";
     let mut rigid = 0;
     for key in reached.instances.as_ref().unwrap() {
         let body = reached.materialized.get(key);
-        let module = body.ir();
+        let module = body.ir().unwrap();
         if key.definition == hold {
             rigid += module.types.iter().filter(|s| s.name.contains('$')).count();
         }

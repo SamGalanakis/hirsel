@@ -42,8 +42,8 @@ impl CheckProduct {
         let llvm = crate::tool_inputs::llvm_library()?;
         let mut modules: Vec<_> = reached
             .iter()
-            .map(|instance| Cow::Borrowed(materialized.get(instance).ir()))
-            .collect();
+            .map(|instance| materialized.get(instance).ir().map(Cow::Borrowed))
+            .collect::<io::Result<_>>()?;
         // A glue instance has no definition, so no image publishes it.
         let mut imported: Vec<_> = reached
             .iter()

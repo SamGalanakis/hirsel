@@ -49,7 +49,12 @@ pub struct Resolver {
 }
 impl Resolver {
     pub fn add(&mut self, children: &[Child]) {
-        for closure in children.iter().flat_map(|c| &c.closures) {
+        self.add_closures(children.iter().flat_map(|c| &c.closures));
+    }
+    /// Add closures by their hashes. A closure read from disk is added only
+    /// after its hash is checked against its rows ([`Closure::new`]).
+    pub fn add_closures<'a>(&mut self, closures: impl IntoIterator<Item = &'a Arc<Closure>>) {
+        for closure in closures {
             self.closures
                 .entry(closure.hash)
                 .or_insert_with(|| Arc::clone(closure));

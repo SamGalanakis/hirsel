@@ -47,10 +47,29 @@ pub(crate) struct Plan<'a> {
     charge_report: Option<Vec<u8>>,
     sources: &'a SourceMap,
 }
+/// Every link-plan input the environment does not cover, canonically: the
+/// root limit, the grant mask, the ordered directories and the charge-report
+/// path. The plan's other fields are the entry's: `symbol` is the entry's
+/// identity, `layout`, `exit_offset` and `parameters` are read from the entry
+/// body (its record's address and the declaration part), `cleanup` is the
+/// cleanup instance's identity, and `sources` is the request's source map,
+/// which the executable key hashes itself.
+pub(crate) fn policy(options: &NativeOptions) -> (u64, u64, &[String], Option<&[u8]>) {
+    (
+        options.root_limit,
+        options.grant_mask,
+        &options.directories,
+        options
+            .logical_charge_report
+            .as_ref()
+            .map(|p| p.as_os_str().as_bytes()),
+    )
+}
 impl<'a> Plan<'a> {
     pub(crate) fn new(
         symbol: String,
         binding: &'a EntryAbi,
+        cleanup: Option<String>,
         options: &'a NativeOptions,
         sources: &'a SourceMap,
     ) -> std::result::Result<Self, NativeStop> {
@@ -82,10 +101,7 @@ impl<'a> Plan<'a> {
             layout,
             exit_offset: binding.exit_offset,
             parameters,
-            cleanup: binding.cleanup.as_ref().map(|m| {
-                m.identity(hirsel_core_ir::InstanceId(m.instances.len() as u32 - 1))
-                    .symbol()
-            }),
+            cleanup,
             root_limit: options.root_limit,
             grant_mask: options.grant_mask,
             directories: &options.directories,

@@ -319,8 +319,8 @@ fn scalar_core_instances_match_closed_bodies() {
         let definition = DefPath::from_full(&format!("core@1/{module}/{name}")).unwrap();
         let key = reached.materialized.named(&definition, &types).unwrap();
         let closed = hirsel_core_ir::Identity::plain(DefPath::from_full(&format!("core@1/{module}/{name}_closed")).unwrap());
-        let a = reached.materialized.get(&key).ir();
-        let b = reached.materialized.get(&closed).ir();
+        let a = reached.materialized.get(&key).ir().unwrap();
+        let b = reached.materialized.get(&closed).ir().unwrap();
         let find = |m: &Module, k: &hirsel_core_ir::Identity| {
             m.functions
                 .iter()

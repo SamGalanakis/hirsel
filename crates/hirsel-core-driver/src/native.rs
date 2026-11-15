@@ -202,6 +202,70 @@ fn emit_unit(
     }
 }
 
+/// The environment every development object key starts with, encoded: the
+/// object schema, the compiler, the runtime ABI, the engine library, the
+/// target, the backend and the emission settings.
+fn environment(options: &NativeOptions, runtime: ContentHash) -> io::Result<Vec<u8>> {
+    encode(&(
+        crate::native_object::SCHEMA,
+        compiler_identity()?,
+        runtime,
+        engine_library(options.backend)?,
+        &options.target,
+        options.backend,
+        options.optimize,
+        options.debug_lines,
+        options.logical_charge_report.is_some(),
+        matches!(options.backend, Backend::Llvm) && !hirsel_llvm_lazy::core::facts_enabled(),
+    ))
+}
+/// `domain` over the encoded `(environment, rest)`: a tuple encodes as its
+/// fields in order.
+fn environment_key(
+    domain: &str,
+    environment: &[u8],
+    rest: &impl Serialize,
+) -> io::Result<ContentHash> {
+    let mut bytes = environment.to_vec();
+    bytes.extend(encode(rest)?);
+    Ok(ContentHash::of_parts(domain, [&bytes[..]]))
+}
+/// A build's native inputs: its toolchain and link recipe, and for a
+/// Cranelift development build the instance records its walk reads.
+pub(crate) struct NativeInputs {
+    pub toolchain: crate::tool_inputs::Toolchain,
+    pub recipe: crate::tool_inputs::LinkRecipe,
+    pub records: Option<crate::instances::Records>,
+}
+pub(crate) fn native_inputs(
+    product: &CheckProduct,
+    options: &NativeOptions,
+) -> io::Result<NativeInputs> {
+    let (toolchain, recipe) =
+        crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?;
+    // LLVM development objects keep the v4 key, and LLVM release reads full IR.
+    let records = if matches!(options.backend, Backend::Cranelift) && !options.optimize {
+        let env = environment(options, toolchain.runtime)?;
+        Some(crate::instances::Records {
+            digest: ContentHash::of_parts("hirsel.core-environment.v1", [&env[..]]),
+            env,
+            store: Store::new(&options.store)?,
+            library: product
+                .image
+                .as_ref()
+                .map(|i| Store::new(&i.store_root().join("native")))
+                .transpose()?,
+        })
+    } else {
+        None
+    };
+    Ok(NativeInputs {
+        toolchain,
+        recipe,
+        records,
+    })
+}
+
 impl CheckProduct {
     /// Dev keeps each checked body as an independent object. LLVM release
     /// composes owned bodies and published inline imports into one codegen unit.
@@ -210,24 +274,14 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
-        let reached = self.reachable(entry, options.instance_limit)?;
-        let (toolchain, _) =
-            crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?;
-        self.emit_instances(
-            entry,
-            reached.require()?,
-            &reached.materialized,
-            options,
-            toolchain,
-        )
+        let reached = self.reachable_for(entry, options)?;
+        self.emit_instances(entry, &reached, options)
     }
     fn emit_instances(
         &self,
         entry: &DefPath,
-        reached: &[Identity],
-        materialized: &crate::instances::InstanceSet,
+        reached: &Reachable<'_>,
         options: &NativeOptions,
-        toolchain: crate::tool_inputs::Toolchain,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         if !options.backend.supports_target(&options.target) {
             return Err(NativeStop::Entry(format!(
@@ -235,6 +289,9 @@ impl CheckProduct {
                 options.backend, options.target
             )));
         }
+        let instances = reached.require()?;
+        let materialized = &reached.materialized;
+        let inputs = reached.native.as_ref().expect("a build's reachable set");
         let store = Store::new(&options.store)?;
         let library_store = self
             .image
@@ -246,19 +303,69 @@ impl CheckProduct {
         if matches!(options.backend, Backend::Llvm) && options.optimize {
             return self.emit_release(
                 entry,
-                reached,
+                instances,
                 materialized,
                 options,
-                toolchain.runtime,
+                inputs.toolchain.runtime,
                 &store,
                 library_store.as_ref(),
             );
         }
-        let llvm = engine_library(options.backend)?;
         let mut objects = Vec::new();
-        let mut scratch = Vec::new();
         let mut names = Vec::new();
-        for instance in reached {
+        if let Some(records) = &inputs.records {
+            for instance in instances {
+                let (object_key, location) = materialized.keys[instance];
+                let store = records.store(location);
+                let (identity, object, compiled) = if let Some((record, object)) =
+                    materialized.hits.get(instance)
+                {
+                    (record.object, object.clone(), false)
+                } else {
+                    let module = materialized.get(instance).ir()?;
+                    let symbols = materialized.link_symbols(instance, &mut names)?;
+                    let object =
+                        emit_unit(module, || symbols, options, object_key).map_err(|message| {
+                            NativeStop::Emit {
+                                definition: instance.definition.clone(),
+                                message,
+                            }
+                        })?;
+                    let fields = &materialized.fields[instance];
+                    let record = crate::native_object::Instance {
+                        schema: crate::native_object::INSTANCE_SCHEMA,
+                        identity: instance.clone(),
+                        own: fields.own,
+                        env: records.digest,
+                        object: ContentHash::default(),
+                        debug: None,
+                        children: fields.children.clone(),
+                        items: module.items.clone(),
+                        closures: fields.closures.clone(),
+                    };
+                    (
+                        crate::native_object::publish_instance(store, object_key, &object, record)?,
+                        object,
+                        true,
+                    )
+                };
+                objects.push(ObjectProduct {
+                    private_variants: 0,
+                    instance: instance.clone(),
+                    identity,
+                    path: crate::native_object::path(store, identity),
+                    bytes: object.bytes,
+                    debug: object.debug,
+                    compiled,
+                });
+            }
+            return Ok(objects);
+        }
+        // LLVM development: the v4 key, the environment, the instance, its
+        // body key and its module's hash.
+        let env = environment(options, inputs.toolchain.runtime)?;
+        let mut scratch = Vec::new();
+        for instance in instances {
             // An image's definitions keep their objects in its store; a glue
             // instance has no definition and is the request's.
             let store = if !self.definitions.contains_key(&instance.definition)
@@ -269,24 +376,11 @@ impl CheckProduct {
                 &store
             };
             let instance_body = materialized.get(instance);
-            let module = instance_body.ir();
-            // The unit is the instance's module: its identity and hash name it. A
-            // published body's hit encodes nothing; a materialized one encodes its
-            // module once, into `scratch`.
-            let object_key = key(
+            let module = instance_body.ir()?;
+            let object_key = environment_key(
                 "hirsel.core-object.v4",
+                &env,
                 &(
-                    crate::native_object::SCHEMA,
-                    compiler_identity()?,
-                    toolchain.runtime,
-                    llvm,
-                    &options.target,
-                    options.backend,
-                    options.optimize,
-                    options.debug_lines,
-                    options.logical_charge_report.is_some(),
-                    matches!(options.backend, Backend::Llvm)
-                        && !hirsel_llvm_lazy::core::facts_enabled(),
                     &instance,
                     instance_body.product.as_ref().map(|p| &p.key),
                     instance_body.ir_hash(&mut scratch)?,
@@ -296,9 +390,9 @@ impl CheckProduct {
                 if let Some((hash, object)) = crate::native_object::load(store, object_key)? {
                     (hash, object, false)
                 } else {
-                    let symbols = || materialized.link_symbols(instance, &mut names);
+                    let symbols = materialized.link_symbols(instance, &mut names)?;
                     let object =
-                        emit_unit(module, symbols, options, object_key).map_err(|message| {
+                        emit_unit(module, || symbols, options, object_key).map_err(|message| {
                             NativeStop::Emit {
                                 definition: instance.definition.clone(),
                                 message,
@@ -329,9 +423,10 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
-        let reached = self.reachable(entry, options.instance_limit)?;
+        let reached = self.reachable_for(entry, options)?;
         self.build_reachable(entry, &reached, options)
     }
+    /// Build `reached`, which `reachable_for` collected for `options`.
     pub fn build_reachable(
         &self,
         entry: &DefPath,
@@ -339,125 +434,267 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
         let instances = reached.require()?;
-        let items = instances
-            .iter()
-            .flat_map(|instance| {
-                reached
-                    .materialized
-                    .get(instance)
-                    .ir()
-                    .items
-                    .iter()
-                    .cloned()
-            })
-            .collect::<Vec<_>>();
-        let sources = self.native_sources(&items)?;
-        let entry_plan = self.process_entry(entry, options, &sources)?;
-        let (toolchain, recipe) =
-            crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?;
-        let mut objects =
-            self.emit_instances(entry, instances, &reached.materialized, options, toolchain)?;
-        if let Some(module) = &self.entry_binding(entry)?.cleanup {
-            let store = Store::new(&options.store)?;
-            let object_key = key(
-                "hirsel.core-entry-cleanup.v4",
-                &(
-                    crate::native_object::SCHEMA,
-                    compiler_identity()?,
-                    toolchain.runtime,
-                    engine_library(options.backend)?,
-                    &options.target,
-                    options.backend,
-                    options.optimize,
-                    options.debug_lines,
-                    options.logical_charge_report.is_some(),
-                    matches!(options.backend, Backend::Llvm)
-                        && !hirsel_llvm_lazy::core::facts_enabled(),
-                    crate::body::ir_hash(module, &mut Vec::new())?,
-                ),
-            )?;
-            let (identity, object, compiled) =
-                if let Some((identity, object)) = crate::native_object::load(&store, object_key)? {
-                    (identity, object, false)
-                } else {
-                    let object = emit_unit(module, || module.link_symbols(), options, object_key)
-                        .map_err(|message| NativeStop::Emit {
-                        definition: entry.clone(),
-                        message,
-                    })?;
-                    (
-                        crate::native_object::publish(&store, object_key, &object)?,
-                        object,
-                        true,
-                    )
-                };
-            objects.push(ObjectProduct {
-                private_variants: 0,
-                instance: module.identity(hirsel_core_ir::InstanceId(
-                    module.instances.len() as u32 - 1,
-                )),
-                identity,
-                path: crate::native_object::path(&store, identity),
-                bytes: object.bytes,
-                debug: object.debug,
-                compiled,
-            });
+        let inputs = reached
+            .native
+            .as_ref()
+            .ok_or_else(|| NativeStop::Entry("a build needs `reachable_for` its options".into()))?;
+        let mut items = Vec::new();
+        for instance in instances {
+            items.extend(reached.materialized.items(instance)?.iter().cloned());
         }
+        let sources = self.native_sources(&items)?;
+        let mut objects = self.emit_instances(entry, reached, options)?;
+        let (abi, cleanup) = self.bind_entry_native(entry, options, inputs)?;
+        if let Some(cleanup) = cleanup {
+            objects.push(cleanup);
+        }
+        let entry_plan = crate::native_entry::Plan::new(
+            Identity::plain(entry.clone()).symbol(),
+            &abi,
+            objects
+                .iter()
+                .skip(instances.len())
+                .map(|o| o.instance.symbol())
+                .next(),
+            options,
+            &sources,
+        )?;
         link(
             &entry_plan,
             &objects,
             options,
             &sources,
-            toolchain.image,
-            recipe,
+            inputs.toolchain.image,
+            inputs.recipe.clone(),
         )
     }
-    fn entry_binding(&self, entry: &DefPath) -> Result<&EntryAbi, NativeStop> {
+    /// The entry's declaration part, bound by check.
+    fn entry_decl(&self, entry: &DefPath) -> Result<&EntryDecl, NativeStop> {
         let binding = self
             .native_entry
             .as_ref()
             .filter(|(path, _)| path == entry)
-            .map(|(_, abi)| abi)
+            .map(|(_, decl)| decl)
             .or_else(|| self.test_entries.get(entry))
             .ok_or_else(|| {
                 NativeStop::Entry("no checked entry selected for this definition".into())
             })?;
         binding.as_ref().map_err(|e| NativeStop::Entry(e.clone()))
     }
-    fn process_entry<'a>(
-        &'a self,
+    /// The entry's ABI from its declaration part and its body's IR, and its
+    /// result cleanup module.
+    fn entry_abi(
+        &self,
         entry: &DefPath,
-        options: &'a NativeOptions,
-        sources: &'a hirsel_core_ir::source::SourceMap,
-    ) -> Result<crate::native_entry::Plan<'a>, NativeStop> {
-        crate::native_entry::Plan::new(
-            Identity::plain(entry.clone()).symbol(),
-            self.entry_binding(entry)?,
-            options,
-            sources,
-        )
+        decl: &EntryDecl,
+    ) -> Result<Result<(EntryAbi, Option<Module>), String>, NativeStop> {
+        let product = match self.demand_body(entry) {
+            Ok(product) => product,
+            Err(_) => return Ok(Err("entry has no checked body product".into())),
+        };
+        let module = product.ir()?;
+        Ok(entry_abi(decl, entry, &product, module))
+    }
+    /// The entry's ABI and its cleanup object. A Cranelift development build
+    /// reads both from the entry record and the cleanup's instance record, and
+    /// demands the entry body's IR only on a miss; LLVM keeps the v4 key for
+    /// the cleanup object.
+    fn bind_entry_native(
+        &self,
+        entry: &DefPath,
+        options: &NativeOptions,
+        inputs: &NativeInputs,
+    ) -> Result<(EntryAbi, Option<ObjectProduct>), NativeStop> {
+        let decl = self.entry_decl(entry)?;
+        let store = Store::new(&options.store)?;
+        let Some(records) = &inputs.records else {
+            let (abi, cleanup) = self.entry_abi(entry, decl)?.map_err(NativeStop::Entry)?;
+            let Some(module) = cleanup else {
+                return Ok((abi, None));
+            };
+            let env = environment(options, inputs.toolchain.runtime)?;
+            let object_key = environment_key(
+                "hirsel.core-entry-cleanup.v4",
+                &env,
+                &crate::body::ir_hash(&module, &mut Vec::new())?,
+            )?;
+            let (identity, object, compiled) =
+                if let Some((identity, object)) = crate::native_object::load(&store, object_key)? {
+                    (identity, object, false)
+                } else {
+                    let object = emit_unit(&module, || module.link_symbols(), options, object_key)
+                        .map_err(|message| NativeStop::Emit {
+                            definition: entry.clone(),
+                            message,
+                        })?;
+                    (
+                        crate::native_object::publish(&store, object_key, &object)?,
+                        object,
+                        true,
+                    )
+                };
+            let object = ObjectProduct {
+                private_variants: 0,
+                instance: cleanup_identity(&module),
+                identity,
+                path: crate::native_object::path(&store, identity),
+                bytes: object.bytes,
+                debug: object.debug,
+                compiled,
+            };
+            return Ok((abi, Some(object)));
+        };
+        let Ok(product) = self.demand_body(entry) else {
+            return Err(NativeStop::Entry(
+                "entry has no checked body product".into(),
+            ));
+        };
+        let own = product.record;
+        // The entry record is keyed by the environment, the entry's identity,
+        // its body record's address, the link-plan policy and the declaration
+        // part. The address commits to the entry module, so to the closures of
+        // the `Result` and `Exit` rows the ABI is read from.
+        let entry_key = environment_key(
+            "hirsel.core-entry.v1",
+            &records.env,
+            &(
+                Identity::plain(entry.clone()),
+                own,
+                crate::native_entry::policy(options),
+                decl,
+            ),
+        )?;
+        let mut computed = None;
+        let record = match entry_record(&store, entry_key)? {
+            Some(record) => record,
+            None => {
+                let bound = self.entry_abi(entry, decl)?;
+                let record = EntryRecord {
+                    schema: ENTRY_SCHEMA,
+                    abi: bound
+                        .as_ref()
+                        .map(|(abi, _)| abi.clone())
+                        .map_err(Clone::clone),
+                    cleanup: bound
+                        .as_ref()
+                        .ok()
+                        .and_then(|(_, m)| m.as_ref())
+                        .map(cleanup_identity),
+                };
+                publish(&store, entry_key, &encode(&record)?)?;
+                computed = bound.ok().and_then(|(_, m)| m);
+                record
+            }
+        };
+        let abi = record.abi.map_err(NativeStop::Entry)?;
+        let Some(identity) = record.cleanup else {
+            return Ok((abi, None));
+        };
+        // The cleanup is a function of the entry module: its key takes the
+        // entry body's address as its `own`.
+        let object_key = records.key(&identity, Some(own))?;
+        let hit = crate::native_object::load_instance(&store, object_key)?
+            .filter(|r| r.identity == identity && r.own == Some(own) && r.env == records.digest);
+        if let Some(record) = hit
+            && let Some(object) = crate::native_object::load_object(&store, &record)?
+        {
+            return Ok((
+                abi,
+                Some(ObjectProduct {
+                    private_variants: 0,
+                    instance: identity,
+                    identity: record.object,
+                    path: crate::native_object::path(&store, record.object),
+                    bytes: object.bytes,
+                    debug: object.debug,
+                    compiled: false,
+                }),
+            ));
+        }
+        let module = match computed {
+            Some(module) => module,
+            None => self
+                .entry_abi(entry, decl)?
+                .map_err(NativeStop::Entry)?
+                .1
+                .ok_or_else(|| NativeStop::Entry("entry cleanup is unavailable".into()))?,
+        };
+        let object = emit_unit(&module, || module.link_symbols(), options, object_key).map_err(
+            |message| NativeStop::Emit {
+                definition: entry.clone(),
+                message,
+            },
+        )?;
+        let record = crate::native_object::Instance {
+            schema: crate::native_object::INSTANCE_SCHEMA,
+            identity: identity.clone(),
+            own: Some(own),
+            env: records.digest,
+            object: ContentHash::default(),
+            debug: None,
+            children: vec![],
+            items: module.items.clone(),
+            closures: vec![],
+        };
+        let hash = crate::native_object::publish_instance(&store, object_key, &object, record)?;
+        Ok((
+            abi,
+            Some(ObjectProduct {
+                private_variants: 0,
+                instance: identity,
+                identity: hash,
+                path: crate::native_object::path(&store, hash),
+                bytes: object.bytes,
+                debug: object.debug,
+                compiled: true,
+            }),
+        ))
     }
 }
-// This is a driver product, captured while the checked declaration table is live.
-// It is cached with the check, so native builds never resolve/type-check again.
+/// The entry's ABI: its result's recipe, where an `Exit` status sits in it,
+/// and its provider parameters. Read from the entry body's module, in the
+/// build; the declaration part comes from check.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct EntryAbi {
     pub(super) recipe: Recipe,
     pub(super) exit_offset: Option<u64>,
     pub(super) parameters: Vec<EntryParameter>,
-    pub(super) cleanup: Option<Module>,
+}
+/// The part of an entry's binding that check reads from the declaration
+/// table, while it is live: the error is `Exit`, and the provider parameters.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct EntryDecl {
+    pub(super) exit: bool,
+    pub(super) parameters: Vec<EntryParameter>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct EntryParameter {
     pub(super) ty: String,
     pub(super) name: String,
 }
-pub(crate) type EntryBinding = (DefPath, Result<EntryAbi, String>);
-pub(crate) fn bind_entry(
-    p: &Program<'_>,
-    entry: &DefPath,
-    product: Option<&DefinitionProduct>,
-) -> EntryBinding {
+pub(crate) type EntryBinding = (DefPath, Result<EntryDecl, String>);
+/// A Cranelift development entry record (`hirsel.core-entry.v1`): the ABI
+/// read from the entry body's module, and the identity of its result cleanup.
+#[derive(Serialize, Deserialize)]
+struct EntryRecord {
+    schema: u32,
+    abi: Result<EntryAbi, String>,
+    cleanup: Option<Identity>,
+}
+const ENTRY_SCHEMA: u32 = 1;
+fn entry_record(store: &Store, key: ContentHash) -> io::Result<Option<EntryRecord>> {
+    Ok(cached(store, key)?
+        .and_then(|(_, bytes)| crate::decode::<EntryRecord>(&bytes))
+        .filter(|r| r.schema == ENTRY_SCHEMA))
+}
+/// A cleanup module's own instance: its last.
+fn cleanup_identity(module: &Module) -> Identity {
+    module.identity(hirsel_core_ir::InstanceId(
+        module.instances.len() as u32 - 1,
+    ))
+}
+/// Check's part of an entry binding, from the declaration table alone.
+pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
     use hirsel_core_front::TyKind;
     let binding = (|| {
         let fd = p.function(entry).ok_or("entry declaration unavailable")?;
@@ -471,41 +708,11 @@ pub(crate) fn bind_entry(
         {
             return Err("PROG-3 requires Result[(), E]");
         }
-        let product = product.ok_or("entry has no checked body product")?;
-        let function = product
-            .check
-            .function
-            .ok_or("entry body is not fully lowered")?;
-        let module = product.ir();
-        let signature = &module.signatures[module.functions[function.index()].signature.index()];
-        let dest = signature
-            .dest
-            .ok_or("entry result has no emitted destination")?;
-        let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
-        let recipe = recipes[dest.index()].clone();
-        let exit_offset = match p.types.kind(args[1]) {
-            TyKind::Adt(d, a)
-                if a.is_empty()
-                    && p.decls[d.index()].path
-                        == DefPath::from_full("core@1/core/Exit").unwrap() =>
-            {
-                let hirsel_core_layout::Body::Variant(cases) = &module.types[dest.index()].body
-                else {
-                    unreachable!("checked Result has variant shape")
-                };
-                let hirsel_core_layout::FieldTy::Inline(exit) = cases[1].fields[0].ty else {
-                    unreachable!("checked Exit is an inline result payload")
-                };
-                let Layout::Fixed(result) = &recipe.layout else {
-                    unreachable!("entry result is fixed")
-                };
-                let Layout::Fixed(exit) = &recipes[exit.index()].layout else {
-                    unreachable!("Exit is fixed")
-                };
-                Some(result.offsets[1][0] + exit.offsets[0][0])
-            }
-            _ => None,
-        };
+        let exit = matches!(
+            p.types.kind(args[1]),
+            TyKind::Adt(d, a) if a.is_empty()
+                && p.decls[d.index()].path == DefPath::from_full("core@1/core/Exit").unwrap()
+        );
         let parameters = fd
             .params
             .iter()
@@ -519,16 +726,55 @@ pub(crate) fn bind_entry(
                 })
             })
             .collect::<Result<Vec<_>, &str>>()?;
-        let cleanup = (!recipe.plain).then(|| result_cleanup(module, dest, entry));
-        Ok(EntryAbi {
-            recipe,
-            exit_offset,
-            parameters,
-            cleanup,
-        })
+        Ok(EntryDecl { exit, parameters })
     })()
     .map_err(str::to_owned);
     (entry.clone(), binding)
+}
+/// The build's part of an entry binding, from the entry body's module.
+fn entry_abi(
+    decl: &EntryDecl,
+    entry: &DefPath,
+    product: &DefinitionProduct,
+    module: &Module,
+) -> Result<(EntryAbi, Option<Module>), String> {
+    let binding = (|| {
+        let function = product
+            .check
+            .function
+            .ok_or("entry body is not fully lowered")?;
+        let signature = &module.signatures[module.functions[function.index()].signature.index()];
+        let dest = signature
+            .dest
+            .ok_or("entry result has no emitted destination")?;
+        let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
+        let recipe = recipes[dest.index()].clone();
+        let exit_offset = decl.exit.then(|| {
+            let hirsel_core_layout::Body::Variant(cases) = &module.types[dest.index()].body else {
+                unreachable!("checked Result has variant shape")
+            };
+            let hirsel_core_layout::FieldTy::Inline(exit) = cases[1].fields[0].ty else {
+                unreachable!("checked Exit is an inline result payload")
+            };
+            let Layout::Fixed(result) = &recipe.layout else {
+                unreachable!("entry result is fixed")
+            };
+            let Layout::Fixed(exit) = &recipes[exit.index()].layout else {
+                unreachable!("Exit is fixed")
+            };
+            result.offsets[1][0] + exit.offsets[0][0]
+        });
+        let cleanup = (!recipe.plain).then(|| result_cleanup(module, dest, entry));
+        Ok((
+            EntryAbi {
+                recipe,
+                exit_offset,
+                parameters: decl.parameters.clone(),
+            },
+            cleanup,
+        ))
+    })();
+    binding.map_err(|e: &str| e.to_owned())
 }
 
 /// Runtime CAP-4 kind numbers. Args is always supplied by the process constructor.
@@ -798,6 +1044,7 @@ mod tests {
     include!("source_sites_native.rs");
     include!("facts_native.rs");
     include!("object_key_native.rs");
+    include!("instance_record_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

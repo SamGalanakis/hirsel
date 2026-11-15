@@ -3,7 +3,7 @@
 use hirsel_core_ids::ContentHash;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,7 +18,7 @@ const BODY_HEADER: usize = 28;
 /// framed as one part. A body record's IR part is hashed by it, and so is a
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
-const VERSION: u32 = 30;
+const VERSION: u32 = 31;
 const HEADER: usize = 12;
 const TRAILER: usize = 40;
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -61,10 +61,10 @@ impl Record {
         archive.get(start..start.checked_add(len)?)
     }
 }
-/// A verified body record: its whole file and the ranges of its two parts.
+/// A verified body record: its whole file and the range of its IR. The
+/// head is read by `Store::get_body_head`.
 pub(crate) struct Body {
     bytes: Vec<u8>,
-    head: std::ops::Range<usize>,
     ir: std::ops::Range<usize>,
     pub ir_hash: ContentHash,
 }
@@ -106,16 +106,23 @@ impl Body {
         }
         Some(Self {
             bytes,
-            head: BODY_HEADER..hash_at,
             ir: ir_at..end,
             ir_hash,
         })
     }
-    pub fn head(&self) -> &[u8] {
-        &self.bytes[self.head.clone()]
-    }
     pub fn ir(&self) -> &[u8] {
         &self.bytes[self.ir.clone()]
+    }
+}
+/// A body record's head, read without its IR (`Store::get_body_head`).
+pub(crate) struct Head {
+    bytes: Vec<u8>,
+    head: std::ops::Range<usize>,
+    pub ir_hash: ContentHash,
+}
+impl Head {
+    pub fn head(&self) -> &[u8] {
+        &self.bytes[self.head.clone()]
     }
 }
 pub(crate) struct ArchiveWriter {
@@ -144,6 +151,7 @@ impl ArchiveWriter {
     }
 }
 
+#[derive(Clone)]
 pub struct Store {
     root: PathBuf,
     image: bool,
@@ -276,6 +284,84 @@ impl Store {
             return Ok(None);
         };
         Ok(Body::split(bytes, key, image.as_ref()))
+    }
+    /// A body record's head and `ir_hash`, read under its address without
+    /// its IR.
+    ///
+    /// A head read checks BODY_MAGIC, VERSION, both lengths, the exact file
+    /// length, the trailer address and the prefix address over exactly the
+    /// head bytes. It returns only fields the address covers, and nothing
+    /// derived from IR. `get_body` alone verifies `ir_hash` and decodes IR.
+    pub(crate) fn get_body_head(&self, key: ContentHash) -> io::Result<Option<Head>> {
+        let image = crate::meter::ImageRead::start(self.image);
+        let mut file = match File::open(self.path(key)) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if let Some(image) = &image {
+            image.opened();
+        }
+        let size = file.metadata()?.len();
+        let mut header = [0u8; BODY_HEADER];
+        if size < BODY_HEADER as u64 || file.read_exact(&mut header).is_err() {
+            return Ok(None);
+        }
+        if &header[..8] != BODY_MAGIC || header[8..12] != VERSION.to_le_bytes() {
+            return Ok(None);
+        }
+        let length = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().unwrap());
+        let (head_len, ir_len) = (length(12), length(20));
+        let Some(prefix) = (BODY_HEADER as u64)
+            .checked_add(head_len)
+            .and_then(|n| n.checked_add(32))
+        else {
+            return Ok(None);
+        };
+        if prefix.checked_add(ir_len).and_then(|n| n.checked_add(32)) != Some(size) {
+            return Ok(None);
+        }
+        let Ok(prefix) = usize::try_from(prefix) else {
+            return Ok(None);
+        };
+        let mut trailer = [0u8; 32];
+        file.seek(SeekFrom::Start(size - 32))?;
+        file.read_exact(&mut trailer)?;
+        if trailer != key.0 {
+            return Ok(None);
+        }
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(prefix).map_err(io::Error::other)?;
+        bytes.extend_from_slice(&header);
+        bytes.resize(prefix, 0);
+        file.seek(SeekFrom::Start(BODY_HEADER as u64))?;
+        file.read_exact(&mut bytes[BODY_HEADER..])?;
+        if let Some(image) = &image {
+            image.bytes(BODY_HEADER + 32 + (prefix - BODY_HEADER));
+        }
+        let digest = || Sha256::digest(&bytes);
+        let address = match &image {
+            Some(image) => image.digest(prefix, digest),
+            None => digest(),
+        };
+        if address[..] != key.0 {
+            return Ok(None);
+        }
+        let ir_hash = ContentHash(bytes[prefix - 32..].try_into().unwrap());
+        bytes.truncate(prefix - 32);
+        Ok(Some(Head {
+            bytes,
+            head: BODY_HEADER..prefix - 32,
+            ir_hash,
+        }))
+    }
+    /// Remove a record whose IR failed its check behind a valid head, so the
+    /// next request misses it and checks the body again.
+    pub(crate) fn remove_damaged(&self, key: ContentHash) -> io::Result<()> {
+        match fs::remove_file(self.path(key)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
     fn read_whole(
         &self,

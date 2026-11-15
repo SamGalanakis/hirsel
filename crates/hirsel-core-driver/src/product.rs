@@ -602,8 +602,13 @@ mod tests {
         assert_eq!(repaired.image.identity, first.image.identity);
         let body = changed.image.demand(&answer).unwrap();
         assert_eq!(
-            hirsel_core_ir::eval::run(body.ir(), body.check.function.unwrap(), &[], 1_000_000)
-                .outcome,
+            hirsel_core_ir::eval::run(
+                body.ir().unwrap(),
+                body.check.function.unwrap(),
+                &[],
+                1_000_000
+            )
+            .outcome,
             hirsel_core_ir::eval::Outcome::Returned(vec![9])
         );
     }
@@ -728,8 +733,8 @@ mod agreement {
             }
             let image = product.demand_body(path).unwrap();
             assert_eq!(
-                hirsel_core_ir::text::print(body.ir()),
-                hirsel_core_ir::text::print(image.ir()),
+                hirsel_core_ir::text::print(body.ir().unwrap()),
+                hirsel_core_ir::text::print(image.ir().unwrap()),
                 "CoreIR for {path}"
             );
             assert_eq!(
@@ -774,8 +779,8 @@ mod agreement {
             assert_eq!(a.instances.as_ref().unwrap(), b.instances.as_ref().unwrap());
             for key in a.instances.as_ref().unwrap() {
                 assert_eq!(
-                    hirsel_core_ir::text::print(a.materialized.get(key).ir()),
-                    hirsel_core_ir::text::print(b.materialized.get(key).ir()),
+                    hirsel_core_ir::text::print(a.materialized.get(key).ir().unwrap()),
+                    hirsel_core_ir::text::print(b.materialized.get(key).ir().unwrap()),
                     "instance {key:?}"
                 );
             }

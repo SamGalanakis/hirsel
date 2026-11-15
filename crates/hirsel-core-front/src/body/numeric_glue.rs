@@ -119,7 +119,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         args[0] = Arg::Address(out);
         for (i, &value) in vals.iter().enumerate() {
             let ty = subst(&mut self.t, g.params[i].ty, tys);
-            let rep = self.rep(ty).ok()?;
+            let rep = self.rep_at(ty, n)?;
             let address = if matches!(rep, Rep::Place(_)) {
                 self.address(
                     AddressBase::Value(value?),
@@ -169,7 +169,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             op,
         });
         self.inst(Inst::Call { call }, n);
-        match self.rep(abi.result).ok()? {
+        match self.rep_at(abi.result, n)? {
             Rep::Scalar(ty) => {
                 let field = self.address(
                     AddressBase::Address(out),

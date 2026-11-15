@@ -45,10 +45,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
         success: impl FnOnce(&mut Self, AddressId, ValueId),
     ) -> Option<ValueId> {
-        let id = match self.rep(ty).ok()? {
-            Rep::Place(id) => id,
-            _ => return None,
-        };
+        let id = self.place_row(ty, "an admitted value without a place is not built", n)?;
         if !self.live() {
             return None;
         }

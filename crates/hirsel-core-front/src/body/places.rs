@@ -672,7 +672,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 address = self.address(AddressBase::Value(pointer), &[], place, n);
             }
         }
-        Some((address, self.rep(ty).ok()?))
+        Some((address, self.rep_at(ty, n)?))
     }
     /// The place of row `id` that the view stored at `address` points at.
     pub(super) fn read_bits(&mut self, address: AddressId, t: Ty, n: NodeId) -> ValueId {
@@ -723,7 +723,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let element = self.place_ty(elem, n)?;
             let base = self.address(AddressBase::Value(pointer), &[], place, n);
             let at = self.index_address(base, collection, index, element, n)?;
-            match self.rep(elem).ok()? {
+            match self.rep_at(elem, n)? {
                 Rep::None => None,
                 Rep::Scalar(t) => Some(self.read_bits(at, t, n)),
                 Rep::Place(_) if viewed => Some(self.pointer(at, n)),
@@ -879,6 +879,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let place = self.place_ty(pair, n)?;
         let to = self.new_slot(place, n);
         let TyKind::Tuple(views) = self.t.kind(pair).clone() else {
+            self.gap(n, "a map pair that is not a tuple is not built");
             return None;
         };
         // Each half of the pair is a view: the entry's own bytes (FORM #56).
@@ -894,7 +895,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             );
             let pointer = self.pointer(address, n);
-            let stored = self.rep(elem).ok()?.stored();
+            let stored = self.rep_at(elem, n)?.stored();
             let Some(stored) = stored else {
                 continue;
             };
@@ -920,6 +921,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let TyKind::Adt(_, args) = self.t.kind(collection).clone() else {
+            self.gap(n, "a map that is not a declared type is not built");
             return None;
         };
         self.map_take_entry_values(header, collection, index, result, args[0], args[1], n)
@@ -927,7 +929,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// The row of `List[item]`, whose one field is the `seq` carrier (FORM #113).
     pub(super) fn list_carrier(&mut self, item: TyId, n: NodeId) -> Option<TypeId> {
-        let list = self.list_ty(item)?;
+        let list = self.list_ty(item, n)?;
         self.seq_carrier(list, n)
     }
     /// The row of an own `List` or `String` of type `ty`, whose one field is its
@@ -1277,9 +1279,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match var.binding {
             Binding::Value(v) => v,
             Binding::Slot(a) => {
-                let (Some(address), Ok(r)) = (a, self.rep(var.ty)) else {
+                // An unbound slot is a Never binder: reading it ends the path (FORM #31a).
+                let Some(address) = a else {
                     return None;
                 };
+                let r = self.rep_at(var.ty, n)?;
                 if !self.live() {
                     return None;
                 }
@@ -1494,7 +1498,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     element,
                     n,
                 );
-                match self.rep(payload).ok()? {
+                match self.rep_at(payload, n)? {
                     Rep::None => None,
                     Rep::Scalar(ty) => Some(self.read_bits(to, ty, n)),
                     Rep::Place(_) => Some(self.pointer(to, n)),

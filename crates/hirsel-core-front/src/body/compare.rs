@@ -54,7 +54,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return Ok(None);
         }
-        let Some(place) = self.place_of(t) else {
+        let Some(place) = self.place_of(t, n) else {
             // Unit components: always equal.
             let eq = matches!(op, CompareOp::Eq | CompareOp::Le | CompareOp::Ge);
             return Ok(self.konst(Ty::Scalar(Scalar::Bool), u64::from(eq), n));
@@ -125,9 +125,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
-    /// The place a value of `t` occupies; None for unit.
-    fn place_of(&mut self, t: TyId) -> Option<PlaceTy> {
-        match self.rep(t).ok()? {
+    /// The place a value of `t` occupies; None for unit, and for a type not built,
+    /// whose gap is named here rather than compared as unit (FORM #120).
+    fn place_of(&mut self, t: TyId, n: NodeId) -> Option<PlaceTy> {
+        match self.rep_at(t, n)? {
             Rep::None => None,
             Rep::Scalar(s) => Some(PlaceTy::Value(s)),
             Rep::Place(id) => Some(PlaceTy::Declared(id)),
@@ -240,7 +241,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         .iter()
                         .map(|f| subst(&mut self.t, f.ty, args))
                         .collect();
-                    if tys.iter().all(|&x| self.place_of(x).is_none()) {
+                    if tys.iter().all(|&x| self.place_of(x, n).is_none()) {
                         continue;
                     }
                     let Some(kv) = self.konst(u32t, k as u64, n) else {
@@ -396,7 +397,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         eq_only: bool,
         n: NodeId,
     ) {
-        let Some(place) = self.place_of(x) else {
+        let Some(place) = self.place_of(x, n) else {
             return;
         };
         let fa = self.address(AddressBase::Address(a), &[step], place, n);

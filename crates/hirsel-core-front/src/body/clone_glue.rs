@@ -1133,7 +1133,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => None,
         };
-        let mut at = match self.rep(part).ok()? {
+        let mut at = match self.rep_at(part, n)? {
             Rep::Place(_) => v,
             _ => {
                 let slot = self.slot(part, Some(v), n)?;
@@ -1201,7 +1201,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let block = self.get_word(AddressBase::Value(at), 0, Ty::Ptr, n)?;
             (src, target, function, block)
         };
-        let rid = self.declared(result)?;
+        let rid = self.place_row(result, "a built-in result without a place is not built", n)?;
         if !self.live() {
             return None;
         }
@@ -1296,7 +1296,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         };
         let (id, function, _) = self.key_function(KeyOp::CloneIn(target.0), part, n)?;
-        let rid = self.declared(result)?;
+        let rid = self.place_row(result, "a built-in result without a place is not built", n)?;
         if !self.live() {
             return None;
         }

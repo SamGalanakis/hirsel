@@ -22,8 +22,14 @@ impl Cx<'_, '_, '_> {
                 let data = if let Some(&id) = self.e.constant_statics.get(&value) {
                     id
                 } else {
-                    let Ok(Rep::Place(id)) = self.rep(value.ty) else {
-                        return None;
+                    let id = match self.rep_at(value.ty, n)? {
+                        Rep::Place(id) => id,
+                        // A zero-sized aggregate has no value to read.
+                        Rep::None => return None,
+                        Rep::Scalar(_) => {
+                            self.gap(n, "a published aggregate held as a scalar is not built");
+                            return None;
+                        }
                     };
                     let Layout::Fixed(fixed) = &self.e.recipes[id.index()].layout else {
                         unreachable!()
@@ -53,7 +59,8 @@ impl Cx<'_, '_, '_> {
     ) -> Option<()> {
         match value.data {
             crate::ConstData::Bits(bits) => {
-                let Ok(Rep::Scalar(ty)) = self.rep(value.ty) else {
+                let Rep::Scalar(ty) = self.rep_at(value.ty, n)? else {
+                    self.gap(n, "a published field of bits without a scalar is not built");
                     return None;
                 };
                 let size = match ty {
@@ -64,8 +71,14 @@ impl Cx<'_, '_, '_> {
             }
             crate::ConstData::Unit => {}
             crate::ConstData::Fields { start, len, case } => {
-                let Ok(Rep::Place(id)) = self.rep(value.ty) else {
-                    return None;
+                let id = match self.rep_at(value.ty, n)? {
+                    Rep::Place(id) => id,
+                    // A zero-sized field takes no bytes.
+                    Rep::None => return Some(()),
+                    Rep::Scalar(_) => {
+                        self.gap(n, "a published record held as a scalar is not built");
+                        return None;
+                    }
                 };
                 if let Some(case) = case {
                     let Layout::Fixed(fixed) = &self.e.recipes[id.index()].layout else {
@@ -80,7 +93,7 @@ impl Cx<'_, '_, '_> {
                     }
                 }
                 let stride = if let TyKind::Array(elem, _) = *self.t.kind(value.ty) {
-                    Some(match self.rep(elem).ok()? {
+                    Some(match self.rep_at(elem, n)? {
                         Rep::None => 0,
                         Rep::Scalar(Ty::Scalar(s)) => s.size(),
                         Rep::Scalar(Ty::Ptr) => 8,

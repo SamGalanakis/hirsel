@@ -152,7 +152,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        let place = rep.stored()?;
+        // A zero-sized value has no place: nothing is replaced and the result is unit.
+        let Some(place) = rep.stored() else {
+            return None;
+        };
         let address = self.address(AddressBase::Value(pointer?), &[], place, n);
         let old = match rep {
             Rep::Scalar(t) => Some(self.read_bits(address, t, n)),
@@ -240,13 +243,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         self.consume(Some(value), n);
+        // A zero-sized payload has no place: the unwrapped value is unit.
+        let Some(place) = rep.stored() else {
+            return None;
+        };
         let payload = self.address(
             AddressBase::Address(address),
             &[Step::CaseField {
                 case: success,
                 field: 0,
             }],
-            rep.stored()?,
+            place,
             n,
         );
         match rep {

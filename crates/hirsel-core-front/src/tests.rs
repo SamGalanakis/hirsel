@@ -224,6 +224,17 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
             functions.insert(fd.path.0.name.clone(), id);
         }
     }
+    // A body the checker accepts emits, or names why it does not (FORM #120): a halt
+    // with no reason fails the case whatever its expect lines say.
+    let silent: Vec<_> = gaps
+        .iter()
+        .filter(|g| g.what == crate::body::SILENT_HALT)
+        .collect();
+    assert!(
+        silent.is_empty(),
+        "{}: accepted, not emitted, no gap: {silent:?}",
+        path.display()
+    );
     emitter.materialize_instances().unwrap_or_else(|e| {
         panic!(
             "{}: materialize checked generic bodies: {e}",

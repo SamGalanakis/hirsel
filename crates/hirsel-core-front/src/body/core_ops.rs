@@ -721,7 +721,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        let place = rep.stored()?;
+        // A zero-sized field has no address: its callers store nothing (FORM #120).
+        let Some(place) = rep.stored() else {
+            return None;
+        };
         let at = self.address(AddressBase::Address(to), steps, place, n);
         // A builtin handle field is stored directly in its parent's recipe.
         // Rebase its carrier before addressing fields of that carrier.
@@ -793,7 +796,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         success: impl FnOnce(&mut Self, AddressId, TyId),
         error: impl FnOnce(&mut Self, AddressId, TyId),
     ) -> Option<ValueId> {
+        // A zero-sized result (`sleep_until`'s unit) has nothing to build: the call
+        // already ran.
+        if self.rep_at(ty, n)? == Rep::None {
+            return None;
+        }
         let TyKind::Adt(_, arguments) = self.t.kind(ty).clone() else {
+            self.gap(
+                n,
+                "a runtime result that is not a declared type is not built",
+            );
             return None;
         };
         let id = self.runtime_type(ty, n)?;
@@ -964,7 +976,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some((
             self.b.blocks[join.index()]
                 .params
-                .get(&self.b.pools.values)?[0],
+                .get(&self.b.pools.values)
+                .expect("the join block just built holds its parameter")[0],
             overflow,
         ))
     }
@@ -1308,7 +1321,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // Native task-entry glue follows x/r.carried. The fixed runtime C entry
         // still owns input and result buffers by address.
         let logical = self.layout_size(r, true, n)?;
-        let xrep = self.rep(x).ok()?;
+        let xrep = self.rep_at(x, n)?;
         let rid = self.runtime_type(r, n)?;
         let (xid, input) = self.runtime_place(x, value, n)?;
         let u = Ty::Scalar(Scalar::U64);
@@ -1381,7 +1394,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let (charge, overflow) = self.owner_charge(item, kind, n)?;
-        let rep = self.rep(item).ok()?;
+        let rep = self.rep_at(item, n)?;
         let id = self.runtime_type(item, n)?;
         let payload = self.layout_size(item, false, n)?;
         let u = Ty::Scalar(Scalar::U64);
@@ -1462,17 +1475,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )
     }
 
-    pub(super) fn list_ty(&mut self, item: TyId) -> Option<TyId> {
-        let list = self.p.core_decl("List")?;
+    pub(super) fn list_ty(&mut self, item: TyId, n: NodeId) -> Option<TyId> {
+        let list = self.prelude("List", n)?;
         Some(self.t.mk(TyKind::Adt(list, vec![item])))
     }
 
-    fn log_ty(&mut self, item: TyId) -> Option<TyId> {
+    fn log_ty(&mut self, item: TyId, n: NodeId) -> Option<TyId> {
         let log = self
             .p
             .decls
             .iter()
-            .position(|d| d.role == Some(crate::decls::Role::Log) && d.path.0.name == "Log")?;
+            .position(|d| d.role == Some(crate::decls::Role::Log) && d.path.0.name == "Log");
+        let log = self.named(log, "a log without the prelude's Log is not built", n)?;
         Some(
             self.t
                 .mk(TyKind::Adt(crate::types::DeclId(log as u32), vec![item])),
@@ -1481,7 +1495,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// MEM-29: the log node is a box allocation whose payload is the List carrier.
     fn runtime_log_new(&mut self, item: TyId, result: TyId, n: NodeId) -> Option<ValueId> {
-        let list = self.list_ty(item)?;
+        let list = self.list_ty(item, n)?;
         let (charge, overflow) = self.owner_charge(list, None, n)?;
         let id = self.runtime_type(list, n)?;
         let carrier = self.list_carrier(item, n)?;
@@ -1544,7 +1558,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let log_ty = self.log_ty(item)?;
+        let log_ty = self.log_ty(item, n)?;
         let log_id = self.runtime_type(log_ty, n)?;
         let log_base = self.address(AddressBase::Value(log), &[], PlaceTy::Declared(log_id), n);
         let node_at = self.address(
@@ -1555,17 +1569,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let node = self.read_bits(node_at, Ty::Ptr, n);
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-        let cap = self
-            .t
-            .mk(TyKind::Adt(self.p.core_decl("Capacity")?, vec![]));
-        let reserve = self
-            .t
-            .mk(TyKind::Adt(self.p.core_decl("Result")?, vec![UNIT, cap]));
+        let cap = self.prelude("Capacity", n)?;
+        let cap = self.t.mk(TyKind::Adt(cap, vec![]));
+        let reserve = self.prelude("Result", n)?;
+        let reserve = self.t.mk(TyKind::Adt(reserve, vec![UNIT, cap]));
         let reserved = self.list_reserve(item, node, one, reserve, n)?;
-        let reserve_id = match self.rep(reserve) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
+        let reserve_id =
+            self.place_row(reserve, "a log reserve without a place is not built", n)?;
         let tag = self.value(Ty::Scalar(Scalar::U32));
         let from = self.address(
             AddressBase::Value(reserved),
@@ -1595,7 +1605,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let no = self.new_block(&[]);
         let done = self.new_block(&[]);
         self.list_branch(ok, yes, no, n);
-        let item_rep = self.rep(item).ok()?;
+        let item_rep = self.rep_at(item, n)?;
         self.start(yes);
         let carrier = self.list_carrier(item, n)?;
         let len = self.carrier_word(node, carrier, SeqWord::Len, n);
@@ -1625,10 +1635,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let error_ty = match self.t.kind(result).clone() {
             TyKind::Adt(_, args) => args[1],
-            _ => return None,
+            _ => {
+                self.gap(n, "a log append that is not a declared type is not built");
+                return None;
+            }
         };
-        let cap_at =
-            self.runtime_field(out, &[Step::CaseField { case: 1, field: 0 }], error_ty, n)?;
+        let cap_at = self.runtime_field(out, &[Step::CaseField { case: 1, field: 0 }], error_ty, n);
+        let cap_at = self.named(cap_at, "a log refusal without a place is not built", n)?;
         let cap_id = self.runtime_type(cap, n)?;
         let old_cap = self.address(
             AddressBase::Address(from),
@@ -1674,7 +1687,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let log_ty = self.log_ty(item)?;
+        let log_ty = self.log_ty(item, n)?;
         let log_id = self.runtime_type(log_ty, n)?;
         let log_base = self.address(AddressBase::Value(log), &[], PlaceTy::Declared(log_id), n);
         let node_at = self.address(
@@ -1684,7 +1697,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         let node = self.read_bits(node_at, Ty::Ptr, n);
-        let list = self.list_ty(item)?;
+        let list = self.list_ty(item, n)?;
         let list_id = self.runtime_type(list, n)?;
         let to = self.new_slot(PlaceTy::Declared(list_id), n);
         self.copy_to(to, node, list_id, n);
@@ -1845,7 +1858,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 },
                 n,
             );
-            let candidate = self.reinterpret(candidate, Ty::Ptr, Ty::Scalar(Scalar::U64), n)?;
+            let candidate = self
+                .reinterpret(candidate, Ty::Ptr, Ty::Scalar(Scalar::U64), n)
+                .expect("a function reference is a pointer");
             let equal = self.value(Ty::Scalar(Scalar::Bool));
             self.inst(
                 Inst::Compare {
@@ -2050,7 +2065,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     fn runtime_unbox(&mut self, item: TyId, value: ValueId, n: NodeId) -> Option<ValueId> {
         let (charge, _) = self.owner_charge(item, None, n)?;
-        let rep = self.rep(item).ok()?;
+        let rep = self.rep_at(item, n)?;
         let id = self.runtime_type(item, n)?;
         let node = self.runtime_handle(value, n);
         let payload = self.owner_payload(node, id, false, n)?;
@@ -2108,6 +2123,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         )?;
         let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
+            self.gap(
+                n,
+                "an argument lookup that is not a declared type is not built",
+            );
             return None;
         };
         let payload = arguments[0];

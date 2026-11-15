@@ -93,9 +93,7 @@ impl Cx<'_, '_, '_> {
         at: ValueId,
         n: NodeId,
     ) -> Option<AddressId> {
-        let Ok(Rep::Place(id)) = self.rep(ty) else {
-            return None;
-        };
+        let id = self.place_row(ty, "a locator without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         for (offset, v) in [(0, blob), (8, at)] {
             let o = self.konst(Ty::Scalar(Scalar::U64), offset, n)?;
@@ -563,7 +561,7 @@ impl Cx<'_, '_, '_> {
                 let at = self.fields_of(AddressBase::Value(v), id, n);
                 self.address(AddressBase::Address(at), &[Step::Field(i as u32)], place, n)
             };
-            match self.rep(ft).ok()? {
+            match self.rep_at(ft, n)? {
                 r @ Rep::Scalar(_) => Some(self.read_bits(address, r.ty()?, n)),
                 Rep::Place(_) if ty != ft => {
                     if owner {}

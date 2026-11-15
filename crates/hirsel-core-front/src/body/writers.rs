@@ -64,7 +64,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     fn words(&mut self, k: u64, n: NodeId) -> Option<AddressId> {
         let ty = self.t.mk(TyKind::Array(scalar(Scalar::U64), k));
-        let id = self.declared(ty)?;
+        let id = self.place_row(ty, "a built-in operand without a place is not built", n)?;
         Some(self.new_slot(PlaceTy::Declared(id), n))
     }
     fn over(&mut self, sinks: &mut Sinks) -> BlockId {
@@ -268,10 +268,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// The `Result[_, BuildError]` slot of `result` and the `BuildError` row.
     fn build_result(&mut self, result: TyId, n: NodeId) -> Option<(AddressId, TypeId)> {
-        let id = self.declared(result)?;
-        let error = self.p.core_decl("BuildError")?;
+        let id = self.place_row(result, "a built-in result without a place is not built", n)?;
+        let error = self.prelude("BuildError", n)?;
         let error = self.t.mk(TyKind::Adt(error, vec![]));
-        let eid = self.declared(error)?;
+        let eid = self.place_row(error, "a build error without a place is not built", n)?;
         Some((self.new_slot(PlaceTy::Declared(id), n), eid))
     }
     fn error_place(&mut self, to: AddressId, eid: TypeId, n: NodeId) -> AddressId {
@@ -396,9 +396,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let frame = self.new_frame(state, ty, sinks, n)?;
         let r = self.call_lowered(fty, f, &[Some(frame)], n)?;
         let TyKind::Fn(_, rt, _, _) = self.t.kind(fty).clone() else {
+            self.gap(n, "a builder callback that is not a function is not built");
             return None;
         };
-        let rid = self.declared(rt)?;
+        let rid = self.place_row(rt, "a built-in result without a place is not built", n)?;
         let at = self.address(AddressBase::Value(r), &[], PlaceTy::Declared(rid), n);
         let case = self.value(Ty::Scalar(Scalar::U32));
         self.inst(
@@ -413,9 +414,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (good, bad) = (self.new_block(&[]), self.new_block(&[]));
         self.branch(ok, good, bad, n);
         self.start(bad);
-        let error = self.p.core_decl("BuildError")?;
+        let error = self.prelude("BuildError", n)?;
         let error = self.t.mk(TyKind::Adt(error, vec![]));
-        let eid = self.declared(error)?;
+        let eid = self.place_row(error, "a build error without a place is not built", n)?;
         let e = self.address(
             AddressBase::Address(at),
             &[Step::CaseField { case: 1, field: 0 }],
@@ -571,9 +572,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse_arity_at(at, args.len(), k, format!("expected {k} arguments"));
                 return None;
             }
-            let ftys = self.compact_fields(ty, case)?;
+            let ftys = self.compact_fields(ty, case);
+            let ftys = self.named(
+                ftys,
+                "an emitted literal of a type without fields is not built",
+                a,
+            )?;
             if let Some(c) = case {
-                let s = Self::tag_scalar(self.variant_cases(ty)?);
+                let cases = self.variant_cases(ty);
+                let s = Self::tag_scalar(self.named(
+                    cases,
+                    "an emitted case of a type without cases is not built",
+                    a,
+                )?);
                 let size = self.u64k(s.size(), a)?;
                 let at = self.reserve(state, size, sinks, a)?;
                 let tag = self.konst(Ty::Scalar(s), u64::from(c), a)?;
@@ -640,7 +651,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let k = self.u64k(size, a)?;
                     let at = self.reserve(state, k, sinks, a)?;
                     let blob = self.state_word(state, 0, Ty::Ptr, a)?;
-                    let r = self.rep(ty).ok()?;
+                    let r = self.rep_at(ty, a)?;
                     return self.encode_plain(blob, at, ty, r, v, a);
                 }
                 self.gap(a, "this field of an emitted literal is not built");
@@ -653,8 +664,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// each element encoded in order.
     fn write_span(&mut self, state: ValueId, ty: TyId, a: NodeId, sinks: &mut Sinks) -> Option<()> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let elem = self.role_of(ty)?.1.first().copied()?;
-        let list = self.p.core_decl("List")?;
+        let elem = self.role_of(ty).and_then(|(_, xs)| xs.first().copied());
+        let elem = self.named(elem, "a fixed span without an element type is not built", a)?;
+        let list = self.prelude("List", a)?;
         let list = self.t.mk(TyKind::Adt(list, vec![elem]));
         let mark = self.owner_mark();
         let (t, v) = self.operand(a, expect(list));
@@ -672,7 +684,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.unencoded_element(elem, a);
             return None;
         };
-        let r = self.rep(elem).ok()?;
+        let r = self.rep_at(elem, a)?;
         let over = self.operand_over(sinks, mark);
         let count = self.get_word(AddressBase::Value(xs), 8, u64t, a)?;
         let w = self.state_word(state, 24, u64t, a)?;
@@ -871,7 +883,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// A pointer to the `String` a `Text` is written from: a place is viewed for the
     /// copy, never moved (OWN-7); any other operand is a `String` value.
     fn string_view(&mut self, a: NodeId) -> Option<ValueId> {
-        let string = self.p.core_decl("String")?;
+        let string = self.prelude("String", a)?;
         let string = self.t.mk(TyKind::Adt(string, vec![]));
         let (t, v) = self.operand(a, expect(string));
         self.coerce(
@@ -1320,7 +1332,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if let Some(target) = self.link_option(ty) {
             let child = self.child_of(target)?;
-            let option = self.p.core_decl("Option")?;
+            let option = self.prelude("Option", a)?;
             let option = self.t.mk(TyKind::Adt(option, vec![child]));
             pieces.push(Piece::OptLink(typed(self, option)?, option));
             return Some(());
@@ -1349,7 +1361,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// The case of the `Option[Child]` at `o` (1 is `Some`) and its payload's address.
     fn opt_child(&mut self, o: ValueId, ty: TyId, n: NodeId) -> Option<(ValueId, AddressId)> {
-        let id = self.declared(ty)?;
+        let id = self.place_row(ty, "a built-in operand without a place is not built", n)?;
         let at = self.address(AddressBase::Value(o), &[], PlaceTy::Declared(id), n);
         let case = self.value(Ty::Scalar(Scalar::U32));
         self.inst(
@@ -1362,7 +1374,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let one = self.konst(Ty::Scalar(Scalar::U32), 1, n)?;
         let some = self.test(CompareOp::Eq, case, one, n);
         let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), 2));
-        let wid = self.declared(words)?;
+        let wid = self.place_row(words, "a builder's words without a place are not built", n)?;
         let payload = self.address(
             AddressBase::Address(at),
             &[Step::CaseField { case: 1, field: 0 }],
@@ -1568,7 +1580,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.u64k(s.size(), n)?
                 }
                 Piece::Plain(ty, v, k) => {
-                    let r = self.rep(ty).ok()?;
+                    let r = self.rep_at(ty, n)?;
                     self.encode_plain(blob, pos, ty, r, v, n)?;
                     self.u64k(k, n)?
                 }
@@ -1683,9 +1695,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let d = self.pointer(d, n);
         let r = self.call_lowered(fty, f, &[Some(d)], n)?;
         let TyKind::Fn(_, rt, _, _) = self.t.kind(fty).clone() else {
+            self.gap(n, "a builder callback that is not a function is not built");
             return None;
         };
-        let rid = self.declared(rt)?;
+        let rid = self.place_row(rt, "a built-in result without a place is not built", n)?;
         let at = self.address(AddressBase::Value(r), &[], PlaceTy::Declared(rid), n);
         let case = self.value(Ty::Scalar(Scalar::U32));
         self.inst(
@@ -1960,9 +1973,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         let data = self.pointer(bytes, n);
-        let string = self.p.core_decl("String")?;
+        let string = self.prelude("String", n)?;
         let string = self.t.mk(TyKind::Adt(string, vec![]));
-        let id = self.declared(string)?;
+        let id = self.place_row(string, "a string without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         self.put_word(AddressBase::Address(to), &[], 0, data, n)?;
         self.put_word(AddressBase::Address(to), &[], 8, len, n)?;
@@ -1973,7 +1986,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// `round8(8 + len)` (MEM-24), located at 16.
     fn copy_in(&mut self, region: ValueId, s: ValueId, result: TyId, n: NodeId) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let id = self.declared(result)?;
+        let id = self.place_row(result, "a built-in result without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let len = self.get_word(AddressBase::Value(s), 8, u64t, n)?;
         let (blob, available, charge) =
@@ -2078,8 +2091,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let (_, _, _, count) = self.span_parts(header, n)?;
-        let rep = self.rep(result).ok()?;
-        let to = self.new_slot(rep.stored()?, n);
+        // A zero-sized result has no value to build, and none is owed (FORM #120).
+        let Some(place) = self.rep_at(result, n)?.stored() else {
+            return None;
+        };
+        let to = self.new_slot(place, n);
         let more = self.test(CompareOp::Lt, index, count, n);
         let (load, empty, done) = (
             self.new_block(&[]),
@@ -2117,7 +2133,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
         let elem = self.bare(elem);
-        let id = self.declared(result)?;
+        let id = self.place_row(result, "a built-in result without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let (blob, at, w, count) = self.span_parts(span, n)?;
         // Every element is at least one byte of an admitted blob, so 24 + 8 count fits.
@@ -2228,8 +2244,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let elem = self.bare(elem);
         let block = self.read_sequence_word(index, 0, Ty::Ptr, n);
         let count = self.read_sequence_word(block, 16, u64t, n);
-        let rep = self.rep(result).ok()?;
-        let to = self.new_slot(rep.stored()?, n);
+        // A zero-sized result has no value to build, and none is owed (FORM #120).
+        let Some(place) = self.rep_at(result, n)?.stored() else {
+            return None;
+        };
+        let to = self.new_slot(place, n);
         let more = self.test(CompareOp::Lt, i, count, n);
         let (load, empty, done) = (
             self.new_block(&[]),
@@ -2279,7 +2298,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        let er = self.rep(elem).ok()?;
+        let er = self.rep_at(elem, n)?;
         if let Some(place) = er.stored() {
             let dest = self.address(
                 AddressBase::Address(to),
@@ -2308,8 +2327,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
         let elem = self.bare(elem);
-        let rep = self.rep(result).ok()?;
-        let to = self.new_slot(rep.stored()?, n);
+        // A zero-sized result has no value to build, and none is owed (FORM #120).
+        let Some(place) = self.rep_at(result, n)?.stored() else {
+            return None;
+        };
+        let to = self.new_slot(place, n);
         let count = self.get_word(AddressBase::Value(frame), 16, u64t, n)?;
         let more = match index {
             Some(i) => self.test(CompareOp::Lt, i, count, n),

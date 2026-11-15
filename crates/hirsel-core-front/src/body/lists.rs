@@ -229,13 +229,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Ok(Rep::Place(id)) => id,
             _ => return None,
         };
-        let capacity = self
-            .t
-            .mk(TyKind::Adt(self.p.core_decl("Capacity")?, vec![]));
-        let capacity_id = match self.rep(capacity) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
+        let capacity = self.prelude("Capacity", n)?;
+        let capacity = self.t.mk(TyKind::Adt(capacity, vec![]));
+        let capacity_id = self.place_row(capacity, "a capacity without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
@@ -520,13 +516,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => return None,
         };
-        let cap_ty = self
-            .t
-            .mk(TyKind::Adt(self.p.core_decl("Capacity")?, vec![]));
-        let cap_id = match self.rep(cap_ty) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
+        let cap_ty = self.prelude("Capacity", n)?;
+        let cap_ty = self.t.mk(TyKind::Adt(cap_ty, vec![]));
+        let cap_id = self.place_row(cap_ty, "a capacity without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let old_cap = self.carrier_word(header, carrier, SeqWord::Cap, n);
@@ -628,11 +620,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // Owned storage is replaced by one `grow` (crate docs, "Growth"), which
         // admits like the old block and refunds its charge after the install.
         self.start(like);
-        let list = self.p.core_decl("List")?;
+        let list = self.prelude("List", n)?;
         let list = self.t.mk(TyKind::Adt(list, vec![item]));
-        let Ok(Rep::Place(list_id)) = self.rep(list) else {
-            return None;
-        };
+        let list_id = self.place_row(list, "a list without a place is not built", n)?;
         let carrier = self.address(
             AddressBase::Value(header),
             &[],
@@ -763,10 +753,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let count = self.carrier_word(source, carrier, SeqWord::Len, n);
         let reserved = self.list_reserve(item, header, count, result, n)?;
-        let result_id = match self.rep(result) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
+        let result_id = self.place_row(result, "a list result without a place is not built", n)?;
         let at = self.address(
             AddressBase::Value(reserved),
             &[],
@@ -826,10 +813,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let reserved = self.list_reserve(item, header, count, result, n)?;
-        let result_id = match self.rep(result) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
+        let result_id = self.place_row(result, "a list result without a place is not built", n)?;
         let at = self.address(
             AddressBase::Value(reserved),
             &[],
@@ -1269,7 +1253,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         // A zero-sized element has no stored place, so `Some` is its case alone (#60).
-        if let Some(place) = self.rep(item).ok()?.stored() {
+        if let Some(place) = self.rep_at(item, n)?.stored() {
             let at = self.address(
                 AddressBase::Address(out),
                 &[Step::CaseField { case: 1, field: 0 }],

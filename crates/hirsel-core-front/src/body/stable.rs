@@ -164,7 +164,7 @@ impl Cx<'_, '_, '_> {
             }
             return Some(());
         }
-        match self.rep(ty).ok()? {
+        match self.rep_at(ty, n)? {
             Rep::Scalar(t) => {
                 let from = self.byte_at(blob, at, PlaceTy::Value(t), n);
                 let value = self.read_bits(from, t, n);
@@ -334,8 +334,11 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let count = self.span_parts(header, n)?.3;
-        let rep = self.rep(result).ok()?;
-        let to = self.new_slot(rep.stored()?, n);
+        // A zero-sized result has no value to build, and none is owed (FORM #120).
+        let Some(place) = self.rep_at(result, n)?.stored() else {
+            return None;
+        };
+        let to = self.new_slot(place, n);
         let condition = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Compare {
@@ -361,7 +364,7 @@ impl Cx<'_, '_, '_> {
             },
             n,
         );
-        let elem_rep = self.rep(elem).ok()?;
+        let elem_rep = self.rep_at(elem, n)?;
         if let Some(place) = elem_rep.stored() {
             let dest = self.address(
                 AddressBase::Address(to),

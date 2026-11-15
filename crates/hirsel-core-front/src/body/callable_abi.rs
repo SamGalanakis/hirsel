@@ -222,7 +222,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut values = Vec::with_capacity(params.len());
         let mut parameter = 1;
         for &(mode, ty) in &params {
-            let rep = child.rep(ty).ok()?;
+            let rep = child.rep_at(ty, n)?;
             if mode != Mode::Mut && matches!(rep, Rep::None) {
                 values.push(None);
                 continue;

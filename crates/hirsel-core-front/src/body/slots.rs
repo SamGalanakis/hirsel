@@ -25,7 +25,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let header = vals[0]?;
                 let index = vals[1]?;
                 let (at, ty) = self.slots_at(item, header, index, n)?;
-                let rep = self.rep(item).ok()?;
+                let rep = self.rep_at(item, n)?;
                 self.install(at, rep, vals[2], n);
                 self.consume(vals[2], n);
                 let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
@@ -176,7 +176,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(check);
         let index = self.b.blocks[check.index()]
             .params
-            .get(&self.b.pools.values)?[0];
+            .get(&self.b.pools.values)
+            .expect("the check block just built holds its parameter")[0];
         let more = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Compare {
@@ -237,18 +238,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let value = self.list_with_capacity(item, count, result, n)?;
         // List uses MAX capacity for ZSTs. A ring still needs its requested
         // power-of-two capacity, even though its slots occupy no bytes.
-        let result_id = match self.rep(result).ok()? {
-            Rep::Place(id) => id,
-            _ => return None,
-        };
+        let result_id = self.place_row(result, "a ring without a place is not built", n)?;
         let payload = match self.t.kind(result) {
             TyKind::Adt(_, args) => args[0],
-            _ => return None,
+            _ => {
+                self.gap(n, "a ring that is not a declared type is not built");
+                return None;
+            }
         };
-        let payload_id = match self.rep(payload).ok()? {
-            Rep::Place(id) => id,
-            _ => return None,
-        };
+        let payload_id =
+            self.place_row(payload, "a ring's slots without a place are not built", n)?;
         let at = self.address(
             AddressBase::Value(value),
             &[],

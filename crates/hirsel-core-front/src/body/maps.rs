@@ -737,12 +737,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             key,
             value,
         ]));
-        let Rep::Place(place) = self.rep(ty).map_err(|what| self.gap(n, what)).ok()? else {
-            return None;
-        };
-        let collection = self
-            .t
-            .mk(TyKind::Adt(self.p.core_decl("Map")?, vec![key, value]));
+        let place = self.place_row(ty, "a map entry without a place is not built", n)?;
+        let collection = self.prelude("Map", n)?;
+        let collection = self.t.mk(TyKind::Adt(collection, vec![key, value]));
         let entry = MapEntry {
             ty,
             place,
@@ -760,6 +757,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<AddressId> {
         let TyKind::Adt(_, args) = self.t.kind(collection) else {
+            self.gap(n, "a map that is not a declared type is not built");
             return None;
         };
         let entry = self.map_entry(args[0], args[1], n)?;

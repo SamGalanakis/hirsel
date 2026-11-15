@@ -1738,7 +1738,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if owner == self.frame_level {
             let ty = self.t.mk(TyKind::Array(scalar(Scalar::U64), words as u64));
-            let place = self.rep(ty).ok()?.stored()?;
+            let place = self.stored_at(ty, "an environment of no words has no slot", n)?;
             self.out.counts.places += 1;
             let address = self.entry_slot(place, n);
             return Some(self.pointer(address, n));

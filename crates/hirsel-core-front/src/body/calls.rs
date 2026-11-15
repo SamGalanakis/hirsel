@@ -1190,11 +1190,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let g = &self.p.fns[f];
         if g.path.0.modules == ["core"] && g.path.0.name == "fail" {
             // `fail(msg)` raises with the message it takes (FORM `raise fail`).
-            let string = self.p.core_decl("String")?;
-            let string = self.t.mk(TyKind::Adt(string, vec![]));
-            let Ok(Rep::Place(id)) = self.rep(string) else {
+            let Some(string) = self.p.core_decl("String") else {
+                self.gap(n, "fail without the prelude's String is not built");
                 return None;
             };
+            let string = self.t.mk(TyKind::Adt(string, vec![]));
+            let id = self.place_row(string, "fail's message without a place is not built", n)?;
             let msg = vals[0]?;
             if !self.live() {
                 return None;
@@ -1382,8 +1383,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if name == "mul_wide" {
             return self.mul_wide(vals[0]?, vals[1]?, g.result, n);
         }
-        let target = *tys.get(1)?;
-        let target_ty = value_ty(&self.t, target).ok().flatten()?;
+        let Some(&target) = tys.get(1) else {
+            self.gap(n, "a numeric conversion without a target type is not built");
+            return None;
+        };
+        let Some(target_ty) = value_ty(&self.t, target).ok().flatten() else {
+            self.gap(
+                n,
+                "a numeric conversion to a type without a scalar is not built",
+            );
+            return None;
+        };
         let mode = match name {
             "widen" => {
                 let (ts, b) = int_of(&self.t, target)?;
@@ -1584,10 +1594,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ok: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let id = match self.rep(ty).ok()? {
-            Rep::Place(id) => id,
-            _ => return None,
-        };
+        let id = self.place_row(
+            ty,
+            "a checked numeric result without a place is not built",
+            n,
+        )?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let yes = self.new_block(&[]);
         let no = self.new_block(&[]);
@@ -1608,7 +1619,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             place,
             n,
         );
-        let rep = self.rep(payload).ok()?;
+        let rep = self.rep_at(payload, n)?;
         self.install(at, rep, Some(value), n);
         self.jump(join, &[], n);
         self.start(no);
@@ -1781,9 +1792,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        let error = self
-            .t
-            .mk(TyKind::Adt(self.p.core_decl("FloatError")?, vec![]));
+        let error = self.prelude("FloatError", n)?;
+        let error = self.t.mk(TyKind::Adt(error, vec![]));
         let place = self.place_ty(error, n)?;
         let at = self.address(
             AddressBase::Address(to),
@@ -1856,7 +1866,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(
             self.b.blocks[join.index()]
                 .params
-                .get(&self.b.pools.values)?[0],
+                .get(&self.b.pools.values)
+                .expect("the join block just built holds its parameter")[0],
         )
     }
     fn float_total_order(

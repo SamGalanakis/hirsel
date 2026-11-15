@@ -206,7 +206,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// A `let mut` slot holding `v`; its address is evaluated once, where it begins.
     pub(super) fn slot(&mut self, ty: TyId, v: Option<ValueId>, n: NodeId) -> Option<AddressId> {
-        let r = self.rep(ty).ok()?;
+        let r = self.rep_at(ty, n)?;
         if !self.live() {
             return None;
         }
@@ -1023,7 +1023,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         (UNIT, None)
     }
     fn iteration_value(&mut self, address: AddressId, ty: TyId, n: NodeId) -> Option<ValueId> {
-        match self.rep(ty).ok()? {
+        match self.rep_at(ty, n)? {
             Rep::None => None,
             Rep::Scalar(t) => {
                 let result = self.value(t);

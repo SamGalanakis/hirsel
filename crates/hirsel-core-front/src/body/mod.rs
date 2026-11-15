@@ -1586,6 +1586,44 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.reps.insert(ty, r);
         r
     }
+    /// How a value of `ty` is carried, or the gap that says why it is not built: an
+    /// emit step never ends on a representation without naming it (FORM #120).
+    fn rep_at(&mut self, ty: TyId, n: NodeId) -> Option<Rep> {
+        self.rep(ty).map_err(|what| self.gap(n, what)).ok()
+    }
+    /// The row of a value of `ty` held in a place, or the gap `what` (FORM #120).
+    fn place_row(&mut self, ty: TyId, what: &'static str, n: NodeId) -> Option<TypeId> {
+        match self.rep_at(ty, n)? {
+            Rep::Place(id) => Some(id),
+            _ => {
+                self.gap(n, what);
+                None
+            }
+        }
+    }
+    /// `found`, or the gap `what` when it is absent: an emit step that needs it names
+    /// why it stops (FORM #120).
+    fn named<T>(&mut self, found: Option<T>, what: &'static str, n: NodeId) -> Option<T> {
+        if found.is_none() {
+            self.gap(n, what);
+        }
+        found
+    }
+    /// The prelude declaration `name` a built-in is made of, or the gap naming its
+    /// absence (FORM #120).
+    fn prelude(&mut self, name: &str, n: NodeId) -> Option<crate::types::DeclId> {
+        let found = self.p.core_decl(name);
+        self.named(found, "a built-in without the core prelude is not built", n)
+    }
+    /// The place a stored value of `ty` takes, or the gap `what`: a zero-sized value
+    /// takes none, so a step that needs one names it (FORM #120).
+    fn stored_at(&mut self, ty: TyId, what: &'static str, n: NodeId) -> Option<PlaceTy> {
+        let stored = self.rep_at(ty, n)?.stored();
+        if stored.is_none() {
+            self.gap(n, what);
+        }
+        stored
+    }
     /// The CoreIR type of a value of `ty`; None for unit, Never and types not built.
     fn ir_ty(&mut self, ty: TyId) -> Option<Ty> {
         self.rep(ty).ok().and_then(Rep::ty)

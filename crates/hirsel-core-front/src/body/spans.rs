@@ -43,7 +43,8 @@ impl Cx<'_, '_, '_> {
         };
         match name {
             "builder" => {
-                let id = self.declared(result)?;
+                let id =
+                    self.place_row(result, "a built-in result without a place is not built", n)?;
                 let to = self.new_slot(PlaceTy::Declared(id), n);
                 let null = self.konst(Ty::Ptr, 0, n)?;
                 self.put_word(AddressBase::Address(to), &[], 0, null, n)?;
@@ -60,12 +61,6 @@ impl Cx<'_, '_, '_> {
         }
     }
 
-    pub(super) fn declared(&mut self, ty: TyId) -> Option<TypeId> {
-        match self.rep(ty).ok()? {
-            Rep::Place(id) => Some(id),
-            _ => None,
-        }
-    }
     pub(super) fn word_at(
         &mut self,
         base: AddressBase,
@@ -236,7 +231,7 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
     ) -> Option<()> {
         let cty = self.capacity_ty(n);
-        let id = self.declared(cty)?;
+        let id = self.place_row(cty, "a capacity without a place is not built", n)?;
         let at = self.address(base, steps, PlaceTy::Declared(id), n);
         for (i, v) in [charge, available].into_iter().enumerate() {
             let f = self.address(
@@ -264,7 +259,7 @@ impl Cx<'_, '_, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let id = self.declared(result)?;
+        let id = self.place_row(result, "a built-in result without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let (block, available, charge) = self.region_blob(region, count, es, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
@@ -325,7 +320,7 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let id = self.declared(result)?;
+        let id = self.place_row(result, "a built-in result without a place is not built", n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let blob = self.get_word(AddressBase::Value(b), 0, Ty::Ptr, n)?;
         let region = self.get_word(AddressBase::Value(b), 8, Ty::Ptr, n)?;
@@ -419,7 +414,7 @@ impl Cx<'_, '_, '_> {
         )?;
         let back_ty = self.place_ty(elem, n)?;
         let back = self.address(AddressBase::Address(to), &[err, Step::Field(1)], back_ty, n);
-        let r = self.rep(elem).ok()?;
+        let r = self.rep_at(elem, n)?;
         self.install(back, r, x, n);
         self.jump(end, &[], n);
         // Room: encode `x` after the count elements and count it.
@@ -558,7 +553,7 @@ impl Cx<'_, '_, '_> {
                         for (i, field) in
                             self.compact_fields(ty, Some(case))?.into_iter().enumerate()
                         {
-                            let rep = self.rep(field).ok()?;
+                            let rep = self.rep_at(field, n)?;
                             if let Some(place) = rep.stored() {
                                 let from = self.address(
                                     AddressBase::Address(whole),
@@ -635,7 +630,7 @@ impl Cx<'_, '_, '_> {
                     let more = self.test(CompareOp::Lt, index, limit, n);
                     self.branch(more, body, done, n);
                     self.start(body);
-                    let rep = self.rep(elem).ok()?;
+                    let rep = self.rep_at(elem, n)?;
                     if let Some(place) = rep.stored() {
                         let from = self.address(
                             AddressBase::Address(whole),
@@ -659,7 +654,7 @@ impl Cx<'_, '_, '_> {
                 let mut offset = 0;
                 for i in 0..count {
                     let field = self.field_ty(ty, i)?;
-                    let fr = self.rep(field).ok()?;
+                    let fr = self.rep_at(field, n)?;
                     let place = self.place_ty(field, n)?;
                     let from =
                         self.address(AddressBase::Address(whole), &[Step::Field(i)], place, n);
@@ -680,7 +675,7 @@ impl Cx<'_, '_, '_> {
     }
 
     fn span_finish(&mut self, b: ValueId, result: TyId, n: NodeId) -> Option<ValueId> {
-        let id = self.declared(result)?;
+        let id = self.place_row(result, "a built-in result without a place is not built", n)?;
         let blob = self.get_word(AddressBase::Value(b), 0, Ty::Ptr, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let empty = self.test(CompareOp::Eq, blob, null, n);

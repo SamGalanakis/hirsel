@@ -573,7 +573,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             // A compact value's field is found in its blob (MEM-9, MEM-11).
             subject.value.and_then(|header| {
                 let (a, _) = self.compact_field(header, subject.ty, case, field, n)?;
-                match self.rep(ty).ok()? {
+                match self.rep_at(ty, n)? {
                     Rep::Scalar(t) => Some(self.read_bits(a, t, n)),
                     Rep::Place(_) => Some(self.pointer(a, n)),
                     _ => None,
@@ -1427,7 +1427,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        match self.rep(ty).ok()? {
+        match self.rep_at(ty, n)? {
             Rep::None => None,
             Rep::Place(id) => Some(self.snapshot(value, id, n)),
             // A view of a scalar is the scalar (FORM #56).
@@ -1607,7 +1607,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let to = self.new_slot(PlaceTy::Declared(id), n);
         self.inst(Inst::SetCase { address: to, case }, n);
-        let rep = self.rep(payload).ok()?;
+        let rep = self.rep_at(payload, n)?;
         let place = rep.stored();
         if let Some(place) = place {
             let at = self.address(
@@ -1797,10 +1797,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let ty = self.capacity_ty(n);
-        let id = match self.rep(ty) {
-            Ok(Rep::Place(id)) => id,
-            _ => return None,
-        };
+        let id = self.place_row(ty, "a capacity without a place is not built", n)?;
         if !self.live() {
             return None;
         }

@@ -230,22 +230,25 @@ impl Types {
             .or_else(|| self.published_map.get(k).copied())
     }
     /// A kind interned in this table or its bases, not in a published prefix:
-    /// an overlay asks its own clone of the base's published kinds.
-    fn find_interned(&self, k: &TyKind, hash: Option<u64>) -> Option<TyId> {
-        if self.map.is_empty() {
-            return self.base.as_ref().and_then(|b| b.find_interned(k, hash));
+    /// an overlay asks its own clone of the base's published kinds. A loop, so
+    /// every intern inlines it; the key hashes once, at the first level with kinds.
+    #[inline(always)]
+    fn find_interned(&self, k: &TyKind, mut hash: Option<u64>) -> Option<TyId> {
+        let mut types = self;
+        loop {
+            if !types.map.is_empty() {
+                let hash = *hash.get_or_insert_with(|| rustc_hash::FxBuildHasher.hash_one(k));
+                let kinds = types.kinds.own_slice();
+                let base = types.base_len + types.kinds.base_len();
+                if let Some(&(id, _)) = types
+                    .map
+                    .find(hash, |&(id, _)| kinds[id.0 as usize - base].kind == *k)
+                {
+                    return Some(id);
+                }
+            }
+            types = types.base.as_deref()?;
         }
-        let hash = hash.unwrap_or_else(|| rustc_hash::FxBuildHasher.hash_one(k));
-        let kinds = self.kinds.own_slice();
-        let base = self.base_len + self.kinds.base_len();
-        self.map
-            .find(hash, |&(id, _)| kinds[id.0 as usize - base].kind == *k)
-            .map(|&(id, _)| id)
-            .or_else(|| {
-                self.base
-                    .as_ref()
-                    .and_then(|b| b.find_interned(k, Some(hash)))
-            })
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
         crate::cost_scope!("phase", "type interning/hashing");

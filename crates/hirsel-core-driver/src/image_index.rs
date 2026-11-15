@@ -513,7 +513,8 @@ mod tests {
     }
 
     /// Law: lookups racing from several threads on a cold image answer what
-    /// the published rows say, the first decode of a row winning for all.
+    /// the published rows say, the first decode of a row winning for all,
+    /// whether they ask the image's map or race one request's clone of it.
     #[test]
     fn concurrent_lookups_on_a_cold_image_answer_as_the_rows() {
         let dir = tempfile::tempdir().unwrap();
@@ -535,9 +536,11 @@ mod tests {
             .step_by(7919 / 3)
             .map(|k| numbers.iter().find(|(n, _)| *n == k).map(|(_, v)| *v))
             .collect();
+        let request = map.clone();
         std::thread::scope(|scope| {
             for t in 0..8 {
-                let (map, table, expected, names) = (&map, &table, &expected, &names);
+                let map = if t % 2 == 0 { &request } else { &map };
+                let (table, expected, names) = (&table, &expected, &names);
                 scope.spawn(move || {
                     let keys: Vec<u64> = (0..3000 * 7919).step_by(7919 / 3).collect();
                     for n in 0..keys.len() {

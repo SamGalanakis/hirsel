@@ -558,8 +558,9 @@ pub struct Map<K: Ord + std::hash::Hash, V> {
     own: rustc_hash::FxHashMap<K, V>,
     /// The prefix's row for each key this clone asked, present or absent, by
     /// the key itself: a repeat neither encodes nor probes. Only a clone has
-    /// one, so it lives as long as the request that cloned the map, and the
-    /// image's own maps keep no request's keys.
+    /// one, so the image's own maps keep no request's keys. It lives as long
+    /// as whatever holds the clone, a retained product included, and is
+    /// bounded by the names that product's one immutable snapshot can ask.
     answers: Option<Box<Mutex<rustc_hash::FxHashMap<K, Option<u32>>>>>,
 }
 impl<K: Ord + std::hash::Hash + Clone, V: Clone> Clone for Map<K, V> {

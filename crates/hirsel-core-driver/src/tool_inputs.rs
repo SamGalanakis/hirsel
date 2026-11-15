@@ -588,12 +588,19 @@ fn recipe_file(path: &Path) -> io::Result<RecipeFile> {
 ///    lower bound on real time between the file's last change and the read.
 /// 5. Durations are measured on CLOCK_BOOTTIME (/proc/uptime), compared only
 ///    between sightings of one boot and one time namespace; file times are
-///    never compared with our clock.
+///    never compared with our clock. Without a well-formed boot id and time
+///    namespace there is no clock, and nothing is promoted.
+///
+/// Rule 5 governs how a record becomes settled, not what settled means:
+/// settled is a fact about the file's stat (unchanged for at least the window,
+/// so its timestamp tick is over and any later write moves ctime), so a settled
+/// record whose stat equals the live one holds in any boot and without a clock.
 ///
 /// What this does not defend, by contract: a write through an already
 /// writable shared mapping that moves no timestamp until writeback; a
-/// filesystem whose timestamp granularity exceeds `WINDOW`; and a file clock
-/// set back so that a later edit repeats an earlier timestamp exactly.
+/// filesystem whose timestamp granularity exceeds `WINDOW`; a file clock set
+/// back so that a later edit repeats an earlier timestamp exactly; and an
+/// input changed during the request that reads it.
 const WINDOW: u64 = 2_000_000_000;
 
 /// Observe a file against its previous record: trust a settled stat, else
@@ -666,6 +673,9 @@ thread_local! {
     /// Runs between a sighting's read and its classification.
     pub(crate) static AFTER_READ: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
+    /// A test's raw boot id and time namespace link, in place of /proc's.
+    pub(crate) static SOURCE: std::cell::Cell<Option<(Option<&'static str>, Option<&'static str>)>> =
+        const { std::cell::Cell::new(None) };
     /// How many files this thread has read for their bytes.
     pub(crate) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -675,13 +685,20 @@ thread_local! {
 /// no record is ever promoted.
 fn clock() -> Option<Reading> {
     static COUNT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let count = COUNT
-        .get_or_init(|| {
-            let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
-            let namespace = std::fs::read_link("/proc/self/ns/time").ok()?;
-            Some(format!("{} {}", boot.trim(), namespace.display()))
-        })
-        .clone()?;
+    let read = || {
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok();
+        let namespace = std::fs::read_link("/proc/self/ns/time")
+            .ok()
+            .and_then(|link| link.into_os_string().into_string().ok());
+        clock_identity(boot.as_deref(), namespace.as_deref())
+    };
+    #[cfg(test)]
+    let count = match SOURCE.get() {
+        Some((boot, namespace)) => clock_identity(boot, namespace),
+        None => COUNT.get_or_init(read).clone(),
+    }?;
+    #[cfg(not(test))]
+    let count = COUNT.get_or_init(read).clone()?;
     #[cfg(test)]
     if let Some(now) = CLOCK.get() {
         return Some(Reading {
@@ -699,6 +716,23 @@ fn clock() -> Option<Reading> {
         earliest: at,
         latest: at + 10_000_000,
     })
+}
+
+/// Which count a clock reading belongs to: a boot id (a UUID) and a time
+/// namespace (`time:[inode]`). Anything else is no clock.
+fn clock_identity(boot: Option<&str>, namespace: Option<&str>) -> Option<String> {
+    let boot = boot?.trim();
+    let uuid = boot.len() == 36
+        && boot.char_indices().all(|(at, c)| {
+            if matches!(at, 8 | 13 | 18 | 23) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        });
+    let inode = namespace?.strip_prefix("time:[")?.strip_suffix(']')?;
+    let namespace = !inode.is_empty() && inode.bytes().all(|b| b.is_ascii_digit());
+    (uuid && namespace).then(|| format!("{boot} time:[{inode}]"))
 }
 
 fn recipe_stat(path: &Path) -> io::Result<RecipeStat> {
@@ -1002,6 +1036,8 @@ mod tests {
         time: (i64, i64),
         bytes: &'static [u8],
         during: Option<(&'static [u8], u64)>,
+        /// The boot id this request runs under; the record's when unset.
+        boot: Option<Option<&'static str>>,
         expect: RecipeInputs,
         reads: usize,
     }
@@ -1018,15 +1054,51 @@ mod tests {
             time,
             bytes,
             during: None,
+            boot: None,
             expect,
             reads,
         }
     }
 
-    /// Record the file as `first` bytes at clock 0 and `time`, then run `steps`
-    /// in order. A step stamped like the record asserts that its stat really
-    /// collides with the recorded one.
-    fn stat_trust(case: &str, time: (i64, i64), first: &'static [u8], steps: Vec<Step>) {
+    const BOOT: Option<&str> = Some("3a0fcf86-35cb-41c6-8348-cdf6518ffb7a\n");
+    const OTHER_BOOT: Option<&str> = Some("5d2e9a41-0b7c-4f3e-9a8d-61c0ffee0042\n");
+    const NAMESPACE: Option<&str> = Some("time:[4026531834]");
+
+    /// Record the file as `first` bytes at clock 0, stamped `time`, under boot
+    /// id `boot` and namespace `namespace`; then run `steps` in order. A step
+    /// stamped like the record asserts that its stat really collides with the
+    /// recorded one. Returns the first step that went otherwise.
+    fn stat_trust_in(
+        case: &str,
+        (boot, namespace): (Option<&'static str>, Option<&'static str>),
+        time: (i64, i64),
+        first: &'static [u8],
+        steps: Vec<Step>,
+    ) -> Result<(), String> {
+        SOURCE.set(Some((boot, namespace)));
+        let result = stat_trust_steps(case, time, first, steps, namespace);
+        SOURCE.set(None);
+        CLOCK.set(None);
+        TIMES.set(None);
+        result
+    }
+
+    fn stat_trust(
+        case: &str,
+        time: (i64, i64),
+        first: &'static [u8],
+        steps: Vec<Step>,
+    ) -> Result<(), String> {
+        stat_trust_in(case, (BOOT, NAMESPACE), time, first, steps)
+    }
+
+    fn stat_trust_steps(
+        case: &str,
+        time: (i64, i64),
+        first: &'static [u8],
+        steps: Vec<Step>,
+        namespace: Option<&'static str>,
+    ) -> Result<(), String> {
         let work = tempfile::tempdir().unwrap();
         let input = work.path().join("crt.o");
         std::fs::write(&input, first).unwrap();
@@ -1045,6 +1117,9 @@ mod tests {
                 );
             }
             CLOCK.set(Some(step.at));
+            if let Some(boot) = step.boot {
+                SOURCE.set(Some((boot, namespace)));
+            }
             if let Some((bytes, at)) = step.during {
                 let input = input.clone();
                 AFTER_READ.set(Some(Box::new(move || {
@@ -1055,14 +1130,13 @@ mod tests {
             READS.set(0);
             let inputs = refresh_recipe_inputs(&mut recipe).unwrap();
             AFTER_READ.set(None);
-            assert_eq!(
-                (inputs, READS.get()),
-                (step.expect, step.reads),
-                "{case} step {index}"
-            );
+            let got = (inputs, READS.get());
+            let want = (step.expect, step.reads);
+            if got != want {
+                return Err(format!("{case} step {index}: got {got:?}, want {want:?}"));
+            }
         }
-        CLOCK.set(None);
-        TIMES.set(None);
+        Ok(())
     }
 
     #[test]
@@ -1072,13 +1146,14 @@ mod tests {
         let later = (1_700_000_001, 4_000_000);
         let future = (4_102_444_800, 0); // 2100-01-01, ahead of any clock here
         let ms = 1_000_000;
-        stat_trust(
+        let mut results = vec![];
+        results.push(stat_trust(
             "same-tick equal-length edit",
             tick,
             b"first",
             vec![step(ms, tick, b"later", Changed, 1)],
-        );
-        stat_trust(
+        ));
+        results.push(stat_trust(
             "edit after promotion in a later tick",
             tick,
             b"first",
@@ -1087,8 +1162,8 @@ mod tests {
                 step(WINDOW + ms, tick, b"first", Current, 0),
                 step(WINDOW + 2 * ms, later, b"later", Changed, 1),
             ],
-        );
-        stat_trust(
+        ));
+        results.push(stat_trust(
             "sightings exactly a window apart",
             tick,
             b"first",
@@ -1096,8 +1171,8 @@ mod tests {
                 step(WINDOW, tick, b"first", Restated, 1),
                 step(WINDOW + ms, tick, b"first", Current, 0),
             ],
-        );
-        stat_trust(
+        ));
+        results.push(stat_trust(
             "sightings just under a window apart",
             tick,
             b"first",
@@ -1105,20 +1180,20 @@ mod tests {
                 step(WINDOW - 1, tick, b"first", Current, 1),
                 step(WINDOW + 5 * ms, tick, b"later", Changed, 1),
             ],
-        );
-        stat_trust(
+        ));
+        results.push(stat_trust(
             "an edit between sightings in the recorded tick",
             tick,
             b"first",
             vec![step(WINDOW, tick, b"later", Changed, 1)],
-        );
-        stat_trust(
+        ));
+        results.push(stat_trust(
             "a ctime in the future",
             future,
             b"first",
             vec![step(ms, future, b"later", Changed, 1)],
-        );
-        stat_trust(
+        ));
+        results.push(stat_trust(
             "an edit after the promoting read",
             tick,
             b"first",
@@ -1129,13 +1204,81 @@ mod tests {
                 },
                 step(WINDOW + 20 * ms, tick, b"later", Changed, 1),
             ],
-        );
+        ));
+        let failed: Vec<String> = results.into_iter().filter_map(Result::err).collect();
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[test]
+    fn a_settled_stat_holds_in_another_boot_and_a_sighting_does_not() {
+        use RecipeInputs::{Current, Restated};
+        let tick = (1_700_000_000, 4_000_000);
+        let ms = 1_000_000;
+        let failed: Vec<String> = [
+            stat_trust(
+                "settled in one boot, read in another and without a clock",
+                tick,
+                b"first",
+                vec![
+                    step(WINDOW, tick, b"first", Restated, 1),
+                    Step {
+                        boot: Some(OTHER_BOOT),
+                        ..step(ms, tick, b"first", Current, 0)
+                    },
+                    Step {
+                        boot: Some(None),
+                        ..step(2 * ms, tick, b"first", Current, 0)
+                    },
+                ],
+            ),
+            stat_trust(
+                "sighted in one boot, read a window later in another",
+                tick,
+                b"first",
+                vec![
+                    Step {
+                        boot: Some(OTHER_BOOT),
+                        ..step(WINDOW, tick, b"first", Restated, 1)
+                    },
+                    step(WINDOW + ms, tick, b"first", Current, 1),
+                ],
+            ),
+            stat_trust_in(
+                "an empty boot id is no clock",
+                (Some("\n"), NAMESPACE),
+                tick,
+                b"first",
+                vec![
+                    step(WINDOW, tick, b"first", Current, 1),
+                    step(3 * WINDOW, tick, b"first", Current, 1),
+                ],
+            ),
+            stat_trust_in(
+                "a malformed boot id is no clock",
+                (Some("not-a-boot-id"), NAMESPACE),
+                tick,
+                b"first",
+                vec![step(WINDOW, tick, b"first", Current, 1)],
+            ),
+            stat_trust_in(
+                "an unreadable time namespace is no clock",
+                (BOOT, None),
+                tick,
+                b"first",
+                vec![step(WINDOW, tick, b"first", Current, 1)],
+            ),
+        ]
+        .into_iter()
+        .filter_map(Result::err)
+        .collect();
+        assert!(failed.is_empty(), "{failed:#?}");
     }
 
     #[test]
     fn a_record_written_by_the_earlier_stat_rule_is_not_read() {
         // e4b65f6c recorded stats it could not trust. A manifest it wrote names
-        // runtime bytes that the file no longer holds, under the live stat.
+        // runtime bytes that the file no longer holds, under the live stat; it
+        // is shaped like a current record, so only its schema keeps it out.
         let work = tempfile::tempdir().unwrap();
         let bin = work.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -1164,6 +1307,7 @@ mod tests {
                 "path": path,
                 "content": ContentHash::of_bytes(b"bytes the file held before"),
                 "stat": recipe_stat(path).unwrap(),
+                "trust": "Settled",
             })
         };
         let manifest = serde_json::json!({

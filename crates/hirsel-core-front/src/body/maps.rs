@@ -82,7 +82,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 } else {
                     growth::FillWord::Capacity
                 };
-                Some(Some(self.fill_word(vals[0]?, word, n)))
+                Some(Some(self.fill_word(vals[0]?, None, word, n)))
             }
             "slot_hash" | "slot_live" | "slot_key" | "slot_value" => {
                 let collection = self.map_type(types)?;

@@ -43,6 +43,21 @@ pub const fn seq(capacity: u64, elem: u64) -> Option<u64> {
     }
 }
 
+/// The largest capacity, so also length, an own `List[T]` carrier can hold when `T`
+/// has logical size `size` (FORM #113): the largest `capacity` whose [`seq`] charge
+/// is admitted, `floor((2^64 - 8) / size)`. By logical size, not stride: MEM-24
+/// charges `round8(capacity x size(T))` and SEM-4 says an own List's length is never
+/// more than its capacity, so this is the bound the spec gives. No fact for sizes 0
+/// and 1: a zero-sized element's length is unbounded (SEM-4), and a static
+/// `as_bytes` or argument view is a `Bytes` carrier whose length exceeds its capacity.
+pub const fn seq_len_bound(size: u64) -> Option<u64> {
+    if size < 2 {
+        None
+    } else {
+        Some((u64::MAX - 7) / size)
+    }
+}
+
 /// `Map[K, V]` storage of `capacity` entries.
 pub const fn map(capacity: u64, key: u64, value: u64) -> Option<u64> {
     match key.checked_add(value) {

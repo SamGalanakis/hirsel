@@ -134,6 +134,36 @@ pub enum Step {
     /// no alignment (MEM-9), so a read, store or copy through an address with a
     /// `byte` step is unaligned. Unchecked.
     Byte(ValueId),
+    /// One word of the `seq` field this place is (FORM #113): last in its address,
+    /// whose type is the word's (`ptr` data, `u64` len and capacity). An own `List`
+    /// or `String` carrier's words are reached this way, so the evaluator checks
+    /// `len <= capacity <= charge::seq_len_bound(size(T))` (logical size, SEM-4 and
+    /// MEM-24) and an engine may assume it.
+    Seq(SeqWord),
+}
+
+/// A word of the 24-byte `seq` carrier: data, len, capacity at bytes 0, 8, 16.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SeqWord {
+    Data,
+    Len,
+    Cap,
+}
+
+impl SeqWord {
+    pub const fn offset(self) -> u64 {
+        match self {
+            Self::Data => 0,
+            Self::Len => 8,
+            Self::Cap => 16,
+        }
+    }
+    pub const fn ty(self) -> Ty {
+        match self {
+            Self::Data => Ty::Ptr,
+            Self::Len | Self::Cap => Ty::Scalar(Scalar::U64),
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

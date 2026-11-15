@@ -399,11 +399,20 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
                 format!("a{i}: base address must come first")
             })?,
         }
-        for s in a.steps.get(&b.pools.steps).ok_or("steps out of pool")? {
-            if let Step::Index(v) | Step::Element(v) | Step::Byte(v) = s {
-                need(c.ty(*v)?.int().is_some(), || {
-                    format!("a{i}: index is not an integer")
-                })?;
+        let steps = a.steps.get(&b.pools.steps).ok_or("steps out of pool")?;
+        for (k, s) in steps.iter().enumerate() {
+            match *s {
+                Step::Index(v) | Step::Element(v) | Step::Byte(v) => {
+                    need(c.ty(v)?.int().is_some(), || {
+                        format!("a{i}: index is not an integer")
+                    })?
+                }
+                // FORM #113: a carrier word is a leaf of its word's type.
+                Step::Seq(w) => need(
+                    k + 1 == steps.len() && a.ty == PlaceTy::Value(w.ty()),
+                    || format!("a{i}: a seq word must be the last step, typed as the word"),
+                )?,
+                _ => {}
             }
         }
     }

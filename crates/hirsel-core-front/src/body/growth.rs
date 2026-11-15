@@ -42,13 +42,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.growth.pointers.insert(result, address);
     }
     /// Read the used or capacity word of the sequence or map whose header
-    /// `header` points at.
-    pub(super) fn fill_word(&mut self, header: ValueId, word: FillWord, n: NodeId) -> ValueId {
-        let offset = match word {
-            FillWord::Used => 8,
-            FillWord::Capacity => 16,
+    /// `header` points at; an own List's (its row `carrier`) is a typed carrier
+    /// word (FORM #113), a Map's two raw words.
+    pub(super) fn fill_word(
+        &mut self,
+        header: ValueId,
+        carrier: Option<TypeId>,
+        word: FillWord,
+        n: NodeId,
+    ) -> ValueId {
+        let result = match (carrier, word) {
+            (Some(c), FillWord::Used) => self.carrier_word(header, c, SeqWord::Len, n),
+            (Some(c), FillWord::Capacity) => self.carrier_word(header, c, SeqWord::Cap, n),
+            (None, FillWord::Used) => {
+                self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n)
+            }
+            (None, FillWord::Capacity) => {
+                self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n)
+            }
         };
-        let result = self.read_sequence_word(header, offset, Ty::Scalar(Scalar::U64), n);
         if self.live() {
             let place = self.place_chain(header);
             self.growth.words.insert(result, (word, place));

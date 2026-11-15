@@ -70,6 +70,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .unwrap()[0]
     }
     pub(super) fn list_new(&mut self, item: TyId, result: TyId, n: NodeId) -> Option<ValueId> {
+        let carrier = self.list_carrier(item, n)?;
         let value = self.empty_list(result, n)?;
         let storage = self.list_storage(item, n)?;
         let cap = match storage {
@@ -81,7 +82,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.list_choose(on, max, zero, n)
             }
         };
-        self.sequence_word(value, 16, Ty::Scalar(Scalar::U64), cap, n);
+        self.set_carrier_word(value, carrier, SeqWord::Cap, cap, n);
         Some(value)
     }
     fn list_refused(
@@ -510,6 +511,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        let carrier = self.list_carrier(item, n)?;
         let id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
@@ -526,8 +528,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => return None,
         };
         let to = self.new_slot(PlaceTy::Declared(id), n);
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
-        let old_cap = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        let old_cap = self.carrier_word(header, carrier, SeqWord::Cap, n);
         let (needed, len_over) =
             self.list_arith(ArithOp::Add, ArithMode::Checked, len, additional, n);
         let lacks_room = self.list_compare(CompareOp::Gt, needed, old_cap, n);
@@ -597,7 +599,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let commit = self.new_block(&[]);
         self.list_branch(nonempty, copy_data, commit, n);
         self.start(copy_data);
-        let old_data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let old_data = self.carrier_word(header, carrier, SeqWord::Data, n);
         let from = self.address(
             AddressBase::Value(old_data),
             &[],
@@ -620,8 +622,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         self.jump(commit, &[], n);
         self.start(commit);
-        self.sequence_word(header, 0, Ty::Ptr, block, n);
-        self.sequence_word(header, 16, Ty::Scalar(Scalar::U64), new_cap, n);
+        self.set_carrier_word(header, carrier, SeqWord::Data, block, n);
+        self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
         self.jump(success, &[], n);
         // Owned storage is replaced by one `grow` (crate docs, "Growth"), which
         // admits like the old block and refunds its charge after the install.
@@ -728,6 +730,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        let carrier = self.list_carrier(item, n)?;
         let cap_ty = self
             .t
             .mk(TyKind::Adt(self.p.core_decl("Capacity")?, vec![]));
@@ -791,14 +794,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         self.start(yes);
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let element = self.list_element(item, header, len, n)?;
         if let Some(place) = rep.stored() {
             let at = self.address(AddressBase::Value(element), &[], place, n);
             self.install(at, rep, value, n);
         }
         let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
-        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), new_len, n);
+        self.set_carrier_word(header, carrier, SeqWord::Len, new_len, n);
         self.inst(
             Inst::SetCase {
                 address: to,
@@ -854,8 +857,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let old_len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
-        let count = self.read_sequence_word(source, 8, Ty::Scalar(Scalar::U64), n);
+        let carrier = self.list_carrier(item, n)?;
+        let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        let count = self.carrier_word(source, carrier, SeqWord::Len, n);
         let reserved = self.list_reserve(item, header, count, result, n)?;
         let result_id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
@@ -885,7 +889,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.list_branch(copying, copy, done, n);
         self.start(copy);
         let target = self.list_element(item, header, old_len, n)?;
-        let data = self.read_sequence_word(source, 0, Ty::Ptr, n);
+        let data = self.carrier_word(source, carrier, SeqWord::Data, n);
         let stride = self.layout_size(item, false, n)?;
         let (bytes, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, count, stride, n);
         let from = self.address(
@@ -902,7 +906,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         self.inst(Inst::Copy { to, from, bytes }, n);
         let (len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, old_len, count, n);
-        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), len, n);
+        self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
         self.jump(done, &[], n);
         self.start(done);
         Some(reserved)
@@ -917,7 +921,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let old_len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let carrier = self.list_carrier(item, n)?;
+        let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let reserved = self.list_reserve(item, header, count, result, n)?;
         let result_id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
@@ -955,7 +960,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         if let Some(place) = rep.stored() {
-            let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+            let data = self.carrier_word(header, carrier, SeqWord::Data, n);
             let stride = self.layout_size(item, false, n)?;
             let empty = self.list_compare(CompareOp::Eq, stride, zero, n);
             let setup = self.new_block(&[]);
@@ -987,7 +992,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.start(commit);
         let (len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, old_len, count, n);
-        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), len, n);
+        self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
         self.jump(done, &[], n);
         self.start(done);
         Some(reserved)
@@ -1003,6 +1008,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        let carrier = self.list_carrier(item, n)?;
         let id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
@@ -1013,7 +1019,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             // an address-carried fixed carrier, including when T has size zero.
             _ => unreachable!("a List slice result has its list carrier"),
         };
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let ordered = self.list_compare(CompareOp::Le, lo, hi, n);
         let contained = self.list_compare(CompareOp::Le, hi, len, n);
         let valid = self.list_bool(BinaryOp::BitAnd, ordered, contained, n);
@@ -1032,7 +1038,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(yes);
         let stride = self.layout_size(item, false, n)?;
         let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, lo, stride, n);
-        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
         let at = self.address(
             AddressBase::Value(data),
             &[Step::Byte(offset)],
@@ -1043,9 +1049,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (count, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, hi, lo, n);
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let value = self.pointer(to, n);
-        self.sequence_word(value, 0, Ty::Ptr, data, n);
-        self.sequence_word(value, 8, Ty::Scalar(Scalar::U64), count, n);
-        self.sequence_word(value, 16, Ty::Scalar(Scalar::U64), count, n);
+        self.set_carrier_word(value, carrier, SeqWord::Data, data, n);
+        // Capacity first: a typed len store is checked against it (FORM #113).
+        self.set_carrier_word(value, carrier, SeqWord::Cap, count, n);
+        self.set_carrier_word(value, carrier, SeqWord::Len, count, n);
         // The view has no owner and never drops the source elements or storage.
         Some(value)
     }
@@ -1057,6 +1064,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        let carrier = self.list_carrier(item, n)?;
         let id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
@@ -1073,7 +1081,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         let out = self.new_slot(PlaceTy::Declared(id), n);
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let present = self.list_compare(CompareOp::Ne, len, zero, n);
         let yes = self.new_block(&[]);
@@ -1092,7 +1100,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(yes);
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
         let (last, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, len, one, n);
-        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), last, n);
+        self.set_carrier_word(header, carrier, SeqWord::Len, last, n);
         self.inst(
             Inst::SetCase {
                 address: out,
@@ -1125,13 +1133,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     pub(super) fn list_clear(&mut self, item: TyId, header: ValueId, n: NodeId) {
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let Some(carrier) = self.list_carrier(item, n) else {
+            return;
+        };
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
         // The carrier retains its allocation, while a drain owns the old elements.
         // Advancing that drain before each drop also resumes correctly on failure.
-        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), zero, n);
+        self.set_carrier_word(header, carrier, SeqWord::Len, zero, n);
         if self.drop_id(item).is_some() {
-            let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+            let data = self.carrier_word(header, carrier, SeqWord::Data, n);
             let next = self.new_slot(PlaceTy::Value(Ty::Scalar(Scalar::U64)), n);
             self.inst(
                 Inst::Store {
@@ -1154,7 +1165,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value: Option<ValueId>,
         n: NodeId,
     ) -> Option<ValueId> {
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let in_bounds = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Compare {
@@ -1201,7 +1213,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         right: ValueId,
         n: NodeId,
     ) -> Option<()> {
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let a = self.list_compare(CompareOp::Lt, left, len, n);
         let b = self.list_compare(CompareOp::Lt, right, len, n);
         let valid = self.list_bool(BinaryOp::BitAnd, a, b, n);
@@ -1275,7 +1288,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         index: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let carrier = self.list_carrier(item, n)?;
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
         let stride = self.layout_size(item, false, n)?;
         let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, index, stride, n);
         let place = match self.rep(item) {
@@ -1300,6 +1314,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        let carrier = self.list_carrier(item, n)?;
         let id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
@@ -1309,7 +1324,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => return None,
         };
         let out = self.new_slot(PlaceTy::Declared(id), n);
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let present = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Compare {
@@ -1389,8 +1404,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let pointer = self.pointer(list, n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
-        self.sequence_word(pointer, 0, Ty::Ptr, data, n);
-        self.sequence_word(pointer, 8, Ty::Scalar(Scalar::U64), zero, n);
-        self.sequence_word(pointer, 16, Ty::Scalar(Scalar::U64), capacity, n);
+        self.set_carrier_word(pointer, list_id, SeqWord::Data, data, n);
+        self.set_carrier_word(pointer, list_id, SeqWord::Len, zero, n);
+        self.set_carrier_word(pointer, list_id, SeqWord::Cap, capacity, n);
     }
 }

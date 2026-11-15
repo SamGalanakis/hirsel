@@ -29,7 +29,8 @@ use hirsel_core_ir::{
     AddressBase, AddressId, AddressInfo, AllocKind, AllocPlace, Anchor, Arg, ArithMode, ArithOp,
     BinaryOp, Block, BlockId, Body, CallId, CallSite, Callee, CompareOp, ConvertMode, Edge, EdgeId,
     FuncId, Function, Inst, InstanceId, InstanceKey, ItemId, Loan, Module, Param, PlaceTy,
-    PoolRange, ReadMode, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
+    PoolRange, ReadMode, SeqWord, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId, UnaryOp,
+    ValueId,
 };
 use hirsel_core_layout::{
     Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,

@@ -238,6 +238,10 @@ enum At {
     Counted(TypeRef),
     /// An inline array: its element type and length are `Machine::arrays[i]`.
     Array(usize),
+    /// A `seq` field, by its element's logical size (MEM-24's charge unit).
+    Seq(u64),
+    /// A word of a `seq` field whose element has this logical size (FORM #113).
+    Word(SeqWord, u64),
     Other,
 }
 
@@ -929,7 +933,31 @@ impl Machine<'_> {
                     .position(|(x, k)| x == &**e && k == n)
                     .expect("collected"),
             ),
+            FieldTy::Seq(e) => At::Seq(field_size(&self.m.types, &self.recipes, e).2),
             _ => At::Other,
+        }
+    }
+    /// FORM #113: an own `List` or `String` carrier reached through a typed word
+    /// holds `len <= capacity <= charge::seq_len_bound(size)` for its element's
+    /// logical size (SEM-4, MEM-24), which LLVM is told.
+    /// Checked after every typed read and every typed len store; a capacity store
+    /// checks its bound alone, since a carrier being built stores capacity first
+    /// and its len word is not yet written.
+    fn check_carrier(&self, carrier: u64, size: u64, stored: Option<SeqWord>) {
+        let Some(bound) = hirsel_core_layout::charge::seq_len_bound(size) else {
+            return;
+        };
+        let (len, cap) = (self.load(carrier + 8, 8), self.load(carrier + 16, 8));
+        match stored {
+            Some(SeqWord::Data) => {}
+            Some(SeqWord::Cap) => assert!(
+                cap <= bound,
+                "FORM #113: a size-{size} carrier's capacity {cap} is above its bound {bound}"
+            ),
+            Some(SeqWord::Len) | None => assert!(
+                len <= cap && cap <= bound,
+                "FORM #113: a size-{size} carrier holds len {len}, capacity {cap}, bound {bound}"
+            ),
         }
     }
     fn stride(&self, e: &FieldTy) -> u64 {
@@ -1818,6 +1846,14 @@ impl Machine<'_> {
                     at = At::Other;
                     continue;
                 }
+                Step::Seq(w) => {
+                    let At::Seq(size) = at else {
+                        panic!("seq word of a place that is not a seq field")
+                    };
+                    p += w.offset();
+                    at = At::Word(w, size);
+                    continue;
+                }
                 Step::Index(i) => {
                     // Raw storage of elements of the address's type.
                     p += vals[i.index()] * self.place_size(info.ty);
@@ -2060,6 +2096,9 @@ impl Machine<'_> {
                 self.touch(address, places[address.index()].0, n);
                 self.read_marked(places[address.index()].0, n);
                 vals[result.index()] = self.load(places[address.index()].0, n);
+                if let (p, At::Word(w, size)) = places[address.index()] {
+                    self.check_carrier(p - w.offset(), size, None);
+                }
             }
             Inst::Store { address, value } => {
                 let (t, mut x) = (ty(value), vals[value.index()]);
@@ -2073,6 +2112,9 @@ impl Machine<'_> {
                 let n = bytes_of(t);
                 self.touch(address, places[address.index()].0, n);
                 self.store(places[address.index()].0, n, x);
+                if let (p, At::Word(w, size)) = places[address.index()] {
+                    self.check_carrier(p - w.offset(), size, Some(w));
+                }
             }
             Inst::StorageLive { .. } | Inst::StorageDead { .. } => {}
             Inst::UpdateMask {

@@ -797,7 +797,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             )),
             TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::List) => {
                 let header = self.pointer(base, n);
-                let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+                let carrier = self.seq_carrier(collection, n)?;
+                let len = self.carrier_word(header, carrier, SeqWord::Len, n);
                 let condition = self.value(Ty::Scalar(Scalar::Bool));
                 self.inst(
                     Inst::Compare {
@@ -830,7 +831,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Some(n),
                 );
                 self.start(yes);
-                let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+                let data = self.carrier_word(header, carrier, SeqWord::Data, n);
                 Some(self.address(AddressBase::Value(data), &[Step::Index(index)], element, n))
             }
             _ => None,
@@ -922,6 +923,87 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         };
         self.map_take_entry_values(header, collection, index, result, args[0], args[1], n)
+    }
+
+    /// The row of `List[item]`, whose one field is the `seq` carrier (FORM #113).
+    pub(super) fn list_carrier(&mut self, item: TyId, n: NodeId) -> Option<TypeId> {
+        let list = self.list_ty(item)?;
+        self.seq_carrier(list, n)
+    }
+    /// The row of an own `List` or `String` of type `ty`, whose one field is its
+    /// `seq` carrier; `None` for any other type (a Map, a span, a view).
+    pub(super) fn seq_carrier(&mut self, ty: TyId, n: NodeId) -> Option<TypeId> {
+        if !matches!(self.role_of(ty), Some((Role::List | Role::String, _))) {
+            return None;
+        }
+        match self.rep(self.bare(ty)) {
+            Ok(Rep::Place(id)) => Some(id),
+            Ok(_) => None,
+            Err(what) => {
+                self.gap(n, what);
+                None
+            }
+        }
+    }
+    /// A word of an own `List` or `String` carrier, addressed through the carrier's
+    /// row so its type names the element (FORM #113): the evaluator checks
+    /// `len <= capacity <= charge::seq_len_bound(size(T))` at it, and LLVM ranges it.
+    pub(super) fn carrier_word(
+        &mut self,
+        header: ValueId,
+        carrier: TypeId,
+        word: SeqWord,
+        n: NodeId,
+    ) -> ValueId {
+        let ty = word.ty();
+        if !self.live() {
+            return self.value(ty);
+        }
+        let address = self.carrier_word_at(header, carrier, word, n);
+        let result = self.value(ty);
+        self.inst(
+            Inst::Read {
+                result,
+                address,
+                mode: ReadMode::Bits,
+            },
+            n,
+        );
+        result
+    }
+    pub(super) fn set_carrier_word(
+        &mut self,
+        header: ValueId,
+        carrier: TypeId,
+        word: SeqWord,
+        value: ValueId,
+        n: NodeId,
+    ) {
+        if !self.live() {
+            return;
+        }
+        let address = self.carrier_word_at(header, carrier, word, n);
+        self.inst(Inst::Store { address, value }, n);
+    }
+    fn carrier_word_at(
+        &mut self,
+        header: ValueId,
+        carrier: TypeId,
+        word: SeqWord,
+        n: NodeId,
+    ) -> AddressId {
+        let row = self.address(
+            AddressBase::Value(header),
+            &[],
+            PlaceTy::Declared(carrier),
+            n,
+        );
+        self.address(
+            AddressBase::Address(row),
+            &[Step::Field(0), Step::Seq(word)],
+            PlaceTy::Value(word.ty()),
+            n,
+        )
     }
 
     /// FORM's Seq carrier is data/length/capacity; a word read does not copy storage.

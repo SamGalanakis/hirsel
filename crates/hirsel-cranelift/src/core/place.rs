@@ -76,6 +76,7 @@ impl<'c> Function<'_, '_, 'c> {
                 PlaceTy::Declared(t) => At::Declared(t),
                 _ => At::Other,
             },
+            Step::Seq(_) => At::Other,
             Step::Deref => match at {
                 At::Pointer(t) => At::Declared(t),
                 At::Counted(t) => held(self.input, t),
@@ -132,6 +133,7 @@ impl<'c> Function<'_, '_, 'c> {
                     let offset = self.resize(offset, types::I64, false);
                     self.b.ins().iadd(ptr, offset)
                 }
+                Step::Seq(w) => self.b.ins().iadd_imm_s(ptr, w.offset() as i64),
                 Step::Deref => {
                     let p = self.b.ins().load(types::I64, MemFlagsData::new(), ptr, 0);
                     if matches!(at, At::Counted(_)) {

@@ -459,6 +459,23 @@ fn charge_v1_matches_the_spec_table() {
     assert_eq!(charge::grown_capacity(8, 100), Some(100));
     assert_eq!(charge::seq(u64::MAX, 2), None);
     assert_eq!(charge::round8(u64::MAX - 3), None);
+    // FORM #113, hand-derived floor((2^64 - 8) / s) for logical size s: a bound one too
+    // high would let LLVM assume a length the admission (MEM-22, MEM-24) never grants.
+    // s = 3: 3 × 6148914691236517202 = 2^64 - 10, rounds to 2^64 - 8; one more is past 2^64 - 1.
+    // s = 9 is a (u64, u8) record (stride 16): the spec's bound is by the 9, not the 16.
+    for (s, bound) in [
+        (2, 9223372036854775804),
+        (3, 6148914691236517202),
+        (8, 2305843009213693951),
+        (9, 2049638230412172400),
+        (24, 768614336404564650),
+    ] {
+        assert_eq!(charge::seq_len_bound(s), Some(bound), "size {s}");
+        assert!(charge::seq(bound, s).is_some(), "size {s} admits its bound");
+        assert_eq!(charge::seq(bound + 1, s), None, "size {s} refuses one past");
+    }
+    assert_eq!(charge::seq_len_bound(1), None);
+    assert_eq!(charge::seq_len_bound(0), None);
 }
 
 /// Bug: a resource is laid out inline in its holder, so its cause cell and grant

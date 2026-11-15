@@ -207,6 +207,7 @@ impl<'a> Origins<'a> {
             for step in info.steps.get(&self.body.pools.steps).unwrap() {
                 let offset = match *step {
                     Step::Byte(v) => self.constant(v),
+                    Step::Seq(w) => Some(w.offset()),
                     Step::Field(0) => Some(0),
                     Step::Deref => {
                         loc = None;

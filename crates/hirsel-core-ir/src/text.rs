@@ -48,6 +48,7 @@ names!(ConvertMode {
     IntToFloat = "int_to_float", Reinterpret = "reinterpret", FloatResize = "float_resize",
 });
 names!(ArithMode { Wrapping = "wrapping", Saturating = "saturating", Checked = "checked" });
+names!(SeqWord { Data = "data", Len = "len", Cap = "cap" });
 names!(ArithOp { Add = "add", Sub = "sub", Mul = "mul", Div = "div" });
 names!(ScalarUnaryOp {
     Sqrt = "sqrt", Floor = "floor", Ceil = "ceil", Trunc = "trunc", Round = "round", RoundEven = "round_even", Abs = "abs",
@@ -104,7 +105,10 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::Pointer { .. }
                         )
                 })
-                || b.pools.steps.iter().any(|s| matches!(s, Step::Byte(_)))
+                || b.pools
+                    .steps
+                    .iter()
+                    .any(|s| matches!(s, Step::Byte(_) | Step::Seq(_)))
         })
 }
 
@@ -348,6 +352,7 @@ impl Printer {
                     Step::Index(v) => format!(" index v{}", v.0),
                     Step::Element(v) => format!(" element v{}", v.0),
                     Step::Byte(v) => format!(" byte v{}", v.0),
+                    Step::Seq(w) => format!(" seq {}", w.name()),
                 };
             }
             l += &format!(" : {}", place(a.ty));
@@ -1952,6 +1957,13 @@ impl Parser {
                             "index" => Step::Index(l.value()?),
                             "element" => Step::Element(l.value()?),
                             "byte" => Step::Byte(l.value()?),
+                            "seq" => {
+                                let w = l.next()?;
+                                Step::Seq(
+                                    SeqWord::from_name(w)
+                                        .ok_or_else(|| format!("unknown seq word `{w}`"))?,
+                                )
+                            }
                             s => return Err(format!("unknown step `{s}`")),
                         });
                     }

@@ -703,9 +703,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 None if matches!(self.t.kind(inner), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan))) => {
                     value.and_then(|v| self.span_parts(v, n).map(|p| p.3))
                 }
+                // An own List's len is a typed carrier word (FORM #113); a Map's count is not.
                 None => value
                     .filter(|_| self.live())
-                    .map(|v| self.read_sequence_word(v, 8, Ty::Scalar(Scalar::U64), n)),
+                    .map(|v| match self.seq_carrier(inner, n) {
+                        Some(carrier) => self.carrier_word(v, carrier, SeqWord::Len, n),
+                        None => self.read_sequence_word(v, 8, Ty::Scalar(Scalar::U64), n),
+                    }),
             };
             (elem, start, limit, false, Some((inner, value)))
         };
@@ -736,7 +740,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some((collection, Some(header)))
                 if self.live() && matches!(self.role_of(collection), Some((Role::List, _))) =>
             {
-                Some(self.read_sequence_word(header, 0, Ty::Ptr, n))
+                self.seq_carrier(collection, n)
+                    .map(|carrier| self.carrier_word(header, carrier, SeqWord::Data, n))
             }
             _ => None,
         };

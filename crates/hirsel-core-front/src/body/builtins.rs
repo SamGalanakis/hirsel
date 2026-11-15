@@ -78,7 +78,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 } else {
                     growth::FillWord::Capacity
                 };
-                return Some(Some(self.fill_word(vals[0]?, word, n)));
+                let carrier = self.list_carrier(item, n)?;
+                return Some(Some(self.fill_word(vals[0]?, Some(carrier), word, n)));
             }
             _ => {}
         }
@@ -98,9 +99,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let pointer = self.pointer(slot, n);
         let null = self.konst(Ty::Ptr, 0, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
-        self.sequence_word(pointer, 0, Ty::Ptr, null, n);
-        self.sequence_word(pointer, 8, Ty::Scalar(Scalar::U64), zero, n);
-        self.sequence_word(pointer, 16, Ty::Scalar(Scalar::U64), zero, n);
+        // An own List or String's words are typed (FORM #113), capacity before len so
+        // a len store is checked against it; a Map or slots header is three raw words.
+        match self.seq_carrier(ty, n) {
+            Some(carrier) => {
+                self.set_carrier_word(pointer, carrier, SeqWord::Data, null, n);
+                self.set_carrier_word(pointer, carrier, SeqWord::Cap, zero, n);
+                self.set_carrier_word(pointer, carrier, SeqWord::Len, zero, n);
+            }
+            None => {
+                self.sequence_word(pointer, 0, Ty::Ptr, null, n);
+                self.sequence_word(pointer, 8, Ty::Scalar(Scalar::U64), zero, n);
+                self.sequence_word(pointer, 16, Ty::Scalar(Scalar::U64), zero, n);
+            }
+        }
         self.temp(ty, Some(pointer));
         Some(pointer)
     }

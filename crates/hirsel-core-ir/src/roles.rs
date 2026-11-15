@@ -425,6 +425,7 @@ impl Derive<'_> {
                 (Loc::Carrier(r, o), Step::Byte(n)) => {
                     Loc::Carrier(r, o.checked_add(self.constant(n)?)?)
                 }
+                (Loc::Carrier(r, o), Step::Seq(w)) => Loc::Carrier(r, o.checked_add(w.offset())?),
                 (Loc::Buffer(r), Step::Index(_) | Step::Byte(_)) => Loc::Buffer(r),
                 _ => return None,
             };

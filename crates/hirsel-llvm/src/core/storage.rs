@@ -98,6 +98,7 @@ impl FunctionEmitter<'_> {
                         PlaceTy::Declared(t) => self.kind_of(t),
                         _ => At::Other,
                     },
+                    Step::Seq(_) => At::Other,
                     Step::Element(_) => {
                         let At::Array(element, _) = at else {
                             unreachable!()
@@ -150,6 +151,10 @@ impl FunctionEmitter<'_> {
                         }
                         _ => At::Other,
                     };
+                }
+                Step::Seq(w) => {
+                    p = self.offset(&p, w.offset());
+                    at = At::Other;
                 }
                 Step::Byte(v) => {
                     let offset = self.numeric(v);

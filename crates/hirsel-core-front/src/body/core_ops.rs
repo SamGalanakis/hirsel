@@ -554,9 +554,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .runtime_row(RtOp::DestId, &[], n)
                 .map(|values| values[0]),
             Kernel::StringShorten => {
-                if self.live() {
-                    self.sequence_word(vals[0]?, 8, Ty::Scalar(Scalar::U64), vals[1]?, n);
-                }
+                // A String's carrier is the List[u8] row's (stride 1, no bound).
+                let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+                self.set_carrier_word(vals[0]?, carrier, SeqWord::Len, vals[1]?, n);
                 None
             }
             Kernel::CarrierView => self.runtime_carrier_view(vals[0]?, result, n),
@@ -1459,7 +1459,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )
     }
 
-    fn list_ty(&mut self, item: TyId) -> Option<TyId> {
+    pub(super) fn list_ty(&mut self, item: TyId) -> Option<TyId> {
         let list = self.p.core_decl("List")?;
         Some(self.t.mk(TyKind::Adt(list, vec![item])))
     }
@@ -1481,6 +1481,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let list = self.list_ty(item)?;
         let (charge, overflow) = self.owner_charge(list, None, n)?;
         let id = self.runtime_type(list, n)?;
+        let carrier = self.list_carrier(item, n)?;
         let payload = self.layout_size(list, false, n)?;
         let node = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
@@ -1510,9 +1511,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
             |cx, to, log| {
                 // The node itself is the List carrier: {data, len, capacity}.
-                cx.sequence_word(node, 0, Ty::Ptr, null, n);
-                cx.sequence_word(node, 8, Ty::Scalar(Scalar::U64), zero, n);
-                cx.sequence_word(node, 16, Ty::Scalar(Scalar::U64), zero, n);
+                cx.set_carrier_word(node, carrier, SeqWord::Data, null, n);
+                cx.set_carrier_word(node, carrier, SeqWord::Cap, zero, n);
+                cx.set_carrier_word(node, carrier, SeqWord::Len, zero, n);
                 if let Some(at) =
                     cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], log, n)
                 {
@@ -1593,14 +1594,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.list_branch(ok, yes, no, n);
         let item_rep = self.rep(item).ok()?;
         self.start(yes);
-        let len = self.read_sequence_word(node, 8, Ty::Scalar(Scalar::U64), n);
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(node, carrier, SeqWord::Len, n);
         let element = self.list_element(item, node, len, n)?;
         if let Some(place) = item_rep.stored() {
             let at = self.address(AddressBase::Value(element), &[], place, n);
             self.install(at, item_rep, value, n);
         }
         let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
-        self.sequence_word(node, 8, Ty::Scalar(Scalar::U64), new_len, n);
+        self.set_carrier_word(node, carrier, SeqWord::Len, new_len, n);
         self.inst(
             Inst::SetCase {
                 address: out,

@@ -128,7 +128,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::Remove
                     | HostOp::RemoveTree
                     | HostOp::Stdout
-                    | HostOp::Stderr => (args[1], no_mode),
+                    | HostOp::Stderr
+                    | HostOp::Random => (args[1], no_mode),
                     HostOp::Close
                     | HostOp::TryLock
                     | HostOp::Unlock

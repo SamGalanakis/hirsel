@@ -50,7 +50,7 @@ mod provider_m3 {
         let mut options = native_options(backend, dir.path());
         options.link = crate::native::Link::Driver(linker);
         options.root_limit = 1 << 20;
-        options.grant_mask = (1 << 9) | (1 << 10);
+        options.grant_mask = (1 << 3) | (1 << 9) | (1 << 10);
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let built = product.build(&entry, &options).unwrap();
         for case in [

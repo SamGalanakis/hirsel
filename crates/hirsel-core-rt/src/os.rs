@@ -316,6 +316,28 @@ impl OsProvider {
                 // fsync on a directory persists its entry updates.
                 syscall(unsafe { libc::fsync(fd) } as isize)?;
             }
+            RANDOM => {
+                let mut filled = 0usize;
+                while filled < request.buffer.capacity.saturating_sub(request.buffer.len) {
+                    let spare = request.buffer.capacity - request.buffer.len - filled;
+                    // SAFETY: the carrier owns writable spare capacity and the
+                    // syscall is bounded to that exact extent.
+                    let n = unsafe {
+                        libc::getrandom(
+                            request.buffer.data.add(request.buffer.len + filled).cast(),
+                            spare,
+                            0,
+                        )
+                    };
+                    let n = syscall(n as isize)? as usize;
+                    if n == 0 {
+                        return Err(io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    filled += n;
+                }
+                request.buffer.len += filled;
+                out.written = filled as u64;
+            }
             MONO_NS => {
                 out.value = self.monotonic_ns();
             }

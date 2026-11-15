@@ -19,6 +19,7 @@ pub const RENAME: u8 = 14;
 pub const SLEEP_UNTIL: u8 = 15;
 pub const SYNC: u8 = 16;
 pub const SYNC_DIR: u8 = 17;
+pub const RANDOM: u8 = 18;
 
 /// IoError tags. Other carries the host error number.
 #[repr(C)]

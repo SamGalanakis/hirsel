@@ -80,6 +80,7 @@ struct World {
     nodes: std::collections::BTreeMap<(u64, Vec<u8>), Node>,
     files: Vec<Option<OpenFile>>,
     temporaries: u64,
+    random: u8,
 }
 enum Node {
     File(Vec<u8>),
@@ -489,6 +490,17 @@ impl Machine<'_> {
                     _ => self.world.stderr.extend(bytes),
                 }
                 ok(0, n)
+            }
+            HostOp::Random => {
+                let (_, data, len, cap) = self.carrier(a[1]);
+                let spare = cap.saturating_sub(len) as usize;
+                let bytes = (0..spare)
+                    .map(|i| self.world.random.wrapping_add(i as u8))
+                    .collect::<Vec<_>>();
+                self.world.random = self.world.random.wrapping_add(spare as u8);
+                self.put(data + len, &bytes);
+                self.store(a[1] + 8, 8, len + spare as u64);
+                ok(0, spare as u64)
             }
             HostOp::Open => {
                 let key = (a[0], self.carrier(a[1]).0);

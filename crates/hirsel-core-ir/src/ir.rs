@@ -758,10 +758,12 @@ pub enum HostOp {
     Sync,
     /// Flush directory entries with fsync.
     SyncDir,
+    /// Fill a Bytes carrier's spare capacity from the Random capability.
+    Random,
 }
 
 impl HostOp {
-    pub const ALL: [HostOp; 18] = [
+    pub const ALL: [HostOp; 19] = [
         HostOp::Open,
         HostOp::Read,
         HostOp::Write,
@@ -780,6 +782,7 @@ impl HostOp {
         HostOp::SleepUntil,
         HostOp::Sync,
         HostOp::SyncDir,
+        HostOp::Random,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -806,6 +809,7 @@ impl HostOp {
             HostOp::SleepUntil => "host_sleep_until",
             HostOp::Sync => "host_sync",
             HostOp::SyncDir => "host_sync_dir",
+            HostOp::Random => "host_random",
         }
     }
     /// Whether the operation waits (a cancellation point, so it can fail).

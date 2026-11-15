@@ -74,6 +74,7 @@ operations! {
     ("host", "sleep_until", Lane::Runtime(Kernel::Host(HostOp::SleepUntil)), "B", "core-ops-914", false),
     ("host", "sync", Lane::Runtime(Kernel::Host(HostOp::Sync)), "B", "core-ops-914", false),
     ("host", "sync_dir", Lane::Runtime(Kernel::Host(HostOp::SyncDir)), "B", "core-ops-914", false),
+    ("host", "random", Lane::Runtime(Kernel::Host(HostOp::Random)), "B", "core-ops-914", false),
     ("list", "sum", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("list", "fill", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("string", "from", Lane::PendingCode, "C", "std-seed-api-889", false),
@@ -2403,7 +2404,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         cx.runtime_store(to, &[], u64t, value, n);
                     }
                 }
-                HostOp::Read | HostOp::Mkdtemp => {
+                HostOp::Read | HostOp::Mkdtemp | HostOp::Random => {
                     cx.runtime_case_payload(to, 0, ty, Some(value), n)
                 }
                 HostOp::TryLock => {

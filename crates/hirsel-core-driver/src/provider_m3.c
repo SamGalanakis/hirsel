@@ -142,6 +142,12 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         CHECK(r->handle==7);
         s.sync_dirs++;
         return out;
+    case 18:
+        CHECK(r->handle==0 && r->buffer.capacity-r->buffer.len>=4);
+        for(size_t i=0;i<r->buffer.capacity-r->buffer.len;i++) r->buffer.data[r->buffer.len+i]=(uint8_t)(0xa0+i);
+        out.written=r->buffer.capacity-r->buffer.len;
+        r->buffer.len=r->buffer.capacity;
+        return out;
     case 14:
         if(crash_mode()) { CHECK(r->handle==7 && r->path_len==3 && r->path[0]=='a' && r->path[1]==0 && r->path[2]=='b'); s.live_name='b'; crash_mark_cut(); return out; }
         CHECK(r->handle==7 && r->path_len==13 && !memcmp(r->path,"sync-a\0sync-b",13));
@@ -161,16 +167,16 @@ static void diagnostic(void *state,const uint8_t *data,size_t len) {if(crash_mod
 static void event(void *state,HirselCoreEvent e) {(void)state;if(e.kind==3)s.cancels++;}
 static uint8_t entry(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {s.root=ctx;return s.entry(ctx,cfg,out);}
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry main) {
-    (void)names;(void)sources;CHECK(input->args_len==1 && input->parameters_len==3);
+    (void)names;(void)sources;CHECK(input->args_len==1 && input->parameters_len==4);
     CHECK(input->args[0].len<sizeof s.mode);memcpy(s.mode,input->args[0].data,input->args[0].len);
     s.entry=main;memcpy(s.file,is("read")?"abc":"old",3);s.length=3;
     HirselCoreProvider provider={&s,issue,deliver};
-    HirselCoreEntryGrant caps[3];uint64_t grants[3];
-    for(size_t i=0;i<3;i++) {uint8_t k=input->parameters[i].kind;caps[i]=(HirselCoreEntryGrant){k,&provider,k==0?7:0};grants[i]=i+1;}
+    HirselCoreEntryGrant caps[4];uint64_t grants[4];
+    for(size_t i=0;i<4;i++) {uint8_t k=input->parameters[i].kind;caps[i]=(HirselCoreEntryGrant){k,&provider,k==0?7:0};grants[i]=i+1;}
     HirselCoreBuffer args[1];for(size_t i=0;i<1;i++) args[i]=(HirselCoreBuffer){(uint8_t*)input->args[i].data,input->args[i].len,0};
     HirselCoreProcessConfig cfg={0};cfg.root_limit=input->root_limit;cfg.args=args;cfg.args_len=1;
-    cfg.grants=grants;cfg.grants_len=3;cfg.provider=&provider;cfg.state=&s;cfg.diagnostic=diagnostic;
-    cfg.scheduler=(HirselCoreSchedulerProvider){&s,event,0};cfg.stop_fd=2;cfg.capabilities=caps;cfg.capabilities_len=3;
+    cfg.grants=grants;cfg.grants_len=4;cfg.provider=&provider;cfg.state=&s;cfg.diagnostic=diagnostic;
+    cfg.scheduler=(HirselCoreSchedulerProvider){&s,event,0};cfg.stop_fd=2;cfg.capabilities=caps;cfg.capabilities_len=4;
     if(crash_mode()) { s.crash_cut=(unsigned)strtoul(s.mode+5,NULL,10); s.crash_pending=s.crash_cut==0; }
     uint8_t status=hirsel_core_run(&cfg,entry);
     if(crash_mode() && s.crashed) {

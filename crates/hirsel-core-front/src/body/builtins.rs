@@ -29,6 +29,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if module == ["list"] && name == "word_le" {
             return Some(self.list_word_le(vals[0]?, vals[1]?, n));
         }
+        if module == ["list"] && name == "put_word_le" {
+            return Some(self.list_put_word_le(vals[0]?, vals[1]?, result, n));
+        }
         if module == ["list"] {
             return self.list_value(name, types[0], vals, result, n);
         }

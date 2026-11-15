@@ -182,6 +182,65 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.read_bits(address, Ty::Scalar(Scalar::U64), n))
     }
 
+    /// The store twin of word_le. Reserve first, so a refusal preserves every
+    /// carrier word and byte; success appends one unaligned little-endian u64.
+    pub(super) fn list_put_word_le(
+        &mut self,
+        header: ValueId,
+        word: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let Some(carrier) = self.list_carrier(scalar(Scalar::U8), n) else {
+            self.gap(n, "put_word_le without the Bytes carrier row is not built");
+            return None;
+        };
+        let result_id =
+            self.place_row(result, "put_word_le without a Result place is not built", n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        let width = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
+        let reserved = self.list_reserve(scalar(Scalar::U8), header, width, result, n)?;
+        let at = self.address(
+            AddressBase::Value(reserved),
+            &[],
+            PlaceTy::Declared(result_id),
+            n,
+        );
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: at,
+            },
+            n,
+        );
+        let zero = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
+        let ok = self.list_compare(CompareOp::Eq, tag, zero, n);
+        let store = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(ok, store, done, n);
+        self.start(store);
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+        let at = self.address(
+            AddressBase::Value(data),
+            &[Step::Byte(len)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: at,
+                value: word,
+            },
+            n,
+        );
+        let (len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, width, n);
+        self.set_carrier_word(header, carrier, SeqWord::Len, len, n);
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(reserved)
+    }
+
     pub(super) fn list_arith(
         &mut self,
         op: ArithOp,

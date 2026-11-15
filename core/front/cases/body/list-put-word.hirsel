@@ -1,0 +1,79 @@
+// expect: accept
+// expect: run within_capacity() = true used 0
+// expect: run exact_fit() = true used 0
+// expect: run refused() = true used 0
+// expect: run literal_bytes() = true used 0
+// expect: run unaligned() = true used 0
+// expect: run empty_growth() = true used 0
+// expect: run function_value() = true used 0
+// 0x0807060504030201 appends [1,2,3,4,5,6,7,8]. Reading bytes independently
+// catches an endian/width error even if word_le has the same error.
+fn bytes_match(b: Bytes, at: u64) -> bool {
+    let mut ok = true
+    for i in 0u64 .. 8u64 {
+        ok = ok && b[at + i] == int.truncate(i + 1)
+    }
+    ok && list.word_le(b, at) == 0x0807060504030201u64
+}
+
+fn within_capacity() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(32))
+    let r = bound bytes 0 {
+        list.put_word_le(mut b, 0x0807060504030201u64)?
+        list.len(b) == 8 && list.capacity(b) == 32 && bytes_match(b, 0)
+    }
+    match r {
+        Ok(ok) => ok,
+        Error(_) => false
+    }
+}
+
+fn exact_fit() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(8))
+    result.unwrap(list.put_word_le(mut b, 0x0807060504030201u64))
+    list.len(b) == 8 && list.capacity(b) == 8 && bytes_match(b, 0)
+}
+
+// Capacity 1 costs 8. Growing to len+8 = 9 costs 16; none remains under bound 8.
+// Refusal must retain data, len, cap, and the original byte.
+fn refused() -> bool {
+    let r = bound bytes 8 {
+        let mut b: Bytes = list.with_capacity(1)?
+        result.unwrap(list.push(mut b, 0xA5))
+        match list.put_word_le(mut b, 0x0807060504030201u64) {
+            Error(c) => c.requested == 16 && c.available == 0 && list.len(b) == 1 && list.capacity(b) == 1 && b[0] == 0xA5,
+            Ok(()) => false
+        }
+    }
+    match r {
+        Ok(ok) => ok,
+        Error(_) => false
+    }
+}
+
+fn literal_bytes() -> bool {
+    let mut b = result.unwrap(b"abc")
+    result.unwrap(list.put_word_le(mut b, 0x0807060504030201u64))
+    let again = result.unwrap(b"abc")
+    list.len(b) == 11 && b[0] == 97 && b[1] == 98 && b[2] == 99 && bytes_match(b, 3) && list.len(again) == 3 && again[2] == 99
+}
+
+fn unaligned() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(9))
+    result.unwrap(list.push(mut b, 0xFF))
+    result.unwrap(list.put_word_le(mut b, 0x0807060504030201u64))
+    list.len(b) == 9 && list.capacity(b) == 9 && b[0] == 0xFF && bytes_match(b, 1)
+}
+
+fn empty_growth() -> bool {
+    let mut b: Bytes = list.new()
+    result.unwrap(list.put_word_le(mut b, 0x0807060504030201u64))
+    list.len(b) == 8 && list.capacity(b) == 8 && bytes_match(b, 0)
+}
+
+fn function_value() -> bool {
+    let put: fn(mut Bytes, u64) -> Result[(), Capacity] = list.put_word_le
+    let mut b: Bytes = list.new()
+    result.unwrap(put(mut b, 0x0807060504030201u64))
+    bytes_match(b, 0)
+}

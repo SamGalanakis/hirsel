@@ -147,6 +147,7 @@ operations! {
     ("int", "trailing_zeros", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "count_ones", Lane::Numeric, "A", "core-check-index-912", false),
     ("list", "word_le", Lane::Value, "A", "core-check-index-912", false),
+    ("list", "put_word_le", Lane::Value, "A", "core-ops-914", false),
     ("int", "widen", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "narrow", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "try_narrow", Lane::Numeric, "A", "core-check-index-912", false),

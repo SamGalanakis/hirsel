@@ -198,7 +198,7 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable(entry, options.instance_limit)?;
-        let toolchain =
+        let (toolchain, _) =
             crate::tool_inputs::toolchain(&options.cc, &options.target, &options.runtime)?;
         self.emit_instances(
             entry,
@@ -329,7 +329,7 @@ impl CheckProduct {
             .collect::<Vec<_>>();
         let sources = self.native_sources(&items)?;
         let entry_plan = self.process_entry(entry, options, &sources)?;
-        let toolchain =
+        let (toolchain, recipe) =
             crate::tool_inputs::toolchain(&options.cc, &options.target, &options.runtime)?;
         let mut objects =
             self.emit_instances(entry, instances, &reached.materialized, options, toolchain)?;
@@ -377,7 +377,14 @@ impl CheckProduct {
                 compiled,
             });
         }
-        link(&entry_plan, &objects, options, &sources, toolchain.image)
+        link(
+            &entry_plan,
+            &objects,
+            options,
+            &sources,
+            toolchain.image,
+            recipe,
+        )
     }
     fn entry_binding(&self, entry: &DefPath) -> Result<&EntryAbi, NativeStop> {
         let binding = self
@@ -568,6 +575,7 @@ fn link(
     options: &NativeOptions,
     sources: &hirsel_core_ir::source::SourceMap,
     toolchain: ContentHash,
+    recipe: crate::tool_inputs::LinkRecipe,
 ) -> Result<BuildProduct, NativeStop> {
     let headers = [
         "hirsel_core_rt.h",
@@ -579,8 +587,6 @@ fn link(
     .map(|n| read_input(&options.include.join(n)))
     .into_iter()
     .collect::<io::Result<Vec<_>>>()?;
-    let recipe = crate::tool_inputs::link_recipe(&options.cc, &options.target)
-        .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
     // Development links use lld's cheap string-merging mode. Release keeps
     // the linker default; this spelling is part of the executable key below.
     let link_mode = if options.optimize {

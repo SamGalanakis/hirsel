@@ -193,6 +193,7 @@ pub fn publish(
     root: &Path,
     std: bool,
     runtime: Option<(&Path, &str)>,
+    cc: &Path,
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
     let cache = crate::product::normalized(root).join("core-packages");
@@ -207,5 +208,18 @@ pub fn publish(
         &product.image,
         runtime,
     )?;
+    // Sight the registered runtime's toolchain inputs now, as a request
+    // would find them (the compiler beside the registration, canonical), so
+    // the first request a window after the install promotes them instead of
+    // sighting them itself. A toolchain that cannot be read here is a build's
+    // error to report, not the install's.
+    if let Some((_, target)) = runtime
+        && let Some(installed) = Installed::at(&crate::product::normalized(root))?
+        && let Some(archive) = installed.runtime(target)
+        && let (Ok(cc), Ok(archive)) = (crate::tool_inputs::link_driver(cc), archive.canonicalize())
+    {
+        let _ = crate::tool_inputs::toolchain(&cc, target, &archive);
+        meter.finish("install/tool input sighting");
+    }
     Ok(product)
 }

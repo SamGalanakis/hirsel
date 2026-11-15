@@ -188,7 +188,15 @@ pub(crate) struct Toolchain {
 /// re-reading unchanged runtime, linker and CRT bytes on every request. The
 /// recipe belongs to the C driver and target alone; the runtime archive is
 /// this request's own input, so one recipe serves every runtime.
-pub(crate) fn toolchain(cc: &Path, target: &str, runtime: &Path) -> io::Result<Toolchain> {
+///
+/// The request's link recipe comes back with it, so the request observes
+/// each file once: the recipe's files are recorded here as the recipe saw
+/// them, and the link uses this recipe rather than observing them again.
+pub(crate) fn toolchain(
+    cc: &Path,
+    target: &str,
+    runtime: &Path,
+) -> io::Result<(Toolchain, LinkRecipe)> {
     let recipe = link_recipe(cc, target)?;
     let root = recipe_directory(cc)?;
     let key = driver_file_key(cc)?;
@@ -206,6 +214,10 @@ pub(crate) fn toolchain(cc: &Path, target: &str, runtime: &Path) -> io::Result<T
         .filter(|manifest| manifest.schema == TOOLCHAIN_SCHEMA && manifest.target == target);
     let mut files = Vec::with_capacity(paths.len());
     for file in paths {
+        if let Some(seen) = recipe.files.iter().find(|entry| entry.path == file) {
+            files.push(seen.clone());
+            continue;
+        }
         let previous = old
             .as_ref()
             .and_then(|manifest| manifest.files.iter().find(|entry| entry.path == file));
@@ -235,7 +247,7 @@ pub(crate) fn toolchain(cc: &Path, target: &str, runtime: &Path) -> io::Result<T
         };
         publish(&root, &path, &manifest)?;
     }
-    Ok(toolchain)
+    Ok((toolchain, recipe))
 }
 
 fn find_llvm_library(cc: &Path) -> Option<PathBuf> {
@@ -958,23 +970,27 @@ mod tests {
         std::fs::write(&runtime, b"runtime").unwrap();
         let target = "x86_64-unknown-linux-gnu";
         CLOCK.set(Some(0));
-        let identity = toolchain(&cc, target, &runtime).unwrap();
+        let identity = toolchain(&cc, target, &runtime).unwrap().0;
         for file in [&linker, &crt, &runtime] {
             let copy = file.with_extension("rematerialised");
             std::fs::copy(file, &copy).unwrap();
             std::fs::rename(&copy, file).unwrap();
         }
         // The new stats are sighted, then settled by a sighting a window later.
+        // A request reads each moved file once, though both the recipe and the
+        // toolchain record name the linker and the CRT.
         CLOCK.set(Some(1));
-        assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
+        READS.set(0);
+        assert_eq!(toolchain(&cc, target, &runtime).unwrap().0, identity);
+        assert_eq!(READS.get(), 4, "cc, linker, CRT and runtime, once each");
         CLOCK.set(Some(1 + WINDOW));
-        assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
+        assert_eq!(toolchain(&cc, target, &runtime).unwrap().0, identity);
         let directory = recipe_directory(&cc).unwrap();
         let key = driver_file_key(&cc).unwrap();
         let manifest_path = directory.join(format!("toolchain-{target}-{key}.json"));
         let written = std::fs::metadata(&manifest_path).unwrap().ino();
         READS.set(0);
-        assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
+        assert_eq!(toolchain(&cc, target, &runtime).unwrap().0, identity);
         assert_eq!(READS.get(), 0, "settled toolchain files are not read again");
         assert_eq!(
             std::fs::metadata(&manifest_path).unwrap().ino(),
@@ -1010,19 +1026,19 @@ mod tests {
         let (first, second) = (work.path().join("first.a"), work.path().join("second.a"));
         std::fs::write(&first, b"first runtime").unwrap();
         std::fs::write(&second, b"second runtime").unwrap();
-        let first_identity = toolchain(&cc, target, &first).unwrap();
-        let second_identity = toolchain(&cc, target, &second).unwrap();
+        let first_identity = toolchain(&cc, target, &first).unwrap().0;
+        let second_identity = toolchain(&cc, target, &second).unwrap().0;
         assert_ne!(
             first_identity, second_identity,
             "different runtime bytes link differently"
         );
         std::fs::write(&second, b"second runtime, rebuilt").unwrap();
         assert_ne!(
-            toolchain(&cc, target, &second).unwrap(),
+            toolchain(&cc, target, &second).unwrap().0,
             second_identity,
             "a rebuilt runtime archive must miss every object keyed by the old one"
         );
-        assert_eq!(toolchain(&cc, target, &first).unwrap(), first_identity);
+        assert_eq!(toolchain(&cc, target, &first).unwrap().0, first_identity);
     }
 
     #[test]
@@ -1360,7 +1376,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            toolchain(&cc, target, &runtime).unwrap().runtime,
+            toolchain(&cc, target, &runtime).unwrap().0.runtime,
             ContentHash::of_parts(
                 "hirsel.core-runtime.v2",
                 [ContentHash::of_bytes(b"runtime").0.as_slice()]

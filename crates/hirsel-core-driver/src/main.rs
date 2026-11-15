@@ -314,6 +314,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                     root,
                     command == "std-product",
                     runtime.as_deref().map(|runtime| (runtime, target.as_str())),
+                    &cc,
                     &mut meter,
                 )?
             } else if command == "std-product" {

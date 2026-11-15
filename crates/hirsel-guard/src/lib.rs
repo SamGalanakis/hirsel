@@ -31,8 +31,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub const DEFAULT_LIMIT: u64 = 4 << 30;
 /// Exit status of a process that reached its limit (sysexits' `EX_OSERR`).
 pub const EXIT_STATUS: i32 = 71;
-/// Worker threads or processes without `HIRSEL_JOBS`.
-pub const DEFAULT_JOBS: usize = 2;
 /// Exit status of a malformed `HIRSEL_MEMORY_LIMIT`.
 const USAGE_STATUS: i32 = 2;
 /// Exit status of a debug build that allocated or freed inside a section (sysexits'
@@ -304,26 +302,6 @@ pub fn sanitized(command: &mut std::process::Command) -> &mut std::process::Comm
             }
             Ok(())
         })
-    }
-}
-
-/// The worker count for a runner's threads or processes: `HIRSEL_JOBS`, which
-/// the Buck2 test launcher sets to the action's CPU reservation, else
-/// [`DEFAULT_JOBS`]. A malformed or zero value is an error naming the variable.
-pub fn jobs() -> usize {
-    match std::env::var("HIRSEL_JOBS") {
-        Err(std::env::VarError::NotPresent) => DEFAULT_JOBS,
-        Ok(text) => match text.parse::<usize>() {
-            Ok(jobs) if jobs > 0 => jobs,
-            _ => {
-                eprintln!("hirsel: HIRSEL_JOBS={text} is not a positive count of workers");
-                std::process::exit(USAGE_STATUS);
-            }
-        },
-        Err(std::env::VarError::NotUnicode(_)) => {
-            eprintln!("hirsel: HIRSEL_JOBS is not a positive count of workers");
-            std::process::exit(USAGE_STATUS);
-        }
     }
 }
 
@@ -799,37 +777,6 @@ mod tests {
         let output = child("tests::exhaustion_child", &[("HIRSEL_MEMORY_LIMIT", "4GB")]);
         assert_eq!(output.status.code(), Some(USAGE_STATUS));
         assert!(String::from_utf8_lossy(&output.stderr).contains("HIRSEL_MEMORY_LIMIT=4GB is not"));
-    }
-
-    #[test]
-    fn jobs_child() {
-        if std::env::var_os(CHILD).is_none() {
-            return;
-        }
-        println!("jobs {}", jobs());
-    }
-
-    #[test]
-    fn workers_come_from_hirsel_jobs_and_default_to_two() {
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "tests::jobs_child",
-                "--exact",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(CHILD, "1")
-            .env_remove("HIRSEL_JOBS");
-        let output = command.output().unwrap();
-        assert!(String::from_utf8_lossy(&output.stdout).contains("jobs 2\n"));
-        let output = child("tests::jobs_child", &[("HIRSEL_JOBS", "3")]);
-        assert!(String::from_utf8_lossy(&output.stdout).contains("jobs 3\n"));
-        for bad in ["0", "-1", "all"] {
-            let output = child("tests::jobs_child", &[("HIRSEL_JOBS", bad)]);
-            assert_eq!(output.status.code(), Some(USAGE_STATUS), "{bad}");
-            assert!(String::from_utf8_lossy(&output.stderr).contains("not a positive count"));
-        }
     }
 
     #[test]

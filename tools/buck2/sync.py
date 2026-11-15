@@ -114,24 +114,9 @@ TEST_DATA = {
 }
 
 # Their tests live in integration/proof targets, not these empty entry points.
-EMPTY_UNIT_HARNESSES = {'hirsel-core-driver-bin-hirsel-unittest',
+EMPTY_UNIT_HARNESSES = {'hirsel-intern-unittest', 'hirsel-core-driver-bin-hirsel-unittest',
  'hirsel-core-driver-bin-hirsel-core-request-cost-unittest',
  'hirsel-core-syntax-bin-hirsel-core-syntax-unittest'}
-
-# Tests that draw random cases. Their binaries run under a seed that is part
-# of the test's action key (TEST_SEED in defs.bzl), so a cached pass covers
-# that seed only.
-SEEDED = re.compile(r"\bproptest!")
-
-
-@functools.cache
-def _seeded_text(text: str) -> bool:
-    return SEEDED.search(text) is not None
-
-
-def seeded(source_dir: pathlib.Path, crate_root: pathlib.Path) -> bool:
-    return any(_seeded_text(READS.text(source)) for source in sorted(set(READS.glob(source_dir, "**/*.rs")) | {crate_root}))
-
 
 INCLUDE = re.compile(r'\binclude(?:_str|_bytes)?!\(\s*"([^"]+)"\s*\)')
 PATH_ATTR = re.compile(r'#\[path\s*=\s*"([^"]+)"\s*\]')
@@ -528,8 +513,7 @@ def first_party(meta: dict) -> str:
             return dict(data=test_data(binary, name, package_dir, src),
                         files_env=files_env,
                         # hirsel-llvm's target tests link and run AArch64 objects through the pinned cross tools.
-                        native_tools=True if binary in ("hirsel-cranelift-test-core_native", "hirsel-llvm-unittest") else None,
-                        seeded=seeded(target_dir(package_dir, src), src) or None)
+                        native_tools=True if binary in ("hirsel-cranelift-test-core_native", "hirsel-llvm-unittest") else None)
 
         lib = next((t for t in package["targets"] if set(t["kind"]) & {"lib", "rlib", "staticlib"}), None)
         build = next((t for t in package["targets"] if t["kind"] == ["custom-build"]), None)

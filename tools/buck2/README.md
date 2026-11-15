@@ -298,11 +298,7 @@ Target names follow Cargo's targets, all in the root package:
   archive; the layering test reads `workspace-metadata.json`, generated from
   Cargo's workspace graph by `sync.py`. Neither
   invokes Cargo on a worker.
-- A pool test's passing verdict is cached by its action key. Test binaries
-  whose sources draw random cases (`proptest!`, `SEEDED` in `sync.py`) run
-  under `PROPTEST_RNG_SEED` from `-c hirsel.test_seed` (default 1), which is in
-  that key: a cached pass covers its seed only; `HIRSEL_TEST_SEED=<n>`
-  reproduces one.
+- A pool test's passing verdict is cached by its action key.
 - `cargo_units.py` asks the pinned Cargo for unit-graph v1, without compiling,
   for each package's normal build and its package-local tests. Production
   receives only normal dependency features; tests receive their own declared

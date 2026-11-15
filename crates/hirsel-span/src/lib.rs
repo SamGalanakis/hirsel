@@ -9,7 +9,6 @@
 hirsel_guard::install!();
 
 use hirsel_intern::Scramble;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -253,13 +252,8 @@ impl SourceFile {
     pub fn logical_path(&self) -> &Path {
         &self.logical_path
     }
-    /// Exposes the full source and charges its byte length per access. This
-    /// measures repeated full-source access, not byte loads through a held str.
+    /// Exposes the full source.
     pub fn text(&self) -> &str {
-        hirsel_intern::work::count_by(
-            hirsel_intern::work::Counter::SourceTextBytes,
-            self.text.len() as u64,
-        );
         &self.text
     }
     pub fn location(&self, offset: u32) -> Option<LineColumn> {

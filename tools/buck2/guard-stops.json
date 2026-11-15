@@ -1,10 +1,1 @@
-{
-  "hirsel-intern-unittest": [
-    {
-      "date": "2026-10-19",
-      "needed_kb": 4194304,
-      "reserved_kb": 524288,
-      "stop": "jobs::tests run eight workers each on a 128 MiB compiler stack, which the data limit counts in full; with the pool's four test threads that is 4 GiB of stack (resident peak 34M). Measured: passes at a 4G limit, stops at 3584M"
-    }
-  ]
-}
+{}

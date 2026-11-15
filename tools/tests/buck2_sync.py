@@ -427,28 +427,5 @@ class GuardedRoots(unittest.TestCase):
             self.assertTrue(sync.guarded(root / 'main.rs'))
 
 
-class SeededTests(unittest.TestCase):
-    def test_a_binary_drawing_random_cases_anywhere_in_its_modules_is_seeded(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            main = root / 'main.rs'
-            main.write_text('mod deep;\n')
-            (root / 'deep').mkdir()
-            (root / 'deep/mod.rs').write_text('#[test]\nfn fixed() {}\n')
-            self.assertFalse(sync.seeded(root, main))
-            (root / 'deep/mod.rs').write_text('proptest! {\n #[test]\n fn any(x in 0u8..) {}\n}\n')
-            self.assertTrue(sync.seeded(root, main))
-
-    def test_the_seed_reaches_exactly_the_proptest_binaries(self):
-        import re
-        buck = (Path(__file__).resolve().parents[2] / 'BUCK').read_text()
-        seeded = {m[1] for m in re.finditer(r'hirsel_test\(\n    name = "([^"]+)",(.*?)\n\)', buck, re.S)
-                  if 'seeded = True' in m[2]}
-        self.assertIn('hirsel-intern-unittest', seeded)
-        self.assertNotIn('hirsel-core-driver-unittest', seeded)
-
-
-
-
 if __name__ == '__main__':
     unittest.main()

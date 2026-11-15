@@ -53,10 +53,6 @@ impl ContentHash {
                 Ok(())
             }
         }
-        use hirsel_intern::timings::instructions::{self as counted, Owner, Volume};
-        let _scope = counted::scope(Owner::Hash);
-        counted::volume(Volume::Hashes, 1);
-        counted::volume(Volume::HashedBytes, length);
         let mut hash = Sha256::new();
         hash.update((domain.len() as u64).to_le_bytes());
         hash.update(domain.as_bytes());
@@ -83,16 +79,11 @@ impl ContentHash {
         domain: &str,
         emit: impl FnOnce(&mut PartsHasher) -> std::io::Result<()>,
     ) -> std::io::Result<Self> {
-        use hirsel_intern::timings::instructions::{self as counted, Owner, Volume};
-        let _scope = counted::scope(Owner::Hash);
         let mut hasher = PartsHasher {
             hash: Sha256::new(),
-            bytes: 0,
         };
         hasher.part(domain.as_bytes());
         emit(&mut hasher)?;
-        counted::volume(Volume::Hashes, 1);
-        counted::volume(Volume::HashedBytes, hasher.bytes);
         Ok(Self(hasher.hash.finalize().into()))
     }
 
@@ -117,7 +108,6 @@ impl ContentHash {
 /// Builder for the length-framed parts consumed by [`ContentHash::of_parts_stream`].
 pub struct PartsHasher {
     hash: Sha256,
-    bytes: u64,
 }
 
 impl PartsHasher {
@@ -125,7 +115,6 @@ impl PartsHasher {
     fn part(&mut self, bytes: &[u8]) {
         self.hash.update((bytes.len() as u64).to_le_bytes());
         self.hash.update(bytes);
-        self.bytes += bytes.len() as u64;
     }
 
     #[inline]
@@ -134,7 +123,6 @@ impl PartsHasher {
         self.hash.update(length.to_le_bytes());
         self.hash.update([first]);
         self.hash.update(rest);
-        self.bytes += length;
     }
 
     #[inline]
@@ -152,7 +140,6 @@ impl PartsHasher {
         if writer.remaining != 0 {
             return Err(std::io::Error::other("content hash part is short"));
         }
-        self.bytes += length;
         Ok(())
     }
 }

@@ -33,11 +33,6 @@ BIN_EXE_DIR = "buck-out/tmp/cargo-bin-exe"
 # `-c hirsel.tests=host` explicitly opts into execution on the invoking host;
 # `-c hirsel.tests=focus` uses one CPU unless a target requires an exact count.
 TESTS_ON_HOST = read_root_config("hirsel", "tests", "pool") == "host"
-# The seed of every randomly seeded test (PROPTEST_RNG_SEED). It is part of the
-# test's environment, so of its cached verdict: a pass is reused only under the
-# same seed; a run under `-c hirsel.test_seed=N` draws another.
-TEST_SEED = read_root_config("hirsel", "test_seed", "1")
-
 def _request(binary):
     return [str(field) for field in test_request(binary)]
 
@@ -225,12 +220,11 @@ def _test_crate_flags(crate_root):
         return []
     return select({"root//tools/buck2:profile_checked": ["-Copt-level=0"], "DEFAULT": []})
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, native_tools = False, seeded = False):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, native_tools = False):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
     `data` are the files the test reads at run time.
-    `seeded` binaries draw random cases and run under `TEST_SEED`.
     """
     harness = name + "-harness"
     bin_exe_dir = "{}/{}".format(BIN_EXE_DIR, harness)
@@ -281,7 +275,6 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         cwd = manifest_dir,
         test_binary = name,
         request = _request(name),
-        seed = TEST_SEED if seeded else "",
         visibility = ["PUBLIC"],
     )
     host_cases = OPENAT2_TEST_CASES.get(name, [])
@@ -402,8 +395,6 @@ def _rust_test_impl(ctx):
     if ctx.attrs.pool:
         env["HIRSEL_TEST_POOL"] = "1"
         env["HIRSEL_TEST_REPORTER"] = cmd_args(ctx.attrs._test_reporter)
-    if ctx.attrs.seed:
-        env["PROPTEST_RNG_SEED"] = ctx.attrs.seed
     command = cmd_args(ctx.attrs._launcher, ctx.attrs.harness[RunInfo], ctx.attrs.args, hidden = inputs)
     if ctx.attrs.fixture_output:
         fixture = ctx.actions.declare_output("fixture", dir = True)
@@ -454,7 +445,6 @@ _rust_test = rule(
         "pool": attrs.bool(default = False),
         # A pool run's `[cpu, memory_kb, cpu_class]`, for its executor (platforms.bzl).
         "request": attrs.list(attrs.string(), default = []),
-        "seed": attrs.string(default = ""),
         "test_binary": attrs.string(default = ""),
         "_launcher": attrs.source(default = "root//tools/buck2:test_launcher.sh"),
         "_scratch_owner": attrs.source(default = "root//tools/buck2:scratch.py"),

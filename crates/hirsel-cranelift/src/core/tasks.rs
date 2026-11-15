@@ -299,6 +299,15 @@ impl Function<'_, '_, '_> {
                     self.c_call("hirsel_core_try_send", &[P, P], &[K], &[args[0], args[1]])?[0];
                 1
             }
+            RtOp::TryReceive { .. } => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_try_receive",
+                    &[P, P],
+                    &[K],
+                    &[args[0], args[1]],
+                )?[0];
+                1
+            }
         };
         for (&id, &value) in call
             .results

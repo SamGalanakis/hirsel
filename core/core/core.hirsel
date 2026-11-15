@@ -101,6 +101,8 @@ pub type Closed[T] = Closed(T)
 
 pub type SendError[T] = Full(T) | Closed(T)
 
+pub type ReceiveError = Empty | Closed
+
 pub type JoinError = Failed(Causes) | Cancelled(Causes)
 
 pub opaque type Site

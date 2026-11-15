@@ -223,6 +223,9 @@ impl FunctionEmitter<'_> {
             RtOp::TrySend { .. } => {
                 self.native_call("hirsel_core_try_send", &[K], &[p(&args[0]), p(&args[1])])
             }
+            RtOp::TryReceive { .. } => {
+                self.native_call("hirsel_core_try_receive", &[K], &[p(&args[0]), p(&args[1])])
+            }
         };
         let mut values = values;
         if op.fails() {

@@ -13,8 +13,10 @@ pub mod crash {
     pub enum Op<'a> {
         Create(&'a str),
         Write(&'a str, &'a [u8]),
+        Append(&'a str, &'a [u8]),
         Sync(&'a str),
         Rename(&'a str, &'a str),
+        Remove(&'a str),
         SyncDir,
     }
 
@@ -53,6 +55,13 @@ pub mod crash {
                     let inode = self.live_names[name.to_owned()];
                     self.live_data.insert(inode, bytes.to_vec());
                 }
+                Op::Append(name, bytes) => {
+                    let inode = self.live_names[name.to_owned()];
+                    self.live_data
+                        .get_mut(&inode)
+                        .unwrap()
+                        .extend_from_slice(bytes);
+                }
                 Op::Sync(name) => {
                     let inode = self.live_names[name.to_owned()];
                     self.durable_data
@@ -60,8 +69,11 @@ pub mod crash {
                 }
                 Op::Rename(from, to) => {
                     let inode = self.live_names.remove(*from).unwrap();
-                    assert!(!self.live_names.contains_key(*to));
+                    self.live_names.remove(*to);
                     self.live_names.insert((*to).into(), inode);
+                }
+                Op::Remove(name) => {
+                    self.live_names.remove(*name).unwrap();
                 }
                 Op::SyncDir => self.durable_names = self.live_names.clone(),
             }
@@ -213,6 +225,48 @@ mod tests {
         let second = run_until_restart(&ops, ops.len()).snapshot();
         assert_eq!(first, second);
         assert_eq!(first.data.len(), 1);
+    }
+
+    #[test]
+    fn append_survives_only_after_file_sync() {
+        let ops = [
+            Op::Create("a"),
+            Op::Write("a", b"x"),
+            Op::Sync("a"),
+            Op::SyncDir,
+            Op::Append("a", b"y"),
+            Op::Sync("a"),
+        ];
+        assert_eq!(run_until_restart(&ops, 5).read("a"), Some(&b"x"[..]));
+        assert_eq!(run_until_restart(&ops, 6).read("a"), Some(&b"xy"[..]));
+    }
+
+    #[test]
+    fn rename_overwrite_and_remove_survive_only_after_directory_sync() {
+        let rename = [
+            Op::Create("a"),
+            Op::Write("a", b"a"),
+            Op::Sync("a"),
+            Op::Create("b"),
+            Op::Write("b", b"b"),
+            Op::Sync("b"),
+            Op::SyncDir,
+            Op::Rename("a", "b"),
+            Op::SyncDir,
+        ];
+        assert_eq!(run_until_restart(&rename, 8).read("b"), Some(&b"b"[..]));
+        assert_eq!(run_until_restart(&rename, 9).read("b"), Some(&b"a"[..]));
+
+        let remove = [
+            Op::Create("a"),
+            Op::Write("a", b"a"),
+            Op::Sync("a"),
+            Op::SyncDir,
+            Op::Remove("a"),
+            Op::SyncDir,
+        ];
+        assert_eq!(run_until_restart(&remove, 5).read("a"), Some(&b"a"[..]));
+        assert_eq!(run_until_restart(&remove, 6).read("a"), None);
     }
 }
 

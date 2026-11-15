@@ -52,7 +52,8 @@ pub(crate) fn cross_task_refund(owner: u64, bytes: u64) {
 
 pub use crate::channel::{
     hirsel_core_channel_new, hirsel_core_channel_sender, hirsel_core_receive,
-    hirsel_core_receiver_drop, hirsel_core_send, hirsel_core_sender_drop, hirsel_core_try_send,
+    hirsel_core_receiver_drop, hirsel_core_send, hirsel_core_sender_drop, hirsel_core_try_receive,
+    hirsel_core_try_send,
 };
 pub use crate::tasks::{
     hirsel_core_cancel, hirsel_core_check_cancel, hirsel_core_join, hirsel_core_spawn,

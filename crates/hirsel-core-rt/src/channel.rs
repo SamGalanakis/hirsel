@@ -235,6 +235,39 @@ pub unsafe extern "C" fn hirsel_core_receive(
         }
     }
 }
+
+/// # Safety
+/// Sole receiver borrow and writable T destination. Empty and Closed return
+/// immediately; Empty is the deterministic scheduler poll point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_try_receive(
+    channel: *mut Channel,
+    destination: *mut u8,
+) -> u8 {
+    // SAFETY: receiver pins the channel and destination for this call.
+    unsafe {
+        let status = if (*channel).len != 0 {
+            ptr::copy_nonoverlapping(
+                (*channel)
+                    .storage
+                    .as_ptr()
+                    .add((*channel).head * (*channel).item.bytes),
+                destination,
+                (*channel).item.bytes,
+            );
+            (*channel).head = ((*channel).head + 1) % (*channel).capacity;
+            (*channel).len -= 1;
+            tasks::event(tasks::RECEIVE, (*channel).id, 0);
+            0
+        } else if (*channel).senders == 0 {
+            2
+        } else {
+            1
+        };
+        tasks::event(tasks::TRY_RECEIVE, (*channel).id, status as u64);
+        status
+    }
+}
 /// # Safety
 /// Transfers one live sender. No allocation and no finalizer failure.
 #[unsafe(no_mangle)]

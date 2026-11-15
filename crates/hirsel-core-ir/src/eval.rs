@@ -1527,6 +1527,17 @@ impl Machine<'_> {
                     None => panic!("receive would wait"),
                 }
             }
+            RtOp::TryReceive { .. } => {
+                let i = ((a[0] - CHAN_BASE) / 2) as usize;
+                match self.chans[i].queue.pop_front() {
+                    Some(bytes) => {
+                        self.put(a[1], &bytes);
+                        vec![0]
+                    }
+                    None if self.chans[i].senders == 0 => vec![2],
+                    None => vec![1],
+                }
+            }
         })
     }
 

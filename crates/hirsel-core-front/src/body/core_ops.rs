@@ -27,6 +27,7 @@ pub(crate) enum Kernel {
     Send,
     TrySend,
     Receive,
+    TryReceive,
     LogNew,
     LogAppend,
     LogFinish,
@@ -97,6 +98,7 @@ operations! {
     ("channel", "send", Lane::Runtime(Kernel::Send), "B", "core-ops-914", false),
     ("channel", "try_send", Lane::Runtime(Kernel::TrySend), "B", "core-ops-914", false),
     ("channel", "receive", Lane::Runtime(Kernel::Receive), "B", "core-ops-914", false),
+    ("channel", "try_receive", Lane::Runtime(Kernel::TryReceive), "B", "core-ops-914", false),
     ("char", "from_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("char", "to_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("core", "fail", Lane::Language, "A", "core-check-895", false),
@@ -622,6 +624,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.runtime_send(kernel, types[0], vals[0]?, vals[1], result, n)
             }
             Kernel::Receive => self.runtime_receive(types[0], vals[0]?, result, n),
+            Kernel::TryReceive => self.runtime_try_receive(types[0], vals[0]?, result, n),
             Kernel::Join => self.runtime_join(types[0], vals[0]?, result, n),
             Kernel::LogNew => self.runtime_log_new(types[0], result, n),
             Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], result, n),
@@ -1116,6 +1119,53 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )
     }
 
+    fn runtime_try_receive(
+        &mut self,
+        item: TyId,
+        receiver: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let receiver = self.runtime_handle(receiver, n);
+        let id = self.runtime_type(item, n)?;
+        let output = self.new_slot(PlaceTy::Declared(id), n);
+        let [status, ..] = self.runtime_row(
+            RtOp::TryReceive { item: id },
+            &[Arg::Value(receiver), Arg::Address(output)],
+            n,
+        )?;
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), status, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                let value = cx.runtime_read(output, ty, n);
+                cx.runtime_case_payload(to, 0, ty, value, n);
+            },
+            |cx, to, error| {
+                let Some(error_to) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], error, n)
+                else {
+                    return;
+                };
+                let empty = cx.runtime_compare(Ty::Scalar(Scalar::U8), status, 1, n);
+                let Some(empty) = empty else { return };
+                let yes = cx.new_block(&[]);
+                let no = cx.new_block(&[]);
+                let join = cx.new_block(&[]);
+                cx.runtime_branch(empty, yes, no, n);
+                cx.start(yes);
+                cx.runtime_case_payload(error_to, 0, UNIT, None, n);
+                cx.jump(join, &[], n);
+                cx.start(no);
+                cx.runtime_case_payload(error_to, 1, UNIT, None, n);
+                cx.jump(join, &[], n);
+                cx.start(join);
+            },
+        )
+    }
+
     fn runtime_read(&mut self, from: AddressId, ty: TyId, n: NodeId) -> Option<ValueId> {
         match self.rep(ty) {
             Ok(Rep::Place(_)) => Some(self.pointer(from, n)),
@@ -1224,6 +1274,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::ChannelSender
             | Kernel::Send
             | Kernel::TrySend
+            | Kernel::TryReceive
             | Kernel::Receive
             | Kernel::LogNew
             | Kernel::LogAppend

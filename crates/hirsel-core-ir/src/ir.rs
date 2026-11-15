@@ -707,6 +707,9 @@ pub enum RtOp {
     Receive {
         item: TypeId,
     },
+    TryReceive {
+        item: TypeId,
+    },
     DestId,
     /// Bytewise order of two byte ranges (SEM-7): `String`, `Text` and `Bytes`.
     CompareBytes,
@@ -838,6 +841,7 @@ impl RtOp {
     /// | `send[T]` | sender `ptr`, `&T` | `bool`: published (false: `Closed`, the item stays) |
     /// | `try_send[T]` | sender `ptr`, `&T` | status `u8`: 0 published, 1 `Full`, 2 `Closed` |
     /// | `receive[T]` | receiver `ptr`, `&T` | `bool`: received (false: `Closed`) |
+    /// | `try_receive[T]` | receiver `ptr`, `&T` | status `u8`: 0 received, 1 `Empty`, 2 `Closed` |
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
     /// | `hash_bytes` | `data: ptr`, `len: u64` | `u64`: the fixed byte hash (crate docs, "Maps") |
@@ -901,6 +905,7 @@ impl RtOp {
             RtOp::Send { item } => (vec![V(p), take(item)], vec![bool_]),
             RtOp::TrySend { item } => (vec![V(p), take(item)], vec![u8_]),
             RtOp::Receive { item } => (vec![V(p), out(item)], vec![bool_]),
+            RtOp::TryReceive { item } => (vec![V(p), out(item)], vec![u8_]),
             RtOp::DestId => (vec![], vec![u64_]),
             RtOp::CompareBytes => (
                 vec![V(p), V(u64_), V(p), V(u64_)],
@@ -958,7 +963,8 @@ impl RtOp {
             RtOp::ChannelNew { item }
             | RtOp::Send { item }
             | RtOp::TrySend { item }
-            | RtOp::Receive { item } => vec![item],
+            | RtOp::Receive { item }
+            | RtOp::TryReceive { item } => vec![item],
             RtOp::Cancel
             | RtOp::CheckCancel
             | RtOp::ChannelSender

@@ -81,6 +81,7 @@ pub const JOIN: u8 = 4;
 pub const PUBLISH: u8 = 5;
 pub const RECEIVE: u8 = 6;
 pub const TRY_SEND: u8 = 7;
+pub const TRY_RECEIVE: u8 = 10;
 pub const SENDERS: u8 = 8;
 pub const CLOSE: u8 = 9;
 pub const ARC_NEW: u8 = crate::abi_layout::ARC_EVENT_NEW;
@@ -378,7 +379,7 @@ unsafe fn drain_refunds(task: *mut Task) {
 /// before scheduling; never observe cancellation or change that result here.
 #[inline(always)]
 unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
-    if (kind == TRY_SEND && value == 1)
+    if ((kind == TRY_SEND || kind == TRY_RECEIVE) && value == 1)
         || ((kind == ARC_UNWRAP || kind == CHECK_CANCEL) && value == 0)
         || kind == CAPACITY
     {

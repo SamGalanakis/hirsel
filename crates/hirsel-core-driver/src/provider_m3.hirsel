@@ -71,6 +71,19 @@ fn crash_write(d:Dir)->bool waits {
     result.unwrap(host.sync_dir(d))
     true
 }
+fn close_sender(take tx:Sender[u64])->bool { true }
+fn try_receive_sequence()->bool waits {
+    let c:Result[(Sender[u64],Receiver[u64]),Capacity]=channel.new(2)
+    let (tx,rx)=result.unwrap(take c)
+    match channel.try_receive(rx) { Error(Empty)=>{}, _=>return false }
+    result.unwrap(channel.send(tx,7))
+    match channel.try_receive(rx) { Ok(v)=>if v!=7{return false}, _=>return false }
+    result.unwrap(channel.send(tx,8))
+    if result.unwrap(channel.receive(rx))!=8 {return false}
+    match channel.try_receive(rx) { Error(Empty)=>{}, _=>return false }
+    if !close_sender(take tx) {return false}
+    match channel.try_receive(rx) { Error(Closed)=>true, _=>false }
+}
 type IssueInput:send { f:HostFile, tx:Sender[u64], write:bool }
 fn issued(take input:IssueInput)->u64 waits {
     let mut x=take input
@@ -119,7 +132,7 @@ fn cancel_blocked(tasks:Tasks,sending:bool)->bool waits {
 }
 pub fn main(d:Dir,tasks:Tasks,a:Args)->Result[(),Exit] {
     let mode=option.unwrap(args.get(a,0))
-    let ok=if mode=="read" {read_sequence(d)} else if mode=="crash-read" {crash_read(d)} else if mode=="crash0" || mode=="crash1" || mode=="crash2" || mode=="crash3" || mode=="crash4" || mode=="crash5" {crash_write(d)} else if mode=="errors" {errors(d)}
+    let ok=if mode=="read" {read_sequence(d)} else if mode=="try-receive" {try_receive_sequence()} else if mode=="crash-read" {crash_read(d)} else if mode=="crash0" || mode=="crash1" || mode=="crash2" || mode=="crash3" || mode=="crash4" || mode=="crash5" {crash_write(d)} else if mode=="errors" {errors(d)}
       else if mode=="append0" {append_sequence(d,0)} else if mode=="append1" {append_sequence(d,1)} else if mode=="append3" {append_sequence(d,3)}
       else if mode=="sync" || mode=="sync-fail" {sync_sequence(d)}
       else if mode=="before-read" {cancelled_at_provider(d,tasks,true,false)}

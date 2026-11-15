@@ -67,6 +67,7 @@ mod provider_m3 {
             "crash3",
             "crash4",
             "crash5",
+            "try-receive",
             "before-read",
             "issue-read",
             "delivery-read",

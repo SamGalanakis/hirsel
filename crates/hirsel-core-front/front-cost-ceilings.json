@@ -217,9 +217,9 @@
       },
       "image_per_token": {
         "records_opened": 0.0019044951687438734,
-        "bytes_read": 7.612015123932222,
+        "bytes_read": 7.849460859823554,
         "digests": 0.0019044951687438734,
-        "digest_bytes": 7.536591513793586,
+        "digest_bytes": 7.771740652569668,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.02940764598795687,
@@ -734,6 +734,35 @@
       },
       "measured_tokens": 35705,
       "evidence": "std-ordered-map-998/full-std-cost.log"
+    },
+    {
+      "reason": "Complete the std.omap source-growth baseline with actual land observations. The new module adds 40 completed bodies (M1 386->426, std 213->253). Ticket 4860 read 68 image records; a local reproduction on the same base reads 67 and passes. Only the two image-byte cells red in the land receive its observed bytes plus 2 percent; stage, record-count and fixed finished-process budgets are unchanged.",
+      "commit_range": "5daa0c1d1b25..98448b0b",
+      "source_bodies_before": {
+        "m1": 386,
+        "std": 213
+      },
+      "source_bodies_after": {
+        "m1": 426,
+        "std": 253
+      },
+      "previous_ceilings": {
+        "bytes_read": 7.612015123932222,
+        "digest_bytes": 7.536591513793586
+      },
+      "land_image_counts": {
+        "bytes_read": 274769,
+        "digest_bytes": 272049
+      },
+      "local_image_counts": {
+        "bytes_read": 270613,
+        "digest_bytes": 267933
+      },
+      "measured_tokens": 35705,
+      "evidence": [
+        "/tmp/std-ordered-map-998-land.log",
+        "std-ordered-map-998/front-cost-reproduce.log"
+      ]
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

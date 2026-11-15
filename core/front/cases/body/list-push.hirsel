@@ -7,6 +7,10 @@
 // A drop has no grant, so grow raises out of a push there: the taken element is
 // the caller's until a store consumes it, so the raise drops it exactly once.
 // expect: run raised_push() = fail Capacity trace 7
+// push taken as a function value hands the element back in its Error.
+// expect: run value_error() = 50
+// The pushed place is evaluated once.
+// expect: run effectful_place() = 107
 fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)] {
     list.push(mut xs, take x)
 }
@@ -90,4 +94,30 @@ fn raised_push() -> u64 {
         Ok(_p) => 0u64,
         Error(_) => 999
     }
+}
+
+fn value_error() -> u64 {
+    let cb: fn(mut List[String], take String) -> Result[(), (Capacity, String)] = list.push
+    let mut xs: List[String] = list.new()
+    let x = result.unwrap(string.from("seven"))
+    let r = bound bytes 0 {
+        cb(mut xs, take x)
+    }
+    match r {
+        Ok(Error((_, take back))) => string.byte_len(back) * 10 + list.len(xs),
+        _ => 0
+    }
+}
+
+fn bump(mut n: u64) -> u64 {
+    n += 1
+    0
+}
+
+fn effectful_place() -> u64 {
+    let mut xs: List[List[u64]] = list.new()
+    result.unwrap(list.push(mut xs, list.new()))
+    let mut n: u64 = 0
+    result.unwrap(list.push(mut xs[bump(mut n)], 7))
+    n * 100 + xs[0][0]
 }

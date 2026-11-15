@@ -6,7 +6,7 @@
 //! covers every page, and a request reads and checks only the sections record
 //! and the pages it touches, once.
 use super::*;
-use hirsel_core_ids::published::{Descriptor, Map, Publisher, Source, Table};
+use hirsel_core_ids::published::{Descriptor, Map, Publisher, Reader, Source, Table};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -51,14 +51,15 @@ fn key_hash(key: &[u8]) -> u64 {
 }
 
 pub(crate) struct Writer {
-    namespace: ContentHash,
+    reader: Arc<Reader>,
     bytes: Vec<u8>,
     tables: Vec<Section>,
 }
 impl Writer {
-    pub fn new(namespace: ContentHash) -> Self {
+    /// The written tables read back through `reader`, the published image's own.
+    pub fn new(reader: Arc<Reader>) -> Self {
         Self {
-            namespace,
+            reader,
             bytes: Vec::new(),
             tables: Vec::new(),
         }
@@ -105,7 +106,7 @@ impl Writer {
             slots,
         });
         let d = Descriptor {
-            namespace: self.namespace,
+            namespace: self.reader.namespace(),
             table: self.tables.len() as u32 - 1,
             len: u32::try_from(rows.len()).map_err(|_| too_large())?,
         };
@@ -138,7 +139,8 @@ impl Publisher for Writer {
         table: &Table<T>,
     ) -> io::Result<Table<T>> {
         let rows = table.iter().map(encode).collect::<io::Result<Vec<_>>>()?;
-        Table::from_descriptor(self.section(&rows, None)?)
+        let descriptor = self.section(&rows, None)?;
+        self.reader.table(descriptor)
     }
     fn map<
         K: Clone
@@ -165,7 +167,8 @@ impl Publisher for Writer {
             row.extend_from_slice(&encode(value)?);
             rows.push(row);
         }
-        Map::from_descriptor(self.section(&rows, Some(&keys))?)
+        let descriptor = self.section(&rows, Some(&keys))?;
+        self.reader.map(descriptor)
     }
 }
 
@@ -423,7 +426,7 @@ mod tests {
         let store = Store::image(dir.path()).unwrap();
         let namespace = ContentHash::of_bytes(b"section-lookup-law");
         let index = Arc::new(DiskIndex::new(dir.path()).unwrap());
-        hirsel_core_ids::published::bind_source(namespace, index.clone());
+        let reader = Reader::new(namespace, index.clone());
         let (a, b) = colliding();
         let big = vec![7u8; 3 * PAGE + 5];
         let strings: Vec<(String, Vec<u8>)> = ["a", "ab", "", "a\0"]
@@ -449,7 +452,7 @@ mod tests {
         let lone = vec![(a.clone(), vec![1u8])];
         let rows: Vec<Vec<u8>> = (0..40).map(|i| vec![i as u8; 1000 + i]).collect();
 
-        let mut writer = Writer::new(namespace);
+        let mut writer = Writer::new(reader.clone());
         writer.map::<String, Vec<u8>>(&Map::default()).unwrap();
         writer
             .map(&strings.iter().cloned().collect::<Map<_, _>>())
@@ -517,10 +520,10 @@ mod tests {
         let store = Store::image(dir.path()).unwrap();
         let namespace = ContentHash::of_bytes(b"concurrent-lookup-law");
         let index = Arc::new(DiskIndex::new(dir.path()).unwrap());
-        hirsel_core_ids::published::bind_source(namespace, index.clone());
+        let reader = Reader::new(namespace, index.clone());
         let numbers: Vec<(u64, u64)> = (0..3000).map(|i| (i * 7919, i * i)).collect();
         let names: Vec<String> = (0..500).map(|i| format!("name {i}")).collect();
-        let mut writer = Writer::new(namespace);
+        let mut writer = Writer::new(reader.clone());
         let map = writer
             .map(&numbers.iter().cloned().collect::<Map<_, _>>())
             .unwrap();

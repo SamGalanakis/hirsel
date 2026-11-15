@@ -1,7 +1,7 @@
 //! Immutable packages with a fixed root and content-addressed, indexed rows.
 use super::*;
 use hirsel_core_front::Library;
-use hirsel_core_ids::published::{Map, Publisher, Sparse, Table};
+use hirsel_core_ids::published::{Map, Publisher, Reader, Sparse, Table};
 use std::sync::OnceLock;
 
 #[derive(Clone, Default)]
@@ -55,6 +55,8 @@ pub struct CoreImage {
     files: std::sync::Mutex<BTreeMap<usize, Arc<FileProduct>>>,
     bodies: Sparse<Arc<DefinitionProduct>>,
     indexed: Arc<crate::image_index::DiskIndex>,
+    /// This image's tables, over its own store and no other reader's.
+    reader: Arc<Reader>,
 }
 impl CoreImage {
     pub(crate) fn store_root(&self) -> PathBuf {
@@ -81,7 +83,7 @@ impl CoreImage {
         }
         let indexed = Arc::new(crate::image_index::DiskIndex::new(path)?);
         indexed.open(identity, root.sections);
-        hirsel_core_ids::published::bind_source(root.namespace, indexed.clone());
+        let reader = Reader::new(root.namespace, indexed.clone());
         Ok(Some(Arc::new(Self {
             store,
             identity,
@@ -92,6 +94,7 @@ impl CoreImage {
             files: std::sync::Mutex::default(),
             bodies: Sparse::default(),
             indexed,
+            reader,
         })))
     }
     pub(crate) fn directory(&self) -> io::Result<Arc<ImageDirectory>> {
@@ -231,7 +234,7 @@ impl CoreImage {
     fn read<T: serde::de::DeserializeOwned>(&self, record: ContentHash) -> io::Result<T> {
         let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         let bytes = self.store.get(record)?.ok_or_else(miss)?;
-        decode(&bytes).ok_or_else(miss)
+        self.reader.decode(|| decode(&bytes)).ok_or_else(miss)
     }
 }
 fn miss() -> io::Error {
@@ -314,8 +317,8 @@ impl Driver {
         }
         let namespace = product.snapshot;
         let indexed = Arc::new(crate::image_index::DiskIndex::new(&store_path)?);
-        hirsel_core_ids::published::bind_source(namespace, indexed.clone());
-        let mut writer = crate::image_index::Writer::new(namespace);
+        let reader = Reader::new(namespace, indexed.clone());
+        let mut writer = crate::image_index::Writer::new(reader.clone());
         let directory = ImageDirectory {
             compiler: compiler_identity()?,
             inputs,
@@ -353,6 +356,7 @@ impl Driver {
             files: std::sync::Mutex::default(),
             bodies: Sparse::default(),
             indexed,
+            reader,
         });
         let _ = image.directory.set(Arc::new(directory));
         for (i, file) in product.files.iter().enumerate() {

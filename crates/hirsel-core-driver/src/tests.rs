@@ -1546,27 +1546,35 @@ fn copied_indexed_image_reads_its_live_store() {
         )
         .unwrap();
     let original = image.unwrap();
-    let copied = dir.path().join("copied");
-    std::fs::create_dir(&copied).unwrap();
-    for entry in std::fs::read_dir(original.store_root()).unwrap() {
-        let entry = entry.unwrap();
-        if entry.path().is_file() {
-            std::fs::copy(entry.path(), copied.join(entry.file_name())).unwrap();
+    let copy = |name: &str| {
+        let copied = dir.path().join(name);
+        std::fs::create_dir(&copied).unwrap();
+        for entry in std::fs::read_dir(original.store_root()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_file() {
+                std::fs::copy(entry.path(), copied.join(entry.file_name())).unwrap();
+            }
         }
-    }
-    let reopened = CoreImage::open(&copied).unwrap().unwrap();
+        copied
+    };
+    let answer = DefPath::from_full("core@1/lib/answer").unwrap();
+    let reads = |image: &CoreImage| {
+        image.resolve_name(&answer).unwrap().is_some() && image.demand_declaration(&answer).unwrap()
+    };
+    let open = |root: &std::path::Path| CoreImage::open(root).unwrap().unwrap();
+    // Another open of the same image, dropped or left without its store, never
+    // reaches a cold open's reads.
+    let (first, spare) = (open(&original.store_root()), copy("spare"));
+    drop(open(&spare));
+    assert!(reads(&first));
+    let (first, second) = (open(&original.store_root()), open(&spare));
+    std::fs::remove_dir_all(&spare).unwrap();
+    assert!(reads(&first));
+    drop(second);
+    // And a copy reads its own store, not the one it was copied from.
+    let reopened = open(&copy("copied"));
     std::fs::remove_dir_all(original.store_root()).unwrap();
-    assert!(
-        reopened
-            .resolve_name(&DefPath::from_full("core@1/lib/answer").unwrap())
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        reopened
-            .demand_declaration(&DefPath::from_full("core@1/lib/answer").unwrap())
-            .unwrap()
-    );
+    assert!(reads(&reopened));
 }
 
 #[test]

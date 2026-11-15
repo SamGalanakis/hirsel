@@ -229,11 +229,6 @@ pub struct Published<T> {
     provider: Arc<dyn Provider<T>>,
     cache: Rows<T>,
     ranges: Sparse<Vec<T>>,
-    // The source's answer for exact key bytes. It trusts nothing and guards
-    // nothing, and it is measured, not redundant: without it the suite edit
-    // probes 13,698 times instead of 3,424 and its image index costs 10.58 M
-    // instead of 8.75 M (959 hit path).
-    lookups: Mutex<rustc_hash::FxHashMap<Vec<u8>, Option<u32>>>,
 }
 impl<T> Published<T> {
     fn row(&self, index: usize) -> &T {
@@ -251,113 +246,139 @@ impl<T> Published<T> {
             })
             .unwrap_or_else(|e| miss(e))
     }
-    fn find(&self, key: &(impl Serialize + ?Sized)) -> Option<u32> {
-        #[cfg(feature = "front-observer")]
-        if self.observed {
-            return observed(|| self.find_plain(key));
-        }
-        self.find_plain(key)
-    }
+    /// A key's row by one probe; its caller observes it.
     #[inline(always)]
-    fn find_plain(&self, key: &(impl Serialize + ?Sized)) -> Option<u32> {
+    fn find(&self, key: &(impl Serialize + ?Sized)) -> Option<u32> {
         with_lookup_key(key, |key| {
-            if let Some(index) = self.lookups.lock().unwrap().get(key) {
-                return *index;
-            }
-            let index = self.provider.find(key).unwrap_or_else(|e| miss(e));
-            self.lookups.lock().unwrap().insert(key.to_vec(), index);
-            index
+            self.provider.find(key).unwrap_or_else(|e| miss(e))
         })
     }
 }
-type Registry = BTreeMap<ContentHash, BTreeMap<(u32, TypeId), Weak<dyn Any + Send + Sync>>>;
-fn registry() -> &'static Mutex<Registry> {
-    static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
-    REGISTRY.get_or_init(Mutex::default)
-}
-/// Retain the returned binding while an image can be decoded. Registrations are
-/// weak; package/request destruction releases the demanded rows normally.
+/// A published table over its provider, owned by its caller and shared with no
+/// other table. An image's tables come from its [`Reader`].
 pub fn bind<T: Send + Sync + 'static>(
     descriptor: Descriptor,
     provider: Arc<dyn Provider<T>>,
 ) -> Arc<Published<T>> {
-    let binding = Arc::new(Published {
+    Arc::new(Published {
         #[cfg(feature = "front-observer")]
         observed: OBSERVE.with_borrow(|active| active.is_some()),
         descriptor,
         provider,
         cache: Rows::new(),
         ranges: Sparse::default(),
-        lookups: Mutex::default(),
-    });
-    let erased: Arc<dyn Any + Send + Sync> = binding.clone();
-    registry()
-        .lock()
-        .unwrap()
-        .entry(descriptor.namespace)
-        .or_default()
-        .insert(
-            (descriptor.table, TypeId::of::<T>()),
-            Arc::downgrade(&erased),
-        );
-    binding
+    })
 }
 /// External record bytes, indexed within one immutable package namespace.
 pub trait Source: Send + Sync {
     fn row(&self, table: Descriptor, index: u32) -> io::Result<Vec<u8>>;
     fn find(&self, table: Descriptor, key: &[u8]) -> io::Result<Option<u32>>;
 }
-fn sources() -> &'static Mutex<BTreeMap<ContentHash, Weak<dyn Source>>> {
-    static SOURCES: OnceLock<Mutex<BTreeMap<ContentHash, Weak<dyn Source>>>> = OnceLock::new();
-    SOURCES.get_or_init(Mutex::default)
+type Bindings = BTreeMap<(u32, TypeId), Weak<dyn Any + Send + Sync>>;
+/// One opened image: its live source and the tables decoded from it. A
+/// descriptor resolves only through the reader decoding it, so opening or
+/// dropping another reader of the same namespace never reaches this one.
+pub struct Reader {
+    namespace: ContentHash,
+    source: Arc<dyn Source>,
+    bindings: Mutex<Bindings>,
 }
-pub fn bind_source(namespace: ContentHash, source: Arc<dyn Source>) {
-    sources()
-        .lock()
-        .unwrap()
-        .insert(namespace, Arc::downgrade(&source));
-    // A reopened/copied cache binds new decoders to that reader's live store.
-    registry().lock().unwrap().remove(&namespace);
+thread_local! {
+    static DECODING: std::cell::RefCell<Option<Arc<Reader>>> =
+        const { std::cell::RefCell::new(None) };
 }
-struct Decoder<T>(Descriptor, Arc<dyn Source>, std::marker::PhantomData<T>);
+impl Reader {
+    pub fn new(namespace: ContentHash, source: Arc<dyn Source>) -> Arc<Self> {
+        Arc::new(Self {
+            namespace,
+            source,
+            bindings: Mutex::default(),
+        })
+    }
+    pub fn namespace(&self) -> ContentHash {
+        self.namespace
+    }
+    /// Run a decode whose published descriptors resolve to this reader's tables.
+    pub fn decode<R>(self: &Arc<Self>, f: impl FnOnce() -> R) -> R {
+        struct Restore(Option<Arc<Reader>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let previous = self.0.take();
+                DECODING.with_borrow_mut(|active| *active = previous);
+            }
+        }
+        let _restore = Restore(DECODING.with_borrow_mut(|active| active.replace(Arc::clone(self))));
+        f()
+    }
+    pub fn table<T: serde::de::DeserializeOwned + Send + Sync + 'static>(
+        self: &Arc<Self>,
+        descriptor: Descriptor,
+    ) -> io::Result<Table<T>> {
+        Ok(Table::published(self.binding(descriptor)?))
+    }
+    pub fn map<K, V>(self: &Arc<Self>, descriptor: Descriptor) -> io::Result<Map<K, V>>
+    where
+        K: Ord + std::hash::Hash + serde::de::DeserializeOwned + Send + Sync + 'static,
+        V: serde::de::DeserializeOwned + Send + Sync + 'static,
+    {
+        Ok(Map::published(self.binding(descriptor)?))
+    }
+    fn binding<T: serde::de::DeserializeOwned + Send + Sync + 'static>(
+        self: &Arc<Self>,
+        descriptor: Descriptor,
+    ) -> io::Result<Arc<Published<T>>> {
+        if descriptor.namespace != self.namespace {
+            return Err(io::Error::other(
+                "a published table names another image's namespace than the reader decoding it",
+            ));
+        }
+        let key = (descriptor.table, TypeId::of::<T>());
+        let mut bindings = self.bindings.lock().unwrap();
+        if let Some(bound) = bindings
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .and_then(|p| p.downcast().ok())
+        {
+            return Ok(bound);
+        }
+        let bound = bind(
+            descriptor,
+            Arc::new(Decoder(
+                descriptor,
+                Arc::clone(self),
+                std::marker::PhantomData,
+            )),
+        );
+        let erased: Arc<dyn Any + Send + Sync> = bound.clone();
+        bindings.insert(key, Arc::downgrade(&erased));
+        Ok(bound)
+    }
+}
+struct Decoder<T>(Descriptor, Arc<Reader>, std::marker::PhantomData<T>);
 impl<T: serde::de::DeserializeOwned + Send + Sync> Provider<T> for Decoder<T> {
     fn row(&self, index: u32) -> io::Result<T> {
         use bincode::Options;
-        let bytes = self.1.row(self.0, index)?;
-        bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_limit(bytes.len() as u64)
-            .reject_trailing_bytes()
-            .deserialize(&bytes)
-            .map_err(io::Error::other)
+        let bytes = self.1.source.row(self.0, index)?;
+        self.1.decode(|| {
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(bytes.len() as u64)
+                .reject_trailing_bytes()
+                .deserialize(&bytes)
+                .map_err(io::Error::other)
+        })
     }
     fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
-        self.1.find(self.0, key)
+        self.1.source.find(self.0, key)
     }
 }
 fn binding<T: serde::de::DeserializeOwned + Send + Sync + 'static>(
     descriptor: Descriptor,
 ) -> io::Result<Arc<Published<T>>> {
-    let cached = registry()
-        .lock()
-        .unwrap()
-        .get(&descriptor.namespace)
-        .and_then(|rows| rows.get(&(descriptor.table, TypeId::of::<T>())))
-        .and_then(Weak::upgrade)
-        .and_then(|p| p.downcast().ok());
-    if let Some(cached) = cached {
-        return Ok(cached);
-    }
-    let source = sources()
-        .lock()
-        .unwrap()
-        .get(&descriptor.namespace)
-        .and_then(Weak::upgrade)
-        .ok_or_else(|| io::Error::other("published package binding is unavailable"))?;
-    Ok(bind(
-        descriptor,
-        Arc::new(Decoder(descriptor, source, std::marker::PhantomData)),
-    ))
+    DECODING
+        .with_borrow(Clone::clone)
+        .ok_or_else(|| io::Error::other("a published table is decoded outside its image's reader"))?
+        .binding(descriptor)
 }
 
 #[derive(Clone)]
@@ -396,12 +417,6 @@ impl<T> From<Vec<T>> for Table<T> {
     }
 }
 impl<T> Table<T> {
-    pub fn from_descriptor(descriptor: Descriptor) -> io::Result<Self>
-    where
-        T: serde::de::DeserializeOwned + Send + Sync + 'static,
-    {
-        Ok(Self::published(binding(descriptor)?))
-    }
     pub fn published(prefix: Arc<Published<T>>) -> Self {
         Self {
             prefix: Some(prefix),
@@ -538,16 +553,30 @@ impl<'de, T: serde::de::DeserializeOwned + Send + Sync + 'static> Deserialize<'d
     }
 }
 
-#[derive(Clone)]
 pub struct Map<K: Ord + std::hash::Hash, V> {
     prefix: Option<Arc<Published<(K, V)>>>,
     own: rustc_hash::FxHashMap<K, V>,
+    /// The prefix's row for each key this clone asked, present or absent, by
+    /// the key itself: a repeat neither encodes nor probes. Only a clone has
+    /// one, so it lives as long as the request that cloned the map, and the
+    /// image's own maps keep no request's keys.
+    answers: Option<Box<Mutex<rustc_hash::FxHashMap<K, Option<u32>>>>>,
+}
+impl<K: Ord + std::hash::Hash + Clone, V: Clone> Clone for Map<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            prefix: self.prefix.clone(),
+            own: self.own.clone(),
+            answers: self.prefix.as_ref().map(|_| Box::default()),
+        }
+    }
 }
 impl<K: Ord + std::hash::Hash, V> Default for Map<K, V> {
     fn default() -> Self {
         Self {
             prefix: None,
             own: rustc_hash::FxHashMap::default(),
+            answers: None,
         }
     }
 }
@@ -560,16 +589,13 @@ impl<K: Ord + std::hash::Hash + fmt::Debug, V: fmt::Debug> fmt::Debug for Map<K,
     }
 }
 impl<K: Ord + std::hash::Hash, V> Map<K, V> {
-    pub fn from_descriptor(descriptor: Descriptor) -> io::Result<Self>
-    where
-        K: serde::de::DeserializeOwned + Send + Sync + 'static,
-        V: serde::de::DeserializeOwned + Send + Sync + 'static,
-    {
-        Ok(Self::published(binding(descriptor)?))
-    }
-    pub fn index_of<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> Option<usize>
+    pub fn index_of<Q: Ord + std::hash::Hash + Serialize + ToOwned + ?Sized>(
+        &self,
+        key: &Q,
+    ) -> Option<usize>
     where
         K: Borrow<Q>,
+        Q::Owned: Into<K>,
     {
         if self.own.contains_key(key) {
             return Some(
@@ -579,18 +605,60 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
                     + self.own.keys().position(|k| k.borrow() == key).unwrap(),
             );
         }
-        self.prefix.as_ref()?.find(key).map(|i| i as usize)
+        self.prefix.as_ref()?;
+        self.find_published(key).map(|i| i as usize)
+    }
+    #[inline(never)]
+    fn find_published<Q: Ord + std::hash::Hash + Serialize + ToOwned + ?Sized>(
+        &self,
+        key: &Q,
+    ) -> Option<u32>
+    where
+        K: Borrow<Q>,
+        Q::Owned: Into<K>,
+    {
+        #[cfg(feature = "front-observer")]
+        if self.prefix.as_ref().unwrap().observed {
+            return observed(|| self.find_published_plain(key));
+        }
+        self.find_published_plain(key)
+    }
+    #[inline(always)]
+    fn find_published_plain<Q: Ord + std::hash::Hash + Serialize + ToOwned + ?Sized>(
+        &self,
+        key: &Q,
+    ) -> Option<u32>
+    where
+        K: Borrow<Q>,
+        Q::Owned: Into<K>,
+    {
+        let prefix = self.prefix.as_ref().unwrap();
+        let Some(answers) = &self.answers else {
+            return prefix.find(key);
+        };
+        if let Some(&row) = answers.lock().unwrap().get(key) {
+            return row;
+        }
+        // An unwinding source error leaves no answer.
+        let row = prefix.find(key);
+        answers.lock().unwrap().insert(key.to_owned().into(), row);
+        row
     }
     pub fn published(prefix: Arc<Published<(K, V)>>) -> Self {
         Self {
             prefix: Some(prefix),
             own: rustc_hash::FxHashMap::default(),
+            answers: None,
         }
     }
     #[inline]
-    pub fn get<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> Option<&V>
+    pub fn get<Q: Ord + std::hash::Hash + Serialize + ToOwned + ?Sized>(
+        &self,
+        key: &Q,
+    ) -> Option<&V>
     where
-        K: Borrow<Q> + Clone,
+        K: Borrow<Q>,
+        Q::Owned: Into<K>,
     {
         if let Some(value) = self.own.get(key) {
             return Some(value);
@@ -599,9 +667,13 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
         self.get_published(key)
     }
     #[inline(never)]
-    fn get_published<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> Option<&V>
+    fn get_published<Q: Ord + std::hash::Hash + Serialize + ToOwned + ?Sized>(
+        &self,
+        key: &Q,
+    ) -> Option<&V>
     where
-        K: Borrow<Q> + Clone,
+        K: Borrow<Q>,
+        Q::Owned: Into<K>,
     {
         #[cfg(feature = "front-observer")]
         if self.prefix.as_ref().unwrap().observed {
@@ -610,21 +682,24 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
         self.get_published_plain(key)
     }
     #[inline(always)]
-    fn get_published_plain<Q: Ord + std::hash::Hash + Serialize + ?Sized>(
+    fn get_published_plain<Q: Ord + std::hash::Hash + Serialize + ToOwned + ?Sized>(
         &self,
         key: &Q,
     ) -> Option<&V>
     where
-        K: Borrow<Q> + Clone,
+        K: Borrow<Q>,
+        Q::Owned: Into<K>,
     {
-        // One probe of the resident sections; the row's decoded value is kept.
-        let prefix = self.prefix.as_ref().unwrap();
-        let i = prefix.find(key)?;
-        Some(&prefix.row(i as usize).1)
+        let i = self.find_published_plain(key)?;
+        Some(&self.prefix.as_ref().unwrap().row_plain(i as usize).1)
     }
-    pub fn contains_key<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> bool
+    pub fn contains_key<Q: Ord + std::hash::Hash + Serialize + ToOwned + ?Sized>(
+        &self,
+        key: &Q,
+    ) -> bool
     where
-        K: Borrow<Q> + Clone,
+        K: Borrow<Q>,
+        Q::Owned: Into<K>,
     {
         self.get(key).is_some()
     }
@@ -682,6 +757,7 @@ impl<K: Ord + std::hash::Hash, V> FromIterator<(K, V)> for Map<K, V> {
         Self {
             prefix: None,
             own: i.into_iter().collect(),
+            answers: None,
         }
     }
 }
@@ -703,7 +779,11 @@ impl<
             .map(binding)
             .transpose()
             .map_err(serde::de::Error::custom)?;
-        Ok(Self { prefix, own })
+        Ok(Self {
+            prefix,
+            own,
+            answers: None,
+        })
     }
 }
 
@@ -829,10 +909,15 @@ mod tests {
             provider,
         ));
         let mut other = map.clone();
-        other.insert(7, 99);
+        // The clone's answers for 7 (present) and 8 (absent) precede its own.
+        assert_eq!((other.get(&7), other.get(&8)), (Some(&42), None));
+        assert_eq!(other.index_of(&8), None);
         other.insert(8, 1);
+        assert_eq!((other.get(&8), other.index_of(&8)), (Some(&1), Some(1)));
+        other.insert(7, 99);
         assert_eq!((other.get(&7), other.get(&8)), (Some(&99), Some(&1)));
         assert_eq!((map.get(&7), map.get(&8)), (Some(&42), None));
+        assert_eq!((map.index_of(&7), map.index_of(&8)), (Some(0), None));
     }
     struct Missing;
     impl Provider<u64> for Missing {
@@ -851,5 +936,184 @@ mod tests {
         let error = catch_io(|| Ok(rows[0])).unwrap_err();
         assert_eq!(error.to_string(), "damaged external row");
         assert!(std::panic::catch_unwind(|| catch_io::<()>(|| panic!("compiler bug"))).is_err());
+    }
+
+    /// Rows of four same-typed tables per image: two maps holding key 7 at
+    /// different rows, and two plain tables. Every value names its image and table.
+    struct Image(u32);
+    impl Image {
+        fn rows(&self, table: u32) -> Vec<Vec<u8>> {
+            let tag = self.0 * 100 + table * 10;
+            match table {
+                0 => vec![
+                    bincode::serialize(&(7u32, tag)).unwrap(),
+                    bincode::serialize(&(9u32, tag + 1)).unwrap(),
+                ],
+                1 => vec![
+                    bincode::serialize(&(9u32, tag)).unwrap(),
+                    bincode::serialize(&(7u32, tag + 1)).unwrap(),
+                ],
+                _ => vec![bincode::serialize(&tag).unwrap()],
+            }
+        }
+    }
+    impl Source for Image {
+        fn row(&self, table: Descriptor, index: u32) -> io::Result<Vec<u8>> {
+            Ok(self.rows(table.table)[index as usize].clone())
+        }
+        fn find(&self, table: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
+            Ok(self
+                .rows(table.table)
+                .iter()
+                .position(|row| row.starts_with(key))
+                .map(|i| i as u32))
+        }
+    }
+    /// Law: a lookup answers from the table it names, in the image it names. Two
+    /// same-typed tables of one image, or the same table of two images, share
+    /// no row and no answer, whether opened directly or decoded from a value.
+    #[test]
+    fn same_typed_tables_of_two_images_answer_apart() {
+        let open = |tag: u32| {
+            let namespace = ContentHash::of_bytes(&tag.to_le_bytes());
+            (Reader::new(namespace, Arc::new(Image(tag))), namespace)
+        };
+        let ((one, ns1), (two, ns2)) = (open(1), open(2));
+        let at = |namespace, table, len| Descriptor {
+            namespace,
+            table,
+            len,
+        };
+        for (reader, namespace, tag) in [(&one, ns1, 100), (&two, ns2, 200)] {
+            let first: Map<u32, u32> = reader.map(at(namespace, 0, 2)).unwrap();
+            let second: Map<u32, u32> = reader.map(at(namespace, 1, 2)).unwrap();
+            let (first, second) = (first.clone(), second.clone());
+            assert_eq!((first.get(&7), first.index_of(&7)), (Some(&tag), Some(0)));
+            assert_eq!(
+                (second.get(&7), second.index_of(&7)),
+                (Some(&(tag + 11)), Some(1))
+            );
+            let rows: Vec<Table<u32>> = [2, 3]
+                .map(|t| reader.table(at(namespace, t, 1)).unwrap())
+                .into();
+            assert_eq!((rows[0][0], rows[1][0]), (tag + 20, tag + 30));
+            // A value's descriptor decodes into the reader decoding it.
+            let wire = bincode::serialize(&second).unwrap();
+            let decoded: Map<u32, u32> = reader.decode(|| bincode::deserialize(&wire)).unwrap();
+            assert_eq!(decoded.get(&9), Some(&(tag + 10)));
+        }
+        let wire = bincode::serialize(&one.map::<u32, u32>(at(ns1, 0, 2)).unwrap()).unwrap();
+        assert!(
+            two.decode(|| bincode::deserialize::<Map<u32, u32>>(&wire))
+                .is_err()
+        );
+        assert!(bincode::deserialize::<Map<u32, u32>>(&wire).is_err());
+    }
+
+    /// A key whose encoding asks another map, and panics when it is 13.
+    #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    struct Asking(u32);
+    thread_local! {
+        static ASKED: Map<u32, u32> = Map::published(bind(
+            Descriptor { namespace: ContentHash::of_bytes(b"asked"), table: 1, len: 1 },
+            Arc::new(Prefix) as Arc<dyn Provider<(u32, u32)>>,
+        ))
+        .clone();
+    }
+    impl Serialize for Asking {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            assert_eq!(ASKED.with(|asked| asked.get(&7).copied()), Some(42));
+            assert_ne!(self.0, 13, "a key that cannot encode");
+            self.0.serialize(s)
+        }
+    }
+    /// Its rows, whose index asks another map while it probes.
+    struct Asker;
+    impl Provider<(Asking, u32)> for Asker {
+        fn row(&self, index: u32) -> io::Result<(Asking, u32)> {
+            Ok((Asking(7 + index), 70 + index))
+        }
+        fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
+            assert_eq!(ASKED.with(|asked| asked.index_of(&7)), Some(0));
+            Ok(match key {
+                [7, 0, 0, 0] => Some(0),
+                [8, 0, 0, 0] => Some(1),
+                _ => None,
+            })
+        }
+    }
+    /// Law: a lookup made while encoding a key or probing an index answers as
+    /// it would alone and leaves the outer key's bytes intact; a lookup that
+    /// unwinds leaves the next one unharmed.
+    #[test]
+    fn lookups_inside_a_lookup_and_after_an_unwind_answer_exactly() {
+        let map = Map::published(bind(
+            Descriptor {
+                namespace: ContentHash::of_bytes(b"asker"),
+                table: 0,
+                len: 2,
+            },
+            Arc::new(Asker) as Arc<dyn Provider<(Asking, u32)>>,
+        ))
+        .clone();
+        assert_eq!(
+            (map.get(&Asking(8)), map.get(&Asking(7))),
+            (Some(&71), Some(&70))
+        );
+        assert_eq!(map.get(&Asking(9)), None);
+        let unwound =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| map.get(&Asking(13))));
+        assert!(unwound.is_err());
+        assert_eq!(
+            (map.get(&Asking(8)), map.index_of(&Asking(9))),
+            (Some(&71), None)
+        );
+        assert_eq!(
+            (map.get(&Asking(10)), map.index_of(&Asking(7))),
+            (None, Some(0))
+        );
+        assert_eq!(encode_lookup_key(&Asking(8)), [8, 0, 0, 0]);
+    }
+
+    /// An index and rows that each fail once before answering.
+    #[derive(Default)]
+    struct Flaky {
+        finds: std::sync::atomic::AtomicU32,
+        rows: std::sync::atomic::AtomicU32,
+    }
+    impl Provider<(u32, u32)> for Flaky {
+        fn row(&self, index: u32) -> io::Result<(u32, u32)> {
+            match self.rows.fetch_add(1, std::sync::atomic::Ordering::Relaxed) {
+                0 => Err(io::Error::other("row failed")),
+                _ => Ok((7, 42 + index)),
+            }
+        }
+        fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
+            match self
+                .finds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            {
+                0 => Err(io::Error::other("find failed")),
+                _ => Ok((key == [7, 0, 0, 0]).then_some(0)),
+            }
+        }
+    }
+    /// Law: a source error is that lookup's error, never its answer; the next
+    /// lookup of the same key asks the source again.
+    #[test]
+    fn a_failed_lookup_leaves_no_answer() {
+        let map = Map::published(bind(
+            Descriptor {
+                namespace: ContentHash::of_bytes(b"flaky"),
+                table: 0,
+                len: 1,
+            },
+            Arc::new(Flaky::default()) as Arc<dyn Provider<(u32, u32)>>,
+        ))
+        .clone();
+        let ask = || catch_io(|| Ok(map.get(&7).copied())).map_err(|e| e.to_string());
+        assert_eq!(ask(), Err("find failed".into()));
+        assert_eq!(ask(), Err("row failed".into()));
+        assert_eq!(ask(), Ok(Some(42)));
     }
 }

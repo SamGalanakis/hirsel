@@ -203,11 +203,13 @@ impl Types {
     pub fn overlay(base: std::sync::Arc<Types>) -> Self {
         let base_len = base.len();
         Self {
+            // The base's published kinds, asked through this overlay's own
+            // clone, so its answers live as long as the overlay.
+            published_map: base.published_map.clone(),
             base: Some(base),
             base_len,
             kinds: Table::default(),
             map: hashbrown::HashTable::new(),
-            published_map: Map::default(),
         }
     }
     fn find(&self, k: &TyKind) -> Option<TyId> {
@@ -219,18 +221,31 @@ impl Types {
     fn find_shared(&self, k: &TyKind) -> Option<TyId> {
         self.base
             .as_ref()
-            .and_then(|b| b.find(k))
+            .and_then(|b| b.find_interned(k, None))
             .or_else(|| self.published_map.get(k).copied())
     }
     #[inline(always)]
     fn find_hashed(&self, k: &TyKind, hash: u64) -> Option<TyId> {
+        self.find_interned(k, Some(hash))
+            .or_else(|| self.published_map.get(k).copied())
+    }
+    /// A kind interned in this table or its bases, not in a published prefix:
+    /// an overlay asks its own clone of the base's published kinds.
+    fn find_interned(&self, k: &TyKind, hash: Option<u64>) -> Option<TyId> {
+        if self.map.is_empty() {
+            return self.base.as_ref().and_then(|b| b.find_interned(k, hash));
+        }
+        let hash = hash.unwrap_or_else(|| rustc_hash::FxBuildHasher.hash_one(k));
         let kinds = self.kinds.own_slice();
         let base = self.base_len + self.kinds.base_len();
         self.map
             .find(hash, |&(id, _)| kinds[id.0 as usize - base].kind == *k)
             .map(|&(id, _)| id)
-            .or_else(|| self.base.as_ref().and_then(|b| b.find_hashed(k, hash)))
-            .or_else(|| self.published_map.get(k).copied())
+            .or_else(|| {
+                self.base
+                    .as_ref()
+                    .and_then(|b| b.find_interned(k, Some(hash)))
+            })
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
         crate::cost_scope!("phase", "type interning/hashing");

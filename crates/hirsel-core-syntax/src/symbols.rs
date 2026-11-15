@@ -496,34 +496,40 @@ mod tests {
     use super::*;
     use hirsel_core_ids::{
         ContentHash,
-        published::{self, Descriptor, Provider},
+        published::{Descriptor, Reader, Source},
     };
     use std::{
         io,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    /// Table 0 holds the strings, table 1 the name index, as the image codec
+    /// writes them: a string is its u64 length and bytes, a symbol its u32.
     struct Names {
         rows: Vec<(Arc<str>, Symbol)>,
         lookups: AtomicUsize,
     }
-    impl Provider<(Arc<str>, Symbol)> for Names {
-        fn row(&self, index: u32) -> io::Result<(Arc<str>, Symbol)> {
-            Ok(self.rows[index as usize].clone())
+    fn text(name: &str) -> Vec<u8> {
+        let mut bytes = (name.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(name.as_bytes());
+        bytes
+    }
+    impl Source for Names {
+        fn row(&self, table: Descriptor, index: u32) -> io::Result<Vec<u8>> {
+            let (name, id) = &self.rows[index as usize];
+            let mut bytes = text(name);
+            if table.table == 1 {
+                bytes.extend_from_slice(&id.0.to_le_bytes());
+            }
+            Ok(bytes)
         }
-        fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
+        fn find(&self, _: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
             self.lookups.fetch_add(1, Ordering::Relaxed);
             Ok(self
                 .rows
                 .iter()
-                .position(|(name, _)| key.len() == 8 + name.len() && key.ends_with(name.as_bytes()))
+                .position(|(name, _)| key == text(name))
                 .map(|i| i as u32))
-        }
-    }
-    struct Strings(Vec<Arc<str>>);
-    impl Provider<Arc<str>> for Strings {
-        fn row(&self, index: u32) -> io::Result<Arc<str>> {
-            Ok(self.0[index as usize].clone())
         }
     }
 
@@ -545,24 +551,21 @@ mod tests {
             table: 0,
             len: original.len() as u32,
         };
+        let reader = Reader::new(descriptor.namespace, names.clone());
         let mut published = Symbols {
-            strings: published::Table::published(published::bind(
-                descriptor,
-                Arc::new(Strings(original.strings.iter().cloned().collect())),
-            )),
-            published_index: published::Map::published(published::bind(
-                Descriptor {
+            strings: reader.table(descriptor).unwrap(),
+            published_index: reader
+                .map(Descriptor {
                     table: 1,
                     ..descriptor
-                },
-                names.clone(),
-            )),
+                })
+                .unwrap(),
             index: FxHashMap::default(),
             single: original.single,
         };
         let own = published.intern("own_name");
-        let mut reopened: Symbols =
-            serde_json::from_value(serde_json::to_value(&published).unwrap()).unwrap();
+        let wire = serde_json::to_value(&published).unwrap();
+        let mut reopened: Symbols = reader.decode(|| serde_json::from_value(wire).unwrap());
         names.lookups.store(0, Ordering::Relaxed);
         for (name, id) in &original.index {
             if *id != library {

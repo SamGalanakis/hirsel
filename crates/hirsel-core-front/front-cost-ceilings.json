@@ -213,14 +213,14 @@
         "body keys": 317.01722447836437,
         "image read": 23.629743733370677,
         "image digest": 19.008542220977453,
-        "image index": 250.04061055874527
+        "image index": 203.79778742473042
       },
       "image_per_token": {
         "records_opened": 0.0018204733230639965,
         "bytes_read": 7.219465060915838,
         "digests": 0.0018204733230639965,
         "digest_bytes": 7.161854082061336,
-        "index_calls": 1.7196191009662511,
+        "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.02940764598795687,
         "nodes_decoded": 5.601456378658451e-05
@@ -576,6 +576,22 @@
           "index_calls": {
             "before": 1.8995938944125472,
             "after": 1.7196191009662511
+          }
+        }
+      }
+    },
+    {
+      "reason": "959/968 request-local typed memo: a Map clone answers each key it asked, present or absent, by the key itself before any encoding; the shared Published.lookups memo is deleted, and each opened image resolves descriptors through its own Reader. Lowers only the suite-edit image index stage and its index_calls count; observation 7133922 instructions, 42395 calls, +2% rounded. Nothing raised.",
+      "base": "1fb730a5",
+      "changes": {
+        "suite-edit": {
+          "image index": {
+            "before": 250.04061055874527,
+            "after": 203.79778742473042
+          },
+          "index_calls": {
+            "before": 1.7196191009662511,
+            "after": 1.211118890911637
           }
         }
       }

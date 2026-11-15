@@ -230,8 +230,11 @@ static LLVMValueRef call_twin(LLVMBuilderRef builder, LLVMContextRef context,
 // callee's final header. A loan is exclusive or frozen for the whole call
 // (OWN-11), so no other path observes the place while its words travel.
 // `convention` and `registers` are the target's twin calling convention and how
-// many integer words it returns in registers: on x86-64 the C and fast
-// conventions return three, so twins use Swift's, which returns four.
+// many words a twin returns. On x86-64 and AArch64 twins use preserve_most: the
+// cold callee saves the registers the caller keeps live, so the hot path holds
+// its values across the growth call and the cost sits in the twin. A twin
+// returns up to four words, in registers on AArch64; on x86-64 three come back
+// in registers and four come back through a caller slot.
 static void register_carriers(LLVMModuleRef module, LLVMContextRef context,
                               LLVMCallConv convention, unsigned registers) {
     LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
@@ -754,7 +757,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         local_imports(module);
         int x86 = !strncmp(triple, "x86_64", 6), arm = !strncmp(triple, "aarch64", 7) ||
             !strncmp(triple, "arm64", 5);
-        register_carriers(module, context, x86 ? LLVMSwiftCallConv : LLVMFastCallConv,
+        register_carriers(module, context, x86 || arm ? LLVMPreserveMostCallConv : LLVMFastCallConv,
             x86 || arm ? 4 : 2);
         // These passes rewrite signatures and calls by hand: a malformed rewrite
         // stops the build here instead of reaching code generation.

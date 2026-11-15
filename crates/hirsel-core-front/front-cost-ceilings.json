@@ -17,7 +17,7 @@
         "source_bytes": 332990,
         "tokens": 69215,
         "costs": {
-          "parse": 35391479,
+          "parse": 28822805,
           "index": 510931,
           "resolve": 15073239,
           "input counts": 586539,
@@ -39,7 +39,7 @@
         }
       },
       "instructions_per_token": {
-        "parse": 521.5545763201618,
+        "parse": 424.75274290255004,
         "index": 7.530159647475259,
         "resolve": 222.13104095932962,
         "input counts": 8.644080040453659,
@@ -64,7 +64,7 @@
         "source_bytes": 206367,
         "tokens": 35146,
         "costs": {
-          "parse": 21501422,
+          "parse": 15868658,
           "index": 354803,
           "resolve": 7159533,
           "input counts": 304386,
@@ -86,7 +86,7 @@
         }
       },
       "instructions_per_token": {
-        "parse": 624.0112672850396,
+        "parse": 460.5369362089569,
         "index": 10.297046605588118,
         "resolve": 207.78466966368862,
         "input counts": 8.834575769646618,
@@ -111,7 +111,7 @@
         "source_bytes": 140130,
         "tokens": 35705,
         "costs": {
-          "parse": 17140046,
+          "parse": 16063120,
           "index": 600147,
           "resolve": 14743476,
           "input counts": 296471,
@@ -133,7 +133,7 @@
         }
       },
       "instructions_per_token": {
-        "parse": 489.6485086122392,
+        "parse": 458.8820165242963,
         "index": 17.146057975073518,
         "resolve": 421.18470802408626,
         "input counts": 8.472202772720907,
@@ -270,6 +270,16 @@
           }
         }
       }
+    },
+    {
+      "reason": "Lexer-only control after removing the prehashed request index; image-mode suite returned to the lexer-only path. Only parse ceilings lowered.",
+      "commit_range": "0356eb70..6b05f181",
+      "parse_after": {
+        "m1": 28822805,
+        "std": 15868658,
+        "suite-edit": 16063120
+      },
+      "ceiling_basis": "same-binary core-front-cost control; observation plus 2 percent"
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

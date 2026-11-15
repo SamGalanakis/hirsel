@@ -15,8 +15,24 @@ pub(super) struct PendingCall {
     missing_capabilities: bool,
     /// Leading written arguments the checker has already checked.
     checked: usize,
+    /// LANG-11 visits non-literal arguments first; an argument made only of
+    /// unsuffixed literals is checked once the preceding arguments have fixed
+    /// its parameter type.
+    order: Vec<usize>,
 }
 impl Checker<'_, '_> {
+    fn literal_argument(&self, id: ast::ExprId) -> bool {
+        use ast::ExprKind;
+        match self.input.syntax.tree.expressions[id.0 as usize].kind {
+            ExprKind::Literal(ast::Literal::Integer(ref text) | ast::Literal::Float(ref text)) => {
+                literals::suffix(text).is_none()
+            }
+            ExprKind::Tuple(ref children) | ExprKind::Sequence(ref children) => {
+                children.iter().all(|child| self.literal_argument(*child))
+            }
+            _ => false,
+        }
+    }
     pub(super) fn arena_scope_literal(&self, literal: ast::ExprId) -> bool {
         self.calls.iter().any(|call| {
             let CallTarget::Definition(path) = &call.target else {
@@ -477,6 +493,14 @@ impl Checker<'_, '_> {
             .into_iter()
             .filter_map(|(p, _, contract)| contract.then_some(p.0 as usize))
             .collect();
+        let mut order: Vec<_> = (0..arguments.len()).collect();
+        if checked == 0 {
+            let literal = arguments
+                .iter()
+                .map(|argument| self.literal_argument(argument.value))
+                .collect::<Vec<_>>();
+            order.sort_by_key(|i| literal[*i]);
+        }
         let call = self.calls.len();
         self.calls.push(PendingCall {
             id,
@@ -493,6 +517,7 @@ impl Checker<'_, '_> {
             missing_capabilities,
             bad,
             checked,
+            order,
         });
         self.next_argument(call, 0)
     }
@@ -531,17 +556,18 @@ impl Checker<'_, '_> {
         Ok(())
     }
     fn next_argument(&mut self, call: usize, index: usize) -> Result<(), QueryError> {
-        if index == self.calls[call].arguments.len() {
+        if index == self.calls[call].order.len() {
             return self.finish_call(call);
         }
         if index < self.calls[call].checked {
             return self.call_argument(call, index);
         }
         let c = &self.calls[call];
-        let arg = c.arguments[index].value;
+        let actual = c.order[index];
+        let arg = c.arguments[actual].value;
         let frame = c.frame;
-        let unmapped = c.ordinals[index].is_none();
-        let template = c.ordinals[index]
+        let unmapped = c.ordinals[actual].is_none();
+        let template = c.ordinals[actual]
             .filter(|i| !c.capability_parameters.contains(i))
             .and_then(|i| c.function.parameters.get(i))
             .map(|p| p.ty);
@@ -866,9 +892,10 @@ impl Checker<'_, '_> {
     }
     pub(super) fn call_argument(&mut self, call: usize, index: usize) -> Result<(), QueryError> {
         let c = &self.calls[call];
-        let expression = c.arguments[index].value;
+        let actual_index = c.order[index];
+        let expression = c.arguments[actual_index].value;
         let actual = self.value(expression);
-        let template = c.ordinals[index]
+        let template = c.ordinals[actual_index]
             .filter(|i| !c.capability_parameters.contains(i))
             .and_then(|i| c.function.parameters.get(i))
             .map(|p| p.ty);
@@ -879,7 +906,7 @@ impl Checker<'_, '_> {
         let mut bad = self.invalid(actual);
         if !bad {
             if let Some(template) = template {
-                let readonly = c.ordinals[index]
+                let readonly = c.ordinals[actual_index]
                     .and_then(|i| c.function.parameters.get(i))
                     .is_some_and(|p| p.passing != ast::PassingMode::Mut);
                 let function = c.function.clone();

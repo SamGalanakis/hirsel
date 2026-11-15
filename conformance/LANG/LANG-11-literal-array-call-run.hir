@@ -1,0 +1,10 @@
+// rule: LANG-11
+// expect: run
+fn array_value[T](value: Inline[T, 2], x: T) -> u64 {
+  0u64
+}
+
+pub fn main() -> Result[(), ()] {
+  let _ = array_value([1, 2], 3u64)
+  Ok(())
+}

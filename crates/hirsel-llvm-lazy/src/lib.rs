@@ -24,74 +24,8 @@ pub fn compile_ir_for_target(
     loader::compile(ir, speed, target)
 }
 
-/// Version of the atomic object, raw bitcode and semantic-summary product.
-pub const NATIVE_LIBRARY_SCHEMA: u32 = 2;
-/// Raw module transport; ordinary O3 and its existing bounded late round.
-pub const IMPORT_PIPELINE_ID: &str = "raw-module-v1-o3-late";
-/// Preserve the pre-SSA 2048 selection after local/cross-block SSA: float.scan
-/// shrank 1758 -> 1384 -> 1130; excluded json.write_string 2167 -> 1731 -> 1469.
-/// This remains far above LLVM's 250 weighted O3 inline-cost threshold.
-pub const INLINE_IMPORT_INSTRUCTION_LIMIT: u64 = 1280;
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ImportFunction {
-    pub symbol: String,
-    /// Instructions in the public body and its private infallible implementation.
-    pub instructions: u64,
-}
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ImportSummary {
-    pub functions: Vec<ImportFunction>,
-    pub facts: Vec<hirsel_core_ir::roles::BodyFacts>,
-}
-impl ImportSummary {
-    /// Whether a public body is an inline candidate. Keep the unit itself: its
-    /// declarations and private helpers still determine composition order.
-    pub fn selected(&self) -> bool {
-        self.functions
-            .iter()
-            .any(|f| f.instructions <= INLINE_IMPORT_INSTRUCTION_LIMIT)
-    }
-}
-#[derive(Clone, Debug)]
-pub struct NativeLibrary {
-    pub object: hirsel_core_ir::source::NativeObject,
-    pub bitcode: Vec<u8>,
-    pub summary: ImportSummary,
-}
-/// Publish the canonical object and the exact raw emitter module together.
-/// The caller derives facts over the complete publication/dependency graph.
-pub fn compile_library(
-    module: &hirsel_core_ir::Module,
-    facts: &hirsel_core_ir::roles::Facts,
-    target: hirsel_core_layout::Target,
-    observe_charge: bool,
-    debug_lines: bool,
-    object_key: hirsel_core_ids::ContentHash,
-) -> Result<NativeLibrary, String> {
-    let context = std::rc::Rc::new(construction::Context::new()?);
-    let native = core::emit_native_module_in_context(
-        module,
-        target,
-        context,
-        facts,
-        observe_charge,
-        debug_lines,
-    )
-    .map_err(|e| e.to_string())?;
-    let output = loader::library(native, target)?;
-    Ok(NativeLibrary {
-        object: core::finish_native_object(output.object, object_key, debug_lines)?,
-        bitcode: output.bitcode,
-        summary: ImportSummary {
-            functions: output.functions,
-            facts: facts.record(module),
-        },
-    })
-}
-/// An application-owned Core unit, an inline candidate from a published
-/// library, or foreign LLVM text. Owned Core units always enter as `Core`;
-/// `Text` is for hand-written engine composition cases and text differentials.
+/// A Core unit of the program, or foreign LLVM text. `Text` is for hand-written
+/// engine composition cases and text differentials.
 pub enum Unit<'a> {
     Core {
         module: &'a hirsel_core_ir::Module,
@@ -99,16 +33,8 @@ pub enum Unit<'a> {
         observe_charge: bool,
         debug_lines: bool,
     },
-    Text {
-        ir: &'a str,
-        imported: bool,
-    },
-    Import {
-        bitcode: &'a [u8],
-        summary: &'a ImportSummary,
-    },
+    Text(&'a str),
 }
-
 /// One release codegen unit. LLVM resolves instance symbols, internalizes all
 /// owned definitions except `exports`, then runs the ordinary O3 pipeline.
 pub fn emit_program(units: &[Unit<'_>], exports: &[String]) -> Result<Vec<u8>, String> {
@@ -145,11 +71,7 @@ pub fn emit_program_for_target(
                 )
                 .map_err(|e| e.to_string())?,
             )),
-            Unit::Text { ir, imported } => lowered.push(loader::ProgramUnit::Text {
-                ir,
-                imported: *imported,
-            }),
-            Unit::Import { bitcode, .. } => lowered.push(loader::ProgramUnit::Import(bitcode)),
+            Unit::Text(ir) => lowered.push(loader::ProgramUnit::Text(ir)),
         }
     }
     loader::program(lowered, exports, target)

@@ -52,9 +52,9 @@ fn main() {
             .unwrap()
             .success()
     );
-    let bitcode = source.with_file_name("bitcode.cpp");
-    println!("cargo:rerun-if-changed={}", bitcode.display());
-    let bitcode_object = out.join("bitcode.o");
+    let compose = source.with_file_name("compose.cpp");
+    println!("cargo:rerun-if-changed={}", compose.display());
+    let compose_object = out.join("compose.o");
     assert!(
         Command::new(prefix.join("bin/hirsel-clang++"))
             .args([
@@ -74,9 +74,9 @@ fn main() {
             .arg("-I")
             .arg(prefix.join("include"))
             .arg("-c")
-            .arg(&bitcode)
+            .arg(&compose)
             .arg("-o")
-            .arg(&bitcode_object)
+            .arg(&compose_object)
             .status()
             .unwrap()
             .success()
@@ -109,7 +109,7 @@ fn main() {
             .arg(&shared)
             .arg(&source)
             .arg(&copy_object)
-            .arg(&bitcode_object)
+            .arg(&compose_object)
             .arg(&builder_object)
             .arg("-l:libstdc++.so.6")
             .arg("-L")

@@ -454,11 +454,6 @@ impl CheckProduct {
             )));
         }
         let store = Store::new(&options.store)?;
-        let library_store = self
-            .image
-            .as_ref()
-            .map(|i| Store::new(&i.store_root().join("native")))
-            .transpose()?;
         // Callable code variants are LLVM-release only. Dev and evaluator keep
         // the shared semantic bodies; the dev measurements show no gain here.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
@@ -475,11 +470,15 @@ impl CheckProduct {
                     options,
                     inputs.toolchain.runtime,
                     &store,
-                    library_store.as_ref(),
                 )?,
                 None,
             ));
         }
+        let library_store = self
+            .image
+            .as_ref()
+            .map(|i| Store::new(&i.store_root().join("native")))
+            .transpose()?;
         let mut objects = Vec::new();
         let mut names = Vec::new();
         if let Some(records) = &inputs.records {
@@ -1780,7 +1779,8 @@ mod tests {
         run_clean(&native.executable, 7);
         assert_eq!(installed.rechecked.len(), 1);
         assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), 2);
-        // A second application's private native store still reuses core's objects.
+        // A second application's private native store: development reuses
+        // core's objects; a release build is one whole-program unit and links none.
         let mut other_options = native_options(backend, dir.path());
         other_options.optimize = optimize;
         other_options.store = dir.path().join("another-app-native");
@@ -1789,64 +1789,11 @@ mod tests {
             .iter()
             .filter(|o| o.instance.definition.package_is("core", "1"))
             .collect::<Vec<_>>();
-        assert_eq!(core.len(), 2);
-        assert!(core.iter().all(|o| !o.compiled));
         if optimize {
-            let answer = core
-                .iter()
-                .find(|o| o.instance.definition.to_string().ends_with("/answer"))
-                .unwrap();
-            let name = format!("h{}", selection(answer.instance.digest()));
-            let own = objects
-                .iter()
-                .find(|o| o.instance.definition == entry)
-                .unwrap();
-            assert!(
-                !std::fs::read(&own.path)
-                    .unwrap()
-                    .windows(name.len())
-                    .any(|w| w == name.as_bytes()),
-                "the program must inline the published answer body, not reference its object"
-            );
-            let store = Store::new(
-                &installed
-                    .image
-                    .as_ref()
-                    .unwrap()
-                    .store_root()
-                    .join("native"),
-            )
-            .unwrap();
-            for library in &core {
-                let archive = store.get(library.identity).unwrap().unwrap();
-                let product =
-                    crate::native_library::read(&archive, hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA)
-                        .expect("one complete native-library product");
-                assert!(product.object.debug.is_none());
-                assert_eq!(product.object.bytes, std::fs::read(&library.path).unwrap());
-                assert!(
-                    product.bitcode.starts_with(b"BC\xc0\xde"),
-                    "raw LLVM bitcode"
-                );
-                assert!(!product.summary.functions.is_empty());
-                assert!(!product.summary.facts.is_empty());
-            }
-            // Missing bitcode/summary is a product miss. Rebuild that canonical
-            // object, preserving the unchanged application's cached object.
-            let path = store.path(answer.identity);
-            let bytes = std::fs::read(&path).unwrap();
-            std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
-            let repaired = installed.emit_reachable(&entry, &other_options).unwrap();
-            assert_eq!(repaired.iter().filter(|o| o.compiled).count(), 1);
-            let fixed = repaired
-                .iter()
-                .find(|o| o.instance == answer.instance)
-                .unwrap();
-            assert!(fixed.compiled);
-            assert_eq!(fixed.identity, answer.identity);
-            let rebuilt = installed.build(&entry, &other_options).unwrap();
-            assert_eq!(rebuilt.compiled, 0);
-            run_clean(&rebuilt.executable, 7);
+            assert!(core.is_empty(), "a release build links no library object");
+        } else {
+            assert_eq!(core.len(), 2);
+            assert!(core.iter().all(|o| !o.compiled));
         }
         assert_eq!(objects.iter().filter(|o| o.compiled).count(), 1);
         // A cached negative body is refused only when this entry reaches it.
@@ -1876,7 +1823,7 @@ mod tests {
     }
     #[test]
     #[ignore = "explicit native integration target"]
-    fn release_inlines_published_core_and_reuses_its_objects() {
+    fn release_builds_published_core_whole_program() {
         product_entry(Backend::Llvm, true);
     }
     #[test]

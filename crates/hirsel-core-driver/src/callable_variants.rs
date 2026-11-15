@@ -31,7 +31,6 @@ struct Variant<'a> {
 }
 pub(crate) fn prepare<'m>(
     modules: &mut Vec<Cow<'m, Module>>,
-    imported: &mut Vec<bool>,
     reached: &[Identity],
     materialized: &InstanceSet,
     entry: &DefPath,
@@ -73,7 +72,6 @@ pub(crate) fn prepare<'m>(
     let body_identities = owners.clone();
     collect(
         modules,
-        imported,
         originals,
         bodies,
         owners,
@@ -88,7 +86,6 @@ pub(crate) fn prepare<'m>(
 #[allow(clippy::too_many_arguments)]
 fn collect<'m>(
     modules: &mut Vec<Cow<'m, Module>>,
-    imported: &mut Vec<bool>,
     originals: BTreeMap<Identity, Target>,
     bodies: BTreeMap<ContentHash, Target>,
     owners: Vec<ContentHash>,
@@ -101,7 +98,6 @@ fn collect<'m>(
     // private row is ever published to a library image.
     let mut c = Work {
         modules,
-        imported,
         originals,
         bodies,
         owners,
@@ -144,7 +140,6 @@ fn collect<'m>(
 // Separate lifetimes allow the original Cow modules to outlive collection.
 struct Work<'a, 'm> {
     modules: &'a mut Vec<Cow<'m, Module>>,
-    imported: &'a mut Vec<bool>,
     originals: BTreeMap<Identity, Target>,
     /// Every body of every unit, by code identity.
     bodies: BTreeMap<ContentHash, Target>,
@@ -211,7 +206,6 @@ impl Work<'_, '_> {
             function,
         };
         self.modules.push(Cow::Owned(module));
-        self.imported.push(false);
         self.owners.push(self.owners[base.unit]);
         self.variants.insert(hash, target);
         self.pending.push((target, bindings));
@@ -332,9 +326,6 @@ impl Work<'_, '_> {
                 .unwrap()
                 .calls[i]
                 .callee = Callee::Direct(f);
-            // A shared library function rewritten to call a private body is also
-            // request owned, never a published object with private references.
-            self.imported[unit] = false;
         }
         let m = &self.modules[unit];
         let body = m.functions[target.function.index()].body.as_ref().unwrap();
@@ -428,7 +419,6 @@ b0(v0: ptr, v1: u64):
     }
     fn run(m: &Module, limit: usize) -> Result<Vec<Cow<'_, Module>>, NativeStop> {
         let mut units = vec![Cow::Borrowed(m)];
-        let mut imported = vec![true];
         let target = |i: usize| Target {
             unit: 0,
             function: FuncId(i as u32),
@@ -449,7 +439,6 @@ b0(v0: ptr, v1: u64):
             .collect();
         collect(
             &mut units,
-            &mut imported,
             originals,
             bodies,
             vec![ContentHash::default()],
@@ -461,10 +450,6 @@ b0(v0: ptr, v1: u64):
             4,
             limit,
         )?;
-        assert!(
-            imported.iter().all(|i| !i),
-            "rewritten library and private units belong to caller"
-        );
         Ok(units)
     }
     #[test]
@@ -545,16 +530,7 @@ fn root() -> u64 { let delta:u64=1; forward(41u64, fn(x:u64)->u64 {x+delta}) }
             .iter()
             .map(|k| Cow::Borrowed(reached.materialized.get(k).ir().unwrap()))
             .collect();
-        let mut imported = vec![false; keys.len()];
-        prepare(
-            &mut modules,
-            &mut imported,
-            keys,
-            &reached.materialized,
-            &entry,
-            64,
-        )
-        .unwrap();
+        prepare(&mut modules, keys, &reached.materialized, &entry, 64).unwrap();
         assert_eq!(
             modules.len(),
             keys.len() + 2,
@@ -603,16 +579,7 @@ fn unknown(f: fn(u64) -> u64) -> u64 { forward(41u64, f) }
                 .iter()
                 .flat_map(|m| m.code_variants.values().copied())
                 .collect();
-            let mut imported = vec![false; keys.len()];
-            prepare(
-                &mut modules,
-                &mut imported,
-                keys,
-                &reached.materialized,
-                &entry,
-                64,
-            )
-            .unwrap();
+            prepare(&mut modules, keys, &reached.materialized, &entry, 64).unwrap();
             assert_eq!(
                 modules
                     .iter()

@@ -4,7 +4,6 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/IRReader.h>
-#include <llvm-c/BitReader.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
@@ -19,10 +18,7 @@
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
-typedef struct { const uint8_t *data; size_t len; uint8_t imported, bitcode; LLVMModuleRef module; } HirselLlvmUnit;
-typedef struct { uint8_t *symbol; size_t len; uint64_t instructions; } HirselLlvmImport;
-typedef struct { HirselLlvmImport *data; size_t len; } HirselLlvmImports;
-extern LLVMMemoryBufferRef hirsel_llvm_raw_bitcode(LLVMModuleRef module);
+typedef struct { const uint8_t *data; size_t len; LLVMModuleRef module; } HirselLlvmUnit;
 extern void *hirsel_llvm_composer(LLVMModuleRef module);
 extern int hirsel_llvm_compose(void *composer, LLVMModuleRef unit);
 extern void hirsel_llvm_composer_free(void *composer);
@@ -523,127 +519,16 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
     LLVMDisposeBuilder(builder);
 }
 
-// An imported body is the program's own for its direct calls. As an
-// available_externally definition LLVM treats it as inexact: it infers no
-// attributes from it, grants no single-call inlining bonus, and O3 discards it
-// before our late argument promotion. Each import with an ordinary direct call
-// therefore gets one private implementation. Address uses still name the
-// cached public entry, whose FORM convention and identity do not change.
-static void local_imports(LLVMModuleRef module) {
-    LLVMContextRef context = LLVMGetModuleContext(module);
-    LLVMDIBuilderRef debug = NULL;
-    unsigned always = LLVMGetEnumAttributeKindForName("alwaysinline", 12);
-    LLVMValueRef last = LLVMGetLastFunction(module);
-    for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
-        LLVMValueRef next = f == last ? NULL : LLVMGetNextFunction(f);
-        if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMAvailableExternallyLinkage) {
-            f = next; continue;
-        }
-        unsigned calls = 0, ordinary = 0;
-        for (LLVMUseRef use = LLVMGetFirstUse(f); use; use = LLVMGetNextUse(use)) {
-            LLVMValueRef call = LLVMGetUser(use);
-            if (LLVMIsACallInst(call) && LLVMGetCalledValue(call) == f &&
-                LLVMGetOperandUse(call, LLVMGetNumOperands(call)-1) == use) {
-                ++calls;
-                if (!LLVMGetCallSiteEnumAttribute(call, LLVMAttributeFunctionIndex, always)) ++ordinary;
-            }
-        }
-        // A register-result adapter already forces its call to inline. Leave
-        // imports used only there to that existing path.
-        if (!ordinary) { f = next; continue; }
-        LLVMValueRef *sites = malloc(calls * sizeof(*sites));
-        unsigned at = 0;
-        for (LLVMUseRef use = LLVMGetFirstUse(f); use; use = LLVMGetNextUse(use)) {
-            LLVMValueRef call = LLVMGetUser(use);
-            if (LLVMIsACallInst(call) && LLVMGetCalledValue(call) == f &&
-                LLVMGetOperandUse(call, LLVMGetNumOperands(call)-1) == use) sites[at++] = call;
-        }
-        size_t len;
-        const char *name = LLVMGetValueName2(f, &len);
-        char *label = malloc(len + 7);
-        memcpy(label, name, len); strcpy(label + len, ".local");
-        LLVMSetValueName2(f, label, len + 6);
-        LLVMMetadataRef scope = worker_scope(module, &debug, f, LLVMGetSubprogram(f));
-        if (scope) {
-            for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(f); block; block = LLVMGetNextBasicBlock(block))
-                for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = LLVMGetNextInstruction(inst))
-                    LLVMInstructionSetDebugLoc(inst, worker_location(debug, context, LLVMInstructionGetDebugLoc(inst), scope));
-        }
-        label[len] = 0;
-        LLVMValueRef external = LLVMAddFunction(module, label, LLVMGlobalGetValueType(f));
-        free(label);
-        LLVMSetFunctionCallConv(external, LLVMGetFunctionCallConv(f));
-        // Preserve ABI and semantic attributes, including sret and narrow
-        // extensions.
-        for (unsigned i = 0, count = LLVMCountParams(f); i <= count + 1; ++i) {
-            unsigned index = i == count + 1 ? LLVMAttributeFunctionIndex : i;
-            unsigned n = LLVMGetAttributeCountAtIndex(f, index);
-            LLVMAttributeRef *attrs = malloc(n * sizeof(*attrs));
-            LLVMGetAttributesAtIndex(f, index, attrs);
-            for (unsigned j = 0; j < n; ++j) LLVMAddAttributeAtIndex(external, index, attrs[j]);
-            free(attrs);
-        }
-        // RAUW also handles function addresses nested in constant aggregates.
-        LLVMReplaceAllUsesWith(f, external);
-        for (unsigned i = 0; i < calls; ++i)
-            LLVMSetOperand(sites[i], LLVMGetNumOperands(sites[i])-1, f);
-        free(sites);
-        LLVMSetLinkage(f, LLVMInternalLinkage);
-        f = next;
-    }
-    finish_worker_debug(debug);
-}
-
 // A unit's public bodies: its root and the bodies it carries, which every unit
 // that carries one defines weak by its code identity.
 static int public_body(LLVMValueRef f) {
     LLVMLinkage linkage = LLVMGetLinkage(f);
     return LLVMCountBasicBlocks(f) && (linkage == LLVMExternalLinkage || linkage == LLVMWeakODRLinkage);
 }
-static size_t import_instructions(LLVMValueRef f) {
-    size_t count = 0;
-    for (LLVMBasicBlockRef b = LLVMGetFirstBasicBlock(f); b; b = LLVMGetNextBasicBlock(b))
-        for (LLVMValueRef i = LLVMGetFirstInstruction(b); i; i = LLVMGetNextInstruction(i)) ++count;
-    return count;
-}
-static void bound_imports(LLVMModuleRef module, uint64_t limit) {
-    for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
-        LLVMValueRef next = LLVMGetNextFunction(f);
-        if (LLVMGetLinkage(f) != LLVMAvailableExternallyLinkage || !LLVMCountBasicBlocks(f)) {
-            f = next; continue;
-        }
-        size_t len;
-        const char *raw = LLVMGetValueName2(f, &len);
-        char *name = malloc(len + 12);
-        if (!name) abort();
-        memcpy(name, raw, len); strcpy(name + len, ".infallible");
-        LLVMValueRef implementation = LLVMGetNamedFunction(module, name);
-        size_t size = import_instructions(f);
-        if (implementation) size += import_instructions(implementation);
-        name[len] = 0;
-        if (size <= limit) { free(name); f = next; continue; }
-        LLVMSetValueName2(f, "", 0);
-        LLVMValueRef declaration = LLVMAddFunction(module, name, LLVMGlobalGetValueType(f));
-        free(name);
-        LLVMSetFunctionCallConv(declaration, LLVMGetFunctionCallConv(f));
-        for (unsigned i = 0, count = LLVMCountParams(f); i <= count + 1; ++i) {
-            unsigned index = i == count + 1 ? LLVMAttributeFunctionIndex : i;
-            unsigned n = LLVMGetAttributeCountAtIndex(f, index);
-            LLVMAttributeRef *attrs = malloc(n * sizeof(*attrs));
-            LLVMGetAttributesAtIndex(f, index, attrs);
-            for (unsigned j = 0; j < n; ++j) LLVMAddAttributeAtIndex(declaration, index, attrs[j]);
-            free(attrs);
-        }
-        LLVMReplaceAllUsesWith(f, declaration);
-        LLVMDeleteFunction(f);
-        f = next;
-    }
-}
 
 static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out,
-                          uint64_t import_limit, HirselLlvmOutput *raw, HirselLlvmImports *summary) {
+                          uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
     pthread_once(&initialized, initialize);
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
@@ -669,8 +554,6 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     void *composer = standalone ? NULL : hirsel_llvm_composer(module);
     LLVMMemoryBufferRef buffer = NULL;
     int failed;
-    char **imports = NULL;
-    size_t imports_len = 0, imports_capacity = 0;
     for (size_t i = 0; i < count; ++i) {
         LLVMModuleRef unit = units[i].module;
         if (unit) {
@@ -681,61 +564,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             failed = 0;
         } else {
         buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((const char*)units[i].data, units[i].len, "hirsel-core");
-        if (units[i].bitcode) {
-            failed = LLVMParseBitcodeInContext2(context, buffer, &unit);
-            if (failed) message = LLVMCreateMessage("LLVM bitcode decoding failed");
-        } else {
-            failed = LLVMParseIRInContext2(context, buffer, &unit, &message);
-        }
+        failed = LLVMParseIRInContext2(context, buffer, &unit, &message);
         LLVMDisposeMemoryBuffer(buffer);
         }
         if (failed || !unit) { error(out, message); LLVMDisposeMessage(message); goto done; }
-        if (raw) {
-            // Snapshot exactly the parsed emitter module, before any target,
-            // linkage, adapter, probe or optimization mutation.
-            LLVMMemoryBufferRef bitcode = hirsel_llvm_raw_bitcode(unit);
-            copy(raw, LLVMGetBufferStart(bitcode), LLVMGetBufferSize(bitcode), 0);
-            LLVMDisposeMemoryBuffer(bitcode);
-            size_t count = 0;
-            for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f))
-                if (public_body(f)) ++count;
-            summary->data = calloc(count ? count : 1, sizeof(*summary->data));
-            if (!summary->data) abort();
-            summary->len = count;
-            size_t row = 0;
-            for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f)) {
-                if (!public_body(f)) continue;
-                size_t len;
-                const char *name = LLVMGetValueName2(f, &len);
-                char *implementation = malloc(len + 12);
-                if (!implementation) abort();
-                memcpy(implementation, name, len); strcpy(implementation + len, ".infallible");
-                LLVMValueRef body = LLVMGetNamedFunction(unit, implementation);
-                uint64_t size = import_instructions(f) + (body ? import_instructions(body) : 0);
-                free(implementation);
-                uint8_t *symbol = malloc(len ? len : 1);
-                if (!symbol) abort();
-                memcpy(symbol, name, len);
-                summary->data[row++] = (HirselLlvmImport){symbol, len, size};
-            }
-        }
-        if (units[i].imported) {
-            for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f)) {
-                if (public_body(f)) {
-                    size_t len;
-                    const char *name = LLVMGetValueName2(f, &len);
-                    if (imports_len == imports_capacity) {
-                        imports_capacity = imports_capacity ? imports_capacity * 2 : 8;
-                        imports = realloc(imports, imports_capacity * sizeof(*imports));
-                        if (!imports) abort();
-                    }
-                    imports[imports_len] = malloc(len + 1);
-                    if (!imports[imports_len]) abort();
-                    memcpy(imports[imports_len], name, len);
-                    imports[imports_len++][len] = 0;
-                }
-            }
-        }
         // The linker resolves each unit's instance-named declarations and
         // renames its private statics/helpers. It consumes the source module.
         if (standalone) module = unit;
@@ -747,11 +579,6 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     // optimizer and code generator stop naming the values they create.
     discard_names = !LLVMContextShouldDiscardValueNames(context);
     if (discard_names) LLVMContextSetDiscardValueNames(context, 1);
-    // IRLinker may discard an unreferenced available_externally definition
-    // before a later unit supplies its callers. Keep definitions until every
-    // unit is linked, then restore their non-emitting inline-import linkage.
-    for (size_t i = 0; i < imports_len; ++i)
-        LLVMSetLinkage(LLVMGetNamedFunction(module, imports[i]), LLVMAvailableExternallyLinkage);
     if (export_count) {
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {
             if (!public_body(f)) continue;
@@ -765,9 +592,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     }
     if (speed && export_count) {
         hirsel_llvm_merge_glue(module);
-        bound_imports(module, import_limit);
         register_results(module, context);
-        local_imports(module);
         int x86 = !strncmp(triple, "x86_64", 6), arm = !strncmp(triple, "aarch64", 7) ||
             !strncmp(triple, "arm64", 5);
         register_carriers(module, context, x86 || arm ? LLVMPreserveMostCallConv : LLVMFastCallConv,
@@ -831,30 +656,21 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     if (message) LLVMDisposeMessage(message);
 done:
     if (composer) hirsel_llvm_composer_free(composer);
-    for (size_t i = 0; i < imports_len; ++i) free(imports[i]);
-    free(imports);
     if (module) LLVMDisposeModule(module);
     // A caller's context parses text units again in its next program.
     if (discard_names && !own_context) LLVMContextSetDiscardValueNames(context, 0);
     if (own_context) LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v2(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v3(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu,
-                          uint64_t import_limit, HirselLlvmOutput *out) {
-    emit_program(units, count, exports, export_count, speed, triple, cpu, out, import_limit, NULL, NULL);
+                          uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
+    emit_program(units, count, exports, export_count, speed, triple, cpu, out);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
-    HirselLlvmUnit unit = { ir, len, 0, 0, NULL };
-    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, out, 0, NULL, NULL);
-}
-__attribute__((visibility("default")))
-void hirsel_llvm_library_v2(LLVMModuleRef module, const char *triple, const char *cpu,
-                          HirselLlvmOutput *out, HirselLlvmOutput *raw, HirselLlvmImports *summary) {
-    HirselLlvmUnit unit = { NULL, 0, 0, 0, module };
-    emit_program(&unit, 1, NULL, 0, 1, triple, cpu, out, 0, raw, summary);
+    HirselLlvmUnit unit = { ir, len, NULL };
+    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

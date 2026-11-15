@@ -121,20 +121,15 @@ also counts startup and reporting outside that interval; report that residual.
 
 `hirsel build <package-dir> --runtime <libhirsel_core_rt.a> -o program`
 uses the same checked request and collects reachable instances. Development emits
-one object per checked body; LLVM release composes request-owned bodies and
-published inline candidates into one unit. Both link the independently built core runtime. `run` builds and
+one object per checked body; LLVM release composes every reached body into one
+unit. Both link the independently built core runtime. `run` builds and
 executes it, forwarding arguments after `--` and returning its process status.
 
-LLVM release publishes each canonical library unit as one native product: its
-public object, raw LLVM bitcode captured before any pass, and its import summary.
-The existing native selection and store checksum cover all three atomically. A
-partial product or an older object-only product is a miss and is rebuilt. Warm
-application builds load bitcode directly and emit LLVM text only for their own
-units. The application key includes the imported product identities and
-summaries; every native key also includes the fact schema and the sealed and
-place-blind parameter facts its emitter consumed. The library and application
-use those same derived facts during emission. This changes the import transport,
-not the optimisation pipeline.
+LLVM release is whole-program: every reached body, the program's and each core
+or std instance's, whether its package arrived as source or by signature, is an
+internal definition of the one release unit, and no library object is linked.
+The unit's key covers every reached module and the sealed and place-blind
+parameter facts its emitter consumed, with the fact schema.
 Release builds cache the program-wide role facts by their complete content
 inputs. An unchanged build restores the same consumed rows; an edit in the
 fixpoint's input set derives them again. Native object keys retain the exact
@@ -277,8 +272,7 @@ gap to be closed later.
 ## Native compilation units
 
 Development emits one object per reached checked definition. LLVM release
-composes request-owned bodies and published inline candidates into one unit;
-separate installed objects retain public entries. Units carry complete local
+composes every reached body into one unit and exports only the entry. Units carry complete local
 type, static, signature, instance and source-anchor tables. Cranelift receives
 recipes computed from `module.types`; LLVM computes the same recipes internally.
 Both retain finalizer and drop inputs. Release exposes direct bodies for inlining

@@ -17,7 +17,6 @@ mod native;
 mod native_debug;
 mod native_entry;
 mod native_facts;
-mod native_library;
 mod native_object;
 mod native_sources;
 mod prebuild;

@@ -1622,10 +1622,7 @@ fn carrier_program_cases(target: Target) {
             .collect::<Vec<_>>();
         exports.dedup();
         let object = hirsel_llvm_lazy::emit_program_for_target(
-            &[hirsel_llvm_lazy::Unit::Text {
-                ir: &ir,
-                imported: false,
-            }],
+            &[hirsel_llvm_lazy::Unit::Text(&ir)],
             &exports,
             target,
         )
@@ -1763,10 +1760,7 @@ b2:
         let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
         let ir = carrier_ir(&module, &facts[0], target, false);
         let object = hirsel_llvm_lazy::emit_program_for_target(
-            &[hirsel_llvm_lazy::Unit::Text {
-                ir: &ir,
-                imported: false,
-            }],
+            &[hirsel_llvm_lazy::Unit::Text(&ir)],
             &[symbol(&module, case.function)],
             target,
         )
@@ -1871,10 +1865,7 @@ fn cancelled(tasks: Tasks) -> u64 waits {
     let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
     let ir = carrier_ir(&module, &facts[0], target, false);
     let object = hirsel_llvm_lazy::emit_program_for_target(
-        &[hirsel_llvm_lazy::Unit::Text {
-            ir: &ir,
-            imported: false,
-        }],
+        &[hirsel_llvm_lazy::Unit::Text(&ir)],
         &[symbol(&module, names["cancelled"])],
         target,
     )
@@ -1910,156 +1901,12 @@ fn cancelled(tasks: Tasks) -> u64 waits {
     assert_eq!(report.used, expected.used);
 }
 
-/// A carrier callee from a cached library: the program's private copy of the import
-/// (`.local`) gets the word twin, and the caller sees the header the import wrote. f0
-/// stores 9 at element 0 of [5, 6] and sets the length to 1, so f1 returns 1 * 100 + 9.
-/// f0 can fail (on a null block), so its body is its public entry, not an
-/// `.infallible` split behind it.
-fn imported_carrier_callee(target: Target) {
-    let library = text::parse(
-        r#"core v1
-type t0 = own "List[u64]" { items: seq u64 }
-sig g0 = (&mut t0) -> ()
-inst n0 = samples@1/import_words/reset [] []
-fn f0 = n0 g0 {
-  addr a0 = v0 : t0
-  addr a1 = a0 field 0 byte v1 : ptr
-  addr a2 = a0 field 0 byte v2 : u64
-  addr a3 = v3 byte v1 : u64
-b0(v0: ptr):
-  v1: u64 = const 0
-  v2: u64 = const 8
-  address a0
-  address a1
-  address a2
-  v3: ptr = read a1
-  v6: ptr = const 0x0
-  v7: bool = eq v3, v6
-  branch v7, b2, b1
-b1:
-  address a3
-  v4: u64 = const 9
-  store a3, v4
-  v5: u64 = const 1
-  store a2, v5
-  return
-b2:
-  raise unwrap
-}
-"#,
-    )
-    .unwrap();
-    let caller = text::parse(
-        r#"core v1
-type t0 = own "List[u64]" { items: seq u64 }
-sig g0 = (&mut t0) -> ()
-sig g1 = () -> (u64)
-inst n0 = samples@1/import_words/reset [] []
-inst n1 = samples@1/import_words/entry [] []
-fn f0 = n0 g0 extern
-fn f1 = n1 g1 {
-  slot s0 = t0
-  addr a0 = s0 : t0
-  addr a1 = s0 field 0 byte v0 : ptr
-  addr a2 = s0 field 0 byte v1 : u64
-  addr a3 = s0 field 0 byte v2 : u64
-  addr a4 = v4 byte v0 : u64
-  addr a5 = v4 byte v1 : u64
-b0:
-  v0: u64 = const 0
-  v1: u64 = const 8
-  v2: u64 = const 16
-  v3: u64 = const 32
-  v4: ptr, v5: u64 = alloc for seq u64 v3 align 8 charge v3
-  v6: ptr = const 0x0
-  v7: bool = ne v4, v6
-  branch v7, b1, b2
-b1:
-  live s0
-  address a0
-  address a1
-  address a2
-  address a3
-  address a4
-  address a5
-  v8: u64 = const 5
-  v9: u64 = const 6
-  store a4, v8
-  store a5, v9
-  v10: u64 = const 2
-  v11: u64 = const 4
-  store a1, v4
-  store a2, v10
-  store a3, v11
-  call f0 g0 (&a0) fail b3 cold
-  v12: u64 = read a2
-  v13: u64 = read a4
-  v14: u64 = const 100
-  v15: u64 = mul v12, v14
-  v16: u64 = add v15, v13
-  drop a0 t0
-  return v16
-b2:
-  return v0
-b3:
-  drop a0 t0
-  propagate
-}
-"#,
-    )
-    .unwrap();
-    wf::module(&library).unwrap();
-    wf::module(&caller).unwrap();
-    let facts = hirsel_core_ir::roles::Facts::program(&[&library, &caller], &[]);
-    let library_ir = carrier_ir(&library, &facts[0], target, true);
-    let caller_ir = carrier_ir(&caller, &facts[1], target, false);
-    let object = hirsel_llvm_lazy::emit_program_for_target(
-        &[
-            hirsel_llvm_lazy::Unit::Text {
-                ir: &library_ir,
-                imported: true,
-            },
-            hirsel_llvm_lazy::Unit::Text {
-                ir: &caller_ir,
-                imported: false,
-            },
-        ],
-        &[symbol(&caller, FuncId(1))],
-        target,
-    )
-    .unwrap();
-    let twin = format!("{}.local.words", symbol(&library, FuncId(0)));
-    assert!(
-        object.windows(twin.len()).any(|w| w == twin.as_bytes()),
-        "no {twin}"
-    );
-    let case = Case {
-        function: FuncId(1),
-        args: vec![],
-        limit: u64::MAX,
-        injection: None,
-    };
-    let report = execute_target_object(
-        &caller,
-        std::slice::from_ref(&case),
-        "",
-        "",
-        Optimization::Speed,
-        Some(object),
-        target,
-    )
-    .remove(0);
-    assert_eq!(report.outcome, eval::Outcome::Returned(vec![109]));
-    assert_eq!(report.used, 0);
-}
-
 #[test]
 fn carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_program_cases(Target::X86_64Linux);
     carrier_sret_case(Target::X86_64Linux);
     cancelled_cold_word_call(Target::X86_64Linux, false);
     cancelled_cold_word_call(Target::X86_64Linux, true);
-    imported_carrier_callee(Target::X86_64Linux);
 }
 
 #[test]
@@ -2069,7 +1916,6 @@ fn aarch64_carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_sret_case(Target::Aarch64Linux);
     cancelled_cold_word_call(Target::Aarch64Linux, false);
     cancelled_cold_word_call(Target::Aarch64Linux, true);
-    imported_carrier_callee(Target::Aarch64Linux);
 }
 
 #[test]
@@ -3248,404 +3094,6 @@ fn joined_cause_views_use_core_layout() {
 }
 
 #[test]
-fn raw_library_bitcode_preserves_text_objects_and_runs() {
-    let library = text::parse(
-        r#"core v1
-sig g0 = (u64) -> (u64)
-inst n0 = samples@1/raw_library/xor [] []
-fn f0 = n0 g0 {
-b0(v0: u64):
-  v1: u64 = const 5
-  v2: u64 = bitxor v0, v1
-  return v2
-}
-"#,
-    )
-    .unwrap();
-    let caller = text::parse(
-        r#"core v1
-sig g0 = (u64) -> (u64)
-inst n0 = samples@1/raw_library/xor [] []
-inst n1 = samples@1/raw_library/entry [] []
-fn f0 = n0 g0 extern
-fn f1 = n1 g0 {
-b0(v0: u64):
-  v1: u64 = call f0 g0 (v0)
-  return v1
-}
-"#,
-    )
-    .unwrap();
-    wf::module(&library).unwrap();
-    wf::module(&caller).unwrap();
-    let facts = hirsel_core_ir::roles::Facts::program(&[&library, &caller], &[]);
-    for target in [Target::X86_64Linux, Target::Aarch64Linux] {
-        let product = hirsel_llvm_lazy::compile_library(
-            &library,
-            &facts[0],
-            target,
-            false,
-            false,
-            hirsel_core_ids::ContentHash::of_bytes(b"bitcode fixture"),
-        )
-        .unwrap();
-        let library_ir = hirsel_llvm_lazy::core::emit_ir_relocatable_with_role_facts_for_target(
-            &library, target, false, false, &facts[0],
-        )
-        .unwrap();
-        assert_eq!(
-            product.object.bytes,
-            hirsel_llvm_lazy::compile_ir_for_target(&library_ir, true, target).unwrap()
-        );
-        assert_eq!(product.summary.facts, facts[0].record(&library));
-        assert!(product.summary.selected());
-        assert!(
-            product
-                .summary
-                .functions
-                .iter()
-                .any(|f| f.symbol == symbol(&library, FuncId(0)) && f.instructions > 2)
-        );
-        let caller_ir = hirsel_llvm_lazy::core::emit_ir_relocatable_with_role_facts_for_target(
-            &caller, target, false, false, &facts[1],
-        )
-        .unwrap();
-        let exports = [symbol(&caller, FuncId(1))];
-        for reversed in [false, true] {
-            let mut text_units = [
-                hirsel_llvm_lazy::Unit::Text {
-                    ir: &library_ir,
-                    imported: true,
-                },
-                hirsel_llvm_lazy::Unit::Text {
-                    ir: &caller_ir,
-                    imported: false,
-                },
-            ];
-            let mut bitcode_units = [
-                hirsel_llvm_lazy::Unit::Import {
-                    bitcode: &product.bitcode,
-                    summary: &product.summary,
-                },
-                hirsel_llvm_lazy::Unit::Text {
-                    ir: &caller_ir,
-                    imported: false,
-                },
-            ];
-            if reversed {
-                text_units.reverse();
-                bitcode_units.reverse();
-            }
-            let control =
-                hirsel_llvm_lazy::emit_program_for_target(&text_units, &exports, target).unwrap();
-            let native =
-                hirsel_llvm_lazy::emit_program_for_target(&bitcode_units, &exports, target)
-                    .unwrap();
-            assert_eq!(control, native, "{target:?}, reversed={reversed}");
-            if target == Target::X86_64Linux && !reversed {
-                let mut oracle = caller.clone();
-                oracle.functions[0].body = library.functions[0].body.clone();
-                let cases = [0, 1, 7, u64::MAX].map(|value| Case {
-                    function: FuncId(1),
-                    args: vec![value],
-                    limit: 0,
-                    injection: None,
-                });
-                let reports =
-                    execute_object(&oracle, &cases, "", "", Optimization::Speed, Some(native));
-                for (case, report) in cases.iter().zip(reports) {
-                    assert_eq!(
-                        report.outcome,
-                        eval::run(&oracle, case.function, &case.args, 0).outcome
-                    );
-                    assert_eq!(report.used, 0);
-                }
-            }
-        }
-        let dir = std::env::temp_dir().join(format!(
-            "hirsel-raw-bitcode-{}-{target:?}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("library.bc"), product.bitcode).unwrap();
-        let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
-        let decoded = output(
-            Command::new(prefix.join("bin/llvm-dis"))
-                .arg(dir.join("library.bc"))
-                .arg("-o")
-                .arg("-"),
-        );
-        assert!(
-            decoded.contains("alloca"),
-            "raw homes must precede every pass"
-        );
-        assert!(
-            !decoded.contains("probe-stack"),
-            "probe settings are applied after the snapshot"
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-}
-
-#[test]
-fn raw_imports_above_the_body_bound_keep_the_rest_of_the_module() {
-    let mut library = "@library_value = constant i64 17\ndefine i64 @large(i64 %x) {\n".to_owned();
-    let limit = hirsel_llvm_lazy::INLINE_IMPORT_INSTRUCTION_LIMIT;
-    for i in 0..limit {
-        let previous = if i == 0 {
-            "%x".into()
-        } else {
-            format!("%x{}", i - 1)
-        };
-        writeln!(library, "%x{i} = add i64 {previous}, 0").unwrap();
-    }
-    writeln!(library, "ret i64 %x{}\n}}", limit - 1).unwrap();
-    let caller = "@library_value = external constant i64\ndefine i64 @entry() {\n%x = load i64, ptr @library_value\nret i64 %x\n}";
-    let dir = std::env::temp_dir().join(format!("hirsel-raw-bound-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("library.ll"), &library).unwrap();
-    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
-    output(
-        Command::new(prefix.join("bin/llvm-as"))
-            .arg(dir.join("library.ll"))
-            .arg("-o")
-            .arg(dir.join("library.bc")),
-    );
-    let bitcode = std::fs::read(dir.join("library.bc")).unwrap();
-    let summary = hirsel_llvm_lazy::ImportSummary {
-        functions: vec![hirsel_llvm_lazy::ImportFunction {
-            symbol: "large".into(),
-            instructions: limit + 1,
-        }],
-        facts: Vec::new(),
-    };
-    assert!(!summary.selected());
-    let text = hirsel_llvm_lazy::emit_program(
-        &[
-            hirsel_llvm_lazy::Unit::Text {
-                ir: &library,
-                imported: true,
-            },
-            hirsel_llvm_lazy::Unit::Text {
-                ir: caller,
-                imported: false,
-            },
-        ],
-        &["entry".into()],
-    )
-    .unwrap();
-    let decoded = hirsel_llvm_lazy::emit_program(
-        &[
-            hirsel_llvm_lazy::Unit::Import {
-                bitcode: &bitcode,
-                summary: &summary,
-            },
-            hirsel_llvm_lazy::Unit::Text {
-                ir: caller,
-                imported: false,
-            },
-        ],
-        &["entry".into()],
-    )
-    .unwrap();
-    assert_eq!(decoded, text, "the bound selects bodies, not whole modules");
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn release_import_bound_keeps_small_bodies_and_uses_cached_large_entries() {
-    fn body(name: &str, instructions: usize, linkage: &str) -> String {
-        let mut text = format!("define {linkage}i64 @{name}(i64 %x) {{\n");
-        for i in 0..instructions - 1 {
-            let input = if i == 0 {
-                "%x".into()
-            } else {
-                format!("%v{}", i - 1)
-            };
-            writeln!(text, "%v{i} = add i64 {input}, 0").unwrap();
-        }
-        writeln!(text, "ret i64 %v{}\n}}", instructions - 2).unwrap();
-        text
-    }
-    let dir = std::env::temp_dir().join(format!("hirsel-core-import-bound-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
-    std::fs::write(dir.join("probe.c"), "#include <stdint.h>\nextern uint64_t entry(uint64_t);\nint main(void){uint64_t xs[]={0,1,UINT64_MAX};for(unsigned i=0;i<3;i++)if(entry(xs[i])!=xs[i])return 1;return 0;}\n").unwrap();
-    let entry = "declare i64 @import_bound(i64)\ndefine i64 @entry(i64 %x) {%r = call i64 @import_bound(i64 %x)\nret i64 %r}";
-    let limit = hirsel_llvm_lazy::INLINE_IMPORT_INSTRUCTION_LIMIT as usize;
-    for instructions in [limit - 1, limit + 1] {
-        for wrapper in [false, true] {
-            let imported = if wrapper {
-                let mut text = body("import_bound.infallible", instructions - 2, "internal ");
-                text.push_str("define i64 @import_bound(i64 %x) {%r = call i64 @import_bound.infallible(i64 %x)\nret i64 %r}\n");
-                text
-            } else {
-                body("import_bound", instructions, "")
-            };
-            let units = [
-                hirsel_llvm_lazy::Unit::Text {
-                    ir: &imported,
-                    imported: true,
-                },
-                hirsel_llvm_lazy::Unit::Text {
-                    ir: entry,
-                    imported: false,
-                },
-            ];
-            let bytes = hirsel_llvm_lazy::emit_program(&units, &["entry".into()]).unwrap();
-            std::fs::write(dir.join("unit.o"), bytes).unwrap();
-            let undefined = output(
-                Command::new(prefix.join("bin/llvm-nm"))
-                    .arg("--undefined-only")
-                    .arg(dir.join("unit.o")),
-            );
-            assert_eq!(
-                undefined.contains("import_bound"),
-                instructions > limit,
-                "{instructions} instructions, wrapper={wrapper}: {undefined}"
-            );
-            // The cached library supplies the same public definition when the
-            // application keeps only its declaration, including wrapper bodies.
-            std::fs::write(
-                dir.join("library.o"),
-                hirsel_llvm_lazy::compile_ir(&imported, true).unwrap(),
-            )
-            .unwrap();
-            output(
-                Command::new(prefix.join("bin/clang"))
-                    .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
-                    .arg(dir.join("probe.c"))
-                    .arg(dir.join("unit.o"))
-                    .arg(dir.join("library.o"))
-                    .arg("-o")
-                    .arg(dir.join("probe")),
-            );
-            output(&mut Command::new(dir.join("probe")));
-        }
-    }
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn release_imports_keep_transitive_bodies_in_either_unit_order() {
-    let leaf = "define i64 @leaf(i64 %x) { %y = mul i64 %x, 3\n ret i64 %y }";
-    let middle = "declare i64 @leaf(i64)\ndefine i64 @middle(i64 %x) { %a = call i64 @leaf(i64 %x)\n %y = add i64 %a, 1\n ret i64 %y }";
-    let entry = "declare i64 @middle(i64)\ndefine i64 @entry(i64 %x) { %y = call i64 @middle(i64 %x)\n ret i64 %y }";
-    let dir = std::env::temp_dir().join(format!("hirsel-core-imports-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
-    std::fs::write(dir.join("probe.c"), "#include <stdint.h>\nextern uint64_t entry(uint64_t);\nint main(void) {uint64_t xs[]={0,1,UINT64_MAX,UINT64_MAX/3}; for(unsigned i=0;i<4;i++) if(entry(xs[i])!=xs[i]*3+1) return 1; return 0;}\n").unwrap();
-    for order in [
-        [(leaf, true), (middle, true), (entry, false)],
-        [(entry, false), (middle, true), (leaf, true)],
-    ] {
-        let units = order.map(|(ir, imported)| hirsel_llvm_lazy::Unit::Text { ir, imported });
-        let object = hirsel_llvm_lazy::emit_program(&units, &["entry".into()]).unwrap();
-        std::fs::write(dir.join("unit.o"), object).unwrap();
-        let undefined = output(
-            Command::new(prefix.join("bin/llvm-nm"))
-                .arg("--undefined-only")
-                .arg(dir.join("unit.o")),
-        );
-        assert!(
-            undefined.trim().is_empty(),
-            "small supplied bodies must inline: {undefined}"
-        );
-        output(
-            Command::new(prefix.join("bin/clang"))
-                .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
-                .arg(dir.join("probe.c"))
-                .arg(dir.join("unit.o"))
-                .arg("-o")
-                .arg(dir.join("probe")),
-        );
-        output(&mut Command::new(dir.join("probe")));
-    }
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn private_imports_preserve_public_addresses_and_failure_destinations() {
-    let imported = r#"
-define zeroext i8 @view(ptr %ctx, ptr %out, ptr readonly %pair, i8 zeroext %fail) noinline {
-entry:
-  %bad = icmp ne i8 %fail, 0
-  br i1 %bad, label %failure, label %success
-success:
-  %a = load i64, ptr %pair, align 1
-  %p = getelementptr i8, ptr %pair, i64 8
-  %b = load i64, ptr %p, align 1
-  %sum = add i64 %a, %b
-  store i64 %sum, ptr %out, align 1
-  ret i8 0
-failure:
-  ret i8 %fail
-}
-"#;
-    let owned = r#"
-declare zeroext i8 @view(ptr, ptr, ptr, i8 zeroext)
-@addresses = private constant [1 x ptr] [ptr @view]
-define ptr @address() {
-  %p = load ptr, ptr @addresses
-  ret ptr %p
-}
-define zeroext i8 @direct(ptr %out, ptr %pair, i8 zeroext %fail) {
-  %status = call zeroext i8 @view(ptr null, ptr %out, ptr %pair, i8 zeroext %fail)
-  ret i8 %status
-}
-"#;
-    let dir = std::env::temp_dir().join(format!(
-        "hirsel-core-private-imports-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
-    std::fs::write(
-        dir.join("probe.c"),
-        r#"#include <stdint.h>
-typedef uint8_t (*View)(void *, uint64_t *, const uint64_t *, uint8_t);
-uint8_t view(void *ctx, uint64_t *out, const uint64_t *p, uint8_t fail) {
-    if (fail) return fail;
-    *out = p[0] + p[1]; return 0;
-}
-extern View address(void);
-extern uint8_t direct(uint64_t *, const uint64_t *, uint8_t);
-int main(void) {
-    if (address() != view) return 1;
-    uint64_t pair[] = {UINT64_MAX, 3};
-    for (unsigned fail = 0; fail < 256; ++fail) {
-        uint64_t a = 123, b = 123;
-        if (direct(&a, pair, fail) != fail) return 2;
-        if (address()(0, &b, pair, fail) != fail) return 3;
-        if (a != b || a != (fail ? 123 : 2)) return 4;
-    }
-    return 0;
-}
-"#,
-    )
-    .unwrap();
-    for order in [
-        [(imported, true), (owned, false)],
-        [(owned, false), (imported, true)],
-    ] {
-        let units = order.map(|(ir, imported)| hirsel_llvm_lazy::Unit::Text { ir, imported });
-        let object =
-            hirsel_llvm_lazy::emit_program(&units, &["address".into(), "direct".into()]).unwrap();
-        std::fs::write(dir.join("unit.o"), object).unwrap();
-        output(
-            Command::new(prefix.join("bin/clang"))
-                .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
-                .arg(dir.join("probe.c"))
-                .arg(dir.join("unit.o"))
-                .arg("-o")
-                .arg(dir.join("probe")),
-        );
-        output(&mut Command::new(dir.join("probe")));
-    }
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
 fn lazy_component_preserves_exact_core_objects() {
     for source in [
         include_str!("../../../hirsel-core-ir/samples/arith.core"),
@@ -3758,14 +3206,8 @@ fn private_register_results_keep_the_public_destination_and_failure_abi() {
             .enumerate()
             .map(|(i, _)| symbol(&module, FuncId(i as u32)))
             .collect::<Vec<_>>();
-        let bytes = hirsel_llvm_lazy::emit_program(
-            &[hirsel_llvm_lazy::Unit::Text {
-                ir: &ir,
-                imported: false,
-            }],
-            &exports,
-        )
-        .unwrap();
+        let bytes =
+            hirsel_llvm_lazy::emit_program(&[hirsel_llvm_lazy::Unit::Text(&ir)], &exports).unwrap();
         let cases = [0, 1, 2, 3, 123].map(|value| Case {
             function,
             args: vec![value],
@@ -4071,10 +3513,7 @@ fn site_fixture(target: Target) {
                 .map(|case| symbol(&module, case.function))
                 .collect::<Vec<_>>();
             hirsel_llvm_lazy::emit_program_for_target(
-                &[hirsel_llvm_lazy::Unit::Text {
-                    ir: &ir,
-                    imported: false,
-                }],
+                &[hirsel_llvm_lazy::Unit::Text(&ir)],
                 &exports,
                 target,
             )

@@ -313,6 +313,10 @@ impl Source for DiskIndex {
         self.rows.fetch_add(1, Ordering::Relaxed);
         Ok(bytes)
     }
+    /// A map row is its key's encoding followed by its value's, a table has one
+    /// key type, every query type encodes as that key type does, and an encoding
+    /// of one type is prefix-free: a row that starts with the query's bytes has
+    /// exactly that key.
     fn find(&self, table: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
         let pages = self.installed()?;
         let section = section(pages, table)?;
@@ -346,4 +350,116 @@ impl Source for DiskIndex {
     }
 }
 
-// Old-against-new differential for F-image (temporary; not committed).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_core_ids::DefPath;
+
+    /// Two string keys whose slot hashes agree in the tag word and the low two
+    /// bits, so in a two-entry map they share a first slot and a tag.
+    fn colliding() -> (String, String) {
+        let mut seen = std::collections::HashMap::new();
+        for i in 0u64.. {
+            let key = format!("k{i}");
+            let hash = key_hash(&encode(&key).unwrap());
+            if let Some(other) = seen.insert((hash >> 32, hash & 3), key.clone()) {
+                return (other, key);
+            }
+        }
+        unreachable!()
+    }
+
+    /// Law: every query against the published sections answers what a linear
+    /// scan of the published rows answers: the row with that key, or none.
+    #[test]
+    fn section_lookups_agree_with_a_linear_scan_of_the_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::image(dir.path()).unwrap();
+        let namespace = ContentHash::of_bytes(b"section-lookup-law");
+        let index = Arc::new(DiskIndex::new(dir.path()).unwrap());
+        hirsel_core_ids::published::bind_source(namespace, index.clone());
+        let (a, b) = colliding();
+        let big = vec![7u8; 3 * PAGE + 5];
+        let strings: Vec<(String, Vec<u8>)> = ["a", "ab", "", "a\0"]
+            .into_iter()
+            .map(String::from)
+            .chain([a.clone(), b.clone()])
+            .enumerate()
+            .map(|(i, k)| {
+                (
+                    k,
+                    if i == 1 {
+                        big.clone()
+                    } else {
+                        vec![i as u8; 900]
+                    },
+                )
+            })
+            .collect();
+        let parent = DefPath::from_full("library@1/parent").unwrap();
+        let child = DefPath::from_full("library@1/parent/child").unwrap();
+        let paths = vec![(parent.clone(), 1u32), (child.clone(), 2)];
+        let numbers: Vec<(u64, u64)> = (0..3000).map(|i| (i * 7919, i)).collect();
+        let lone = vec![(a.clone(), vec![1u8])];
+        let rows: Vec<Vec<u8>> = (0..40).map(|i| vec![i as u8; 1000 + i]).collect();
+
+        let mut writer = Writer::new(namespace);
+        writer.map::<String, Vec<u8>>(&Map::default()).unwrap();
+        writer
+            .map(&strings.iter().cloned().collect::<Map<_, _>>())
+            .unwrap();
+        writer
+            .map(&paths.iter().cloned().collect::<Map<_, _>>())
+            .unwrap();
+        writer
+            .map(&numbers.iter().cloned().collect::<Map<_, _>>())
+            .unwrap();
+        writer
+            .map(&lone.iter().cloned().collect::<Map<_, _>>())
+            .unwrap();
+        writer.table(&Table::<Vec<u8>>::default()).unwrap();
+        writer.table(&Table::from(rows.clone())).unwrap();
+        writer.table(&Table::from(vec![big.clone()])).unwrap();
+        let (sections, _) = writer.finish(&store).unwrap();
+        let lens: Vec<u32> = [0, strings.len(), 2, numbers.len(), 1, 0, rows.len(), 1]
+            .map(|n| n as u32)
+            .into();
+        let hash = store.put(&encode(&sections).unwrap()).unwrap();
+        // Read back through the store, as an opened image is.
+        index.open(hash, hash);
+        let d = |table: usize| Descriptor {
+            namespace,
+            table: table as u32,
+            len: lens[table],
+        };
+
+        fn check<K, V>(index: &DiskIndex, d: Descriptor, rows: &[(K, V)], queries: &[K])
+        where
+            K: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+            V: serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            for query in rows.iter().map(|(k, _)| k).chain(queries) {
+                let expected = rows.iter().find(|(k, _)| k == query).map(|(_, v)| v);
+                let found = index.find(d, &encode(query).unwrap()).unwrap().map(|i| {
+                    decode::<(K, V)>(&index.row(d, i).unwrap()).expect("a published row decodes")
+                });
+                match (&found, expected) {
+                    (Some((k, v)), Some(e)) => assert!(k == query && v == e, "{query:?}"),
+                    (None, None) => {}
+                    _ => panic!("{query:?}: found {found:?}, a scan finds {expected:?}"),
+                }
+            }
+        }
+        let absent: Vec<String> = ["b", "abc", "\0", "aa"].map(String::from).into();
+        check::<String, Vec<u8>>(&index, d(0), &[], &absent);
+        check(&index, d(1), &strings, &absent);
+        let other = DefPath::from_full("library@1/parent/other").unwrap();
+        check(&index, d(2), &paths, &[other]);
+        check(&index, d(3), &numbers, &[1, 7918, u64::MAX]);
+        check(&index, d(4), &lone, &[b.clone()]);
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(index.row(d(6), i as u32).unwrap(), encode(row).unwrap());
+        }
+        assert_eq!(index.row(d(7), 0).unwrap(), encode(&big).unwrap());
+    }
+}

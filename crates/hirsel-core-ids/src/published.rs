@@ -676,15 +676,6 @@ mod tests {
             Ok((key == [7, 0, 0, 0]).then_some(0))
         }
     }
-    struct AliasRows;
-    impl Provider<(CountedKey, u32)> for AliasRows {
-        fn row(&self, _: u32) -> io::Result<(CountedKey, u32)> {
-            Ok((CountedKey(9), 42))
-        }
-        fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
-            Ok((key == [7, 0, 0, 0]).then_some(0))
-        }
-    }
     #[test]
     fn published_hot_keys_skip_encoding_and_owned_overrides_win() {
         let descriptor = Descriptor {
@@ -708,15 +699,6 @@ mod tests {
         );
         assert_eq!(map.get(&CountedKey(8)), None);
         assert_eq!(map.get(&CountedKey(8)), None);
-        let alias = Map::published(bind(
-            Descriptor {
-                namespace: ContentHash::of_bytes(b"aliased-key"),
-                ..descriptor
-            },
-            Arc::new(AliasRows),
-        ));
-        assert_eq!(alias.get(&CountedKey(7)), Some(&42));
-        assert_eq!(alias.get(&CountedKey(9)), None);
     }
     struct Missing;
     impl Provider<u64> for Missing {

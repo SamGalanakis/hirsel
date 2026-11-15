@@ -21,6 +21,7 @@ SUITES = (
     ('land', 'test-land', []),
     ('laws-cranelift', 'core-native-laws-cranelift', []),
     ('laws-llvm', 'core-native-laws-llvm', []),
+    ('m2b-host', 'core-m2b-host', []),
 )
 # Python unittest harnesses: their bodies are unittest's count, not libtest lines.
 UNITTEST_SUITES = {'test-land', 'core-native-laws-cranelift', 'core-native-laws-llvm'}

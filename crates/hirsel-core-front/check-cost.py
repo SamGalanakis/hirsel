@@ -73,7 +73,7 @@ def finished_forecast(process, lines, projection, budget):
     return forecast, failures
 
 
-def sample_sources(compiler, output):
+def sample_sources(compiler, output, profile_front=False):
     manifest = json.loads((ROOT / 'core/programs/m1/manifest.json').read_text())
     manifest.pop('entries', None)
     for package in manifest['packages']:
@@ -95,7 +95,8 @@ def sample_sources(compiler, output):
                    'perf', 'stat', '--no-big-num', '-x', ';', '-e', 'instructions:u',
                    '-o', str(directory / 'process-perf.txt'), '--', str(compiler), 'check',
                    '--inputs', str(directory / 'inputs.json'), '--store', str(directory / 'store'),
-                   '--metrics', str(directory / 'metrics.json'), '--json']
+                   '--metrics', str(directory / 'metrics.json'), '--json',
+                   *(['--profile-front'] if profile_front else [])]
         with (directory / 'result.json').open('w') as stdout, (directory / 'stderr.log').open('w') as stderr:
             result = subprocess.run(command, cwd=ROOT, env=env, stdout=stdout, stderr=stderr)
         # Until the checker is complete, benchmark corpora legitimately contain GAPs.

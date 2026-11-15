@@ -1,7 +1,7 @@
 {
   "revision": "6ee84cb5fe1fad288211f7bd1aa486d8d99d6d2d",
-  "policy": "Each F land lowers only its measured stage. Initial margin 2%, rounded up to 100 instructions. Budget targets remain separate. M1 legacy check/lower unchanged.",
-  "nested": "Body keys remain in legacy declarations/check stages; image read includes digest and overlaps the consuming phase. Do not sum nested rows.",
+  "policy": "Existing stage ceilings only decrease by measured savings; no old ceiling is raised. New image-index/work-count cells start at their own observed diagnostic configuration +2%. Phase/keys/read/digest use the production compiler; expensive published-table probes are compiled out of it.",
+  "nested": "Body keys retain legacy phase parents. The diagnostic release index union includes reads/decode/cache/probes. It is a separate configuration; never add it to or subtract it from ordinary phase/read/digest costs. Published roots match with profiling toggled within the diagnostic binary.",
   "suite_targets_instructions": {
     "parse": 8000000,
     "resolve": 7000000,
@@ -26,7 +26,8 @@
           "body keys/for_body": 13053611,
           "body keys": 18760910,
           "image read": 0,
-          "image digest": 0
+          "image digest": 0,
+          "image index": 0
         },
         "image_access": {
           "records_opened": 0,
@@ -35,26 +36,50 @@
           "digest_bytes": 0,
           "read_instructions": 0,
           "digest_instructions": 0,
-          "counter_refusal": null
+          "counter_refusal": null,
+          "index_instructions": 0,
+          "index_calls": 0,
+          "key_probes": 0,
+          "row_demands": 0,
+          "nodes_decoded": 0
+        },
+        "image_index_diagnostic": {
+          "instructions": 0,
+          "counts": {
+            "records_opened": 0,
+            "bytes_read": 0,
+            "digests": 0,
+            "digest_bytes": 0,
+            "index_calls": 0,
+            "key_probes": 0,
+            "row_demands": 0,
+            "nodes_decoded": 0
+          },
+          "basis": "e4b65f6c + F2, two-tool core-front-cost qualification, /tmp/core-check-cost-915-F-rebase-front.log; read/digest remain ordinary-mode observations"
         }
       },
       "instructions_per_token": {
         "parse": 424.75274290255004,
         "index": 7.530159647475259,
         "resolve": 162.8837679693708,
-        "input counts": 8.644080040453659,
+        "input counts": 8.639745719858412,
         "declarations": 158.88463483348986,
         "body keys/new": 84.10749115076212,
         "body keys/for_body": 192.36726143177057,
         "body keys": 276.4747525825327,
         "image read": 0.0,
-        "image digest": 0.0
+        "image digest": 0.0,
+        "image index": 0.0
       },
       "image_per_token": {
         "records_opened": 0.0,
         "bytes_read": 0.0,
         "digests": 0.0,
-        "digest_bytes": 0.0
+        "digest_bytes": 0.0,
+        "index_calls": 0.0,
+        "key_probes": 0.0,
+        "row_demands": 0.0,
+        "nodes_decoded": 0.0
       }
     },
     "std": {
@@ -73,7 +98,8 @@
           "body keys/for_body": 5937975,
           "body keys": 9540102,
           "image read": 0,
-          "image digest": 0
+          "image digest": 0,
+          "image index": 0
         },
         "image_access": {
           "records_opened": 0,
@@ -82,26 +108,50 @@
           "digest_bytes": 0,
           "read_instructions": 0,
           "digest_instructions": 0,
-          "counter_refusal": null
+          "counter_refusal": null,
+          "index_instructions": 0,
+          "index_calls": 0,
+          "key_probes": 0,
+          "row_demands": 0,
+          "nodes_decoded": 0
+        },
+        "image_index_diagnostic": {
+          "instructions": 0,
+          "counts": {
+            "records_opened": 0,
+            "bytes_read": 0,
+            "digests": 0,
+            "digest_bytes": 0,
+            "index_calls": 0,
+            "key_probes": 0,
+            "row_demands": 0,
+            "nodes_decoded": 0
+          },
+          "basis": "e4b65f6c + F2, two-tool core-front-cost qualification, /tmp/core-check-cost-915-F-rebase-front.log; read/digest remain ordinary-mode observations"
         }
       },
       "instructions_per_token": {
         "parse": 460.5369362089569,
-        "index": 10.297046605588118,
+        "index": 10.28851078358846,
         "resolve": 150.125192055995,
-        "input counts": 8.834575769646618,
+        "input counts": 8.826039947646958,
         "declarations": 219.9396801912024,
         "body keys/new": 104.54105730381836,
         "body keys/for_body": 172.3325556251067,
         "body keys": 276.87361292892507,
         "image read": 0.0,
-        "image digest": 0.0
+        "image digest": 0.0,
+        "image index": 0.0
       },
       "image_per_token": {
         "records_opened": 0.0,
         "bytes_read": 0.0,
         "digests": 0.0,
-        "digest_bytes": 0.0
+        "digest_bytes": 0.0,
+        "index_calls": 0.0,
+        "key_probes": 0.0,
+        "row_demands": 0.0,
+        "nodes_decoded": 0.0
       }
     },
     "suite-edit": {
@@ -120,7 +170,8 @@
           "body keys/for_body": 8558364,
           "body keys": 11097064,
           "image read": 827105,
-          "image digest": 665321
+          "image digest": 665321,
+          "image index": 10862165
         },
         "image_access": {
           "records_opened": 63,
@@ -129,26 +180,50 @@
           "digest_bytes": 250700,
           "read_instructions": 827105,
           "digest_instructions": 665321,
-          "counter_refusal": null
+          "counter_refusal": null,
+          "index_instructions": 0,
+          "index_calls": 66495,
+          "key_probes": 3424,
+          "row_demands": 1029,
+          "nodes_decoded": 1
+        },
+        "image_index_diagnostic": {
+          "instructions": 10862165,
+          "counts": {
+            "records_opened": 61,
+            "bytes_read": 244452,
+            "digests": 61,
+            "digest_bytes": 242500,
+            "index_calls": 66495,
+            "key_probes": 3424,
+            "row_demands": 1029,
+            "nodes_decoded": 1
+          },
+          "basis": "e4b65f6c + F2, two-tool core-front-cost qualification, /tmp/core-check-cost-915-F-rebase-front.log; read/digest remain ordinary-mode observations"
         }
       },
       "instructions_per_token": {
         "parse": 458.8820165242963,
         "index": 17.146057975073518,
         "resolve": 361.4115670074219,
-        "input counts": 8.472202772720907,
+        "input counts": 8.46380058815292,
         "declarations": 134.0204453157821,
         "body keys/new": 72.52485646268029,
         "body keys/for_body": 244.49236801568406,
         "body keys": 317.01722447836437,
         "image read": 23.629743733370677,
-        "image digest": 19.008542220977453
+        "image digest": 19.008542220977453,
+        "image index": 310.30667973673155
       },
       "image_per_token": {
         "records_opened": 0.0018204733230639965,
         "bytes_read": 7.219465060915838,
         "digests": 0.0018204733230639965,
-        "digest_bytes": 7.161854082061336
+        "digest_bytes": 7.161854082061336,
+        "index_calls": 1.8995938944125472,
+        "key_probes": 0.09782943565326985,
+        "row_demands": 0.02940764598795687,
+        "nodes_decoded": 5.601456378658451e-05
       }
     }
   },
@@ -365,6 +440,129 @@
         "suite-edit": 12651080
       },
       "evidence": "core-syntax-891/resolve-F/fixed-modes-{cost,differential}.log"
+    },
+    {
+      "reason": "Exclude observer bookkeeping, compile lookup hooks out of production, add separately configured exact image-index union. Old ceilings only lowered; 60000 and legacy guard unchanged.",
+      "base": "18329f22 + landed F253f42f13374",
+      "changes": {
+        "m1": {
+          "input counts": {
+            "before": 8.644080040453659,
+            "after": 8.639745719858412
+          },
+          "image index": {
+            "before": null,
+            "after": 0.0
+          },
+          "index_calls": {
+            "before": null,
+            "after": 0.0
+          },
+          "key_probes": {
+            "before": null,
+            "after": 0.0
+          },
+          "row_demands": {
+            "before": null,
+            "after": 0.0
+          },
+          "nodes_decoded": {
+            "before": null,
+            "after": 0.0
+          }
+        },
+        "std": {
+          "index": {
+            "before": 10.297046605588118,
+            "after": 10.28851078358846
+          },
+          "input counts": {
+            "before": 8.834575769646618,
+            "after": 8.826039947646958
+          },
+          "image index": {
+            "before": null,
+            "after": 0.0
+          },
+          "index_calls": {
+            "before": null,
+            "after": 0.0
+          },
+          "key_probes": {
+            "before": null,
+            "after": 0.0
+          },
+          "row_demands": {
+            "before": null,
+            "after": 0.0
+          },
+          "nodes_decoded": {
+            "before": null,
+            "after": 0.0
+          }
+        },
+        "suite-edit": {
+          "input counts": {
+            "before": 8.472202772720907,
+            "after": 8.46380058815292
+          },
+          "image index": {
+            "before": null,
+            "after": 461.42276992017923
+          },
+          "index_calls": {
+            "before": null,
+            "after": 2.7145497829435654
+          },
+          "key_probes": {
+            "before": null,
+            "after": 0.09785744293516314
+          },
+          "row_demands": {
+            "before": null,
+            "after": 0.03089203192830136
+          },
+          "nodes_decoded": {
+            "before": null,
+            "after": 0.008626242823134015
+          }
+        }
+      },
+      "compiler_sha256": "fc8e034915185c47d79c1425f767be26c6b7396b17fc13484556c8d6f8c93d57",
+      "image_profiler_sha256": "1a99aa3a1fcb55361bae1bc535483d5034f109d659da9d4a416f2542cb427647",
+      "rebase_note": "Preserved all intervening F-stage reductions and histories through e4b65f6c, including flat paged F-image. New image-index union ceiling uses the qualified pre-rebase diagnostic observation; no existing ceiling raised."
+    },
+    {
+      "reason": "Merged-main qualification of new diagnostic cells after F-image flat pages; initialize at current observation plus 2 percent, rounded to 100 instructions or whole count. No old phase/read/digest cell or fixed budget raised.",
+      "base": "e4b65f6c + F2",
+      "evidence": "/tmp/core-check-cost-915-F-rebase-front.log",
+      "changes": {
+        "m1": {},
+        "std": {},
+        "suite-edit": {
+          "image index": {
+            "before": 461.42276992017923,
+            "after": 310.30667973673155
+          },
+          "index_calls": {
+            "before": 2.7145497829435654,
+            "after": 1.8995938944125472
+          },
+          "key_probes": {
+            "before": 0.09785744293516314,
+            "after": 0.09782943565326985
+          },
+          "row_demands": {
+            "before": 0.03089203192830136,
+            "after": 0.02940764598795687
+          },
+          "nodes_decoded": {
+            "before": 0.008626242823134015,
+            "after": 5.601456378658451e-05
+          }
+        }
+      },
+      "rebase_note": "Preserved fixed-path-mode resolve reductions through22ef139dc05f, plus all prior F histories; no existing ceiling raised."
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

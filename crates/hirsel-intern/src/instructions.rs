@@ -9,6 +9,7 @@ mod sys {
         pub fn syscall(number: i64, ...) -> i64;
         pub fn read(fd: i32, buffer: *mut std::ffi::c_void, count: usize) -> isize;
         pub fn close(fd: i32) -> i32;
+        pub fn ioctl(fd: i32, request: usize, ...) -> i32;
     }
     #[cfg(target_arch = "x86_64")]
     pub const PERF_EVENT_OPEN: i64 = 298;
@@ -56,6 +57,34 @@ impl InstructionCounter {
         any(target_arch = "x86_64", target_arch = "aarch64")
     )))]
     pub fn open() -> Result<InstructionCounter, String> {
+        Err("instruction counters need Linux perf events".into())
+    }
+    /// Suspend counting while the observer records its own bookkeeping.
+    #[inline(always)]
+    pub fn pause(&self) -> Result<(), String> {
+        self.set_enabled(false)
+    }
+    /// Resume counting the compiler's work with the same pinned PMU slot.
+    #[inline(always)]
+    pub fn resume(&self) -> Result<(), String> {
+        self.set_enabled(true)
+    }
+    #[cfg(target_os = "linux")]
+    #[inline(always)]
+    fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        // SAFETY: self owns this perf-event fd. These ioctls take no pointer.
+        let result = unsafe { sys::ioctl(self.0, if enabled { 0x2400 } else { 0x2401 }, 0usize) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "instruction counter control refused: {}",
+                std::io::Error::last_os_error()
+            ))
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    fn set_enabled(&self, _enabled: bool) -> Result<(), String> {
         Err("instruction counters need Linux perf events".into())
     }
     #[cfg(all(

@@ -33,11 +33,54 @@ def manifests(root, out):
     (out / 'suite-edited-inputs.json').write_text(json.dumps(changed))
 
 
-def command(compiler, runtime, out, manifest, entry, store, tag):
+def command(compiler, runtime, out, manifest, entry, store, tag, cc, profile_front=False):
     host = out / 'host'
     host.mkdir(exist_ok=True)
-    return [str(compiler), 'build', '--inputs', str(manifest), '--entry', entry,
+    return [str(compiler), 'build', *(['--profile-front'] if profile_front else []), '--inputs', str(manifest), '--entry', entry,
             '--store', str(store), '--json', '--backend', 'cranelift',
-            '--runtime', str(runtime), '--dir', str(host), '--grant', 'Stdout',
+            '--runtime', str(runtime), '--cc', str(cc), '--dir', str(host), '--grant', 'Stdout',
             '--grant', 'Tasks', '-o', str(out / (tag + '.bin')),
             '--metrics', str(out / (tag + '.metrics.json'))]
+
+
+def toolchain(root, buck_inputs=None):
+    """Select current Buck outputs, or explicit inputs supplied by a Buck test.
+
+    Standalone callers always ask Buck, regardless of inherited LLVM variables.
+    The link editor is the one clang actually selects, checked against the lock.
+    """
+    import hashlib
+    import os
+    import subprocess
+    import time
+    if buck_inputs is None:
+        while os.getloadavg()[0] > 32:
+            time.sleep(10)
+        outputs = json.loads(subprocess.check_output([
+            str(root / '.buck2/bin/buck2'), 'build', '--show-json-output',
+            '//tools/buck2/native-toolchain:llvm', '//tools/buck2/native-toolchain:kit'], cwd=root, text=True))
+        llvm = (root / outputs['root//tools/buck2/native-toolchain:llvm']).resolve()
+        kit = (root / outputs['root//tools/buck2/native-toolchain:kit']).resolve()
+    else:
+        # These paths are target outputs injected by hirsel_script_test, not a
+        # guessed configuration directory. No nested Buck invocation in a test.
+        llvm, kit = (Path(buck_inputs[k]).resolve() for k in ('llvm', 'kit'))
+    env = os.environ | {'LD_LIBRARY_PATH': str(llvm / 'lib')}
+    clang = llvm / 'bin/clang'
+    selected = subprocess.check_output([str(clang), '-print-prog-name=ld.lld'], env=env, text=True).strip()
+    lld = Path(selected)
+    if not lld.is_absolute():
+        raise ValueError('pinned clang did not select an absolute ld.lld: ' + selected)
+    digest = hashlib.sha256(lld.read_bytes()).hexdigest()
+    pin = next(line.split()[1] for line in (root / 'tools/native-toolchain/llvm-23.lock').read_text().splitlines()
+               if line.startswith('static_lld '))
+    if digest != pin:
+        raise ValueError(f'selected ld.lld {lld} has sha256 {digest}; lock pins {pin}')
+    return dict(llvm=str(llvm), kit=str(kit), clang=str(clang), linker=str(lld.resolve()), linker_sha256=digest)
+
+
+def stamp_metrics(path, tools):
+    row = json.loads(path.read_text())
+    row['linker_sha256'] = tools['linker_sha256']
+    row['linker'] = tools['linker']
+    path.write_text(json.dumps(row, indent=2) + '\n')

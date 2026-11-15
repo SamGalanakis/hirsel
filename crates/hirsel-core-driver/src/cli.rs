@@ -28,6 +28,7 @@ pub enum OptionId {
     Store,
     Inputs,
     Metrics,
+    ProfileFront,
     Image,
     Lib,
     Help,
@@ -303,6 +304,13 @@ static OPTIONS: &[OptionSpec] = &[
             "std-product"
         ],
         "Write exclusive stage instruction measurements."
+    ),
+    option!(
+        ProfileFront,
+        ["--profile-front"],
+        None,
+        ["check", "build", "run"],
+        "Include nested published-image work in --metrics (adds profiling overhead)."
     ),
     option!(
         Image,

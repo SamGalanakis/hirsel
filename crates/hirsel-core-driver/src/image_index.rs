@@ -218,7 +218,10 @@ impl DiskIndex {
         let sections = self
             .store
             .get(hash)?
-            .and_then(|bytes| decode::<Sections>(&bytes))
+            .and_then(|bytes| {
+                let _decode = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Decode);
+                decode::<Sections>(&bytes)
+            })
             .ok_or_else(|| {
                 io::Error::other(format!(
                     "core image {} is damaged: its sections record is missing or fails its hash check; rebuild the image",
@@ -303,6 +306,7 @@ fn section(pages: &Pages, table: Descriptor) -> io::Result<&Section> {
 }
 impl Source for DiskIndex {
     fn row(&self, table: Descriptor, index: u32) -> io::Result<Vec<u8>> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Row);
         let pages = self.installed()?;
         if index >= table.len {
             return Err(damaged(pages));
@@ -318,6 +322,7 @@ impl Source for DiskIndex {
     /// of one type is prefix-free: a row that starts with the query's bytes has
     /// exactly that key.
     fn find(&self, table: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Probe);
         let pages = self.installed()?;
         let section = section(pages, table)?;
         let (slots, mask) = section

@@ -96,6 +96,16 @@ host_transition(
     visibility = ["PUBLIC"],
 )
 
+# Diagnostic published-table scopes are compiled out of the production compiler.
+constraint_setting(name = "front_observer", visibility = ["PUBLIC"])
+constraint_value(name = "front_observer_enabled", constraint_setting = ":front_observer", visibility = ["PUBLIC"])
+platform(name = "front_observer_release", constraint_values = [
+    "prelude//os/constraints:linux", "prelude//cpu/constraints:x86_64",
+    ":profile_release", ":front_observer_enabled"], visibility = ["PUBLIC"])
+host_transition(name = "front_observer_tool_transition", configuration_name = "root//tools/buck2:front_observer_release",
+    budget = ":budget", panic = ":panic", profile = ":profile_release", cpu = "prelude//cpu/constraints:x86_64",
+    extra_constraints = [":front_observer_enabled"], visibility = ["PUBLIC"])
+
 constraint_setting(name = "panic")
 
 constraint_value(name = "panic_abort", constraint_setting = ":panic", visibility = ["PUBLIC"])

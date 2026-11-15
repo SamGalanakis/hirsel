@@ -95,6 +95,7 @@ impl CoreImage {
         })))
     }
     pub(crate) fn directory(&self) -> io::Result<Arc<ImageDirectory>> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         if let Some(directory) = self.directory.get() {
             return Ok(Arc::clone(directory));
         }
@@ -104,6 +105,7 @@ impl CoreImage {
     }
     /// Resolve one fully qualified name through the package's immutable indexes.
     pub fn resolve_name(&self, path: &DefPath) -> io::Result<Option<Definition>> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         hirsel_core_ids::published::catch_io(|| {
             let directory = self.directory()?;
             let index = &directory.index;
@@ -119,6 +121,7 @@ impl CoreImage {
     }
     /// Demand the named signature/summary row, without loading other declarations.
     pub fn demand_declaration(&self, path: &DefPath) -> io::Result<bool> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         hirsel_core_ids::published::catch_io(|| {
             let library = self.declarations()?;
             Ok(match library.paths.get(path) {
@@ -146,6 +149,7 @@ impl CoreImage {
     /// One library file's text for an executable's source table; the
     /// executable names the file by its module, never by its installed path.
     pub(crate) fn source_text(&self, module: ModuleId) -> io::Result<String> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         hirsel_core_ids::published::catch_io(|| {
             let directory = self.directory()?;
             let row = directory.sources.get(&module).ok_or_else(|| {
@@ -155,6 +159,7 @@ impl CoreImage {
         })
     }
     fn file_inner(&self, index: usize) -> io::Result<Arc<FileProduct>> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         if let Some(file) = self.files.lock().unwrap().get(&index) {
             return Ok(Arc::clone(file));
         }
@@ -169,6 +174,7 @@ impl CoreImage {
         Ok(file)
     }
     pub(crate) fn has_body(&self, path: &DefPath) -> io::Result<bool> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         hirsel_core_ids::published::catch_io(|| {
             Ok(self.directory()?.definitions.contains_key(path))
         })
@@ -180,6 +186,7 @@ impl CoreImage {
         self.indexed.checked_pages()
     }
     pub(crate) fn file_offset(&self, module: ModuleId, item: u32) -> io::Result<u32> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         hirsel_core_ids::published::catch_io(|| {
             Ok(self
                 .directory()?
@@ -196,6 +203,7 @@ impl CoreImage {
         Ok(self.demand_arc(path)?.as_ref())
     }
     fn demand_arc(&self, path: &DefPath) -> io::Result<&Arc<DefinitionProduct>> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         hirsel_core_ids::published::catch_io(|| {
             let directory = self.directory()?;
             let id = directory.definitions.index_of(path).ok_or_else(|| {
@@ -212,6 +220,7 @@ impl CoreImage {
         })
     }
     pub(crate) fn declarations(&self) -> io::Result<Arc<Library>> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         if let Some(rows) = self.declarations.get() {
             return Ok(Arc::clone(rows));
         }
@@ -220,6 +229,7 @@ impl CoreImage {
         Ok(rows)
     }
     fn read<T: serde::de::DeserializeOwned>(&self, record: ContentHash) -> io::Result<T> {
+        let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         let bytes = self.store.get(record)?.ok_or_else(miss)?;
         decode(&bytes).ok_or_else(miss)
     }

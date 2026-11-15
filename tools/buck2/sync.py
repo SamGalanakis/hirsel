@@ -508,6 +508,7 @@ FULL_GATE_SKIPS = {}
 # Their tests live in integration/proof targets, not these empty entry points.
 EMPTY_UNIT_HARNESSES = {'hirsel-analysis-canary-unittest',
  'hirsel-core-driver-bin-hirsel-core-unittest',
+ 'hirsel-core-driver-bin-hirsel-core-request-cost-unittest',
  'hirsel-core-syntax-bin-hirsel-core-syntax-unittest',
  'hirsel-authority-unittest',
  'hirsel-check-protocol-unittest',
@@ -1350,10 +1351,11 @@ def first_party(meta: dict) -> str:
                             bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core", "hirsel-core-request-cost": "//:hirsel-core-driver-bin-hirsel-core-request-cost"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**"]) + ["core/tools/measure.py", "core/tools/m1.py", "tools/capped", "crates/hirsel-core-front/cost-ceilings.json"]')))
     out.append("\n" + call("hirsel_script_test", name="core-front-cost", script="crates/hirsel-core-front/front-cost.py", full=False, host=True, production=True, native_tools=True,
-                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel-core"],
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel-core", "--image-profiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel-core-observed", "--buck-tool-inputs"],
                             bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
+                            front_observer_bin_exes={"hirsel-core-observed": "//:hirsel-core-driver-bin-hirsel-core"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/langarena/**"]) + ["core/tools/request_cost.py", "core/tools/langarena.py", "core/tools/std_native.py", "core/tools/m1.py", "core/tools/measure.py", "tools/capped", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost-ceilings.json"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/langarena/**"]) + ["core/tools/request_cost.py", "core/tools/langarena.py", "core/tools/std_native.py", "core/tools/m1.py", "core/tools/measure.py", "tools/capped", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost-ceilings.json", "tools/native-toolchain/llvm-23.lock"]')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost-unit", script="crates/hirsel-core-front/test-check-cost.py", full=False, host=True,
                             data=["crates/hirsel-core-front/test-check-cost.py", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost.py", "core/tools/request_cost.py", "core/tools/measure.py"]))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**"])')))

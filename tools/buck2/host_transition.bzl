@@ -12,13 +12,14 @@ def _host_transition_impl(ctx):
     profile = ctx.attrs.profile[ConstraintValueInfo]
     cpu = ctx.attrs.cpu[ConstraintValueInfo]
     configuration_name = ctx.attrs.configuration_name
+    extra_constraints = [dep[ConstraintValueInfo] for dep in ctx.attrs.extra_constraints]
     def apply(platform):
         constraints = dict(platform.configuration.constraints)
         constraints.pop(budget.label, None)
         constraints.pop(panic.label, None)
         if not preserve_sanitizer:
             constraints.pop(sanitizer.label, None)
-        for value in [profile, cpu]:
+        for value in [profile, cpu] + extra_constraints:
             constraints[value.setting.label] = value
         return PlatformInfo(
             label = configuration_name,
@@ -29,6 +30,7 @@ def _host_transition_impl(ctx):
 host_transition = rule(
     impl = _host_transition_impl,
     attrs = {
+        "extra_constraints": attrs.list(attrs.dep(providers = [ConstraintValueInfo]), default = []),
         "sanitizer": attrs.dep(default = "root//tools/buck2:sanitizer", providers = [ConstraintSettingInfo]),
         "preserve_sanitizer": attrs.bool(default = False),
         "configuration_name": attrs.string(default = "hirsel-rust-host"),

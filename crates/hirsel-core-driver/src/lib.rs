@@ -352,9 +352,13 @@ impl Driver {
         request: CheckRequest,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
-        hirsel_core_ids::published::catch_io(|| self.check_inner(request, meter))
+        if meter.enabled() {
+            hirsel_core_ids::published::catch_io(|| self.check_inner::<true>(request, meter))
+        } else {
+            hirsel_core_ids::published::catch_io(|| self.check_inner::<false>(request, meter))
+        }
     }
-    fn check_inner(
+    fn check_inner<const MEASURE: bool>(
         &mut self,
         mut request: CheckRequest,
         meter: &mut Meter,
@@ -475,7 +479,7 @@ impl Driver {
             modules.push((path, output.syntax));
         }
         meter.finish("parse");
-        if meter.enabled() {
+        if MEASURE {
             meter.result.source_bytes += bytes_total as u64;
             meter.result.tokens += modules
                 .iter()
@@ -613,7 +617,19 @@ impl Driver {
             None
         };
         meter.finish("package declarations demand");
-        let mut keys = meter.measure("body keys/new", || {
+        let mut keys = if MEASURE {
+            meter.measure("body keys/new", || {
+                Keys::new(
+                    &index,
+                    &modules,
+                    &resolutions,
+                    &resolution_inputs,
+                    compiler_identity()?,
+                    image_directory.as_ref().map(|i| &*i.headers),
+                    image_directory.as_ref().map(|i| &i.anchors),
+                )
+            })?
+        } else {
             Keys::new(
                 &index,
                 &modules,
@@ -622,8 +638,8 @@ impl Driver {
                 compiler_identity()?,
                 image_directory.as_ref().map(|i| &*i.headers),
                 image_directory.as_ref().map(|i| &i.anchors),
-            )
-        })?;
+            )?
+        };
         {
             let mut p = Program::declare_with_library(
                 &index,
@@ -656,7 +672,18 @@ impl Driver {
                 let item = modules[fd.at.module as usize]
                     .syntax
                     .item(fd.at.item as usize);
-                let mut key = meter.measure("body keys/for_body", || {
+                let mut key = if MEASURE {
+                    meter.measure("body keys/for_body", || {
+                        keys.for_body(
+                            &index,
+                            &fd.path,
+                            modules[fd.at.module as usize].id,
+                            fd.at.item,
+                            item,
+                            &resolution,
+                        )
+                    })?
+                } else {
                     keys.for_body(
                         &index,
                         &fd.path,
@@ -664,8 +691,8 @@ impl Driver {
                         fd.at.item,
                         item,
                         &resolution,
-                    )
-                })?;
+                    )?
+                };
                 // Entry policy is a read of the selected body only. Keep it
                 // out of the shared environment key so another program does
                 // not recheck the library closure, while separating the
@@ -755,7 +782,9 @@ impl Driver {
                 result.definitions.insert(fd.path.clone(), product);
             }
             meter.finish("check/lower");
-            meter.finish_front();
+            if MEASURE {
+                meter.finish_front();
+            }
             for (path, key_hash) in fresh {
                 let product = result
                     .definitions

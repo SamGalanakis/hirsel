@@ -88,6 +88,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut store = None;
     let mut manifest = None;
     let mut metrics = None;
+    let mut profile_front = false;
     let mut image_path = None;
     let mut install_root = None;
     let mut core_product = None;
@@ -187,6 +188,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             Opt::Store => store = Some(PathBuf::from(value)),
             Opt::Inputs => manifest = Some(PathBuf::from(value)),
             Opt::Metrics => metrics = Some(PathBuf::from(value)),
+            Opt::ProfileFront => profile_front = true,
             Opt::Image => image_path = Some(PathBuf::from(value)),
             Opt::Help | Opt::Lib | Opt::FmtCheck | Opt::Signatures | Opt::ListRules => {
                 unreachable!("CLI early command option")
@@ -257,7 +259,16 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     {
         return Err("product --runtime/--target require --install".into());
     }
+    if profile_front && !hirsel_core_ids::published::FRONT_OBSERVER_AVAILABLE {
+        return Err("--profile-front needs the front-observer release compiler".into());
+    }
+    if profile_front && metrics.is_none() {
+        return Err("--profile-front requires --metrics".into());
+    }
     let mut meter = Meter::new(metrics.is_some());
+    if profile_front {
+        meter.profile_image_index();
+    }
     let installed_std = if installed.is_some() && !libraries_explicit && !source_std && !source_core
     {
         installed.as_ref().unwrap().product("std")?

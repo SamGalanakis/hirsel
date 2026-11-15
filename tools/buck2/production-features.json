@@ -39,7 +39,8 @@
     "hirsel-rt/system-allocator": "runtime-option",
     "hirsel-rt/tsan": "test-only",
     "hirsel-syntax/id-salt": "test-only",
-    "hirsel-types/testing": "test-only"
+    "hirsel-types/testing": "test-only",
+    "hirsel-core-ids/front-observer": "test-only"
   },
   "roots": {
     "hirsel-cli-bin-hirsel": [],

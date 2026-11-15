@@ -40,7 +40,8 @@ class FrontStageCeiling(unittest.TestCase):
                                   dict(name='body keys/for_body', instructions=2000)],
                        front_image_access=dict(records_opened=1, bytes_read=100,
                                                digests=1, digest_bytes=68,
-                                               read_instructions=500,
+                                               index_calls=3, key_probes=1, row_demands=1, nodes_decoded=1,
+                                               index_instructions=700, read_instructions=500,
                                                digest_instructions=100,
                                                counter_refusal=None))
         observed = FRONT['front'](metrics)
@@ -50,6 +51,51 @@ class FrontStageCeiling(unittest.TestCase):
         del metrics['substages'][1]
         with self.assertRaisesRegex(ValueError, 'missing body key'):
             FRONT['front'](metrics)
+
+
+class PinnedRequestToolchain(unittest.TestCase):
+    def fixture(self, root):
+        import hashlib
+        llvm = root / 'current-llvm'
+        (llvm / 'bin').mkdir(parents=True)
+        kit = root / 'kit'
+        kit.mkdir()
+        linker = llvm / 'bin/ld.lld'
+        linker.write_bytes(b'pinned static linker')
+        lock = root / 'tools/native-toolchain/llvm-23.lock'
+        lock.parent.mkdir(parents=True)
+        lock.write_text('static_lld ' + hashlib.sha256(linker.read_bytes()).hexdigest() + ' 20 fixture\n')
+        return llvm, kit, linker
+
+    def test_standalone_uses_buck_output_and_records_actual_selected_linker(self):
+        import json
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            llvm, kit, linker = self.fixture(root)
+            outputs = json.dumps({'root//tools/buck2/native-toolchain:llvm': str(llvm),
+                                  'root//tools/buck2/native-toolchain:kit': str(kit)})
+            with patch('subprocess.check_output', side_effect=[outputs, str(linker) + '\n']) as capture, \
+                    patch('os.getloadavg', return_value=(0, 0, 0)), \
+                    patch.dict('os.environ', {'LLVM_SYS_231_PREFIX': '/stale/config/llvm'}):
+                tools = FRONT['request_cost'].toolchain(root)
+            self.assertEqual(capture.call_args_list[0].args[0][1], 'build')
+            self.assertIn('//tools/buck2/native-toolchain:llvm', capture.call_args_list[0].args[0])
+            self.assertEqual(tools['llvm'], str(llvm))
+            metrics = root / 'metrics.json'
+            metrics.write_text('{"instructions": 123}')
+            FRONT['request_cost'].stamp_metrics(metrics, tools)
+            self.assertEqual(json.loads(metrics.read_text())['linker_sha256'], tools['linker_sha256'])
+
+    def test_wrong_linker_is_refused_before_running_any_request(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            llvm, kit, linker = self.fixture(root)
+            linker.write_bytes(b'stale dynamic linker')
+            with patch('subprocess.check_output', return_value=str(linker) + '\n'):
+                with self.assertRaisesRegex(ValueError, 'lock pins'):
+                    FRONT['request_cost'].toolchain(root, dict(llvm=llvm, kit=kit))
 
 
 class ProcessCeiling(unittest.TestCase):

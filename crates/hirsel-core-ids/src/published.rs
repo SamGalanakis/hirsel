@@ -18,6 +18,59 @@ pub struct Descriptor {
     pub len: u32,
 }
 
+/// An optional, allocation-free observer for published-prefix work.
+/// The driver owns the counter and restores the prior observer when its meter ends.
+pub const FRONT_OBSERVER_AVAILABLE: bool = cfg!(feature = "front-observer");
+pub type Observe = fn() -> Option<Observation>;
+pub type Observer = (
+    std::rc::Rc<hirsel_intern::instructions::InstructionCounter>,
+    Observe,
+);
+pub struct Observation {
+    state: [u64; 4],
+    finish: fn([u64; 4]),
+}
+impl Observation {
+    pub fn new(state: [u64; 4], finish: fn([u64; 4])) -> Self {
+        Self { state, finish }
+    }
+}
+impl Drop for Observation {
+    fn drop(&mut self) {
+        OBSERVE.with_borrow(|observer| {
+            if let Some((counter, _)) = observer {
+                // The driver records any refused counter control in the callback.
+                let _ = counter.pause();
+                (self.finish)(self.state);
+                let _ = counter.resume();
+            }
+        });
+    }
+}
+thread_local! { static OBSERVE: std::cell::RefCell<Option<Observer>> = const { std::cell::RefCell::new(None) }; }
+pub fn observe_with(observer: Option<Observer>) -> Option<Observer> {
+    OBSERVE.with_borrow_mut(|active| std::mem::replace(active, observer))
+}
+/// Also used once by the driver's observer calibration, with no lookup work.
+pub fn observe_prefix() -> Option<Observation> {
+    OBSERVE.with_borrow(|observer| {
+        let (counter, enter) = observer.as_ref()?;
+        let _ = counter.pause();
+        let scope = enter();
+        let _ = counter.resume();
+        scope
+    })
+}
+#[inline(never)]
+pub fn observed<T>(f: impl FnOnce() -> T) -> T {
+    let _scope = observe();
+    f()
+}
+
+fn observe() -> Option<Observation> {
+    observe_prefix()
+}
+
 /// A producer's numeric rows and optional key-to-row index. The driver owns IO.
 pub trait Provider<T>: Send + Sync {
     fn row(&self, index: u32) -> io::Result<T>;
@@ -108,13 +161,24 @@ impl<T> Sparse<T> {
 
 // Lookup keys use the existing fixed-width codec, written once into their owned
 // memo key. serialize() would walk the value once to size it and again to write.
+#[inline(never)]
 fn encode_lookup_key(key: &(impl Serialize + ?Sized)) -> Vec<u8> {
+    #[cfg(feature = "front-observer")]
+    if OBSERVE.with_borrow(|active| active.is_some()) {
+        return observed(|| encode_lookup_key_plain(key));
+    }
+    encode_lookup_key_plain(key)
+}
+#[inline(always)]
+fn encode_lookup_key_plain(key: &(impl Serialize + ?Sized)) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(64);
     bincode::serialize_into(&mut bytes, key).expect("published lookup key encoding");
     bytes
 }
 
 pub struct Published<T> {
+    #[cfg(feature = "front-observer")]
+    observed: bool,
     descriptor: Descriptor,
     provider: Arc<dyn Provider<T>>,
     cache: Sparse<T>,
@@ -123,11 +187,27 @@ pub struct Published<T> {
 }
 impl<T> Published<T> {
     fn row(&self, index: usize) -> &T {
+        #[cfg(feature = "front-observer")]
+        if self.observed {
+            return observed(|| self.row_plain(index));
+        }
+        self.row_plain(index)
+    }
+    #[inline(always)]
+    fn row_plain(&self, index: usize) -> &T {
         self.cache
             .get_or_try_init(index as u64, || self.provider.row(index as u32))
             .unwrap_or_else(|e| miss(e))
     }
     fn find(&self, key: Vec<u8>) -> Option<u32> {
+        #[cfg(feature = "front-observer")]
+        if self.observed {
+            return observed(|| self.find_plain(key));
+        }
+        self.find_plain(key)
+    }
+    #[inline(always)]
+    fn find_plain(&self, key: Vec<u8>) -> Option<u32> {
         if let Some(index) = self.lookups.lock().unwrap().get(key.as_slice()) {
             return *index;
         }
@@ -148,6 +228,8 @@ pub fn bind<T: Send + Sync + 'static>(
     provider: Arc<dyn Provider<T>>,
 ) -> Arc<Published<T>> {
     let binding = Arc::new(Published {
+        #[cfg(feature = "front-observer")]
+        observed: OBSERVE.with_borrow(|active| active.is_some()),
         descriptor,
         provider,
         cache: Sparse::default(),
@@ -470,6 +552,20 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
     }
     #[inline(never)]
     fn get_published<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q> + Clone,
+    {
+        #[cfg(feature = "front-observer")]
+        if self.prefix.as_ref().unwrap().observed {
+            return observed(|| self.get_published_plain(key));
+        }
+        self.get_published_plain(key)
+    }
+    #[inline(always)]
+    fn get_published_plain<Q: Ord + std::hash::Hash + Serialize + ?Sized>(
+        &self,
+        key: &Q,
+    ) -> Option<&V>
     where
         K: Borrow<Q> + Clone,
     {

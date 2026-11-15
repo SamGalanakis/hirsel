@@ -160,6 +160,10 @@ CLIPPY_TWINS = read_root_config("hirsel", "clippy", "false") == "true"
 def _rust(rule, name, **attrs):
     if attrs.get("crate") in ["hirsel_llvm", "hirsel_cranelift", "cpu_pool_8"] and read_root_config("hirsel", "native_tsan", "false") == "true":
         attrs["features"] = attrs.get("features", []) + ["native-tsan"]
+    if attrs.get("crate") == "hirsel_core_ids":
+        attrs["features"] = attrs.get("features", []) + select({
+            "root//tools/buck2:front_observer_enabled": ["front-observer"], "DEFAULT": [],
+        })
     # Runtime diagnostic features are explicit build selections. Ordinary
     # archives omit ownership hooks and their private observer state.
     if attrs.get("crate") == "hirsel_free":
@@ -465,6 +469,7 @@ def hirsel_core_cranelift_test(name, case, data):
 def _rust_test_impl(ctx):
     binaries = dict(ctx.attrs.bin_exes)
     binaries.update(ctx.attrs.release_bin_exes)
+    binaries.update(ctx.attrs.front_observer_bin_exes)
     exes = {bin: dep[DefaultInfo].default_outputs[0] for bin, dep in binaries.items()}
     inputs = ctx.attrs.data + [exe for _, exe in sorted(exes.items())] + [ctx.attrs._test_reporter, ctx.attrs._scratch_owner]
     tools = {name: dep[DefaultInfo].default_outputs[0] for name, dep in ctx.attrs.native_tools.items()}
@@ -582,6 +587,7 @@ _rust_test = rule(
         "args": attrs.list(attrs.string(), default = []),
         "bin_exe_dir": attrs.string(default = ""),
         "bin_exes": attrs.dict(attrs.string(), attrs.transition_dep(cfg = "root//tools/buck2:test_tool_transition"), default = {}),
+        "front_observer_bin_exes": attrs.dict(attrs.string(), attrs.transition_dep(cfg = "root//tools/buck2:front_observer_tool_transition"), default = {}),
         "release_bin_exes": attrs.dict(attrs.string(), attrs.transition_dep(cfg = "root//tools/buck2:release_tool_transition"), default = {}),
         "costs": attrs.option(attrs.source(), default = None),
         "cwd": attrs.string(),
@@ -785,7 +791,7 @@ def hirsel_test_suite(name, tests):
     """A name that runs exactly `tests`: a target name main's tools/land still lists."""
     _suite(name = name, tests = tests, visibility = ["PUBLIC"])
 
-def hirsel_script_test(name, script, data, runtime_archives = [], full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1, native_tools = False):
+def hirsel_script_test(name, script, data, runtime_archives = [], full = True, args = [], bin_exes = {}, front_observer_bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1, native_tools = False):
     """A script harness with the same hermetic inputs as native Rust tests.
     `files_env` names further input files as environment variables. `host`
     runs it on the invoking host, never the pool: for a tool built there.
@@ -803,7 +809,7 @@ def hirsel_script_test(name, script, data, runtime_archives = [], full = True, a
         _rust_test(
             name = name if shards == 1 else "{}-shard-{}".format(name, shard), harness = ":" + binary,
             args = args if shards == 1 else args + ["--shard", "{}/{}".format(shard, shards)], data = data, cwd = ".",
-            bin_exes = {} if production else bin_exes, release_bin_exes = bin_exes if production else {},
+            bin_exes = {} if production else bin_exes, release_bin_exes = bin_exes if production else {}, front_observer_bin_exes = front_observer_bin_exes,
             bin_exe_dir = BIN_EXE_DIR + "/" + name, products = products, files_env = files_env,
             llvm = "root//tools/buck2/native-toolchain:llvm",
             llvm_libraries = "toolchains//:llvm-libraries",

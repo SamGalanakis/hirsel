@@ -76,7 +76,12 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             .unwrap();
             let handle = if matches!(
                 op,
-                HostOp::Read | HostOp::Write | HostOp::Close | HostOp::TryLock | HostOp::Unlock
+                HostOp::Read
+                    | HostOp::Write
+                    | HostOp::Close
+                    | HostOp::TryLock
+                    | HostOp::Unlock
+                    | HostOp::Sync
             ) {
                 source.push_str("world.seeding=1; HirselCoreHostRequest seed={.operation=0}; HirselCoreHostOutcome opened=hirsel_core_host_file_open(ctx,cfg->provider,&seed); require(!opened.error.tag && !opened.status); world.seeding=0;\n");
                 "opened.value"

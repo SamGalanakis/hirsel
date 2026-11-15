@@ -618,6 +618,7 @@ impl Machine<'_> {
                 self.world.nodes.insert((a[0], name), Node::Dir);
                 ok(DIR_BASE + k, 0)
             }
+            HostOp::Sync | HostOp::SyncDir => ok(0, 0),
         })
     }
     fn kind(&self, p: u64, kind: Counted) {

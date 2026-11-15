@@ -59,6 +59,8 @@ mod provider_m3 {
             "append0",
             "append1",
             "append3",
+            "sync",
+            "sync-fail",
             "before-read",
             "issue-read",
             "delivery-read",

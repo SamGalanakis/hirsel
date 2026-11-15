@@ -33,6 +33,22 @@ fn append_sequence(d:Dir,n:u64)->bool waits {
     if result.unwrap(host.read(mut reader,mut got))!=7 {return false}
     got[0]==b'o' && got[1]==b'l' && got[2]==b'd' && got[3]==b'x' && got[4]==b'y' && got[5]==b'z' && got[6]==b'!'
 }
+fn sync_sequence(d:Dir)->bool waits {
+    let mut f=result.unwrap(host.open(d,"sync-a",Write))
+    result.unwrap(host.write(mut f,string.as_bytes("durable")))
+    match host.sync(mut f) {
+        Error(Other(5)) => { result.unwrap(host.close(take f)); true }
+        Ok(()) => {
+            result.unwrap(host.close(take f))
+            result.unwrap(host.rename(d,"sync-a","sync-b"))
+            result.unwrap(host.sync_dir(d))
+            let mut r=result.unwrap(host.open(d,"sync-b",Read))
+            let mut b:Bytes=result.unwrap(list.with_capacity(16))
+            result.unwrap(host.read(mut r,mut b))==7 && list.len(b)==7
+        }
+        _ => false
+    }
+}
 type IssueInput:send { f:HostFile, tx:Sender[u64], write:bool }
 fn issued(take input:IssueInput)->u64 waits {
     let mut x=take input
@@ -83,6 +99,7 @@ pub fn main(d:Dir,tasks:Tasks,a:Args)->Result[(),Exit] {
     let mode=option.unwrap(args.get(a,0))
     let ok=if mode=="read" {read_sequence(d)} else if mode=="errors" {errors(d)}
       else if mode=="append0" {append_sequence(d,0)} else if mode=="append1" {append_sequence(d,1)} else if mode=="append3" {append_sequence(d,3)}
+      else if mode=="sync" || mode=="sync-fail" {sync_sequence(d)}
       else if mode=="before-read" {cancelled_at_provider(d,tasks,true,false)}
       else if mode=="issue-read" || mode=="delivery-read" {cancelled_at_provider(d,tasks,false,false)}
       else if mode=="issue-write" || mode=="delivery-write" {cancelled_at_provider(d,tasks,false,true)}

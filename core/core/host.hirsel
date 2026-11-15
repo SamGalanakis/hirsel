@@ -22,6 +22,12 @@ pub fn remove_tree(d: Dir, p: String) -> Result[(), IoError] waits
 
 pub fn rename(d: Dir, from: String, to: String) -> Result[(), IoError] waits
 
+// Flush file data and the metadata needed to read it back (fdatasync).
+pub fn sync(mut f: HostFile) -> Result[(), IoError] waits
+
+// Flush directory entry updates (fsync on the granted directory).
+pub fn sync_dir(d: Dir) -> Result[(), IoError] waits
+
 pub fn wall_ms(c: Clock) -> u64
 
 pub fn mono_ns(c: Clock) -> u64

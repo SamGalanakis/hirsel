@@ -37,7 +37,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             site,
         };
         let outcome = match op {
-            READ | WRITE | CLOSE | TRY_LOCK | UNLOCK => {
+            READ | WRITE | CLOSE | TRY_LOCK | UNLOCK | SYNC => {
                 hirsel_core_host_file(context, handle, &mut request)
             }
             OPEN
@@ -46,6 +46,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             | MKDTEMP
             | REMOVE
             | REMOVE_TREE
+            | SYNC_DIR
             | WALL_MS
             | MONO_NS
             | crate::provider::STDOUT

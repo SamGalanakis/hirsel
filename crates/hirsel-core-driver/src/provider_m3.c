@@ -8,7 +8,7 @@
 #include <unistd.h>
 static struct {
     char mode[32];
-    unsigned opens, reads, writes, live, cancels, blocked;
+    unsigned opens, reads, writes, syncs, sync_dirs, live, cancels, blocked;
     unsigned char file[32]; size_t length, cursor;
     HirselCoreContext *root, *active, *waiting;
     HirselCoreTask *child;
@@ -61,6 +61,12 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
     }
     switch(r->operation) {
     case 0:
+        if(is("sync") || is("sync-fail")) {
+            CHECK(r->handle==7 && ((r->path_len==6 && !memcmp(r->path,"sync-a",6) && r->mode==1) || (r->path_len==6 && !memcmp(r->path,"sync-b",6) && r->mode==0)));
+            s.opens++; CHECK(!s.live || (r->path_len==6 && !memcmp(r->path,"sync-b",6)));
+            if(r->path_len==6 && !memcmp(r->path,"sync-a",6)) s.length=0;
+            s.live=1; s.cursor=0; out.value=17; return out;
+        }
         CHECK(r->handle==7 && r->path_len==1 && r->path[0]=='f');
         if(is("errors") && s.opens<5) {
             out.error.tag=(uint8_t)(++s.opens);out.error.code=out.error.tag==5?1234:0;return out;
@@ -85,6 +91,9 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         CHECK(r->handle==17 && s.live);
         unsigned n=s.writes++;size_t count=r->buffer.len;
         if(issued()) {CHECK(n==0 && count==3);count=1;out.error.tag=5;out.error.code=5;}
+        else if(is("sync") || is("sync-fail")) {
+            CHECK(n==0 && count==7);
+        }
         else if(n==0) {CHECK(!strncmp(s.mode,"append",6) && count==3);count=(size_t)(s.mode[6]-'0');out.error.tag=5;out.error.code=5;}
         else if(n==2) {CHECK(count==1);count=0;out.error.tag=2;}
         CHECK(s.length+count<=sizeof s.file);
@@ -92,6 +101,18 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         s.length+=count;out.written=count;return out;
     }
     case 3: CHECK(r->handle==17 && s.live);s.live=0;return out;
+    case 16:
+        CHECK(r->handle==17 && s.live);
+        s.syncs++;
+        if(is("sync-fail")) { out.error.tag=5; out.error.code=5; }
+        return out;
+    case 17:
+        CHECK(r->handle==7);
+        s.sync_dirs++;
+        return out;
+    case 14:
+        CHECK(r->handle==7 && r->path_len==13 && !memcmp(r->path,"sync-a\0sync-b",13));
+        return out;
     default: CHECK(0);
     }
     return out;
@@ -117,12 +138,15 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,c
     HirselCoreProcessConfig cfg={0};cfg.root_limit=input->root_limit;cfg.args=args;cfg.args_len=1;
     cfg.grants=grants;cfg.grants_len=3;cfg.provider=&provider;cfg.state=&s;cfg.diagnostic=diagnostic;
     cfg.scheduler=(HirselCoreSchedulerProvider){&s,event,0};cfg.stop_fd=2;cfg.capabilities=caps;cfg.capabilities_len=3;
-    uint8_t status=hirsel_core_run(&cfg,entry);CHECK(status==0 && !s.live && !s.wait_active);
+    uint8_t status=hirsel_core_run(&cfg,entry);
+    CHECK(status==0 && !s.live && !s.wait_active);
     if(is("before-read"))CHECK(s.reads==0 && s.cancels==1);
     if(issued())CHECK(s.cancels==1 && (strstr(s.mode,"write")?s.writes:s.reads)==1);
     if(blocked())CHECK(s.blocked==1 && s.cancels==1);
     if(is("read"))CHECK(s.cursor==3 && s.reads==5);
     if(is("errors"))CHECK(s.opens==6 && s.length==3);
     if(!strncmp(s.mode,"append",6))CHECK(s.writes==4 && s.length==7 && !memcmp(s.file,"oldxyz!",7));
+    if(is("sync"))CHECK(s.syncs==1 && s.sync_dirs==1 && !s.live);
+    if(is("sync-fail"))CHECK(s.syncs==1 && s.sync_dirs==0 && !s.live);
     return status;
 }

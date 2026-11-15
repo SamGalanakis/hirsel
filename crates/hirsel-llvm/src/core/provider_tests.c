@@ -19,6 +19,8 @@ static HirselCoreHostOutcome scripted_issue(void *state, HirselCoreHostRequest *
         out.written=2;
         break;
     case 3: assert(r->handle==40 || r->handle==41); break;
+    case 16: assert(r->handle==40 || r->handle==41); break;
+    case 17: assert(r->handle==70); break;
     case 6:
         assert(r->handle==71 && r->path_len==1 && r->path[0]=='x');
         if(subdir_created) out.error.tag=3; else subdir_created=true;

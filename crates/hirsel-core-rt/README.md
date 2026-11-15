@@ -172,7 +172,7 @@ hirsel_core_refund_in(context,payer,bytes) uses the same fast path. Both preserv
 Canonical admission and the plain/align8 prefix store need no tag mask.
 
 FORM #50 provider rows use `hirsel_core_host_op(context, op, handle, operand,
-mode, site)`, with HostOp codes 0..13. Operand points to a String/Bytes carrier;
+mode, site)`, with HostOp codes 0..17 (including sync and sync_dir). Operand points to a String/Bytes carrier;
 only read/mkdtemp update its length. Capacity zero borrows storage regardless of
 the pointer or length. No provider call frees, grows or admits carrier storage.
 Open returns a provider-aware HostFile; mkdtemp returns a provider-aware Dir.

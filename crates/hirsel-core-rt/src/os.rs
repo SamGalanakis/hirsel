@@ -304,6 +304,18 @@ impl OsProvider {
                     out.status = 1;
                 }
             }
+            SYNC => {
+                let fd = self.files[&request.handle].as_raw_fd();
+                // fdatasync makes file contents and the metadata required to
+                // read them back durable. A refusal is delivered as a host
+                // error; the store owns the poison/recovery policy.
+                syscall(unsafe { libc::fdatasync(fd) } as isize)?;
+            }
+            SYNC_DIR => {
+                let fd = self.directories[&request.handle].as_raw_fd();
+                // fsync on a directory persists its entry updates.
+                syscall(unsafe { libc::fsync(fd) } as isize)?;
+            }
             MONO_NS => {
                 out.value = self.monotonic_ns();
             }

@@ -71,6 +71,8 @@ operations! {
     ("code", "callable", Lane::Runtime(Kernel::CodeCallable), "A", "core-ops-914", false),
     ("host", "rename", Lane::Runtime(Kernel::Host(HostOp::Rename)), "B", "core-ops-914", false),
     ("host", "sleep_until", Lane::Runtime(Kernel::Host(HostOp::SleepUntil)), "B", "core-ops-914", false),
+    ("host", "sync", Lane::Runtime(Kernel::Host(HostOp::Sync)), "B", "core-ops-914", false),
+    ("host", "sync_dir", Lane::Runtime(Kernel::Host(HostOp::SyncDir)), "B", "core-ops-914", false),
     ("list", "sum", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("list", "fill", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("string", "from", Lane::PendingCode, "C", "std-seed-api-889", false),
@@ -2264,7 +2266,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u64t = Ty::Scalar(Scalar::U64);
         let file = matches!(
             op,
-            HostOp::Read | HostOp::Write | HostOp::Close | HostOp::TryLock | HostOp::Unlock
+            HostOp::Read
+                | HostOp::Write
+                | HostOp::Close
+                | HostOp::TryLock
+                | HostOp::Unlock
+                | HostOp::Sync
         );
         // HostFile's entire carrier is the opaque u64 key, not provider metadata.
         let handle = if file {

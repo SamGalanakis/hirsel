@@ -139,6 +139,7 @@ fn locks_are_exclusive_idempotent_and_end_at_close() {
     assert_eq!(f.simple(TRY_LOCK, a, b"", 0).value, 1);
     f.simple(CLOSE, a, b"", 0);
 }
+
 #[test]
 fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
     crate::openat2_required::require();

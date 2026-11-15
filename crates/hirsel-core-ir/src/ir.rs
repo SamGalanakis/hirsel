@@ -751,10 +751,14 @@ pub enum HostOp {
     Stderr,
     Rename,
     SleepUntil,
+    /// Flush a file's data and read-visible metadata with fdatasync.
+    Sync,
+    /// Flush directory entries with fsync.
+    SyncDir,
 }
 
 impl HostOp {
-    pub const ALL: [HostOp; 16] = [
+    pub const ALL: [HostOp; 18] = [
         HostOp::Open,
         HostOp::Read,
         HostOp::Write,
@@ -771,6 +775,8 @@ impl HostOp {
         HostOp::Stderr,
         HostOp::Rename,
         HostOp::SleepUntil,
+        HostOp::Sync,
+        HostOp::SyncDir,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -795,6 +801,8 @@ impl HostOp {
             HostOp::Stderr => "stderr_write",
             HostOp::Rename => "host_rename",
             HostOp::SleepUntil => "host_sleep_until",
+            HostOp::Sync => "host_sync",
+            HostOp::SyncDir => "host_sync_dir",
         }
     }
     /// Whether the operation waits (a cancellation point, so it can fail).
@@ -841,6 +849,8 @@ impl RtOp {
     /// | `host_read` | `HostFile: u64`, buffer `ptr` | outcome |
     /// | `host_write` | `HostFile: u64`, bytes `ptr` | outcome |
     /// | `host_close`, `host_try_lock`, `host_unlock` | `HostFile: u64` | outcome |
+    /// | `host_sync` | `HostFile: u64` | outcome |
+    /// | `host_sync_dir` | `Dir: u64` | outcome |
     /// | `host_mkdir`, `host_remove`, `host_remove_tree` | `Dir: u64`, path `ptr` | outcome |
     /// | `host_mkdtemp` | `Dir: u64`, name `ptr` | outcome |
     /// | `host_wall_ms`, `host_mono_ns` | `Clock: u64` | `u64` |
@@ -909,7 +919,11 @@ impl RtOp {
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
                     HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),
-                    HostOp::Close | HostOp::TryLock | HostOp::Unlock => (vec![V(u64_)], outcome),
+                    HostOp::Close
+                    | HostOp::TryLock
+                    | HostOp::Unlock
+                    | HostOp::Sync
+                    | HostOp::SyncDir => (vec![V(u64_)], outcome),
                     HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
                     _ => (vec![V(u64_), V(p)], outcome),
                 }

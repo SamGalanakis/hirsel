@@ -3054,6 +3054,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             }
             HostOp::Rename => &["u64", "ptr", "ptr"],
             HostOp::SleepUntil => &["u64", "u64"],
+            HostOp::Sync | HostOp::SyncDir => &["u64"],
             _ => &["u64", "ptr"],
         };
         let results: &[&str] = if op.waits() {

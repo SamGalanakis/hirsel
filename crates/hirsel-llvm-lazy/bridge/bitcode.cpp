@@ -7,6 +7,7 @@
 #include <llvm/Linker/Linker.h>
 #include <llvm/Support/CBindingWrapping.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/IPO/MergeFunctions.h>
 extern "C" LLVMMemoryBufferRef hirsel_llvm_raw_bitcode(LLVMModuleRef module) {
     llvm::SmallVector<char, 0> bytes;
     llvm::raw_svector_ostream stream(bytes);
@@ -26,3 +27,17 @@ extern "C" int hirsel_llvm_compose(void *composer, LLVMModuleRef unit) {
     return static_cast<llvm::Linker *>(composer)->linkInModule(std::unique_ptr<llvm::Module>(llvm::unwrap(unit)));
 }
 extern "C" void hirsel_llvm_composer_free(void *composer) { delete static_cast<llvm::Linker *>(composer); }
+
+// Every unit of a program emits the drop and compare glue its own types need,
+// so composition renames one body per unit (core_drop_N.1, .2, ...). Merge the
+// identical ones before optimisation, so the pipeline optimises each body once.
+// MergeFunctions also rewrites the callers whose only difference was a merged
+// callee, so whole glue trees collapse.
+extern "C" void hirsel_llvm_merge_glue(LLVMModuleRef module) {
+    std::vector<llvm::Function *> glue;
+    for (llvm::Function &f : *llvm::unwrap(module))
+        if (!f.isDeclaration() && f.hasLocalLinkage() &&
+            (f.getName().starts_with("core_drop_") || f.getName().starts_with("core_compare_")))
+            glue.push_back(&f);
+    if (glue.size() > 1) llvm::MergeFunctionsPass::runOnFunctions(glue);
+}

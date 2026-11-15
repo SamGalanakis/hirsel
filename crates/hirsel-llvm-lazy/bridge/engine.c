@@ -26,6 +26,7 @@ extern LLVMMemoryBufferRef hirsel_llvm_raw_bitcode(LLVMModuleRef module);
 extern void *hirsel_llvm_composer(LLVMModuleRef module);
 extern int hirsel_llvm_compose(void *composer, LLVMModuleRef unit);
 extern void hirsel_llvm_composer_free(void *composer);
+extern void hirsel_llvm_merge_glue(LLVMModuleRef module);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
@@ -763,6 +764,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         }
     }
     if (speed && export_count) {
+        hirsel_llvm_merge_glue(module);
         bound_imports(module, import_limit);
         register_results(module, context);
         local_imports(module);

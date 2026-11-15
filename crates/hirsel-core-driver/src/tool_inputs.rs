@@ -436,10 +436,20 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("--") || !Path::new(arg).exists());
         if transient {
-            if !marker {
-                args.push(INPUT_MARKER.into());
-                marker = true;
+            // Only the synthetic source's object stands for the build's
+            // own inputs. Another transient object is a source the driver
+            // adds itself (a wrapper's support file) whose compile job this
+            // capture could not replay (a gcc `cc1` and `as` pair rather
+            // than a clang `-cc1`): folding it into the marker would drop a
+            // link input and link a different program.
+            if marker {
+                return Err(io::Error::other(format!(
+                    "link recipe capture through {} cannot replay the compile of a link source the driver adds; name a clang driver",
+                    driver.display()
+                )));
             }
+            args.push(INPUT_MARKER.into());
+            marker = true;
         } else {
             args.push(arg.clone());
         }
@@ -1013,6 +1023,34 @@ mod tests {
             "a rebuilt runtime archive must miss every object keyed by the old one"
         );
         assert_eq!(toolchain(&cc, target, &first).unwrap(), first_identity);
+    }
+
+    #[test]
+    fn a_link_source_the_driver_adds_and_the_capture_cannot_replay_refuses() {
+        // A wrapper `cc "$@" support.c -Wl,--wrap=f` over gcc: gcc compiles support.c
+        // through cc1 and as, which the capture does not replay, so the link line names
+        // two transient objects. Folding both into the one input marker kept --wrap=f
+        // and dropped __wrap_f's definition (the 922 Arc recording sink).
+        let work = tempfile::tempdir().unwrap();
+        let bin = work.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let linker = bin.join("ld.lld");
+        std::fs::write(&linker, b"linker").unwrap();
+        let cc = bin.join("cc");
+        let (own, added) = (work.path().join("cc1.o"), work.path().join("cc2.o"));
+        std::fs::write(
+            &cc,
+            format!(
+                "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"{}\" \"--wrap=f\" \"-lc\"' >&2\n",
+                linker.display(),
+                own.display(),
+                added.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = link_recipe(&cc, "x86_64-unknown-linux-gnu").unwrap_err();
+        assert!(refused.to_string().contains("cannot replay"), "{refused}");
     }
 
     fn recipe(input: &Path) -> LinkRecipe {

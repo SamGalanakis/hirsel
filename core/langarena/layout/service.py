@@ -57,7 +57,13 @@ def build(args, phase, backend, observed=False):
         command += ['--dir', Path(__file__).with_name('inputs').resolve()]
     if args.events:
         linker = args.out / 'recording-cc'
-        linker.write_text('#!/bin/sh\nexec cc \"$@\" ' + shlex.quote(str(Path(__file__).with_name('arc_events.c'))) + ' -I' + shlex.quote(str(ROOT / 'crates/hirsel-core-rt/include')) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
+        # A prebuilt object, as std_native's scripted-cc: the direct-link recipe keeps an
+        # existing support object for every C driver, while an appended source is
+        # recovered only from clang's -cc1 lines, never from gcc's cc1 and as.
+        support = args.out / 'arc_events.o'
+        execute(['cc', '-c', '-fPIC', Path(__file__).with_name('arc_events.c'), '-I' + str(ROOT / 'crates/hirsel-core-rt/include'),
+                 '-o', support], check=True)
+        linker.write_text('#!/bin/sh\nexec cc \"$@\" ' + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
         linker.chmod(0o755)
         command += ['--cc', linker]
     if backend == 'llvm':

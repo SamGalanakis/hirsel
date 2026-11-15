@@ -122,7 +122,7 @@ def shadow(library, compiler, out):
             shutil.copyfile(library / 'libLLVM.so.23.1', lib / f.name)
         else:
             (lib / f.name).symlink_to(f.resolve())
-    copy = out / 'a/b/c/d/e/f/hirsel_core'
+    copy = out / 'a/b/c/d/e/f/hirsel'
     copy.parent.mkdir(parents=True)
     shutil.copy2(compiler, copy)
     return copy

@@ -209,10 +209,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     );
                     return ERROR;
                 };
-                if !matches!(
-                    kind(&self.p.decls, &self.t, element, &self.params),
-                    Kind::Plain | Kind::Own
-                ) {
+                let element_kind = kind(&self.p.decls, &self.t, element, &self.params);
+                if element_kind == Kind::Scoped {
+                    let shown = self.shown(element);
+                    self.refuse_compared(
+                        "OWN-19",
+                        c[1],
+                        shown,
+                        "not scoped",
+                        "a scoped value is not a collection element",
+                    );
+                    return ERROR;
+                }
+                if !matches!(element_kind, Kind::Plain | Kind::Own) {
                     self.refuse(
                         "SEM-9",
                         c[1],

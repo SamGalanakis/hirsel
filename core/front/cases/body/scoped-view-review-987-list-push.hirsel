@@ -1,0 +1,3 @@
+fn push(mut xs: List[u64]) { let _ = list.push(mut xs, 3u64) }
+fn bad(mut xs: List[u64]) -> u64 { match isolate(fn() -> u64 { push(mut xs); list.len(xs) }) { Ok(Ok(n)) => n, _ => 0 } }
+// expect: refuse FAIL-16 at 2:50

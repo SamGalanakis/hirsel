@@ -1,0 +1,2 @@
+fn bad(f: scoped fn() -> u64) { let alias = view f; let _ = isolate(fn() -> u64 { alias() }); }
+// expect: refuse FAIL-16 at 1:69

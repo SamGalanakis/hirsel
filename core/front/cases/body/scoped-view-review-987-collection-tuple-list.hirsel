@@ -1,0 +1,3 @@
+fn bad(xs: List[(scoped fn() -> u64, u64)]) {}
+// expect: refuse OWN-19 at 1:17
+// expect: compared OWN-19 at 1:17 | (scoped fn() -> u64, u64) | not scoped

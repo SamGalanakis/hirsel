@@ -1120,6 +1120,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
             }
             let elem = *elem.get_or_insert(ty);
+            if i == 0 && self.type_kind(elem) == Kind::Scoped {
+                let shown = self.shown(elem);
+                self.refuse_compared(
+                    "OWN-19",
+                    child,
+                    shown,
+                    "not scoped",
+                    "a scoped value is not a collection element",
+                );
+                return (ERROR, None);
+            }
             let array = *result.get_or_insert_with(|| self.t.mk(TyKind::Array(elem, count)));
             if repeat && self.type_kind(elem) != Kind::Plain {
                 self.refuse("SEM-9", child, "a repeated array element must be plain");

@@ -1,0 +1,3 @@
+fn bad(xs: Map[u64, scoped[view] fn() -> u64]) {}
+// expect: refuse OWN-19 at 1:21
+// expect: compared OWN-19 at 1:21 | scoped[view] fn() -> u64 | not scoped

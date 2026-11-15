@@ -1,0 +1,2 @@
+fn bad() -> u64 { let mut n: u64 = 0; let change = scoped fn() { n += 1 }; match isolate(fn() -> u64 { change(); n }) { Ok(Ok(v)) => v, _ => 0 } }
+// expect: refuse FAIL-16 at 1:90

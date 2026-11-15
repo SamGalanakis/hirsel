@@ -1007,6 +1007,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         child.header = n;
         child.frame_level = self.frame_level + 1;
         child.entry = false;
+        child.inherited_refusal = self.inherited_refusal || !self.out.refusals.is_empty();
         let view_only = expected_kind == Some(Callable::ScopedView);
         child.capture_frame = Some(CaptureFrame {
             view_only,
@@ -2689,6 +2690,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         child.fd = std::borrow::Cow::Owned(fd);
         child.entry = false;
+        child.inherited_refusal = self.inherited_refusal || !self.out.refusals.is_empty();
         std::mem::swap(&mut child.t, &mut self.t);
         let function = child.e.function(
             &child.fd.path,

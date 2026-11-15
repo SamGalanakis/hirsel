@@ -1,0 +1,334 @@
+stable type Stamp {
+    n: u64
+}
+
+type Chain {
+    next: Option[Box[Chain]],
+    value: u64
+}
+
+type A {
+    b: Option[Box[B]],
+    value: u64
+}
+
+type B {
+    a: Option[Box[A]],
+    value: u64
+}
+
+scoped type Holder {
+    f: scoped[view] fn() -> u64
+}
+
+fn run(f: scoped[view] fn() -> u64) -> u64 {
+    match isolate(fn() -> u64 {
+        f()
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+fn read(x: (u64, u64)) -> u64 {
+    match isolate(fn() -> u64 {
+        x.0
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+fn copied(take x: u64) -> u64 {
+    let _ = isolate(fn() -> u64 {
+        let mut y = x;
+        y += 1;
+        y
+    });
+    x
+}
+
+fn copied_fail(take x: u64) -> u64 {
+    let _ = isolate(fn() -> u64 {
+        let mut y = x;
+        y += 1;
+        fail("x")
+    });
+    x
+}
+
+fn allocate(r: Region) -> u64 {
+    match (Stamp(n: 8) in r) {
+        Ok(s) => s.n,
+        Error(_) => 0
+    }
+}
+
+fn field(x: Holder) -> u64 {
+    run(fn() -> u64 {
+        (x.f)()
+    })
+}
+
+pub fn array() -> u64 {
+    let x =[2u64, 8u64];
+    match isolate(fn() -> u64 {
+        x[1]
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+pub fn array_fail() -> u64 {
+    let x =[2u64, 8u64];
+    let _ = isolate(fn() -> u64 {
+        let mut y = x[1];
+        y += 1;
+        fail("x")
+    });
+    x[1]
+}
+
+pub fn view_parameter() -> u64 {
+    read((4u64, 9u64))
+}
+
+pub fn take_copy() -> u64 {
+    copied(3u64)
+}
+
+pub fn take_copy_fail() -> u64 {
+    copied_fail(3u64)
+}
+
+pub fn recursive() -> u64 {
+    let x = Chain(next: None, value: 13u64);
+    match isolate(fn() -> u64 {
+        x.value
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+pub fn recursive_fail() -> u64 {
+    let x = Chain(next: None, value: 13u64);
+    let _ = isolate(fn() -> u64 {
+        let mut y = x.value;
+        y += 1;
+        fail("x")
+    });
+    x.value
+}
+
+pub fn mutual() -> u64 {
+    let x = A(b: None, value: 14u64);
+    match isolate(fn() -> u64 {
+        x.value
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 99
+    }
+}
+
+pub fn mutual_fail() -> u64 {
+    let x = A(b: None, value: 14u64);
+    let _ = isolate(fn() -> u64 {
+        let mut y = x.value;
+        y += 1;
+        fail("x")
+    });
+    x.value
+}
+
+pub fn region_call() -> u64 {
+    region r {
+        match isolate(fn() -> u64 {
+            allocate(r)
+        }) {
+            Ok(Ok(n)) => n,
+            _ => 99
+        }
+    }
+}
+
+pub fn region_call_fail() -> u64 {
+    region r {
+        let s = result.unwrap(Stamp(n: 5) in r);
+        let _ = isolate(fn() -> u64 {
+            let _ = allocate(r);
+            fail("x")
+        });
+        s.n
+    }
+}
+
+pub fn region_fit() -> u64 {
+    region r {
+        let s = result.unwrap(Stamp(n: 6) in r);
+        run(fn() -> u64 {
+            s.n
+        })
+    }
+}
+
+pub fn region_fit_fail() -> u64 {
+    region r {
+        let s = result.unwrap(Stamp(n: 6) in r);
+        let _ = run(fn() -> u64 {
+            let _ = allocate(r);
+            let _ = s.n;
+            fail("x")
+        });
+        s.n
+    }
+}
+
+pub fn map_entry() -> u64 {
+    let mut m: Map[u64, u64] = map.new();
+    let _ = map.insert(mut m, 1u64, 5u64);
+    let v = option.unwrap(map.get(m, 1u64));
+    run(fn() -> u64 {
+        v
+    })
+}
+
+pub fn map_entry_fail() -> u64 {
+    let mut m: Map[u64, u64] = map.new();
+    let _ = map.insert(mut m, 1u64, 5u64);
+    let v = option.unwrap(map.get(m, 1u64));
+    let _ = run(fn() -> u64 {
+        let mut y: u64 = v;
+        y += 1;
+        fail("x")
+    });
+    v
+}
+
+pub fn qualified_field() -> u64 {
+    let n = 7u64;
+    field(Holder(f: fn() -> u64 {
+        n
+    }))
+}
+
+pub fn plain_array() -> u64 {
+    let xs =[fn() -> u64 {
+        6u64
+    }];
+    xs[0]()
+}
+
+pub fn scoped_sums() -> u64 {
+    let n = 7u64;
+    let x = Some((scoped fn() -> u64 {
+        n
+    }, 2u64));
+    match x {
+        Some(p) => (p.0)() + p.1,
+        None => 0
+    }
+}
+
+// expect: run array() = 8
+// expect: run array_fail() = 8 used 32
+// expect: run view_parameter() = 4
+// expect: run take_copy() = 3
+// expect: run take_copy_fail() = 3 used 32
+// expect: run recursive() = 13
+// expect: run recursive_fail() = 13 used 32
+// expect: run mutual() = 14
+// expect: run mutual_fail() = 14 used 32
+// expect: run region_call() = 8
+// expect: run region_call_fail() = 5 used 32
+// expect: run region_fit() = 6
+// expect: run region_fit_fail() = 6 used 32
+// expect: run map_entry() = 5
+// expect: run map_entry_fail() = 5 used 32
+// expect: run qualified_field() = 7
+// expect: run plain_array() = 6
+// expect: run scoped_sums() = 9
+fn read_fail(x: (u64, u64)) -> u64 {
+    let _ = isolate(fn() -> u64 {
+        let mut y = x.0;
+        y += 1;
+        fail("x")
+    });
+    x.0
+}
+
+pub fn view_parameter_fail() -> u64 {
+    read_fail((4u64, 9u64))
+}
+
+// expect: run view_parameter_fail() = 4 used 32
+pub fn qualified_field_fail() -> u64 {
+    let n = 7u64
+    let _ = field(Holder(f: fn() -> u64 {
+        let mut y = n;
+        y += 1;
+        fail("x")
+    }))
+    n
+}
+
+pub fn plain_array_fail() -> u64 {
+    let xs =[fn() -> u64 {
+        6u64
+    }]
+    let _ = isolate(fn() -> u64 {
+        let mut y = xs[0]();
+        y += 1;
+        fail("x")
+    })
+    xs[0]()
+}
+
+pub fn scoped_sums_fail() -> u64 {
+    let n = 7u64
+    let x = Some((scoped fn() -> u64 {
+        n
+    }, 2u64))
+    let _ = run(fn() -> u64 {
+        let mut y: u64 = match x {
+            Some(p) => (p.0)() + p.1,
+            None => 0
+        }
+        y += 1
+        fail("x")
+    })
+    n
+}
+
+// expect: run qualified_field_fail() = 7 used 32
+// expect: run plain_array_fail() = 6 used 32
+// expect: run scoped_sums_fail() = 7 used 32
+// The native driver prints each actual outer value after the caught failure.
+pub fn main(out: Stdout) -> Result[(), Exit] waits {
+    let mut line = string.new()
+    result.unwrap(string.push_u64(mut line, array_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, view_parameter_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, take_copy_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, recursive_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, mutual_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, region_call_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, region_fit_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, map_entry_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, qualified_field_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, plain_array_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(string.push_u64(mut line, scoped_sums_fail()))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(stdout.write(out, line))
+    Ok(())
+}

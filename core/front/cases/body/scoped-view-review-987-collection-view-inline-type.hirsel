@@ -1,0 +1,3 @@
+fn bad() -> u64 { let xs: Inline[scoped[view] fn() -> u64, 1] = [fn() -> u64 { 6u64 }]; 0 }
+// expect: refuse OWN-19 at 1:34
+// expect: compared OWN-19 at 1:34 | scoped[view] fn() -> u64 | not scoped

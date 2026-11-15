@@ -1,0 +1,3 @@
+fn bad(a: scoped[view] fn() -> u64, b: scoped[view] fn() -> u64) -> bool { a == b }
+// expect: refuse LANG-21 at 1:76
+// expect: compared LANG-21 at 1:76 | scoped[view] fn() -> u64 | key

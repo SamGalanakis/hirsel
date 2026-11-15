@@ -1,0 +1,2 @@
+fn bad(mut x: (u64, u64)) -> u64 { let _ = isolate(fn() -> u64 { x.0 += 1; fail("x") }); x.1 }
+// expect: refuse FAIL-16 at 1:52

@@ -1,0 +1,3 @@
+fn bad() { let f: scoped[view] fn() -> u64 = fn() -> u64 { 6u64 }; let xs = [f] }
+// expect: refuse OWN-19 at 1:78
+// expect: compared OWN-19 at 1:78 | scoped[view] fn() -> u64 | not scoped

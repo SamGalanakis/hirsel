@@ -1,0 +1,2 @@
+fn bad(take s: String) { let _ = isolate(fn() -> u64 { let t = take s; string.byte_len(t) }); }
+// expect: refuse LANG-14 at 1:64

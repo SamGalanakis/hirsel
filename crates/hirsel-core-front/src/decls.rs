@@ -1618,10 +1618,16 @@ impl Program<'_> {
                     }
                 }
                 Pending::Array { ty, params, site } => {
-                    if !matches!(
-                        kind(&self.decls, &self.types, ty, &params),
-                        Kind::Plain | Kind::Own
-                    ) {
+                    let element_kind = kind(&self.decls, &self.types, ty, &params);
+                    if element_kind == Kind::Scoped {
+                        self.refusals.push(
+                            refusal("OWN-19", site, "a scoped value is not a collection element")
+                                .with_comparison(
+                                    canonical(&self.decls, &self.types, ty),
+                                    "not scoped",
+                                ),
+                        );
+                    } else if !matches!(element_kind, Kind::Plain | Kind::Own) {
                         self.refusals.push(refusal(
                             "SEM-9",
                             site,

@@ -1,0 +1,4 @@
+type A { b: Option[Box[B]], value: u64 }
+type B { a: Option[Box[A]], value: u64 }
+fn bad(mut x: A) { let _ = isolate(fn() -> u64 { x.value += 1; fail("x") }); }
+// expect: refuse FAIL-16 at 3:36

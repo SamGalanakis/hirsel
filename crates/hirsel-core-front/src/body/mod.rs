@@ -1131,6 +1131,8 @@ struct Cx<'c, 'a, 'e> {
     pending: Option<(AddressBase, TypeId)>,
     out: CoreCheck,
     capture_frame: Option<closures::CaptureFrame>,
+    /// An enclosing closure context has already reported a refusal of this item.
+    inherited_refusal: bool,
     has_callback_parameters: bool,
     frame_level: u32,
     descriptors: closures::Descriptors,
@@ -1251,6 +1253,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             pending: None,
             out: CoreCheck::default(),
             capture_frame: None,
+            inherited_refusal: false,
             has_callback_parameters: false,
             frame_level: 0,
             descriptors: closures::Descriptors::default(),
@@ -2160,6 +2163,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn finish(mut self) -> CoreCheck {
         crate::cost_scope!("phase", "body finish");
         if let Some(n) = self.halted
+            && !self.inherited_refusal
             && self.out.refusals.is_empty()
             && self.out.gaps.is_empty()
             && let site = self.p.site(self.at, n)

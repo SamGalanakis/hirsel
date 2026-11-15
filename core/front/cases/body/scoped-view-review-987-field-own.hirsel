@@ -1,0 +1,3 @@
+type Holder { f: scoped fn() -> u64 }
+// expect: refuse OWN-19 at 1:15
+// expect: compared OWN-19 at 1:15 | scoped fn() -> u64 | not scoped

@@ -1,0 +1,3 @@
+fn bad() { let xs = [Some(scoped fn() -> u64 { 6u64 })] }
+// expect: refuse OWN-19 at 1:22
+// expect: compared OWN-19 at 1:22 | core@1/core/Option[scoped fn() -> u64] | not scoped

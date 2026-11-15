@@ -1,0 +1,6 @@
+fn use[T](x: T) -> u64 { 1u64 }
+fn bad() -> u64 { let a: scoped[view] fn() -> u64 = fn() -> u64 { 1u64 }; let b: scoped fn() -> u64 = fn() -> u64 { 2u64 }; use(a) + use(b) }
+// expect: refuse OWN-19 at 2:129
+// expect: refuse OWN-19 at 2:138
+// expect: compared OWN-19 at 2:129 | scoped[view] fn() -> u64 | not scoped
+// expect: compared OWN-19 at 2:138 | scoped fn() -> u64 | not scoped

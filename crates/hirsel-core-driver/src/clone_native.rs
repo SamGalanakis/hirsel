@@ -1,10 +1,16 @@
 fn clone_request(source: &str, dir: &Path) -> CheckRequest {
+    core_request("pub fn main() -> Result[(), Exit] { let p = probe.Probe(value: \"kept\"); let q: probe.Probe[String] = result.unwrap(clone(p)); if q.value == \"kept\" { Ok(()) } else { Error(Exit(status: 7)) } }", &[("probe", source)], dir)
+}
+/// An app over the real core with `probes` added to it as core modules.
+fn core_request(main: &str, probes: &[(&str, &str)], dir: &Path) -> CheckRequest {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut request = source_request("pub fn main() -> Result[(), Exit] { let p = probe.Probe(value: \"kept\"); let q: probe.Probe[String] = result.unwrap(clone(p)); if q.value == \"kept\" { Ok(()) } else { Error(Exit(status: 7)) } }", dir);
+    let mut request = source_request(main, dir);
     let mut core = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
-    let file = dir.join("probe.hirsel");
-    std::fs::write(&file, source).unwrap();
-    core.sources.push(hirsel_core_resolve::ModuleSource { file, modules: vec!["probe".into()], signatures: true });
+    for (name, source) in probes {
+        let file = dir.join(format!("{name}.hirsel"));
+        std::fs::write(&file, source).unwrap();
+        core.sources.push(hirsel_core_resolve::ModuleSource { file, modules: vec![name.to_string()], signatures: true });
+    }
     request.inputs.packages[1] = core;
     request
 }
@@ -64,3 +70,56 @@ fn clone_product_body_is_reached_cranelift() { clone_product(Backend::Cranelift)
 #[test]
 #[ignore = "explicit native integration target"]
 fn clone_product_body_is_reached_llvm() { clone_product(Backend::Llvm); }
+
+/// Core module `held` declares `P`; `hook_a` and `hook_b` each hold an unrelated
+/// function, and `P`'s clone hook, which adds one to the copy, is appended to
+/// the module `hook` names. The app's `copies` clones a `P` holding 7.
+fn hook_request(hook: Option<&str>, dir: &Path) -> CheckRequest {
+    let held = "pub type P { value: u64 }\npub fn make(v: u64) -> P { P(value: v) }\npub fn value(p: P) -> u64 { p.value }\n";
+    let with = |name: &str, other: &str| {
+        let hooked = "clone(p: held.P) { Ok(held.make(held.value(p) + 1u64)) }\n";
+        format!("{other}{}", if hook == Some(name) { hooked } else { "" })
+    };
+    let (a, b) = (with("hook_a", "pub fn other() -> u64 { 0u64 }\n"), with("hook_b", "pub fn other() -> u64 { 1u64 }\n"));
+    core_request("fn copies() -> u64 { let p = held.make(7u64); let copied: held.P = result.unwrap(clone(p)); held.value(copied) * 100u64 + held.value(p) }\npub fn main() -> Result[(), Exit] { let v = copies(); if v == 807u64 { Error(Exit(status: 8)) } else if v == 707u64 { Error(Exit(status: 7)) } else { Error(Exit(status: 9)) } }", &[("held", held), ("hook_a", &a), ("hook_b", &b)], dir)
+}
+/// A type's clone hook selection, absence included, keys every body that
+/// clones the type. Law: after the hook moves to another module, appears or
+/// goes, an incremental build rechecks the reader and its program runs like a
+/// fresh build's. Oracle: the source, exit 8 with the hook (the copy holds 8)
+/// and 7 without (a structural copy). Red before a type's header row read its
+/// hook: a moved or removed hook kept the reader's old call to the old hook
+/// path, which stopped the build, and an added one kept the structural copy.
+fn hook_selection(backend: Backend) {
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let reader = DefPath::from_full("app@1/main/copies").unwrap();
+    let run = |product: &CheckProduct, dir: &Path| -> Result<Option<i32>, String> {
+        let built = product.build(&entry, &native_options(backend, dir)).map_err(|e| format!("{e:?}"))?;
+        let out = Command::new(&built.executable).output().unwrap();
+        assert!(out.stdout.is_empty() && out.stderr.is_empty());
+        Ok(out.status.code())
+    };
+    let edits = [(Some("hook_a"), Some("hook_b")), (None, Some("hook_a")), (Some("hook_a"), None)];
+    let mut built = vec![];
+    let mut expected = vec![];
+    for (from, to) in edits {
+        let dir = tempfile::tempdir().unwrap();
+        let base = Driver::default().check(hook_request(from, dir.path()), &mut Meter::new(false)).unwrap();
+        assert!(base.accepted(), "{:?} {:?}", base.diagnostics, base.incomplete);
+        run(&base, dir.path()).unwrap();
+        let edited = Driver::default().check(hook_request(to, dir.path()), &mut Meter::new(false)).unwrap();
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh = Driver::default().check(hook_request(to, fresh_dir.path()), &mut Meter::new(false)).unwrap();
+        let exit = Ok(Some(if to.is_some() { 8 } else { 7 }));
+        assert_eq!(run(&fresh, fresh_dir.path()), exit, "{from:?} -> {to:?}: fresh");
+        built.push((from, to, edited.rechecked.contains(&reader), run(&edited, dir.path())));
+        expected.push((from, to, true, exit));
+    }
+    assert_eq!(built, expected);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_hook_selection_rebuilds_like_fresh_cranelift() { hook_selection(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_hook_selection_rebuilds_like_fresh_llvm() { hook_selection(Backend::Llvm); }

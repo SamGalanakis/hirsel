@@ -114,12 +114,45 @@ pub struct Program<'a> {
     pub(crate) alias_state: Vec<u8>,
     /// Aliases being lowered, each with its reference continuing the chain.
     pub(crate) alias_stack: Vec<(DeclId, Option<Site>)>,
-    core_declarations: [std::sync::OnceLock<Option<DeclId>>; 12],
+    core_declarations: [std::sync::OnceLock<Option<DeclId>>; PRELUDE.len()],
+}
+
+/// The core types lowering builds, matches or lays out without the program naming
+/// them: a capacity failure, a string literal, a region, a `Causes` element. A
+/// body's reuse key covers every one, since no resolved name of the body reaches it.
+pub const PRELUDE: [&str; 13] = [
+    "String",
+    "Result",
+    "Capacity",
+    "List",
+    "Region",
+    "Map",
+    "Text",
+    "Cause",
+    "BuildError",
+    "Child",
+    "FloatError",
+    "Bytes",
+    "Option",
+];
+/// The path of the core prelude type `name`, when the index has core.
+fn prelude_path(index: &NameIndex, name: &str) -> Option<DefPath> {
+    let package = &index.packages[index.core?.0 as usize];
+    Some(DefPath(hirsel_core_ids::ItemPath {
+        package: hirsel_core_ids::PackageId {
+            name: index.symbols.text(package.name).into(),
+            version: index.symbols.text(package.version).into(),
+        },
+        modules: vec!["core".into()],
+        name: name.into(),
+    }))
 }
 
 impl<'a> Program<'a> {
-    /// The core prelude type named `name`, when the program has core.
+    /// The core prelude type named `name`, when the program has core. `name` is
+    /// one of [`PRELUDE`].
     pub(crate) fn core_decl(&self, name: &str) -> Option<DeclId> {
+        // Lowering asks on hot paths: a match, in `PRELUDE`'s order.
         let slot = match name {
             "String" => 0,
             "Result" => 1,
@@ -133,21 +166,14 @@ impl<'a> Program<'a> {
             "Child" => 9,
             "FloatError" => 10,
             "Bytes" => 11,
-            _ => return self.core_decl_uncached(name),
+            "Option" => 12,
+            _ => panic!("`{name}` is not a core prelude type"),
         };
+        debug_assert_eq!(PRELUDE[slot], name);
         *self.core_declarations[slot].get_or_init(|| self.core_decl_uncached(name))
     }
     fn core_decl_uncached(&self, name: &str) -> Option<DeclId> {
-        let key = self.index.core?;
-        let package = &self.index.packages[key.0 as usize];
-        let path = DefPath(hirsel_core_ids::ItemPath {
-            package: hirsel_core_ids::PackageId {
-                name: self.index.symbols.text(package.name).into(),
-                version: self.index.symbols.text(package.version).into(),
-            },
-            modules: vec!["core".into()],
-            name: name.into(),
-        });
+        let path = prelude_path(self.index, name)?;
         match self
             .by_path
             .get(&path)

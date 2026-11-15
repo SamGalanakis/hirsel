@@ -1,6 +1,8 @@
 //! Definition keys keep implementation edits separate from signature dependencies.
 use super::*;
-use hirsel_core_resolve::{DefinitionId, LookupResult, LookupScope, Namespace, Target};
+use hirsel_core_resolve::{
+    DefinitionId, DefinitionKind, LookupResult, LookupScope, Namespace, Target,
+};
 use hirsel_core_syntax::Symbol;
 use hirsel_core_syntax::{Item, NodeKind, TokenKind};
 use std::collections::BTreeSet;
@@ -90,6 +92,9 @@ pub(crate) struct Headers {
     /// An image's own signature closure per definition, sealed when the image
     /// is published (`seal`). Empty in a request's own headers.
     closures: hirsel_core_ids::published::Table<Option<ContentHash>>,
+    /// The hash over the core prelude types' closures, sealed with an image
+    /// that holds core (`Keys::prelude_closure`).
+    prelude: Option<ContentHash>,
 }
 impl Headers {
     pub(crate) fn get(&self, path: &DefPath) -> Option<&Header> {
@@ -109,6 +114,7 @@ impl Headers {
             rows: writer.table(&self.rows)?,
             names: writer.map(&self.names)?,
             closures: writer.table(&self.closures)?,
+            prelude: self.prelude,
         })
     }
     /// The image's header rows with every definition's closure hash. An image
@@ -128,7 +134,8 @@ impl Headers {
                 }
             }
         }
-        let keys = Keys::bare(index, self.clone());
+        let mut keys = Keys::bare(index, self.clone());
+        keys.prelude = prelude(index);
         let mut closures = Vec::with_capacity(self.rows.len());
         for (id, row) in self.rows.iter().enumerate() {
             closures.push(match row {
@@ -137,6 +144,10 @@ impl Headers {
             });
         }
         let mut sealed = self.clone();
+        sealed.prelude = match keys.prelude.is_empty() {
+            true => None,
+            false => Some(keys.prelude_closure(index)?),
+        };
         sealed.closures = closures.into();
         Ok(sealed)
     }
@@ -170,6 +181,23 @@ impl<T> Demand<T> {
         Ok(cell.get().unwrap())
     }
 }
+/// The core prelude types' definitions (`hirsel_core_front::PRELUDE`), when
+/// the index has core.
+fn prelude(index: &NameIndex) -> Vec<usize> {
+    let Some(core) = index
+        .symbols
+        .find("core")
+        .and_then(|c| index.core_module(c))
+    else {
+        return vec![];
+    };
+    hirsel_core_front::PRELUDE
+        .iter()
+        .filter_map(|name| index.definition(core, index.symbols.find(name)?))
+        .filter(|&d| index.get(d).kind == DefinitionKind::Type)
+        .map(|d| d.0 as usize)
+        .collect()
+}
 pub(crate) struct Keys {
     pub(crate) headers: Headers,
     environment: ContentHash,
@@ -185,6 +213,10 @@ pub(crate) struct Keys {
     constructors: std::cell::RefCell<rustc_hash::FxHashMap<(u32, Symbol), Arc<[DefinitionId]>>>,
     // Symbol texts the lookup rows name.
     texts: std::cell::RefCell<rustc_hash::FxHashMap<u32, Box<str>>>,
+    // The core prelude types every body's signatures read
+    // (`hirsel_core_front::PRELUDE`), and their closures' hash once per request.
+    prelude: Vec<usize>,
+    prelude_closure: std::cell::OnceCell<ContentHash>,
 }
 impl Keys {
     pub fn new(
@@ -210,6 +242,7 @@ impl Keys {
             "hirsel.core-environment.v1",
             [&encode(&(compiler, &inputs.core, namespaces))?[..]],
         );
+        let mut hooks = vec![];
         for (m, rows) in modules.iter().zip(resolutions) {
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
                 let Some(definition) = index.item_definition(m.id, ordinal as u32, item) else {
@@ -259,6 +292,9 @@ impl Keys {
                         _ => {}
                     }
                 }
+                if index.get(definition).kind == DefinitionKind::Clone {
+                    hooks.push((definition, reads.clone()));
+                }
                 anchors.insert((m.id, ordinal as u32), path.clone());
                 headers.names.insert(path, definition);
                 headers.rows[definition.0 as usize] = Some(Header {
@@ -272,6 +308,28 @@ impl Keys {
                     anchor: (m.id, ordinal as u32),
                 });
             }
+        }
+        // A clone hook is a fact about the type it clones, attached from its own
+        // item (MEM-17): the type's row reads the hook, so the type's closure covers
+        // the hook's presence, path and header, and a hook moved, added or removed
+        // changes every closure that reaches the type.
+        for (hook, reads) in hooks {
+            for ty in reads {
+                if index.get(ty).kind != DefinitionKind::Type {
+                    continue;
+                }
+                if let Some(row) = headers.rows[ty.0 as usize].as_mut()
+                    && let Err(at) = row.reads.binary_search(&hook)
+                {
+                    row.reads.insert(at, hook);
+                }
+            }
+        }
+        // An image that holds core sealed the prelude's hash; a request can
+        // change no type in it.
+        match headers.prelude {
+            Some(hash) => drop(keys.prelude_closure.set(hash)),
+            None => keys.prelude = prelude(index),
         }
         keys.headers = headers;
         keys.anchors = anchors;
@@ -289,6 +347,8 @@ impl Keys {
             closures: Default::default(),
             constructors: Default::default(),
             texts: Default::default(),
+            prelude: vec![],
+            prelude_closure: Default::default(),
         }
     }
 
@@ -527,6 +587,23 @@ impl Keys {
         pending.dedup();
         pending
     }
+    /// One hash over the closures of the core prelude types, which lowering
+    /// builds, matches or lays out with no resolved name of the body reaching
+    /// them; every body's signatures include it.
+    fn prelude_closure(&self, index: &NameIndex) -> io::Result<ContentHash> {
+        if let Some(hash) = self.prelude_closure.get() {
+            return Ok(*hash);
+        }
+        let mut closures = Vec::with_capacity(self.prelude.len());
+        for &id in &self.prelude {
+            closures.push(self.closure(index, id)?);
+        }
+        let hash = ContentHash::of_parts(
+            "hirsel.prelude-closure.v1",
+            closures.iter().map(|c| &c.0[..]),
+        );
+        Ok(*self.prelude_closure.get_or_init(|| hash))
+    }
     pub fn for_body(
         &self,
         index: &NameIndex,
@@ -547,10 +624,11 @@ impl Keys {
         let signatures = {
             hirsel_core_front::cost_scope!("key work", "signature closure");
             let pending = self.signature_start(index, module, own, resolution);
-            let mut components = Vec::with_capacity(pending.len());
+            let mut components = Vec::with_capacity(pending.len() + 1);
             for id in pending {
                 components.push(self.closure(index, id)?);
             }
+            components.push(self.prelude_closure(index)?);
             components.sort_unstable();
             components.dedup();
             ContentHash::of_parts(

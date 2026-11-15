@@ -2250,7 +2250,7 @@ fn every_reached_shape_name_has_one_closure() {
     for s in m1.packages.iter_mut().flat_map(|p| &mut p.sources) {
         s.file = root.join(&s.file);
     }
-    let langarena = langarena_inputs(&root, &root.join("core/langarena"));
+    let langarena = langarena_inputs(&root, &root.join("core/core"), &root.join("core/langarena"));
     let dir = tempfile::tempdir().unwrap();
     let mut requests: Vec<(String, CheckRequest)> = [("langarena", langarena), ("m1", m1)]
         .into_iter()
@@ -2453,15 +2453,15 @@ fn corpus_files(dir: &Path, tests: bool) -> Vec<hirsel_core_resolve::ModuleSourc
         .collect()
 }
 
-/// The suite program: source core and std from `root`, langarena from
+/// The suite program: core from `core`, std from `root`, langarena from
 /// `langarena`, tests included.
-fn langarena_inputs(root: &Path, langarena: &Path) -> CorpusManifest {
+fn langarena_inputs(root: &Path, core: &Path, langarena: &Path) -> CorpusManifest {
     CorpusManifest {
         core: package("core"),
         packages: vec![
             PackageManifest {
                 package: package("core"),
-                sources: corpus_files(&root.join("core/core"), false),
+                sources: corpus_files(core, false),
                 dependencies: vec![],
             },
             PackageManifest {
@@ -2484,8 +2484,9 @@ fn langarena_inputs(root: &Path, langarena: &Path) -> CorpusManifest {
 /// paths it took away, and rechecks the fan-out hand-derived from the
 /// source: an item's own text moves its body alone; a header moves every
 /// body that reads it (the direct callers of `helper.checksum_str`, found by
-/// reading the corpus); placement moves nothing. Attack 960's resolution cases run here suite-shaped, under the
-/// law alone.
+/// reading the corpus); placement moves nothing; a clone hook moved, added or
+/// removed moves the hook and every body whose signatures reach its type. Attack 960's resolution cases run here suite-shaped, under the
+/// law alone, and so does a core field reorder of a type lowering builds unnamed.
 #[test]
 fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2494,20 +2495,45 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let arena = dir.path().join("langarena");
-    let mut pending = vec![root.join("core/langarena")];
-    while let Some(d) = pending.pop() {
-        let to = arena.join(d.strip_prefix(root.join("core/langarena")).unwrap());
-        std::fs::create_dir_all(&to).unwrap();
-        for e in std::fs::read_dir(&d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                pending.push(p);
-            } else {
-                std::fs::copy(&p, to.join(p.file_name().unwrap())).unwrap();
+    let core = dir.path().join("core");
+    for (from, into) in [("core/langarena", &arena), ("core/core", &core)] {
+        let mut pending = vec![root.join(from)];
+        while let Some(d) = pending.pop() {
+            let to = into.join(d.strip_prefix(root.join(from)).unwrap());
+            std::fs::create_dir_all(&to).unwrap();
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    pending.push(p);
+                } else {
+                    std::fs::copy(&p, to.join(p.file_name().unwrap())).unwrap();
+                }
             }
         }
     }
     let helper = std::fs::read_to_string(arena.join("helper.hirsel")).unwrap();
+    let prelude = std::fs::read_to_string(core.join("core.hirsel")).unwrap();
+    // `held.P` is a core type and `hooked` its clone hook, which core alone
+    // may declare (MEM-17); `probe_copies` clones a `P`.
+    let held = "pub type P { value: u64 }\npub fn make(v: u64) -> P { P(value: v) }\npub fn value(p: P) -> u64 { p.value }\n";
+    let hooked = |other: &str| {
+        format!("{other}clone(p: held.P) {{ Ok(held.make(held.value(p) + 1u64)) }}\n")
+    };
+    let (other_a, other_b) = (
+        "pub fn other() -> u64 { 0u64 }\n",
+        "pub fn other() -> u64 { 1u64 }\n",
+    );
+    let copies = "pub fn copies() -> u64 {\n    let p = held.make(7u64)\n    let copied: held.P = result.unwrap(clone(p))\n    held.value(copied)\n}\n";
+    let hook_files = |a: String, b: String| -> Vec<(&'static str, Option<String>)> {
+        vec![
+            ("core/held.hirsel", Some(held.into())),
+            ("core/hook_a.hirsel", Some(a)),
+            ("core/hook_b.hirsel", Some(b)),
+            ("probe_copies.hirsel", Some(copies.into())),
+        ]
+    };
+    // A capacity refusal `bound` builds: the reader names no core type.
+    let refused = "fn bounded() -> u64 { 7u64 }\npub fn refused() -> u64 {\n    let r = bound bytes 1152921504606846976u64 { bounded() }\n    match r {\n        Ok(_) => 1u64,\n        Error(c) => c.requested\n    }\n}\n";
     let edited = |from: &str, to: &str| {
         assert!(helper.contains(from), "{from}");
         helper.replacen(from, to, 1)
@@ -2632,26 +2658,70 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
             ],
             None,
         ),
+        (
+            "a clone hook moves to another core module",
+            hook_files(hooked(other_a), other_b.into()),
+            hook_files(other_a.into(), hooked(other_b)),
+            Some(vec!["P.$clone", "copies", "make", "value"]),
+        ),
+        (
+            "a clone hook is added",
+            hook_files(other_a.into(), other_b.into()),
+            hook_files(hooked(other_a), other_b.into()),
+            Some(vec!["P.$clone", "copies", "make", "value"]),
+        ),
+        (
+            "a clone hook is removed",
+            hook_files(hooked(other_a), other_b.into()),
+            hook_files(other_a.into(), other_b.into()),
+            Some(vec!["copies", "make", "value"]),
+        ),
+        (
+            "core reorders the fields of a capacity refusal a reader never names",
+            vec![("probe_refused.hirsel", Some(refused.into()))],
+            vec![
+                ("probe_refused.hirsel", Some(refused.into())),
+                (
+                    "core/core.hirsel",
+                    Some(prelude.replacen(
+                        "    requested: u64,\n    available: u64\n",
+                        "    available: u64,\n    requested: u64\n",
+                        1,
+                    )),
+                ),
+            ],
+            None,
+        ),
     ];
     // Inputs are copied read-only: a write replaces the file.
     let put = |path: &Path, text: &str| {
         let _ = std::fs::remove_file(path);
         std::fs::write(path, text).unwrap();
     };
+    let at = |name: &str| match name.strip_prefix("core/") {
+        Some(name) => core.join(name),
+        None => arena.join(name),
+    };
     let set = |files: &Files| {
         put(&arena.join("helper.hirsel"), &helper);
+        put(&core.join("core.hirsel"), &prelude);
         for probe in [
             "probe_record",
             "probe_variant",
             "probe_user",
             "probe_hidden",
             "probe_shadow",
+            "probe_copies",
+            "probe_refused",
+            "core/held",
+            "core/hook_a",
+            "core/hook_b",
         ] {
-            let _ = std::fs::remove_file(arena.join(format!("{probe}.hirsel")));
+            let _ = std::fs::remove_file(at(&format!("{probe}.hirsel")));
         }
         for (name, text) in files {
             if let Some(text) = text {
-                put(&arena.join(name), text);
+                put(&at(name), text);
             }
         }
     };
@@ -2659,7 +2729,7 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
         Driver::default()
             .check(
                 CheckRequest {
-                    inputs: langarena_inputs(&root, &arena),
+                    inputs: langarena_inputs(&root, &core, &arena),
                     store: store.to_owned(),
                     library: LibraryInput::Sources,
                     entry: None,
@@ -2717,6 +2787,9 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
         let gone: &[&str] = match case {
             "remove" | "rename" => &["spare"],
             "a module function a local shadows is removed" => &["g"],
+            "a clone hook moves to another core module" | "a clone hook is removed" => {
+                &["P.$clone"]
+            }
             _ => &[],
         };
         assert_eq!(removed, gone, "{case}: tombstones");

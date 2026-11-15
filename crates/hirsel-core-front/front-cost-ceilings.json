@@ -216,10 +216,10 @@
         "image index": 203.79778742473042
       },
       "image_per_token": {
-        "records_opened": 0.0018204733230639965,
-        "bytes_read": 7.219465060915838,
-        "digests": 0.0018204733230639965,
-        "digest_bytes": 7.161854082061336,
+        "records_opened": 0.0019044951687438734,
+        "bytes_read": 7.612015123932222,
+        "digests": 0.0019044951687438734,
+        "digest_bytes": 7.536591513793586,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.02940764598795687,
@@ -708,6 +708,32 @@
       },
       "compiler_sha256": "e97de58e9c4d0960ef27e99a1b687e11e012eb6c69445519303a2d53653a001a",
       "evidence": "/tmp/905-frontcost-1.log"
+    },
+    {
+      "reason": "std.omap adds a seventeenth std module with 40 completed bodies (8f1c3331). Its additional published header/image records are read by suite-edit. Only the four red image-work counters receive the observed work plus 2 percent; source-stage ceilings and suite target budgets stay unchanged.",
+      "revision": "8f1c333197b7108bb4fb9840639532082dad3505",
+      "source_bodies_before": {
+        "m1": 386,
+        "std": 213
+      },
+      "source_bodies_after": {
+        "m1": 426,
+        "std": 253
+      },
+      "image_counts_before": {
+        "records_opened": 0.0018204733230639965,
+        "bytes_read": 7.219465060915838,
+        "digests": 0.0018204733230639965,
+        "digest_bytes": 7.161854082061336
+      },
+      "image_counts_after": {
+        "records_opened": 66,
+        "bytes_read": 266457,
+        "digests": 66,
+        "digest_bytes": 263817
+      },
+      "measured_tokens": 35705,
+      "evidence": "std-ordered-map-998/full-std-cost.log"
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

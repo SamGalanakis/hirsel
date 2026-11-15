@@ -3,16 +3,16 @@
   "basis": "Qualified frozen/source-growth audit43d46518..4fcdeb12. Fixed-manifest population7082/3691->7263/3872lines,351/173->365/187complete bodies. Deque9+1, split cursors2, Mapclone2 new bodies each corpus; changed JSON source adds20lines. All named body-free increments are excluded from growth. Retain all concurrent growth/census histories. Fixed named anchor residual reduced for542fd0f2; raw60000andproduct rules unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 7745,
-      "check_lower_per_line": 17118.66,
+      "code_lines": 8589,
+      "check_lower_per_line": 17900,
       "whole_request_per_line": 33515.74,
       "whole_process_per_line": 33614.33
     },
     "std": {
-      "code_lines": 4357,
-      "check_lower_per_line": 11466.48,
-      "whole_request_per_line": 26061.5,
-      "whole_process_per_line": 26257.93
+      "code_lines": 5201,
+      "check_lower_per_line": 14300,
+      "whole_request_per_line": 27600,
+      "whole_process_per_line": 27800
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
@@ -96,23 +96,23 @@
   },
   "margin": "M1 growth observation+2%, std+5%, rounded up to100. Growth baseline is pre-anchor frozen work plus current compiler own-source minus frozen-source work. Named anchor residual is a fixed absolute instruction count, never part of the60000budget. Other body-free regressions remain red.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "7420972c06f9; Log/code kernel measured pair delta;377/199 complete,7745/4357code lines",
+  "forecast_revision": "8f1c333197b7; std.omap adds 40 completed source bodies; m1 386->426, std 213->253; 8589/5201 code lines",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 377,
-      "bodies": 377,
+      "complete_bodies": 426,
+      "bodies": 426,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 33130.13298902518,
-      "finished_process_per_line": 33130.13298902518
+      "measured_process_per_line": 32194.1,
+      "finished_process_per_line": 32194.1
     },
     "std": {
-      "complete_bodies": 199,
-      "bodies": 199,
+      "complete_bodies": 253,
+      "bodies": 253,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 25794.447326141842,
-      "finished_process_per_line": 25794.447326141842
+      "measured_process_per_line": 27354.72,
+      "finished_process_per_line": 27354.72
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -6201,6 +6201,48 @@
         "m1": 7794,
         "std": 4406
       }
+    },
+    {
+      "from_revision": "072c82b7e4382c5e7fa0264224ffec732b710278",
+      "to_revision": "8f1c333197b7108bb4fb9840639532082dad3505",
+      "reason": "The new std.omap B+ tree adds 40 checked bodies and joins the canonical M1/std manifest. Only red all-source cells receive observation plus 2 percent rounded up to 100 instructions per line; named absolute anchor allowances and the fixed 60000 finished budget are unchanged. Before/after source bodies are counted from the accepted corpus declarations, including core clone bodies.",
+      "completed_bodies_before": {
+        "m1": [
+          386,
+          386
+        ],
+        "std": [
+          213,
+          213
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          426,
+          426
+        ],
+        "std": [
+          253,
+          253
+        ]
+      },
+      "measured_lines": {
+        "m1": 8589,
+        "std": 5201
+      },
+      "observations": {
+        "m1": {
+          "check_lower_adjusted_per_line": 17519.14,
+          "whole_request_per_line": 32055.77,
+          "whole_process_per_line": 32194.1
+        },
+        "std": {
+          "check_lower_adjusted_per_line": 13950.5,
+          "whole_request_adjusted_per_line": 26968.82,
+          "whole_process_adjusted_per_line": 27167.54
+        }
+      },
+      "evidence": "std-ordered-map-998/full-std-cost.log"
     }
   ],
   "denominator_policy": "Fixed M1/core-std manifest closure, deterministic actual code lines. Print baseline and current counts when different. Source-line movement alone is expected source development, not a regression; empty corpus, missing counters, every numeric ceiling and the fixed finished-process budget still fail. Refresh recorded reference and forecast when supported work changes.",

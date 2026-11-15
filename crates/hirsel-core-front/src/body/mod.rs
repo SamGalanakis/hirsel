@@ -379,6 +379,22 @@ impl Emitter {
     fn add_function(&mut self, key: InstanceKey, sig: Signature) -> FuncId {
         self.add_function_abi(key, sig, scalar_abi::SignatureAbi::default())
     }
+    /// `op`'s glue at closed row `ty`. The glue is derived on the module itself, so
+    /// the rows it adds are registered here: a later request for one of those
+    /// instances, closed or the placeholder of a type generic only in its regions
+    /// (whose name, carrying no region, is already closed), is that row and not a
+    /// second one (one row per instance; FORM #117).
+    fn glue(&mut self, ty: TypeId, op: key_glue::KeyOp) -> Result<FuncId, &'static str> {
+        let start = self.module.functions.len();
+        let glue = key_glue::ensure(&mut self.module, ty, op);
+        for (i, function) in self.module.functions.iter().enumerate().skip(start) {
+            let key = &self.module.instances[function.instance.index()];
+            if !self.funcs.contains_key(key) {
+                self.funcs.insert(key.clone(), FuncId(i as u32));
+            }
+        }
+        glue
+    }
     fn add_function_abi(
         &mut self,
         key: InstanceKey,

@@ -1264,3 +1264,13 @@ fn generic_stable_keys_cranelift() { generic_stable_keys(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn generic_stable_keys_llvm() { generic_stable_keys(Backend::Llvm); }
+
+fn clone_stable(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/clone-stable.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_stable_cranelift() { clone_stable(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_stable_llvm() { clone_stable(Backend::Llvm); }

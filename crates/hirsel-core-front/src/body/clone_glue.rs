@@ -101,6 +101,15 @@ impl Derive<'_> {
         to: ValueId,
     ) -> Result<(), &'static str> {
         self.structural_clone_allowed(ty, true)?;
+        if self.module.types[ty.index()].repr == LRepr::Stable {
+            // A clone keeps the regions of its stable parts (MEM-17): a stable value,
+            // a root or an element of a cloned container, is copied as its holder,
+            // the block pointer, and its block is shared, not copied (FORM #117).
+            copy(c, to, from, hirsel_core_layout::POINTER);
+            let zero = c.constant(0);
+            ret(c, &[zero, zero]);
+            return Ok(());
+        }
         let size = self.row_size(ty);
         copy(c, to, from, size);
         if let Some(f) = self.module.types[ty.index()].clone {
@@ -155,6 +164,22 @@ impl Derive<'_> {
     }
     fn size_of(&self, field: &FieldTy) -> u64 {
         hirsel_core_layout::field_size(&self.module.types, &self.recipes, field).0
+    }
+    /// A Box block of target row `t`: the bytes it holds and its charge, the
+    /// target's logical size rounded up to 8 (MEM-24), as `box.new` admits it.
+    fn boxed(&self, t: TypeId) -> (u64, u64) {
+        let (repr, recipe) = (self.module.types[t.index()].repr, &self.recipes[t.index()]);
+        let size = held_size(repr, recipe, false).expect("a boxed target has a fixed layout");
+        let logical = held_size(repr, recipe, true).expect("a boxed target has a logical size");
+        (size, round8(logical))
+    }
+    /// The charge of `count` elements of `item` in a List block: their logical
+    /// sizes, rounded up to 8 (MEM-24), never their native strides.
+    fn seq_charge(&self, c: &mut Code, item: &FieldTy, count: ValueId) -> ValueId {
+        let logical = hirsel_core_layout::field_size(&self.module.types, &self.recipes, item).2;
+        let l = c.constant(logical);
+        let units = c.mul(count, l);
+        round8_value(c, units)
     }
     /// Whether a value of `field` holds an own or counted part (seen breaks a cycle).
     fn owns(&self, field: &FieldTy, seen: &mut Vec<u32>) -> bool {
@@ -291,13 +316,13 @@ impl Derive<'_> {
             }
             FieldTy::Box(t) => {
                 let t = TypeId(t.0);
-                let size = self.row_size(t);
-                let block = alloc(c, self.allocation_kind(field), round8(size), size, fail);
+                let (size, charge) = self.boxed(t);
+                let block = alloc(c, self.allocation_kind(field), charge, size, fail);
                 let f = self.function(t, KeyOp::Clone)?;
                 let old = c.read(from, Ty::Ptr);
                 let x = c.address(old, PlaceTy::Declared(t));
                 let y = c.address(block, PlaceTy::Declared(t));
-                self.call_checked(c, f, x, y, fail, Some((block, round8(size))));
+                self.call_checked(c, f, x, y, fail, Some((block, charge)));
                 store(c, to, block);
             }
             FieldTy::Rc(_) | FieldTy::Arc(_) => {
@@ -326,10 +351,11 @@ impl Derive<'_> {
                 store(c, cap, zero);
                 c.jump(done, &[]);
                 c.start(some);
-                let stride = self.size_of(item);
-                let k = c.constant(stride);
+                // The block holds `len` native strides and is charged `len` logical
+                // sizes (MEM-24), as a List's own growth charges it.
+                let k = c.constant(self.size_of(item));
                 let bytes = c.mul(len, k);
-                let charge = round8_value(c, bytes);
+                let charge = self.seq_charge(c, item, len);
                 let block = alloc_kind(c, self.allocation_kind(field), charge, bytes, fail);
                 let old = c.read(from, Ty::Ptr);
                 copy_value(c, block, old, bytes);
@@ -465,7 +491,7 @@ impl Derive<'_> {
                     ty: t,
                     fail: None,
                 });
-                let charge = c.constant(round8(self.row_size(t)));
+                let charge = c.constant(self.boxed(t).1);
                 c.inst(Inst::Free { block, charge });
             }
             FieldTy::Rc(t) | FieldTy::Arc(t) => {
@@ -490,9 +516,7 @@ impl Derive<'_> {
                     let len = c.read(len_at, Ty::Scalar(Scalar::U64));
                     self.drop_items(c, item, block, len)?;
                 }
-                let stride = c.constant(self.size_of(item));
-                let bytes = c.mul(cap, stride);
-                let charge = round8_value(c, bytes);
+                let charge = self.seq_charge(c, item, cap);
                 c.inst(Inst::Free { block, charge });
                 c.jump(done, &[]);
                 c.start(done);
@@ -700,7 +724,7 @@ impl Derive<'_> {
                 c.start(some);
                 let stride = c.constant(self.size_of(item));
                 let bytes = c.mul(len, stride);
-                let charge = round8_value(c, bytes);
+                let charge = self.seq_charge(c, item, len);
                 let block = alloc_kind(
                     c,
                     self.allocation_kind(&FieldTy::Seq(item.clone())),
@@ -720,11 +744,11 @@ impl Derive<'_> {
             // A stable field becomes a new node holding its twin.
             (FieldTy::Stable(t), FieldTy::Box(u)) => {
                 let (t, u) = (TypeId(t.0), TypeId(u.0));
-                let size = self.row_size(u);
+                let (size, charge) = self.boxed(u);
                 let block = alloc(
                     c,
                     self.allocation_kind(&FieldTy::Box(TypeRef(u.0))),
-                    round8(size),
+                    charge,
                     size,
                     fail,
                 );
@@ -732,7 +756,7 @@ impl Derive<'_> {
                 let old = c.read(from, Ty::Ptr);
                 let x = c.address(old, PlaceTy::Declared(t));
                 let y = c.address(block, PlaceTy::Declared(u));
-                self.call_checked(c, f, x, y, fail, Some((block, round8(size))));
+                self.call_checked(c, f, x, y, fail, Some((block, charge)));
                 store(c, to, block);
             }
             (FieldTy::Stable(t), FieldTy::Inline(u)) if t != u => {

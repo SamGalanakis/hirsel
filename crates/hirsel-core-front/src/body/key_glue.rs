@@ -236,7 +236,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     });
                 function
             } else {
-                match ensure(&mut self.e.module, id, op) {
+                match self.e.glue(id, op) {
                     Ok(function) => function,
                     Err(what) => {
                         self.gap(n, what);

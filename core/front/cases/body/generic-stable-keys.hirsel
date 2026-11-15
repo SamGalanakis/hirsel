@@ -13,6 +13,7 @@
 // expect: run same_concrete() = 1
 // expect: run order_generic() = 1
 // expect: run order_concrete() = 1
+// expect: run captured() = 10
 // native: run heaped() = 159
 stable type Span3: key + ordered {
     a: u64,
@@ -162,6 +163,29 @@ fn heaped() -> u64 {
                 }
             },
             _ => 0
+        }
+    }
+}
+
+// A scoped closure in a generic body captures a stable T as its holder (LANG-14 allows
+// a scoped view capture; an owning one is refused): equal contents in two blocks, then
+// unequal ones.
+fn same_in[T: key](x: T, y: T) -> u64 {
+    let cb = scoped fn() -> u64 {
+        if x == y {
+            1
+        } else {
+            0
+        }
+    }
+    cb()
+}
+
+fn captured() -> u64 {
+    region r {
+        match (Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 3) in r, Span3(a: 1, b: 2, c: 4) in r) {
+            (Ok(s), Ok(t), Ok(u)) => same_in(s, t) * 10 + same_in(s, u),
+            _ => 99
         }
     }
 }

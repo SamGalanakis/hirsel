@@ -231,6 +231,18 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         )
     });
     let module = &emitter.module;
+    // One row per instance (Emitter): two rows of one key are one symbol declared twice
+    // natively, and a body-less one is an import of a symbol this module defines.
+    let mut rows = std::collections::HashMap::new();
+    for (i, f) in module.functions.iter().enumerate() {
+        let key = &module.instances[f.instance.index()];
+        if let Some(j) = rows.insert(key, i) {
+            panic!(
+                "{}: rows {j} and {i} are one instance {key:?}",
+                path.display()
+            );
+        }
+    }
     let rigid = concrete_rows_reaching_rigid(module);
     assert!(
         rigid.is_empty(),

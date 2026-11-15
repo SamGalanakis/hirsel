@@ -8,6 +8,7 @@ mod construction;
 #[path = "../../hirsel-llvm/src/core/mod.rs"]
 pub mod core;
 mod loader;
+pub use loader::llvm_library;
 
 /// Compile compiler-produced LLVM text through the same once-loaded component.
 /// This is also the object-parity boundary used by the direct engine's tests.

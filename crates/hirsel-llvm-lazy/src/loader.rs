@@ -1,9 +1,13 @@
 //! The component is part of the executable, rather than an independently
 //! replaceable plugin. Its bytes are mapped only when LLVM emits an object.
+//! libLLVM is not part of the executable: [`llvm_library`] names the one file this
+//! process loads, so an LLVM product's key can name that file's content.
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 include!(concat!(env!("OUT_DIR"), "/component.rs"));
@@ -99,8 +103,104 @@ fn open(name: &CStr) -> Result<*mut libc::c_void, String> {
         Ok(handle)
     }
 }
+/// The libLLVM file this process's LLVM backend loads, resolved once and
+/// without loading it: a request served from the store keys on it and never
+/// maps LLVM. The loader opens exactly this path, so the file an LLVM key
+/// names is the file that emits its bytes.
+///
+/// The search is the dynamic loader's own for a name this executable opens:
+/// its directories (RPATH, LD_LIBRARY_PATH as read at start, RUNPATH, the
+/// system directories) from `dlinfo`, in order, each probed for the SONAME.
+/// A library in none of them is one only `ld.so.cache` names; then dlopen
+/// resolves the name itself, once, and the path it opened is the answer.
+pub fn llvm_library() -> Result<&'static Path, String> {
+    static LIBRARY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    LIBRARY
+        .get_or_init(|| {
+            search_directories()?
+                .into_iter()
+                .map(|directory| directory.join(LLVM_LIBRARY))
+                .find(|candidate| candidate.is_file())
+                .map_or_else(opened_by_name, Ok)
+        })
+        .as_ref()
+        .map(PathBuf::as_path)
+        .map_err(Clone::clone)
+}
+fn search_directories() -> Result<Vec<PathBuf>, String> {
+    // SAFETY: a null name returns the main program's handle, loading nothing.
+    let main = unsafe { libc::dlopen(std::ptr::null(), libc::RTLD_LAZY) };
+    if main.is_null() {
+        return Err(dl_error());
+    }
+    #[repr(C)]
+    struct Serpath {
+        name: *mut libc::c_char,
+        flags: libc::c_uint,
+    }
+    #[repr(C)]
+    struct Serinfo {
+        size: libc::size_t,
+        count: libc::c_uint,
+        paths: [Serpath; 1],
+    }
+    let mut sized = Serinfo {
+        size: 0,
+        count: 0,
+        paths: [Serpath {
+            name: std::ptr::null_mut(),
+            flags: 0,
+        }],
+    };
+    // SAFETY: SERINFOSIZE fills the header with the size the list needs.
+    if unsafe { libc::dlinfo(main, libc::RTLD_DI_SERINFOSIZE, (&raw mut sized).cast()) } != 0 {
+        return Err(dl_error());
+    }
+    // u64 words keep the buffer aligned for the header and its pointers.
+    let mut buffer = vec![0u64; sized.size.div_ceil(8)];
+    let info = buffer.as_mut_ptr().cast::<Serinfo>();
+    // SAFETY: the buffer holds `size` bytes, aligned; SERINFO writes the
+    // header, `count` entries and their strings within it.
+    unsafe {
+        (*info).size = sized.size;
+        (*info).count = sized.count;
+        if libc::dlinfo(main, libc::RTLD_DI_SERINFO, info.cast()) != 0 {
+            return Err(dl_error());
+        }
+        let paths = std::ptr::addr_of!((*info).paths).cast::<Serpath>();
+        Ok((0..(*info).count as usize)
+            .map(|i| {
+                let name = CStr::from_ptr((*paths.add(i)).name);
+                PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes()))
+            })
+            .collect())
+    }
+}
+fn opened_by_name() -> Result<PathBuf, String> {
+    let handle = open(&CString::new(LLVM_LIBRARY).unwrap())?;
+    let mut map: *mut libc::c_void = std::ptr::null_mut();
+    // SAFETY: LINKMAP stores the handle's `struct link_map *`; its second
+    // field, l_name, is the path the loader opened, for the process's life.
+    unsafe {
+        if libc::dlinfo(handle, libc::RTLD_DI_LINKMAP, (&raw mut map).cast()) != 0 {
+            return Err(dl_error());
+        }
+        let name = *map.cast::<*const libc::c_char>().add(1);
+        let path = PathBuf::from(std::ffi::OsString::from_vec(
+            CStr::from_ptr(name).to_bytes().to_vec(),
+        ));
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            Err(format!(
+                "{LLVM_LIBRARY} was opened as {}, not an absolute path",
+                path.display()
+            ))
+        }
+    }
+}
 fn load() -> Result<Backend, String> {
-    let llvm = CString::new(LLVM_LIBRARY).unwrap();
+    let llvm = CString::new(llvm_library()?.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
     open(&llvm)?;
     // SAFETY: memfd_create returns a new exclusively owned fd, not an existing
     // process handle. The sealed file is the linked component's exact bytes.

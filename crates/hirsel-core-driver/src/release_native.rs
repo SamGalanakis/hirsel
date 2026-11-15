@@ -38,6 +38,8 @@ impl CheckProduct {
         library_store: Option<&Store>,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let compiler = compiler_identity()?;
+        // Release is LLVM's alone: every object here is libLLVM's output.
+        let llvm = crate::tool_inputs::llvm_library()?;
         let mut emitted = HashSet::new();
         let mut modules: Vec<_> = reached
             .iter()
@@ -79,6 +81,7 @@ impl CheckProduct {
                 "hirsel.core-object.v1",
                 &(
                     compiler,
+                    llvm,
                     &options.target,
                     options.backend,
                     options.optimize,
@@ -158,6 +161,7 @@ impl CheckProduct {
             "hirsel.core-release-unit.v2",
             &(
                 compiler,
+                llvm,
                 &options.target,
                 options.debug_lines,
                 options.logical_charge_report.is_some(),

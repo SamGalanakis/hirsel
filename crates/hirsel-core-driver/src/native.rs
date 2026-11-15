@@ -116,6 +116,13 @@ pub struct BuildProduct {
     pub observation_mode: bool,
     pub debug_lines: bool,
 }
+/// The libLLVM an LLVM object's key takes (`tool_inputs::llvm_library`):
+/// none for Cranelift, which is part of the compiler executable.
+fn engine_library(backend: Backend) -> io::Result<Option<ContentHash>> {
+    matches!(backend, Backend::Llvm)
+        .then(crate::tool_inputs::llvm_library)
+        .transpose()
+}
 pub(crate) fn key(domain: &str, value: &impl Serialize) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(domain, [&encode(value)?[..]]))
 }
@@ -249,6 +256,7 @@ impl CheckProduct {
                 library_store.as_ref(),
             );
         }
+        let llvm = engine_library(options.backend)?;
         let mut objects = Vec::new();
         let mut emitted = HashSet::new();
         let mut scratch = Vec::new();
@@ -271,6 +279,7 @@ impl CheckProduct {
                     crate::native_object::SCHEMA,
                     compiler_identity()?,
                     toolchain.runtime,
+                    llvm,
                     &options.target,
                     options.backend,
                     options.optimize,
@@ -354,6 +363,7 @@ impl CheckProduct {
                     crate::native_object::SCHEMA,
                     compiler_identity()?,
                     toolchain.runtime,
+                    engine_library(options.backend)?,
                     &options.target,
                     options.backend,
                     options.optimize,

@@ -108,6 +108,12 @@ fn recipe_directory(driver: &Path) -> io::Result<PathBuf> {
 
 fn identity(program: &Path, search: &OsStr, store: &Store) -> io::Result<Tool> {
     let path = selected(program, search)?;
+    let content = recorded(&path, store)?.content;
+    Ok(Tool { path, content })
+}
+/// One host file's content under its own record: the stat rule decides
+/// whether the bytes are read again.
+fn recorded(path: &Path, store: &Store) -> io::Result<RecipeFile> {
     let key = ContentHash::of_parts(
         "hirsel.host-tool-revision.v2",
         [crate::encode(&path)?.as_slice()],
@@ -123,19 +129,45 @@ fn identity(program: &Path, search: &OsStr, store: &Store) -> io::Result<Tool> {
         .flatten()
         .and_then(|bytes| serde_json::from_slice::<RecipeFile>(&bytes).ok())
         .filter(|record| record.path == path);
-    let seen = observe(&path, previous.as_ref())?;
+    let seen = observe(path, previous.as_ref())?;
     if previous.as_ref() != Some(&seen) {
         let hash = store.put(&serde_json::to_vec(&seen).map_err(io::Error::other)?)?;
         store.select(&selection, hash)?;
     }
-    Ok(Tool {
-        path,
-        content: seen.content,
-    })
+    Ok(seen)
+}
+fn host_tools() -> io::Result<Store> {
+    Store::new(&PackageProduct::default_cache().join("host-tools"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests stand in for another libLLVM: the file whose content LLVM keys take.
+    pub(crate) static LLVM_LIBRARY: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// The content of the libLLVM this process's LLVM backend loads: the file
+/// `hirsel_llvm_lazy::llvm_library` resolves, which the loader then opens by
+/// that path. Every key of bytes LLVM emits takes it, as the executable's
+/// identity does not cover a library it opens at run time; Cranelift keys do
+/// not. Read under the stat rule, once per process.
+pub(crate) fn llvm_library() -> io::Result<ContentHash> {
+    #[cfg(test)]
+    if let Some(path) = LLVM_LIBRARY.with_borrow(Clone::clone) {
+        return Ok(recorded(&path, &host_tools()?)?.content);
+    }
+    static CONTENT: std::sync::LazyLock<io::Result<ContentHash>> = std::sync::LazyLock::new(|| {
+        let path = hirsel_llvm_lazy::llvm_library().map_err(io::Error::other)?;
+        Ok(recorded(path, &host_tools()?)?.content)
+    });
+    CONTENT
+        .as_ref()
+        .copied()
+        .map_err(|e| io::Error::new(e.kind(), e.to_string()))
 }
 pub(crate) fn link_tools(cc: &Path) -> io::Result<(Tool, Tool)> {
     let search = std::env::var_os("PATH").unwrap_or_default();
-    let store = Store::new(&PackageProduct::default_cache().join("host-tools"))?;
+    let store = host_tools()?;
     let driver = identity(cc, &search, &store)?;
     // Resolve the pinned LLVM link editor rather than the host `ld`.  The
     // absolute path is part of the tool identity and is passed back to clang
@@ -872,6 +904,30 @@ fn shell_words(line: &str) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Law: LLVM keys take the loaded libLLVM's bytes, so a library one byte
+    /// apart (same name and size) is another identity, and a copy the same.
+    /// Oracle: the files' bytes.
+    #[test]
+    fn a_libllvm_one_byte_apart_is_another_llvm_identity() {
+        let work = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0x5a; 4096];
+        let file = |name: &str, bytes: &[u8]| {
+            let path = work.path().join(name).join("libLLVM.so.23.1");
+            std::fs::create_dir(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            LLVM_LIBRARY.set(Some(path));
+            let identity = llvm_library().unwrap();
+            LLVM_LIBRARY.set(None);
+            identity
+        };
+        let first = file("first", &bytes);
+        let copy = file("copy", &bytes);
+        bytes[2048] ^= 1;
+        let apart = file("apart", &bytes);
+        assert_eq!(first, copy);
+        assert_ne!(first, apart);
+    }
+
     #[test]
     fn earlier_path_candidate_and_replaced_tool_change_selection() {
         let work = tempfile::tempdir().unwrap();

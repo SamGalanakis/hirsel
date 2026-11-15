@@ -122,6 +122,72 @@ fn dev_objects_served_from_the_store_are_fresh_emissions() {
     }
 }
 
+/// Law: an LLVM object's key takes the content of the libLLVM the loader
+/// opens, not its name or version: another library misses every object, the
+/// same one hits. Two stand-ins one byte apart play the libraries whose
+/// content the key takes; the real one emits. Oracle: a fresh emission into
+/// empty stores under the same stand-in (an object's bytes embed its key).
+#[test]
+#[ignore = "explicit native integration target"]
+fn another_libllvm_misses_every_llvm_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = native_options(Backend::Llvm, dir.path());
+    let library = |name: &str, last: u8| {
+        let path = dir.path().join(name).join("libLLVM.so.23.1");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes = vec![0x5a; 4096];
+        bytes[4095] = last;
+        std::fs::write(&path, bytes).unwrap();
+        path
+    };
+    let (first, second) = (library("first", 0), library("second", 1));
+    let product = Driver::default()
+        .check(
+            object_request(SHAPE, dir.path(), "store"),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let under =
+        |library: &Path, run: &mut dyn FnMut() -> BTreeMap<String, (bool, Vec<u8>, Vec<u8>)>| {
+            crate::tool_inputs::LLVM_LIBRARY.set(Some(library.to_owned()));
+            let objects = run();
+            crate::tool_inputs::LLVM_LIBRARY.set(None);
+            objects
+        };
+    let fresh = |library: &Path, n| {
+        let mut fresh = || {
+            fresh_objects(SHAPE, dir.path(), &options, n)
+                .into_iter()
+                .map(|(i, (bytes, debug))| (i, (true, bytes, debug)))
+                .collect()
+        };
+        without_compiled(&under(library, &mut fresh))
+    };
+    let cold = under(&first, &mut || objects_of(&product, &options));
+    assert!(!cold.is_empty());
+    assert_eq!(compiled_names(&cold).len(), cold.len(), "cold");
+    assert_eq!(without_compiled(&cold), fresh(&first, 0), "cold");
+    let hit = under(&first, &mut || objects_of(&product, &options));
+    assert_eq!(
+        compiled_names(&hit),
+        Vec::<&str>::new(),
+        "the same library hits"
+    );
+    assert_eq!(without_compiled(&hit), fresh(&first, 1), "hit");
+    let other = under(&second, &mut || objects_of(&product, &options));
+    assert_eq!(
+        compiled_names(&other),
+        compiled_names(&cold),
+        "another library misses every object"
+    );
+    assert_eq!(
+        without_compiled(&other),
+        fresh(&second, 2),
+        "another library"
+    );
+}
+
 /// A valid body record whose stored module hash differs, behind the live
 /// row: the next request takes the record and misses that body's object.
 #[test]

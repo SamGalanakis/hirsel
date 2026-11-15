@@ -308,7 +308,7 @@ impl Driver {
             index: Arc::new(product.index.publish(&mut writer)?),
             files: writer.table(&files.into())?,
             sources: writer.map(&sources)?,
-            headers: Arc::new(product.headers.publish(&mut writer)?),
+            headers: Arc::new(product.headers.seal(&product.index)?.publish(&mut writer)?),
             anchors: writer.map(&anchors)?,
             offsets: writer.map(&offsets)?,
             declarations: store.put(&encode(&library.publish(&mut writer)?)?)?,

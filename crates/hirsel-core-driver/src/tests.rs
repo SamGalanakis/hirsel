@@ -568,6 +568,33 @@ fn refused_library_never_publishes_an_image() {
     );
 }
 
+/// Law: an image definition's header reads stay inside the image, because a
+/// request takes the image's sealed closures as given. A header row that reads
+/// past the image's rows is refused where the image is sealed for publication.
+#[test]
+fn an_image_header_read_outside_the_image_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default()
+        .check(
+            library_request(
+                "pub type T { x: u64 }\npub fn f(t: T) -> u64 { 0 }\n",
+                dir.path(),
+            ),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    product.headers.seal(&product.index).unwrap();
+    let mut forged = (*product.headers).clone();
+    let outside = hirsel_core_resolve::DefinitionId(forged.rows.len() as u32);
+    let reader = (0..forged.rows.len())
+        .find(|&i| forged.rows[i].as_ref().is_some_and(|h| !h.reads.is_empty()))
+        .unwrap();
+    forged.rows[reader].as_mut().unwrap().reads.push(outside);
+    let refused = forged.seal(&product.index).err().unwrap().to_string();
+    assert!(refused.contains("outside the image"), "{refused}");
+}
+
 #[test]
 fn prog7_machine_refusal_spans_point_into_current_file_bytes() {
     let dir = tempfile::tempdir().unwrap();
@@ -2296,6 +2323,10 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
     let spare = format!("{helper}\npub fn spare() -> u32 {{ 0u32 }}\n");
     let probe_a = "type R { x: u64 }\nfn make() -> R { R(x: 1u64) }\nconst K: R = R(x: 1u64)\n";
     let hidden_a = "fn f(x: probe_hidden.Hidden) -> u64 { 0 }\n";
+    // A local binding that shadows a module function, and a local a later
+    // module function shadows: the lookup rows outside the item carry both.
+    let shadow = "fn f() -> u64 {\n    let g = 1u64\n    g\n}\n";
+    let local = "fn h() -> u64 {\n    let y = 1u64\n    y\n}\n";
     type Files = Vec<(&'static str, Option<String>)>;
     let only = |text: String| -> Files { vec![("helper.hirsel", Some(text))] };
     let cases: Vec<(&str, Files, Files, Option<Vec<&str>>)> = vec![
@@ -2380,6 +2411,24 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
             None,
         ),
         (
+            "a module function a local shadows is removed",
+            vec![(
+                "probe_shadow.hirsel",
+                Some(format!("fn g() -> u64 {{ 0 }}\n{shadow}")),
+            )],
+            vec![("probe_shadow.hirsel", Some(shadow.into()))],
+            Some(vec!["f"]),
+        ),
+        (
+            "a module function takes the name of another item's local",
+            vec![("probe_shadow.hirsel", Some(local.into()))],
+            vec![(
+                "probe_shadow.hirsel",
+                Some(format!("{local}fn y() -> u64 {{ 0 }}\n")),
+            )],
+            Some(vec!["h", "y"]),
+        ),
+        (
             "whitespace moves a foreign private type a refusal names",
             vec![
                 ("probe_user.hirsel", Some(hidden_a.into())),
@@ -2404,6 +2453,7 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
             "probe_variant",
             "probe_user",
             "probe_hidden",
+            "probe_shadow",
         ] {
             let _ = std::fs::remove_file(arena.join(format!("{probe}.hirsel")));
         }
@@ -2472,10 +2522,10 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
             (rows(&fresh_store).0, files(&fresh_store)),
             "{case}: publication"
         );
-        let gone: &[&str] = if matches!(case, "remove" | "rename") {
-            &["spare"]
-        } else {
-            &[]
+        let gone: &[&str] = match case {
+            "remove" | "rename" => &["spare"],
+            "a module function a local shadows is removed" => &["g"],
+            _ => &[],
         };
         assert_eq!(removed, gone, "{case}: tombstones");
         if let Some(expect) = expect {

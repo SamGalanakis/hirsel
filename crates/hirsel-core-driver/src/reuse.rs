@@ -1,6 +1,7 @@
 //! Definition keys keep implementation edits separate from signature dependencies.
 use super::*;
-use hirsel_core_resolve::{DefinitionId, LookupResult, LookupScope, Target};
+use hirsel_core_resolve::{DefinitionId, LookupResult, LookupScope, Namespace, Target};
+use hirsel_core_syntax::Symbol;
 use hirsel_core_syntax::{Item, NodeKind, TokenKind};
 use std::collections::BTreeSet;
 
@@ -86,6 +87,9 @@ pub(crate) struct Header {
 pub(crate) struct Headers {
     pub(crate) rows: hirsel_core_ids::published::Table<Option<Header>>,
     names: hirsel_core_ids::published::Map<DefPath, DefinitionId>,
+    /// An image's own signature closure per definition, sealed when the image
+    /// is published (`seal`). Empty in a request's own headers.
+    closures: hirsel_core_ids::published::Table<Option<ContentHash>>,
 }
 impl Headers {
     pub(crate) fn get(&self, path: &DefPath) -> Option<&Header> {
@@ -104,7 +108,37 @@ impl Headers {
         Ok(Self {
             rows: writer.table(&self.rows)?,
             names: writer.map(&self.names)?,
+            closures: writer.table(&self.closures)?,
         })
+    }
+    /// The image's header rows with every definition's closure hash. An image
+    /// definition's header reads stay inside the image: requests append their
+    /// definitions after its prefix and take its closures as given, so a read
+    /// that leaves the image would make those closures wrong. It is refused.
+    pub(crate) fn seal(&self, index: &NameIndex) -> io::Result<Self> {
+        for (id, row) in self.rows.iter().enumerate() {
+            let Some(header) = row else { continue };
+            for read in &header.reads {
+                if self.by_id(*read).is_none() {
+                    return Err(io::Error::other(format!(
+                        "internal error: image header `{}` reads definition {} outside the image",
+                        index.definition_path(DefinitionId(id as u32)),
+                        read.0,
+                    )));
+                }
+            }
+        }
+        let keys = Keys::bare(index, self.clone());
+        let mut closures = Vec::with_capacity(self.rows.len());
+        for (id, row) in self.rows.iter().enumerate() {
+            closures.push(match row {
+                Some(_) => Some(keys.closure(index, id)?),
+                None => None,
+            });
+        }
+        let mut sealed = self.clone();
+        sealed.closures = closures.into();
+        Ok(sealed)
     }
 }
 // Request-owned IDs get direct slots; the installed prefix is sparse and is
@@ -139,12 +173,18 @@ impl<T> Demand<T> {
 pub(crate) struct Keys {
     pub(crate) headers: Headers,
     environment: ContentHash,
-    paths: Demand<Arc<DefPath>>,
-    modules: Demand<ModulePath>,
-    packages: Demand<PackageId>,
+    // One identity digest per definition, module and package a request's keys
+    // name; see `definition_identity`, `module_identity`, `package_identity`.
+    definitions: Demand<ContentHash>,
+    modules: Demand<ContentHash>,
+    packages: Demand<ContentHash>,
     anchors: hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>,
     // One closure hash per definition, memoised across the bodies of a request.
     closures: std::cell::RefCell<rustc_hash::FxHashMap<u32, ContentHash>>,
+    // Contextual constructor candidates in index order, per (module, name).
+    constructors: std::cell::RefCell<rustc_hash::FxHashMap<(u32, Symbol), Arc<[DefinitionId]>>>,
+    // Symbol texts the lookup rows name.
+    texts: std::cell::RefCell<rustc_hash::FxHashMap<u32, Box<str>>>,
 }
 impl Keys {
     pub fn new(
@@ -158,6 +198,7 @@ impl Keys {
     ) -> io::Result<Self> {
         let mut headers = image_headers.cloned().unwrap_or_default();
         headers.rows.resize(index.definitions.len(), None);
+        let mut keys = Self::bare(index, Headers::default());
         let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut namespaces: Vec<_> = inputs
             .packages
@@ -203,10 +244,19 @@ impl Keys {
                 let mut reads = BTreeSet::new();
                 let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
-                    if (item.tree.node(name.node).origin.span.start as usize) < end {
-                        reads.extend(target_definitions(index, m.id, name.target));
+                    let into = if (item.tree.node(name.node).origin.span.start as usize) < end {
+                        &mut reads
                     } else {
-                        body_reads.extend(target_definitions(index, m.id, name.target));
+                        &mut body_reads
+                    };
+                    match name.target {
+                        Target::Definition(id) => {
+                            into.insert(id);
+                        }
+                        Target::ContextualConstructor { name } => {
+                            into.extend(keys.constructors(index, m.id, name).iter().copied());
+                        }
+                        _ => {}
                     }
                 }
                 anchors.insert((m.id, ordinal as u32), path.clone());
@@ -223,17 +273,25 @@ impl Keys {
                 });
             }
         }
-        let keys = Self {
+        keys.headers = headers;
+        keys.anchors = anchors;
+        keys.environment = environment;
+        Ok(keys)
+    }
+    fn bare(index: &NameIndex, headers: Headers) -> Self {
+        Self {
             headers,
-            environment,
-            anchors,
-            paths: Demand::new(index.definitions.base_len(), index.definitions.len()),
+            environment: ContentHash::default(),
+            anchors: Default::default(),
+            definitions: Demand::new(index.definitions.base_len(), index.definitions.len()),
             modules: Demand::new(index.modules.base_len(), index.modules.len()),
             packages: Demand::new(index.packages.base_len(), index.packages.len()),
             closures: Default::default(),
-        };
-        Ok(keys)
+            constructors: Default::default(),
+            texts: Default::default(),
+        }
     }
+
     fn dependency(&self, index: &NameIndex, id: usize) -> io::Result<&Header> {
         hirsel_core_front::cost_scope!("key query", "dependency lookup");
         let id = hirsel_core_resolve::DefinitionId(id as u32);
@@ -244,26 +302,59 @@ impl Keys {
             ))
         })
     }
-    fn path(&self, index: &NameIndex, id: hirsel_core_resolve::DefinitionId) -> &Arc<DefPath> {
-        self.paths
-            .get_or_try_init(id.0 as u64, || Ok(Arc::new(index.definition_path(id))))
-            .unwrap()
+    /// A definition's identity: its canonical path, under its own domain so
+    /// no module or package identity can share an input with it.
+    fn definition_identity(&self, index: &NameIndex, id: DefinitionId) -> io::Result<ContentHash> {
+        self.definitions
+            .get_or_try_init(id.0 as u64, || {
+                Ok(ContentHash::of_parts(
+                    "hirsel.key-identity.definition.v1",
+                    [&encode(&index.definition_path(id))?[..]],
+                ))
+            })
+            .copied()
     }
-    fn module(&self, index: &NameIndex, id: ModuleId) -> &ModulePath {
+    fn module_identity(&self, index: &NameIndex, id: ModuleId) -> io::Result<ContentHash> {
         self.modules
-            .get_or_try_init(id.0 as u64, || Ok(index.module_path(id)))
-            .unwrap()
+            .get_or_try_init(id.0 as u64, || {
+                Ok(ContentHash::of_parts(
+                    "hirsel.key-identity.module.v1",
+                    [&encode(&index.module_path(id))?[..]],
+                ))
+            })
+            .copied()
     }
-    fn package(&self, index: &NameIndex, id: hirsel_core_resolve::PackageKey) -> &PackageId {
+    fn package_identity(
+        &self,
+        index: &NameIndex,
+        id: hirsel_core_resolve::PackageKey,
+    ) -> io::Result<ContentHash> {
         self.packages
             .get_or_try_init(id.0 as u64, || {
                 let p = &index.packages[id.0 as usize];
-                Ok(PackageId {
+                let package = PackageId {
                     name: index.symbols.text(p.name).into(),
                     version: index.symbols.text(p.version).into(),
-                })
+                };
+                Ok(ContentHash::of_parts(
+                    "hirsel.key-identity.package.v1",
+                    [&encode(&package)?[..]],
+                ))
             })
-            .unwrap()
+            .copied()
+    }
+    /// A module's contextual constructor candidates for `name`, in index order.
+    fn constructors(
+        &self,
+        index: &NameIndex,
+        module: ModuleId,
+        name: Symbol,
+    ) -> Arc<[DefinitionId]> {
+        self.constructors
+            .borrow_mut()
+            .entry((module.0, name))
+            .or_insert_with(|| index.constructor_candidates(module, name).collect())
+            .clone()
     }
     pub fn capture_anchors(
         &self,
@@ -297,14 +388,23 @@ impl Keys {
             site.item = h.anchor.1;
         }
     }
+    /// A closure already known: hashed earlier in this request, or sealed in
+    /// the image this request's prefix comes from.
+    fn known(&self, id: usize) -> Option<ContentHash> {
+        if let Some(&hash) = self.closures.borrow().get(&(id as u32)) {
+            return Some(hash);
+        }
+        self.headers.closures.get(id).copied().flatten()
+    }
     /// The closure hash of `start`: a Merkle hash over the condensation of the
     /// header-read graph. Each strongly connected component hashes its members'
-    /// (path, header digest) rows and its successor components' hashes, so a
-    /// changed digest or a changed edge out of a component changes the hash of
-    /// every component that reaches it. Iterative Tarjan; every component is
-    /// hashed once per request, whatever the number of bodies that reach it.
+    /// (definition identity, header digest) rows and its successor components'
+    /// hashes, so a changed digest or a changed edge out of a component changes
+    /// the hash of every component that reaches it. Iterative Tarjan; every
+    /// component is hashed once per request, whatever the number of bodies that
+    /// reach it, and an image's components were hashed when it was sealed.
     fn closure(&self, index: &NameIndex, start: usize) -> io::Result<ContentHash> {
-        if let Some(&hash) = self.closures.borrow().get(&(start as u32)) {
+        if let Some(hash) = self.known(start) {
             return Ok(hash);
         }
         // Visit order and low link per node of this traversal.
@@ -329,7 +429,7 @@ impl Keys {
             let reads = &self.dependency(index, v)?.reads;
             if let Some(w) = reads.get(child).map(|id| id.0 as usize) {
                 frames.last_mut().unwrap().1 += 1;
-                if self.closures.borrow().contains_key(&(w as u32)) {
+                if self.known(w).is_some() {
                     continue;
                 }
                 match order.get(&w) {
@@ -361,30 +461,30 @@ impl Keys {
             }
             let mut rows = Vec::with_capacity(members.len());
             let mut successors = vec![];
-            {
-                let closures = self.closures.borrow();
-                for &m in &members {
-                    let header = self.dependency(index, m)?;
-                    rows.push((
-                        self.path(index, hirsel_core_resolve::DefinitionId(m as u32))
-                            .as_ref(),
-                        header.digest,
-                    ));
-                    successors.extend(
-                        header
-                            .reads
-                            .iter()
-                            .filter_map(|w| closures.get(&w.0).copied()),
-                    );
-                }
+            for &m in &members {
+                let header = self.dependency(index, m)?;
+                rows.push((
+                    self.definition_identity(index, DefinitionId(m as u32))?,
+                    header.digest,
+                ));
+                successors.extend(header.reads.iter().filter_map(|w| self.known(w.0 as usize)));
             }
             rows.sort_unstable();
             successors.sort_unstable();
             successors.dedup();
-            let hash = ContentHash::of_parts(
-                "hirsel.signature-component.v1",
-                [&encode(&(rows, successors))?[..]],
-            );
+            let hash = ContentHash::of_parts_stream("hirsel.signature-component.v2", |parts| {
+                parts.part_byte_slice(0, &(rows.len() as u64).to_le_bytes());
+                for (identity, digest) in &rows {
+                    let mut row = [0u8; 64];
+                    row[..32].copy_from_slice(&identity.0);
+                    row[32..].copy_from_slice(&digest.0);
+                    parts.part_byte_slice(1, &row);
+                }
+                for successor in &successors {
+                    parts.part_byte_slice(2, &successor.0);
+                }
+                Ok(())
+            })?;
             let mut closures = self.closures.borrow_mut();
             for m in members {
                 closures.insert(m as u32, hash);
@@ -393,8 +493,9 @@ impl Keys {
         Ok(self.closures.borrow()[&(start as u32)])
     }
     /// The definitions whose signatures a body reads directly: its own header,
-    /// every resolved name and every non-negative lookup result.
+    /// every resolved name and every non-negative lookup result, each once.
     fn signature_start(
+        &self,
         index: &NameIndex,
         module: ModuleId,
         own: DefinitionId,
@@ -402,21 +503,28 @@ impl Keys {
     ) -> Vec<usize> {
         let mut pending = Vec::with_capacity(1 + resolution.names.len() + resolution.reads.len());
         pending.push(own.0 as usize);
+        let target = |t: Target, pending: &mut Vec<usize>| match t {
+            Target::Definition(d) => pending.push(d.0 as usize),
+            Target::ContextualConstructor { name } => pending.extend(
+                self.constructors(index, module, name)
+                    .iter()
+                    .map(|d| d.0 as usize),
+            ),
+            _ => {}
+        };
         for name in &resolution.names {
-            target_ids(index, module, name.target, &mut pending);
+            target(name.target, &mut pending);
         }
         // Negative, ambiguous and shadowed lookup dependencies remain unchanged.
         for read in &resolution.reads {
             match &read.result {
-                LookupResult::Found(t) | LookupResult::Shadowed(t) => {
-                    target_ids(index, module, *t, &mut pending);
-                }
-                LookupResult::Private(p) | LookupResult::Opaque(p) => {
-                    pending.push(p.0 as usize);
-                }
+                LookupResult::Found(t) | LookupResult::Shadowed(t) => target(*t, &mut pending),
+                LookupResult::Private(p) | LookupResult::Opaque(p) => pending.push(p.0 as usize),
                 LookupResult::Ambiguous | LookupResult::Missing => {}
             }
         }
+        pending.sort_unstable();
+        pending.dedup();
         pending
     }
     pub fn for_body(
@@ -436,136 +544,146 @@ impl Keys {
                     "internal error: core reuse body `{path}` has no indexed definition"
                 ))
             })?;
-        let pending = Self::signature_start(index, module, own, resolution);
         let signatures = {
             hirsel_core_front::cost_scope!("key work", "signature closure");
+            let pending = self.signature_start(index, module, own, resolution);
             let mut components = Vec::with_capacity(pending.len());
-            for &id in &pending {
+            for id in pending {
                 components.push(self.closure(index, id)?);
             }
             components.sort_unstable();
             components.dedup();
             ContentHash::of_parts(
-                "hirsel.signature-closure.v2",
+                "hirsel.signature-closure.v3",
                 components.iter().map(|c| &c.0[..]),
             )
         };
-        let lookups: Vec<_> = {
+        let lookups = {
             hirsel_core_front::cost_scope!("key work", "lookup rows");
-            resolution
-                .reads
-                .iter()
-                .map(|r| {
-                    let (kind, local, module_scope, package_scope) = match r.scope {
-                        LookupScope::Local(n) => (0, n, None, None),
-                        LookupScope::Bind(n) => (1, n, None, None),
-                        LookupScope::Label(n) => (2, n, None, None),
-                        LookupScope::Module(m) => (3, 0, Some(self.module(index, m)), None),
-                        LookupScope::Prelude(p) => (4, 0, None, Some(self.package(index, p))),
-                        LookupScope::Modules(p) => (5, 0, None, Some(self.package(index, p))),
-                        LookupScope::Children(m) => (6, 0, Some(self.module(index, m)), None),
-                        LookupScope::Variants(m) => (7, 0, Some(self.module(index, m)), None),
-                    };
-                    let result = match r.result {
-                        LookupResult::Found(t) => (0, Some(self.target_key(index, module, t))),
-                        LookupResult::Missing => (1, None),
-                        LookupResult::Private(d) => (
-                            2,
-                            Some(self.target_key(index, module, Target::Definition(d))),
-                        ),
-                        LookupResult::Opaque(d) => (
-                            3,
-                            Some(self.target_key(index, module, Target::Definition(d))),
-                        ),
-                        LookupResult::Shadowed(t) => (4, Some(self.target_key(index, module, t))),
-                        LookupResult::Ambiguous => (5, None),
-                    };
-                    (
-                        r.namespace,
-                        kind,
-                        local,
-                        module_scope,
-                        package_scope,
-                        index.symbols.text(r.symbol),
-                        r.constructor,
-                        result,
-                    )
-                })
-                .collect()
+            self.lookups(index, module, resolution)?
         };
         Ok(DefinitionKey {
             body: self.dependency(index, own.0 as usize)?.source,
             signatures,
-            lookups: ContentHash::of_bytes(&encode(&lookups)?),
+            lookups,
             environment: self.environment,
         })
     }
-}
-#[derive(Serialize)]
-enum TargetKey<'a> {
-    Definition(&'a DefPath),
-    Module(&'a ModulePath),
-    Binder(u32),
-    Builtin(&'a str),
-    Constructor(&'a str, Vec<&'a DefPath>),
-    Missing,
-}
-impl Keys {
-    fn target_key<'a>(
-        &'a self,
-        index: &'a NameIndex,
+    /// One part over the body's lookups outside the item: their count, then
+    /// each row in resolution order: namespace, scope kind, the scope's module
+    /// or package identity, the constructor flag, the symbol's text, then the
+    /// result tag and its target. Every variable-length field carries its
+    /// length and every tag fixes the fields after it, so the rows need no
+    /// framing of their own.
+    ///
+    /// A lookup in a local, binding or label scope is left out: its result is
+    /// a binder of this item or missing, fixed by the item's text, which the
+    /// key's body digest hashes, and a binding that shadows a module or
+    /// prelude name is fixed by that name's own module or prelude row here.
+    fn lookups(
+        &self,
+        index: &NameIndex,
+        module: ModuleId,
+        resolution: &Resolution,
+    ) -> io::Result<ContentHash> {
+        ContentHash::of_parts_stream("hirsel.body-lookups.v4", |parts| {
+            let mut row = Vec::with_capacity(64 * resolution.reads.len() + 8);
+            row.extend_from_slice(&[0; 8]);
+            let mut count = 0u64;
+            for r in &resolution.reads {
+                let (kind, scope) = match r.scope {
+                    LookupScope::Local(_) | LookupScope::Bind(_) | LookupScope::Label(_) => {
+                        continue;
+                    }
+                    LookupScope::Module(m) => (0u8, self.module_identity(index, m)?),
+                    LookupScope::Prelude(p) => (1, self.package_identity(index, p)?),
+                    LookupScope::Modules(p) => (2, self.package_identity(index, p)?),
+                    LookupScope::Children(m) => (3, self.module_identity(index, m)?),
+                    LookupScope::Variants(m) => (4, self.module_identity(index, m)?),
+                };
+                count += 1;
+                row.push(match r.namespace {
+                    Namespace::Type => 0,
+                    Namespace::Value => 1,
+                });
+                row.push(kind);
+                row.extend_from_slice(&scope.0);
+                row.push(r.constructor as u8);
+                self.text(index, r.symbol, &mut row);
+                match r.result {
+                    LookupResult::Found(t) => {
+                        row.push(0);
+                        self.target(index, module, t, &mut row)?;
+                    }
+                    LookupResult::Missing => row.push(1),
+                    LookupResult::Private(d) => {
+                        row.push(2);
+                        self.target(index, module, Target::Definition(d), &mut row)?;
+                    }
+                    LookupResult::Opaque(d) => {
+                        row.push(3);
+                        self.target(index, module, Target::Definition(d), &mut row)?;
+                    }
+                    LookupResult::Shadowed(t) => {
+                        row.push(4);
+                        self.target(index, module, t, &mut row)?;
+                    }
+                    LookupResult::Ambiguous => row.push(5),
+                }
+            }
+            row[..8].copy_from_slice(&count.to_le_bytes());
+            parts.part_byte_slice(0, &row);
+            Ok(())
+        })
+    }
+    /// A symbol's text with its length, read from the index once per request.
+    fn text(&self, index: &NameIndex, symbol: Symbol, row: &mut Vec<u8>) {
+        let mut texts = self.texts.borrow_mut();
+        let text = texts
+            .entry(symbol.0)
+            .or_insert_with(|| index.symbols.text(symbol).into());
+        row.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        row.extend_from_slice(text.as_bytes());
+    }
+    /// A lookup target: a tag, then its identity, binder, text or, for a
+    /// contextual constructor, its name and its candidates' identities in order.
+    fn target(
+        &self,
+        index: &NameIndex,
         module: ModuleId,
         target: Target,
-    ) -> TargetKey<'a> {
+        row: &mut Vec<u8>,
+    ) -> io::Result<()> {
         match target {
-            Target::Definition(d) => TargetKey::Definition(self.path(index, d).as_ref()),
-            Target::Module(m) => TargetKey::Module(self.module(index, m)),
-            Target::Binder(b) => TargetKey::Binder(b),
-            Target::Builtin(s) => TargetKey::Builtin(index.symbols.text(s)),
-            Target::ContextualConstructor { name } => TargetKey::Constructor(
-                index.symbols.text(name),
-                index
-                    .constructor_candidates(module, name)
-                    .map(|d| self.path(index, d).as_ref())
-                    .collect(),
-            ),
-            Target::Missing => TargetKey::Missing,
+            Target::Definition(d) => {
+                row.push(0);
+                row.extend_from_slice(&self.definition_identity(index, d)?.0);
+            }
+            Target::Module(m) => {
+                row.push(1);
+                row.extend_from_slice(&self.module_identity(index, m)?.0);
+            }
+            Target::Binder(b) => {
+                row.push(2);
+                row.extend_from_slice(&b.to_le_bytes());
+            }
+            Target::Builtin(s) => {
+                row.push(3);
+                self.text(index, s, row);
+            }
+            Target::ContextualConstructor { name } => {
+                row.push(4);
+                self.text(index, name, row);
+                let candidates = self.constructors(index, module, name);
+                row.extend_from_slice(&(candidates.len() as u32).to_le_bytes());
+                for &d in candidates.iter() {
+                    row.extend_from_slice(&self.definition_identity(index, d)?.0);
+                }
+            }
+            Target::Missing => row.push(5),
         }
+        Ok(())
     }
-}
-fn target_ids(index: &NameIndex, module: ModuleId, target: Target, out: &mut Vec<usize>) {
-    match target {
-        Target::Definition(d) => out.push(d.0 as usize),
-        Target::ContextualConstructor { name } => {
-            out.extend(
-                index
-                    .constructor_candidates(module, name)
-                    .map(|d| d.0 as usize),
-            );
-        }
-        _ => {}
-    }
-}
-fn target_definitions(
-    index: &NameIndex,
-    module: ModuleId,
-    target: Target,
-) -> impl Iterator<Item = DefinitionId> + '_ {
-    let direct = if let Target::Definition(id) = target {
-        Some(id)
-    } else {
-        None
-    };
-    let constructor = if let Target::ContextualConstructor { name } = target {
-        Some(name)
-    } else {
-        None
-    };
-    direct.into_iter().chain(
-        constructor
-            .into_iter()
-            .flat_map(move |name| index.constructor_candidates(module, name)),
-    )
 }
 /// The item-relative end of the header: a function's body block start, else
 /// the item's end. Node spans are item-relative.

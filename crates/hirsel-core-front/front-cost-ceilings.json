@@ -22,9 +22,9 @@
           "resolve": 15073239,
           "input counts": 586539,
           "declarations": 11046333,
-          "body keys/new": 5867751,
-          "body keys/for_body": 24145029,
-          "body keys": 30012780,
+          "body keys/new": 5707299,
+          "body keys/for_body": 13053611,
+          "body keys": 18760910,
           "image read": 0,
           "image digest": 0
         },
@@ -44,9 +44,9 @@
         "resolve": 222.13104095932962,
         "input counts": 8.644080040453659,
         "declarations": 162.78696814274363,
-        "body keys/new": 86.47258542223507,
-        "body keys/for_body": 355.8188253991187,
-        "body keys": 442.289966047822,
+        "body keys/new": 84.10749115076212,
+        "body keys/for_body": 192.36726143177057,
+        "body keys": 276.4747525825327,
         "image read": 0.0,
         "image digest": 0.0
       },
@@ -69,9 +69,9 @@
           "resolve": 7159533,
           "input counts": 304386,
           "declarations": 7743196,
-          "body keys/new": 3662243,
-          "body keys/for_body": 10660550,
-          "body keys": 14322793,
+          "body keys/new": 3602127,
+          "body keys/for_body": 5937975,
+          "body keys": 9540102,
           "image read": 0,
           "image digest": 0
         },
@@ -91,9 +91,9 @@
         "resolve": 207.78466966368862,
         "input counts": 8.834575769646618,
         "declarations": 224.7225857850111,
-        "body keys/new": 106.28521026574859,
-        "body keys/for_body": 309.38940419962444,
-        "body keys": 415.674614465373,
+        "body keys/new": 104.54105730381836,
+        "body keys/for_body": 172.3325556251067,
+        "body keys": 276.87361292892507,
         "image read": 0.0,
         "image digest": 0.0
       },
@@ -116,9 +116,9 @@
           "resolve": 14743476,
           "input counts": 296471,
           "declarations": 4740517,
-          "body keys/new": 3035232,
-          "body keys/for_body": 17975173,
-          "body keys": 21010405,
+          "body keys/new": 2538700,
+          "body keys/for_body": 8558364,
+          "body keys": 11097064,
           "image read": 2314911,
           "image digest": 939901
         },
@@ -138,9 +138,9 @@
         "resolve": 421.18470802408626,
         "input counts": 8.472202772720907,
         "declarations": 135.42641086682536,
-        "body keys/new": 86.71054474163283,
-        "body keys/for_body": 513.5051113289455,
-        "body keys": 600.2156560705783,
+        "body keys/new": 72.52485646268029,
+        "body keys/for_body": 244.49236801568406,
+        "body keys": 317.01722447836437,
         "image read": 66.133594734631,
         "image digest": 26.850581151099284
       },
@@ -199,6 +199,76 @@
         "m1": 380,
         "std": 202,
         "suite-edit": 1
+      }
+    },
+    {
+      "reason": "F-keys: stream-hashed lookup rows with per-request identities, one pass over start and closure, image closures sealed at publication, item-local lookup rows dropped from the key. Only body keys ceilings lowered.",
+      "pin_pair": {
+        "before": "c8b195f642d14a375a53825ff97b243f45a51c967528c971f59ca8dd86278b5b",
+        "after": "2a0483296a0d9b324d91ddef4861fd914744a2bbea03be397c1fef8bfde89722"
+      },
+      "evidence": "/workspace/code/hirsel-briefs/check-product-959/pair-{main,e}.log",
+      "body keys": {
+        "m1": {
+          "body keys/new": {
+            "before_limit": 86.47258542223507,
+            "before_observed": 5865855,
+            "observed_instructions": 5707299,
+            "after_limit": 84.10749115076212
+          },
+          "body keys/for_body": {
+            "before_limit": 355.8188253991187,
+            "before_observed": 24179890,
+            "observed_instructions": 13053611,
+            "after_limit": 192.36726143177057
+          },
+          "body keys": {
+            "before_limit": 442.289966047822,
+            "before_observed": 30045745,
+            "observed_instructions": 18760910,
+            "after_limit": 276.4747525825327
+          }
+        },
+        "std": {
+          "body keys/new": {
+            "before_limit": 106.28521026574859,
+            "before_observed": 3661620,
+            "observed_instructions": 3602127,
+            "after_limit": 104.54105730381836
+          },
+          "body keys/for_body": {
+            "before_limit": 309.38940419962444,
+            "before_observed": 10660704,
+            "observed_instructions": 5937975,
+            "after_limit": 172.3325556251067
+          },
+          "body keys": {
+            "before_limit": 415.674614465373,
+            "before_observed": 14322324,
+            "observed_instructions": 9540102,
+            "after_limit": 276.87361292892507
+          }
+        },
+        "suite-edit": {
+          "body keys/new": {
+            "before_limit": 86.71054474163283,
+            "before_observed": 3038138,
+            "observed_instructions": 2538700,
+            "after_limit": 72.52485646268029
+          },
+          "body keys/for_body": {
+            "before_limit": 513.5051113289455,
+            "before_observed": 17932901,
+            "observed_instructions": 8558364,
+            "after_limit": 244.49236801568406
+          },
+          "body keys": {
+            "before_limit": 600.2156560705783,
+            "before_observed": 20971039,
+            "observed_instructions": 11097064,
+            "after_limit": 317.01722447836437
+          }
+        }
       }
     }
   ],

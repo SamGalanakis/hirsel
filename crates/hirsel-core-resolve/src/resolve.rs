@@ -639,13 +639,13 @@ impl<'a> Resolver<'a, '_> {
         self.out.diagnostics.push(diagnostic);
         Target::Missing
     }
-    fn bare_target(
+    fn bare_target<const TYPE_CONTEXT: bool, const CONSTRUCT: bool>(
         &mut self,
         n: NodeId,
         name: Symbol,
-        type_context: bool,
-        construct: bool,
     ) -> Target {
+        let type_context = TYPE_CONTEXT;
+        let construct = CONSTRUCT;
         if type_context && builtin(name) {
             return Target::Builtin(name);
         }
@@ -690,7 +690,9 @@ impl<'a> Resolver<'a, '_> {
             self.missing(n)
         }
     }
-    fn use_path(&mut self, n: NodeId, type_context: bool, construct: bool) {
+    fn use_path<const TYPE_CONTEXT: bool, const CONSTRUCT: bool>(&mut self, n: NodeId) {
+        let type_context = TYPE_CONTEXT;
+        let construct = CONSTRUCT;
         let node = self.item.tree.node(n);
         let simple = node.origin.tokens.end == node.origin.tokens.start + 1;
         let name = self.name(node.token.unwrap());
@@ -717,7 +719,7 @@ impl<'a> Resolver<'a, '_> {
         }
         if simple {
             let before = self.out.diagnostics.len();
-            let target = self.bare_target(n, key.1, type_context, construct);
+            let target = self.bare_target::<TYPE_CONTEXT, CONSTRUCT>(n, key.1);
             if self.out.diagnostics.len() == before && target != Target::Missing {
                 self.paths[key.1.0 as usize & 7] = Some((key, target));
             }
@@ -899,7 +901,7 @@ impl<'a> Resolver<'a, '_> {
             NodeKind::ConstructorPattern => {
                 let c = self.children(n);
                 if let Some((&path, fields)) = c.split_first() {
-                    self.use_path(path, false, true);
+                    self.use_path::<false, true>(path);
                     for &f in fields {
                         self.pattern(f);
                     }
@@ -961,11 +963,11 @@ impl<'a> Resolver<'a, '_> {
             match self.item.tree.node(n).kind {
                 NodeKind::Literal => break,
                 NodeKind::Path => {
-                    self.use_path(n, false, false);
+                    self.use_path::<false, false>(n);
                     break;
                 }
                 NodeKind::TypePath => {
-                    self.use_path(n, true, false);
+                    self.use_path::<true, false>(n);
                     break;
                 }
                 _ => {}
@@ -1014,8 +1016,8 @@ impl<'a> Resolver<'a, '_> {
                     }
                     self.numeric_parameter = old;
                 }
-                NodeKind::Path => self.use_path(n, false, false),
-                NodeKind::TypePath => self.use_path(n, true, false),
+                NodeKind::Path => self.use_path::<false, false>(n),
+                NodeKind::TypePath => self.use_path::<true, false>(n),
                 NodeKind::Let | NodeKind::LetMut => {
                     for &child in &c[1..] {
                         self.visit(child);
@@ -1077,7 +1079,7 @@ impl<'a> Resolver<'a, '_> {
                     if let Some((&callee, args)) = c.split_first() {
                         let before = self.out.names.len();
                         if self.item.tree.node(callee).kind == NodeKind::Path {
-                            self.use_path(callee, false, true);
+                            self.use_path::<false, true>(callee);
                         } else {
                             self.visit(callee);
                         }

@@ -19,7 +19,7 @@
         "costs": {
           "parse": 28822805,
           "index": 510931,
-          "resolve": 11374269,
+          "resolve": 11052922,
           "input counts": 586539,
           "declarations": 10781487,
           "body keys/new": 5707299,
@@ -41,7 +41,7 @@
       "instructions_per_token": {
         "parse": 424.75274290255004,
         "index": 7.530159647475259,
-        "resolve": 167.6197356064437,
+        "resolve": 162.8837679693708,
         "input counts": 8.644080040453659,
         "declarations": 158.88463483348986,
         "body keys/new": 84.10749115076212,
@@ -66,7 +66,7 @@
         "costs": {
           "parse": 15868658,
           "index": 354803,
-          "resolve": 5323177,
+          "resolve": 5172831,
           "input counts": 304386,
           "declarations": 7578354,
           "body keys/new": 3602127,
@@ -88,7 +88,7 @@
       "instructions_per_token": {
         "parse": 460.5369362089569,
         "index": 10.297046605588118,
-        "resolve": 154.4898423718204,
+        "resolve": 150.125192055995,
         "input counts": 8.834575769646618,
         "declarations": 219.9396801912024,
         "body keys/new": 104.54105730381836,
@@ -113,7 +113,7 @@
         "costs": {
           "parse": 16063120,
           "index": 600147,
-          "resolve": 12826069,
+          "resolve": 12651080,
           "input counts": 296471,
           "declarations": 4691372,
           "body keys/new": 2538700,
@@ -135,7 +135,7 @@
       "instructions_per_token": {
         "parse": 458.8820165242963,
         "index": 17.146057975073518,
-        "resolve": 366.40806609718527,
+        "resolve": 361.4115670074219,
         "input counts": 8.472202772720907,
         "declarations": 134.0204453157821,
         "body keys/new": 72.52485646268029,
@@ -350,6 +350,21 @@
           "after_limit": 7.161854082061336
         }
       }
+    },
+    {
+      "reason": "Post-land profile identified use_path above0.5M self instructions. Specialize fixed type/constructor modes, preserving resolutions and reads over660sources plus real M1 manifest. Only resolve ceilings lowered; one-third source line remains MISSED.",
+      "revision": "a4798f60..fixed-path-modes",
+      "resolve_before": {
+        "m1": 11374269,
+        "std": 5323177,
+        "suite-edit": 12826069
+      },
+      "resolve_after": {
+        "m1": 11052922,
+        "std": 5172831,
+        "suite-edit": 12651080
+      },
+      "evidence": "core-syntax-891/resolve-F/fixed-modes-{cost,differential}.log"
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

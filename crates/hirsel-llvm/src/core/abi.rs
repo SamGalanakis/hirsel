@@ -6,6 +6,9 @@ use super::*;
 
 pub(super) struct Return {
     pub target: hirsel_core_layout::Target,
+    /// A CoreIR function's own convention, which every caller shares (status
+    /// appended), rather than a C one.
+    pub internal: bool,
     pub ty: Type,
     pub storage: Type,
     pub indirect: bool,
@@ -29,9 +32,20 @@ pub(super) fn extension(target: hirsel_core_layout::Target, t: Ty) -> Extension 
 }
 impl Return {
     pub fn internal_on_target(target: hirsel_core_layout::Target, fields: &[Ty]) -> Self {
+        Self::core(target, fields, true)
+    }
+
+    /// A CoreIR function's result convention: its fields, then its status byte
+    /// when it may fail (an `.infallible` body has none).
+    pub fn core(target: hirsel_core_layout::Target, fields: &[Ty], has_status: bool) -> Self {
         let mut fields = fields.to_vec();
-        fields.push(Ty::Scalar(Scalar::U8));
-        Self::on_target(target, &fields)
+        if has_status {
+            fields.push(Ty::Scalar(Scalar::U8));
+        }
+        Self {
+            internal: true,
+            ..Self::on_target(target, &fields)
+        }
     }
 
     /// A CoreIR value argument as caller and callee type it.
@@ -77,9 +91,15 @@ impl Return {
     pub fn signature(&self, params: Vec<Parameter>) -> FnSig {
         FnSig {
             result: self.ty.clone(),
-            extension: match self.fields.as_slice() {
-                [t] => extension(self.target, *t),
-                _ => Extension::None,
+            // An internal result in one integer register narrower than a word
+            // (a packed payload and status, as i40) is zero-extended by its
+            // callee on every target, so no caller re-masks the high bits; the
+            // definition, its declarations and every call site take this one sig.
+            extension: match (self.internal, &self.ty, self.fields.as_slice()) {
+                (true, Type::Int(bits), _) if *bits < 64 => Extension::Zero,
+                (true, ..) => Extension::None,
+                (false, _, [t]) => extension(self.target, *t),
+                (false, ..) => Extension::None,
             },
             nonnull: false,
             params,
@@ -144,6 +164,7 @@ impl Return {
         let reg_stride = if homogeneous { size(fields[0]) } else { 8 };
         Self {
             target,
+            internal: false,
             ty,
             storage,
             indirect,
@@ -254,11 +275,7 @@ impl FunctionEmitter<'_> {
             Callee::Runtime(_) => return false,
         };
         let sig = &self.module.signatures[site.signature.index()];
-        let abi = if has_status {
-            Return::internal_on_target(self.abi.target, &sig.results)
-        } else {
-            Return::on_target(self.abi.target, &sig.results)
-        };
+        let abi = Return::core(self.abi.target, &sig.results, has_status);
         if has_status && !self.has_status {
             return false;
         }
@@ -406,11 +423,7 @@ impl FunctionEmitter<'_> {
             Callee::Direct(f) => self.failures.may_fail[f.index()],
             _ => true,
         };
-        let abi = if has_status {
-            Return::internal_on_target(self.abi.target, &sig.results)
-        } else {
-            Return::on_target(self.abi.target, &sig.results)
-        };
+        let abi = Return::core(self.abi.target, &sig.results, has_status);
         let (mut args, carrier_shadow) = self.call_arguments(site, false);
         let callee = self.callee(site.callee, has_status);
         let site_word = self.call_site_word(site.callee);
@@ -513,7 +526,7 @@ impl FunctionEmitter<'_> {
         }
         args.push(word(Local::CALLER_SITE));
         let values = self.invoke(
-            &Return::on_target(self.abi.target, &sig.results),
+            &Return::core(self.abi.target, &sig.results, false),
             &Value::global(format!("{name}.infallible")),
             args,
             &CallAttrs::default(),

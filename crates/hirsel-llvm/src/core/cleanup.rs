@@ -59,9 +59,14 @@ pub(super) fn glue_emitter<'a>(
     }
 }
 
-/// `i8 core_drop_N(ptr context, ptr payload, i64 caller_site)`.
+/// `zeroext i8 core_drop_N(ptr context, ptr payload, i64 caller_site)`.
 pub(super) fn drop_signature() -> FnSig {
-    FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::I64])
+    // The status byte is an internal result: zero-extended like every CoreIR
+    // status (abi::Return::core), so a finalizer's calls agree with its definition.
+    FnSig {
+        extension: Extension::Zero,
+        ..FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::I64])
+    }
 }
 /// `zeroext i1 (ptr context, ptr payload, ptr cursor, ptr worklist)`: true when done.
 pub(super) fn step_signature() -> FnSig {

@@ -751,7 +751,41 @@ fn agree(module: &Module, cases: &[(FuncId, Vec<u64>)]) {
         .collect::<Vec<_>>();
     agree_cases(module, &cases, false);
 }
+/// Every direct call's result extension is its callee's: LLVM leaves a
+/// disagreement undefined (a caller relying on high bits its callee never zeroed).
+fn call_results_match_callees(ir: &str) {
+    let split = |line: &str, key: &str| -> Option<(String, bool, bool)> {
+        let rest = &line[line.find(key)? + key.len()..];
+        let at = rest.find(" @")?;
+        let name = rest[at + 2..].split('(').next()?;
+        let head = &rest[..at];
+        (!name.contains([',', ')', ' '])).then(|| {
+            (
+                name.to_owned(),
+                head.contains("zeroext"),
+                head.contains("signext"),
+            )
+        })
+    };
+    let callees = ir
+        .lines()
+        .filter_map(|l| split(l, "define ").or_else(|| split(l, "declare ")))
+        .map(|(name, z, s)| (name, (z, s)))
+        .collect::<std::collections::HashMap<_, _>>();
+    for line in ir.lines() {
+        if let Some((name, z, s)) = split(line, "call ")
+            && let Some(&callee) = callees.get(&name)
+        {
+            assert_eq!(
+                (z, s),
+                callee,
+                "result extension of a call to @{name}: {line}"
+            );
+        }
+    }
+}
 fn agree_cases(module: &Module, cases: &[Case], memory: bool) {
+    call_results_match_callees(&emit_ir(module).unwrap());
     let got = execute(module, cases);
     assert_eq!(got.len(), cases.len());
     for (case, got) in cases.iter().zip(got) {

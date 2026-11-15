@@ -633,7 +633,7 @@ impl FunctionEmitter<'_> {
                     && hirsel_core_ir::roles::carrier(self.module, ty)
                     && self.module.types[ty.index()].finalizer.is_none();
                 let failed = self.call(
-                    &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::I64]),
+                    &super::cleanup::drop_signature(),
                     &Value::global(format!("core_drop_{}", ty.0)),
                     &[CONTEXT, p, site],
                     &CallAttrs {

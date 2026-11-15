@@ -342,11 +342,7 @@ fn emit_module(
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
-        let abi = if has_status || f.body.is_none() {
-            abi::Return::internal_on_target(target, &sig.results)
-        } else {
-            abi::Return::on_target(target, &sig.results)
-        };
+        let abi = abi::Return::core(target, &sig.results, has_status || f.body.is_none());
         let name = symbol(module, FuncId(i as u32));
         let (params, locals) = abi.parameters(sig, facts);
         let Some(body) = &f.body else {

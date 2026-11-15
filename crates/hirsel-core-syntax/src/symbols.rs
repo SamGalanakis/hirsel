@@ -1,6 +1,6 @@
 //! Identifier symbols owned by one compilation package, including its dependencies.
 //! Safe and session-local: no global interner, locks, or extended lifetimes.
-use rustc_hash::FxHashMap;
+use std::hash::Hasher;
 use std::sync::Arc;
 #[derive(
     Clone,
@@ -131,11 +131,92 @@ pub mod sym {
     pub const OK_VARIANT: Symbol = Symbol(107);
     pub const ERROR_VARIANT: Symbol = Symbol(108);
 }
+#[derive(Clone, Debug)]
+struct NameIndex {
+    keys: Vec<u64>,
+    heads: Vec<u32>,
+    len: usize,
+}
+impl Default for NameIndex {
+    fn default() -> Self {
+        Self {
+            keys: vec![0; 256],
+            heads: vec![u32::MAX; 256],
+            len: 0,
+        }
+    }
+}
+impl NameIndex {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn reserve(&mut self, needed: usize) {
+        if needed.saturating_mul(2) <= self.keys.len() {
+            return;
+        }
+        let mut cap = self.keys.len().max(1);
+        while cap < needed.saturating_mul(2) {
+            cap = cap.saturating_mul(2);
+        }
+        let old = std::mem::replace(
+            self,
+            Self {
+                keys: vec![0; cap],
+                heads: vec![u32::MAX; cap],
+                len: 0,
+            },
+        );
+        for (key, head) in old
+            .keys
+            .into_iter()
+            .zip(old.heads)
+            .filter(|(_, h)| *h != u32::MAX)
+        {
+            let slot = self.find_slot(key);
+            self.keys[slot] = key;
+            self.heads[slot] = head;
+            self.len += 1;
+        }
+    }
+    #[inline]
+    fn find_slot(&self, key: u64) -> usize {
+        let mask = self.keys.len() - 1;
+        let mut slot = key as usize & mask;
+        while self.heads[slot] != u32::MAX && self.keys[slot] != key {
+            slot = (slot + 1) & mask;
+        }
+        slot
+    }
+    #[inline]
+    fn head(&self, key: u64) -> Option<u32> {
+        let slot = self.find_slot(key);
+        (self.heads[slot] != u32::MAX).then_some(self.heads[slot])
+    }
+    #[inline]
+    fn insert(&mut self, key: u64, id: u32) -> u32 {
+        self.reserve(self.len + 1);
+        let slot = self.find_slot(key);
+        let old = self.heads[slot];
+        if old == u32::MAX {
+            self.keys[slot] = key;
+            self.len += 1;
+        }
+        self.heads[slot] = id;
+        old
+    }
+    #[cfg(test)]
+    fn get(&self, key: &u64) -> Option<&u32> {
+        let slot = self.find_slot(*key);
+        (self.heads[slot] != u32::MAX).then(|| &self.heads[slot])
+    }
+}
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Symbols {
     strings: hirsel_core_ids::published::Table<Arc<str>>,
     #[serde(skip)]
-    index: FxHashMap<Arc<str>, Symbol>,
+    index: NameIndex,
+    #[serde(skip)]
+    hash_next: Vec<u32>,
     published_index: hirsel_core_ids::published::Map<Arc<str>, Symbol>,
     #[serde(skip)]
     single: [Symbol; 128],
@@ -153,20 +234,24 @@ impl<'de> serde::Deserialize<'de> for Symbols {
         let wire = Wire::deserialize(decoder)?;
         let base = wire.strings.base_len();
         let known = Self::default();
-        let mut index = known.index;
-        index.extend(
-            wire.strings
-                .own_iter()
-                .enumerate()
-                .filter(|(i, _)| base + *i != 0)
-                .map(|(i, s)| (s.clone(), Symbol((base + i) as u32))),
-        );
-        Ok(Self {
+        let mut result = Self {
             strings: wire.strings,
-            index,
+            index: known.index,
+            hash_next: known.hash_next,
             published_index: wire.published_index,
             single: known.single,
-        })
+        };
+        let own: Vec<Arc<str>> = result.strings.own_iter().cloned().collect();
+        for (i, s) in own.iter().enumerate() {
+            let id = base + i;
+            if id != 0 {
+                result.insert_index(Symbol(id as u32), s);
+            }
+        }
+        // The published table's base entries are not owned by `strings`, but
+        // are still resolved by `published_index` on demand.
+        let _ = base;
+        Ok(result)
     }
 }
 impl Default for Symbols {
@@ -293,24 +378,25 @@ impl Default for Symbols {
                 }
             }
         }
-        Self {
+        let mut result = Self {
             single,
-            index: strings
-                .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(i, s)| (s.clone(), Symbol(i as u32)))
-                .collect(),
+            index: NameIndex::default(),
+            hash_next: vec![u32::MAX; strings.len()],
             strings: strings.into(),
             published_index: Default::default(),
+        };
+        for i in 1..result.strings.len() {
+            let s = result.strings[i].clone();
+            result.insert_index(Symbol(i as u32), &s);
         }
+        result
     }
 }
 impl Symbols {
     pub fn reserve_for_source(&mut self, bytes: usize) {
         let additional = (bytes / 32).max(64);
         let needed = self.index.len().saturating_add(additional);
-        if self.index.capacity() < needed { self.index.reserve(needed - self.index.len()); }
+        self.index.reserve(needed);
     }
     pub fn publish(
         &self,
@@ -327,6 +413,7 @@ impl Symbols {
         Ok(Self {
             strings: writer.table(&self.strings)?,
             index: known.index,
+            hash_next: known.hash_next,
             published_index: writer.map(&names)?,
             single: known.single,
         })
@@ -344,10 +431,18 @@ impl Symbols {
         if let Some(id) = fixed_symbol(text) {
             return id;
         }
-        let id = if let Some(&id) = self.index.get(text) {
-            id
-        } else if let Some(id) = self.published_index.get(text).copied() {
-            self.index.insert(Arc::from(text), id);
+        let hash = hash_name(text.as_bytes());
+        let mut entry = self.index.head(hash);
+        while let Some(index) = entry {
+            let id = Symbol(index);
+            if self.text(id) == text {
+                return id;
+            }
+            let next = self.hash_next[index as usize];
+            entry = (next != u32::MAX).then_some(next);
+        }
+        let id = if let Some(id) = self.published_index.get(text).copied() {
+            self.insert_index(id, text);
             id
         } else {
             let id = Symbol(
@@ -358,7 +453,8 @@ impl Symbols {
             );
             let text: Arc<str> = Arc::from(text);
             self.strings.push(text.clone());
-            self.index.insert(text, id);
+            self.hash_next.push(u32::MAX);
+            self.insert_index(id, &text);
             id
         };
         if let Some(b) = single {
@@ -368,10 +464,17 @@ impl Symbols {
     }
     #[inline]
     pub fn find(&self, text: &str) -> Option<Symbol> {
-        self.index
-            .get(text)
-            .copied()
-            .or_else(|| self.published_index.get(text).copied())
+        let hash = hash_name(text.as_bytes());
+        let mut entry = self.index.head(hash);
+        while let Some(index) = entry {
+            let id = Symbol(index);
+            if self.text(id) == text {
+                return Some(id);
+            }
+            entry = (self.hash_next[index as usize] != u32::MAX)
+                .then_some(self.hash_next[index as usize]);
+        }
+        self.published_index.get(text).copied()
     }
     #[inline(always)]
     pub fn text(&self, id: Symbol) -> &str {
@@ -383,11 +486,91 @@ impl Symbols {
     pub fn is_empty(&self) -> bool {
         self.strings.is_empty()
     }
+
+    #[inline]
+    fn insert_index(&mut self, id: Symbol, text: &str) {
+        let hash = hash_name(text.as_bytes());
+        let slot = id.0 as usize;
+        if self.hash_next.len() <= slot {
+            self.hash_next.resize(slot + 1, u32::MAX);
+        }
+        self.hash_next[slot] = self.index.insert(hash, id.0);
+    }
+}
+
+#[inline(always)]
+fn hash_name(bytes: &[u8]) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    hasher.write(bytes);
+    hasher.finish()
 }
 #[inline(always)]
 fn fixed_symbol(text: &str) -> Option<Symbol> {
     Some(match text {
-        "fn"=>sym::FN,"let"=>sym::LET,"mut"=>sym::MUT,"match"=>sym::MATCH,"if"=>sym::IF,"else"=>sym::ELSE,"loop"=>sym::LOOP,"while"=>sym::WHILE,"for"=>sym::FOR,"in"=>sym::IN,"break"=>sym::BREAK,"continue"=>sym::CONTINUE,"return"=>sym::RETURN,"take"=>sym::TAKE,"copy"=>sym::COPY,"view"=>sym::VIEW,"type"=>sym::TYPE,"stable"=>sym::STABLE,"resource"=>sym::RESOURCE,"scoped"=>sym::SCOPED,"region"=>sym::REGION,"bound"=>sym::BOUND,"pub"=>sym::PUB,"opaque"=>sym::OPAQUE,"const"=>sym::CONST,"where"=>sym::WHERE,"true"=>sym::TRUE,"false"=>sym::FALSE,"bytes"=>sym::BYTES,"drop"=>sym::DROP,"compact"=>sym::COMPACT,"twin"=>sym::TWIN,"test"=>sym::TEST,"grant"=>sym::GRANT,"own"=>sym::OWN,"send"=>sym::SEND,"waits"=>sym::WAITS,"plain"=>sym::PLAIN,"shareable"=>sym::SHAREABLE,"key"=>sym::KEY,"ordered"=>sym::ORDERED,"integer"=>sym::INTEGER,"float"=>sym::FLOAT,"Inline"=>sym::INLINE,"bool"=>sym::BOOL,"char"=>sym::CHAR,"u8"=>sym::U8,"u16"=>sym::U16,"u32"=>sym::U32,"u64"=>sym::U64,"i8"=>sym::I8,"i16"=>sym::I16,"i32"=>sym::I32,"i64"=>sym::I64,"f32"=>sym::F32,"f64"=>sym::F64,"None"=>sym::NONE_VARIANT,"Some"=>sym::SOME_VARIANT,"Ok"=>sym::OK_VARIANT,"Error"=>sym::ERROR_VARIANT,"packed"=>sym::PACKED,"streamable"=>sym::STREAMABLE,"clone"=>sym::CLONE,_=>return None,
+        "fn" => sym::FN,
+        "let" => sym::LET,
+        "mut" => sym::MUT,
+        "match" => sym::MATCH,
+        "if" => sym::IF,
+        "else" => sym::ELSE,
+        "loop" => sym::LOOP,
+        "while" => sym::WHILE,
+        "for" => sym::FOR,
+        "in" => sym::IN,
+        "break" => sym::BREAK,
+        "continue" => sym::CONTINUE,
+        "return" => sym::RETURN,
+        "take" => sym::TAKE,
+        "copy" => sym::COPY,
+        "view" => sym::VIEW,
+        "type" => sym::TYPE,
+        "stable" => sym::STABLE,
+        "resource" => sym::RESOURCE,
+        "scoped" => sym::SCOPED,
+        "region" => sym::REGION,
+        "bound" => sym::BOUND,
+        "pub" => sym::PUB,
+        "opaque" => sym::OPAQUE,
+        "const" => sym::CONST,
+        "where" => sym::WHERE,
+        "true" => sym::TRUE,
+        "false" => sym::FALSE,
+        "bytes" => sym::BYTES,
+        "drop" => sym::DROP,
+        "compact" => sym::COMPACT,
+        "twin" => sym::TWIN,
+        "test" => sym::TEST,
+        "grant" => sym::GRANT,
+        "own" => sym::OWN,
+        "send" => sym::SEND,
+        "waits" => sym::WAITS,
+        "plain" => sym::PLAIN,
+        "shareable" => sym::SHAREABLE,
+        "key" => sym::KEY,
+        "ordered" => sym::ORDERED,
+        "integer" => sym::INTEGER,
+        "float" => sym::FLOAT,
+        "Inline" => sym::INLINE,
+        "bool" => sym::BOOL,
+        "char" => sym::CHAR,
+        "u8" => sym::U8,
+        "u16" => sym::U16,
+        "u32" => sym::U32,
+        "u64" => sym::U64,
+        "i8" => sym::I8,
+        "i16" => sym::I16,
+        "i32" => sym::I32,
+        "i64" => sym::I64,
+        "f32" => sym::F32,
+        "f64" => sym::F64,
+        "None" => sym::NONE_VARIANT,
+        "Some" => sym::SOME_VARIANT,
+        "Ok" => sym::OK_VARIANT,
+        "Error" => sym::ERROR_VARIANT,
+        "packed" => sym::PACKED,
+        "streamable" => sym::STREAMABLE,
+        "clone" => sym::CLONE,
+        _ => return None,
     })
 }
 
@@ -494,23 +677,26 @@ mod tests {
                 },
                 names.clone(),
             )),
-            index: FxHashMap::default(),
+            index: NameIndex::default(),
+            hash_next: vec![u32::MAX; original.strings.len()],
             single: original.single,
         };
         let own = published.intern("own_name");
         let mut reopened: Symbols =
             serde_json::from_value(serde_json::to_value(&published).unwrap()).unwrap();
         names.lookups.store(0, Ordering::Relaxed);
-        for (name, id) in &original.index {
-            if *id != library {
-                assert_eq!(reopened.intern(name), *id);
+        for (i, name) in original.strings.iter().enumerate().skip(1) {
+            let id = Symbol(i as u32);
+            if id != library {
+                assert_eq!(reopened.intern(name), id);
             }
         }
         assert_eq!(names.lookups.load(Ordering::Relaxed), 0);
         assert_eq!(reopened.intern("own_name"), own);
         assert_eq!(reopened.intern("library_name"), library);
         assert_eq!(reopened.text(library), "library_name");
-        assert_eq!(reopened.index.get("library_name"), Some(&library));
+        let hash = hash_name(b"library_name");
+        assert_eq!(reopened.index.get(&hash), Some(&library.0));
         assert_eq!(reopened.intern("library_name"), library);
         assert_eq!(names.lookups.load(Ordering::Relaxed), 1);
         let fresh = reopened.intern("fresh_name");

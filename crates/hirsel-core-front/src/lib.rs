@@ -28,7 +28,8 @@ pub use types::*;
 
 use hirsel_core_ids::DefPath;
 use hirsel_core_resolve::{
-    DefinitionId, ModuleId, NameIndex, Refusal, Resolution, ResolvedUse, Site, Target, resolve,
+    DefinitionId, ModuleId, NameIndex, Refusal, Resolution, ResolutionScratch, ResolvedUse, Site,
+    Target,
 };
 use hirsel_core_syntax::{Item, NodeId, Span, SyntaxFile};
 use std::collections::HashMap;
@@ -159,13 +160,16 @@ impl<'a> Program<'a> {
 
     /// Resolve every item, then publish summaries and signatures (slice a).
     pub fn declare(index: &'a NameIndex, modules: &'a [ModuleInput]) -> Self {
+        let mut resolution_scratch = ResolutionScratch::default();
         let resolutions = modules
             .iter()
             .map(|m| {
                 m.syntax
                     .items()
                     .enumerate()
-                    .map(|(i, item)| std::sync::Arc::new(resolve(index, m.id, i as u32, item)))
+                    .map(|(i, item)| {
+                        std::sync::Arc::new(resolution_scratch.resolve(index, m.id, i as u32, item))
+                    })
                     .collect()
             })
             .collect();

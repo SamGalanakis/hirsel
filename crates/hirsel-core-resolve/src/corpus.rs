@@ -114,6 +114,7 @@ impl Corpus {
     }
     pub fn analyze(&self, parsed: &ParsedCorpus, index: &NameIndex) -> CorpusReport {
         let mut files = vec![];
+        let mut scratch = ResolutionScratch::default();
         for (source, p) in self.sources.iter().zip(&parsed.files) {
             let module = index.module(&source.module).unwrap();
             let mut result = FileResult {
@@ -163,7 +164,7 @@ impl Corpus {
                 }
             }
             for (i, item) in p.syntax.items().enumerate() {
-                let r = resolve(index, module, i as u32, item);
+                let r = scratch.resolve(index, module, i as u32, item);
                 result.names += r.names.len();
                 result.reads += r.reads.len();
                 result.resource_refusal |= r.resource_refusal.is_some();

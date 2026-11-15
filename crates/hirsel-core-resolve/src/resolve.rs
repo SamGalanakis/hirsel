@@ -1,10 +1,12 @@
 use crate::{index::path_tokens, *};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, Symbol, TokenId, sym};
-use rustc_hash::FxHashSet;
 
 /// Expression nesting the resolver walks before it refuses the item as a resource
 /// refusal (PROG-6).
 pub const RESOLVE_NESTING_LIMIT: u32 = 384;
+// Two MiB of generation-stamped words at most. Larger scope/name products
+// use the packed-key set, so this is a representation choice, not a tool limit.
+const LOCAL_READ_WORD_LIMIT: usize = 131_072;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BinderKind {
     Local,
@@ -102,94 +104,141 @@ struct Binding {
 /// Resolve one borrowed item. The visitor allocates no child/path/scope objects.
 /// Result tables and scratch storage are reserved once, before traversal.
 pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>) -> Resolution {
-    if item.range.has_errors {
-        return Resolution::default();
-    }
-    let size = item.range.resolution_size;
-    let queries = size.names as usize
-        + size.binders as usize
-        + size.labels as usize
-        + size.path_extra as usize
-        + size.exits as usize;
-    let read_capacity = queries * 6;
-    // Each name may be queried in lexical versions and in fixed index scopes.
-    // Use the smaller proven key bound for the dedup table, rather than one bucket
-    // per occurrence in a large body that repeats the same few names.
-    let versions = size.scopes as usize + size.binders as usize + 1;
-    let scope_keys = 5 * versions + 5 * index.modules.len() + index.packages.len() + 5;
-    let dedup_capacity = read_capacity.min(index.symbols.len().saturating_mul(scope_keys));
-    let mut r = Resolver {
-        index,
-        module,
-        item,
-        ordinal,
-        bindings: Vec::with_capacity(size.binders as usize),
-        slots: vec![u32::MAX; index.symbols.len() * 2],
-        labels: Vec::with_capacity(size.labels as usize),
-        label_base: 0,
-        loop_base: 0,
-        loops: Vec::with_capacity(size.loops as usize),
-        numeric_parameter: false,
-        numeric_declaration: Some(index.module_package(module)) == index.core
-            && matches!(
-                item.tree.node(item.root).kind,
-                NodeKind::Function
-                    | NodeKind::CloneHook
-                    | NodeKind::TypeDecl
-                    | NodeKind::StableType
-                    | NodeKind::ResourceType
-                    | NodeKind::ScopedType
-            ),
-        scope_id: 0,
-        next_scope: 1,
-        depth: 0,
-        paths: [None; 8],
-        seen: FxHashSet::with_capacity_and_hasher(dedup_capacity, Default::default()),
-        out: Resolution {
-            names: Vec::with_capacity(size.names as usize),
-            binders: Vec::with_capacity(size.binders as usize),
-            reads: Vec::with_capacity(read_capacity),
-            ..Resolution::default()
-        },
-    };
-    if Some(index.module_package(module)) != index.core
-        && item.tree.node(item.root).kind == NodeKind::Function
-        && !item
-            .tree
-            .children(item.root)
-            .iter()
-            .any(|&c| item.tree.node(c).kind == NodeKind::Block)
-    {
-        let end = item.tree.node(item.root).origin.span.end;
-        r.out.diagnostics.push(
-            Refusal::new(
-                "LANG-5",
-                Site {
-                    module,
-                    item: ordinal,
-                    span: Span { start: end, end },
-                },
-                "a function outside core requires a body",
-            )
-            .with_comparison(
-                "function without a body",
-                "function body outside package core",
-            ),
-        );
-    }
-    r.visit(item.root);
-    r.out
+    ResolutionScratch::default().resolve(index, module, ordinal, item)
 }
-struct Resolver<'a> {
+
+/// Request-owned work tables reused across items. Results own only their output rows.
+#[derive(Default)]
+pub struct ResolutionScratch {
+    bindings: Vec<Binding>,
+    slots: Vec<u32>,
+    labels: Vec<(Symbol, u32, NodeKind)>,
+    loops: Vec<NodeKind>,
+    seen: ReadSet,
+    recorded: Vec<[u32; 10]>,
+    local_words: Vec<ReadWord>,
+    local_stride: usize,
+    local_limit: usize,
+}
+impl ResolutionScratch {
+    pub fn resolve(
+        &mut self,
+        index: &NameIndex,
+        module: ModuleId,
+        ordinal: u32,
+        item: Item<'_>,
+    ) -> Resolution {
+        if item.range.has_errors {
+            return Resolution::default();
+        }
+        let size = item.range.resolution_size;
+        let queries = size.names as usize
+            + size.binders as usize
+            + size.labels as usize
+            + size.path_extra as usize
+            + size.exits as usize;
+        let read_capacity = queries * 6;
+        // Each name may be queried in lexical versions and in fixed index scopes.
+        // Use the smaller proven key bound for the dedup table, rather than one bucket
+        // per occurrence in a large body that repeats the same few names.
+        let versions = size.scopes as usize + size.binders as usize + 1;
+        let scope_keys = 5 * versions + 5 * index.modules.len() + index.packages.len() + 5;
+        let dedup_capacity = read_capacity.min(index.symbols.len().saturating_mul(scope_keys));
+        self.slots.resize(index.symbols.len() * 2, u32::MAX);
+        self.bindings.reserve(size.binders as usize);
+        self.labels.reserve(size.labels as usize);
+        self.loops.reserve(size.loops as usize);
+        self.seen.reset(dedup_capacity);
+        self.local_stride = index.symbols.len().div_ceil(64);
+        let local_limit = self.local_stride.saturating_mul(versions).saturating_mul(2);
+        self.local_limit = if local_limit <= LOCAL_READ_WORD_LIMIT {
+            local_limit
+        } else {
+            0
+        };
+        if self.local_words.len() < self.local_limit {
+            self.local_words
+                .resize(self.local_limit, ReadWord::default());
+        }
+        if self.seen.generation == 1 {
+            self.local_words.fill(ReadWord::default());
+        }
+        self.recorded.resize(index.symbols.len(), [0; 10]);
+        if self.seen.generation == 1 {
+            self.recorded.fill([0; 10]);
+        }
+        let mut r = Resolver {
+            index,
+            module,
+            item,
+            ordinal,
+            scratch: self,
+            label_base: 0,
+            loop_base: 0,
+            numeric_parameter: false,
+            numeric_declaration: Some(index.module_package(module)) == index.core
+                && matches!(
+                    item.tree.node(item.root).kind,
+                    NodeKind::Function
+                        | NodeKind::CloneHook
+                        | NodeKind::TypeDecl
+                        | NodeKind::StableType
+                        | NodeKind::ResourceType
+                        | NodeKind::ScopedType
+                ),
+            scope_id: 0,
+            next_scope: 1,
+            depth: 0,
+            paths: [None; 8],
+
+            out: Resolution {
+                names: Vec::with_capacity(size.names as usize),
+                binders: Vec::with_capacity(size.binders as usize),
+                reads: Vec::with_capacity(read_capacity),
+                ..Resolution::default()
+            },
+        };
+        if Some(index.module_package(module)) != index.core
+            && item.tree.node(item.root).kind == NodeKind::Function
+            && !item
+                .tree
+                .children(item.root)
+                .iter()
+                .any(|&c| item.tree.node(c).kind == NodeKind::Block)
+        {
+            let end = item.tree.node(item.root).origin.span.end;
+            r.out.diagnostics.push(
+                Refusal::new(
+                    "LANG-5",
+                    Site {
+                        module,
+                        item: ordinal,
+                        span: Span { start: end, end },
+                    },
+                    "a function outside core requires a body",
+                )
+                .with_comparison(
+                    "function without a body",
+                    "function body outside package core",
+                ),
+            );
+        }
+        r.visit(item.root);
+        while let Some(b) = r.scratch.bindings.pop() {
+            r.scratch.slots[Resolver::slot(b.symbol, b.namespace)] = b.previous;
+        }
+        r.scratch.labels.clear();
+        r.scratch.loops.clear();
+        r.out
+    }
+}
+struct Resolver<'a, 's> {
     index: &'a NameIndex,
     module: ModuleId,
     item: Item<'a>,
     ordinal: u32,
-    bindings: Vec<Binding>,
-    slots: Vec<u32>,
-    labels: Vec<(Symbol, u32, NodeKind)>,
+    scratch: &'s mut ResolutionScratch,
     label_base: usize,
-    loops: Vec<NodeKind>,
     loop_base: usize,
     numeric_parameter: bool,
     numeric_declaration: bool,
@@ -197,10 +246,10 @@ struct Resolver<'a> {
     next_scope: u32,
     depth: u32,
     paths: [Option<((u32, Symbol, bool, bool), Target)>; 8],
-    seen: FxHashSet<(LookupScope, Symbol, Namespace, bool)>,
+
     out: Resolution,
 }
-impl<'a> Resolver<'a> {
+impl<'a> Resolver<'a, '_> {
     fn site(&self, n: NodeId) -> Site {
         Site {
             module: self.module,
@@ -214,6 +263,7 @@ impl<'a> Resolver<'a> {
     fn children(&self, n: NodeId) -> &'a [NodeId] {
         self.item.tree.children(n)
     }
+    #[inline(always)]
     fn record(
         &mut self,
         n: NodeId,
@@ -223,7 +273,48 @@ impl<'a> Resolver<'a> {
         constructor: bool,
         result: LookupResult,
     ) {
-        if self.seen.insert((scope, symbol, namespace, constructor)) {
+        // Current-module and prelude lookups have four namespace/mode keys.
+        // Module-head and variant queries always use Value/false and Value/true.
+        let mode = (namespace == Namespace::Value) as usize * 2 + constructor as usize;
+        let dense = match scope {
+            LookupScope::Module(module) if module == self.module => Some(mode),
+            LookupScope::Prelude(_) => Some(4 + mode),
+            LookupScope::Modules(_) => Some(8),
+            LookupScope::Variants(_) => Some(9),
+            _ => None,
+        };
+        let local = if let LookupScope::Local(id) = scope {
+            (id as usize * 2 + (namespace == Namespace::Value) as usize)
+                .saturating_mul(self.scratch.local_stride)
+                .saturating_add(symbol.0 as usize / 64)
+        } else {
+            usize::MAX
+        };
+        let fresh = if local < self.scratch.local_limit {
+            let word = &mut self.scratch.local_words[local];
+            let bit = 1u64 << (symbol.0 & 63);
+            if word.generation != self.scratch.seen.generation {
+                word.generation = self.scratch.seen.generation;
+                word.bits = 0;
+            }
+            if word.bits & bit != 0 {
+                return;
+            }
+            word.bits |= bit;
+            true
+        } else if let Some(column) = dense {
+            let stamp = &mut self.scratch.recorded[symbol.0 as usize][column];
+            if *stamp == self.scratch.seen.generation {
+                return;
+            }
+            *stamp = self.scratch.seen.generation;
+            true
+        } else {
+            self.scratch
+                .seen
+                .insert(lookup_key(scope, symbol, namespace, constructor))
+        };
+        if fresh {
             self.out.reads.push(Lookup {
                 node: n,
                 scope,
@@ -238,17 +329,17 @@ impl<'a> Resolver<'a> {
         name.0 as usize * 2 + usize::from(ns == Namespace::Value)
     }
     fn local_in(&self, name: Symbol, ns: Namespace) -> Option<u32> {
-        let b = self.slots[Self::slot(name, ns)];
+        let b = self.scratch.slots[Self::slot(name, ns)];
         (b != u32::MAX).then_some(b)
     }
     fn scope(&mut self, f: impl FnOnce(&mut Self)) {
-        let mark = self.bindings.len();
+        let mark = self.scratch.bindings.len();
         let old = self.scope_id;
         self.scope_id = self.next_scope;
         self.next_scope += 1;
         f(self);
-        for b in self.bindings.drain(mark..) {
-            self.slots[Self::slot(b.symbol, b.namespace)] = b.previous;
+        for b in self.scratch.bindings.drain(mark..) {
+            self.scratch.slots[Self::slot(b.symbol, b.namespace)] = b.previous;
         }
         self.scope_id = old;
     }
@@ -319,12 +410,12 @@ impl<'a> Resolver<'a> {
             site: self.site(n),
         });
         let slot = Self::slot(name, ns);
-        self.bindings.push(Binding {
+        self.scratch.bindings.push(Binding {
             symbol: name,
             namespace: ns,
-            previous: self.slots[slot],
+            previous: self.scratch.slots[slot],
         });
-        self.slots[slot] = id;
+        self.scratch.slots[slot] = id;
         self.scope_id = self.next_scope;
         self.next_scope += 1;
     }
@@ -388,14 +479,18 @@ impl<'a> Resolver<'a> {
                     || self.index.get(id).kind != DefinitionKind::Type
                     || self.index.variant_names(id).is_empty()
             });
-        self.selected(
+        let target = candidate.map(Target::Definition);
+        // This is a direct member of the current module. Cross-module visibility
+        // is handled by qualified_member, whose candidate can be an extension.
+        self.record(
             n,
+            ns,
             LookupScope::Module(module),
             name,
-            ns,
             construct,
-            candidate,
-        )
+            target.map_or(LookupResult::Missing, LookupResult::Found),
+        );
+        target
     }
     fn prelude_lookup(
         &mut self,
@@ -404,14 +499,12 @@ impl<'a> Resolver<'a> {
         ns: Namespace,
         construct: bool,
     ) -> Option<Target> {
+        let core = self.index.core?;
         let candidate = self.index.prelude(name, ns, construct).filter(|&id| {
             !construct
                 || self.index.get(id).kind != DefinitionKind::Type
                 || self.index.variant_names(id).is_empty()
         });
-        let Some(core) = self.index.core else {
-            return None;
-        };
         self.selected(
             n,
             LookupScope::Prelude(core),
@@ -546,15 +639,70 @@ impl<'a> Resolver<'a> {
         self.out.diagnostics.push(diagnostic);
         Target::Missing
     }
+    fn bare_target(
+        &mut self,
+        n: NodeId,
+        name: Symbol,
+        type_context: bool,
+        construct: bool,
+    ) -> Target {
+        if type_context && builtin(name) {
+            return Target::Builtin(name);
+        }
+        let ns = if type_context {
+            Namespace::Type
+        } else {
+            Namespace::Value
+        };
+        let local = self.local_in(name, ns);
+        self.record(
+            n,
+            ns,
+            LookupScope::Local(self.scope_id),
+            name,
+            false,
+            local.map_or(LookupResult::Missing, |b| {
+                LookupResult::Found(Target::Binder(b))
+            }),
+        );
+        if let Some(b) = local {
+            return Target::Binder(b);
+        }
+        if let Some(t) = self
+            .module_lookup(n, self.module, name, ns, false)
+            .or_else(|| self.prelude_lookup(n, name, ns, false))
+        {
+            return t;
+        }
+        if construct && self.has_variant(name) {
+            return self.constructor(n, name);
+        }
+        if construct {
+            return self
+                .module_lookup(n, self.module, name, Namespace::Type, true)
+                .or_else(|| self.prelude_lookup(n, name, Namespace::Type, true))
+                .unwrap_or_else(|| self.variant_or_missing(n, name));
+        }
+        if !type_context {
+            self.head_lookup(n, name)
+                .unwrap_or_else(|| self.variant_or_missing(n, name))
+        } else {
+            self.missing(n)
+        }
+    }
     fn use_path(&mut self, n: NodeId, type_context: bool, construct: bool) {
         let node = self.item.tree.node(n);
         let simple = node.origin.tokens.end == node.origin.tokens.start + 1;
-        let key = (
-            self.scope_id,
-            self.name(node.token.unwrap()),
-            type_context,
-            construct,
-        );
+        let name = self.name(node.token.unwrap());
+        if simple && type_context && builtin(name) {
+            self.out.names.push(ResolvedUse {
+                node: n,
+                target: Target::Builtin(name),
+                projections: Span::default(),
+            });
+            return;
+        }
+        let key = (self.scope_id, name, type_context, construct);
         if simple {
             if let Some((old, target)) = self.paths[key.1.0 as usize & 7] {
                 if old == key {
@@ -567,7 +715,19 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
-        let diagnostics_before = self.out.diagnostics.len();
+        if simple {
+            let before = self.out.diagnostics.len();
+            let target = self.bare_target(n, key.1, type_context, construct);
+            if self.out.diagnostics.len() == before && target != Target::Missing {
+                self.paths[key.1.0 as usize & 7] = Some((key, target));
+            }
+            self.out.names.push(ResolvedUse {
+                node: n,
+                target,
+                projections: Span::default(),
+            });
+            return;
+        }
         let mut parts = path_tokens(self.item, n);
         let Some(head_token) = parts.next() else {
             return;
@@ -703,9 +863,6 @@ impl<'a> Resolver<'a> {
                 self.missing(n)
             }
         };
-        if simple && self.out.diagnostics.len() == diagnostics_before && target != Target::Missing {
-            self.paths[key.1.0 as usize & 7] = Some((key, target));
-        }
         self.out.names.push(ResolvedUse {
             node: n,
             target,
@@ -759,8 +916,8 @@ impl<'a> Resolver<'a> {
     fn function(&mut self, n: NodeId) {
         let old = self.label_base;
         let old_loop = self.loop_base;
-        self.label_base = self.labels.len();
-        self.loop_base = self.loops.len();
+        self.label_base = self.scratch.labels.len();
+        self.loop_base = self.scratch.loops.len();
         self.scope(|r| {
             let children = r.children(n);
             for &c in children {
@@ -795,263 +952,271 @@ impl<'a> Resolver<'a> {
             self.visit(n);
         }
     }
-    fn visit(&mut self, n: NodeId) {
-        if self.out.resource_refusal.is_some() {
-            return;
-        }
-        match self.item.tree.node(n).kind {
-            NodeKind::Literal => return,
-            NodeKind::Path => return self.use_path(n, false, false),
-            NodeKind::TypePath => return self.use_path(n, true, false),
-            _ => {}
-        }
-        if self.depth >= RESOLVE_NESTING_LIMIT {
-            self.out.resource_refusal = Some((self.site(n), RESOLVE_NESTING_LIMIT));
-            return;
-        }
-        self.depth += 1;
-        self.visit_inner(n);
-        self.depth -= 1;
-    }
-    fn visit_inner(&mut self, n: NodeId) {
-        let node = self.item.tree.node(n);
-        let kind = node.kind;
-        let token = node.token;
-        let c = self.children(n);
-        match kind {
-            NodeKind::Function
-            | NodeKind::CloneHook
-            | NodeKind::Closure
-            | NodeKind::ScopedClosure
-            | NodeKind::CallableType
-            | NodeKind::ScopedCallableType
-            | NodeKind::OwnCallableType => self.function(n),
-            NodeKind::TypeDecl
-            | NodeKind::StableType
-            | NodeKind::ResourceType
-            | NodeKind::ScopedType
-            | NodeKind::Block => self.scope(|r| {
-                for &child in c {
-                    r.visit(child)
-                }
-            }),
-            NodeKind::Generic | NodeKind::RegionGeneric => {
-                self.bind(
-                    n,
-                    token.unwrap(),
-                    if kind == NodeKind::Generic {
-                        BinderKind::TypeParameter
-                    } else {
-                        BinderKind::Region
-                    },
-                );
-                let old = self.numeric_parameter;
-                self.numeric_parameter = kind == NodeKind::Generic;
-                for &child in c {
-                    self.visit(child);
-                }
-                self.numeric_parameter = old;
+    fn visit(&mut self, mut n: NodeId) {
+        let initial_depth = self.depth;
+        loop {
+            if self.out.resource_refusal.is_some() {
+                break;
             }
-            NodeKind::Path => self.use_path(n, false, false),
-            NodeKind::TypePath => self.use_path(n, true, false),
-            NodeKind::Let | NodeKind::LetMut => {
-                for &child in &c[1..] {
-                    self.visit(child);
+            match self.item.tree.node(n).kind {
+                NodeKind::Literal => break,
+                NodeKind::Path => {
+                    self.use_path(n, false, false);
+                    break;
                 }
-                self.pattern(c[0]);
+                NodeKind::TypePath => {
+                    self.use_path(n, true, false);
+                    break;
+                }
+                _ => {}
             }
-            NodeKind::For | NodeKind::ForTake => {
-                self.visit(c[1]);
-                self.scope(|r| {
+            if self.depth >= RESOLVE_NESTING_LIMIT {
+                self.out.resource_refusal = Some((self.site(n), RESOLVE_NESTING_LIMIT));
+                break;
+            }
+            self.depth += 1;
+
+            let node = self.item.tree.node(n);
+            let kind = node.kind;
+            let token = node.token;
+            let c = self.children(n);
+            match kind {
+                NodeKind::Function
+                | NodeKind::CloneHook
+                | NodeKind::Closure
+                | NodeKind::ScopedClosure
+                | NodeKind::CallableType
+                | NodeKind::ScopedCallableType
+                | NodeKind::OwnCallableType => self.function(n),
+                NodeKind::TypeDecl
+                | NodeKind::StableType
+                | NodeKind::ResourceType
+                | NodeKind::ScopedType
+                | NodeKind::Block => self.scope(|r| {
+                    for &child in c {
+                        r.visit(child)
+                    }
+                }),
+                NodeKind::Generic | NodeKind::RegionGeneric => {
+                    self.bind(
+                        n,
+                        token.unwrap(),
+                        if kind == NodeKind::Generic {
+                            BinderKind::TypeParameter
+                        } else {
+                            BinderKind::Region
+                        },
+                    );
+                    let old = self.numeric_parameter;
+                    self.numeric_parameter = kind == NodeKind::Generic;
+                    for &child in c {
+                        self.visit(child);
+                    }
+                    self.numeric_parameter = old;
+                }
+                NodeKind::Path => self.use_path(n, false, false),
+                NodeKind::TypePath => self.use_path(n, true, false),
+                NodeKind::Let | NodeKind::LetMut => {
+                    for &child in &c[1..] {
+                        self.visit(child);
+                    }
+                    self.pattern(c[0]);
+                }
+                NodeKind::For | NodeKind::ForTake => {
+                    self.visit(c[1]);
+                    self.scope(|r| {
+                        r.pattern(c[0]);
+                        r.scratch.loops.push(kind);
+                        r.visit(c[2]);
+                        r.scratch.loops.pop();
+                    });
+                }
+                NodeKind::If | NodeKind::While => {
+                    self.scope(|r| {
+                        r.condition(c[0]);
+                        if kind == NodeKind::While {
+                            r.scratch.loops.push(kind);
+                        }
+                        r.visit(c[1]);
+                        if kind == NodeKind::While {
+                            r.scratch.loops.pop();
+                        }
+                    });
+                    for &child in &c[2..] {
+                        self.visit(child);
+                    }
+                }
+                NodeKind::Loop => {
+                    self.scratch.loops.push(kind);
+                    for &child in c {
+                        self.visit(child);
+                    }
+                    self.scratch.loops.pop();
+                }
+                NodeKind::Arm => self.scope(|r| {
                     r.pattern(c[0]);
-                    r.loops.push(kind);
-                    r.visit(c[2]);
-                    r.loops.pop();
-                });
-            }
-            NodeKind::If | NodeKind::While => {
-                self.scope(|r| {
-                    r.condition(c[0]);
-                    if kind == NodeKind::While {
-                        r.loops.push(kind);
+                    for &child in &c[1..] {
+                        r.visit(child);
                     }
-                    r.visit(c[1]);
-                    if kind == NodeKind::While {
-                        r.loops.pop();
+                }),
+                NodeKind::Region | NodeKind::Drop => self.scope(|r| {
+                    r.bind(
+                        n,
+                        token.unwrap(),
+                        if kind == NodeKind::Region {
+                            BinderKind::Region
+                        } else {
+                            BinderKind::Parameter
+                        },
+                    );
+                    for &child in c {
+                        r.visit(child);
                     }
-                });
-                for &child in &c[2..] {
-                    self.visit(child);
-                }
-            }
-            NodeKind::Loop => {
-                self.loops.push(kind);
-                for &child in c {
-                    self.visit(child);
-                }
-                self.loops.pop();
-            }
-            NodeKind::Arm => self.scope(|r| {
-                r.pattern(c[0]);
-                for &child in &c[1..] {
-                    r.visit(child);
-                }
-            }),
-            NodeKind::Region | NodeKind::Drop => self.scope(|r| {
-                r.bind(
-                    n,
-                    token.unwrap(),
-                    if kind == NodeKind::Region {
-                        BinderKind::Region
-                    } else {
-                        BinderKind::Parameter
-                    },
-                );
-                for &child in c {
-                    r.visit(child);
-                }
-            }),
-            NodeKind::Call => {
-                if let Some((&callee, args)) = c.split_first() {
-                    let before = self.out.names.len();
-                    if self.item.tree.node(callee).kind == NodeKind::Path {
-                        self.use_path(callee, false, true);
-                    } else {
-                        self.visit(callee);
-                    }
-                    for &arg in args {
-                        self.visit(arg);
-                    }
-                    if args
-                        .iter()
-                        .any(|&a| self.item.tree.node(a).kind == NodeKind::LabelledArgument)
-                    {
-                        let target = self.out.names[before..]
+                }),
+                NodeKind::Call => {
+                    if let Some((&callee, args)) = c.split_first() {
+                        let before = self.out.names.len();
+                        if self.item.tree.node(callee).kind == NodeKind::Path {
+                            self.use_path(callee, false, true);
+                        } else {
+                            self.visit(callee);
+                        }
+                        for &arg in args {
+                            self.visit(arg);
+                        }
+                        if args
                             .iter()
-                            .find(|u| u.node == callee)
-                            .map(|u| u.target);
-                        if matches!(target,Some(Target::Definition(id)) if self.index.get(id).kind==DefinitionKind::Function)
-                            || matches!(target, Some(Target::Binder(_)))
+                            .any(|&a| self.item.tree.node(a).kind == NodeKind::LabelledArgument)
                         {
-                            self.out.diagnostics.push(
-                                Refusal::new(
-                                    "LANG-9",
-                                    self.site(n),
-                                    "ordinary calls have no labelled arguments",
-                                )
-                                .with_comparison(
-                                    "labelled arguments",
-                                    "positional arguments in an ordinary call",
-                                ),
-                            );
+                            let target = self.out.names[before..]
+                                .iter()
+                                .find(|u| u.node == callee)
+                                .map(|u| u.target);
+                            if matches!(target,Some(Target::Definition(id)) if self.index.get(id).kind==DefinitionKind::Function)
+                                || matches!(target, Some(Target::Binder(_)))
+                            {
+                                self.out.diagnostics.push(
+                                    Refusal::new(
+                                        "LANG-9",
+                                        self.site(n),
+                                        "ordinary calls have no labelled arguments",
+                                    )
+                                    .with_comparison(
+                                        "labelled arguments",
+                                        "positional arguments in an ordinary call",
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
-            }
-            NodeKind::Labelled => {
-                let name = self.name(token.unwrap());
-                let old = self.labels[self.label_base..]
-                    .iter()
-                    .rev()
-                    .find(|&&(s, _, _)| s == name)
-                    .map(|&(_, b, _)| b);
-                if let Some(b) = old {
-                    let mut d = Refusal::new("LANG-15", self.site(n), "active label is shadowed");
-                    d.causal.push(self.out.binders[b as usize].site);
-                    d = d.with_comparison(
-                        self.index.symbols.text(name),
-                        "a label name not already active in this function",
-                    );
-                    self.out.diagnostics.push(d);
-                }
-                let id = self.out.binders.len() as u32;
-                self.out.binders.push(Binder {
-                    id,
-                    name,
-                    kind: BinderKind::Label,
-                    site: self.site(n),
-                });
-                self.labels.push((name, id, self.item.tree.node(c[0]).kind));
-                for &child in c {
-                    self.visit(child);
-                }
-                self.labels.pop();
-            }
-            NodeKind::Break | NodeKind::Continue => {
-                let target = if let Some(t) = token {
-                    let name = self.name(t);
-                    self.labels[self.label_base..]
-                        .iter()
-                        .rev()
-                        .find(|&&(s, _, _)| s == name)
-                        .map(|&(_, _, k)| k)
-                } else {
-                    self.loops[self.loop_base..].last().copied()
-                };
-                if token.is_none() && target.is_none() {
-                    self.out.diagnostics.push(Refusal::new(
-                        "LANG-15",
-                        self.site(n),
-                        "exit has no enclosing loop",
-                    ));
-                } else if kind == NodeKind::Continue && target == Some(NodeKind::Block) {
-                    self.out.diagnostics.push(
-                        Refusal::new("LANG-15", self.site(n), "continue target is a block")
-                            .with_comparison("labelled block", "loop target for continue"),
-                    );
-                } else if kind == NodeKind::Break
-                    && !c.is_empty()
-                    && matches!(
-                        target,
-                        Some(NodeKind::While | NodeKind::For | NodeKind::ForTake)
-                    )
-                {
-                    self.out.diagnostics.push(
-                        Refusal::new(
-                            "LANG-15",
-                            self.site(n),
-                            "while and for do not accept a break value",
-                        )
-                        .with_comparison(
-                            "while/for target with a break value",
-                            "loop-expression target for a valued break",
-                        ),
-                    );
-                }
-                if let Some(t) = token {
-                    let name = self.name(t);
-                    let b = self.labels[self.label_base..]
+                NodeKind::Labelled => {
+                    let name = self.name(token.unwrap());
+                    let old = self.scratch.labels[self.label_base..]
                         .iter()
                         .rev()
                         .find(|&&(s, _, _)| s == name)
                         .map(|&(_, b, _)| b);
-                    self.record(
-                        n,
-                        Namespace::Value,
-                        LookupScope::Label(self.scope_id),
+                    if let Some(b) = old {
+                        let mut d =
+                            Refusal::new("LANG-15", self.site(n), "active label is shadowed");
+                        d.causal.push(self.out.binders[b as usize].site);
+                        d = d.with_comparison(
+                            self.index.symbols.text(name),
+                            "a label name not already active in this function",
+                        );
+                        self.out.diagnostics.push(d);
+                    }
+                    let id = self.out.binders.len() as u32;
+                    self.out.binders.push(Binder {
+                        id,
                         name,
-                        false,
-                        b.map_or(LookupResult::Missing, |b| {
-                            LookupResult::Found(Target::Binder(b))
-                        }),
-                    );
-                    if b.is_none() {
+                        kind: BinderKind::Label,
+                        site: self.site(n),
+                    });
+                    self.scratch
+                        .labels
+                        .push((name, id, self.item.tree.node(c[0]).kind));
+                    for &child in c {
+                        self.visit(child);
+                    }
+                    self.scratch.labels.pop();
+                }
+                NodeKind::Break | NodeKind::Continue => {
+                    let target = if let Some(t) = token {
+                        let name = self.name(t);
+                        self.scratch.labels[self.label_base..]
+                            .iter()
+                            .rev()
+                            .find(|&&(s, _, _)| s == name)
+                            .map(|&(_, _, k)| k)
+                    } else {
+                        self.scratch.loops[self.loop_base..].last().copied()
+                    };
+                    if token.is_none() && target.is_none() {
                         self.out.diagnostics.push(Refusal::new(
                             "LANG-15",
                             self.site(n),
-                            "exit label not found in this function",
+                            "exit has no enclosing loop",
                         ));
+                    } else if kind == NodeKind::Continue && target == Some(NodeKind::Block) {
+                        self.out.diagnostics.push(
+                            Refusal::new("LANG-15", self.site(n), "continue target is a block")
+                                .with_comparison("labelled block", "loop target for continue"),
+                        );
+                    } else if kind == NodeKind::Break
+                        && !c.is_empty()
+                        && matches!(
+                            target,
+                            Some(NodeKind::While | NodeKind::For | NodeKind::ForTake)
+                        )
+                    {
+                        self.out.diagnostics.push(
+                            Refusal::new(
+                                "LANG-15",
+                                self.site(n),
+                                "while and for do not accept a break value",
+                            )
+                            .with_comparison(
+                                "while/for target with a break value",
+                                "loop-expression target for a valued break",
+                            ),
+                        );
+                    }
+                    if let Some(t) = token {
+                        let name = self.name(t);
+                        let b = self.scratch.labels[self.label_base..]
+                            .iter()
+                            .rev()
+                            .find(|&&(s, _, _)| s == name)
+                            .map(|&(_, b, _)| b);
+                        self.record(
+                            n,
+                            Namespace::Value,
+                            LookupScope::Label(self.scope_id),
+                            name,
+                            false,
+                            b.map_or(LookupResult::Missing, |b| {
+                                LookupResult::Found(Target::Binder(b))
+                            }),
+                        );
+                        if b.is_none() {
+                            self.out.diagnostics.push(Refusal::new(
+                                "LANG-15",
+                                self.site(n),
+                                "exit label not found in this function",
+                            ));
+                        }
+                    }
+                    for &child in c {
+                        self.visit(child);
                     }
                 }
-                for &child in c {
-                    self.visit(child);
-                }
-            }
-            NodeKind::BoundName => {
-                if matches!(self.name(token.unwrap()), sym::INTEGER | sym::FLOAT)
-                    && !(self.numeric_declaration && self.numeric_parameter)
-                {
-                    self.out.diagnostics.push(Refusal::new(
+                NodeKind::BoundName => {
+                    if matches!(self.name(token.unwrap()), sym::INTEGER | sym::FLOAT)
+                        && !(self.numeric_declaration && self.numeric_parameter)
+                    {
+                        self.out.diagnostics.push(Refusal::new(
                         "OWN-4",
                         self.site(n),
                         "numeric bounds are only permitted on type parameters of core declarations",
@@ -1059,14 +1224,93 @@ impl<'a> Resolver<'a> {
                         format!("{} bound on {} in package {}", self.index.symbols.text(self.name(token.unwrap())),
                             if self.numeric_parameter { "a type parameter" } else { "a declaration" }, self.index.module_path(self.module).package.name),
                         "numeric bound on a core declaration's type parameter"));
+                    }
+                }
+                NodeKind::Error => {}
+                _ => {
+                    if let [child] = c {
+                        n = *child;
+                        continue;
+                    }
+                    for &child in c {
+                        self.visit(child)
+                    }
                 }
             }
-            NodeKind::Error => {}
-            _ => {
-                for &child in c {
-                    self.visit(child)
-                }
-            }
+            break;
+        }
+        self.depth = initial_depth;
+    }
+}
+
+#[inline]
+fn lookup_key(scope: LookupScope, symbol: Symbol, ns: Namespace, construct: bool) -> u128 {
+    let (tag, id) = match scope {
+        LookupScope::Local(id) => (0u128, id),
+        LookupScope::Bind(id) => (1, id),
+        LookupScope::Label(id) => (2, id),
+        LookupScope::Module(id) => (3, id.0),
+        LookupScope::Prelude(id) => (4, id.0),
+        LookupScope::Modules(id) => (5, id.0),
+        LookupScope::Children(id) => (6, id.0),
+        LookupScope::Variants(id) => (7, id.0),
+    };
+    ((id as u128) << 42)
+        | (tag << 39)
+        | ((construct as u128) << 38)
+        | (((ns == Namespace::Value) as u128) << 37)
+        | symbol.0 as u128
+}
+
+#[derive(Clone, Copy, Default)]
+struct ReadBucket {
+    low: u64,
+    high: u32,
+    generation: u32,
+}
+#[derive(Default)]
+struct ReadSet {
+    buckets: Vec<ReadBucket>,
+    generation: u32,
+}
+impl ReadSet {
+    fn reset(&mut self, bound: usize) {
+        let capacity = bound.saturating_mul(2).max(16).next_power_of_two();
+        if capacity > self.buckets.len() {
+            self.buckets.resize(capacity, ReadBucket::default());
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.buckets.fill(ReadBucket::default());
+            self.generation = 1;
         }
     }
+    #[inline]
+    fn insert(&mut self, key: u128) -> bool {
+        let mixed = (key as u64) ^ ((key >> 64) as u64).wrapping_mul(0x517cc1b727220a95);
+        let hash = mixed.rotate_left(26).wrapping_mul(0x517cc1b727220a95);
+        let mask = self.buckets.len() - 1;
+        let mut slot = (hash ^ (hash >> 32)) as usize & mask;
+        loop {
+            let b = &mut self.buckets[slot];
+            if b.generation != self.generation {
+                *b = ReadBucket {
+                    low: key as u64,
+                    high: (key >> 64) as u32,
+                    generation: self.generation,
+                };
+                return true;
+            }
+            if b.low == key as u64 && b.high == (key >> 64) as u32 {
+                return false;
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ReadWord {
+    bits: u64,
+    generation: u32,
 }

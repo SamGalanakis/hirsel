@@ -16,12 +16,17 @@ rows. Each written use retains its node and target ID; field suffixes refer to a
 range rather than copied strings. Dependency rows deduplicate scope/symbol/namespace/mode
 keys, retaining missing, private, opaque, ambiguous and shadowed outcomes. Local bindings
 use one marked undo stack and dense symbol slots. Traversal borrows child ranges and
-allocates no child, path or scope objects. Results and scratch tables are reserved before
-traversal. Refusal paths alone build diagnostic text.
+allocates no child, path or scope objects. Results are reserved before traversal.
+`ResolutionScratch` reuses binding slots, undo stacks and generation-stamped read
+sets across items. Each item starts a fresh generation without clearing previous
+hash buckets. Local read bitmaps use at most 2 MiB; larger scope/name products use
+the packed-key set. This chooses a representation and imposes no language limit.
+The driver and front reuse scratch across their full request. Refusal paths alone
+build diagnostic text.
 
 Locals beat modules, including a dotted path's first component. Local/value-definition
 and prelude-function shadowing remains refused. Builtin types resolve first and cannot
-be redeclared. Numeric bounds are contextual and legal only on type parameters of bodiless
+be redeclared. Numeric bounds are contextual and legal only on type parameters of
 core declarations. Loop/label targets obey LANG-15 and cannot cross a closure.
 Ownership, type fitting, constructor selection and lowering belong to core-front.
 

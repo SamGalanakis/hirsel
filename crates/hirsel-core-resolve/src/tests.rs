@@ -1164,3 +1164,37 @@ fn prog_7_visibility_and_path_heads_report_actual_and_required_kinds() {
     );
     assert_eq!(r.diagnostics[0].causal.len(), 1);
 }
+
+#[test]
+fn scratch_reuse_keeps_each_items_reads_sites_and_private_refusals() {
+    let (index, files) = fixture(&[
+        (
+            "lib",
+            "fn secret(x: u64) -> u64 { x }\npub fn visible(x: u64) -> u64 { x }",
+        ),
+        (
+            "main",
+            "fn first(x: u64) -> u64 { let y = x; y }\nfn second(x: u64) -> u64 { let y = x; y }\nfn third() { lib.secret(1); lib.secret(2); lib.visible(3) }",
+        ),
+    ]);
+    let mut scratch = ResolutionScratch::default();
+    for &f in &[0, 1, 0, 1] {
+        for (i, item) in files[f].1.items().enumerate() {
+            let expected = resolve(&index, files[f].0, i as u32, item);
+            let actual = scratch.resolve(&index, files[f].0, i as u32, item);
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+    }
+    let third = scratch.resolve(&index, files[1].0, 2, files[1].1.item(2));
+    assert_eq!(
+        third
+            .diagnostics
+            .iter()
+            .filter(|d| d.rule == "PROG-2")
+            .count(),
+        2
+    );
+}

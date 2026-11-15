@@ -42,7 +42,7 @@ use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 use hirsel_core_ir::Module;
 use hirsel_core_resolve::{
     CorpusManifest, Definition, DefinitionId, ModuleId, ModulePath, NameIndex, PackageManifest,
-    Refusal, Resolution, Site, resolve,
+    Refusal, Resolution, ResolutionScratch, Site,
 };
 use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile, parse_bytes};
 use serde::{Deserialize, Serialize};
@@ -552,13 +552,16 @@ impl Driver {
             });
         }
         meter.finish("index");
+        let mut resolution_scratch = ResolutionScratch::default();
         let resolutions: Vec<Vec<Arc<Resolution>>> = modules
             .iter()
             .map(|m| {
                 m.syntax
                     .items()
                     .enumerate()
-                    .map(|(i, item)| Arc::new(resolve(&index, m.id, i as u32, item)))
+                    .map(|(i, item)| {
+                        Arc::new(resolution_scratch.resolve(&index, m.id, i as u32, item))
+                    })
                     .collect()
             })
             .collect();

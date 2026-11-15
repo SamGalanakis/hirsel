@@ -432,7 +432,7 @@ impl Substitution<'_> {
         shape.held = shape.held.map(|held| self.field(&held, false));
         self.module.types[row.index()].held = shape.held.clone();
         let compact = matches!(shape.repr, hirsel_core_layout::Repr::Compact(_));
-        let mut fields = |fields: &mut Vec<hirsel_core_layout::Field>, s: &mut Self| {
+        let fields = |fields: &mut Vec<hirsel_core_layout::Field>, s: &mut Self| {
             for x in fields {
                 x.ty = s.field(&x.ty, compact);
             }

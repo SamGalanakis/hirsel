@@ -482,7 +482,7 @@ mod places;
 mod remap;
 mod views;
 use places::promote;
-use remap::{addresses, compact, values};
+use remap::{compact, values};
 use views::{scalar_copies, scalar_views};
 
 mod numeric;

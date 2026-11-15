@@ -472,7 +472,6 @@ dependencies = [
  "hirsel-core-ids",
  "hirsel-core-syntax",
  "hirsel-guard",
- "rustc-hash",
  "serde",
  "serde_json",
 ]

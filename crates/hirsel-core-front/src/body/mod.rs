@@ -191,15 +191,6 @@ impl Rep {
         }
     }
 }
-/// A parameter remains rigid while checking its source body. Its instance follows
-/// the concrete row's carried representation, including a view of the parameter.
-fn rigid(t: &impl TyRead, ty: TyId) -> bool {
-    match t.kind(ty) {
-        TyKind::Param(_) => true,
-        TyKind::View(x) => matches!(t.kind(*x), TyKind::Param(_)),
-        _ => false,
-    }
-}
 /// Generic `i` of `fd` as its own argument: a type parameter, or a region's root.
 fn generic_arg(fd: &crate::decls::FnDecl, i: usize) -> TyKind {
     if fd.generics[i].region {
@@ -1284,9 +1275,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn binder(&self, n: NodeId) -> Option<u32> {
         let s = self.item.tree.node(n).origin.span;
         self.binder_at.get(&(s.start, s.end)).copied()
-    }
-    fn name(&self, ty: TyId) -> String {
-        crate::decls::canonical(&self.p.decls, &self.t, ty)
     }
     /// `ty` as a refusal shows it, each region root by its source name (PROG-7).
     fn shown(&self, ty: TyId) -> String {

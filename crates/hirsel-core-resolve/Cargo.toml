@@ -11,7 +11,6 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
-rustc-hash = "2"
 hirsel-guard = { path = "../hirsel-guard" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }

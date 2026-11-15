@@ -280,7 +280,7 @@ impl OsProcess {
                     if let Some(probe) = probe.take() {
                         let designation = process._metadata[(handle - 1) as usize].handle;
                         probe(process.os.as_ref().unwrap(), designation)
-                            .map_err(|error| StartupError::UnsupportedHostOpenat2(error))?;
+                            .map_err(StartupError::UnsupportedHostOpenat2)?;
                     }
                 }
                 process.grants.push(handle);

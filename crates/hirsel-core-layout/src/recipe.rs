@@ -379,7 +379,7 @@ impl RecipeScratch {
             )?;
         }
         self.suffix.resize_with(appended, || None);
-        let mut out = Computed {
+        let out = Computed {
             prefix: recipes,
             suffix: &mut self.suffix,
         };

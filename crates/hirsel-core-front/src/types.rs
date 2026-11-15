@@ -214,12 +214,6 @@ impl Types {
             map: hashbrown::HashTable::new(),
         }
     }
-    fn find(&self, k: &TyKind) -> Option<TyId> {
-        if self.map.is_empty() {
-            return self.find_shared(k);
-        }
-        self.find_hashed(k, rustc_hash::FxBuildHasher.hash_one(k))
-    }
     fn find_shared(&self, k: &TyKind) -> Option<TyId> {
         self.base
             .as_ref()
@@ -897,7 +891,7 @@ mod interner_tests {
         assert_eq!(first_id, second_id);
         assert_eq!(first.kind(first_id), &two);
         assert_eq!(second.kind(second_id), &three);
-        assert_eq!(program.find(&two), None);
+        assert_eq!(program.find_interned(&two, None), None);
         assert_eq!(base.len(), start);
         let wire = serde_json::to_value(&program).unwrap();
         assert_eq!(

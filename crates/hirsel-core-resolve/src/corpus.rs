@@ -192,7 +192,7 @@ impl Corpus {
             let mut out = String::new();
             let mut end = 0;
             for token in lex(&source.text, &mut Symbols::default()).tokens {
-                if (token.kind.is_trivia() || token.kind == TokenKind::Eof) {
+                if token.kind.is_trivia() || token.kind == TokenKind::Eof {
                     continue;
                 }
                 let start = token.span.start as usize;

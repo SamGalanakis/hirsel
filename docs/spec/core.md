@@ -234,7 +234,7 @@ operations it names; nothing else about them may be inferred from an implementat
   writing, creating the file when absent and emptying it otherwise; `Append` opens for
   writing at the end, creating it when absent; `CreateNew` creates a file for writing and
   returns `Exists` when one is present. `host.read` appends to `buf` at most its spare
-  capacity, advances the file's cursor by the count and returns it, `Ok(0)` at end of file
+  capacity, never changes its capacity, advances the file's cursor by the count and returns it, `Ok(0)` at end of file
   or when `buf` has no spare capacity; a read that returns an error has appended nothing
   and moved no cursor, so a partial read is delivered as `Ok`. A successful `host.write`
   committed all of `b`; a `WriteError`'s `written` bytes stay written. Streams take bytes

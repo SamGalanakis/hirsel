@@ -69,7 +69,12 @@ fail with `Bounds`, or return `None`, when `i` is out of range. `list.push` and 
 growing operations return `Result[_, (Capacity, T)]` or `Result[_, Capacity]` and grow as
 [MEM-24](budgets.md#mem-24-logical-charges) says; `list.capacity` reads the capacity and
 `list.reserve(mut xs, n)` grows it to at least `len + n`. Removing elements never
-allocates or shrinks. A `List[T]` whose `T` has size 0 ([core](core.md#built-in-types)) has
+allocates or shrinks. An own `List`'s length is never more than its capacity: growing
+operations admit capacity before they add elements, removing elements only shortens it,
+and a host read fills only spare capacity ([core](core.md#contracts-the-signatures-do-not-state)). A view of a
+list reports that list's length and capacity, and a slice's capacity is its length. A
+`View[Bytes]` from `string.as_bytes` instead reports its `String`'s capacity, which for
+static storage is 0, below its length ([core](core.md#contracts-the-signatures-do-not-state)). A `List[T]` whose `T` has size 0 ([core](core.md#built-in-types)) has
 no element storage: its capacity is `2^64 − 1` from creation, and creating, reserving and
 growing it admit nothing; only its length is bounded, so a `reserve` past `2^64 − 1`
 elements and a push at that length return `Capacity` with `requested` `2^64 − 1`

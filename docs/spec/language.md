@@ -303,11 +303,20 @@ A callable type has one of three kinds, written in the type:
 |---|---|---|---|
 | `fn(A, mut B, take C) -> R` | top-level functions and closures that capture nothing | plain, `send` | 8 |
 | `own fn(..) -> R`, `own[send] fn(..) -> R` | the above, and **owning closures** (LANG-14); `own[send]` only those whose captures are all `send` | own; `send` only with `[send]` | 16 |
+| `scoped[view] fn(..) -> R` | a scoped closure whose fully transitive capture descriptor (OWN-21), its own entries with those of every scoped callback it invokes, passes on, returns or stores, has view entries only; and plain and owning callables | scoped | 16 |
 | `scoped fn(..) -> R` | any closure, and the above | scoped ([OWN-21](ownership.md#own-21-scoped-callbacks)) | 16 |
 
-The bracket of an owning callable type parses any bounds (LANG-5) but holds nothing but
-`send`: any other bound, or a second bound, is refused here, at the first bound name unless
-that is `send` and otherwise at the second. An owning closure is never `shareable`
+The bracket of an owning callable type parses `view` or any bounds (LANG-5) but holds
+nothing but `send`: `view`, any other bound, or a second bound, is refused here, at the
+first name unless that is `send` and otherwise at the second. The bracket of a scoped
+callable type holds nothing but `view`, and a bound there is refused here, at the first
+bound name. A scoped callback the closure received as an unqualified `scoped fn` has an
+unknown descriptor and counts as a `mut` entry; its `mut` and `take` parameters are not
+captures, and each activation checks them (OWN-9 to OWN-11). The descriptor is summarized
+where the closure is defined, and a closure that does not fit is refused here; the
+diagnostic points at the first `mut` entry. A `scoped[view] fn` fits a `scoped fn` of the
+same parameters and result, losing its promise; a `scoped fn` never fits a `scoped[view]
+fn`. Its result names no anchor (OWN-20). An owning closure is never `shareable`
 ([OWN-4](ownership.md#own-4-bounds)). A callable type also says whether it is `waits` (LANG-8). A callable fits a callable type
 when its parameter modes and types and its result are identical, its kind is admitted, and
 it is `waits` only if the type is; one that does not fit is refused here, at the callable.

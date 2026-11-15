@@ -26,6 +26,12 @@ raised it:
 
 `Capacity` outside a finalizer is an error, never a failure.
 
+A failure raised inside a core function has as its site the call that reached it from the
+nearest non-core caller. When that call is through a function value, the site is the call
+through the value, and where the function was named is not recorded: with `fn apply(f:
+fn(take Option[u64]) -> u64, take x: Option[u64]) -> u64 { f(take x) }`, `apply(option.unwrap,
+None)` fails with `Unwrap` at `apply`'s `f(take x)`.
+
 ```hirsel
 fn mean(xs: List[i64]) -> i64 { list.sum(xs) / int.narrow(list.len(xs)) }   // Division when xs is empty
 ```
@@ -269,7 +275,8 @@ parameter and therefore never scoped ([OWN-19](ownership.md#own-19-scoped-values
 (OWN-21) has a `mut` entry. The descriptor checked is the transitive one: it unites the
 descriptors of the scoped callbacks the body invokes or passes on, with `mut` dominating
 view, and a scoped callback that the enclosing function received as a parameter counts as
-a `mut` entry, because its descriptor is its caller's and is not known in this body. A
+a `mut` entry, because its descriptor is its caller's and is not known in this body, unless
+its type is `scoped[view] fn`, whose entries are views ([LANG-13](language.md#lang-13-callables)). A
 capture the body lends `mut`, a `Box` payload reached through it included, is a `mut`
 entry (LANG-14). An `own fn` or `fn` value lends nothing outside its environment, which
 its calls only view ([LANG-14](language.md#lang-14-captures)), so the body may call one.

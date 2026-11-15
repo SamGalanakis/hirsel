@@ -186,7 +186,7 @@ anchor      = "in", place, { ",", place } ;
 place       = name, { ".", name } ;
 type-atom   = type-path, [ "[", nonempty(type-arg), "]" ]
             | "(", ")" | "(", type, ")" | "(", type, ",", list(type), ")"
-            | [ "scoped" | "own", [ "[", bounds, "]" ] ], "fn", "(", list(fn-param), ")",
+            | [ "scoped" | "own", [ "[", ( "view" | bounds ), "]" ] ], "fn", "(", list(fn-param), ")",
               [ "->", type ], [ "waits" ] ;
 type-arg    = type | "in", place | integer ;
 fn-param    = [ "take" | "mut" | "bytes" ], [ name, ":" ], type ;

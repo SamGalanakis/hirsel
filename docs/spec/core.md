@@ -144,8 +144,10 @@ operations it names; nothing else about them may be inferred from an implementat
   capacity is its length; `string.as_bytes` reports its `String`'s capacity, 0 for static
   storage. No view grants spare capacity.
 - **Words.** `list.word_le(b, at)` reads the 8 bytes of `b` from `at` as a little-endian
-  `u64` and fails with `Bounds` unless `at + 8 ≤ len`; it is the only multi-byte load, and
-  there is no store. Byte search, UTF-8 validation and other scans are ordinary Hirsel over
+  `u64` and fails with `Bounds` unless `at + 8 ≤ len`. Its store twin, `list.put_word_le(mut
+  b, x) -> Result[(), Capacity]`, appends `x` as 8 little-endian bytes, growing `b` as
+  [MEM-24](budgets.md#mem-24-logical-charges) says, and on `Capacity` leaves `b` unchanged.
+  They are the only multi-byte load and store. Byte search, UTF-8 validation and other scans are ordinary Hirsel over
   it and the bit counts of [SEM-1](semantics.md#sem-1-integers) (`string.find` is std),
   not engine kernels.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,

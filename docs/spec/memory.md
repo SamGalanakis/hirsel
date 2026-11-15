@@ -488,7 +488,9 @@ their result `U` and what is copied: first `x`'s own type, if it is `U` or `U`'s
 that is `U` or its twin. No match is refused. `clone(x) -> Result[U, Capacity]` makes a
 plain, own or counted `U`: it deep-copies the own parts of the selected value into new
 blocks charged to the current limit and shares its counted edges, a counted root selected
-as `U` included, and keeps the regions of its stable fields. `clone_in(r, x) -> Result[U
+as `U` included, and keeps the regions of its stable fields. A stable reference (`S in r`),
+at the root or as a part, is copied as the reference: the copy shares its block, and
+nothing is allocated for it. `clone_in(r, x) -> Result[U
 in r, Capacity]` makes a stable `U` in `r`. A compact value or sequence is never
 re-encoded at `U`'s own `W`; which bytes are copied follows its type, with no check at run
 time. A value of a streamable type (MEM-12) is copied as exactly its own bytes at its `W`,

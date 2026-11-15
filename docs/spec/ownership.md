@@ -795,7 +795,9 @@ except that a field callback of an `emit` literal is active only while its field
 activation each captured place must be live, and writable for a `mut` capture, and its loan
 is checked as an argument of that call against the other arguments, active loans and
 freezes (OWN-9 to OWN-12). Forwarding a received callback reborrows its loans and creates no
-second loan of the same place. Each activation of a `mut` capture is a `mut` loan of the
+second loan of the same place; a received `scoped[view] fn` activates only view loans, and
+forwarded as an unqualified `scoped fn` it reborrows the same view loans while its receiver
+counts it as unknown ([LANG-13](language.md#lang-13-callables)). Each activation of a `mut` capture is a `mut` loan of the
 captured slot, and a value installed through it, or into a place under it, may read only
 that slot's written anchors (OWN-19), their parts and sub-views of them, as OWN-20 counts
 them, and the regions its type names, as through a `mut` parameter (OWN-11); a captured

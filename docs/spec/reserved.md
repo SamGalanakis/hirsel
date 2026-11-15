@@ -186,7 +186,7 @@ allocator chunk size becomes a logical capacity (MEM-28).
 
 | hook | v1 | state |
 |---|---|---|
-| O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits; authority only through arguments | open: authority facades (R19) and static brands (R24) |
+| O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits; authority only through arguments | open: authority facades (R19), static brands (R24) and callable results anchored to a place ([LANG-13](language.md#lang-13-callables)) |
 | F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; `isolate` (FAIL-16) | open: a single `Result[R, Causes]` form, which needs a per-boundary cause cell; a form that moves owned state into the body and back; `shield` |
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order | open: the content hash of a declaration for stored data is not specified |
 | D, code descriptors | code identity; identity bytes of closed named functions (PROG-9); no address or order dependence | open: `code.revision(s) -> Option[Bytes]`, never part of equality; instance identities |

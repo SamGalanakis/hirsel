@@ -696,8 +696,13 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
                             runtimes="//:hirsel-core-rt-archives", visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py", full=False,
-                            data=["tools/tests/distribution_notices.py"],
-                            files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py"}))
+                            data=["tools/tests/distribution_notices.py", "NOTICES.md", "Cargo.lock",
+                                  "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
+                                  *("//tools/toolchain-dist:licenses/" + name for name in (
+                                      "libc6-dev.copyright", "gcc-13-base.copyright", "common-licenses/LGPL-2.1",
+                                      "common-licenses/GPL-2", "common-licenses/GPL-3"))],
+                            files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py",
+                                       "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
     out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
                             production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "core/tools/std_api_index.py",

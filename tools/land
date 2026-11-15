@@ -97,6 +97,8 @@ CORE_ACCEPTANCE = (
     # native::tests in two halves: the #[ignore] bodies that need the host's
     # openat2, run one per target on the invoking host, and the pool of the rest.
     '//:core-driver-native-openat2', '//:core-driver-native-pool',
+    # NOTICES.md against Cargo.lock, llvm-23.lock and the built installation.
+    '//:gate-distribution-notices',
 )
 # A target literal in a tools/land: the tool on main checks every batch this
 # tree joins, so each one it names must exist in the tree submitted.

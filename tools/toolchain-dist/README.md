@@ -18,16 +18,40 @@ Training checks the retained native hello source and builds it with Cranelift an
 
 The PGO pipeline retains the existing tsrs training structure: instrument, run ordinary source commands, require nonempty profiles, merge, and rebuild with matching symbol metadata. Its training corpus is temporary until the new core has native programs. No compiler performance claim follows from this deletion.
 
-Release packaging writes `notices/manifest.json`, `notices/crates/`,
-`notices/rust/` and `notices/adapted-source/` beside the compiler. Copy or archive
-the **whole output directory**, including `notices/`; there is no user-directory
-installation step. The bare Buck `hirsel-toolchain` target is a build artifact;
-use `tools/toolchain-dist/build` for the redistributable output.
+`NOTICES.md` at the repository root is the distribution's notice inventory. It is
+generated, never edited: `tools/toolchain-dist/notices.py --write [--bundle DIR]`
+derives it from Cargo.lock, Cargo metadata, the Buck link graph,
+`tools/native-toolchain/llvm-23.lock`, the locked LLVM source archive and an
+installation (by default it builds `//:hirsel-toolchain`). The archive is
+`HIRSEL_LLVM_SOURCE_ARCHIVE`, or the copy under `$XDG_CACHE_HOME/hirsel/llvm-source`,
+downloaded from `source_url` and checked against `source_sha256` when absent.
+`notice-sources.json` classifies every file an installation ships (`files`):
+first-party, linked crates (the compiler and the runtime archive, by their
+workspace package and link root) or a native pin (`lib/libLLVM.so.23.1`,
+`bin/ld.lld`). A native pin's notices are the LLVM source tree's license and
+copyright-bearing files (`native_text_rule`) and the texts of the C and C++
+runtimes it links statically, copied from the build host's Ubuntu packages
+into `licenses/`.
 
-`notices.py` walks the compiler's configured Buck link edges and identifies
-crate archives from source edges, then joins them to locked Cargo metadata.
-It excludes build scripts and proc-macro executables, and inventories linked
-inputs before dead-code elimination. It reads license-file inputs and all
+`//:gate-distribution-notices` (land acceptance) fails when a crate Cargo.lock
+reaches from the shipped workspace packages has no row, when a native row is
+not its llvm-23.lock pin, when a vendored text changed, or when the built
+installation has a file no `files` class covers or a native file that is not
+its pin. A dependency change therefore lands with `notices.py --write`.
+
+Release packaging writes `notices/manifest.json`, `notices/crates/`,
+`notices/rust/`, `notices/native/`, `notices/adapted-source/` and a copy of
+`NOTICES.md` beside the compiler. Copy or archive the **whole output
+directory**, including `notices/`; there is no user-directory installation
+step. The bare Buck `hirsel-toolchain` target is a build artifact; use
+`tools/toolchain-dist/build` for the redistributable output. Packaging recomputes
+the whole inventory, refuses when `NOTICES.md` differs, and refuses a bundle
+`check_bundle` does not cover.
+
+`notices.py` walks the compiler's and the runtime's configured Buck link edges
+and identifies crate archives from source edges, then joins them to locked Cargo
+metadata. It excludes build scripts and proc-macro executables, and inventories
+linked inputs before dead-code elimination. It reads license-file inputs and all
 upstream LICENSE/COPYING/COPYRIGHT/NOTICE files (including nested C and assembly
 licenses), plus full text files with embedded copyright or SPDX notices,
 from Cargo's cached archives after checking their Cargo.lock SHA-256.
@@ -36,9 +60,8 @@ license files, required native texts or Rust notices fail packaging and remove
 the incomplete output. No license text is synthesized from a package name or
 SPDX identifier. All supplied alternatives are retained without electing an
 alternative; a missing Cargo license expression is reported as a manifest gap.
-`notice-sources.json` records the bundle boundary and the explicitly required
-mimalloc v3 and ring/BoringSSL/fiat/once_cell texts. Changing the bundle contents
-requires updating that boundary; unexpected top-level files are refused.
+`required_texts` names the explicitly required mimalloc v3 and
+ring/BoringSSL/fiat/once_cell texts.
 
 The manifest records the pinned archive provenance, license expressions,
 upstream text paths and hashes, source/build-input hashes, and every bundled
@@ -46,15 +69,8 @@ file's hash. It has no timestamps, checkout paths or host identifiers. Notice
 collection checks that existing file bytes did not change; compiler identity,
 ordinary std products remain untouched. `hirsel-build.json` records the
 notice manifest hash and a canonical digest of the `core-packages` file map.
-
-The standard bundle does not copy native runtime archives, the link kit, LLVM
-shared libraries, clang or host system libraries. Their external status and
-pin paths are explicit in the manifest. Native checks still select those
-inputs through the existing environment. `tools/native-toolchain/install
---unpack DIR` retains the pinned Debian packages' `usr/share/doc/*/copyright`
-through its full `dpkg -x` extraction. Extending the release to carry any of
-those code objects requires extending the notice inventory too; this collector
-does not claim to cover an added native toolchain tree.
+The host loader, libc, libm, libgcc_s, libstdc++ and libz the compiler and
+libLLVM load are system dependencies and are not shipped.
 
 Prior art: Rust release packaging at rust-lang/rust
 `a7c37f9f0ee5e93396106e9de20f4a86b4154e63`,

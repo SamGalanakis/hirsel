@@ -1,7 +1,38 @@
 {
   "schema": 1,
-  "root": "root//:hirsel-core-driver-bin-hirsel",
-  "scope": "Linux installation prefix (//:hirsel-toolchain): compiler link inputs (Rust and bundled C/assembly, before dead-code elimination), Rust standard library, core packages and runtimes. Build scripts and proc-macro executables are build tools, not linked libraries. Upstream library notices can conservatively cover other targets.",
+  "scope": "Linux installation prefix (//:hirsel-toolchain): every shipped file is classified by `files`. Crate inventories are link inputs (Rust and bundled C/assembly, before dead-code elimination) of the compiler and the runtime archive; build scripts and proc-macro executables are build tools, not linked libraries. Native libraries are the llvm-23.lock pins, with the notices of the source tree they are built from and of the C and C++ runtimes they link statically. Upstream library notices can conservatively cover other targets.",
+  "files": {
+    "hirsel": {
+      "crates": "root//:hirsel-core-driver-bin-hirsel",
+      "package": "hirsel-core-driver",
+      "contents": "the compiler"
+    },
+    "runtime/*/*/libhirsel_core_rt.a": {
+      "crates": "root//:hirsel-core-rt-standalone",
+      "package": "hirsel-core-rt",
+      "contents": "the runtime archive a program links, per target"
+    },
+    "hirsel-core-toolchain.json": {
+      "contents": "the installation record"
+    },
+    "link/*.json": {
+      "contents": "the host link recipe"
+    },
+    "core-packages/*": {
+      "contents": "the core and std package images (Hirsel sources and their checked and compiled products)"
+    },
+    "lib/libLLVM.so.23.1": {
+      "native": "engine_llvm",
+      "contents": "the compiler's LLVM library (tools/native-toolchain/build-libllvm)"
+    },
+    "bin/ld.lld": {
+      "native": "static_lld",
+      "contents": "the linker, a static PIE (tools/native-toolchain/build-static-lld)"
+    },
+    "hirsel.profdata": {
+      "contents": "the profile a PGO build of the compiler used (PGO builds only)"
+    }
+  },
   "bundle_entries": [
     "hirsel",
     "hirsel-core-toolchain.json",
@@ -13,6 +44,63 @@
   ],
   "rust_lock": "tools/buck2/toolchain-lock.json",
   "rust_tree": "tools/buck2/toolchains/rust-files",
+  "llvm_lock": "tools/native-toolchain/llvm-23.lock",
+  "native": {
+    "engine_llvm": {
+      "licenses": [
+        "llvm/LICENSE.TXT"
+      ],
+      "source_dirs": [
+        "llvm/lib",
+        "llvm/include"
+      ],
+      "static": [
+        "glibc",
+        "gcc"
+      ],
+      "static_note": "Linked by the pinned clang and lld against the build host's glibc and GCC; the startup objects, libgcc and libc_nonshared parts linked into it are covered conservatively by both runtimes' texts. libz, libstdc++, libm, libgcc_s and libc are loaded from the host."
+    },
+    "static_lld": {
+      "licenses": [
+        "llvm/LICENSE.TXT",
+        "lld/LICENSE.TXT"
+      ],
+      "source_dirs": [
+        "llvm/lib",
+        "llvm/include",
+        "lld"
+      ],
+      "static": [
+        "glibc",
+        "gcc"
+      ],
+      "static_note": "A static PIE: it contains the build host's glibc (libc.a, libm.a; LGPL-2.1-or-later) and libstdc++, libgcc and libgcc_eh (GPL-3.0-or-later with the GCC Runtime Library Exception)."
+    }
+  },
+  "native_text_rule": "From the locked source archive (source_url, source_sha256): each component's licenses, every file under its source_dirs named LICENSE/COPYING/COPYRIGHT/NOTICE, and every text file there that contains 'copyright', outside test, unittests, docs and utils directories.",
+  "host_runtimes": {
+    "glibc": {
+      "package": "libc6-dev",
+      "version": "2.39-0ubuntu8.12",
+      "distribution": "Ubuntu 24.04",
+      "texts": {
+        "tools/toolchain-dist/licenses/libc6-dev.copyright": "/usr/share/doc/libc6-dev/copyright",
+        "tools/toolchain-dist/licenses/common-licenses/LGPL-2.1": "/usr/share/common-licenses/LGPL-2.1",
+        "tools/toolchain-dist/licenses/common-licenses/GPL-2": "/usr/share/common-licenses/GPL-2"
+      },
+      "source": "The corresponding source is Ubuntu's glibc 2.39-0ubuntu8.12 source package. The rest of each component is built from the locked LLVM source archive by its build script (tools/native-toolchain/build-static-lld with static-lld-elf-only.patch, or build-libllvm), so a recipient can rebuild and relink it against a modified glibc."
+    },
+    "gcc": {
+      "package": "gcc-13-base (libstdc++-13-dev, libgcc-13-dev)",
+      "version": "13.3.0-6ubuntu2~24.04.1",
+      "distribution": "Ubuntu 24.04",
+      "texts": {
+        "tools/toolchain-dist/licenses/gcc-13-base.copyright": "/usr/share/doc/gcc-13-base/copyright",
+        "tools/toolchain-dist/licenses/common-licenses/GPL-3": "/usr/share/common-licenses/GPL-3"
+      },
+      "source": "The corresponding source is Ubuntu's gcc-13 13.3.0-6ubuntu2~24.04.1 source package; the GCC Runtime Library Exception (in the copyright file) applies."
+    }
+  },
   "adapted_source_notices": [
     "third-party/NOTICES.md",
     "third-party/LICENSE.crc32c",
@@ -34,7 +122,7 @@
   },
   "external": [
     {
-      "component": "Host loader, libc, libm, libgcc_s and other DT_NEEDED libraries outside lib/",
+      "component": "Host loader, libc, libm, libgcc_s, libstdc++ and libz (the DT_NEEDED libraries of hirsel and lib/libLLVM.so.23.1)",
       "status": "System dependencies, not copied into the installation."
     }
   ],
@@ -63,9 +151,5 @@
       "upstream": "https://github.com/bytecodealliance/wasmtime/blob/f96eabaa11a06086e4fb779ed1c1688481067ab9/LICENSE",
       "reason": "Published archive omits license text; upstream root license is identical to the same-revision locked donor archive text."
     }
-  },
-  "uncollected_entries": {
-    "lib": "libLLVM and the shared libraries it loads (z3, ICU, libxml2, libffi, libedit, libbsd, zlib, zstd), copied from the pinned Debian packages (tools/native-toolchain/llvm-23.lock, tools/buck2/llvm-runtime-lock.json); their Debian copyright files are not yet collected.",
-    "bin": "bin/ld.lld, the static PIE tools/native-toolchain/build-static-lld makes (llvm-23.lock static_lld); its LLVM and statically linked C library notices are not yet collected."
   }
 }

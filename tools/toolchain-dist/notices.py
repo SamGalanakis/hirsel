@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Collect release notices from the configured link graph and pinned crate archives.
+"""Collect release notices from the configured link graph, pinned crate archives and native pins.
+
+    notices.py --write [--bundle DIR]   rewrite NOTICES.md
 
 No SPDX-to-text substitution: retain the actual upstream texts, including nested
 C/assembly notices. Paths in the result are relative and timestamps are absent.
 """
+import fnmatch
 import hashlib
 import json
 import os
@@ -14,10 +17,15 @@ import subprocess
 import tarfile
 import tempfile
 import tomllib
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = Path(__file__).with_name('notice-sources.json')
 LICENSE_NAME = re.compile(r'^(licen[cs]e|copying|copyright|notice)([._-].*)?$', re.I)
+NOTICES = 'NOTICES.md'
+NATIVE_SKIP = {'test', 'tests', 'unittests', 'docs', 'utils'}
+# Written only by a PGO-use build.
+OPTIONAL_ENTRIES = {'hirsel.profdata'}
 
 
 def sha256(path):
@@ -133,28 +141,231 @@ def file_inventory(bundle):
             and p.name != 'hirsel-build.json'}
 
 
-def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None):
+def lock_records(path):
+    """llvm-23.lock: one record per line, `key field...`; `#` starts a comment."""
+    records = {}
+    for line in path.read_text().splitlines():
+        fields = line.split('#', 1)[0].split()
+        if fields:
+            records.setdefault(fields[0], []).append(fields[1:])
+    return records
+
+
+def lock_closure(lock, packages):
+    """Every Cargo.lock registry package the named workspace packages reach,
+    by any dependency kind and for any platform: the lock does not say which."""
+    named = {}
+    for package in lock['package']:
+        named.setdefault(package['name'], []).append(package)
+
+    def find(dependency):
+        name, *rest = dependency.split(' ')
+        candidates = [p for p in named.get(name, []) if not rest or p['version'] == rest[0]]
+        if len(candidates) != 1:
+            raise ValueError(f'Cargo.lock: cannot resolve dependency {dependency!r}')
+        return candidates[0]
+
+    seen, pending = {}, [find(name) for name in packages]
+    while pending:
+        package = pending.pop()
+        key = package['name'] + '-' + package['version']
+        if key not in seen:
+            seen[key] = package
+            pending += [find(d) for d in package.get('dependencies', [])]
+    return {key: package for key, package in sorted(seen.items()) if 'source' in package}
+
+
+def native_texts(archive, sources):
+    """The rule in notice-sources.json `native_text_rule`, over the locked source archive."""
+    components = sources['native'].values()
+    directories = {d for component in components for d in component['source_dirs']}
+    named = {path for component in components for path in component['licenses']}
+    texts = {}
+    with tarfile.open(archive) as source:
+        for member in source:
+            parts = PurePosixPath(member.name).parts[1:]
+            if not member.isfile() or not parts or '..' in parts:
+                continue
+            relative = '/'.join(parts)
+            if relative in named:
+                texts[relative] = source.extractfile(member).read()
+            if not any(relative.startswith(d + '/') for d in directories) or NATIVE_SKIP & set(parts[:-1]):
+                continue
+            data = source.extractfile(member).read()
+            if LICENSE_NAME.fullmatch(parts[-1]) or (b'\0' not in data and re.search(rb'copyright', data, re.I)):
+                texts[relative] = data
+    if named - texts.keys():
+        raise ValueError(f'source archive lacks license texts: {sorted(named - texts.keys())}')
+    return texts
+
+
+def llvm_archive(pins):
+    """The locked LLVM source archive: HIRSEL_LLVM_SOURCE_ARCHIVE, or the cache, or a download into it."""
+    url, digest = pins['source_url'][0][0], pins['source_sha256'][0][0]
+    given = os.environ.get('HIRSEL_LLVM_SOURCE_ARCHIVE')
+    cache = Path(os.environ.get('XDG_CACHE_HOME') or Path.home() / '.cache') / 'hirsel/llvm-source'
+    path = Path(given) if given else cache / (digest + '.tar.xz')
+    if not path.exists():
+        cache.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=cache, delete=False) as partial, urllib.request.urlopen(url) as response:
+            shutil.copyfileobj(response, partial)
+        if sha256(Path(partial.name)) != digest:
+            os.unlink(partial.name)
+            raise ValueError(f'{url} does not have the locked SHA-256')
+        os.replace(partial.name, path)
+    if sha256(path) != digest:
+        raise ValueError(f'{path} does not have the locked source_sha256')
+    return path
+
+
+def inventory(root, sources, recorded=None, linked=None, metadata=None, texts=None):
+    """NOTICES.md's inventory, from Cargo.lock, llvm-23.lock and notice-sources.json.
+
+    `linked` (pattern -> linked crates, from the link graph), `metadata` (Cargo's
+    license expressions) and `texts` (llvm-project path -> bytes) need Buck,
+    Cargo and the source archive; without one, its facts are taken from `recorded`.
+    """
+    recorded = recorded or {}
+    files = sources['files']
+    lock = tomllib.loads((root / 'Cargo.lock').read_text())
+    crate_files = {pattern: entry for pattern, entry in files.items() if 'crates' in entry}
+    closure = lock_closure(lock, [entry['package'] for entry in crate_files.values()])
+    if linked is not None:
+        stray = set().union(*map(set, linked.values())) - closure.keys()
+        if stray:
+            raise ValueError(f'linked crates outside the Cargo.lock closure: {sorted(stray)}')
+    known = {row['crate']: row for row in recorded.get('crates', [])}
+    licenses = {p['name'] + '-' + p['version']: p['license'] for p in metadata['packages'] if p['source']} if metadata else None
+    crates = []
+    for name, package in closure.items():
+        old = known.get(name, {})
+        crates.append(dict(
+            crate=name, checksum=package['checksum'],
+            license=licenses.get(name) if licenses is not None else old.get('license'),
+            linked=sorted(p for p in crate_files if name in linked[p]) if linked is not None else old.get('linked')))
+    pins = lock_records(root / sources['llvm_lock'])
+    source = dict(url=pins['source_url'][0][0], sha256=pins['source_sha256'][0][0])
+    old_native = {row['path']: row for row in recorded.get('native', [])}
+    native = []
+    for pattern, entry in sorted(files.items()):
+        if 'native' not in entry:
+            continue
+        component = sources['native'][entry['native']]
+        (digest, size, asset), = pins[entry['native']]
+        if texts is None:
+            old = old_native.get(pattern, {})
+            kept = old.get('texts') if old.get('source') == source else None
+        else:
+            kept = [dict(path=path, sha256=hashlib.sha256(data).hexdigest()) for path, data in sorted(texts.items())
+                    if path in component['licenses'] or any(path.startswith(d + '/') for d in component['source_dirs'])]
+        native.append(dict(path=pattern, lock=entry['native'], sha256=digest, size=int(size), asset=asset,
+                           source=source, static=component['static'], note=component['static_note'], texts=kept))
+    runtimes = {name: dict({k: v for k, v in runtime.items() if k != 'texts'},
+                           texts=[dict(path=path, upstream=upstream, sha256=sha256(root / path))
+                                  for path, upstream in sorted(runtime['texts'].items())])
+                for name, runtime in sorted(sources['host_runtimes'].items())}
+    return dict(schema=1, files=[dict(path=pattern, **entry) for pattern, entry in files.items()],
+                crates=crates, native=native, host_runtimes=runtimes, external=sources['external'])
+
+
+def render(recorded):
+    """NOTICES.md: tables for readers, then the inventory they are rendered from."""
+    out = ['# Distribution notices', '',
+           'Generated by `tools/toolchain-dist/notices.py --write`; edit `tools/toolchain-dist/notice-sources.json`, '
+           'not this file. `//:gate-distribution-notices` fails when this file is not what Cargo.lock, '
+           '`tools/native-toolchain/llvm-23.lock` and the installation derive, and release packaging '
+           '(`tools/toolchain-dist/build`) refuses an installation it does not cover. Packaging retains every '
+           'text named here under the installation\'s `notices/`.', '',
+           'Code Hirsel adapts into its own sources is listed in [third-party/NOTICES.md](third-party/NOTICES.md). '
+           'Hirsel itself is under [LICENSE](LICENSE).', '',
+           '## Shipped files', '', '| Path | Contents | Notices |', '|---|---|---|']
+    for entry in recorded['files']:
+        if 'native' in entry:
+            notices = f'native component `{entry["native"]}`, below'
+        elif 'crates' in entry:
+            notices = f'Hirsel; the Rust standard library; crates linked into `{entry["path"]}`, below'
+        else:
+            notices = 'Hirsel'
+        out.append(f'| `{entry["path"]}` | {entry["contents"]} | {notices} |')
+    out += ['', '## Rust crates', '',
+            'Every registry package in Cargo.lock that the shipped files\' workspace packages reach, by any '
+            'dependency kind and for any platform. "Linked into" names the shipped files whose link inputs '
+            'include the crate; one linked into none is a build script, proc macro, test or other-platform '
+            'dependency and ships no code. The Rust standard library\'s own notices are retained from the pinned '
+            'toolchain.', '', '| Crate | License | Linked into | Cargo.lock checksum |', '|---|---|---|---|']
+    for row in recorded['crates']:
+        into = ', '.join(f'`{p}`' for p in row['linked'] or []) or 'none'
+        out.append(f'| {row["crate"]} | {row["license"] or "none declared"} | {into} | `{row["checksum"]}` |')
+    out += ['', '## Native components', '']
+    for row in recorded['native']:
+        out += [f'### `{row["path"]}`', '',
+                f'llvm-23.lock `{row["lock"]}`: `{row["asset"]}`, {row["size"]} bytes, SHA-256 `{row["sha256"]}`. '
+                f'Built from {row["source"]["url"]} (SHA-256 `{row["source"]["sha256"]}`), whose notices follow. '
+                f'Runtimes linked statically: {", ".join(row["static"])}. {row["note"]}', '',
+                '| Source file | SHA-256 |', '|---|---|']
+        out += [f'| `{text["path"]}` | `{text["sha256"]}` |' for text in row['texts'] or []]
+        out.append('')
+    out += ['## C and C++ runtimes linked statically', '']
+    for name, runtime in recorded['host_runtimes'].items():
+        out += [f'### {name}', '', f'{runtime["distribution"]} {runtime["package"]} {runtime["version"]}. {runtime["source"]}', '',
+                '| Text | From | SHA-256 |', '|---|---|---|']
+        out += [f'| [`{t["path"]}`]({t["path"]}) | `{t["upstream"]}` | `{t["sha256"]}` |' for t in runtime['texts']]
+        out.append('')
+    out += ['## Not shipped', '']
+    out += [f'- {item["component"]}: {item["status"]}' for item in recorded['external']]
+    out += ['', '## Inventory', '', '```json', json.dumps(recorded, indent=1, sort_keys=True), '```', '']
+    return '\n'.join(out)
+
+
+def recorded(root):
+    text = (root / NOTICES).read_text()
+    match = re.search(r'\n```json\n(.*)\n```\n$', text, re.S)
+    if not match:
+        raise ValueError(f'{NOTICES} has no inventory')
+    return json.loads(match[1]), text
+
+
+def check_bundle(bundle, sources, inventory):
+    """Every shipped file is in exactly one `files` class, and each native file is its pin."""
+    allowed = set(sources['bundle_entries']) | OPTIONAL_ENTRIES | {'notices', 'hirsel-build.json'}
+    present = {p.name for p in bundle.iterdir()}
+    if present - allowed:
+        raise ValueError(f'uninventoried bundle entries: {sorted(present - allowed)}')
+    if set(sources['bundle_entries']) - present - OPTIONAL_ENTRIES:
+        raise ValueError(f'missing bundle entries: {sorted(set(sources["bundle_entries"]) - present - OPTIONAL_ENTRIES)}')
+    files = file_inventory(bundle)
+    for path in files:
+        classes = [p for p in sources['files'] if fnmatch.fnmatchcase(path, p)]
+        if len(classes) != 1:
+            raise ValueError(f'{path}: {"no notice covers this shipped file" if not classes else "classified twice: " + str(classes)}')
+    for row in inventory['native']:
+        if files.get(row['path']) != row['sha256'] or (bundle / row['path']).stat().st_size != row['size']:
+            raise ValueError(f'{row["path"]} is not the llvm-23.lock {row["lock"]} pin its notices cover')
+    for pattern, entry in sources['files'].items():
+        if 'crates' in entry and not any(fnmatch.fnmatchcase(path, pattern) for path in files):
+            raise ValueError(f'no shipped file matches {pattern}')
+    return files
+
+
+def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None, archive=None):
     """Only add notices; refuse missing inputs without leaving a partial directory."""
     sources = sources or json.loads(SOURCES.read_text())
     cargo_home = cargo_home or Path(os.environ.get('CARGO_HOME', Path.home() / '.cargo'))
-    inventory = linked_crates(graph, sources['root'])
+    linked = {pattern: linked_crates(graph, entry['crates']) for pattern, entry in sources['files'].items() if 'crates' in entry}
     packages = {p['name'] + '-' + p['version']: p for p in metadata['packages'] if p['source']}
     lock = tomllib.loads((root / 'Cargo.lock').read_text())
     locked = {p['name'] + '-' + p['version']: p for p in lock['package'] if 'source' in p}
-    allowed = set(sources['bundle_entries']) | {'notices', 'hirsel-build.json', 'hirsel.profdata'}
-    unexpected = {p.name for p in bundle.iterdir()} - allowed
-    if unexpected:
-        raise ValueError(f'uninventoried bundle entries: {sorted(unexpected)}')
-    missing = set(sources['bundle_entries']) - {p.name for p in bundle.iterdir()}
-    if missing:
-        raise ValueError(f'missing bundle entries: {sorted(missing)}')
-    uncollected = sorted(set(sources.get('uncollected_entries', {})) & {p.name for p in bundle.iterdir()})
-    if uncollected:
-        raise ValueError('bundle entries without collected notices: ' + '; '.join(
-            f'{name}: {sources["uncollected_entries"][name]}' for name in uncollected))
-    before = file_inventory(bundle)
+    written, text = recorded(root)
+    before = check_bundle(bundle, sources, inventory(root, sources, written))
     if not before or 'hirsel' not in before:
         raise ValueError('bundle has no compiler')
+    native = {}
+    if any('native' in entry for entry in sources['files'].values()):
+        pins = lock_records(root / sources['llvm_lock'])
+        native = native_texts(archive or llvm_archive(pins), sources)
+    current = inventory(root, sources, linked=linked, metadata=metadata, texts=native)
+    if current != written or render(written) != text:
+        raise ValueError(f'{NOTICES} is stale: run tools/toolchain-dist/notices.py --write')
     destination = bundle / 'notices'
     if destination.exists():
         raise ValueError('notices already exists; use a fresh bundle')
@@ -170,17 +381,22 @@ def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None):
             path.write_bytes(data)
             return dict(path=name, sha256=hashlib.sha256(data).hexdigest())
 
-        for name, targets in inventory.items():
+        shipped = {}
+        for pattern, crates in linked.items():
+            for name, targets in crates.items():
+                shipped.setdefault(name, set()).update(targets)
+        for name, targets in sorted(shipped.items()):
+            targets = sorted(targets)
             package, pin = packages[name], locked[name]
             if package['source'] != pin['source'] or not pin['source'].startswith('registry+'):
                 raise ValueError(f'{name}: unsupported or mismatched package source')
-            archive = pinned_archive(cargo_home, name, pin['checksum'])
+            archive_path = pinned_archive(cargo_home, name, pin['checksum'])
             fallback = sources.get('archive_omissions', {}).get(name)
-            texts = crate_texts(archive, pin['checksum'], package,
+            texts = crate_texts(archive_path, pin['checksum'], package,
                                 sources['required_texts'].get(name, []), allow_empty=bool(fallback))
             used_fallback = bool(fallback) and not any(LICENSE_NAME.fullmatch(PurePosixPath(path).name) for path in texts)
             if used_fallback:
-                texts.update(omitted_text(archive, name, fallback, cargo_home, locked))
+                texts.update(omitted_text(archive_path, name, fallback, cargo_home, locked))
             record = dict(name=package['name'], version=package['version'],
                           source=pin['source'], archive_sha256=pin['checksum'],
                           url=f"https://static.crates.io/crates/{package['name']}/{package['version']}/download",
@@ -193,6 +409,19 @@ def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None):
             if not package['license']:
                 record['gap'] = 'No Cargo license expression; inspect upstream license files.'
             manifest['components'].append(record)
+
+        for row in current['native']:
+            manifest['components'].append(dict(
+                name=row['path'], lock=row['lock'], sha256=row['sha256'], source=row['source'], static=row['static'],
+                selection=sources['native_text_rule'],
+                texts=[dict(upstream=t['path'], **retain('native/llvm-project/' + t['path'], native[t['path']]))
+                       for t in row['texts']]))
+        for name, runtime in current['host_runtimes'].items():
+            manifest['components'].append(dict(
+                name=name, package=runtime['package'], version=runtime['version'], source=runtime['source'],
+                texts=[dict(upstream=t['upstream'], **retain(f'native/{name}/' + PurePosixPath(t['path']).name,
+                                                            (root / t['path']).read_bytes()))
+                       for t in runtime['texts']]))
 
         rust_lock = json.loads((root / sources['rust_lock']).read_text())
         rust = root / sources['rust_tree']
@@ -213,7 +442,8 @@ def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None):
         for name in sources['adapted_source_notices']:
             retain('adapted-source/' + name, (root / name).read_bytes())
         retain('HIRSEL-LICENSE', (root / 'LICENSE').read_bytes())
-        for name in [sources['rust_lock'], 'tools/toolchain-dist/notice-sources.json',
+        retain(NOTICES, text.encode())
+        for name in [sources['rust_lock'], sources['llvm_lock'], 'tools/toolchain-dist/notice-sources.json',
                      'tools/toolchain-dist/notices.py', 'Cargo.toml',
                      *[pin for component in sources['external'] for pin in component.get('pins', [])], *sorted(str(p.relative_to(root)) for p in (root / 'crates').glob('*/Cargo.toml')),
                      *sorted(str(p.relative_to(root)) for p in (root / 'third-party/fixups').rglob('*') if p.is_file())]:
@@ -226,13 +456,45 @@ def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None):
     return manifest
 
 
-def collect(bundle, mode):
+def facts(mode='off'):
+    """The link graph of every `crates` root and Cargo's metadata: the inputs only Buck and Cargo know."""
+    sources = json.loads(SOURCES.read_text())
+    roots = [entry['crates'] for entry in sources['files'].values() if 'crates' in entry]
     configuration = ['--target-platforms', '//tools/buck2:dist', '-c', 'hirsel.dist_pgo=' + mode]
     graph = json.loads(subprocess.check_output([
         str(ROOT / '.buck2/bin/buck2'), 'cquery', *configuration,
-        'deps(' + json.loads(SOURCES.read_text())['root'] + ')',
+        ' + '.join(f'deps({root})' for root in roots),
         '--output-attribute', r'^(buck\.deps|deps|exported_deps|named_deps|flagged_deps|proc_macro)$', '--json'], cwd=ROOT))
+    # Unfiltered: the inventory names every locked crate, other platforms' included.
     metadata = json.loads(subprocess.check_output([
-        os.environ.get('CARGO', 'cargo'), 'metadata', '--locked', '--format-version', '1',
-        '--filter-platform', 'x86_64-unknown-linux-gnu'], cwd=ROOT))
-    return generate(bundle, graph, metadata)
+        os.environ.get('CARGO', 'cargo'), 'metadata', '--locked', '--format-version', '1'], cwd=ROOT))
+    return graph, metadata
+
+
+def collect(bundle, mode):
+    return generate(bundle, *facts(mode))
+
+
+def write(bundle):
+    """Rewrite NOTICES.md from the lock files, Buck, Cargo, the source archive and an installation."""
+    sources = json.loads(SOURCES.read_text())
+    graph, metadata = facts()
+    linked = {pattern: linked_crates(graph, entry['crates']) for pattern, entry in sources['files'].items() if 'crates' in entry}
+    pins = lock_records(ROOT / sources['llvm_lock'])
+    current = inventory(ROOT, sources, linked=linked, metadata=metadata,
+                        texts=native_texts(llvm_archive(pins), sources))
+    check_bundle(bundle, sources, current)
+    (ROOT / NOTICES).write_text(render(current))
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Rewrite NOTICES.md.')
+    parser.add_argument('--write', action='store_true', required=True)
+    parser.add_argument('--bundle', type=Path, help='an installation (default: build //:hirsel-toolchain)')
+    args = parser.parse_args()
+    if args.bundle is None:
+        built = subprocess.check_output([str(ROOT / '.buck2/bin/buck2'), 'build', '//:hirsel-toolchain',
+                                         '--show-full-simple-output'], cwd=ROOT, text=True)
+        args.bundle = Path(built.strip())
+    write(args.bundle)

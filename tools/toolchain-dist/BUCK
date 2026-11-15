@@ -4,3 +4,7 @@
  for _ in [0] if read_root_config("hirsel", "dist_pgo", "off") == "use"]
 
 export_file(name = "notices.py", visibility = ["PUBLIC"])
+
+# The notices gate reads these at their repository paths.
+[export_file(name = path, src = path, mode = "reference", visibility = ["PUBLIC"])
+ for path in ["notice-sources.json"] + glob(["licenses/**"])]

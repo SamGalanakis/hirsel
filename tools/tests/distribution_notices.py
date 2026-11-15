@@ -46,9 +46,14 @@ class Notices(unittest.TestCase):
                             manifest_path='/irrelevant/cache/example-1.0/Cargo.toml')
         self.metadata = dict(packages=[self.package])
         self.write_lock()
-        self.sources = dict(root='root//:compiler', scope='fixture', bundle_entries=['hirsel', 'hirsel-std.products'],
-                            rust_lock='rust-pin.json', rust_tree='rust',
+        self.sources = dict(scope='fixture', bundle_entries=['hirsel', 'hirsel-std.products'],
+                            files={'hirsel': dict(crates='root//:compiler', package='compiler', contents='the compiler'),
+                                   'hirsel-std.products/*': dict(contents='products')},
+                            rust_lock='rust-pin.json', rust_tree='rust', llvm_lock='llvm.lock', native={},
+                            native_text_rule='fixture', host_runtimes={},
                             required_texts={}, adapted_source_notices=['third-party/NOTICES.md'], external=[])
+        (self.root / 'llvm.lock').write_text('source_url https://example/llvm.tar.xz\nsource_sha256 0\n'
+                                             f'static_lld {notices.hashlib.sha256(b"pinned linker").hexdigest()} 13 ld.lld\n')
         self.graph = {
             'root//:compiler (dist#1)': {'deps': ['root//third-party:alias (dist#1)', 'root//:macro (host#2)']},
             'root//third-party:alias (dist#1)': {'buck.deps': ['root//third-party:library (dist#1)']},
@@ -68,15 +73,24 @@ class Notices(unittest.TestCase):
 
     def write_lock(self):
         (self.root / 'Cargo.lock').write_text(
+            '[[package]]\nname = "compiler"\nversion = "0.1.0"\ndependencies = ["example"]\n\n'
             '[[package]]\nname = "example"\nversion = "1.0"\nsource = "registry+test"\n'
             f'checksum = "{notices.sha256(self.crate)}"\n')
 
-    def generate(self, bundle=None):
+    def write_notices(self, archive=None):
+        # NOTICES.md as `notices.py --write` leaves it for this fixture.
+        linked = {'hirsel': notices.linked_crates(self.graph, 'root//:compiler')}
+        texts = notices.native_texts(archive, self.sources) if archive else {}
+        (self.root / 'NOTICES.md').write_text(notices.render(notices.inventory(
+            self.root, self.sources, linked=linked, metadata=self.metadata, texts=texts)))
+
+    def generate(self, bundle=None, archive=None):
+        self.write_notices(archive)
         return notices.generate(bundle or self.bundle, self.graph, self.metadata,
-                                self.root, self.home, self.sources)
+                                self.root, self.home, self.sources, archive)
 
     def test_inventory_uses_link_edges_and_excludes_proc_macro(self):
-        self.assertEqual(notices.linked_crates(self.graph, self.sources['root']),
+        self.assertEqual(notices.linked_crates(self.graph, 'root//:compiler'),
                          {'example-1.0': ['root//third-party:library']})
 
     def test_determinism_and_relocation_preserve_objects_and_native_texts(self):
@@ -142,6 +156,49 @@ class Notices(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'uninventoried bundle entries'):
             self.generate()
 
+    def test_unclassified_file_in_a_known_entry_refuses(self):
+        (self.bundle / 'hirsel-std.products/nested').mkdir()
+        (self.bundle / 'hirsel-std.products/nested/libz.so.1').write_bytes(b'extra code')
+        self.sources['files'] = {'hirsel': self.sources['files']['hirsel'],
+                                 'hirsel-std.products/query-product': dict(contents='products')}
+        with self.assertRaisesRegex(ValueError, 'libz.so.1: no notice covers'):
+            self.generate()
+
+    def test_native_file_ships_its_pinned_source_texts_and_refuses_other_bytes(self):
+        source = self.root / 'llvm.tar.xz'
+        with tarfile.open(source, 'w:xz') as output:
+            for name, data in {'llvm/LICENSE.TXT': b'Apache-2.0 WITH LLVM-exception terms',
+                               'llvm/lib/Support/regcomp.c': b'/* Copyright (c) 1992 Henry Spencer */',
+                               'llvm/lib/Support/plain.cpp': b'// Part of the LLVM Project',
+                               'llvm/lib/Support/test/x.c': b'/* Copyright test only */'}.items():
+                member = tarfile.TarInfo('llvm-project/' + name)
+                member.size = len(data)
+                output.addfile(member, io.BytesIO(data))
+        (self.root / 'llvm.lock').write_text(f'source_url https://example/llvm.tar.xz\nsource_sha256 {notices.sha256(source)}\n'
+                                             f'static_lld {notices.hashlib.sha256(b"pinned linker").hexdigest()} 13 ld.lld\n')
+        self.sources['bundle_entries'].append('bin')
+        self.sources['files']['bin/ld.lld'] = dict(native='static_lld', contents='the linker')
+        self.sources['native'] = dict(static_lld=dict(licenses=['llvm/LICENSE.TXT'], source_dirs=['llvm/lib'],
+                                                      static=[], static_note=''))
+        (self.bundle / 'bin').mkdir()
+        (self.bundle / 'bin/ld.lld').write_bytes(b'pinned linker')
+        copy = self.root / 'copy'
+        shutil.copytree(self.bundle, copy)
+        self.generate(archive=source)
+        retained = self.bundle / 'notices/native/llvm-project'
+        self.assertEqual(sorted(p.relative_to(retained).as_posix() for p in retained.rglob('*') if p.is_file()),
+                         ['llvm/LICENSE.TXT', 'llvm/lib/Support/regcomp.c'])
+        (copy / 'bin/ld.lld').write_bytes(b'another linker')
+        with self.assertRaisesRegex(ValueError, 'not the llvm-23.lock static_lld pin'):
+            self.generate(copy, archive=source)
+        self.assertFalse((copy / 'notices').exists())
+
+    def test_stale_notices_refuse(self):
+        self.write_notices()
+        self.package['license'] = 'MIT'
+        with self.assertRaisesRegex(ValueError, 'NOTICES.md is stale'):
+            notices.generate(self.bundle, self.graph, self.metadata, self.root, self.home, self.sources)
+
     def fallback_fixture(self):
         data = b'actual same-revision upstream terms'
         import hashlib
@@ -181,5 +238,25 @@ class Notices(unittest.TestCase):
         self.assertIn('no alternative license elected', record['selection'])
 
 
+class Repository(unittest.TestCase):
+    """The checked-in NOTICES.md against this tree's lock files and the built installation."""
+
+    def test_notices_cover_every_locked_crate_and_shipped_file(self):
+        sources = json.loads((ROOT / 'tools/toolchain-dist/notice-sources.json').read_text())
+        written, text = notices.recorded(ROOT)
+        derived = notices.inventory(ROOT, sources, written)
+        crates = lambda inventory: {(row['crate'], row['checksum']) for row in inventory['crates']}
+        self.assertEqual(crates(derived) - crates(written), set(), 'locked crates NOTICES.md does not cover')
+        self.assertEqual(derived, written, 'NOTICES.md is stale: run tools/toolchain-dist/notices.py --write')
+        self.assertEqual(notices.render(written), text)
+        notices.check_bundle(Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']), sources, written)
+
+
 if __name__ == '__main__':
-    unittest.main()
+    import argparse
+    import sys
+    # Land acceptance runs every suite with --test-threads 1; these tests run serially.
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test-threads', type=int, choices=[1], default=1)
+    _, rest = parser.parse_known_args()
+    unittest.main(argv=sys.argv[:1] + rest)

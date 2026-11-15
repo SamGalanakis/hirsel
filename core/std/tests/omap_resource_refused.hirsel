@@ -1,0 +1,5 @@
+// An actual std.omap instantiation, checked by tools/omap_bench.py --check-refusal.
+// The front reports LANG-12, required shareable, on the HostFile argument.
+pub fn rejected(m: std.omap.OMap[u64, HostFile]) -> u64 {
+    0
+}

@@ -1,0 +1,468 @@
+// Public persistent-map laws against a sorted-list model.
+fn put(mut ids: u64, m: omap.OMap[u64, u64], k: u64, v: u64) -> omap.OMap[u64, u64] {
+    result.unwrap(omap.insert(mut ids, m, k, v))
+}
+
+fn model(old: List[(u64, u64)], key: u64, value: u64, deleting: bool) -> List[(u64, u64)] {
+    let mut out: List[(u64, u64)] = result.unwrap(list.with_capacity(list.len(old) + 1))
+    let mut installed = deleting
+    for pair in old {
+        if !installed && key < pair.0 {
+            result.unwrap(list.push(mut out, (key, value)))
+            installed = true
+        }
+        if pair.0 == key {
+            if !deleting {
+                result.unwrap(list.push(mut out, (key, value)))
+            }
+            installed = true
+        } else {
+            result.unwrap(list.push(mut out, pair))
+        }
+    }
+    if !installed {
+        result.unwrap(list.push(mut out, (key, value)))
+    }
+    out
+}
+
+fn equal(m: omap.OMap[u64, u64], xs: List[(u64, u64)]) -> bool {
+    if omap.len(m) != list.len(xs) {
+        return false
+    }
+    let mut rows = result.unwrap(omap.range(m, Unbounded, Unbounded))
+    for pair in xs {
+        match result.unwrap(omap.next(mut rows)) {
+            Some((k, v)) => if k != pair.0 || v != pair.1 {
+                return false
+            },
+            None => return false,
+        }
+        match omap.get(m, pair.0) {
+            Some(v) => if v != pair.1 {
+                return false
+            },
+            None => return false,
+        }
+    }
+    if let Some(_) = result.unwrap(omap.next(mut rows)) {
+        return false
+    }
+    if list.len(xs) == 0 {
+        if let Some(_) = omap.first(m) {
+            return false
+        }
+        if let Some(_) = omap.last(m) {
+            return false
+        }
+    } else {
+        match omap.first(m) {
+            Some((k, v)) => if k != xs[0].0 || v != xs[0].1 {
+                return false
+            },
+            None => return false
+        }
+        let end = list.len(xs) - 1
+        match omap.last(m) {
+            Some((k, v)) => if k != xs[end].0 || v != xs[end].1 {
+                return false
+            },
+            None => return false
+        }
+    }
+    true
+}
+
+fn key_at(n: Arc[omap.Node[u64, u64]], i: u64) -> u64 {
+    match omap.node_key(n, i) {
+        Some(k) => k,
+        None => fail("missing node key")
+    }
+}
+
+fn value_at(n: Arc[omap.Node[u64, u64]], i: u64) -> u64 {
+    match omap.node_value(n, i) {
+        Some(v) => v,
+        None => fail("missing node value")
+    }
+}
+
+fn nodes(n: Arc[omap.Node[u64, u64]], is_root: bool) -> bool {
+    let count = omap.node_count(n)
+    if count == 0 || count > 32 || (!is_root && count < 16) {
+        return false
+    }
+    let mut size: u64 = 0
+    let level = omap.node_level(n)
+    for i in 0 .. count {
+        if level == 0 {
+            if let None = omap.node_value(n, i) {
+                return false
+            }
+            size += 1
+        } else {
+            let c = option.unwrap(omap.node_child(n, i))
+            if omap.node_id(c) >= omap.node_id(n) || omap.node_level(c) + 1 != level || !nodes(c, false) {
+                return false
+            }
+            if key_at(n, i) != key_at(c, 0) {
+                return false
+            }
+            size += omap.node_len(c)
+        }
+        if i > 0 && key_at(n, i - 1) >= key_at(n, i) {
+            return false
+        }
+    }
+    size == omap.node_len(n)
+}
+
+// Four independent generators; after each operation compare EVERY held version
+// with the simple sorted-list model, including all earlier snapshots.
+// expect: run held_version_sequences() = true
+fn held_version_sequences() -> bool {
+    for seed in 0u64 .. 4 {
+        let mut ids: u64 = 0
+        let mut m: omap.OMap[u64, u64] = omap.new()
+        let mut xs: List[(u64, u64)] = list.new()
+        let mut versions: List[omap.OMap[u64, u64]] = result.unwrap(list.with_capacity(97))
+        let mut models: List[List[(u64, u64)]] = result.unwrap(list.with_capacity(97))
+        result.unwrap(list.push(mut versions, omap.snapshot(m)))
+        result.unwrap(list.push(mut models, list.new()))
+        let mut state = seed + 1
+        for step in 0u64 .. 96 {
+            state = int.wrapping_add(int.wrapping_mul(state, 6364136223846793005u64), 1442695040888963407u64)
+            let key = (state / 65536) % 70
+            let deleting = (state / 256) % 3 == 0
+            m = if deleting {
+                result.unwrap(omap.remove(mut ids, m, key))
+            } else {
+                put(mut ids, m, key, step + 1)
+            }
+            xs = model(xs, key, step + 1, deleting)
+            result.unwrap(list.push(mut versions, omap.snapshot(m)))
+            let copied: Result[List[(u64, u64)], Capacity] = clone(xs)
+            result.unwrap(list.push(mut models, result.unwrap(take copied)))
+            for i in 0 .. list.len(versions) {
+                if !equal(versions[i], models[i]) {
+                    return false
+                }
+            }
+            if let Some(n) = omap.root(m) {
+                if !nodes(n, true) {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
+// Monotone and reverse insertions force root splits; both deletion directions
+// force redistribution, merges and root collapse while a full snapshot lives.
+// expect: run split_merge_collapse() = true
+fn split_merge_collapse() -> bool {
+    for direction in 0u64 .. 2 {
+        let mut ids: u64 = 0
+        let mut m: omap.OMap[u64, u64] = omap.new()
+        for i in 0u64 .. 1100 {
+            let k = if direction == 0 {
+                i
+            } else {
+                1099 - i
+            }
+            m = put(mut ids, m, k, k + 1)
+        }
+        let pinned = omap.snapshot(m)
+        if omap.node_level(option.unwrap(omap.root(m))) < 2 {
+            return false
+        }
+        for i in 0u64 .. 1100 {
+            let k = if direction == 0 {
+                i
+            } else {
+                1099 - i
+            }
+            m = result.unwrap(omap.remove(mut ids, m, k))
+            if omap.len(m) != 1099 - i {
+                return false
+            }
+            if let Some(n) = omap.root(m) {
+                if !nodes(n, true) {
+                    return false
+                }
+            }
+        }
+        if omap.len(m) != 0 || omap.len(pinned) != 1100 {
+            return false
+        }
+        for i in 0u64 .. 1100 {
+            if option.unwrap(omap.get(pinned, i)) != i + 1 {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// Inclusive/exclusive/unbounded endpoints, empty/reversed ranges and missing
+// endpoints exercise cursor seek through internal nodes and leaf transitions.
+// expect: run range_endpoints() = true
+fn range_endpoints() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    for i in 0u64 .. 160 {
+        m = put(mut ids, m, i * 2, i + 1)
+    }
+    for lo in 0u64 .. 3 {
+        for hi in 0u64 .. 3 {
+            let lower: omap.Bound[u64] = if lo == 0 {
+                Unbounded
+            } else if lo == 1 {
+                Included(64)
+            } else {
+                Excluded(64)
+            }
+            let upper: omap.Bound[u64] = if hi == 0 {
+                Unbounded
+            } else if hi == 1 {
+                Included(130)
+            } else {
+                Excluded(130)
+            }
+            let mut c = result.unwrap(omap.range(m, take lower, take upper))
+            for i in 0u64 .. 160 {
+                let k = i * 2
+                let wanted = (lo == 0 || (lo == 1 && k >= 64) || (lo == 2 && k > 64)) && (hi == 0 || (hi == 1 && k <= 130) || (hi == 2 && k < 130))
+                if wanted {
+                    match result.unwrap(omap.next(mut c)) {
+                        Some((a, b)) => if a != k || b != i + 1 {
+                            return false
+                        },
+                        None => return false,
+                    }
+                }
+            }
+            if let Some(_) = result.unwrap(omap.next(mut c)) {
+                return false
+            }
+        }
+    }
+    let mut empty = result.unwrap(omap.range(m, Included(100), Excluded(90)))
+    if let Some(_) = result.unwrap(omap.next(mut empty)) {
+        return false
+    }
+    let mut absent = result.unwrap(omap.range(m, Included(65), Excluded(67)))
+    match result.unwrap(omap.next(mut absent)) {
+        Some((k, v)) => k == 66 && v == 34,
+        None => false
+    }
+}
+
+// Payloads need ordered/shareable/send, never plain. No Arc payload copying on
+// snapshots, and copying a returned value under Capacity does not consume it.
+// expect: run owned_payload_and_capacity() = true
+fn owned_payload_and_capacity() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[String, List[String]] = omap.new()
+    let mut v: List[String] = list.new()
+    result.unwrap(list.push(mut v, result.unwrap(string.from("row"))))
+    m = result.unwrap(omap.insert(mut ids, m, result.unwrap(string.from("key")), take v))
+    let pinned = result.unwrap(bound bytes 0 {
+        omap.snapshot(m)
+    })
+    let mut c = result.unwrap(omap.range(m, Included(result.unwrap(string.from("key"))), Unbounded))
+    let attempt = result.unwrap(bound bytes 0 {
+        omap.next(mut c)
+    })
+    if let Ok(_) = attempt {
+        return false
+    }
+    let pair = option.unwrap(result.unwrap(omap.next(mut c)))
+    if pair.0 != "key" || pair.1[0] != "row" || omap.len(pinned) != 1 {
+        return false
+    }
+    let key = result.unwrap(string.from("kept"))
+    let value: List[String] = list.new()
+    let denied = result.unwrap(bound bytes 0 {
+        omap.insert(mut ids, m, take key, take value)
+    })
+    match denied {
+        Error((_, (take k, take returned))) => k == "kept" && list.len(returned) == 0 && omap.len(m) == 1,
+        _ => false
+    }
+}
+
+// Rebuild all nodes bottom-up with their original ids, without a codec or
+// invariant re-validation in the map. Contents and node metadata round-trip.
+fn reload(n: Arc[omap.Node[u64, u64]]) -> Arc[omap.Node[u64, u64]] {
+    let mut keys: List[u64] = list.new()
+    let mut values: List[u64] = list.new()
+    let mut children: List[Arc[omap.Node[u64, u64]]] = list.new()
+    for i in 0 .. omap.node_count(n) {
+        result.unwrap(list.push(mut keys, key_at(n, i)))
+        if omap.node_level(n) == 0 {
+            result.unwrap(list.push(mut values, value_at(n, i)))
+        } else {
+            result.unwrap(list.push(mut children, reload(option.unwrap(omap.node_child(n, i)))))
+        }
+    }
+    if omap.node_level(n) == 0 {
+        result.unwrap(omap.leaf(omap.node_id(n), take keys, take values))
+    } else {
+        result.unwrap(omap.branch(omap.node_id(n), take keys, take children))
+    }
+}
+
+// expect: run checkpoint_rebuild_and_ids() = true
+fn checkpoint_rebuild_and_ids() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    for i in 0u64 .. 1100 {
+        m = put(mut ids, m, i, i + 7)
+    }
+    let pin = omap.snapshot(m)
+    let cutoff = ids
+    m = put(mut ids, m, 0, 999)
+    let before = option.unwrap(omap.root(pin))
+    let after = option.unwrap(omap.root(m))
+    if omap.node_id(after) <= cutoff || omap.node_id(before) > cutoff {
+        return false
+    }
+    let old_last = option.unwrap(omap.node_child(before, omap.node_count(before) - 1))
+    let new_last = option.unwrap(omap.node_child(after, omap.node_count(after) - 1))
+    if omap.node_id(old_last) != omap.node_id(new_last) {
+        return false
+    }
+    let rebuilt = omap.from_root(Some(reload(after)))
+    let mut expected: List[(u64, u64)] = list.new()
+    for i in 0u64 .. 1100 {
+        result.unwrap(list.push(mut expected, (i, if i == 0 {
+            999u64
+        } else {
+            i + 7
+        })))
+    }
+    equal(rebuilt, expected) && nodes(option.unwrap(omap.root(rebuilt)), true)
+}
+
+type ReadInput: send {
+    map: omap.OMap[u64, u64],
+    rows: omap.Cursor[u64, u64],
+    gate: Receiver[u64]
+}
+
+fn read_child(take input: ReadInput) -> u64 waits {
+    let ReadInput(map: held_map, rows: held_rows, gate: ready_gate) = take input
+    let _ = result.unwrap(channel.receive(ready_gate))
+    let mut rows = held_rows
+    let mut sum: u64 = 0
+    while let Some((k, v)) = result.unwrap(omap.next(mut rows)) {
+        sum += k + v
+    }
+    let present = option.unwrap(omap.get(held_map, 0))
+    sum + present
+}
+
+// A child holds both a version and a path cursor while the parent writes.
+// expect: run second_task(tasks) = true
+fn second_task(tasks: Tasks) -> bool waits {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    for i in 0u64 .. 100 {
+        m = put(mut ids, m, i, i + 1)
+    }
+    let rows = result.unwrap(omap.range(m, Included(20), Excluded(40)))
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let input = ReadInput(map: omap.snapshot(m), rows: take rows, gate: take rx)
+    let h = result.unwrap(task.spawn(tasks, bytes 1048576, take input, read_child))
+    for i in 0u64 .. 100 {
+        m = put(mut ids, m, i, 999)
+    }
+    result.unwrap(channel.send(tx, 1))
+    result.unwrap(task.join(take h)) == 1201 && option.unwrap(omap.get(m, 0)) == 999
+}
+
+// A thousand independently held roots remain readable after a thousand writes.
+// expect: run thousand_snapshots() = true
+fn thousand_snapshots() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    for i in 0u64 .. 64 {
+        m = put(mut ids, m, i, i)
+    }
+    let mut held: List[omap.OMap[u64, u64]] = result.unwrap(list.with_capacity(1000))
+    for i in 0u64 .. 1000 {
+        result.unwrap(list.push(mut held, omap.snapshot(m)))
+        m = put(mut ids, m, i % 64, 1000 + i)
+    }
+    for version in 0u64 .. 1000 {
+        for k in 0u64 .. 64 {
+            let expected = if version <= k {
+                k
+            } else {
+                1000 + k + ((version - 1 - k) / 64) * 64
+            }
+            if option.unwrap(omap.get(held[version], k)) != expected {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// M4's concrete K=V=Bytes: lexicographic bytes, including prefix order and FF.
+// expect: run byte_rows() = true
+fn byte_rows() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[Bytes, Bytes] = omap.new()
+    m = result.unwrap(omap.insert(mut ids, m, result.unwrap(b"\x01\x00"), result.unwrap(b"two")))
+    m = result.unwrap(omap.insert(mut ids, m, result.unwrap(b"\xff"), result.unwrap(b"three")))
+    m = result.unwrap(omap.insert(mut ids, m, result.unwrap(b"\x01"), result.unwrap(b"one")))
+    let mut rows = result.unwrap(omap.range(m, Unbounded, Unbounded))
+    let a = option.unwrap(result.unwrap(omap.next(mut rows)))
+    let b = option.unwrap(result.unwrap(omap.next(mut rows)))
+    let c = option.unwrap(result.unwrap(omap.next(mut rows)))
+    list.len(a.0) == 1 && a.0[0] == 1 && list.len(b.0) == 2 && b.0[1] == 0 && c.0[0] == 255 && a.1[0] == 111 && b.1[0] == 116 && c.1[0] == 116
+}
+
+// Refuse at successive allocations throughout one multi-level path. Every
+// failure returns both owned inputs and keeps old contents and node ids intact.
+// expect: run partial_capacity_rollback() = true
+fn partial_capacity_rollback() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, String] = omap.new()
+    for i in 0u64 .. 80 {
+        m = result.unwrap(omap.insert(mut ids, m, i, "old"))
+    }
+    let old_id = omap.node_id(option.unwrap(omap.root(m)))
+    let mut refused: u64 = 0
+    let mut succeeded: u64 = 0
+    for i in 0u64 .. 48 {
+        let budget = i * 64
+        let answer = result.unwrap(bound bytes budget {
+            omap.insert(mut ids, m, 81, "new")
+        })
+        match answer {
+            Error((_, (k, take v))) => {
+                if k != 81 || v != "new" {
+                    return false
+                }
+                refused += 1
+            },
+            Ok(take changed) => {
+                if omap.len(changed) != 81 {
+                    return false
+                }
+                succeeded += 1
+            },
+        }
+        if omap.len(m) != 80 || omap.node_id(option.unwrap(omap.root(m))) != old_id {
+            return false
+        }
+        if let Some(_) = omap.get(m, 81) {
+            return false
+        }
+    }
+    refused > 0 && succeeded > 0
+}

@@ -26,7 +26,7 @@ named cases, and `--backend evaluator` runs host-free cases on the test evaluato
 of `len * size(T)` bytes; a comparator failure preserves every element in unspecified
 order, and Capacity leaves the list unchanged. The Deque ring uses uninhabited slots,
 and the Heap uses hole sifts over one List. Their modules are in `core/core`, with no
-std copies or re-exports. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, set, pool, dir,
+std copies or re-exports. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, omap, set, pool, dir,
 file) are reached from another package through the package name: `std.order.compare`,
 `std.set.Set[u64]`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
 written bare (`Held(f)`, `NotUtf8`).
@@ -65,14 +65,61 @@ the seed's, read through one name. No extension declares a core member's name.
 | json |  | 6 | size, parse, push_json, index, get, shown |
 | list | yes | 16 | first, get_or, last, remove, insert, swap_remove, truncate, reverse, sort, sum_bytes, contains, binary_search, dedup, push_copy, extend, binary_search_by |
 | map | yes | 3 | contains, get_or, get_or_insert |
+| omap |  | 21 | new, snapshot, len, root, from_root, node_id, node_level, node_count, node_len, node_key, node_value, node_child, leaf, branch, get, insert, remove, first, last, range, next |
 | order |  | 5 | compare, min, max, reverse, then |
 | pool |  | 11 | new, with_capacity, len, insert, get, get_or, contains, update, remove, clear, next |
 | result | yes | 2 | map_err, capacity_only |
 | set |  | 6 | new, len, contains, insert, remove, entries |
 | string | yes | 15 | with_capacity, is_boundary, push_i64, push_uint, repeat, clear, find, starts_with, ends_with, split_once, next_split, next_line, strip_prefix, strip_suffix, trim_ascii |
-| **total** | **7 of 16** | **107** | |
+| **total** | **7 of 17** | **128** | |
 
 **Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
 and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that
 they wrote themselves. That revalidation stays in std (no core entry point) until it shows in a
 profile.
+
+## Ordered persistent map
+
+`std.omap.OMap[K: ordered + shareable + send, V: shareable + send]` is a
+persistent B+ tree with maximum fan-out 32 and minimum non-root occupancy 16.
+`new` allocates nothing, `snapshot` shares the root in O(1) without allocation,
+and `len` reads its entry count. `get`, `first` and `last` borrow one version.
+An update returns a new version while every held version retains its contents.
+Keys and values have separate immutable Arc owners, so path copies share both
+payloads and untouched subtrees. Resources fail the ordinary `shareable` bound.
+Versions are sendable; last-holder release frees unreachable nodes and payloads
+through the existing constant-stack Arc worklist.
+
+`insert(mut ids,m,k,v)` and `remove(mut ids,m,k)` path-copy, split, merge or
+redistribute O(log n) nodes, at most 32 holders per node. `ids` is the writer's
+last issued u64, shared across all branches. Every new node receives the next
+id after its children; an exhausted counter raises checked Overflow. Capacity
+preserves m; insertion returns its taken key/value. Failed attempts may consume
+ids, which must never be reused. There is no unique-owner mutation fast path:
+these APIs borrow m, and a held checkpoint's node identities must stay fixed.
+
+`range(m,take lower,take upper)` accepts `Unbounded`, `Included(k)` or
+`Excluded(k)` endpoints and returns an owned, sendable `Cursor`. It reserves one
+Arc frame per level, seeks recursively in O(log n), and pins the version from
+which it was made. `next(mut cursor)` returns `Result[Option[(K,V)],Capacity]`.
+It copies just that row, and Capacity leaves that row unconsumed. Traversing k
+rows costs O(k + log n) node work and the cost of copying their payloads.
+Reversed bounds yield an empty cursor. A cursor can outlive its originating map
+and move to another task. User cursors are read with `while let`, not `for`.
+
+Checkpoint writers use `root` for an Arc holder and `node_id`, `node_level`,
+`node_count`, `node_len`, `node_key`, `node_value`, `node_child` for individual
+nodes. Node level is zero at leaves. Leaf count is the number of key/value
+pairs; branch count is the number of children and their minimum keys. Keys,
+values and children outside their count return None. Branches have no values;
+leaves have no children. Node fields are stamp:u64, depth:u64, size:u64 and
+three 24-byte List headers. A full node's logical charge is 616 bytes excluding
+separately counted key/value payloads; exact node lists never grow implicitly.
+
+A checkpoint cutoff can skip a whole subtree whose id is already persisted.
+`leaf(id,take keys,take values)` and `branch(id,take low_keys,take children)`
+construct decoded nodes with recorded ids, without rechecking tree invariants.
+The decoder must provide the documented shape. On Capacity they return their
+input lists. `from_root(take optional_root)` publishes them in O(1). Loading is
+eager and bottom-up, O(n) nodes plus payload bytes. There are no disk, codec or
+unloaded-child operations in omap.

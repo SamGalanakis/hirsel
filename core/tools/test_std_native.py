@@ -12,6 +12,34 @@ from std_native import Contract, discover, first_stop, observation, owner, wrapp
 
 
 class Walker(unittest.TestCase):
+    def test_task_law_gets_grant_on_both_engines_and_is_native_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / 'core/std/tests'
+            tests.mkdir(parents=True)
+            (root / 'core/core').mkdir()
+            (tests / 'task_law.hirsel').write_text(
+                '// expect: run reader(tasks) = true\n'
+                'fn reader(tasks:Tasks)->bool waits { true }')
+            cases = discover(root, ['task_law'])
+            self.assertIn('native_tasks:Tasks', wrapper(cases[0]))
+            self.assertIn('reader(native_tasks)', wrapper(cases[0]))
+            calls = []
+            def compiler(argv, **kwargs):
+                calls.append(argv)
+                self.assertIn(['--grant', 'Tasks'], [argv[i:i+2] for i in range(len(argv)-1)])
+                test = dict(definition='std@1/tests/task_law/native_contract', passed=True,
+                            status=0, stdout='', stderr='')
+                return subprocess.CompletedProcess(argv, 0, json.dumps(dict(tests=[test])).encode(), b'')
+            with patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
+                rows = run(root, root / 'compiler', root / 'runtime', cases,
+                           ['evaluator', 'cranelift', 'llvm'], None, [], evaluator=root / 'evaluator')
+            self.assertEqual(len(calls), 2)
+            self.assertFalse(rows[0]['applicable'])
+            self.assertTrue(rows[0]['native_only'])
+            self.assertIsNone(rows[0]['passed'])
+            self.assertTrue(all(r['ran'] and r['passed'] for r in rows[1:]))
+
     def test_selection_never_turns_an_empty_filter_green(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

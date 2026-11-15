@@ -300,6 +300,13 @@
           "signatures": true
         },
         {
+          "file": "core/std/omap.hirsel",
+          "modules": [
+            "omap"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/std/order.hirsel",
           "modules": [
             "order"

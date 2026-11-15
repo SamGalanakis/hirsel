@@ -234,3 +234,71 @@ fn scale(x: u64, k: u64) -> u64 { x * POW10[k] }
 ```hirsel
 fn first(xs: Inline[u64, 3]) -> u64 { xs[3] }              // fails with Bounds when called
 ```
+
+### SEM-10: Codecs
+
+A **codec** is the encoding, the decoding and the schema of a type that has the `codec`
+bound ([OWN-4](ownership.md#own-4-bounds)). The standard library's `codec` module gives one
+as a plain value of type `Codec[T]`: `codec.of`, declared `fn of[T: codec]() -> Codec[T]`,
+admits nothing, and a call at a type without the bound is refused at that call
+([LANG-12](language.md#lang-12-generics)), so generic code that needs a codec writes `T:
+codec`. A nominal type's codec is generated from its declaration as ordinary checked code,
+which visits its fields in declaration order and its variants in declared order. The byte
+format, the framing of a value among others and the encoding of a schema are the library's;
+this rule fixes what every codec does.
+
+**Defaults.** A field of a record whose definition declares `codec` may give a **default**
+after its type, `pinned: bool = false`: a literal, or `-` and an integer literal
+([LANG-3](syntax.md#lang-3-literals)), typed by the field's type as the initializer of a
+`let` with that type is, so `n: u8 = 300` is refused at the literal. A default on a field
+of a definition that does not declare `codec` is refused, at the default. Construction
+never reads a default ([LANG-9](language.md#lang-9-nominal-types)); only decoding does.
+
+**Old data.** Bytes are decoded against the **writer's schema**, the schema of the
+declaration that encoded them, which the library keeps with them. Decoding resolves the
+writer's schema against the reading declaration's, matching fields by name, so their order
+may differ, and resolving each matched field's type in the same way at every depth. A field
+the writer's schema lacks takes its default. A field without a default that the writer
+lacks, a writer's field the reader lacks, and every other difference are `Schema`. So adding
+a field with a default is the one change that old data survives; removing, renaming or
+retyping a field, or changing the variants of a type, needs an explicit migration program
+that decodes with the old declaration and builds values of the new one.
+
+**Decoding.** A decode returns `Result[Result[T, DecodeError], Capacity]`, where
+`DecodeError = Truncated(u64) | Tag(u64) | Utf8(u64) | Duplicate(u64) | Trailing(u64) |
+Schema(u64)`. Each `u64` is a byte offset, into the writer's schema for `Schema` and into
+the decoded bytes otherwise:
+
+- `Truncated(i)`: the item that starts at `i` runs past the end of the bytes;
+- `Tag(i)`: the variant tag or `bool` at `i` names no value of its type;
+- `Utf8(i)`: a `String`'s bytes stop being UTF-8 at `i`, the first byte not part of a
+  scalar;
+- `Duplicate(i)`: the `Map` key that starts at `i` equals an earlier key of the same map;
+- `Trailing(i)`: the value ends at `i`, before the bytes do;
+- `Schema(i)`: the part of the writer's schema at `i` does not resolve, as above.
+
+Every decode, whatever its bytes:
+
+- never fails ([FAIL-1](failure.md#fail-1-errors-failures-and-run-stops)): every malformed
+  input is a `DecodeError`;
+- has no fixed limit on nesting: it keeps the values still being built on a work stack in
+  storage it admits from the current limit ([MEM-21](budgets.md#mem-21-admission)), never
+  on the call stack, so depth costs storage and never exhausts the stack
+  ([FAIL-15](failure.md#fail-15-run-stops)), and the one resource failure is `Capacity`;
+- leaves nothing behind on an error: before it returns either `Error`, it has released and
+  refunded every block it admitted, its work stack included, and the bytes, which it only
+  views, are unchanged;
+- builds fresh ownership: the value shares no storage with the bytes and, as no codec type
+  holds one, no capability, resource, view or stable reference.
+
+```hirsel unbuilt
+pub type Row: codec { id: u64, name: String, pinned: bool = false }
+fn rows() -> codec.Codec[Row] { codec.of() }   // bytes written before `pinned` decode with false
+```
+```hirsel unbuilt
+type Pair[T]: codec { a: T, b: T }
+fn files() -> codec.Codec[Pair[HostFile]] { codec.of() }   // refused: LANG-12, HostFile is not codec
+```
+```hirsel unbuilt
+type Note { pinned: bool = false }                    // refused: SEM-10, Note does not declare codec
+```

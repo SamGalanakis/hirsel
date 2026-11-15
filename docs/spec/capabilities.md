@@ -104,6 +104,21 @@ fn scratch(d: Dir) -> Result[(Dir, String), IoError] waits {
 }
 ```
 
+A file replaces another durably when its bytes are synced before the rename and the
+directory after it ([core](core.md)); a crash at any point leaves `snap` holding the old
+bytes or the new, and the new once `sync_dir` has returned `Ok(())`:
+
+```hirsel unbuilt
+fn replace(d: Dir, b: Bytes) -> Result[(), IoError] waits {
+  let mut f = host.open(d, "snap.tmp", Write)?
+  match host.write(mut f, b) { Ok(()) => {}, Error(e) => return Error(e.error) }
+  host.sync(f)?
+  host.close(take f)?
+  host.rename(d, "snap.tmp", "snap")?
+  host.sync_dir(d)
+}
+```
+
 ### CAP-6: No ambient input
 
 No operation without a capability argument observes anything outside its arguments: there

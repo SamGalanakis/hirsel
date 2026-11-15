@@ -47,14 +47,14 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 
 | type | kind | bounds | size | holds |
 |---|---|---|---|---|
-| integers, floats | plain | `shareable`, `send`; integers `key`, `ordered` | width | nothing |
-| `bool`, `char`, `()` | plain | `shareable`, `send`, `key`, `ordered` | 1, 4, 0 | nothing |
-| tuples, `Option[T]`, `Result[T, E]` | OWN-3 | `shareable`, `send`, `key`, `ordered` when T | tuple: sum; variant rule (MEM-24) | T's |
+| integers, floats | plain | `shareable`, `send`; integers `key`, `ordered`, `codec` | width | nothing |
+| `bool`, `char`, `()` | plain | `shareable`, `send`, `key`, `ordered`; `bool` and `()` `codec` | 1, 4, 0 | nothing |
+| tuples, `Option[T]`, `Result[T, E]` | OWN-3 | `shareable`, `send`, `key`, `ordered`, `codec` when T | tuple: sum; variant rule (MEM-24) | T's |
 | `Inline[T, n]` | T's kind (plain or own) | `shareable`, `send`, `key`, `ordered` when T | n × size(T) | T's |
 | `Never` | plain | `shareable`, `send`, `key`, `ordered` | 0 | nothing |
-| `String` | own | `shareable`, `send`, `key`, `ordered` | 24 | nothing |
-| `List[T]` | own | `shareable`, `send`, `key`, `ordered` when T | 24 | T's |
-| `Map[K, V]` | own | `shareable`, `send` when K and V | 24 | K's and V's |
+| `String` | own | `shareable`, `send`, `key`, `ordered`, `codec` | 24 | nothing |
+| `List[T]` | own | `shareable`, `send`, `key`, `ordered`, `codec` when T | 24 | T's |
+| `Map[K, V]` | own | `shareable`, `send`, `codec` when K and V | 24 | K's and V's |
 | `Deque[T]` | own | `shareable`, `send` when T | 32 | T's |
 | `Heap[T]` | own | `shareable`, `send` when T | 24 | T's |
 | `Box[T]` | own | `shareable`, `send`, `key`, `ordered` when T | 8 | T's |
@@ -269,8 +269,20 @@ operations it names; nothing else about them may be inferred from an implementat
   absent, and `Denied` when `from` is not a regular file or `to` names anything other than
   a regular file; on an error it renames nothing. When both name the same file it succeeds
   and changes nothing. Its atomicity is visibility only: an `open` of `to` finds the old
-  file or the new one, never neither, and nothing is made durable or synced, so after a host
-  crash either name may hold the file. `host.wall_ms` is milliseconds since 1970 and
+  file or the new one, never neither, and `rename` makes nothing durable, so after a host
+  crash either name may hold the file unless a later `host.sync_dir(d)` returned `Ok(())`.
+  The two sync barriers, `host.sync(f: HostFile) -> Result[(), IoError] waits` and
+  `host.sync_dir(d: Dir) -> Result[(), IoError] waits`, are provider operations not yet in
+  the core source. `host.sync(f)` returns `Ok(())` once every byte of `f`'s file written
+  before its issue, through any handle, survives a host crash, with the file's length and
+  whatever else reading those bytes back needs; it makes no name durable. `host.sync_dir(d)`
+  returns `Ok(())` once every name in the directory `d` is rooted at that was created,
+  renamed or removed before its issue survives a host crash in that state; names in its
+  subdirectories are not covered. A failed sync is an **unknown outcome**: which of those
+  bytes or names survive a crash is not known, and a later success of the same barrier
+  says nothing about them. Like every waiting operation, each is a cancellation point at
+  its issue only, and once issued it completes and delivers
+  ([CAP-8](capabilities.md#cap-8-the-replay-point)), so cancellation never interrupts one. `host.wall_ms` is milliseconds since 1970 and
   `host.mono_ns` never decreases in a run. `host.sleep_until(c, deadline_ns)` returns once
   `host.mono_ns(c) >= deadline_ns`, at once for a deadline already reached; it is a
   cancellation point at its entry and while it waits

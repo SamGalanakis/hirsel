@@ -165,13 +165,13 @@ generics    = "[", nonempty(generic), "]" ;
 generic     = name, [ ":", bounds ] | "in", name ;
 bounds      = bound-name, { "+", bound-name } ;
 bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" | "integer" | "float"
-            | "packed" | "streamable" ;
+            | "packed" | "streamable" | "codec" ;
 outlives    = "where", name, ":", name, { ",", name, ":", name } ;
 type-def    = [ "stable" | "resource" | "scoped" ], "type", name, [ generics ],
               [ ":", bounds ], [ "grant", "bytes", integer ],
               ( fields | "=", type-rhs | empty ), [ drop ] ;
 fields      = "{", [ field, { entry-sep, field }, [ entry-sep ] ], "}" ;
-field       = name, ":", type ;
+field       = name, ":", type, [ "=", scalar ] ;
 type-rhs    = variant, "|", variant, { "|", variant }
             | name, "(", list(payload), ")"
             | type ;

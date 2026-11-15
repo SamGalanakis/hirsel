@@ -134,7 +134,8 @@ right-hand side; a chain of aliases that reaches itself is refused, at the refer
 continues the chain in the member whose definition identity is least, as
 [OWN-2](ownership.md#own-2-type-summaries) reports a cycle. Payloads are all
 labelled or all positional. A record is constructed with every field labelled, in
-declaration order, `P(x: 1, y: 2)`; a variant with labels exactly when its payloads are
+declaration order, `P(x: 1, y: 2)`, a field with a default
+([SEM-10](semantics.md#sem-10-codecs)) included; a variant with labels exactly when its payloads are
 labelled; labels appear in no other call. The representation keyword (`stable`, `resource`,
 `scoped`) or its absence is fixed by the definition
 ([OWN-1](ownership.md#own-1-representation-is-declared-once)). A nominal type's identity is

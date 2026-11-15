@@ -153,14 +153,23 @@ The bounds are:
 - `send`: [CONC-2](tasks.md#conc-2-the-send-bound).
 - `key`: equality and hashing ([SEM-7](semantics.md#sem-7-equality-and-order)).
 - `ordered`: total order (SEM-7).
+- `codec`: the type has a codec ([SEM-10](semantics.md#sem-10-codecs)). Exactly the
+  built-in types whose row lists it ([core](core.md#built-in-types)) and the nominal types
+  that declare it have it. So a resource, scoped, stable or counted type, a callable, a
+  capability and every type that holds one of these never has it: no row lists them, a
+  declaration with such a field is refused at that field, and a `resource`, `scoped` or
+  `stable` definition that declares `codec` is refused at the bound. A plain nominal type
+  has it only when it declares it. Declaring it lets every module encode the type's fields
+  and build its values from decoded bytes, so for an opaque type decoding is a
+  construction outside its module that its owner has allowed.
 - `integer`: exactly the integer types; `float`: exactly `f32` and `f64`. They are written
   only on the type parameters of core declarations ([core](core.md)), and are refused
   anywhere else: numeric generics are not in v1
   ([reserved](reserved.md#not-in-v1)). Each implies every bound that all the types it admits
   have, so a body may rely on those and an instance needs no further check: `T: integer` is
-  also `plain`, `shareable`, `send`, `key`, `ordered`, `packed` and `streamable`, and `T:
-  float` is `plain`, `shareable`, `send`, `packed` and `streamable` but neither `key` nor
-  `ordered`. So a core body `fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a }
+  also `plain`, `shareable`, `send`, `key`, `ordered`, `codec`, `packed` and `streamable`, and `T:
+  float` is `plain`, `shareable`, `send`, `packed` and `streamable` but not `key`, `ordered`
+  or `codec`. So a core body `fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a }
   }` copies and compares, and `fn same[T: float](a: T, b: T) -> bool { a == b }` is refused
   by [LANG-21](language.md#lang-21-operators).
 - `packed`, `streamable`: compact encodings
@@ -178,7 +187,7 @@ instance has a declared bound exactly when each type argument that the fields me
 `Pair[HostFile]` not, while `type Id[T]: key { slot: u64 }` makes every `Id[X]` key. The
 same rule gives the built-in rows of [core](core.md#built-in-types) their "when T", and an
 opaque type's published summary carries which parameters condition each bound, without
-its fields. A refusal is reported at the field whose type breaks the bound. A type without a declaration of `shareable`, `send`, `key` or `ordered` does
+its fields. A refusal is reported at the field whose type breaks the bound. A type without a declaration of `shareable`, `send`, `key`, `ordered` or `codec` does
 not have it, plain types' `shareable` and `send` excepted. `plain`, `packed` and `streamable` are never declared.
 
 ```hirsel
@@ -198,6 +207,17 @@ fn same(a: Item[Entry], b: Item[Entry]) -> bool { a == b }  // refused: LANG-21,
 ```
 ```hirsel
 type Tree: shareable { kids: List[Rc[Tree]], log: HostFile }  // refused: OWN-4, at log
+```
+```hirsel unbuilt
+type Pair[T]: codec { a: T, b: T }        // Pair[u64] is codec, Pair[HostFile] is not
+type Id[T]: codec { slot: u64 }           // every Id[X] is codec
+type Tree: codec { kids: List[Tree] }
+```
+```hirsel unbuilt
+type Handle: codec { name: String, file: HostFile }   // refused: OWN-4, at file
+```
+```hirsel unbuilt
+resource type Lease: codec { n: u64 }                 // refused: OWN-4, a resource is never codec
 ```
 ```hirsel
 fn pick[T: integer](a: T) -> T { a }                      // refused: OWN-4, integer outside core

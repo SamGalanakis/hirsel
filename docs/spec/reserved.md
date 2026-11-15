@@ -65,7 +65,16 @@ failure or poison/discard the affected state. Environment death is not catchable
 the refused `Capacity` and leaves the chain as it is when that admission fails, catches
 after FAIL-8's cleanup, lets outer effects persist, never catches `Cancelled` or a run stop,
 and accepts only a body whose capture descriptor lends nothing `mut`. `shield` has no v1
-form.
+form, and a commit of several provider operations needs none: cancellation reaches a task
+only at a cancellation point and an operation only at its issue
+([CONC-7](tasks.md#conc-7-cancellation-points)); an issued operation completes and
+delivers (CAP-8); a write's error states its committed prefix; a cancelled task's cleanup
+finalizes its files, which closes them and ends their locks (FAIL-8,
+[core](core.md#contracts-the-signatures-do-not-state)); and `host.sync` makes durable every
+byte of a file, through whichever handle it was written. So a commit cancelled between two
+of its operations leaves on disk exactly the bytes its issued writes committed, and the
+file's lock free, the state a killed process leaves: a reopen that syncs the file and
+then reads it recovers both, by the one path.
 
 **R9.** Recording a failure and its causes never admits: cause storage is admitted with
 each task and resource; causes are never truncated and cleanup is never skipped. *v1:*
@@ -81,14 +90,23 @@ yields. *v1:* CAP-5, CAP-8, CONC-7, CONC-10.
 separate declared behaviors. Container equality/hash/order dictionaries have coherent
 branded identities. Codec version/schema/order are explicit; decoding validates outside
 bytes into fresh ownership and grants no authority or brands. Stable decoding uses a
-separate result signature naming its destination root." *v1:* no codecs or dictionaries;
-SEM-5 fixes one equality and hash per key type.
+separate result signature naming its destination root." *v1:* SEM-10: a codec is the one
+dictionary, `Codec[T]` from `codec.of()` for a type with the `codec` bound (OWN-4), and a
+decode returns `Result[Result[T, DecodeError], Capacity]` into fresh ownership holding no
+authority; its schema and the writer's are explicit, resolved by field name. No stable type
+is `codec`, so there is no stable decoding. Eq, Hash and Format dictionaries are not in v1,
+and SEM-5 fixes one equality and hash per key type.
 
 **R12.** Later derivation will be opt-in, owner-local, keep field order and opacity, and
 produce ordinary checked code; adding a derive never gives a generic body a new
 obligation. Typed codecs ship together with derivation. *v1:* OWN-4, LANG-12, PROG-1,
 PROG-2: a type's identity is its definition identity, so no two declarations can be
-confused, and v1 bounds are explicit and rigid.
+confused, and v1 bounds are explicit and rigid. The one derivation is a codec (SEM-10):
+its owner declares `codec` on the definition, which is checked once against the fields'
+declared bounds; it is generated in field order as ordinary checked code; an opaque type's
+fields stay private, and only its owner's declaration lets decoding build one; and a
+generic body that has not written `T: codec` cannot ask for a codec, so declaring it gives
+no body a new obligation.
 
 **R13.** "Selected entry descriptors carry a versioned nominal path/signature and semantic
 code/runtime-contract identity; generic identity includes type/size/dictionary/generator
@@ -164,7 +182,10 @@ outcomes separately, and expose real sync/fencing/conditional-update guarantees 
 needed. Durable providers can prepare before issue and persist completion before delivery.
 Shielding never promises rollback/exactly-once effects across process death; revocation
 and external readiness are explicit provider outcomes." *v1:* CAP-5, CAP-8; `WriteError`
-states the committed prefix of a write; cancellation reaches an operation only at issue.
+states the committed prefix of a write; cancellation reaches an operation only at issue;
+`host.sync` and `host.sync_dir` are the sync barriers, and a failed one is an unknown
+outcome ([core](core.md#contracts-the-signatures-do-not-state)). Fencing and conditional
+update are later.
 
 **R24.** Static pool brands may later let a pool skip its identity check. *v1:* a pool is
 library code whose handles are plain data checked at run time (MEM-18); no rule, keyword or
@@ -188,10 +209,10 @@ allocator chunk size becomes a logical capacity (MEM-28).
 |---|---|---|
 | O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits; authority only through arguments | open: authority facades (R19), static brands (R24) and callable results anchored to a place ([LANG-13](language.md#lang-13-callables)) |
 | F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; `isolate` (FAIL-16) | open: a single `Result[R, Causes]` form, which needs a per-boundary cause cell; a form that moves owned state into the body and back; `shield` |
-| C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order | open: the content hash of a declaration for stored data is not specified |
+| C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the content hash of a declaration for stored data |
 | D, code descriptors | code identity; identity bytes of closed named functions (PROG-9); no address or order dependence | open: `code.revision(s) -> Option[Bytes]`, never part of equality; instance identities |
 | L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
-| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; `WriteError` | open: providers for `Net`, `Random`, `Stdin`, `Env`, `Process`; watching, renaming across directories, durable sync |
+| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; `WriteError`; the sync barriers `host.sync` and `host.sync_dir` ([core](core.md#contracts-the-signatures-do-not-state)), not yet in the core source | open: providers for `Net`, `Random`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1; selection, shared limits, mutexes and atomics later |
 
 ## Not in v1
@@ -206,7 +227,7 @@ gap `D800`–`DFFF`; shareable owning callables (`own[shareable] fn`), which wou
 need every capture `shareable` and OWN-4 to admit the closure, its calls already only
 viewing the environment (LANG-14), and would add a second calling mode, from several tasks; code generic over the numeric types: the bounds `integer` and
 `float` are written only by core declarations ([OWN-4](ownership.md#own-4-bounds)), and a
-library writes one function per width; generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
+library writes one function per width; generics over an `Inline` length; persistent mutable views; derivation other than a codec's (SEM-10); contracts and
 facts; `@varint` (R25); documents in segments (R26); the store, runners and places; recording formats. A later opt-in execution-budget
 scope may stop code at a loop back edge or a call while such a scope is present; no v1
 rule assumes that code cannot be stopped there.

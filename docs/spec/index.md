@@ -53,7 +53,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
 | [Tasks](tasks.md) | CONC-1 to CONC-12 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-8 |
-| [Semantics](semantics.md) | SEM-1 to SEM-9 |
+| [Semantics](semantics.md) | SEM-1 to SEM-10 |
 | [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Core library](core.md) | |
@@ -70,7 +70,8 @@ introduced. A refusal comment `// refused: ID` names the rule a refusal cites. T
 what every operation does to ownership, charges and failures. Examples are informative.
 Every code block is a self-contained program fragment: it declares each type it uses that
 the core library does not, and a block whose comment says `refused` is refused only where
-the comment says.
+the comment says. A block marked `hirsel unbuilt` belongs to its rule but shows what the
+built `hirsel` does not implement yet; the mark is removed when it does.
 
 ## Glossary
 
@@ -78,6 +79,7 @@ the comment says.
 |---|---|
 | anchor | [OWN-19](ownership.md#own-19-scoped-values) |
 | blob | [MEM-9](memory.md#mem-9-compact-types) |
+| codec | [SEM-10](semantics.md#sem-10-codecs) |
 | cancellation point | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | capability | [CAP-1](capabilities.md#cap-1-authority-is-explicit) |
 | commit point | [FAIL-3](failure.md#fail-3-commit-points) |

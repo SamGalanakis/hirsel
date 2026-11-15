@@ -1267,6 +1267,7 @@ impl FunctionEmitter<'_> {
                 let p = self.address(address);
                 let memory = Memory {
                     align: 1,
+                    range: self.seq_word_range(address),
                     scopes: self.access_facts(&[address]),
                     ..Memory::default()
                 };

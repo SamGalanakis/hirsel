@@ -441,6 +441,8 @@ pub(super) struct Memory {
     /// Zero omits the alignment: ABI alignment for an access.
     pub align: u32,
     pub invariant: bool,
+    /// A load's `!range [0, n)` on its i64 result.
+    pub range: Option<u64>,
     pub ordering: Option<Ordering>,
     pub scopes: Option<Scoped>,
 }
@@ -785,6 +787,9 @@ fn memory(out: &mut String, m: &Memory) {
     }
     if m.invariant {
         out.push_str(", !invariant.load !1");
+    }
+    if let Some(n) = m.range {
+        write!(out, ", !range !{{i64 0, i64 {n}}}").unwrap();
     }
     scopes(out, &m.scopes);
 }

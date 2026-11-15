@@ -21,6 +21,8 @@ pub(super) enum At {
     Pointer(TypeId),
     Counted(TypeId),
     Array(Box<FieldTy>, u64),
+    /// The `seq` field of a carrier row, with its element.
+    Seq(Box<FieldTy>),
     Other,
 }
 impl FunctionEmitter<'_> {
@@ -50,6 +52,7 @@ impl FunctionEmitter<'_> {
             FieldTy::Box(t) => At::Pointer(TypeId(t.0)),
             FieldTy::Rc(t) | FieldTy::Arc(t) => At::Counted(TypeId(t.0)),
             FieldTy::Array(e, n) => At::Array(e.clone(), *n),
+            FieldTy::Seq(e) => At::Seq(e.clone()),
             _ => At::Other,
         }
     }
@@ -63,7 +66,27 @@ impl FunctionEmitter<'_> {
             }
         }
     }
+    /// FORM #113: the exclusive end of a typed len or capacity read's value,
+    /// `seq_len_bound` of the element's logical size (MEM-24), when there is one.
+    pub(super) fn seq_word_range(&self, address: AddressId) -> Option<u64> {
+        let info = &self.body.addresses[address.index()];
+        let steps = info.steps.get(&self.body.pools.steps).unwrap();
+        let (Step::Seq(SeqWord::Len | SeqWord::Cap), before) = steps.split_last()? else {
+            return None;
+        };
+        let At::Seq(element) = self.walk(address, before.len()) else {
+            unreachable!("a seq word is addressed through its carrier's seq field")
+        };
+        let size = field_size(&self.module.types, self.recipes, &element).2;
+        Some(hirsel_core_layout::charge::seq_len_bound(size)? + 1)
+    }
     fn kind_at(&self, address: AddressId) -> At {
+        self.walk(address, usize::MAX)
+    }
+    /// The kind of `address`'s place after the first `last` steps of its own
+    /// address (all of its bases' steps).
+    fn walk(&self, address: AddressId, last: usize) -> At {
+        let top = address;
         let mut chain = Vec::new();
         let mut address = address;
         let mut at = loop {
@@ -87,7 +110,13 @@ impl FunctionEmitter<'_> {
         };
         for address in chain.into_iter().rev() {
             let info = &self.body.addresses[address.index()];
-            for step in info.steps.get(&self.body.pools.steps).unwrap() {
+            let steps = info.steps.get(&self.body.pools.steps).unwrap();
+            let take = if address == top {
+                last.min(steps.len())
+            } else {
+                steps.len()
+            };
+            for step in &steps[..take] {
                 at = match *step {
                     Step::Deref => match at {
                         At::Pointer(t) => At::Declared(t),

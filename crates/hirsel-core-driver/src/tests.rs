@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_core_ir::{FuncId, eval};
+use hirsel_core_ir::{FuncId, InstanceKey, eval};
 
 pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
@@ -2584,4 +2584,74 @@ fn answer_of(product: &CheckProduct) -> eval::Outcome {
         .find(|d| d.definition.0.name == "answer")
         .unwrap();
     eval::run(&d.ir, d.check.function.unwrap(), &[], 1_000_000).outcome
+}
+
+/// FORM #111: the growth arm's calls stay cold through every rebuild between the
+/// front and the LLVM emitter: in a generic core body reached as a materialised
+/// instance (deque push_back[u64]: grow when len == capacity) and in a published
+/// std body (io write: flush when the buffer is full). A rebuild that writes
+/// `cold: false` instead of copying the flag drops the fact on exactly these.
+/// FORM #113 in the same program: a List[(u64, u8)] len read is ranged by the
+/// element's logical size 9, floor((2^64 - 8) / 9) + 1, not by its stride 16
+/// (2^60 + 1); a Bytes len (size 1) is not ranged, since a view's length may
+/// exceed its capacity.
+#[test]
+fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n\
+         let mut d: Deque[u64] = deque.new()\n\
+         let _ = deque.push_back(mut d, 1)\n\
+         let mut w = result.unwrap(std.io.out(out, 16))\n\
+         result.unwrap(std.io.write(mut w, \"x\"))\n\
+         let xs: List[(u64, u8)] = list.new()\n\
+         let b: Bytes = list.new()\n\
+         if lens(xs, b) == 1 { return Ok(()) }\n\
+         Ok(())\n\
+         }\n\
+         fn lens(xs: List[(u64, u8)], b: Bytes) -> u64 { list.len(xs) + list.len(b) }\n",
+    )
+    .unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let request = CheckRequest::program(&app, &root, &dir.path().join("store")).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let reached = product
+        .reachable(&DefPath::from_full("app@1/main/main").unwrap(), 4096)
+        .unwrap();
+    let keys = reached.instances.as_ref().unwrap();
+    for (definition, types) in [
+        ("core@1/deque/push_back", vec!["u64".into()]),
+        ("std@1/io/write", vec![]),
+    ] {
+        let key = InstanceKey {
+            definition: DefPath::from_full(definition).unwrap(),
+            types,
+            dictionaries: vec![],
+        };
+        assert!(keys.contains(&key), "{definition} not reached: {keys:?}");
+        let ir = hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir()).unwrap();
+        assert!(
+            ir.lines()
+                .any(|l| l.contains(" call ") && l.contains(" noinline cold")),
+            "{definition}: no cold call\n{ir}"
+        );
+    }
+    let key = InstanceKey {
+        definition: DefPath::from_full("app@1/main/lens").unwrap(),
+        types: vec![],
+        dictionaries: vec![],
+    };
+    let ir = hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir()).unwrap();
+    let ranges: Vec<_> = ir
+        .lines()
+        .filter_map(|l| l.split_once("!range "))
+        .map(|(_, r)| &r[..=r.find('}').unwrap()])
+        .collect();
+    assert_eq!(ranges, ["!{i64 0, i64 2049638230412172401}"], "{ir}");
 }

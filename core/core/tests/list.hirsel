@@ -105,3 +105,44 @@ fn fill_generic_plain() -> bool {
     fill_plain(mut scalars, 2, 42u64)
     ok && scalars[0] == 42 && scalars[1] == 42
 }
+
+// The length bound (SEM-4, MEM-22, MEM-24): storage is charged round8(capacity × size(T))
+// in exact arithmetic, and a charge past 2^64 − 1 is refused with requested 2^64 − 1. So no
+// List[T] of logical size s >= 2 holds more than (2^64 − 8) / s elements, which engines
+// may assume (FORM #113).
+// A product computed in wrapping u64 arithmetic would admit 2^61 u64s as 0 bytes here.
+// 2^61 − 1 u64s charge exactly 2^64 − 8, refused against the 64 bytes of the scope.
+// engine-fact: List len and capacity ranges (core-form-883 FORM #113, LLVM !range)
+// expect: run length_bound_refused() = true
+fn length_bound_refused() -> bool {
+    let r = bound bytes 64 {
+        let words: Result[List[u64], Capacity] = list.with_capacity(2305843009213693952)
+        let below: Result[List[u64], Capacity] = list.with_capacity(2305843009213693951)
+        let pairs: Result[List[(u64, u64)], Capacity] = list.with_capacity(1152921504606846976)
+        let mut xs: List[u64] = list.new()
+        let grown = list.reserve(mut xs, 18446744073709551615)
+        let filled = list.fill(mut xs, 2305843009213693952, 0)
+        maximal(words) && match below {
+            Error(c) => c.requested == 18446744073709551608 && c.available == 64,
+            Ok(_) => false,
+        } && maximal(pairs) && refused_max(grown) && refused_max(filled) && list.len(xs) == 0
+    }
+    match r {
+        Ok(b) => b,
+        Error(_) => false,
+    }
+}
+
+fn maximal[T](r: Result[List[T], Capacity]) -> bool {
+    match r {
+        Error(c) => c.requested == 18446744073709551615 && c.available == 64,
+        Ok(_) => false,
+    }
+}
+
+fn refused_max(r: Result[(), Capacity]) -> bool {
+    match r {
+        Error(c) => c.requested == 18446744073709551615 && c.available == 64,
+        Ok(()) => false,
+    }
+}

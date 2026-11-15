@@ -25,6 +25,7 @@ const ALIAS_SCOPE: u32 = 0;
 const NOALIAS_SCOPE: u32 = 1;
 const INVARIANT: u32 = 2;
 const PROF: u32 = 3;
+const RANGE: u32 = 4;
 
 pub(crate) struct NativeSink {
     context: Rc<llvm::Context>,
@@ -302,6 +303,17 @@ impl NativeSink {
             let empty = self.md(1);
             // SAFETY: metadata attachment on this unit's instruction.
             unsafe { (self.api.attach)(self.unit, instruction, INVARIANT, empty) }
+        }
+        if let Some(n) = m.range {
+            // SAFETY: an i64 range node of this unit on its load.
+            unsafe {
+                let ends = [
+                    (self.api.metadata_integer)(self.unit, 64, 0),
+                    (self.api.metadata_integer)(self.unit, 64, n),
+                ];
+                let range = (self.api.metadata_tuple)(self.unit, ends.as_ptr(), ends.len(), 0);
+                (self.api.attach)(self.unit, instruction, RANGE, range)
+            }
         }
         self.scopes(instruction, &m.scopes);
     }

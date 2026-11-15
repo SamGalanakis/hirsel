@@ -35,6 +35,9 @@ class Contract:
     host_op: int = 0
     package: str = "std"
     evaluator_only: str | None = None
+    # `// engine-fact: <fact>` before the law: an engine states <fact> to its code
+    # generator on the strength of this law, so land runs it natively on every engine.
+    engine_fact: str | None = None
 
     @property
     def name(self):
@@ -112,7 +115,10 @@ def discover(root, filters):
         stdout = stderr = b""
         first_write = None
         host_op = 0
+        engine_fact = None
         for line, text in enumerate(source.splitlines(), 1):
+            if text.startswith("// engine-fact: "):
+                engine_fact = text.removeprefix("// engine-fact: ").strip()
             if text.startswith("// expect: stdout "):
                 stdout = json.loads(text.removeprefix("// expect: stdout ")).encode()
             if text.startswith("// expect: stderr "):
@@ -140,10 +146,11 @@ def discover(root, filters):
             header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, file.relative_to(root).parts[1], evaluator_only)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, file.relative_to(root).parts[1], evaluator_only, engine_fact)
             stdout = stderr = b""
             first_write = None
             host_op = 0
+            engine_fact = None
             if not filters or any(case.name.startswith(f) or ('std.' + case.name).startswith(f) and case.package == 'std' or str(file.relative_to(root)).startswith(f) for f in filters):
                 contracts.append(case)
     if not contracts:

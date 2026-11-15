@@ -1190,7 +1190,10 @@ fn integer_and_float_bounds_imply_their_types_bounds() {
     std::fs::write(
         dir.join("bounds.hirsel"),
         "pub fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a } }\n\
-         pub fn same[T: float](a: T, b: T) -> bool { a == b }\n",
+         pub fn same[T: float](a: T, b: T) -> bool { a == b }\n\
+         pub fn accepts[T: codec](x: T) -> u64 { 1 }\n\
+         pub fn integral[T: integer](x: T) -> u64 { accepts(x) }\n\
+         pub fn fractional[T: float](x: T) -> u64 { accepts(x) }\n",
     )
     .unwrap();
     let (index, inputs) = inputs_with_core("", &dir);
@@ -1206,11 +1209,33 @@ fn integer_and_float_bounds_imply_their_types_bounds() {
             rules.insert(fd.path.0.name.to_string(), refused.join(","));
         }
     }
+    assert_eq!(rules["integral"], "");
+    assert_eq!(rules["fractional"], "");
     // `max` is accepted; `same` is refused once, at its `==`.
     assert_eq!(
         (rules["max"].as_str(), rules["same"].as_str()),
         ("", "LANG-21")
     );
+}
+
+#[test]
+fn codec_bounds_and_field_defaults() {
+    let mut report = vec![];
+    for name in [
+        "bound-accepted",
+        "bound-refused",
+        "defaults-accepted",
+        "defaults-refused",
+        "defaults-expressions-refused",
+    ] {
+        let failures = run_case(&root().join(format!("cases/body/codec-{name}.hirsel")));
+        report.extend(
+            failures
+                .into_iter()
+                .map(|failure| format!("{name}: {failure}")),
+        );
+    }
+    assert!(report.is_empty(), "{}", report.join("\n"));
 }
 
 #[test]

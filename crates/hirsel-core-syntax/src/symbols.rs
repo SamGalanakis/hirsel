@@ -22,6 +22,7 @@ pub mod sym {
     pub const PACKED: Symbol = Symbol(109);
     pub const STREAMABLE: Symbol = Symbol(110);
     pub const CLONE: Symbol = Symbol(111);
+    pub const CODEC: Symbol = Symbol(112);
     pub const FN: Symbol = Symbol(1);
     pub const LET: Symbol = Symbol(2);
     pub const MUT: Symbol = Symbol(3);
@@ -285,6 +286,7 @@ impl Default for Symbols {
         strings.push(Arc::from("packed"));
         strings.push(Arc::from("streamable"));
         strings.push(Arc::from("clone"));
+        strings.push(Arc::from("codec"));
         let mut single = empty_single();
         for (i, s) in strings.iter().enumerate().skip(1) {
             if let [b] = s.as_bytes() {
@@ -452,6 +454,7 @@ fn fixed_symbol(text: &str) -> Option<Symbol> {
         "packed" => sym::PACKED,
         "streamable" => sym::STREAMABLE,
         "clone" => sym::CLONE,
+        "codec" => sym::CODEC,
         _ => return None,
     })
 }

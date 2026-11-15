@@ -1,0 +1,30 @@
+type Unmarked { n: u64 = 1 }
+type Wrong: codec { n: u64 = false }
+type Range: codec { n: u8 = 300 }
+type SignedRange: codec { n: i8 = 128 }
+type Suffix: codec { n: u64 = 1u8 }
+type Generic[T]: codec { n: T = false }
+type Fraction: codec { n: u64 = 1.25 }
+type Number: codec { n: bool = 1 }
+type NegativeUnsigned: codec { n: u8 = -1 }
+type Row: codec { id: u64, pinned: bool = false }
+fn omitted() -> Row { Row(id: 7u64) }
+// expect: refuse SEM-10 at 1:26
+// expect: refuse LANG-11 at 2:30
+// expect: refuse LANG-3 at 3:29
+// expect: refuse LANG-3 at 4:35
+// expect: refuse LANG-11 at 5:31
+// expect: refuse LANG-11 at 6:33
+// expect: refuse LANG-3 at 7:33
+// expect: refuse LANG-11 at 8:32
+// expect: refuse LANG-21 at 9:40
+// expect: refuse LANG-11 at 11:35
+// expect: compared LANG-11 at 11:35 | 1 argument | 2 arguments
+// expect: compared LANG-11 at 2:30 | bool | u64
+// expect: compared LANG-11 at 5:31 | u8 | u64
+// expect: compared LANG-11 at 6:33 | bool | $0
+// expect: compared LANG-11 at 8:32 | 1 | bool
+// expect: compared LANG-21 at 9:40 | u8 | an operand type of `-`
+// expect: compared LANG-3 at 3:29 | 300 | u8
+// expect: compared LANG-3 at 4:35 | 128 | i8
+// expect: compared LANG-3 at 7:33 | 1.25 | u64

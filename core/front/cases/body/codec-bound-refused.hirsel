@@ -1,0 +1,68 @@
+// OWN-4: each forbidden category is named at its field; representation at the bound.
+resource type Resource: codec { n: u64 }
+stable type Stable: codec { n: u64 }
+scoped type Scoped: codec { n: u64 }
+resource type R { n: u64 }
+stable type S { n: u64 }
+type HasResource: codec { payload: R }
+type HasStable[in r]: codec { payload: S in r }
+type HasScoped: codec { payload: View[u64] }
+type HasCounted: codec { payload: Rc[u64] }
+type HasArc: codec { payload: Arc[u64] }
+type HasCallable: codec { payload: fn() -> u64 }
+type HasOwnCallable: codec { payload: own fn() -> u64 }
+type HasScopedCallable: codec { payload: scoped fn() -> u64 }
+type HasCapability: codec { payload: Stdout }
+type HasBox: codec { payload: Box[u64] }
+type HasArray: codec { payload: Inline[u64, 2] }
+type FloatKey: key { payload: f64 }
+type FloatOrdered: ordered { payload: f32 }
+type Plain { n: u64 }
+fn require[T: codec](x: T) -> u64 { 1 }
+fn plain_missing(x: Plain) -> u64 { require(x) }
+fn conditional_missing(x: Wrapper[HostFile]) -> u64 { require(x) }
+type Wrapper[T]: codec { x: T }
+fn never_missing(x: Option[Never]) -> u64 { require(x) }
+// expect: refuse OWN-4 at 2:25
+// expect: refuse OWN-4 at 3:21
+// expect: refuse OWN-4 at 4:21
+// expect: refuse OWN-4 at 7:27
+// expect: refuse OWN-4 at 8:31
+// expect: refuse OWN-19 at 9:25
+// expect: refuse OWN-4 at 9:25
+// expect: refuse OWN-4 at 10:26
+// expect: refuse OWN-4 at 11:22
+// expect: refuse OWN-4 at 12:27
+// expect: refuse OWN-4 at 13:30
+// expect: refuse OWN-19 at 14:33
+// expect: refuse OWN-4 at 14:33
+// expect: refuse OWN-4 at 15:29
+// expect: refuse OWN-4 at 16:22
+// expect: refuse OWN-4 at 17:24
+// expect: refuse OWN-4 at 18:22
+// expect: refuse OWN-4 at 19:30
+// expect: refuse LANG-12 at 22:45
+// expect: refuse LANG-12 at 23:63
+// expect: refuse LANG-12 at 25:53
+// expect: compared LANG-12 at 22:45 | app@1/main/Plain | codec
+// expect: compared LANG-12 at 23:63 | app@1/main/Wrapper[core@1/core/HostFile] | codec
+// expect: compared LANG-12 at 25:53 | core@1/core/Option[Never] | codec
+// expect: compared OWN-19 at 14:33 | scoped fn() -> u64 | not scoped
+// expect: compared OWN-19 at 9:25 | View[u64] | not scoped
+// expect: compared OWN-4 at 10:26 | core@1/core/Rc[u64] | codec
+// expect: compared OWN-4 at 11:22 | core@1/core/Arc[u64] | codec
+// expect: compared OWN-4 at 12:27 | fn() -> u64 | codec
+// expect: compared OWN-4 at 13:30 | own fn() -> u64 | codec
+// expect: compared OWN-4 at 14:33 | scoped fn() -> u64 | codec
+// expect: compared OWN-4 at 15:29 | core@1/core/Stdout | codec
+// expect: compared OWN-4 at 16:22 | core@1/core/Box[u64] | codec
+// expect: compared OWN-4 at 17:24 | Inline[u64, 2] | codec
+// expect: compared OWN-4 at 18:22 | f64 | key
+// expect: compared OWN-4 at 19:30 | f32 | ordered
+// expect: compared OWN-4 at 7:27 | app@1/main/R | codec
+// expect: compared OWN-4 at 8:31 | app@1/main/S in r | codec
+// expect: compared OWN-4 at 9:25 | View[u64] | codec
+type Restricted[T: codec]: codec { x: T }
+type Denied = Restricted[HostFile]
+// expect: refuse LANG-12 at 66:26
+// expect: compared LANG-12 at 66:26 | core@1/core/HostFile | codec

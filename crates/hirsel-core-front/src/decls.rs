@@ -23,14 +23,16 @@ pub const PACKED: u16 = 128;
 pub const STREAMABLE: u16 = 256;
 pub const ENCODED: u16 = PACKED | STREAMABLE;
 const FIXED_ENCODING: u16 = 512;
+/// A declared conditional codec promise (OWN-4, SEM-10).
+pub const CODEC: u16 = 1024;
 /// A declared bound set closed under implication (OWN-4): `integer` and `float` imply
 /// every bound all their admitted types have, and `streamable` implies `packed`.
 pub fn implied(mut b: u16) -> u16 {
     if b & INTEGER != 0 {
-        b |= PLAIN | SHAREABLE | SEND | KEY | ORDERED | ENCODED;
+        b |= PLAIN | SHAREABLE | SEND | KEY | ORDERED | ENCODED | CODEC;
     }
     if b & FLOAT != 0 {
-        b |= PLAIN | SHAREABLE | SEND | ENCODED;
+        b |= PLAIN | SHAREABLE | SEND | ENCODED | CODEC;
     }
     if b & STREAMABLE != 0 {
         b |= PACKED;
@@ -47,6 +49,7 @@ pub fn bound_bit(name: &str) -> u16 {
         "float" => FLOAT,
         "packed" => PACKED,
         "streamable" => STREAMABLE,
+        "codec" => CODEC,
         _ => ORDERED,
     }
 }
@@ -57,19 +60,21 @@ pub(crate) fn counted(k: usize, unit: &str) -> String {
 
 pub fn bound_names(b: u16) -> String {
     let names = [
-        "plain",
-        "shareable",
-        "send",
-        "key",
-        "ordered",
-        "integer",
-        "float",
-        "packed",
-        "streamable",
+        (PLAIN, "plain"),
+        (SHAREABLE, "shareable"),
+        (SEND, "send"),
+        (KEY, "key"),
+        (ORDERED, "ordered"),
+        (INTEGER, "integer"),
+        (FLOAT, "float"),
+        (PACKED, "packed"),
+        (STREAMABLE, "streamable"),
+        (CODEC, "codec"),
     ];
-    (0..9)
-        .filter(|i| b & (1 << i) != 0)
-        .map(|i| names[i])
+    names
+        .into_iter()
+        .filter(|(bit, _)| b & bit != 0)
+        .map(|(_, name)| name)
         .collect::<Vec<_>>()
         .join(" + ")
 }
@@ -84,10 +89,12 @@ pub const H_OPAQUE: u8 = 16;
 
 /// What a rigid type parameter may hold (OWN-2): every category its bounds do not
 /// exclude. `plain` and `shareable` exclude resources, scoped values and stable
-/// references, and nothing excludes a capability.
+/// references. `codec` excludes all five held categories, including capabilities.
 pub fn param_holds(bounds: u16) -> u8 {
     let all = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_STABLE | H_OPAQUE;
-    if bounds & (PLAIN | SHAREABLE) != 0 {
+    if bounds & CODEC != 0 {
+        0
+    } else if bounds & (PLAIN | SHAREABLE) != 0 {
         all & !(H_RESOURCE | H_SCOPED | H_STABLE | H_OPAQUE)
     } else {
         all
@@ -500,6 +507,17 @@ impl Program<'_> {
                                         "plain, packed and streamable are computed, never declared",
                                     ));
                                 }
+                                if bit == CODEC
+                                    && matches!(
+                                        root.kind,
+                                        NodeKind::ResourceType
+                                            | NodeKind::StableType
+                                            | NodeKind::ScopedType
+                                    )
+                                {
+                                    self.refusals.push(refusal("OWN-4", self.site(at, b),
+                                        "a resource, stable or scoped definition cannot declare codec"));
+                                }
                                 declared |= bit;
                             }
                         }
@@ -842,6 +860,17 @@ impl Program<'_> {
                             ty,
                             site: self.site(at, f),
                         });
+                        if let Some(&default) = item.tree.children(f).get(1) {
+                            if self.decls[d.index()].declared & CODEC == 0 {
+                                self.refusals.push(refusal(
+                                    "SEM-10",
+                                    self.site(at, default),
+                                    "a field default requires a codec declaration",
+                                ));
+                            } else {
+                                self.check_field_default(at, default, ty);
+                            }
+                        }
                     }
                     body = DeclBody::Record(fields);
                 }
@@ -2535,23 +2564,27 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
     };
     let meet = |xs: &[TyId]| {
         xs.iter()
-            .fold(all, |b, &x| b & has_bounds(decls, t, x, params))
+            .fold(all | CODEC, |b, &x| b & has_bounds(decls, t, x, params))
     };
     plain_extra
         | match row {
-            TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED,
-            TyKind::Never | TyKind::Unit => all,
-            TyKind::Scalar(Scalar::F32 | Scalar::F64) => PLAIN | SHAREABLE | SEND | FLOAT | ENCODED,
-            TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => {
-                all | INTEGER | ENCODED
+            TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED | CODEC,
+            TyKind::Never => all,
+            TyKind::Unit => all | CODEC,
+            TyKind::Scalar(Scalar::F32 | Scalar::F64) => {
+                PLAIN | SHAREABLE | SEND | FLOAT | ENCODED | CODEC
             }
+            TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => {
+                all | INTEGER | ENCODED | CODEC
+            }
+            TyKind::Scalar(Scalar::Bool | Scalar::Char) => all | ENCODED | CODEC,
             TyKind::Scalar(_) => all | ENCODED,
             TyKind::Fn(_, _, _, callable) => match callable {
                 Callable::Plain => PLAIN | SHAREABLE | SEND,
                 Callable::OwnSend => SEND,
                 Callable::Own | Callable::Scoped | Callable::ScopedView => 0,
             },
-            TyKind::Tuple(xs) => meet(xs) | encoding_bounds(decls, t, ty, params) & ENCODED,
+            TyKind::Tuple(xs) => meet(xs) | (encoding_bounds(decls, t, ty, params) & ENCODED),
             TyKind::Region(_) => 0,
             TyKind::Anchored(x, _) => has_bounds(decls, t, *x, params),
             TyKind::Array(x, _) => has_bounds(decls, t, *x, params) & all,
@@ -2560,8 +2593,8 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
             TyKind::Adt(d, args) => {
                 let decl = &decls[d.index()];
                 let declared = match decl.role {
-                    Some(Role::List) => meet(args) & (KEY | ORDERED | SHAREABLE | SEND),
-                    Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND,
+                    Some(Role::List) => meet(args) & (KEY | ORDERED | SHAREABLE | SEND | CODEC),
+                    Some(Role::String) => KEY | ORDERED | SHAREABLE | SEND | CODEC,
                     Some(Role::Text) => KEY | ORDERED,
                     Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan) => {
                         meet(args) & (KEY | ORDERED)
@@ -2574,7 +2607,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),
                     Some(Role::Sender | Role::Receiver | Role::HostFile) => SEND,
-                    Some(Role::Map) => meet(args) & (SHAREABLE | SEND),
+                    Some(Role::Map) => meet(args) & (SHAREABLE | SEND | CODEC),
                     Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
                     Some(_) => 0,
                     None if decl.structural => meet(args),
@@ -2587,10 +2620,10 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     }
                 };
                 let declared = match decl.repr {
-                    Repr::Stable => declared & !(SEND | SHAREABLE),
-                    Repr::Scoped => declared & !(SEND | SHAREABLE | KEY | ORDERED),
+                    Repr::Stable => declared & !(SEND | SHAREABLE | CODEC),
+                    Repr::Scoped => declared & !(SEND | SHAREABLE | KEY | ORDERED | CODEC),
                     // SEM-7: a resource is never compared, whatever it declares.
-                    Repr::Resource => declared & !(KEY | ORDERED),
+                    Repr::Resource => declared & !(KEY | ORDERED | CODEC),
                     Repr::Own => declared,
                 };
                 declared | encoding_bounds(decls, t, ty, params) & ENCODED

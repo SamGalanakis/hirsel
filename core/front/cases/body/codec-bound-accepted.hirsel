@@ -1,0 +1,79 @@
+// OWN-4: a declared codec bound is conditional, not a constraint on the type itself.
+type Wrapper[T]: codec {
+    x: T
+}
+
+type Id[T]: codec {
+    n: u64
+}
+
+type Phantom[T]: codec {
+    id: Id[T]
+}
+
+type Tree: codec {
+    children: List[Tree]
+}
+
+type Both[T, U]: codec {
+    a: Option[T],
+    b: Result[U, T]
+}
+
+type Floats: codec {
+    a: f32,
+    b: f64
+}
+
+type Character: codec {
+    ch: char
+}
+
+type IntegerRows: codec {
+    a: i8,
+    b: i16,
+    c: i32,
+    d: i64,
+    e: u8,
+    f: u16,
+    g: u32,
+    h: u64
+}
+
+type Shape: codec = Zero | One(u64) | Named(name: String, x: bool)
+
+type NotCodec = Wrapper[HostFile]
+
+fn legal_instance(x: Wrapper[HostFile]) -> u64 {
+    0
+}
+
+fn require[T: codec](x: T) -> u64 {
+    1
+}
+
+fn forward[T: codec](x: T) -> u64 {
+    require(x)
+}
+
+pub fn builtins() -> u64 {
+    let xs: List[u64] = list.new()
+    let m: Map[u64, String] = map.new()
+    let r: Result[u64, String] = Ok(1u64)
+    require(1i8) + require(2i16) + require(3i32) + require(4i64) + require(5u8) + require(6u16) + require(7u32) + require(8u64) + require(true) + require(()) + require((1u64, true)) + require(Some(1u64)) + require(r) + require("text") + require(xs) + require(m) + require(1.5f32) + require(2.5f64) + require('x')
+}
+
+pub fn generic_instances() -> u64 {
+    let id: Id[HostFile] = Id(n: 7u64)
+    let phantom: Phantom[HostFile] = Phantom(id: id)
+    let w: Wrapper[String] = Wrapper(x: "ok")
+    let tree = Tree(children: list.new())
+    forward(w) + require(id) + require(phantom) + require(tree)
+}
+
+pub fn nominal_rows() -> u64 {
+    require(Floats(a: 1.25f32, b: 2.5f64)) + require(Character(ch: 'z')) + require(One(7u64))
+}
+// expect: run builtins() = 19
+// expect: run generic_instances() = 4
+// expect: run nominal_rows() = 3

@@ -14,6 +14,7 @@ mod body;
 mod constants;
 pub use constants::{ConstData, ConstValue, Constant};
 mod decls;
+mod defaults;
 mod identity;
 mod layout;
 mod library;

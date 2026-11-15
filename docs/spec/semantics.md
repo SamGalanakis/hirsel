@@ -351,15 +351,19 @@ Every decode, whatever its bytes:
 - builds fresh ownership: the value shares no storage with the bytes and, as no codec type
   holds one, no capability, resource, view or stable reference.
 
-```hirsel unbuilt
+```hirsel
 pub type Row: codec { id: u64, name: String, pinned: bool = false }
+```
+```hirsel unbuilt
 fn rows() -> codec.Codec[Row] { codec.of() }   // bytes written before `pinned` decode with false
 ```
-```hirsel unbuilt
+```hirsel
 type Pair[T]: codec { a: T, b: T }
-fn files() -> codec.Codec[Pair[HostFile]] { codec.of() }   // refused: LANG-12, HostFile is not codec
 ```
 ```hirsel unbuilt
+fn files() -> codec.Codec[Pair[HostFile]] { codec.of() }   // refused: LANG-12, HostFile is not codec
+```
+```hirsel
 type Note { pinned: bool = false }                    // refused: SEM-10, Note does not declare codec
 ```
 ```hirsel unbuilt

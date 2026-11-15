@@ -1,0 +1,15 @@
+type Expr: codec { n: u64 = 1 + 2 }
+type Path: codec { n: u64 = zero }
+type Group: codec { n: u64 = (0) }
+type Call: codec { n: u64 = zero() }
+type NegativeFloat: codec { n: f64 = -1.25 }
+// expect: refuse LANG-4 at 1:31
+// expect: refuse LANG-5 at 2:29
+// expect: refuse LANG-5 at 3:30
+// expect: refuse LANG-5 at 4:29
+// expect: refuse LANG-5 at 5:39
+// expect: compared LANG-4 at 1:31 | + | comma or newline
+// expect: compared LANG-5 at 2:29 | zero | literal
+// expect: compared LANG-5 at 3:30 | ( | literal
+// expect: compared LANG-5 at 4:29 | zero | literal
+// expect: compared LANG-5 at 5:39 | 1.25 | integer literal

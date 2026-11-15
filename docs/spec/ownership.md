@@ -210,15 +210,15 @@ fn same(a: Item[Entry], b: Item[Entry]) -> bool { a == b }  // refused: LANG-21,
 ```hirsel
 type Tree: shareable { kids: List[Rc[Tree]], log: HostFile }  // refused: OWN-4, at log
 ```
-```hirsel unbuilt
+```hirsel
 type Pair[T]: codec { a: T, b: T }        // Pair[u64] is codec, Pair[HostFile] is not
 type Id[T]: codec { slot: u64 }           // every Id[X] is codec
 type Tree: codec { kids: List[Tree] }
 ```
-```hirsel unbuilt
+```hirsel
 type Handle: codec { name: String, file: HostFile }   // refused: OWN-4, at file
 ```
-```hirsel unbuilt
+```hirsel
 resource type Lease: codec { n: u64 }                 // refused: OWN-4, a resource is never codec
 ```
 ```hirsel

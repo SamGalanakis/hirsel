@@ -1,0 +1,35 @@
+// Defaults are decode-only. Every constructor supplies its own values.
+type Row: codec {
+    id: u64,
+    pinned: bool = false
+}
+
+type Defaults: codec {
+    low: i8 = -128,
+    high: u8 = 255,
+    wide: i64 = -9223372036854775808,
+    decimal: f64 = 1.25,
+    letter: char = 'x',
+    text: String = "default",
+    byte: u8 = b'a'
+}
+
+pub fn ignores_default() -> u64 {
+    let row = Row(id: 7u64, pinned: true)
+    if row.pinned {
+        row.id
+    } else {
+        99
+    }
+}
+
+pub fn all_literals() -> u64 {
+    let row = Defaults(low: -1i8, high: 2u8, wide: 3i64, decimal: 2.5, letter: 'y', text: "explicit", byte: b'b')
+    if row.low == -1i8 && row.high == 2u8 && row.wide == 3i64 && float.to_bits64(row.decimal) == 0x4004000000000000u64 && row.letter == 'y' && row.byte == b'b' {
+        string.byte_len(row.text)
+    } else {
+        99
+    }
+}
+// expect: run ignores_default() = 7
+// expect: run all_literals() = 8

@@ -865,3 +865,27 @@ fn view_keyword_is_a_callable_bound_only() {
             .is_empty()
     );
 }
+
+#[test]
+fn codec_bound_and_literal_defaults_roundtrip() {
+    assert!(!keyword_symbol(sym::CODEC));
+    assert_eq!(lex("codec").tokens[0].kind, TokenKind::Ident);
+    formatted(
+        "pub type Wrapper[T]: codec { x: T, pinned: bool = false, n: i8 = -128, s: String = \"value\" }\nfn codec[T: codec](x: T) {}",
+        ParseMode::Source,
+    );
+    formatted(
+        "pub type Row: codec { pinned: bool = false }",
+        ParseMode::Signatures,
+    );
+    for source in [
+        "type X: codec { n: u64 = 1 + 2 }",
+        "type X: codec { n: u64 = f() }",
+        "type X: codec { n: f64 = -1.25 }",
+    ] {
+        assert!(
+            !parse(source, ParseMode::Source).diagnostics.is_empty(),
+            "{source}"
+        );
+    }
+}

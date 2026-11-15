@@ -29,7 +29,8 @@ const BODY_HEADER: usize = 28;
 /// framed as one part. A body record's IR part is hashed by it, and so is a
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
-const VERSION: u32 = 32;
+// Codec bound bits and the codec contextual symbol change declaration products.
+const VERSION: u32 = 33;
 const HEADER: usize = 12;
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;

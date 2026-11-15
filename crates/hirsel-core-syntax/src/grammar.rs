@@ -29,6 +29,7 @@ pub const BOUNDS: &[Symbol] = &[
     sym::FLOAT,
     sym::PACKED,
     sym::STREAMABLE,
+    sym::CODEC,
 ];
 pub const ASSIGN: &[Symbol] = &[
     sym::EQ,

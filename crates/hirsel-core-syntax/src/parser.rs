@@ -578,7 +578,11 @@ impl Parser<'_> {
                 let n = self.name()?;
                 self.expect(sym::COLON)?;
                 let t = self.ty()?;
-                fields.push(self.node(fs, NodeKind::Field, Some(n), &[t]));
+                let mut children: Nodes = smallvec![t];
+                if self.eat(sym::EQ) {
+                    children.push(self.field_default()?);
+                }
+                fields.push(self.node(fs, NodeKind::Field, Some(n), &children));
                 self.entry_end(sym::RBRACE)?;
             }
             c.push(self.node(st, NodeKind::Fields, None, &fields));
@@ -608,6 +612,37 @@ impl Parser<'_> {
         }
 
         Ok(self.node(s, kind, Some(name), &c))
+    }
+    /// SEM-10 uses the scalar grammar, not a constant expression.
+    fn field_default(&mut self) -> Parsed<NodeId> {
+        let s = self.pos;
+        if self.at(sym::MINUS) {
+            let op = self.bump();
+            if self.token(0).kind != TokenKind::Integer {
+                return self.fail_expected(
+                    "LANG-5",
+                    "integer literal",
+                    "a negative field default is an integer literal",
+                );
+            }
+            let value = self.primary()?;
+            return Ok(self.node(s, NodeKind::Unary, Some(op), &[value]));
+        }
+        if matches!(
+            self.token(0).kind,
+            TokenKind::Integer
+                | TokenKind::Float
+                | TokenKind::Character
+                | TokenKind::Byte
+                | TokenKind::String
+                | TokenKind::Bytes
+                | TokenKind::KwTrue
+                | TokenKind::KwFalse
+        ) {
+            self.primary()
+        } else {
+            self.fail_expected("LANG-5", "literal", "a field default is a literal")
+        }
     }
     fn variant(&mut self) -> Parsed<NodeId> {
         let s = self.pos;

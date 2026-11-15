@@ -15,6 +15,7 @@
 #include <string.h>
 #include <pthread.h>
 #include "aggregate_phi.h"
+#include "failure_edges.h"
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
@@ -796,6 +797,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                 "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,simplifycfg,dse)",
                 machine, options);
         }
+        if (!e) hirsel_cold_failure_edges(module, context);
         LLVMDisposePassBuilderOptions(options);
         if (e) {
             char *text = LLVMGetErrorMessage(e); error(out, text);

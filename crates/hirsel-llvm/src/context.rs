@@ -572,6 +572,15 @@ impl<'context> Module<'context> {
                 );
                 error = LLVMRunPasses(self.raw, cleanup.as_ptr(), machine.raw, options);
             }
+            if error.is_null() {
+                unsafe extern "C" {
+                    fn hirsel_llvm_cold_failure_edges(
+                        module: LLVMModuleRef,
+                        context: LLVMContextRef,
+                    );
+                }
+                hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
+            }
             LLVMDisposePassBuilderOptions(options);
             if error.is_null() {
                 return Ok(());

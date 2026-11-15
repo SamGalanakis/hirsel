@@ -14,6 +14,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        shared.join("failure_edges.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         prefix.join("lib/libLLVM.so.23.1").display()
     );
     println!("cargo:rerun-if-env-changed=LLVM_SYS_231_PREFIX");

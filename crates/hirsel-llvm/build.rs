@@ -11,6 +11,10 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        manifest.join("bridge/failure_edges.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         manifest.join("bridge/loop_version.h").display()
     );
     let sysroot = prefix.join("sysroot");

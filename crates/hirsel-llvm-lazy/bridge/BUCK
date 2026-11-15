@@ -3,6 +3,7 @@ cxx_library(
     srcs = ["engine.c"],
     headers = {
         "aggregate_phi.h": "//crates/hirsel-llvm/bridge:aggregate_phi.h",
+        "failure_edges.h": "//crates/hirsel-llvm/bridge:failure_edges.h",
     },
     header_namespace = "",
     compiler_flags = ["-O2", "-fvisibility=hidden"],

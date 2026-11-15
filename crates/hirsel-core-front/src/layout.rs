@@ -820,8 +820,6 @@ mod tests {
             namespace: hirsel_core_ids::ContentHash::of_bytes(b"layout-prefix-test"),
             table: 0,
             len: 128,
-            rows: Default::default(),
-            lookup: Default::default(),
         };
         let prefix = Table::published(bind(
             descriptor,

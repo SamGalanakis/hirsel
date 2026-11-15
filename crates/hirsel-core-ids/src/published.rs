@@ -16,8 +16,6 @@ pub struct Descriptor {
     pub namespace: ContentHash,
     pub table: u32,
     pub len: u32,
-    pub rows: ContentHash,
-    pub lookup: ContentHash,
 }
 
 /// A producer's numeric rows and optional key-to-row index. The driver owns IO.
@@ -693,8 +691,6 @@ mod tests {
             namespace: ContentHash::of_bytes(b"counted-key"),
             table: 0,
             len: 1,
-            rows: ContentHash::default(),
-            lookup: ContentHash::default(),
         };
         let map = Map::published(bind(descriptor, Arc::new(KeyRows)));
         assert_eq!(map.get(&CountedKey(7)), Some(&42));
@@ -734,8 +730,6 @@ mod tests {
             namespace: ContentHash::of_bytes(b"missing"),
             table: 0,
             len: 1,
-            rows: ContentHash::default(),
-            lookup: ContentHash::default(),
         };
         let rows = Table::published(bind(descriptor, Arc::new(Missing)));
         let error = catch_io(|| Ok(rows[0])).unwrap_err();

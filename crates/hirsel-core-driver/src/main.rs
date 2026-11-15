@@ -329,7 +329,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         };
         println!(
             "{}",
-            serde_json::json!({"image":hex(image.identity),"rebuilt":rebuilt,"name":name,"index_nodes":image.decoded_index_nodes(),"index_rows":image.decoded_index_rows()})
+            serde_json::json!({"image":hex(image.identity),"rebuilt":rebuilt,"name":name,"index_pages":image.checked_index_pages(),"index_rows":image.decoded_index_rows()})
         );
         drop(image);
         meter.finish("package handle teardown");

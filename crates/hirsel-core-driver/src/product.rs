@@ -876,7 +876,7 @@ mod open_tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(encode(&root).unwrap().len(), 128);
+        assert_eq!(encode(&root).unwrap().len(), 160);
         std::fs::write(
             product.image.store.path(root.directory),
             b"damaged unused directory",
@@ -925,7 +925,7 @@ mod indexed_tests {
             drop(product);
             let image = CoreImage::open(&path).unwrap().unwrap();
             assert_eq!(
-                (image.decoded_index_nodes(), image.decoded_index_rows()),
+                (image.checked_index_pages(), image.decoded_index_rows()),
                 (0, 0)
             );
             let name = DefPath::from_full("core@1/core/answer").unwrap();
@@ -936,8 +936,9 @@ mod indexed_tests {
                 rows < 16,
                 "{count} unrelated bodies demanded {rows} index rows"
             );
-            // Each keyed row follows at most two fixed 8-page arrays, a names header and a bounded bucket.
-            assert!(image.decoded_index_nodes() <= rows * 18);
+            // A keyed row reads its slot, its two offsets and its bytes: each may
+            // straddle a page boundary, and none depends on the table's size.
+            assert!(image.checked_index_pages() <= rows * 6);
             assert_eq!((image.decoded_bodies(), image.decoded_files()), (0, 0));
             assert!(
                 image

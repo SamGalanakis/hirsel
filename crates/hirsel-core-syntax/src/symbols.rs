@@ -544,8 +544,6 @@ mod tests {
             namespace: ContentHash([173; 32]),
             table: 0,
             len: original.len() as u32,
-            rows: ContentHash([174; 32]),
-            lookup: ContentHash([175; 32]),
         };
         let mut published = Symbols {
             strings: published::Table::published(published::bind(

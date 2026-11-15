@@ -1,314 +1,144 @@
-//! Indexed package records: bounded-depth numeric arrays and bounded hash buckets.
-//! Every pointer and absence is covered by immutable content-addressed roots.
+//! Published tables as flat sections of one paged byte space. A table is a row
+//! heap behind little-endian u32 offsets; a map adds an open-addressed slot array
+//! over its key bytes, so a lookup is one hash and a few slot reads, and a row is
+//! a byte range. The space is cut into fixed pages, each a content-addressed
+//! record named by the sections record the image root names: the image identity
+//! covers every page, and a request reads and checks only the sections record
+//! and the pages it touches, once.
 use super::*;
 use hirsel_core_ids::published::{Descriptor, Map, Publisher, Source, Table};
-use std::sync::Mutex;
-const BUCKET_LIMIT: usize = 32;
-const ROWS_PER_PAGE: usize = 16;
-const PAGE_HEADER: usize = (ROWS_PER_PAGE + 1) * 8;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn row_pages(store: &Store, rows: &[Vec<u8>]) -> io::Result<ContentHash> {
-    let mut pages = Vec::new();
-    for (i, chunk) in rows.chunks(ROWS_PER_PAGE).enumerate() {
-        let mut bytes = vec![0; PAGE_HEADER];
-        for (slot, row) in chunk.iter().enumerate() {
-            let start = bytes.len() as u64;
-            bytes[slot * 8..(slot + 1) * 8].copy_from_slice(&start.to_le_bytes());
-            bytes.extend_from_slice(row);
-        }
-        let end = bytes.len() as u64;
-        bytes[chunk.len() * 8..(chunk.len() + 1) * 8].copy_from_slice(&end.to_le_bytes());
-        pages.push((i as u32, store.put(&bytes)?));
-    }
-    array(store, &pages, array_shift(pages.last().map_or(0, |p| p.0)))
+pub(crate) const PAGE: usize = 4096;
+
+/// Every page of an image's sections and each published table's place in them,
+/// by its descriptor's table number.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct Sections {
+    pub pages: Vec<ContentHash>,
+    pub tables: Vec<Section>,
 }
-// The private index codec is fixed-width little-endian bincode. Four words
-// have exactly the old 32-byte representation, with fewer serde visits.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct IndexHash([u64; 4]);
-impl From<ContentHash> for IndexHash {
-    fn from(hash: ContentHash) -> Self {
-        Self(std::array::from_fn(|i| {
-            u64::from_le_bytes(hash.0[i * 8..i * 8 + 8].try_into().unwrap())
-        }))
-    }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(crate) struct Section {
+    /// Position of the table's length plus one u32 row offsets, relative to `heap`.
+    offsets: u64,
+    heap: u64,
+    /// A map's slots: `mask + 1` u64 slots, each the key hash's high word over
+    /// the row number plus one; zero is empty.
+    slots: Option<(u64, u32)>,
 }
-impl From<IndexHash> for ContentHash {
-    fn from(hash: IndexHash) -> Self {
-        let mut bytes = [0; 32];
-        for (chunk, word) in bytes.chunks_exact_mut(8).zip(hash.0) {
-            chunk.copy_from_slice(&word.to_le_bytes());
-        }
-        Self(bytes)
+
+/// A fixed function of the key bytes: the published slots depend on it, and the
+/// compiler identity in the image root fixes the compiler that computes it.
+fn key_hash(key: &[u8]) -> u64 {
+    const K: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut h = (key.len() as u64).wrapping_mul(K);
+    let mut words = key.chunks_exact(8);
+    for word in &mut words {
+        h = (h.rotate_left(23) ^ u64::from_le_bytes(word.try_into().unwrap())).wrapping_mul(K);
     }
+    let rest = words.remainder();
+    if !rest.is_empty() {
+        let mut word = [0; 8];
+        word[..rest.len()].copy_from_slice(rest);
+        h = (h.rotate_left(23) ^ u64::from_le_bytes(word)).wrapping_mul(K);
+    }
+    // The low bits pick the slot: fold the well-mixed high bits into them.
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h ^ (h >> 32)
 }
-/// A fixed-size, four-probe Bloom filter. A possible match always takes the
-/// ordinary bounded bucket lookup; only definite absence skips its IO.
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct NameFilter(Box<[[u64; 32]; 4]>);
-impl NameFilter {
-    fn positions(key: ContentHash) -> impl Iterator<Item = (usize, u64)> {
-        IndexHash::from(key).0.into_iter().map(|word| {
-            let bit = word & 8191;
-            ((bit >> 6) as usize, 1u64 << (bit & 63))
-        })
-    }
-    fn insert(&mut self, key: ContentHash) {
-        for (word, bit) in Self::positions(key) {
-            self.0[word / 32][word % 32] |= bit;
-        }
-    }
-    fn might_contain(&self, key: ContentHash) -> bool {
-        Self::positions(key).all(|(word, bit)| self.0[word / 32][word % 32] & bit != 0)
-    }
-}
-#[derive(Serialize, Deserialize)]
-enum Node {
-    Array(Box<[Option<IndexHash>; 16]>),
-    Names {
-        buckets: IndexHash,
-        mask: u32,
-        salt: u32,
-        filter: NameFilter,
-    },
-    Bucket(Vec<(IndexHash, u32)>),
-}
-fn array_shift(maximum: u32) -> u32 {
-    (31 - maximum.max(1).leading_zeros()) / 4 * 4
-}
-fn array(store: &Store, entries: &[(u32, ContentHash)], shift: u32) -> io::Result<ContentHash> {
-    let mut children = [None; 16];
-    for (n, child) in children.iter_mut().enumerate() {
-        let rows: Vec<_> = entries
-            .iter()
-            .copied()
-            .filter(|&(i, _)| ((i >> shift) & 15) as usize == n)
-            .collect();
-        if !rows.is_empty() {
-            *child = Some(if shift == 0 {
-                rows[0].1
-            } else {
-                array(store, &rows, shift - 4)?
-            });
-        }
-    }
-    store.put(&encode(&Node::Array(Box::new(
-        children.map(|h| h.map(IndexHash::from)),
-    )))?)
-}
-fn bucket_index(key: ContentHash, mask: u32, salt: u32) -> u32 {
-    let hash = if salt == 0 {
-        key
-    } else {
-        ContentHash::of_parts("hirsel.name-index.salt", [&key.0[..], &salt.to_le_bytes()])
-    };
-    u32::from_le_bytes(hash.0[..4].try_into().unwrap()) & mask
-}
-fn names(store: &Store, entries: &[(ContentHash, u32)]) -> io::Result<ContentHash> {
-    let mut filter = NameFilter::default();
-    for &(key, _) in entries {
-        filter.insert(key);
-    }
-    let maximum = entries.len().max(1).next_power_of_two();
-    let mut count = entries.len().div_ceil(8).max(1).next_power_of_two();
-    loop {
-        let mask = (count - 1) as u32;
-        // Hash construction is a producer operation. A fixed bucket bound makes
-        // every consumer lookup independent of the number of library declarations.
-        for salt in 0..128 {
-            let mut groups = vec![vec![]; count];
-            for &(key, value) in entries {
-                groups[bucket_index(key, mask, salt) as usize].push((key, value));
-            }
-            if groups.iter().any(|g| g.len() > BUCKET_LIMIT) {
-                continue;
-            }
-            let mut rows = vec![];
-            for (i, group) in groups.into_iter().enumerate() {
-                if !group.is_empty() {
-                    rows.push((
-                        i as u32,
-                        store.put(&encode(&Node::Bucket(
-                            group.into_iter().map(|(h, i)| (h.into(), i)).collect(),
-                        ))?)?,
-                    ));
-                }
-            }
-            let buckets = array(store, &rows, array_shift(mask))?;
-            return store.put(&encode(&Node::Names {
-                buckets: buckets.into(),
-                mask,
-                salt,
-                filter,
-            })?);
-        }
-        if count == maximum {
-            return Err(io::Error::other(
-                "compiler resource refusal: package hash-index construction exhausted",
-            ));
-        }
-        count *= 2;
-    }
-}
-pub(crate) struct DiskIndex {
-    pub store: Store,
-    nodes: Mutex<rustc_hash::FxHashMap<ContentHash, Arc<Node>>>,
-    pages: Mutex<rustc_hash::FxHashMap<ContentHash, Arc<Vec<u8>>>>,
-    reads: std::sync::atomic::AtomicUsize,
-    rows: std::sync::atomic::AtomicUsize,
-}
-impl DiskIndex {
-    pub fn new(path: &Path) -> io::Result<Self> {
-        Ok(Self {
-            store: Store::image(path)?,
-            nodes: Mutex::default(),
-            pages: Mutex::default(),
-            reads: Default::default(),
-            rows: Default::default(),
-        })
-    }
-    fn node(&self, hash: ContentHash) -> io::Result<Arc<Node>> {
-        if let Some(node) = self.nodes.lock().unwrap().get(&hash).cloned() {
-            return Ok(node);
-        }
-        let bytes = self.store.get(hash)?.ok_or_else(miss)?;
-        let node = Arc::new(decode::<Node>(&bytes).ok_or_else(miss)?);
-        self.nodes.lock().unwrap().insert(hash, Arc::clone(&node));
-        self.reads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(node)
-    }
-    fn at(&self, mut root: ContentHash, index: u32, shift: u32) -> io::Result<Option<ContentHash>> {
-        // Omit leading zero digits. At most eight pages cover every u32 index.
-        for shift in (0..=shift).rev().step_by(4) {
-            let node = self.node(root)?;
-            let Node::Array(children) = node.as_ref() else {
-                return Err(miss());
-            };
-            let Some(next) = children[((index >> shift) & 15) as usize] else {
-                return Ok(None);
-            };
-            root = next.into();
-        }
-        Ok(Some(root))
-    }
-    pub fn decoded_nodes(&self) -> usize {
-        self.reads.load(std::sync::atomic::Ordering::Relaxed)
-    }
-    pub fn decoded_rows(&self) -> usize {
-        self.rows.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-impl Source for DiskIndex {
-    fn row(&self, table: Descriptor, index: u32) -> io::Result<Vec<u8>> {
-        if index >= table.len {
-            return Err(miss());
-        }
-        let hash = self
-            .at(
-                table.rows,
-                index / ROWS_PER_PAGE as u32,
-                array_shift((table.len - 1) / ROWS_PER_PAGE as u32),
-            )?
-            .ok_or_else(miss)?;
-        let cached = self.pages.lock().unwrap().get(&hash).cloned();
-        let page = if let Some(page) = cached {
-            page
-        } else {
-            let page = Arc::new(self.store.get(hash)?.ok_or_else(miss)?);
-            self.pages.lock().unwrap().insert(hash, Arc::clone(&page));
-            page
-        };
-        let slot = index as usize % ROWS_PER_PAGE;
-        let offset = |slot: usize| -> io::Result<usize> {
-            let bytes = page.get(slot * 8..(slot + 1) * 8).ok_or_else(miss)?;
-            usize::try_from(u64::from_le_bytes(bytes.try_into().unwrap())).map_err(|_| miss())
-        };
-        let start = offset(slot)?;
-        let end = offset(slot + 1)?;
-        if start < PAGE_HEADER || end < start {
-            return Err(miss());
-        }
-        let bytes = page.get(start..end).ok_or_else(miss)?.to_vec();
-        self.rows.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(bytes)
-    }
-    fn find(&self, table: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
-        let key = ContentHash::of_bytes(key);
-        let node = self.node(table.lookup)?;
-        let Node::Names {
-            buckets,
-            mask,
-            salt,
-            filter,
-        } = node.as_ref()
-        else {
-            return Err(miss());
-        };
-        if !filter.might_contain(key) {
-            hirsel_core_front::cost_scope!("name lookup", "filtered absent");
-            return Ok(None);
-        }
-        hirsel_core_front::cost_scope!("name lookup", "bucket fallback");
-        let Some(hash) = self.at(
-            (*buckets).into(),
-            bucket_index(key, *mask, *salt),
-            array_shift(*mask),
-        )?
-        else {
-            return Ok(None);
-        };
-        let bucket = self.node(hash)?;
-        let Node::Bucket(rows) = bucket.as_ref() else {
-            return Err(miss());
-        };
-        let needle = IndexHash::from(key);
-        Ok(rows
-            .iter()
-            .find(|&&(k, _)| k == needle)
-            .map(|&(_, value)| value))
-    }
-}
-fn miss() -> io::Error {
-    io::Error::other("core image cache miss: damaged or missing indexed record; rebuild the image")
-}
-pub(crate) struct Writer<'a> {
-    store: &'a Store,
+
+pub(crate) struct Writer {
     namespace: ContentHash,
-    next: u32,
+    bytes: Vec<u8>,
+    tables: Vec<Section>,
 }
-impl<'a> Writer<'a> {
-    pub fn new(store: &'a Store, namespace: ContentHash) -> Self {
+impl Writer {
+    pub fn new(namespace: ContentHash) -> Self {
         Self {
-            store,
             namespace,
-            next: 0,
+            bytes: Vec::new(),
+            tables: Vec::new(),
         }
     }
-    fn descriptor(&mut self, len: usize, rows: ContentHash, lookup: ContentHash) -> Descriptor {
-        let descriptor = Descriptor {
+    fn u32(&mut self, value: usize) -> io::Result<()> {
+        let value = u32::try_from(value).map_err(|_| too_large())?;
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+    /// `keys[i]` is the length of row `i`'s leading key bytes, for a map.
+    fn section(&mut self, rows: &[Vec<u8>], keys: Option<&[usize]>) -> io::Result<Descriptor> {
+        let offsets = self.bytes.len() as u64;
+        let mut at = 0;
+        self.u32(0)?;
+        for row in rows {
+            at += row.len();
+            self.u32(at)?;
+        }
+        let heap = self.bytes.len() as u64;
+        for row in rows {
+            self.bytes.extend_from_slice(row);
+        }
+        let slots = keys.map(|keys| {
+            let count = (rows.len() * 2).max(2).next_power_of_two();
+            let mask = count - 1;
+            let mut slots = vec![0u64; count];
+            for (row, (bytes, &key)) in rows.iter().zip(keys).enumerate() {
+                let hash = key_hash(&bytes[..key]);
+                let mut i = hash as usize & mask;
+                while slots[i] != 0 {
+                    i = (i + 1) & mask;
+                }
+                slots[i] = (hash & !0xffff_ffff) | (row as u64 + 1);
+            }
+            let at = self.bytes.len() as u64;
+            for slot in slots {
+                self.bytes.extend_from_slice(&slot.to_le_bytes());
+            }
+            (at, mask as u32)
+        });
+        self.tables.push(Section {
+            offsets,
+            heap,
+            slots,
+        });
+        let d = Descriptor {
             namespace: self.namespace,
-            table: self.next,
-            len: len as u32,
-            rows,
-            lookup,
+            table: self.tables.len() as u32 - 1,
+            len: u32::try_from(rows.len()).map_err(|_| too_large())?,
         };
-        self.next += 1;
-        descriptor
+        Ok(d)
+    }
+    /// Write the pages and give the sections the image root names, with the
+    /// pages as published, to install in the publishing request's index.
+    pub fn finish(self, store: &Store) -> io::Result<(Sections, Vec<Arc<[u8]>>)> {
+        let mut pages = Vec::new();
+        let mut hashes = Vec::new();
+        for page in self.bytes.chunks(PAGE) {
+            hashes.push(store.put(page)?);
+            pages.push(Arc::from(page));
+        }
+        Ok((
+            Sections {
+                pages: hashes,
+                tables: self.tables,
+            },
+            pages,
+        ))
     }
 }
-impl Publisher for Writer<'_> {
+fn too_large() -> io::Error {
+    io::Error::other("compiler resource refusal: a published table exceeds its 4 GiB section")
+}
+impl Publisher for Writer {
     fn table<T: Clone + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static>(
         &mut self,
         table: &Table<T>,
     ) -> io::Result<Table<T>> {
-        let mut rows = vec![];
-        for row in table.iter() {
-            rows.push(encode(row)?);
-        }
-        let root = row_pages(self.store, &rows)?;
-        let empty = names(self.store, &[])?;
-        Table::from_descriptor(self.descriptor(table.len(), root, empty))
+        let rows = table.iter().map(encode).collect::<io::Result<Vec<_>>>()?;
+        Table::from_descriptor(self.section(&rows, None)?)
     }
     fn map<
         K: Clone
@@ -324,181 +154,196 @@ impl Publisher for Writer<'_> {
         &mut self,
         map: &Map<K, V>,
     ) -> io::Result<Map<K, V>> {
-        let mut rows = vec![];
-        let mut keys = vec![];
         let mut entries = map.iter().collect::<Vec<_>>();
         entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
-        for (i, (key, value)) in entries.into_iter().enumerate() {
-            rows.push(encode(&(key, value))?);
-            keys.push((ContentHash::of_bytes(&encode(key)?), i as u32));
+        let mut rows = Vec::with_capacity(entries.len());
+        let mut keys = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            // A row is its key's lookup bytes followed by its value's.
+            let mut row = encode(key)?;
+            keys.push(row.len());
+            row.extend_from_slice(&encode(value)?);
+            rows.push(row);
         }
-        let len = rows.len();
-        let rows = row_pages(self.store, &rows)?;
-        let keys = names(self.store, &keys)?;
-        Map::from_descriptor(self.descriptor(len, rows, keys))
+        Map::from_descriptor(self.section(&rows, Some(&keys))?)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn name_filter_keeps_all_members_and_false_matches_use_exact_lookup() {
-        let mut filter = NameFilter::default();
-        let keys = (0..2048u32)
-            .map(|i| ContentHash::of_bytes(&i.to_le_bytes()))
-            .collect::<Vec<_>>();
-        for &key in &keys {
-            filter.insert(key);
-        }
-        assert!(keys.iter().all(|&key| filter.might_contain(key)));
-        let restored: NameFilter = decode(&encode(&filter).unwrap()).unwrap();
-        assert!(keys.iter().all(|&key| restored.might_contain(key)));
-        let dir = tempfile::tempdir().unwrap();
-        let source = DiskIndex::new(dir.path()).unwrap();
-        let root = names(&source.store, &[(ContentHash::of_bytes(b"present"), 0)]).unwrap();
-        let Node::Names {
-            buckets,
-            mask,
-            salt,
-            ..
-        } = decode(&source.store.get(root).unwrap().unwrap()).unwrap()
-        else {
-            panic!("names")
-        };
-        let filter = NameFilter(Box::new([[u64::MAX; 32]; 4]));
-        let lookup = source
-            .store
-            .put(
-                &encode(&Node::Names {
-                    buckets,
-                    mask,
-                    salt,
-                    filter,
-                })
-                .unwrap(),
-            )
-            .unwrap();
-        let table = Descriptor {
-            namespace: ContentHash::default(),
-            table: 0,
-            len: 1,
-            rows: ContentHash::default(),
-            lookup,
-        };
-        assert_eq!(Source::find(&source, table, b"present").unwrap(), Some(0));
-        assert_eq!(Source::find(&source, table, b"absent").unwrap(), None);
+struct Pages {
+    sections: Sections,
+    pages: Box<[OnceLock<Arc<[u8]>>]>,
+    image: String,
+}
+pub(crate) struct DiskIndex {
+    store: Store,
+    /// The image and its sections record, once the image has a root.
+    root: OnceLock<(ContentHash, ContentHash)>,
+    pages: OnceLock<Pages>,
+    checked: AtomicUsize,
+    rows: AtomicUsize,
+}
+fn image_name(identity: ContentHash) -> String {
+    identity.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+impl DiskIndex {
+    pub fn new(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            store: Store::image(path)?,
+            root: OnceLock::new(),
+            pages: OnceLock::new(),
+            checked: AtomicUsize::new(0),
+            rows: AtomicUsize::new(0),
+        })
     }
-
-    #[test]
-    fn absent_name_does_not_open_bucket_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = DiskIndex::new(dir.path()).unwrap();
-        let lookup = names(&source.store, &[(ContentHash::of_bytes(b"present"), 0)]).unwrap();
-        let table = Descriptor {
-            namespace: ContentHash::default(),
-            table: 0,
-            len: 1,
-            rows: ContentHash::default(),
-            lookup,
-        };
-        assert_eq!(Source::find(&source, table, b"absent").unwrap(), None);
-        assert_eq!(
-            source.decoded_nodes(),
-            1,
-            "absence opened the bucket directory"
-        );
-        assert_eq!(Source::find(&source, table, b"present").unwrap(), Some(0));
+    /// An opened image's sections are read on the first table access.
+    pub fn open(&self, identity: ContentHash, sections: ContentHash) {
+        let _ = self.root.set((identity, sections));
     }
-
-    #[test]
-    fn one_record_uses_no_leading_zero_directory_pages() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = DiskIndex::new(dir.path()).unwrap();
-        let rows = row_pages(&source.store, &[encode(&19u64).unwrap()]).unwrap();
-        let table = Descriptor {
-            namespace: ContentHash::default(),
-            table: 0,
-            len: 1,
-            rows,
-            lookup: ContentHash::default(),
-        };
-        assert_eq!(
-            decode::<u64>(&Source::row(&source, table, 0).unwrap()),
-            Some(19)
-        );
-        assert!(
-            source.decoded_nodes() <= 1,
-            "a single row needs only one directory page"
-        );
-    }
-    #[test]
-    fn index_digest_words_preserve_the_existing_fixed_bytes() {
-        let hash = ContentHash(std::array::from_fn(|i| i as u8));
-        assert_eq!(encode(&IndexHash::from(hash)).unwrap(), hash.0);
-        let children = std::array::from_fn(|i| {
-            if i % 3 == 0 {
-                Some(IndexHash::from(hash))
-            } else {
-                None
-            }
+    /// The sections this process just published, with their pages.
+    pub fn publish(&self, identity: ContentHash, sections: Sections, written: Vec<Arc<[u8]>>) {
+        let _ = self.pages.set(Pages {
+            pages: written.into_iter().map(OnceLock::from).collect(),
+            sections,
+            image: image_name(identity),
         });
-        let node = Node::Array(Box::new(children));
-        // Old enum tag 0, u8 Option tags, then exactly 32 digest bytes.
-        let mut expected = 0u32.to_le_bytes().to_vec();
-        for i in 0..16 {
-            expected.push(u8::from(i % 3 == 0));
-            if i % 3 == 0 {
-                expected.extend_from_slice(&hash.0);
-            }
-        }
-        assert_eq!(encode(&node).unwrap(), expected);
-        let mut filter = NameFilter::default();
-        filter.insert(ContentHash::default());
-        let names = Node::Names {
-            buckets: hash.into(),
-            mask: 7,
-            salt: 11,
-            filter,
-        };
-        let mut names_bytes = 1u32.to_le_bytes().to_vec();
-        names_bytes.extend_from_slice(&hash.0);
-        names_bytes.extend_from_slice(&7u32.to_le_bytes());
-        names_bytes.extend_from_slice(&11u32.to_le_bytes());
-        names_bytes.extend_from_slice(&1u64.to_le_bytes());
-        names_bytes.resize(names_bytes.len() + 127 * 8, 0);
-        assert_eq!(encode(&names).unwrap(), names_bytes);
-        let bucket = Node::Bucket(vec![(hash.into(), 7)]);
-        let mut bucket_bytes = 2u32.to_le_bytes().to_vec();
-        bucket_bytes.extend_from_slice(&1u64.to_le_bytes());
-        bucket_bytes.extend_from_slice(&hash.0);
-        bucket_bytes.extend_from_slice(&7u32.to_le_bytes());
-        assert_eq!(encode(&bucket).unwrap(), bucket_bytes);
-        let Node::Array(decoded) = decode::<Node>(&expected).unwrap() else {
-            panic!("array")
-        };
-        for (i, row) in decoded.iter().enumerate() {
-            assert_eq!(row.map(ContentHash::from), (i % 3 == 0).then_some(hash));
-        }
     }
-    #[test]
-    fn malformed_record_page_offsets_are_external_cache_misses() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = DiskIndex::new(dir.path()).unwrap();
-        for (start, end) in [(0u64, 136u64), (140, 139), (136, 145)] {
-            let mut bytes = vec![0; PAGE_HEADER];
-            bytes[..8].copy_from_slice(&start.to_le_bytes());
-            bytes[8..16].copy_from_slice(&end.to_le_bytes());
-            let page = source.store.put(&bytes).unwrap();
-            let rows = array(&source.store, &[(0, page)], 0).unwrap();
-            let table = Descriptor {
-                namespace: ContentHash::default(),
-                table: 0,
-                len: 1,
-                rows,
-                lookup: ContentHash::default(),
-            };
-            assert!(Source::row(&source, table, 0).is_err());
+    fn installed(&self) -> io::Result<&Pages> {
+        if let Some(pages) = self.pages.get() {
+            return Ok(pages);
         }
+        let &(identity, hash) = self.root.get().ok_or_else(|| {
+            io::Error::other("core image sections are read before their publication")
+        })?;
+        // The root names this record by hash, so damage refuses the request.
+        let sections = self
+            .store
+            .get(hash)?
+            .and_then(|bytes| decode::<Sections>(&bytes))
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "core image {} is damaged: its sections record is missing or fails its hash check; rebuild the image",
+                    image_name(identity)
+                ))
+            })?;
+        let pages = (0..sections.pages.len()).map(|_| OnceLock::new()).collect();
+        Ok(self.pages.get_or_init(|| Pages {
+            sections,
+            pages,
+            image: image_name(identity),
+        }))
+    }
+    fn page<'a>(&self, pages: &'a Pages, n: usize) -> io::Result<&'a [u8]> {
+        let cell = pages.pages.get(n).ok_or_else(|| damaged(pages))?;
+        if let Some(page) = cell.get() {
+            return Ok(page);
+        }
+        // The page's hash is in the sections record the image root names, so a
+        // page that reads back different bytes refuses the request: there is no
+        // other path to its rows.
+        let bytes = self.store.get(pages.sections.pages[n])?.ok_or_else(|| {
+            io::Error::other(format!(
+                "core image {} is damaged: section page {n} is missing or fails its hash check; rebuild the image",
+                pages.image
+            ))
+        })?;
+        self.checked.fetch_add(1, Ordering::Relaxed);
+        Ok(cell.get_or_init(|| Arc::from(bytes)))
+    }
+    fn read(&self, pages: &Pages, at: u64, out: &mut [u8]) -> io::Result<()> {
+        let mut at = usize::try_from(at).map_err(|_| damaged(pages))?;
+        let mut done = 0;
+        while done < out.len() {
+            let page = self.page(pages, at / PAGE)?;
+            let bytes = page.get(at % PAGE..).ok_or_else(|| damaged(pages))?;
+            let n = bytes.len().min(out.len() - done);
+            if n == 0 {
+                return Err(damaged(pages));
+            }
+            out[done..done + n].copy_from_slice(&bytes[..n]);
+            done += n;
+            at += n;
+        }
+        Ok(())
+    }
+    fn u32(&self, pages: &Pages, at: u64) -> io::Result<u32> {
+        let mut bytes = [0; 4];
+        self.read(pages, at, &mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+    fn u64(&self, pages: &Pages, at: u64) -> io::Result<u64> {
+        let mut bytes = [0; 8];
+        self.read(pages, at, &mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+    fn span(&self, pages: &Pages, section: &Section, index: u32) -> io::Result<(u64, usize)> {
+        let start = self.u32(pages, section.offsets + 4 * u64::from(index))?;
+        let end = self.u32(pages, section.offsets + 4 * u64::from(index) + 4)?;
+        let len = end.checked_sub(start).ok_or_else(|| damaged(pages))?;
+        Ok((section.heap + u64::from(start), len as usize))
+    }
+    pub fn checked_pages(&self) -> usize {
+        self.checked.load(Ordering::Relaxed)
+    }
+    pub fn decoded_rows(&self) -> usize {
+        self.rows.load(Ordering::Relaxed)
     }
 }
+fn damaged(pages: &Pages) -> io::Error {
+    io::Error::other(format!(
+        "core image {} is damaged: a section reference is outside its pages; rebuild the image",
+        pages.image
+    ))
+}
+fn section(pages: &Pages, table: Descriptor) -> io::Result<&Section> {
+    pages
+        .sections
+        .tables
+        .get(table.table as usize)
+        .ok_or_else(|| damaged(pages))
+}
+impl Source for DiskIndex {
+    fn row(&self, table: Descriptor, index: u32) -> io::Result<Vec<u8>> {
+        let pages = self.installed()?;
+        if index >= table.len {
+            return Err(damaged(pages));
+        }
+        let (at, len) = self.span(pages, section(pages, table)?, index)?;
+        let mut bytes = vec![0; len];
+        self.read(pages, at, &mut bytes)?;
+        self.rows.fetch_add(1, Ordering::Relaxed);
+        Ok(bytes)
+    }
+    fn find(&self, table: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
+        let pages = self.installed()?;
+        let section = section(pages, table)?;
+        let (slots, mask) = section
+            .slots
+            .ok_or_else(|| io::Error::other("published table has no key index"))?;
+        let hash = key_hash(key);
+        let mut i = hash as u32 & mask;
+        let mut candidate = vec![0; key.len()];
+        for _ in 0..=mask {
+            let slot = self.u64(pages, slots + 8 * u64::from(i))?;
+            if slot == 0 {
+                return Ok(None);
+            }
+            if slot >> 32 == hash >> 32 {
+                let row = (slot as u32).checked_sub(1).ok_or_else(|| damaged(pages))?;
+                if row >= table.len {
+                    return Err(damaged(pages));
+                }
+                let (at, len) = self.span(pages, section, row)?;
+                if len >= key.len() {
+                    self.read(pages, at, &mut candidate)?;
+                    if candidate == key {
+                        return Ok(Some(row));
+                    }
+                }
+            }
+            i = (i + 1) & mask;
+        }
+        Ok(None)
+    }
+}
+
+// Old-against-new differential for F-image (temporary; not committed).

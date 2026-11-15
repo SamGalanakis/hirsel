@@ -119,16 +119,16 @@
           "body keys/new": 2538700,
           "body keys/for_body": 8558364,
           "body keys": 11097064,
-          "image read": 2314911,
-          "image digest": 939901
+          "image read": 827105,
+          "image digest": 665321
         },
         "image_access": {
-          "records_opened": 549,
-          "bytes_read": 306066,
-          "digests": 549,
-          "digest_bytes": 288498,
-          "read_instructions": 2314911,
-          "digest_instructions": 939901,
+          "records_opened": 63,
+          "bytes_read": 252716,
+          "digests": 63,
+          "digest_bytes": 250700,
+          "read_instructions": 827105,
+          "digest_instructions": 665321,
           "counter_refusal": null
         }
       },
@@ -141,14 +141,14 @@
         "body keys/new": 72.52485646268029,
         "body keys/for_body": 244.49236801568406,
         "body keys": 317.01722447836437,
-        "image read": 66.133594734631,
-        "image digest": 26.850581151099284
+        "image read": 23.629743733370677,
+        "image digest": 19.008542220977453
       },
       "image_per_token": {
-        "records_opened": 0.015684077860243662,
-        "bytes_read": 8.743537319703123,
-        "digests": 0.015684077860243662,
-        "digest_bytes": 8.241646828175325
+        "records_opened": 0.0018204733230639965,
+        "bytes_read": 7.219465060915838,
+        "digests": 0.0018204733230639965,
+        "digest_bytes": 7.161854082061336
       }
     }
   },
@@ -314,6 +314,42 @@
         "suite-edit": 12826069
       },
       "evidence": "core-syntax-891/resolve-F/differential-final.log, /tmp/core-syntax-891-tail-cost.log"
+    },
+    {
+      "reason": "F-image: lookup tables as flat paged sections (4 KiB pages, each checked on first touch against the sections record the image root names); node index removed, store VERSION 27. Only suite-edit image read/digest ceilings lowered.",
+      "evidence": "/workspace/code/hirsel-briefs/check-product-959/fimage/",
+      "image": {
+        "image read": {
+          "before_limit": 66.133594734631,
+          "observed_instructions": 827105,
+          "after_limit": 23.629743733370677
+        },
+        "image digest": {
+          "before_limit": 26.850581151099284,
+          "observed_instructions": 665321,
+          "after_limit": 19.008542220977453
+        },
+        "records_opened": {
+          "before_limit": 0.015684077860243662,
+          "observed": 63,
+          "after_limit": 0.0018204733230639965
+        },
+        "bytes_read": {
+          "before_limit": 8.743537319703123,
+          "observed": 252716,
+          "after_limit": 7.219465060915838
+        },
+        "digests": {
+          "before_limit": 0.015684077860243662,
+          "observed": 63,
+          "after_limit": 0.0018204733230639965
+        },
+        "digest_bytes": {
+          "before_limit": 8.241646828175325,
+          "observed": 250700,
+          "after_limit": 7.161854082061336
+        }
+      }
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

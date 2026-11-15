@@ -41,6 +41,9 @@ pub(crate) struct ImageRoot {
     pub directory: ContentHash,
     pub namespace: ContentHash,
     pub source_stamp: ContentHash,
+    /// The published tables' [`crate::image_index::Sections`] record, which
+    /// names every page by hash: the root's identity covers each page.
+    pub sections: ContentHash,
 }
 pub struct CoreImage {
     pub(crate) store: Store,
@@ -61,7 +64,7 @@ impl CoreImage {
             .unwrap()
             .to_owned()
     }
-    /// O(1) in the package size: one selection and a fixed-size compiler/directory root.
+    /// O(1) in the package size: one selection and a fixed-size root.
     pub fn open(path: &Path) -> io::Result<Option<Arc<Self>>> {
         let store = Store::image(path)?;
         let Some(identity) = store.selection("image-root")? else {
@@ -77,6 +80,7 @@ impl CoreImage {
             return Ok(None);
         }
         let indexed = Arc::new(crate::image_index::DiskIndex::new(path)?);
+        indexed.open(identity, root.sections);
         hirsel_core_ids::published::bind_source(root.namespace, indexed.clone());
         Ok(Some(Arc::new(Self {
             store,
@@ -172,8 +176,8 @@ impl CoreImage {
     pub fn decoded_index_rows(&self) -> usize {
         self.indexed.decoded_rows()
     }
-    pub fn decoded_index_nodes(&self) -> usize {
-        self.indexed.decoded_nodes()
+    pub fn checked_index_pages(&self) -> usize {
+        self.indexed.checked_pages()
     }
     pub(crate) fn file_offset(&self, module: ModuleId, item: u32) -> io::Result<u32> {
         hirsel_core_ids::published::catch_io(|| {
@@ -301,7 +305,7 @@ impl Driver {
         let namespace = product.snapshot;
         let indexed = Arc::new(crate::image_index::DiskIndex::new(&store_path)?);
         hirsel_core_ids::published::bind_source(namespace, indexed.clone());
-        let mut writer = crate::image_index::Writer::new(&store, namespace);
+        let mut writer = crate::image_index::Writer::new(namespace);
         let directory = ImageDirectory {
             compiler: compiler_identity()?,
             inputs,
@@ -318,12 +322,16 @@ impl Driver {
             resources: writer.table(&product.resources.clone().into())?,
         };
         let directory_hash = store.put(&encode(&directory)?)?;
+        let (sections, pages) = writer.finish(&store)?;
+        let sections_hash = store.put(&encode(&sections)?)?;
         let identity = store.put(&encode(&ImageRoot {
             compiler: compiler_identity()?,
             directory: directory_hash,
             namespace,
             source_stamp,
+            sections: sections_hash,
         })?)?;
+        indexed.publish(identity, sections, pages);
         store.select("image-root", identity)?;
         let image = Arc::new(CoreImage {
             store,

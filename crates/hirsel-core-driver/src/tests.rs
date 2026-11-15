@@ -743,6 +743,49 @@ fn an_unused_image_declaration_section_is_not_decoded() {
     );
 }
 
+#[test]
+fn a_damaged_section_page_refuses_the_request_and_names_the_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default()
+        .produce_image(
+            library_request("pub fn answer() -> u64 { 42 }\n", dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let image = image.unwrap();
+    let store = Store::new(&dir.path().join("store")).unwrap();
+    let root: crate::image::ImageRoot =
+        decode(&store.get(image.identity).unwrap().unwrap()).unwrap();
+    let sections: crate::image_index::Sections =
+        decode(&store.get(root.sections).unwrap().unwrap()).unwrap();
+    for page in &sections.pages {
+        // One payload byte, inside an intact envelope: only the hash tells.
+        let mut bytes = std::fs::read(store.path(*page)).unwrap();
+        let at = bytes.len() - 41;
+        bytes[at] ^= 1;
+        std::fs::write(store.path(*page), bytes).unwrap();
+    }
+    let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let mut req = request("fn caller() -> u64 { lib.answer() }\n", app.path());
+    req.library = LibraryInput::Image(opened);
+    let error = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .err()
+        .expect("a damaged page has no other path to its rows")
+        .to_string();
+    let name: String = image
+        .identity
+        .0
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert!(
+        error.contains(&name) && error.contains("fails its hash check"),
+        "{error}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn directory_source_file_symlinks_are_checked_instead_of_skipped() {

@@ -1,0 +1,147 @@
+//! Deterministic providers used by durable-library tests.
+//!
+//! The crash model keeps inode bytes and directory names as separate durable
+//! domains. `sync` publishes an inode's bytes; `sync_dir` publishes names.
+//! Restart discards every live change that was not published to the matching
+//! durable domain. No store or runner operation is encoded here.
+
+#[cfg(feature = "testing")]
+pub mod crash {
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum Op<'a> {
+        Create(&'a str),
+        Write(&'a str, &'a [u8]),
+        Sync(&'a str),
+        Rename(&'a str, &'a str),
+        SyncDir,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct Snapshot {
+        pub names: BTreeMap<String, u64>,
+        pub data: BTreeMap<u64, Vec<u8>>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct FileSystem {
+        next_inode: u64,
+        live_names: BTreeMap<String, u64>,
+        durable_names: BTreeMap<String, u64>,
+        live_data: BTreeMap<u64, Vec<u8>>,
+        durable_data: BTreeMap<u64, Vec<u8>>,
+    }
+
+    impl FileSystem {
+        /// Provider issue for a model operation. Delivery is immediate because
+        /// the model has no asynchronous host state.
+        pub fn issue(&mut self, op: &Op<'_>) {
+            self.apply(op);
+        }
+
+        pub fn apply(&mut self, op: &Op<'_>) {
+            match op {
+                Op::Create(name) => {
+                    assert!(!self.live_names.contains_key(*name));
+                    let inode = self.next_inode;
+                    self.next_inode += 1;
+                    self.live_names.insert((*name).into(), inode);
+                    self.live_data.insert(inode, Vec::new());
+                }
+                Op::Write(name, bytes) => {
+                    let inode = self.live_names[name.to_owned()];
+                    self.live_data.insert(inode, bytes.to_vec());
+                }
+                Op::Sync(name) => {
+                    let inode = self.live_names[name.to_owned()];
+                    self.durable_data
+                        .insert(inode, self.live_data[&inode].clone());
+                }
+                Op::Rename(from, to) => {
+                    let inode = self.live_names.remove(*from).unwrap();
+                    assert!(!self.live_names.contains_key(*to));
+                    self.live_names.insert((*to).into(), inode);
+                }
+                Op::SyncDir => self.durable_names = self.live_names.clone(),
+            }
+        }
+
+        pub fn restart(&mut self) {
+            self.live_names = self.durable_names.clone();
+            self.live_data = self.durable_data.clone();
+        }
+
+        pub fn read(&self, name: &str) -> Option<&[u8]> {
+            let inode = self.live_names.get(name)?;
+            self.live_data.get(inode).map(Vec::as_slice)
+        }
+
+        pub fn snapshot(&self) -> Snapshot {
+            Snapshot {
+                names: self.live_names.clone(),
+                data: self.live_data.clone(),
+            }
+        }
+
+        /// Every boundary, including before the first operation and after the
+        /// last, is a valid deterministic crash cut.
+        pub fn cuts(operation_count: usize) -> std::ops::RangeInclusive<usize> {
+            0..=operation_count
+        }
+    }
+
+    pub type CrashProvider = FileSystem;
+
+    pub fn run_until_restart(ops: &[Op<'_>], cut: usize) -> FileSystem {
+        assert!(cut <= ops.len());
+        let mut fs = FileSystem::default();
+        for op in &ops[..cut] {
+            fs.apply(op);
+        }
+        fs.restart();
+        fs
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::crash::{FileSystem, Op, run_until_restart};
+
+    #[test]
+    fn every_cut_loses_only_unsynced_bytes_and_names() {
+        let ops = [
+            Op::Create("a"),
+            Op::Write("a", b"x"),
+            Op::Sync("a"),
+            Op::Rename("a", "b"),
+            Op::SyncDir,
+        ];
+        let mut seen = 0;
+        for cut in FileSystem::cuts(ops.len()) {
+            let fs = run_until_restart(&ops, cut);
+            match cut {
+                0..=3 => assert_eq!(fs.read("a"), None),
+                4 => assert_eq!(fs.read("a"), None),
+                5 => assert_eq!(fs.read("b"), Some(&b"x"[..])),
+                _ => unreachable!(),
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, ops.len() + 1);
+    }
+
+    #[test]
+    fn a_second_run_is_deterministic_and_does_not_reuse_inodes() {
+        let ops = [
+            Op::Create("a"),
+            Op::Write("a", b"x"),
+            Op::Sync("a"),
+            Op::SyncDir,
+        ];
+        let first = run_until_restart(&ops, ops.len()).snapshot();
+        let second = run_until_restart(&ops, ops.len()).snapshot();
+        assert_eq!(first, second);
+        assert_eq!(first.data.len(), 1);
+    }
+}

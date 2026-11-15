@@ -155,7 +155,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                     self.declare_anchors(b, anchors, initial, value, written.unwrap_or(value));
                 }
-                self.own(b, pat);
+                if !(origin == Origin::Let && self.static_owned(value, ty)) {
+                    self.own(b, pat);
+                }
                 self.scope_slots.push(b);
             }
             _ => unreachable!("non-name let patterns use destructure_let"),

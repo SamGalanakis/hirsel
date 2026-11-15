@@ -1,0 +1,47 @@
+// FORM #114: an immutable `let` written only from string literals holds static carriers
+// (capacity 0, MEM-24 charges nothing), so it gets no drop. A place initialised from
+// literals that is then mutated, or whose value moves into a mutable place, still drops:
+// the run harness checks used 0 after each run, so a skipped drop of grown storage leaks.
+// Hand-derived: "ab" + "c" is 3 bytes; "abc" + "d" is 4; "x" + "z" is 2; the three
+// literals iterated are 3 elements, and "bot" + "crawl" + "x" is 9 bytes.
+// expect: run grown() = 3
+// expect: run moved() = 4
+// expect: run element() = 2
+// expect: run kept() = 3
+// expect: run lengths() = 9
+fn grown() -> u64 {
+    let mut s = "ab"
+    let _ = string.push(mut s, "c")
+    string.byte_len(s)
+}
+
+fn moved() -> u64 {
+    let s = "abc"
+    let mut t = s
+    let _ = string.push(mut t, "d")
+    string.byte_len(t)
+}
+
+fn element() -> u64 {
+    let mut a: Inline[String, 2] =["x", "y"]
+    let _ = string.push(mut a[0], "z")
+    string.byte_len(a[0])
+}
+
+fn kept() -> u64 {
+    let a: Inline[String, 3] =["bot", "crawl", "x"]
+    let mut n = 0u64
+    for s in a {
+        n += 1
+    }
+    n
+}
+
+fn lengths() -> u64 {
+    let a: Inline[String, 3] =["bot", "crawl", "x"]
+    let mut n = 0u64
+    for s in a {
+        n += string.byte_len(s)
+    }
+    n
+}

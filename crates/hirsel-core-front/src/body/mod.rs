@@ -136,6 +136,7 @@ pub struct Emitter {
     types: HashMap<String, TypeRef>,
     /// The recipes of `module.types`, recomputed when rows were added.
     recipes: Vec<Recipe>,
+    recipe_scratch: hirsel_core_layout::RecipeScratch,
     generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
     generic_calls: std::collections::BTreeMap<FuncId, GenericCall>,
     #[cfg(any(test, feature = "test-assembly"))]
@@ -504,7 +505,10 @@ impl Emitter {
     fn recipe(&mut self, id: TypeId, mark: usize) -> Option<&Recipe> {
         crate::cost_scope!("phase", "layout/drop recipes");
         if self.recipes.len() != self.module.types.len() {
-            match hirsel_core_layout::extend(&self.module.types, &mut self.recipes) {
+            match self
+                .recipe_scratch
+                .extend(&self.module.types, &mut self.recipes)
+            {
                 Ok(()) => {}
                 Err(_) => {
                     self.module.types.truncate(mark);

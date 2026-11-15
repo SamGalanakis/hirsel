@@ -336,28 +336,64 @@ pub fn compute(shapes: &[Shape]) -> Result<Vec<Recipe>, LayoutError> {
 /// `shapes`; neither that prefix nor its references may change between extensions.
 /// A refused suffix leaves the existing recipes intact.
 pub fn extend(shapes: &[Shape], recipes: &mut Vec<Recipe>) -> Result<(), LayoutError> {
-    let prefix = recipes.len();
-    let mut state = vec![State::Todo; shapes.len()];
-    state[..prefix].fill(State::Done);
-    let mut order = Vec::with_capacity(shapes.len() - prefix);
-    for i in prefix..shapes.len() {
-        visit(shapes, TypeRef(i as u32), &mut state, &mut order)?;
+    RecipeScratch::default().extend(shapes, recipes)
+}
+
+/// Reusable traversal storage for appending recipes to an unchanged prefix.
+#[derive(Default)]
+pub struct RecipeScratch {
+    state: Vec<State>,
+    order: Vec<TypeRef>,
+    stack: Vec<TypeRef>,
+    suffix: Vec<Option<Recipe>>,
+    #[cfg(test)]
+    pub(crate) initialized_rows: usize,
+}
+impl RecipeScratch {
+    /// Compute the new suffix, retaining the prior recipes on refusal. Visit state
+    /// is indexed relative to that suffix; references into the prefix are done.
+    pub fn extend(
+        &mut self,
+        shapes: &[Shape],
+        recipes: &mut Vec<Recipe>,
+    ) -> Result<(), LayoutError> {
+        let prefix = recipes.len();
+        let appended = shapes.len() - prefix;
+        self.state.clear();
+        self.state.resize(appended, State::Todo);
+        #[cfg(test)]
+        {
+            self.initialized_rows += self.state.len();
+        }
+        self.order.clear();
+        self.stack.clear();
+        self.suffix.clear();
+        for i in prefix..shapes.len() {
+            visit(
+                shapes,
+                TypeRef(i as u32),
+                prefix,
+                &mut self.state,
+                &mut self.order,
+                &mut self.stack,
+            )?;
+        }
+        self.suffix.resize_with(appended, || None);
+        let mut out = Computed {
+            prefix: recipes,
+            suffix: &mut self.suffix,
+        };
+        for &t in &self.order {
+            out.suffix[t.index() - prefix] = Some(recipe(shapes, &shapes[t.index()], &out)?);
+        }
+        recipes.extend(self.suffix.drain(..).map(|r| r.expect("visited")));
+        Ok(())
     }
-    let mut out = Computed {
-        prefix: recipes,
-        suffix: vec![None; shapes.len() - prefix],
-    };
-    for t in order {
-        out.suffix[t.index() - prefix] = Some(recipe(shapes, &shapes[t.index()], &out)?);
-    }
-    let suffix = out.suffix;
-    recipes.extend(suffix.into_iter().map(|r| r.expect("visited")));
-    Ok(())
 }
 
 struct Computed<'a> {
     prefix: &'a [Recipe],
-    suffix: Vec<Option<Recipe>>,
+    suffix: &'a mut [Option<Recipe>],
 }
 impl Computed<'_> {
     fn get(&self, t: TypeRef) -> Option<&Recipe> {
@@ -381,21 +417,23 @@ enum State {
 fn visit(
     shapes: &[Shape],
     root: TypeRef,
+    prefix: usize,
     state: &mut [State],
     order: &mut Vec<TypeRef>,
+    stack: &mut Vec<TypeRef>,
 ) -> Result<(), LayoutError> {
-    let mut stack = vec![root];
+    stack.push(root);
     while let Some(&t) = stack.last() {
-        match state[t.index()] {
+        match state[t.index() - prefix] {
             State::Done => {
                 stack.pop();
             }
             State::Visiting | State::Todo => {
-                state[t.index()] = State::Visiting;
-                let pending =
-                    inline_deps(&shapes[t.index()]).find(|d| state[d.index()] != State::Done);
+                state[t.index() - prefix] = State::Visiting;
+                let pending = inline_deps(&shapes[t.index()])
+                    .find(|d| d.index() >= prefix && state[d.index() - prefix] != State::Done);
                 if let Some(d) = pending {
-                    if state[d.index()] == State::Visiting {
+                    if state[d.index() - prefix] == State::Visiting {
                         return Err(LayoutError::Cycle {
                             ty: shapes[t.index()].name.clone(),
                         });
@@ -404,7 +442,7 @@ fn visit(
                     continue;
                 }
                 order.push(t);
-                state[t.index()] = State::Done;
+                state[t.index() - prefix] = State::Done;
                 stack.pop();
             }
         }

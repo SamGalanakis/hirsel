@@ -4,15 +4,15 @@
   "corpora": {
     "m1": {
       "code_lines": 7745,
-      "check_lower_per_line": 17206.22,
-      "whole_request_per_line": 33305.78,
-      "whole_process_per_line": 33405.77
+      "check_lower_per_line": 17116.22,
+      "whole_request_per_line": 33213.27,
+      "whole_process_per_line": 33310.55
     },
     "std": {
       "code_lines": 4357,
-      "check_lower_per_line": 11505.63,
-      "whole_request_per_line": 25902.77,
-      "whole_process_per_line": 26102.65
+      "check_lower_per_line": 11466.48,
+      "whole_request_per_line": 25849.36,
+      "whole_process_per_line": 26045.32
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
@@ -6080,6 +6080,65 @@
       },
       "ceiling_changes": "none: every after observation is above the current ceiling",
       "margin": "2% lowering rule applied only when after < current; no eligible cell"
+    },
+    {
+      "from_revision": "3711cf62",
+      "to_revision": "core-check-cost-915/E1-suffix-scratch",
+      "reason": "Recipe extension visits/initializes only appended rows, with per-emitter reusable scratch. Subtract only each measured same-build-pair saving; preserve inherited margin and named anchor allowance. No completion, denominator or product re-baseline, fixed60000 budget unchanged.",
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 7745,
+          "check_lower_per_line": 17206.22,
+          "whole_request_per_line": 33305.78,
+          "whole_process_per_line": 33405.77
+        },
+        "std": {
+          "code_lines": 4357,
+          "check_lower_per_line": 11505.63,
+          "whole_request_per_line": 25902.77,
+          "whole_process_per_line": 26102.65
+        }
+      },
+      "measured_before": {
+        "m1": {
+          "check_lower_per_line": 16713.060431100846,
+          "whole_request_per_line": 30228.38709263536,
+          "whole_process_per_line": 30405.662432640493
+        },
+        "std": {
+          "check_lower_per_line": 11214.958011802088,
+          "whole_request_per_line": 23230.741942805267,
+          "whole_process_per_line": 23504.633908306856
+        }
+      },
+      "measured_after": {
+        "m1": {
+          "check_lower_per_line": 16623.058506543493,
+          "whole_request_per_line": 30135.87926610213,
+          "whole_process_per_line": 30310.447138824737
+        },
+        "std": {
+          "check_lower_per_line": 11175.810712664548,
+          "whole_request_per_line": 23177.33408987744,
+          "whole_process_per_line": 23447.30163413527
+        }
+      },
+      "ceiling_decrements": {
+        "m1": {
+          "check_lower_per_line": 90.00192,
+          "whole_request_per_line": 92.50783,
+          "whole_process_per_line": 95.21529
+        },
+        "std": {
+          "check_lower_per_line": 39.1473,
+          "whole_request_per_line": 53.40785,
+          "whole_process_per_line": 57.33227
+        }
+      },
+      "measured_lines": {
+        "m1": 7794,
+        "std": 4406
+      }
     }
   ],
   "denominator_policy": "Fixed M1/core-std manifest closure, deterministic actual code lines. Print baseline and current counts when different. Source-line movement alone is expected source development, not a regression; empty corpus, missing counters, every numeric ceiling and the fixed finished-process budget still fail. Refresh recorded reference and forecast when supported work changes.",

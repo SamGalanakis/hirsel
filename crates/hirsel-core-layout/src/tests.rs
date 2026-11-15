@@ -689,6 +689,47 @@ fn appended_layouts_keep_prefix_dependencies_and_refuse_atomically() {
     assert_eq!(recipes, compute(&shapes).unwrap());
 }
 
+#[test]
+fn appended_layout_visit_state_is_linear_and_retry_resets_the_suffix() {
+    let mut scratch = RecipeScratch::default();
+    let mut shapes = Vec::new();
+    let mut recipes = Vec::new();
+    for n in 0..1024 {
+        shapes.push(record(
+            &format!("T{n}"),
+            Repr::Own,
+            vec![field("n", u(Scalar::U64))],
+        ));
+        scratch.extend(&shapes, &mut recipes).unwrap();
+    }
+    assert_eq!(scratch.initialized_rows, 1024);
+    assert_eq!(recipes, compute(&shapes).unwrap());
+    let before = recipes.clone();
+    shapes.push(record(
+        "Forward",
+        Repr::Own,
+        vec![field("next", FieldTy::Inline(TypeRef(1025)))],
+    ));
+    shapes.push(record(
+        "Cycle",
+        Repr::Own,
+        vec![field("self", FieldTy::Inline(TypeRef(1025)))],
+    ));
+    assert_eq!(
+        scratch.extend(&shapes, &mut recipes),
+        Err(LayoutError::Cycle { ty: "Cycle".into() })
+    );
+    assert_eq!(recipes, before);
+    shapes[1025] = record(
+        "Prefix",
+        Repr::Own,
+        vec![field("first", FieldTy::Inline(TypeRef(0)))],
+    );
+    scratch.extend(&shapes, &mut recipes).unwrap();
+    assert_eq!(recipes, compute(&shapes).unwrap());
+    assert_eq!(scratch.initialized_rows, 1028);
+}
+
 /// Bug: a `View[String]` field is laid out as a pointer (8) instead of the String's
 /// own carrier, or is cleaned (a double free of the owner's block), or is allowed in
 /// a type that outlives its owner. `scoped Parser {s: View[String], n: u8}`: s@0 is a

@@ -678,6 +678,9 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="core-bookkeeping-stop", script="tools/tests/core_bookkeeping_stop.py", full=False,
         files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-rt/testdata/bookkeeping_stop.c"]')))
+    out.append("\n" + call("hirsel_script_test", name="core-closed-pipe", script="tools/tests/core_closed_pipe.py", full=False,
+        files_env={"HIRSEL_PIPE_COMPILER": "//:hirsel-core-driver-bin-hirsel"},
+        data=Raw('glob(["core/core/**", "core/std/**"])')))
     out.append("\n" + call("hirsel_script_test", name="core-memory-report", script="tools/tests/core_memory_report.py", full=False,
         files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**", "core/core/**", "core/std/**"]) + ["crates/hirsel-core-rt/testdata/memory_report.c"]')))

@@ -473,6 +473,7 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-llvm-lazy",
+ "libc",
  "mimalloc",
  "object",
  "rustc-hash",

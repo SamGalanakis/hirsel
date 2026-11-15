@@ -706,6 +706,14 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     std::process::exit(exit)
 }
 fn main() {
+    // Every write to stdout or stderr meets a reader that may close early
+    // (`hirsel explain --list | head`). Rust's startup ignores SIGPIPE, which
+    // turns each such write into a panic; the default action ends the process
+    // quietly with the SIGPIPE status. A program run holds its own policy while
+    // it runs (hirsel-core-rt `PipePolicy`), and spawned tools start with the
+    // default action.
+    // SAFETY: no other thread exists yet, and SIG_DFL installs no handler.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     match run() {
         Ok(never) => match never {},
         Err(e) => {

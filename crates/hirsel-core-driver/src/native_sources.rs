@@ -33,13 +33,14 @@ impl CheckProduct {
             let file = if let Some(&file) = files.get(&module) {
                 file
             } else {
-                let source = if let Some(file) = own {
-                    SourceFile {
-                        path: file.path.to_string_lossy().into_owned(),
-                        text: file.syntax.source.clone(),
-                    }
+                let text = if let Some(file) = own {
+                    file.syntax.source.clone()
                 } else {
-                    self.image.as_ref().unwrap().source_file(module)?
+                    self.image.as_ref().unwrap().source_text(module)?
+                };
+                let source = SourceFile {
+                    path: self.source_name(module),
+                    text,
                 };
                 let file = u32::try_from(result.files.len())
                     .map_err(|_| io::Error::other("native source file table exceeds u32"))?;
@@ -52,5 +53,19 @@ impl CheckProduct {
                 .insert(path.clone(), ItemSource { file, file_offset });
         }
         Ok(result)
+    }
+
+    /// What an executable calls one source file: its package and its place in
+    /// the package (`std@1/list.hirsel`), which the module path is. Never a host
+    /// path, so an executable does not depend on where the core product is
+    /// installed or where the project lives.
+    fn source_name(&self, module: ModuleId) -> String {
+        let path = self.index.module_path(module);
+        format!(
+            "{}@{}/{}.hirsel",
+            path.package.name,
+            path.package.version,
+            path.modules.join("/")
+        )
     }
 }

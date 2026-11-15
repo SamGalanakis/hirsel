@@ -490,9 +490,10 @@ fn image_signature_use_skips_source_and_body_decoding() {
         sources.files[source.file as usize].text,
         "pub type Number = u64\npub fn answer() -> Number { 42 }\n"
     );
+    // The executable names the file by its module, not by where it was read.
     assert_eq!(
         sources.files[source.file as usize].path,
-        dir.path().join("main.hirsel").to_string_lossy()
+        "core@1/lib.hirsel"
     );
     assert_eq!(
         (opened.decoded_files(), opened.decoded_bodies()),

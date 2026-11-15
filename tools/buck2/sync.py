@@ -1354,7 +1354,7 @@ def first_party(meta: dict) -> str:
                             data=["crates/hirsel-core-front/test-check-cost.py", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost.py", "core/tools/request_cost.py", "core/tools/measure.py"]))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**"])')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-sites", case_filter="native::tests::failure_sites_",
-                           data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**"])')))
+                           data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**"])')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-provider-m3", case_filter="native::tests::provider_m3::",
                            data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/src/provider_m3.*", "core/core/**"])')))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/core/**", "core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))

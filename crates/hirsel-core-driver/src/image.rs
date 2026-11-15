@@ -139,20 +139,15 @@ impl CoreImage {
     pub fn file(&self, index: usize) -> io::Result<Arc<FileProduct>> {
         hirsel_core_ids::published::catch_io(|| self.file_inner(index))
     }
-    pub(crate) fn source_file(
-        &self,
-        module: ModuleId,
-    ) -> io::Result<hirsel_core_ir::source::SourceFile> {
+    /// One library file's text for an executable's source table; the
+    /// executable names the file by its module, never by its installed path.
+    pub(crate) fn source_text(&self, module: ModuleId) -> io::Result<String> {
         hirsel_core_ids::published::catch_io(|| {
             let directory = self.directory()?;
             let row = directory.sources.get(&module).ok_or_else(|| {
                 io::Error::other("native source module is not in its package image")
             })?;
-            let (path, text): (PathBuf, String) = self.read(*row)?;
-            Ok(hirsel_core_ir::source::SourceFile {
-                path: path.to_string_lossy().into_owned(),
-                text,
-            })
+            self.read(*row)
         })
     }
     fn file_inner(&self, index: usize) -> io::Result<Arc<FileProduct>> {
@@ -270,10 +265,7 @@ impl Driver {
         let mut files = Vec::new();
         let mut sources = Map::default();
         for file in &product.files {
-            sources.insert(
-                file.module,
-                store.put(&encode(&(&file.path, &file.syntax.source))?)?,
-            );
+            sources.insert(file.module, store.put(&encode(&file.syntax.source)?)?);
             files.push(ImageFile {
                 module: file.module,
                 path: file.path.clone(),

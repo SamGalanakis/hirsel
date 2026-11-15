@@ -23,7 +23,7 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
         let output = Command::new(&built.executable).output().unwrap();
         assert_eq!(output.status.code(), Some(101), "{output:?}");
         assert_eq!(output.stdout, b"before\n", "{output:?}");
-        assert_eq!(output.stderr, format!("Overflow at {}:{line}:5\n", dir.path().join("main.hirsel").display()).as_bytes(), "{output:?}");
+        assert_eq!(output.stderr, format!("Overflow at app@1/main.hirsel:{line}:5\n").as_bytes(), "{output:?}");
         assert_eq!(built.debug_lines, debug_lines);
         let bytes = std::fs::read(&built.executable).unwrap();
         use object::Object as _;
@@ -31,7 +31,7 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
             "site constants must survive a PIE load bias");
         if debug_lines {
             let positions = crate::native_debug::source_positions(&bytes).unwrap();
-            assert!(positions.contains(&(dir.path().join("main.hirsel").display().to_string(), line, 5)),
+            assert!(positions.contains(&("app@1/main.hirsel".to_string(), line, 5)),
                 "debug line table lost the raising expression: {positions:?}");
         } else {
             use object::{Object as _, ObjectSection as _};
@@ -121,3 +121,43 @@ fn failure_sites_dynamic_relocation_is_refused() {
     let error = crate::native_entry::check_linked_sites(&std::fs::read(output).unwrap()).unwrap_err();
     assert!(error.contains("dynamic relocation against site symbol"),"{error}");
 }
+
+// An executable names its sources by package (FAIL-2's report reads
+// `std@1/list.hirsel`), never by where the core product is installed or where
+// the project lives: the same program built under two cache roots and two
+// project directories, of different lengths, is the same executable.
+fn failure_sites_relocated(backend: Backend) {
+    let dir = tempfile::tempdir().unwrap();
+    let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let source = "pub fn main() -> Result[(), Exit] {\n    let mut xs: List[u64] = list.new()\n    let _ = list.remove(mut xs, 3)\n    Ok(())\n}\n";
+    let build = |project: &str, cache: &str| {
+        let project = dir.path().join(project);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(dir.path().join(cache)).unwrap();
+        std::fs::write(project.join("main.hirsel"), source).unwrap();
+        let request = CheckRequest::program(&project, &libraries, &project.join("store")).unwrap();
+        let product = Driver::default().check_reachable_with_product(request, &dir.path().join(cache), &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "{:?} {:?} {:?}", product.diagnostics, product.incomplete, product.resources);
+        let mut options = native_options(backend, &project);
+        options.optimize = true;
+        let built = product.build(&entry, &options).unwrap();
+        let output = Command::new(&built.executable).output().unwrap();
+        (std::fs::read(&built.executable).unwrap(), output)
+    };
+    let (first, output) = build("project-a", "cache-a/hirsel/core-packages");
+    let report = String::from_utf8_lossy(&output.stderr).into_owned();
+    for (project, cache) in [("project-a", "cache-bbbbbbbbbbbb/hirsel/core-packages"), ("project-bbbbbbbbbbbb", "cache-a/hirsel/core-packages")] {
+        let (other, _) = build(project, cache);
+        assert!(other == first, "{project} under {cache} is another executable; its report: {report}");
+    }
+    assert_eq!(output.status.code(), Some(101), "{output:?}");
+    assert_eq!(report, "Bounds at std@1/list.hirsel:167:13\n");
+}
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_relocated_cranelift() { failure_sites_relocated(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_relocated_llvm() { failure_sites_relocated(Backend::Llvm); }

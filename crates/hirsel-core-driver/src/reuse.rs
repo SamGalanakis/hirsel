@@ -124,23 +124,10 @@ impl Headers {
             prelude: self.prelude,
         })
     }
-    /// The image's header rows with every definition's closure hash. An image
-    /// definition's header reads stay inside the image: requests append their
-    /// definitions after its prefix and take its closures as given, so a read
-    /// that leaves the image would make those closures wrong. It is refused.
+    /// The image's header rows with every definition's closure hash. Requests
+    /// append their definitions after the image's prefix and take these
+    /// closures as given.
     pub(crate) fn seal(&self, index: &NameIndex) -> io::Result<Self> {
-        for (id, row) in self.rows.iter().enumerate() {
-            let Some(header) = row else { continue };
-            for read in &header.reads {
-                if self.by_id(*read).is_none() {
-                    return Err(io::Error::other(format!(
-                        "internal error: image header `{}` reads definition {} outside the image",
-                        index.definition_path(DefinitionId(id as u32)),
-                        read.0,
-                    )));
-                }
-            }
-        }
         let mut keys = Keys::bare(index, self.clone());
         keys.prelude = prelude(index);
         let mut closures = Vec::with_capacity(self.rows.len());

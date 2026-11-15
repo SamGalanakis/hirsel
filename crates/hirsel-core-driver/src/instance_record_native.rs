@@ -292,3 +292,124 @@ fn a_forged_closure_misses_its_parent() {
     assert_eq!(rebuilt.1, Some(7));
     assert!(rebuilt == fresh, "the forged parent misses and the build is a fresh store's");
 }
+
+/// A two-package request: `app` (main.hirsel) depends on `lib` (api.hirsel)
+/// and both on the source core.
+fn library_request(app: &str, lib: &str, core: &Path, dir: &Path, store: &str) -> CheckRequest {
+    let mut request = record_request(app, core, dir, store);
+    let file = dir.join("api.hirsel");
+    std::fs::write(&file, lib).unwrap();
+    request.inputs.packages[0].dependencies.push(package("lib"));
+    request.inputs.packages.push(PackageManifest {
+        package: package("lib"),
+        sources: vec![hirsel_core_resolve::ModuleSource {
+            file,
+            modules: vec!["api".into()],
+            signatures: false,
+        }],
+        dependencies: vec![package("core")],
+    });
+    request
+}
+fn library_check(app: &str, lib: &str, core: &Path, dir: &Path, store: &str) -> Arc<CheckProduct> {
+    Driver::default()
+        .check(library_request(app, lib, core, dir, store), &mut Meter::new(false))
+        .unwrap()
+}
+/// The diagnostics a build of `app@1/main/main` stops on: rule, module and
+/// file span, sorted.
+fn build_diagnostics(product: &CheckProduct, options: &NativeOptions) -> Vec<(String, String, u32, u32)> {
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let reached = product.reachable_for(&entry, options).unwrap();
+    let mut found: Vec<_> = reached
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let site = product.source_site(&d.primary).unwrap();
+            (d.rule.clone(), site.module, site.span.start, site.span.end)
+        })
+        .collect();
+    found.sort();
+    found
+}
+fn malformed_literal(start: u32) -> Vec<(String, String, u32, u32)> {
+    ["LANG-3", "LANG-5"]
+        .iter()
+        .map(|rule| (rule.to_string(), "lib@1/api".to_string(), start, start + 5))
+        .collect()
+}
+const PROBE_MAIN: &str =
+    "pub fn main() -> Result[(), Exit] { if probe() == 7u64 { Ok(()) } else { Error(Exit(status: 91u8)) } }\n";
+
+/// Law: a build reports the diagnostics of every library body it reaches,
+/// also behind an instance walk that stopped. An edit makes the malformed
+/// `lib.api.broken` reachable through the app's `probe`; the walk stops at
+/// `probe`, and only the stopped-walk fallback in reachability reaches
+/// `broken`. In a store primed by the valid build, and in a fresh one, the
+/// build stops on LANG-3 and LANG-5 at `0u128` (bytes 21..26 of api.hirsel,
+/// counted by hand). Mutant: no fallback (`if false`), red: no diagnostics.
+fn new_reachable_diagnostic(backend: Backend) {
+    const LIB: &str = "pub fn broken()->u64{0u128}\n";
+    let before = format!("fn probe() -> u64 {{ 7 }}\n{PROBE_MAIN}");
+    let after = format!("fn probe() -> u64 {{ lib.api.broken() }}\n{PROBE_MAIN}");
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_sources();
+    let options = native_options(backend, dir.path());
+    let primed = library_check(&before, LIB, &core, dir.path(), "store");
+    assert_eq!(executable_bytes(&primed, &options).1, Some(0), "{backend:?}: primed");
+    let edited = build_diagnostics(&library_check(&after, LIB, &core, dir.path(), "store"), &options);
+    let fresh_options = NativeOptions {
+        store: dir.path().join("fresh-native"),
+        ..native_options(backend, dir.path())
+    };
+    let fresh = build_diagnostics(&library_check(&after, LIB, &core, dir.path(), "fresh"), &fresh_options);
+    assert_eq!(edited, malformed_literal(21), "{backend:?}: primed store");
+    assert_eq!(fresh, malformed_literal(21), "{backend:?}: fresh store");
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn new_reachable_diagnostic_cranelift() {
+    new_reachable_diagnostic(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn new_reachable_diagnostic_llvm() {
+    new_reachable_diagnostic(Backend::Llvm);
+}
+
+/// Law: a library body rejected in a store is rebuilt from its repaired
+/// source. The app's `probe` calls `lib.api.get`, whose `0u128` is malformed:
+/// the build stops on LANG-3 and LANG-5 at bytes 18..23 of api.hirsel
+/// (counted by hand), reached only behind the stopped walk. After the repair
+/// to `7`, the build in that store runs `main` to status 0 and its executable
+/// equals a fresh store's. Mutant: no stopped-walk fallback, red: no
+/// diagnostics before the repair.
+fn rejected_repair(backend: Backend) {
+    let app = format!("fn probe() -> u64 {{ lib.api.get() }}\n{PROBE_MAIN}");
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_sources();
+    let options = native_options(backend, dir.path());
+    let rejected = library_check(&app, "pub fn get()->u64{0u128}\n", &core, dir.path(), "store");
+    assert_eq!(build_diagnostics(&rejected, &options), malformed_literal(18), "{backend:?}: rejected");
+    const REPAIRED: &str = "pub fn get()->u64{7}\n";
+    let repaired = executable_bytes(&library_check(&app, REPAIRED, &core, dir.path(), "store"), &options);
+    let fresh = executable_bytes(
+        &library_check(&app, REPAIRED, &core, dir.path(), "fresh"),
+        &NativeOptions {
+            store: dir.path().join("fresh-native"),
+            ..native_options(backend, dir.path())
+        },
+    );
+    assert_eq!(repaired.1, Some(0), "{backend:?}: repaired");
+    assert!(repaired == fresh, "{backend:?}: the repaired build is a fresh store's");
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn rejected_repair_cranelift() {
+    rejected_repair(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn rejected_repair_llvm() {
+    rejected_repair(Backend::Llvm);
+}

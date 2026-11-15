@@ -883,15 +883,16 @@
 //!   goes into no other data word. A pointer to the carrier or to its buffer is
 //!   used only as an address base or in a comparison, and a buffer pointer also as
 //!   a `free` or `alloc … like` operand. So no value carries a buffer in or out.
-//! - A **place-blind** `mut` or `take` carrier parameter ([`roles::Facts::place_blind`]):
+//! - A **place-blind** `mut`, `take` or `view` carrier parameter ([`roles::Facts::place_blind`]):
 //!   its place's address is never a value. It is only an address base for reads,
 //!   stores, copies, drops and case tests of its bytes, or lent whole to a direct
 //!   callee with a known body that is blind at that position. It is never
 //!   stored, compared, converted, returned, passed on an edge, passed as a value
 //!   or to a runtime operation, an unknown or indirect callee, or marked. A caller may
 //!   then lend a stand-in copy of the 24 bytes and copy it back on every exit,
-//!   failure included, and nothing can tell (Loans: no other path reaches the
-//!   original meanwhile). Sealed and blind are different facts: a body that
+//!   failure included (a `view` needs no copy back), and nothing can tell (Loans:
+//!   no other path reaches the original meanwhile, and a frozen place does not
+//!   change). In particular no anchored result (OWN-20) points into the stand-in. Sealed and blind are different facts: a body that
 //!   moves its buffer through local carriers is blind but not sealed.
 //! - A callee's body is **known** when it is in the module, or, for a function
 //!   without a body, when another module linked into the same program holds the

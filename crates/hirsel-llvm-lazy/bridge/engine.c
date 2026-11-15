@@ -1,5 +1,6 @@
 // The CoreIR object's LLVM phase, with the same target, pipeline and probe
 // settings as hirsel-llvm's direct Context/Module/TargetMachine path.
+#include <llvm-c/Analysis.h>
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/IRReader.h>
@@ -9,6 +10,7 @@
 #include <llvm-c/TargetMachine.h>
 #include <llvm-c/Transforms/PassBuilder.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -84,6 +86,301 @@ static LLVMMetadataRef worker_location(LLVMDIBuilderRef debug, LLVMContextRef co
 static void finish_worker_debug(LLVMDIBuilderRef debug) {
     if (debug) { LLVMDIBuilderFinalize(debug); LLVMDisposeDIBuilder(debug); }
 }
+// The parameters a function marks "hirsel-carriers" = "I:K[:N],...": LLVM parameter
+// I points to a sequence header (data pointer, length, capacity) lent as K, where
+// `m` (mut or take) comes back and `v` (view) does not. N, when present, is the
+// exclusive bound of its length and capacity words (FORM #113's `!range`).
+#define MAX_CARRIERS 8
+typedef struct { unsigned index; char kind; uint64_t bound; } Carrier;
+static unsigned carriers_of(LLVMValueRef f, Carrier *out) {
+    LLVMAttributeRef marker = LLVMGetStringAttributeAtIndex(f, LLVMAttributeFunctionIndex,
+        "hirsel-carriers", 15);
+    if (!marker) return 0;
+    unsigned len, n = 0, field = 0;
+    uint64_t number = 0;
+    const char *text = LLVMGetStringAttributeValue(marker, &len);
+    for (unsigned i = 0; i <= len && n < MAX_CARRIERS; ++i) {
+        char c = i < len ? text[i] : ',';
+        if (c >= '0' && c <= '9') number = number * 10 + (uint64_t)(c - '0');
+        else if (c == 'm' || c == 'v') out[n].kind = c;
+        else if (c == ':') {
+            if (field == 0) { out[n].index = (unsigned)number; out[n].bound = 0; }
+            number = 0; ++field;
+        } else if (c == ',') {
+            if (field == 2) out[n].bound = number;
+            if (field) ++n;
+            number = 0; field = 0;
+        }
+    }
+    return n;
+}
+static void set_carriers(LLVMContextRef context, LLVMValueRef f, const Carrier *cs, unsigned n) {
+    char text[MAX_CARRIERS * 40];
+    int at = 0;
+    for (unsigned i = 0; i < n; ++i) {
+        at += snprintf(text + at, sizeof(text) - (size_t)at, "%s%u:%c", i ? "," : "",
+                       cs[i].index, cs[i].kind);
+        if (cs[i].bound)
+            at += snprintf(text + at, sizeof(text) - (size_t)at, ":%llu",
+                           (unsigned long long)cs[i].bound);
+    }
+    LLVMRemoveStringAttributeAtIndex(f, LLVMAttributeFunctionIndex, "hirsel-carriers", 15);
+    if (n) LLVMAddAttributeAtIndex(f, LLVMAttributeFunctionIndex,
+        LLVMCreateStringAttribute(context, "hirsel-carriers", 15, text, (unsigned)at));
+}
+static unsigned direct_calls(LLVMValueRef f, LLVMValueRef **out) {
+    unsigned calls = 0;
+    for (LLVMUseRef use = LLVMGetFirstUse(f); use; use = LLVMGetNextUse(use)) {
+        LLVMValueRef call = LLVMGetUser(use);
+        if (LLVMIsACallInst(call) && LLVMGetCalledValue(call) == f &&
+            LLVMGetOperandUse(call, LLVMGetNumOperands(call)-1) == use) ++calls;
+    }
+    if (!calls) return 0;
+    *out = malloc(calls * sizeof(**out));
+    unsigned at = 0;
+    for (LLVMUseRef use = LLVMGetFirstUse(f); use; use = LLVMGetNextUse(use)) {
+        LLVMValueRef call = LLVMGetUser(use);
+        if (LLVMIsACallInst(call) && LLVMGetCalledValue(call) == f &&
+            LLVMGetOperandUse(call, LLVMGetNumOperands(call)-1) == use) (*out)[at++] = call;
+    }
+    return calls;
+}
+static unsigned return_words(LLVMTypeRef t) {
+    switch (LLVMGetTypeKind(t)) {
+    case LLVMVoidTypeKind: return 0;
+    case LLVMStructTypeKind: {
+        unsigned n = 0;
+        for (unsigned i = 0, c = LLVMCountStructElementTypes(t); i < c; ++i)
+            n += return_words(LLVMStructGetTypeAtIndex(t, i));
+        return n;
+    }
+    case LLVMArrayTypeKind: return 99;
+    default: return 1;
+    }
+}
+
+// One call of a carrier twin: each carried header's words are loaded from its
+// pointer, and a `mut` header's words are stored back before anything reads the
+// call's status. Returns the call's original result (or the call when void).
+static LLVMValueRef call_twin(LLVMBuilderRef builder, LLVMContextRef context,
+                              LLVMValueRef twin, LLVMTypeRef new_ty, LLVMValueRef *args,
+                              unsigned count, const int *carried, const uint64_t *bounds,
+                              unsigned outs, int has_ret, LLVMValueRef *new_args, unsigned np) {
+    LLVMTypeRef i64 = LLVMInt64TypeInContext(context), i8 = LLVMInt8TypeInContext(context);
+    LLVMTypeRef word_ty[3] = {LLVMPointerTypeInContext(context, 0), i64, i64};
+    LLVMValueRef back[MAX_CARRIERS];
+    unsigned nb = 0, a = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        if (!carried[i]) { new_args[a++] = args[i]; continue; }
+        for (unsigned w = 0; w < 3; ++w) {
+            LLVMValueRef offset = LLVMConstInt(i64, w * 8, 0);
+            LLVMValueRef p = LLVMBuildGEP2(builder, i8, args[i], &offset, 1, "at");
+            LLVMValueRef word = LLVMBuildLoad2(builder, word_ty[w], p, "word");
+            LLVMSetAlignment(word, 1);
+            if (w && bounds[i]) {
+                LLVMValueRef ends[2] = {LLVMConstInt(i64, 0, 0), LLVMConstInt(i64, bounds[i], 0)};
+                LLVMSetMetadata(word, LLVMGetMDKindIDInContext(context, "range", 5),
+                    LLVMMDNodeInContext(context, ends, 2));
+            }
+            new_args[a++] = word;
+        }
+        if (carried[i] == 'm') back[nb++] = args[i];
+    }
+    LLVMValueRef r = LLVMBuildCall2(builder, new_ty, twin, new_args, np, "");
+    LLVMSetInstructionCallConv(r, LLVMGetFunctionCallConv(twin));
+    if (!outs) return r;
+    unsigned at = has_ret ? 1 : 0;
+    for (unsigned b = 0; b < nb; ++b)
+        for (unsigned w = 0; w < 3; ++w) {
+            LLVMValueRef offset = LLVMConstInt(i64, w * 8, 0);
+            LLVMValueRef p = LLVMBuildGEP2(builder, i8, back[b], &offset, 1, "at");
+            LLVMValueRef s = LLVMBuildStore(builder, LLVMBuildExtractValue(builder, r, at++, "word"), p);
+            LLVMSetAlignment(s, 1);
+        }
+    return has_ret ? LLVMBuildExtractValue(builder, r, 0, "inner") : r;
+}
+
+// Short carriers as words on cold edges. A call the front marked cold (the
+// growth path) passes each marked sequence header as its three words, and a
+// `mut` header comes back in the result, so the caller never takes its
+// header's address for the call and the header stays in registers on the hot
+// path. The cold edge calls a twin that holds the words in its own place for
+// the definition, which keeps its body and its pointer ABI for every other
+// call. The twin loads the words back after the call whatever its status, and
+// the caller stores them before it tests the status: both edges see the
+// callee's final header. A loan is exclusive or frozen for the whole call
+// (OWN-11), so no other path observes the place while its words travel.
+// `convention` and `registers` are the target's twin calling convention and how
+// many integer words it returns in registers: on x86-64 the C and fast
+// conventions return three, so twins use Swift's, which returns four.
+static void register_carriers(LLVMModuleRef module, LLVMContextRef context,
+                              LLVMCallConv convention, unsigned registers) {
+    LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+    LLVMDIBuilderRef debug = NULL;
+    LLVMTypeRef i64 = LLVMInt64TypeInContext(context), i8 = LLVMInt8TypeInContext(context);
+    LLVMTypeRef pointer = LLVMPointerTypeInContext(context, 0);
+    LLVMTypeRef word_ty[3] = {pointer, i64, i64};
+    unsigned cold = LLVMGetEnumAttributeKindForName("cold", 4);
+    unsigned sret = LLVMGetEnumAttributeKindForName("sret", 4);
+    LLVMValueRef last = LLVMGetLastFunction(module);
+    for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
+        LLVMValueRef next = f == last ? NULL : LLVMGetNextFunction(f);
+        Carrier cs[MAX_CARRIERS];
+        unsigned n = carriers_of(f, cs);
+        LLVMLinkage linkage = LLVMGetLinkage(f);
+        unsigned count = LLVMCountParams(f);
+        set_carriers(context, f, cs, 0);
+        if (!n || !LLVMCountBasicBlocks(f) || count > 64 ||
+            (linkage != LLVMInternalLinkage && linkage != LLVMPrivateLinkage)) { f = next; continue; }
+        LLVMTypeRef old_ty = LLVMGlobalGetValueType(f), old_ret = LLVMGetReturnType(old_ty);
+        // A `mut` header comes back only within the return registers, and
+        // never from a function whose result already travels by `sret`.
+        unsigned regs = return_words(old_ret);
+        for (unsigned i = 0; i < count; ++i)
+            if (LLVMGetEnumAttributeAtIndex(f, i + 1, sret)) regs = 99;
+        unsigned kept = 0;
+        for (unsigned i = 0; i < n; ++i) {
+            if (cs[i].kind == 'm') {
+                if (regs + 3 > registers) continue;
+                regs += 3;
+            }
+            if (cs[i].index < count &&
+                LLVMGetTypeKind(LLVMTypeOf(LLVMGetParam(f, cs[i].index))) == LLVMPointerTypeKind &&
+                LLVMGetEnumAttributeAtIndex(f, cs[i].index + 1, sret) == NULL)
+                cs[kept++] = cs[i];
+        }
+        n = kept;
+        LLVMValueRef *sites = NULL;
+        unsigned calls = n ? direct_calls(f, &sites) : 0, edges = 0;
+        for (unsigned k = 0; k < calls; ++k)
+            if (LLVMGetCallSiteEnumAttribute(sites[k], LLVMAttributeFunctionIndex, cold))
+                sites[edges++] = sites[k];
+        if (!edges) { free(sites); f = next; continue; }
+        int carried[64] = {0};
+        uint64_t bounds[64] = {0};
+        unsigned outs = 0;
+        for (unsigned i = 0; i < n; ++i) {
+            carried[cs[i].index] = cs[i].kind;
+            bounds[cs[i].index] = cs[i].bound;
+            outs += cs[i].kind == 'm';
+        }
+        // Twin parameters: each carried pointer becomes three words.
+        LLVMTypeRef *old_params = malloc(count * sizeof(*old_params));
+        LLVMGetParamTypes(old_ty, old_params);
+        LLVMTypeRef *params = malloc((count + 2 * n) * sizeof(*params));
+        unsigned np = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            if (carried[i]) for (unsigned w = 0; w < 3; ++w) params[np++] = word_ty[w];
+            else params[np++] = old_params[i];
+        }
+        int has_ret = LLVMGetTypeKind(old_ret) != LLVMVoidTypeKind;
+        LLVMTypeRef result = old_ret;
+        if (outs) {
+            LLVMTypeRef fields[1 + 3 * MAX_CARRIERS];
+            unsigned nf = 0;
+            if (has_ret) fields[nf++] = old_ret;
+            for (unsigned k = 0; k < outs; ++k)
+                for (unsigned w = 0; w < 3; ++w) fields[nf++] = word_ty[w];
+            result = LLVMStructTypeInContext(context, fields, nf, 0);
+        }
+        LLVMTypeRef new_ty = LLVMFunctionType(result, params, np, 0);
+        size_t len;
+        const char *name = LLVMGetValueName2(f, &len);
+        char *label = malloc(len + 8); memcpy(label, name, len); strcpy(label + len, ".words");
+        LLVMValueRef twin = LLVMAddFunction(module, label, new_ty); free(label);
+        LLVMSetLinkage(twin, LLVMInternalLinkage);
+        LLVMSetFunctionCallConv(twin, convention);
+        LLVMAddAttributeAtIndex(twin, LLVMAttributeFunctionIndex,
+            LLVMCreateEnumAttribute(context, cold, 0));
+        // The twin's words: lengths keep their bound; other parameters keep
+        // the definition's attributes.
+        unsigned range = LLVMGetEnumAttributeKindForName("range", 5), at = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            if (!carried[i]) {
+                unsigned na = LLVMGetAttributeCountAtIndex(f, i + 1);
+                LLVMAttributeRef *attrs = malloc((na + 1) * sizeof(*attrs));
+                LLVMGetAttributesAtIndex(f, i + 1, attrs);
+                for (unsigned j = 0; j < na; ++j) LLVMAddAttributeAtIndex(twin, at + 1, attrs[j]);
+                free(attrs);
+                ++at;
+                continue;
+            }
+            for (unsigned w = 1; w < 3 && bounds[i]; ++w) {
+                uint64_t low = 0, high = bounds[i];
+                LLVMAddAttributeAtIndex(twin, at + w + 1,
+                    LLVMCreateConstantRangeAttribute(context, range, 64, &low, &high));
+            }
+            at += 3;
+        }
+        // The twin's body: the words into fresh places, the definition's call,
+        // the `mut` words back out.
+        LLVMMetadataRef scope = worker_scope(module, &debug, twin, LLVMGetSubprogram(f));
+        LLVMPositionBuilderAtEnd(builder, LLVMAppendBasicBlockInContext(context, twin, "entry"));
+        LLVMSetCurrentDebugLocation2(builder, scope
+            ? LLVMDIBuilderCreateDebugLocation(context, 0, 0, scope, NULL) : NULL);
+        LLVMTypeRef header = LLVMArrayType2(i8, 24);
+        LLVMValueRef *args = malloc(count * sizeof(*args));
+        LLVMValueRef places[MAX_CARRIERS];
+        unsigned a = 0, nplace = 0;
+        for (unsigned i = 0; i < count; ++i) {
+            if (!carried[i]) { args[i] = LLVMGetParam(twin, a++); continue; }
+            LLVMValueRef place = LLVMBuildAlloca(builder, header, "carrier");
+            LLVMSetAlignment(place, 8);
+            for (unsigned w = 0; w < 3; ++w) {
+                LLVMValueRef offset = LLVMConstInt(i64, w * 8, 0);
+                LLVMValueRef p = LLVMBuildGEP2(builder, i8, place, &offset, 1, "at");
+                LLVMValueRef s = LLVMBuildStore(builder, LLVMGetParam(twin, a++), p);
+                LLVMSetAlignment(s, 8);
+            }
+            args[i] = place;
+            if (carried[i] == 'm') places[nplace++] = place;
+        }
+        LLVMValueRef inner = LLVMBuildCall2(builder, old_ty, f, args, count, "");
+        LLVMSetInstructionCallConv(inner, LLVMGetFunctionCallConv(f));
+        // A call's tail kind starts as none, and LLVM marks no call `tail` that
+        // is passed a caller's alloca, so the copy-back reads the places after f.
+        if (!outs) {
+            if (has_ret) LLVMBuildRet(builder, inner); else LLVMBuildRetVoid(builder);
+        } else {
+            LLVMValueRef output = LLVMGetPoison(result);
+            unsigned slot = 0;
+            if (has_ret) output = LLVMBuildInsertValue(builder, output, inner, slot++, "output");
+            for (unsigned k = 0; k < nplace; ++k)
+                for (unsigned w = 0; w < 3; ++w) {
+                    LLVMValueRef offset = LLVMConstInt(i64, w * 8, 0);
+                    LLVMValueRef p = LLVMBuildGEP2(builder, i8, places[k], &offset, 1, "at");
+                    LLVMValueRef x = LLVMBuildLoad2(builder, word_ty[w], p, "word");
+                    LLVMSetAlignment(x, 8);
+                    output = LLVMBuildInsertValue(builder, output, x, slot++, "output");
+                }
+            LLVMBuildRet(builder, output);
+        }
+        // Each cold call: the caller's header words in, `mut` words back out.
+        LLVMValueRef *new_args = malloc(np * sizeof(*new_args));
+        for (unsigned k = 0; k < edges; ++k) {
+            LLVMValueRef old_call = sites[k];
+            LLVMPositionBuilderBefore(builder, old_call);
+            LLVMSetCurrentDebugLocation2(builder, LLVMInstructionGetDebugLoc(old_call));
+            for (unsigned i = 0; i < count; ++i) args[i] = LLVMGetArgOperand(old_call, i);
+            LLVMValueRef r = call_twin(builder, context, twin, new_ty, args, count, carried,
+                bounds, outs, has_ret, new_args, np);
+            // The call's own hints (cold, noinline) stay on it.
+            unsigned na = LLVMGetCallSiteAttributeCount(old_call, LLVMAttributeFunctionIndex);
+            LLVMAttributeRef *attrs = malloc((na + 1) * sizeof(*attrs));
+            LLVMGetCallSiteAttributes(old_call, LLVMAttributeFunctionIndex, attrs);
+            for (unsigned j = 0; j < na; ++j) LLVMAddCallSiteAttribute(LLVMIsACallInst(r)
+                ? r : LLVMGetOperand(r, 0), LLVMAttributeFunctionIndex, attrs[j]);
+            free(attrs);
+            if (has_ret) LLVMReplaceAllUsesWith(old_call, r);
+            LLVMInstructionEraseFromParent(old_call);
+        }
+        free(new_args); free(args); free(params); free(old_params); free(sites);
+        f = next;
+    }
+    finish_worker_debug(debug);
+    LLVMDisposeBuilder(builder);
+}
+
 // Private register-return adapter. The FORM destination ABI stays exported.
 static void register_results(LLVMModuleRef module, LLVMContextRef context) {
     LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
@@ -135,6 +432,14 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
         char *label = malloc(n+16); memcpy(label, name, n); strcpy(label+n, ".register");
         LLVMValueRef promoted = LLVMAddFunction(module, label, new_ty); free(label);
         LLVMSetLinkage(promoted, LLVMInternalLinkage); LLVMSetFunctionCallConv(promoted, LLVMFastCallConv);
+        {
+            // Its carriers follow, one parameter earlier without the destination.
+            Carrier cs[MAX_CARRIERS];
+            unsigned nc = carriers_of(f, cs), kept = 0;
+            for (unsigned i = 0; i < nc; ++i)
+                if (cs[i].index >= 2) { cs[kept] = cs[i]; cs[kept++].index -= 1; }
+            set_carriers(context, promoted, cs, kept);
+        }
         LLVMMetadataRef scope = worker_scope(module, &debug, promoted, LLVMGetSubprogram(f));
         LLVMSetCurrentDebugLocation2(builder, scope
             ? LLVMDIBuilderCreateDebugLocation(context, 0, 0, scope, NULL) : NULL);
@@ -428,6 +733,17 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         bound_imports(module, import_limit);
         register_results(module, context);
         local_imports(module);
+        int x86 = !strncmp(triple, "x86_64", 6), arm = !strncmp(triple, "aarch64", 7) ||
+            !strncmp(triple, "arm64", 5);
+        register_carriers(module, context, x86 ? LLVMSwiftCallConv : LLVMFastCallConv,
+            x86 || arm ? 4 : 2);
+        // These passes rewrite signatures and calls by hand: a malformed rewrite
+        // stops the build here instead of reaching code generation.
+        char *message = NULL;
+        int broken = LLVMVerifyModule(module, LLVMReturnStatusAction, &message);
+        if (broken) error(out, message ? message : "bridge passes produced invalid IR");
+        LLVMDisposeMessage(message);
+        if (broken) goto done;
     }
     LLVMSetTarget(module, triple);
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);

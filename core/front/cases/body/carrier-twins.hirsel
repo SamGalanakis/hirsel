@@ -1,0 +1,526 @@
+// Carrier words on cold calls (LLVM program builds): on a call in the true arm of a full
+// test (FORM #111) a place-blind `mut`, `take` or `view` List or String parameter may
+// travel as its three words, and a `mut` one's words come back after the call on every
+// status edge. Each edge under test sits in the arm of `list.len(e) == list.capacity(e)`
+// on an empty `e`, which is always true, so the cold call runs. These runs catch a twin that loses a
+// written word, writes back a stale one, skips the write-back on a failure edge, or takes
+// the word path for a parameter whose address can leave the body or whose layout is not
+// three whole words. Each is hand-derived; every returning run refunds every byte.
+// expect: run grown_refused() = 110004950
+// expect: run grown_trap(0) = 1105951
+// expect: run grown_trap(2) = fail Bounds
+// expect: run replaced() = 2042
+// expect: run replaced_trap(0) = 3
+// expect: run replaced_trap(2) = fail Bounds
+// expect: run caught_twice() = 2 used 32
+// expect: run anchored_mut() = 305
+// expect: run anchored_view() = 202
+// expect: run anchored_whole() = 3
+// expect: run anchored_whole_mut() = 407
+// expect: run anchored_deep_mut() = 407210
+// expect: run anchored_deep_view() = 302210
+// expect: run sub_view() = 34
+// expect: run stable_holder() = 1206
+// expect: run padded() = 41413
+// expect: run niche() = 9
+// expect: run floats() = 1
+// expect: run address_taken() = 212
+// expect: run indirect_tail() = 12117
+// expect: run self_recursion() = 20210
+// expect: run mutual_recursion() = 11112210
+// expect: run tail_call() = 4912
+fn sum(xs: List[u64]) -> u64 {
+    let mut s: u64 = 0
+    for x in xs {
+        s += x
+    }
+    s
+}
+
+fn counted(n: u64) -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    for i in 0u64 .. n {
+        result.unwrap(list.push(mut xs, i))
+    }
+    take xs
+}
+
+// 100 pushes from empty relocate the block several times; then a reservation of 800 kB
+// is refused inside 4000 bytes. The caller reads the relocated words: refused (1),
+// length 100, sum 0 + ... + 99 = 4950: 1 * 100000000 + 100 * 100000 + 4950.
+fn fill_then_refuse(mut xs: List[u64], n: u64) -> Result[u64, Capacity] {
+    for i in 0u64 .. n {
+        match list.push(mut xs, i) {
+            Ok(_) => {},
+            Error((e, _)) => return Error(e)
+        }
+    }
+    list.reserve(mut xs, 100000)?
+    Ok(0)
+}
+
+fn grown_refused() -> u64 {
+    let r: Result[u64, Capacity] = bound bytes 4000 {
+        let mut xs: List[u64] = list.new()
+        let e: List[u64] = list.new()
+        let refused = if list.len(e) == list.capacity(e) {
+            match fill_then_refuse(mut xs, 100) {
+                Ok(_) => 0u64,
+                Error(_) => 1u64
+            }
+        } else {
+            2u64
+        }
+        refused * 100000000 + list.len(xs) * 100000 + sum(xs)
+    }
+    match r {
+        Ok(n) => n,
+        Error(_) => 0
+    }
+}
+
+// The same growth, then a Bounds trap: the run's cleanup frees the relocated block
+// once. Index 0 returns 1 and the caller reads length 101 (0 .. 99, then 1) and sum
+// 4950 + 1: 1 * 1000000 + 101 * 1000 + 4951 = 1105951.
+fn fill_then_index(mut xs: List[u64], i: u64) -> u64 {
+    for k in 0u64 .. 100 {
+        result.unwrap(list.push(mut xs, k))
+    }
+    let a =[1u64, 2u64];
+    result.unwrap(list.push(mut xs, a[i]))
+    a[i]
+}
+
+fn grown_trap(i: u64) -> u64 {
+    let mut xs: List[u64] = list.new()
+    let e: List[u64] = list.new()
+    let r = if list.len(e) == list.capacity(e) {
+        fill_then_index(mut xs, i)
+    } else {
+        0
+    }
+    r * 1000000 + list.len(xs) * 1000 + sum(xs)
+}
+
+// The callee replaces the caller's list (its old block of ten is freed) with [40, 2]:
+// length 2, sum 42.
+fn swap_in(mut xs: List[u64]) -> u64 {
+    let mut ys: List[u64] = list.new()
+    result.unwrap(list.push(mut ys, 40))
+    result.unwrap(list.push(mut ys, 2))
+    xs = take ys
+    list.len(xs)
+}
+
+fn replaced() -> u64 {
+    let mut xs = counted(10)
+    let e: List[u64] = list.new()
+    let n = if list.len(e) == list.capacity(e) {
+        swap_in(mut xs)
+    } else {
+        0
+    }
+    n * 1000 + sum(xs)
+}
+
+// Replaced, then a trap: cleanup frees the new block, not the freed old one. Index 0
+// returns length 3 (40, 2, 1).
+fn replace_then_index(mut xs: List[u64], i: u64) -> u64 {
+    let e: List[u64] = list.new()
+    if list.len(e) == list.capacity(e) {
+        swap_in(mut xs);
+    }
+    let a =[1u64, 2u64];
+    result.unwrap(list.push(mut xs, a[i]))
+    list.len(xs)
+}
+
+fn replaced_trap(i: u64) -> u64 {
+    let mut xs = counted(10)
+    replace_then_index(mut xs, i)
+}
+
+// 01afc9d2: a caught Fail whose callee grew a `mut` list first, caught twice. Each
+// catch returns 1; the earlier cause cell is refunded and the last is kept (FAIL-16).
+fn push_then_fail(mut xs: List[u64]) -> u64 {
+    result.unwrap(list.push(mut xs, 1))
+    if list.len(xs) > 0 {
+        fail(result.unwrap(string.from("busy")))
+    }
+    0
+}
+
+fn caught() -> u64 {
+    match isolate(fn() -> u64 {
+        let mut xs: List[u64] = list.new()
+        let e: List[u64] = list.new()
+        if list.len(e) == list.capacity(e) {
+            push_then_fail(mut xs)
+        } else {
+            0
+        }
+    }) {
+        Error(_) => 9,
+        Ok(Ok(v)) => v,
+        Ok(Error(_)) => 1,
+    }
+}
+
+fn caught_twice() -> u64 {
+    let a = caught()
+    let b = caught()
+    a + b
+}
+
+// OWN-20: results anchored to a `mut` and to a view parameter. A result anchored to a
+// `mut` loan cannot leave an `if` arm (OWN-10), so those calls stay direct. [1, 2] then 5: length 3
+// and element 2 is 5; [1, 2, 3] from 1: length 2 and element 0 is 2.
+fn grown_view(mut xs: List[u64]) -> View[List[u64]] in xs {
+    result.unwrap(list.push(mut xs, 5))
+    list.slice(xs, 0, list.len(xs))
+}
+
+fn anchored_mut() -> u64 {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 1))
+    result.unwrap(list.push(mut xs, 2))
+    let v = grown_view(mut xs)
+    list.len(v) * 100 + v[2]
+}
+
+fn tail_view(xs: List[u64]) -> View[List[u64]] in xs {
+    list.slice(xs, 1, list.len(xs))
+}
+
+fn anchored_view() -> u64 {
+    let mut xs: List[u64] = list.new()
+    for i in 1u64 .. 4 {
+        result.unwrap(list.push(mut xs, i))
+    }
+    let e: List[u64] = list.new()
+    let v = if list.len(e) == list.capacity(e) {
+        tail_view(xs)
+    } else {
+        tail_view(xs)
+    }
+    list.len(v) * 100 + v[0]
+}
+
+// The anchored result is the parameter itself, so its address is the caller's place:
+// length 3, and from `mut` [0, 1, 2] then 7: length 4 and element 3 is 7.
+fn itself(xs: List[u64]) -> View[List[u64]] in xs {
+    view xs
+}
+
+fn anchored_whole() -> u64 {
+    let xs = counted(3)
+    let e: List[u64] = list.new()
+    let v = if list.len(e) == list.capacity(e) {
+        itself(xs)
+    } else {
+        itself(xs)
+    }
+    list.len(v)
+}
+
+fn itself_mut(mut xs: List[u64]) -> View[List[u64]] in xs {
+    result.unwrap(list.push(mut xs, 7))
+    view xs
+}
+
+fn anchored_whole_mut() -> u64 {
+    let mut xs = counted(3)
+    let v = itself_mut(mut xs)
+    list.len(v) * 100 + v[3]
+}
+
+// The same through recursion, so the frame that made the view is gone, and stack churn
+// after it: a view into a dead frame's copy reads churned words. churn(20) is
+// 1 + .. + 20 = 210.
+fn deep(mut xs: List[u64], n: u64) -> View[List[u64]] in xs {
+    if n == 0 {
+        result.unwrap(list.push(mut xs, 7))
+        return view xs
+    }
+    deep(mut xs, n - 1)
+}
+
+fn deep_view(xs: List[u64], n: u64) -> View[List[u64]] in xs {
+    if n == 0 {
+        return view xs
+    }
+    let e: List[u64] = list.new()
+    if list.len(e) == list.capacity(e) {
+        deep_view(xs, n - 1)
+    } else {
+        deep_view(xs, n - 1)
+    }
+}
+
+fn churn(n: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    let a =[n, n + 1, n + 2, n + 3];
+    a[0] + churn(n - 1)
+}
+
+fn anchored_deep_mut() -> u64 {
+    let mut xs = counted(3)
+    let v = deep(mut xs, 6)
+    let c = churn(20)
+    list.len(v) * 100000 + v[3] * 1000 + c
+}
+
+fn anchored_deep_view() -> u64 {
+    let xs = counted(3)
+    let e: List[u64] = list.new()
+    let v = if list.len(e) == list.capacity(e) {
+        deep_view(xs, 6)
+    } else {
+        deep_view(xs, 6)
+    }
+    let c = churn(20)
+    list.len(v) * 100000 + v[2] * 1000 + c
+}
+
+// A sub-view into a small record: length 3 and k 4.
+type Box2 {
+    xs: List[u64],
+    k: u64,
+}
+
+fn inner(b: Box2) -> View[List[u64]] in b {
+    view b.xs
+}
+
+fn sub_view() -> u64 {
+    let b = Box2(xs: counted(3), k: 4)
+    let e: List[u64] = list.new()
+    let v = if list.len(e) == list.capacity(e) {
+        inner(b)
+    } else {
+        inner(b)
+    }
+    list.len(v) * 10 + b.k
+}
+
+// A stable holder beside a `mut` list: [1] then 5 is length 2, so 10 + 2, and sum 6.
+stable type Span2 {
+    start: u64,
+    end: u64
+}
+
+fn mix(s: Span2, mut xs: List[u64]) -> u64 {
+    result.unwrap(list.push(mut xs, s.start))
+    s.end + list.len(xs)
+}
+
+fn stable_holder() -> u64 {
+    region r {
+        match Span2(start: 5, end: 10) in r {
+            Ok(s) => {
+                let mut xs: List[u64] = list.new()
+                result.unwrap(list.push(mut xs, 1))
+                let e: List[u64] = list.new()
+                let n = if list.len(e) == list.capacity(e) {
+                    mix(s, mut xs)
+                } else {
+                    0
+                }
+                n * 100 + sum(xs)
+            },
+            Error(_) => 0
+        }
+    }
+}
+
+// Layouts that are not three whole words keep the pointer: padding, a niche, floats.
+type Padded {
+    a: u64,
+    b: u8,
+}
+
+fn bump_padded(mut p: Padded) -> u64 {
+    p.a += 1
+    p.b += 2
+    p.a
+}
+
+fn padded() -> u64 {
+    let mut p = Padded(a: 40, b: 1)
+    let e: List[u64] = list.new()
+    let r = if list.len(e) == list.capacity(e) {
+        bump_padded(mut p)
+    } else {
+        0
+    }
+    let b: u64 = int.widen(p.b)
+    r * 1000 + p.a * 10 + b
+}
+
+fn put(mut o: Option[List[u64]]) {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 9))
+    o = Some(take xs)
+}
+
+fn niche() -> u64 {
+    let mut o: Option[List[u64]] = None
+    let e: List[u64] = list.new()
+    if list.len(e) == list.capacity(e) {
+        put(mut o)
+    }
+    match o {
+        Some(xs) => sum(xs),
+        None => 0
+    }
+}
+
+type Floats {
+    x: f64,
+    y: f64,
+}
+
+fn halve(mut f: Floats) {
+    f.x = f.x / 2.0
+    f.y = f.y + 1.0
+}
+
+fn floats() -> u64 {
+    let mut f = Floats(x: 9.0, y: 1.5)
+    let e: List[u64] = list.new()
+    if list.len(e) == list.capacity(e) {
+        halve(mut f)
+    }
+    if float.to_bits64(f.x) == float.to_bits64(4.5) && float.to_bits64(f.y) == float.to_bits64(2.5) {
+        1
+    } else {
+        0
+    }
+}
+
+// Called directly and through its address: 1, then 2, and the list is [1, 1].
+fn add_one(mut xs: List[u64]) -> u64 {
+    result.unwrap(list.push(mut xs, 1))
+    list.len(xs)
+}
+
+fn address_taken() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let e: List[u64] = list.new()
+    let a = if list.len(e) == list.capacity(e) {
+        add_one(mut xs)
+    } else {
+        0
+    }
+    let m: fn(mut List[u64]) -> u64 = add_one
+    let b = m(mut xs)
+    sum(xs) * 100 + a * 10 + b
+}
+
+// An indirect call in tail position takes the twin's copy of the place: [0 .. 15] then
+// 1 is length 17 and sum 120 + 1 = 121, and the copy's words must be read after it.
+fn forward(mut xs: List[u64], m: fn(mut List[u64]) -> u64) -> u64 {
+    m(mut xs)
+}
+
+fn indirect_tail() -> u64 {
+    let mut xs = counted(16)
+    let e: List[u64] = list.new()
+    let r = if list.len(e) == list.capacity(e) {
+        forward(mut xs, add_one)
+    } else {
+        0
+    }
+    sum(xs) * 100 + r
+}
+
+// Self recursion with one `mut` list (three words and the result: four registers):
+// 20 .. 1 pushed, length 20, sum 210.
+fn count_down(mut xs: List[u64], n: u64) -> u64 {
+    if n == 0 {
+        return list.len(xs)
+    }
+    result.unwrap(list.push(mut xs, n))
+    let e: List[u64] = list.new()
+    if list.len(e) == list.capacity(e) {
+        count_down(mut xs, n - 1)
+    } else {
+        0
+    }
+}
+
+fn self_recursion() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let e: List[u64] = list.new()
+    let r = if list.len(e) == list.capacity(e) {
+        count_down(mut xs, 20)
+    } else {
+        0
+    }
+    r * 1000 + sum(xs)
+}
+
+// Mutual recursion with two `mut` lists (six words, past four registers): ping pushes
+// 21, 19, .., 1 to a (11, sum 121), pong 20, 18, .., 2 to b (10, sum 110).
+fn ping(mut a: List[u64], mut b: List[u64], n: u64) -> u64 {
+    if n == 0 {
+        return list.len(a) * 100 + list.len(b)
+    }
+    result.unwrap(list.push(mut a, n))
+    let e: List[u64] = list.new()
+    if list.len(e) == list.capacity(e) {
+        pong(mut a, mut b, n - 1)
+    } else {
+        0
+    }
+}
+
+fn pong(mut a: List[u64], mut b: List[u64], n: u64) -> u64 {
+    if n == 0 {
+        return list.len(a) * 100 + list.len(b)
+    }
+    result.unwrap(list.push(mut b, n))
+    let e: List[u64] = list.new()
+    if list.len(e) == list.capacity(e) {
+        ping(mut a, mut b, n - 1)
+    } else {
+        0
+    }
+}
+
+fn mutual_recursion() -> u64 {
+    let mut a: List[u64] = list.new()
+    let mut b: List[u64] = list.new()
+    let e: List[u64] = list.new()
+    let r = if list.len(e) == list.capacity(e) {
+        ping(mut a, mut b, 21)
+    } else {
+        0
+    }
+    r * 10000 + sum(a) * 100 + sum(b)
+}
+
+// A direct call in tail position with copy-back: [0 .. 9], then 3, then 1: length 12
+// and sum 45 + 3 + 1 = 49.
+fn tail(mut xs: List[u64], n: u64) -> u64 {
+    result.unwrap(list.push(mut xs, n))
+    let e: List[u64] = list.new()
+    if list.len(e) == list.capacity(e) {
+        add_one(mut xs)
+    } else {
+        0
+    }
+}
+
+fn tail_call() -> u64 {
+    let mut xs = counted(10)
+    let e: List[u64] = list.new()
+    let r = if list.len(e) == list.capacity(e) {
+        tail(mut xs, 3)
+    } else {
+        0
+    }
+    sum(xs) * 100 + r
+}

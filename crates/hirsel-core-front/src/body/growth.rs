@@ -4,12 +4,6 @@
 //! capacity word of one place is a full test, and every call lowered in the
 //! true arm of an `if` on it is marked `cold` on its CallSite. The flag is a
 //! hint with no behaviour (core-ir CallSite::cold).
-//!
-//! A cold call keeps the caller's places out of memory: a `mut` argument of a
-//! fixed layout is passed as a temporary copy and copied back on both edges of
-//! the call. A `mut` place is exclusive for the call, so the round trip cannot
-//! be observed; without it the place's address escapes into the cold call and
-//! the hot path keeps it in memory.
 use super::*;
 use rustc_hash::FxHashSet;
 
@@ -111,61 +105,4 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn is_full_test(&self, condition: Option<ValueId>) -> bool {
         condition.is_some_and(|c| self.growth.full.contains(&c))
     }
-    /// Pass the `mut` place `v` (row `id`) to a cold call through a temporary
-    /// copy; `None` when the call is not cold or the place is a block holder.
-    pub(super) fn cold_place(
-        &mut self,
-        v: ValueId,
-        id: TypeId,
-        n: NodeId,
-    ) -> Option<(AddressId, Staged)> {
-        if !self.growth.cold || self.e.by_block(id) {
-            return None;
-        }
-        let tmp = self.new_slot(PlaceTy::Declared(id), n);
-        self.copy_bytes(tmp, v, id, n);
-        let copy = self.pointer(tmp, n);
-        Some((tmp, Staged { place: v, copy, id }))
-    }
-    /// Copy every staged temporary back into its place.
-    pub(super) fn unstage(&mut self, staged: &[Staged], n: NodeId) {
-        for s in staged {
-            let to = self.address(AddressBase::Value(s.place), &[], PlaceTy::Declared(s.id), n);
-            self.copy_bytes(to, s.copy, s.id, n);
-        }
-    }
-    /// The failure edge of a call with staged places: copy them back, then
-    /// continue to `fail`, or propagate when nothing here needs cleanup.
-    pub(super) fn staged_fail(
-        &mut self,
-        staged: &[Staged],
-        fail: Option<BlockId>,
-        n: NodeId,
-    ) -> Option<BlockId> {
-        if staged.is_empty() {
-            return fail;
-        }
-        let cur = self.cur.take();
-        let open = std::mem::take(&mut self.open);
-        let anchors = std::mem::take(&mut self.open_anchors);
-        let blk = self.new_block(&[]);
-        self.start(blk);
-        self.unstage(staged, n);
-        match fail {
-            Some(f) => self.jump(f, &[], n),
-            None => self.end(Terminator::Propagate, Some(n)),
-        }
-        self.cur = cur;
-        self.open = open;
-        self.open_anchors = anchors;
-        Some(blk)
-    }
-}
-
-/// A `mut` place passed to a cold call as `copy`.
-#[derive(Clone, Copy)]
-pub(super) struct Staged {
-    place: ValueId,
-    copy: ValueId,
-    id: TypeId,
 }

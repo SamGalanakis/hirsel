@@ -566,6 +566,10 @@ pub(super) struct FnAttrs {
     pub nounwind: bool,
     pub argmem_read: bool,
     pub destination_size: Option<u64>,
+    /// `"hirsel-carriers"`: the LLVM parameters that point to a lent sequence
+    /// header, and whether the callee may change it (the bridge passes them as
+    /// words on direct calls).
+    pub carriers: String,
     pub subprogram: Option<usize>,
 }
 impl Default for FnAttrs {
@@ -576,6 +580,7 @@ impl Default for FnAttrs {
             nounwind: false,
             argmem_read: false,
             destination_size: None,
+            carriers: String::new(),
             subprogram: None,
         }
     }
@@ -761,6 +766,9 @@ fn function_attrs(out: &mut String, attrs: &FnAttrs) {
     }
     if let Some(bytes) = attrs.destination_size {
         write!(out, " \"hirsel-destination-size\"=\"{bytes}\"").unwrap();
+    }
+    if !attrs.carriers.is_empty() {
+        write!(out, " \"hirsel-carriers\"=\"{}\"", attrs.carriers).unwrap();
     }
     if let Some(scope) = attrs.subprogram {
         write!(out, " !dbg !{scope}").unwrap();

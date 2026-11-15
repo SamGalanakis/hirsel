@@ -1,7 +1,7 @@
-// FORM #111: a call in the true arm of a full test is cold, and passes a `mut` place
-// as a temporary copy. The copy goes back on both edges: after bump's push replaces
-// the list's block, the caller reads the new len, and a failure's cleanup frees the
-// new block, not the one push already freed.
+// FORM #111: a call in the true arm of a full test is cold, and passes a `mut` carrier
+// as its words. The words go back on both edges: after bump's push replaces the
+// list's block, the caller reads the new len, and a failure's cleanup frees the new
+// block, not the one push already freed.
 // expect: accept
 // expect: run grown(0) = 5
 // expect: run grown(2) = fail Bounds

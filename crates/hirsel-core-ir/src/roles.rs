@@ -28,8 +28,9 @@ pub enum Role {
     Buffers,
 }
 
-/// A carrier type: an own record whose one field is a `seq` of a scalar (`String`,
-/// `Bytes`, `List` of a scalar). Its buffer holds scalars only, never a carrier.
+/// A carrier type: an own record whose one field is a `seq` of a plain element
+/// (`String`, `Bytes`, `List` of scalars or of pointer-free own records). Its buffer
+/// holds plain bytes only, never a carrier or a pointer.
 pub fn carrier(m: &Module, t: TypeId) -> bool {
     let Some(shape) = m.types.get(t.index()) else {
         return false;
@@ -37,8 +38,30 @@ pub fn carrier(m: &Module, t: TypeId) -> bool {
     matches!(
         (&shape.repr, &shape.body),
         (Repr::Own, Shaped::Record(fields))
-            if matches!(&fields[..], [f] if matches!(&f.ty, FieldTy::Seq(e) if matches!(**e, FieldTy::Scalar(_))))
+            if matches!(&fields[..], [f] if matches!(&f.ty, FieldTy::Seq(e) if plain(m, e)))
     )
+}
+
+/// A field type whose bytes hold no pointer: scalars, inline arrays of plain
+/// elements, and own records or variants of plain fields with no finalizer or
+/// clone body.
+fn plain(m: &Module, ty: &FieldTy) -> bool {
+    match ty {
+        FieldTy::Scalar(_) => true,
+        FieldTy::Array(e, _) => plain(m, e),
+        FieldTy::Inline(r) => m.types.get(r.index()).is_some_and(|shape| {
+            shape.repr == Repr::Own
+                && shape.finalizer.is_none()
+                && shape.clone.is_none()
+                && match &shape.body {
+                    Shaped::Record(fields) => fields.iter().all(|f| plain(m, &f.ty)),
+                    Shaped::Variant(cases) => cases
+                        .iter()
+                        .all(|c| c.fields.iter().all(|f| plain(m, &f.ty))),
+                }
+        }),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -112,7 +135,7 @@ fn shape<'a>(m: &Module, f: &'a Function) -> Option<Shape<'a>> {
         for (i, (p, v)) in sig.params.iter().zip(values.iter().skip(skip)).enumerate() {
             if let Param::Address {
                 place: PlaceTy::Declared(ty),
-                loan: Loan::Mut | Loan::Take,
+                loan: Loan::Mut | Loan::Take | Loan::View,
             } = *p
                 && carrier(m, ty)
             {
@@ -139,7 +162,7 @@ fn shape<'a>(m: &Module, f: &'a Function) -> Option<Shape<'a>> {
 /// The version of what [`Facts`] derive (crate docs, "Roles"). A product that
 /// records [`BodyFacts`] includes it in its key, and a change to what a fact
 /// claims or how it is derived bumps it.
-pub const FACTS_SCHEMA: u32 = 1;
+pub const FACTS_SCHEMA: u32 = 2;
 
 /// One parameter's facts, as a published body records them.
 #[derive(
@@ -162,9 +185,9 @@ pub struct BodyFacts {
 
 /// Per-parameter facts of every function of a module (crate docs, "Roles"), the
 /// greatest fixpoint over its direct calls. Derived; a product may record a
-/// body's facts as [`BodyFacts`]. A parameter with a fact is a `mut` or `take`
-/// carrier parameter of a body whose entry block no edge re-enters; every other
-/// parameter has none. A function without a body has the facts of its known
+/// body's facts as [`BodyFacts`]. A parameter with a fact is a `mut`, `take` or
+/// `view` carrier parameter of a body whose entry block no edge re-enters (a
+/// `view` one is never sealed); every other parameter has none. A function without a body has the facts of its known
 /// body ([`Facts::program`]), and none if it has none. A product that keeps a
 /// module's facts keeps its [`Facts::consumed`] rows, and [`Facts::restore`]
 /// gives the facts back: the rows are their one encoding.
@@ -213,10 +236,28 @@ impl Facts {
                             .collect()
                     })
                     .collect();
-                Facts {
-                    sealed: top.clone(),
-                    blind: top,
-                }
+                // A `view` carrier may be place-blind; only one it owns or
+                // changes can be sealed.
+                let sealed = top
+                    .iter()
+                    .zip(&m.functions)
+                    .map(|(t, f)| {
+                        let sig = &m.signatures[f.signature.index()];
+                        t.iter()
+                            .zip(&sig.params)
+                            .map(|(&t, p)| {
+                                t && !matches!(
+                                    p,
+                                    Param::Address {
+                                        loan: Loan::View,
+                                        ..
+                                    }
+                                )
+                            })
+                            .collect()
+                    })
+                    .collect();
+                Facts { sealed, blind: top }
             })
             .collect();
         // Each known body, by the link name its calls bind to: a held body first.
@@ -380,10 +421,23 @@ impl Facts {
         let Some(s) = shape(m, &m.functions[f.index()]) else {
             return Vec::new();
         };
+        // A `view` parameter is a root only for place-blindness: two views of
+        // one place may be passed together, so its bytes and buffers claim no role.
+        let sig = &m.signatures[m.functions[f.index()].signature.index()];
+        let viewed = |r: Root| {
+            matches!(r, Root::Param(i) if matches!(
+                sig.params.get(i as usize),
+                Some(Param::Address { loan: Loan::View, .. })
+            ))
+        };
         s.locs
             .iter()
             .map(|l| {
-                l.map(|l| match l {
+                l.and_then(|l| match l {
+                    Loc::Carrier(root, _) | Loc::Buffer(root) if viewed(root) => None,
+                    l => Some(l),
+                })
+                .map(|l| match l {
                     Loc::Carrier(root, _) => Role::Carrier(root),
                     Loc::Buffer(Root::Param(i)) if self.sealed(f, i) => {
                         Role::Buffer(Root::Param(i))

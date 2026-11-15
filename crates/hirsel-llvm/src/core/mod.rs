@@ -90,6 +90,67 @@ pub fn symbol(module: &Module, function: FuncId) -> String {
     name
 }
 
+/// The `"hirsel-carriers"` marker: each LLVM parameter whose place the bridge
+/// may pass as words on cold calls (FORM #111), `m` when the callee may change it (`mut`,
+/// `take`, so its words come back) and `v` when it is frozen (`view`).
+///
+/// A parameter qualifies when its place is a carrier (`roles::carrier`: an own
+/// record whose one field is a sequence of plain elements, so the place is data
+/// pointer, length, capacity, three initialised words, and the copy is exact)
+/// and the body is place-blind there (`roles::Facts::place_blind`): its address
+/// is never a value, so no anchored result, stored pointer or callee can tell a
+/// stand-in from the place. Every other parameter, and every parameter when the
+/// emitter has no role facts, keeps the pointer ABI.
+fn carriers(
+    module: &Module,
+    recipes: &[hirsel_core_layout::Recipe],
+    facts: Option<&hirsel_core_ir::roles::Facts>,
+    f: FuncId,
+    sig: &Signature,
+    locals: &[Local],
+) -> String {
+    let mut out = String::new();
+    let Some(facts) = facts else {
+        return out;
+    };
+    for (i, p) in sig.params.iter().enumerate() {
+        let Param::Address {
+            place: PlaceTy::Declared(t),
+            loan,
+        } = p
+        else {
+            continue;
+        };
+        if !hirsel_core_ir::roles::carrier(module, *t) || !facts.place_blind(f, i as u32) {
+            continue;
+        }
+        let Some(at) = locals.iter().position(|l| *l == Local::Param(i)) else {
+            continue;
+        };
+        if !out.is_empty() {
+            out.push(',');
+        }
+        let kind = if *loan == Loan::View { 'v' } else { 'm' };
+        write!(out, "{at}:{kind}").unwrap();
+        // The words travel as values, so the bound a len or capacity read
+        // carries (FORM #113) goes with them.
+        if let hirsel_core_layout::Body::Record(fields) = &module.types[t.index()].body
+            && let [
+                hirsel_core_layout::Field {
+                    ty: hirsel_core_layout::FieldTy::Seq(e),
+                    ..
+                },
+            ] = &fields[..]
+            && let Some(bound) = hirsel_core_layout::charge::seq_len_bound(
+                hirsel_core_layout::field_size(&module.types, recipes, e).2,
+            )
+        {
+            write!(out, ":{}", bound + 1).unwrap();
+        }
+    }
+    out
+}
+
 /// Whether to use the producer's optimization facts. Setting the diagnostic
 /// switch suppresses every emitter-supplied fact, while retaining ABI attributes
 /// and stack probes. Drivers include this choice in native object cache keys.
@@ -378,6 +439,7 @@ fn emit_module(
                 _ => Inline::Default,
             },
             destination_size: destination,
+            carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
             subprogram: function_debug.map(|d| d.scope),
             ..FnAttrs::default()
         };

@@ -1716,11 +1716,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if self.e.needs_drop(id) {
             self.consume(Some(from), n);
         }
-        self.copy_bytes(to, from, id, n);
-    }
-    /// The bytes of the row-`id` value `from` points at, copied into place `to`;
-    /// ownership is unchanged.
-    fn copy_bytes(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
         let from = self.address(AddressBase::Value(from), &[], PlaceTy::Declared(id), n);
         let size = self.e.size(id);
         let bytes = self.value(Ty::Scalar(Scalar::U64));

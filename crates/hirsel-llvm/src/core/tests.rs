@@ -1572,6 +1572,239 @@ fn every_front_run_case_matches_the_evaluator() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Carrier words: only a program build (`emit_program`) gives a place-blind List or
+/// String parameter its word twin on cold calls, so these cases run there and must
+/// match the evaluator in result and in bytes still admitted, on both status edges.
+fn carrier_program_cases(target: Target) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
+    for name in [
+        "carrier-twins",
+        "cold-call-place",
+        "causes-retry",
+        "grow-carrier-words",
+        "own-20-mut-anchor",
+    ] {
+        let path = root.join(format!("cases/body/{name}.hirsel"));
+        let source = std::fs::read_to_string(&path).unwrap();
+        let (module, names) = front::lower(&source, &root.join("../core"), "main").unwrap();
+        let cases = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("// expect: run "))
+            .map(|run| {
+                let (call, _) = run.split_once(" = ").unwrap();
+                let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
+                let function = names[name];
+                let sig = &module.signatures[module.functions[function.index()].signature.index()];
+                let args = args
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .zip(&sig.params)
+                    .map(|(a, t)| {
+                        let Param::Value(t) = t else {
+                            panic!("front argument")
+                        };
+                        eval::scalar(*t, a)
+                    })
+                    .collect();
+                Case {
+                    function,
+                    args,
+                    limit: u64::MAX,
+                    injection: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
+        let ir = emit_ir_target_with_role_facts(
+            &module,
+            target,
+            false,
+            facts_enabled(),
+            SourceEmission {
+                relocatable_sites: false,
+                debug_lines: false,
+            },
+            Some(&facts[0]),
+        )
+        .unwrap();
+        let mut exports = cases
+            .iter()
+            .map(|case| symbol(&module, case.function))
+            .collect::<Vec<_>>();
+        exports.dedup();
+        let object = hirsel_llvm_lazy::emit_program_for_target(
+            &[hirsel_llvm_lazy::Unit::Text {
+                ir: &ir,
+                imported: false,
+            }],
+            &exports,
+            target,
+        )
+        .unwrap();
+        let reports = execute_target_object(
+            &module,
+            &cases,
+            "",
+            "",
+            Optimization::Speed,
+            Some(object),
+            target,
+        );
+        for (case, report) in cases.iter().zip(reports) {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            let at = format!("{name}: f{}({:?})", case.function.0, case.args);
+            assert_eq!(report.outcome, expected.outcome, "{at}");
+            assert_eq!(report.used, expected.used, "{at}: bytes still admitted");
+        }
+    }
+}
+
+/// A `mut` carrier beside three results with no status: the results return through
+/// `sret`, which must return void, so the twin takes the words in and the caller keeps
+/// the place in memory (an `sret` twin returning words is invalid IR). f0 empties the
+/// list it is lent and returns its old length, capacity and first element: [5, 6] has
+/// length 2 and capacity 4, so f1 returns 2 + 40 + 500 + 1000 * (length after, 0).
+fn carrier_sret_case(target: Target) {
+    let module = text::parse(
+        r#"core v1
+type t0 = own "List[u64]" { items: seq u64 }
+sig g0 = (&mut t0) -> (u64, u64, u64)
+sig g1 = () -> (u64)
+inst n0 = samples@1/twin/empty [] []
+inst n1 = samples@1/twin/entry [] []
+fn f0 = n0 g0 {
+  addr a0 = v0 : t0
+  addr a1 = a0 field 0 byte v1 : ptr
+  addr a2 = a0 field 0 byte v2 : u64
+  addr a3 = a0 field 0 byte v3 : u64
+  addr a4 = v4 byte v1 : u64
+b0(v0: ptr):
+  v1: u64 = const 0
+  v2: u64 = const 8
+  v3: u64 = const 16
+  address a0
+  address a1
+  address a2
+  address a3
+  v4: ptr = read a1
+  v5: u64 = read a2
+  v6: u64 = read a3
+  address a4
+  v7: u64 = read a4
+  store a2, v1
+  return v5, v6, v7
+}
+fn f1 = n1 g1 {
+  slot s0 = t0
+  addr a0 = s0 : t0
+  addr a1 = s0 field 0 byte v0 : ptr
+  addr a2 = s0 field 0 byte v1 : u64
+  addr a3 = s0 field 0 byte v2 : u64
+  addr a4 = v4 byte v0 : u64
+  addr a5 = v4 byte v1 : u64
+b0:
+  v0: u64 = const 0
+  v1: u64 = const 8
+  v2: u64 = const 16
+  v3: u64 = const 32
+  v4: ptr, v5: u64 = alloc for seq u64 v3 align 8 charge v3
+  v6: ptr = const 0x0
+  v7: bool = ne v4, v6
+  branch v7, b1, b2
+b1:
+  live s0
+  address a0
+  address a1
+  address a2
+  address a3
+  address a4
+  address a5
+  v8: u64 = const 5
+  v9: u64 = const 6
+  store a4, v8
+  store a5, v9
+  v10: u64 = const 2
+  v11: u64 = const 4
+  store a1, v4
+  store a2, v10
+  store a3, v11
+  v12: u64, v13: u64, v14: u64 = call f0 g0 (&a0)
+  v15: u64 = read a2
+  v16: u64 = const 10
+  v17: u64 = const 100
+  v18: u64 = const 1000
+  v19: u64 = mul v13, v16
+  v20: u64 = mul v14, v17
+  v21: u64 = mul v15, v18
+  v22: u64 = add v12, v19
+  v23: u64 = add v22, v20
+  v24: u64 = add v23, v21
+  drop a0 t0
+  return v24
+b2:
+  return v0
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    let case = Case {
+        function: FuncId(1),
+        args: vec![],
+        limit: u64::MAX,
+        injection: None,
+    };
+    let expected = eval::run(&module, case.function, &case.args, case.limit);
+    assert_eq!(expected.outcome, eval::Outcome::Returned(vec![542]));
+    let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
+    let ir = emit_ir_target_with_role_facts(
+        &module,
+        target,
+        false,
+        facts_enabled(),
+        SourceEmission {
+            relocatable_sites: false,
+            debug_lines: false,
+        },
+        Some(&facts[0]),
+    )
+    .unwrap();
+    let object = hirsel_llvm_lazy::emit_program_for_target(
+        &[hirsel_llvm_lazy::Unit::Text {
+            ir: &ir,
+            imported: false,
+        }],
+        &[symbol(&module, case.function)],
+        target,
+    )
+    .unwrap();
+    let report = execute_target_object(
+        &module,
+        std::slice::from_ref(&case),
+        "",
+        "",
+        Optimization::Speed,
+        Some(object),
+        target,
+    )
+    .remove(0);
+    assert_eq!(report.outcome, expected.outcome);
+    assert_eq!(report.used, expected.used);
+}
+
+#[test]
+fn carrier_twins_match_the_evaluator_in_program_builds() {
+    carrier_program_cases(Target::X86_64Linux);
+    carrier_sret_case(Target::X86_64Linux);
+}
+
+#[test]
+#[ignore = "explicit AArch64 runtime integration target"]
+fn aarch64_carrier_twins_match_the_evaluator_in_program_builds() {
+    carrier_program_cases(Target::Aarch64Linux);
+    carrier_sret_case(Target::Aarch64Linux);
+}
+
 #[test]
 fn every_whole_v1_memory_sample_matches_the_evaluator() {
     let mut count = 0;

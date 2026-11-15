@@ -1005,7 +1005,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let dest = dest.map(|id| self.new_slot(PlaceTy::Declared(id), n));
         let start = self.b.pools.args.len();
         self.b.pools.args.extend(dest.map(Arg::Address));
-        let mut staged = Vec::new();
         for (i, p) in g.params.iter().enumerate() {
             if p.mode == Mode::Take {
                 // A1 cleanup: the callee owns a taken argument from entry (T2.3).
@@ -1028,15 +1027,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let arg = match r {
                 _ if p.mode == Mode::Mut => {
                     let place = self.e.mut_place(self.p, &mut self.t, ty, r)?;
-                    if let (Rep::Place(id), PlaceTy::Declared(_)) = (r, place)
-                        && let Some((tmp, s)) = self.cold_place(v, id, n)
-                    {
-                        staged.push(s);
-                        Arg::Address(tmp)
-                    } else {
-                        let a = self.address(AddressBase::Value(v), &[], place, n);
-                        Arg::Address(a)
-                    }
+                    let a = self.address(AddressBase::Value(v), &[], place, n);
+                    Arg::Address(a)
                 }
                 Rep::Place(id) => {
                     let a = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
@@ -1050,7 +1042,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let first = result_ty.map(|t| self.value(t));
         let results = PoolRange::push(&mut self.b.pools.values, first);
         let fail = self.fail_to(n);
-        let fail = self.staged_fail(&staged, fail, n);
         self.b.calls.push(CallSite {
             callee: Callee::Direct(func),
             signature,
@@ -1066,7 +1057,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.end(Terminator::Unreachable, Some(n));
             return None;
         }
-        self.unstage(&staged, n);
         match dest {
             Some(a) => {
                 // A1 cleanup: an own result is a temporary until something takes it.

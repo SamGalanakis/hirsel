@@ -1583,6 +1583,7 @@ fn carrier_program_cases(target: Target) {
         "causes-retry",
         "grow-carrier-words",
         "list-put-word",
+        "list-nested-mutate",
         "own-20-mut-anchor",
     ] {
         let path = root.join(format!("cases/body/{name}.hirsel"));

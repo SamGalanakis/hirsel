@@ -151,7 +151,11 @@ operations it names; nothing else about them may be inferred from an implementat
   it and the bit counts of [SEM-1](semantics.md#sem-1-integers) (`string.find` is std),
   not engine kernels.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
-  where `xs[i]` and `list.set` fail with `Bounds`. `list.fill(mut xs, n, x)` appends `n`
+  where `xs[i]` and `list.set` fail with `Bounds`. An element is mutated in place through
+  its index place (`xs[i] = x`, or `mut xs[i]` as an argument), including nested places
+  such as `rows[i][j] = x` and `list.push(mut rows[i], x)`; `list.get` gives a view.
+  Maps have no index place; use `map.update(mut m, k, f)` to mutate a value in place.
+  `list.fill(mut xs, n, x)` appends `n`
   copies of `x`, growing once to at least `len + n`. `list.sum` adds the elements from index
   0, returns 0 for an empty list, and fails with `Overflow` at the first sum that does not
   fit. A `List` is cleaned element by element from index 0. `list.swap(mut xs, i, j)`

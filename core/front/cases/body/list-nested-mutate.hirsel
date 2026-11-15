@@ -1,0 +1,60 @@
+// expect: accept
+// expect: run direct_assignment() = true used 0
+// expect: run mut_index_push() = true used 0
+// expect: run mut_index_set() = true used 0
+// expect: run replace_restore() = true used 0
+// expect: run swap_pop_restore() = true used 0
+fn rows_new() -> List[List[u64]] {
+    let mut inner: List[u64] = result.unwrap(list.with_capacity(4))
+    result.unwrap(list.push(mut inner, 1u64))
+    result.unwrap(list.push(mut inner, 2u64))
+    let mut rows: List[List[u64]] = result.unwrap(list.with_capacity(2))
+    result.unwrap(list.push(mut rows, take inner))
+    let mut other: List[u64] = list.new()
+    result.unwrap(list.push(mut other, 7u64))
+    result.unwrap(list.push(mut rows, take other))
+    take rows
+}
+
+fn direct_assignment() -> bool {
+    let mut rows = rows_new()
+    rows[0][1] = 9u64
+    rows[0][0] == 1 && rows[0][1] == 9 && rows[1][0] == 7
+}
+
+fn mut_index_push() -> bool {
+    let mut rows = rows_new()
+    let r = bound bytes 0 {
+        list.push(mut rows[0], 9u64)
+    }
+    match take r {
+        Ok(Ok(())) => list.len(rows[0]) == 3 && rows[0][2] == 9 && rows[1][0] == 7,
+        _ => false
+    }
+}
+
+fn mut_index_set() -> bool {
+    let mut rows = rows_new()
+    let old = list.set(mut rows[0], 1, 9u64)
+    old == 2 && rows[0][1] == 9 && rows[1][0] == 7
+}
+
+fn replace_restore() -> bool {
+    let mut rows = rows_new()
+    let empty: List[u64] = list.new()
+    let mut inner = list.set(mut rows, 0, take empty)
+    result.unwrap(list.push(mut inner, 9u64))
+    let _ = list.set(mut rows, 0, take inner)
+    list.len(rows[0]) == 3 && rows[0][2] == 9 && rows[1][0] == 7
+}
+
+fn swap_pop_restore() -> bool {
+    let mut rows = rows_new()
+    let last = list.len(rows) - 1
+    list.swap(mut rows, 0, last)
+    let mut inner = option.unwrap(list.pop(mut rows))
+    result.unwrap(list.push(mut inner, 9u64))
+    result.unwrap(list.push(mut rows, take inner))
+    list.swap(mut rows, 0, last)
+    list.len(rows[0]) == 3 && rows[0][2] == 9 && rows[1][0] == 7
+}

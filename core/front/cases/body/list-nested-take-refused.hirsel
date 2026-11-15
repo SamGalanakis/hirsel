@@ -1,0 +1,5 @@
+// expect: refuse OWN-14 at 3:17
+fn through_take(mut rows: List[List[u64]]) -> List[u64] {
+    let inner = take rows[0]
+    take inner
+}

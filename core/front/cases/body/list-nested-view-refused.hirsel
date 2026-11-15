@@ -1,0 +1,12 @@
+// expect: refuse OWN-5 at 8:11
+fn write(mut xs: List[u64]) {
+    xs[1] = 9u64
+}
+
+fn through_get(mut rows: List[List[u64]]) {
+    let inner = option.unwrap(list.get(rows, 0))
+    write(mut inner)
+}
+// expect: refuse LANG-11 at 8:11
+// expect: cause OWN-5 at 8:11 from 7:9
+// expect: compared LANG-11 at 8:11 | View[core@1/core/List[u64]] | core@1/core/List[u64]

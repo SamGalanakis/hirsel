@@ -312,6 +312,11 @@ impl<T> Table<T> {
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
         (0..self.len()).map(|i| &self[i])
     }
+    /// The appended rows, excluding the immutable published prefix.
+    #[inline]
+    pub fn own_slice(&self) -> &[T] {
+        &self.own
+    }
     pub fn own_iter(&self) -> impl Iterator<Item = &T> {
         self.own.iter()
     }

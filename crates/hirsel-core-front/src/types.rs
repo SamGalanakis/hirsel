@@ -142,7 +142,7 @@ pub struct Types {
     base_len: usize,
     kinds: Table<TypeEntry>,
     #[serde(skip)]
-    map: HashMap<TyKind, TyId>,
+    map: hashbrown::HashTable<(TyId, u64)>,
     published_map: Map<TyKind, TyId>,
 }
 impl<'de> serde::Deserialize<'de> for Types {
@@ -156,12 +156,11 @@ impl<'de> serde::Deserialize<'de> for Types {
         let wire: Wire = serde::Deserialize::deserialize(decoder)?;
         let base_len = wire.base.as_ref().map_or(0, |b| b.len());
         let offset = base_len + wire.kinds.base_len();
-        let map = wire
-            .kinds
-            .own_iter()
-            .enumerate()
-            .map(|(i, k)| (k.kind.clone(), TyId((offset + i) as u32)))
-            .collect();
+        let mut map = hashbrown::HashTable::with_capacity(wire.kinds.len() - wire.kinds.base_len());
+        for (i, k) in wire.kinds.own_iter().enumerate() {
+            let hash = rustc_hash::FxBuildHasher.hash_one(&k.kind);
+            map.insert_unique(hash, (TyId((offset + i) as u32), hash), |&(_, hash)| hash);
+        }
         Ok(Self {
             base: wire.base,
             base_len,
@@ -186,7 +185,7 @@ impl Types {
             base: None,
             base_len: 0,
             kinds: writer.table(&rows)?,
-            map: HashMap::default(),
+            map: hashbrown::HashTable::new(),
             published_map: writer.map(&map)?,
         })
     }
@@ -207,25 +206,46 @@ impl Types {
             base: Some(base),
             base_len,
             kinds: Table::default(),
-            map: HashMap::default(),
+            map: hashbrown::HashTable::new(),
             published_map: Map::default(),
         }
     }
     fn find(&self, k: &TyKind) -> Option<TyId> {
+        if self.map.is_empty() {
+            return self.find_shared(k);
+        }
+        self.find_hashed(k, rustc_hash::FxBuildHasher.hash_one(k))
+    }
+    fn find_shared(&self, k: &TyKind) -> Option<TyId> {
+        self.base
+            .as_ref()
+            .and_then(|b| b.find(k))
+            .or_else(|| self.published_map.get(k).copied())
+    }
+    #[inline(always)]
+    fn find_hashed(&self, k: &TyKind, hash: u64) -> Option<TyId> {
+        let kinds = self.kinds.own_slice();
+        let base = self.base_len + self.kinds.base_len();
         self.map
-            .get(k)
-            .copied()
-            .or_else(|| self.base.as_ref().and_then(|b| b.find(k)))
+            .find(hash, |&(id, _)| kinds[id.0 as usize - base].kind == *k)
+            .map(|&(id, _)| id)
+            .or_else(|| self.base.as_ref().and_then(|b| b.find_hashed(k, hash)))
             .or_else(|| self.published_map.get(k).copied())
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
         crate::cost_scope!("phase", "type interning/hashing");
-        if let Some(id) = self.find(&k) {
+        if self.map.is_empty()
+            && let Some(id) = self.find_shared(&k)
+        {
+            return id;
+        }
+        let hash = rustc_hash::FxBuildHasher.hash_one(&k);
+        if let Some(id) = self.find_hashed(&k, hash) {
             return id;
         }
         let id = TyId(self.len() as u32);
-        self.kinds.push(TypeEntry::new(self, k.clone()));
-        self.map.insert(k, id);
+        self.kinds.push(TypeEntry::new(self, k));
+        self.map.insert_unique(hash, (id, hash), |&(_, hash)| hash);
         id
     }
     #[inline(always)]
@@ -294,11 +314,11 @@ impl<'a> Local<'a> {
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
         crate::cost_scope!("phase", "type interning/hashing");
-        if let Some(id) = self.base.find(&k) {
+        let hash = rustc_hash::FxBuildHasher.hash_one(&k);
+        if let Some(id) = self.base.find_hashed(&k, hash) {
             return id;
         }
         let base = self.base.len();
-        let hash = rustc_hash::FxBuildHasher.hash_one(&k);
         if let Some(&id) = self
             .map
             .find(hash, |id| self.kinds[id.0 as usize - base].kind == k)

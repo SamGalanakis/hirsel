@@ -1,6 +1,7 @@
 # bfs: hand derivation
 
-Validation reads all seven edges before search storage. Enqueue 0 and mark its
+Validation parses all seven edges once, keeping them, before search storage; the
+idiomatic graph is built from the kept edges. Enqueue 0 and mark its
 parent as 0. Processing 0 enqueues 1 then 2; processing 1 enqueues 3; processing 2
 finds 3 already marked and enqueues 4; processing 3 enqueues 5. Processing 4 sees
 5 marked. Processing 5 adds nothing. Queue is `[0,1,2,3,4,5]`. Following parents
@@ -44,6 +45,6 @@ These are source derivations, not executed Hirsel results.
 
 ## Source length
 
-Physical lines, including comments and blanks: 105 idiomatic and 128 matched;
+Physical lines, including comments and blanks: 110 idiomatic and 128 matched;
 Rust entry plus shared program.rs: 89 idiomatic and 106 matched.
 Shared support is counted separately in REPORT.md.

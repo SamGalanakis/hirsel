@@ -74,9 +74,11 @@ fn sum(root: Option[Arc[Node]], count: u64) -> u64 {
 
 fn mark(root: Option[Arc[Node]], mut seen: std.set.Set[u64]) -> Result[(), m1.support.Error] {
     if let Some(n) = root {
-        let _ = m1.support.mem(result.capacity_only(std.set.insert(mut seen, n.id)))?
-        mark(n.left, mut seen)?
-        mark(n.right, mut seen)?
+        // A node already seen heads a subtree already seen: versions share it.
+        if m1.support.mem(result.capacity_only(std.set.insert(mut seen, n.id)))? {
+            mark(n.left, mut seen)?
+            mark(n.right, mut seen)?
+        }
     }
     Ok(())
 }

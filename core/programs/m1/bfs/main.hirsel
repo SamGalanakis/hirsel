@@ -18,16 +18,22 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     if from >= n || to >= n {
         return Error(m1.support.error("InvalidVertex"))
     }
-    // Validate the entire edge input before allocating search state.
-    let edge_start = at
+    // Parse and validate the entire edge input, once, before allocating search state.
+    let mut edges: List[(u64, u64)] = list.new()
     while at < string.byte_len(input) {
         let row = m1.support.line(input, mut at)
         let Some((a, b)) = string.split_once(row, " ") else {
             return Error(m1.support.error("Parse@edge"))
         }
-        if m1.support.number(a)? >= n || m1.support.number(b)? >= n {
+        let source = m1.support.number(a)?
+        if source >= n {
             return Error(m1.support.error("InvalidVertex"))
         }
+        let target = m1.support.number(b)?
+        if target >= n {
+            return Error(m1.support.error("InvalidVertex"))
+        }
+        m1.support.push(mut edges, (source, target))?
     }
     let mut graph = Graph(neighbors: m1.support.mem(list.with_capacity(n))?)
     let mut v: u64 = 0
@@ -35,13 +41,8 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
         m1.support.push(mut graph.neighbors, list.new())?;
         v += 1
     }
-    at = edge_start
-    while at < string.byte_len(input) {
-        let row = m1.support.line(input, mut at)
-        let Some((a, b)) = string.split_once(row, " ") else {
-            return Error(m1.support.error("Parse@edge"))
-        }
-        m1.support.push(mut graph.neighbors[m1.support.number(a)?], m1.support.number(b)?)?
+    for (source, target) in edges {
+        m1.support.push(mut graph.neighbors[source], target)?
     }
     m1.support.admission(variant, "search.parent", 8 * n)?
     let parent_owner = m1.support.marker(tx, "parent")?

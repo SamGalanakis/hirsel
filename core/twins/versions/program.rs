@@ -12,7 +12,8 @@ pub trait Store: Default {
     ) -> Result<Self::Root>;
     fn get(&self, r: &Self::Root, key: u32) -> u64;
     fn release(&mut self, r: Self::Root);
-    fn live(&self) -> usize;
+    /// The nodes reachable from `roots`: what the versions still hold.
+    fn live(&self, roots: &[&Self::Root]) -> usize;
 }
 pub fn run<S: Store>() {
     let (input, variant) = input();
@@ -42,11 +43,11 @@ pub fn run<S: Store>() {
     let current = (0..n).map(|k| s.get(&root, k)).sum::<u64>();
     println!(
         "updates={updates} pinned={old} current={current} live={}",
-        s.live()
+        s.live(&[&pin, &root])
     );
     s.release(pin);
-    println!("after-unpin={}", s.live());
+    println!("after-unpin={}", s.live(&[&root]));
     s.release(root);
-    println!("after-current={}", s.live());
+    println!("after-current={}", s.live(&[]));
     finish(result);
 }

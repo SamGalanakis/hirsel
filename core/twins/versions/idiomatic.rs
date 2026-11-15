@@ -1,10 +1,8 @@
 mod program;
 #[path = "../support.rs"]
 mod support;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::collections::HashSet;
+use std::sync::Arc;
 use support::*;
 type Root = Option<Arc<Node>>;
 struct Node {
@@ -12,26 +10,16 @@ struct Node {
     value: u64,
     left: Root,
     right: Root,
-    live: Arc<AtomicUsize>,
-}
-impl Drop for Node {
-    fn drop(&mut self) {
-        self.live.fetch_sub(1, Ordering::SeqCst);
-    }
 }
 #[derive(Default)]
-struct Store {
-    live: Arc<AtomicUsize>,
-}
+struct Store;
 impl Store {
     fn node(&self, key: u32, value: u64, left: Root, right: Root) -> Arc<Node> {
-        self.live.fetch_add(1, Ordering::SeqCst);
         Arc::new(Node {
             key,
             value,
             left,
             right,
-            live: self.live.clone(),
         })
     }
     fn build_range(&self, a: u32, b: u32) -> Root {
@@ -102,8 +90,19 @@ impl program::Store for Store {
     fn release(&mut self, r: Root) {
         drop(r);
     }
-    fn live(&self) -> usize {
-        self.live.load(Ordering::SeqCst)
+    fn live(&self, roots: &[&Root]) -> usize {
+        // A node already seen heads a subtree already seen: versions share it.
+        fn mark(r: &Root, seen: &mut HashSet<*const Node>) {
+            if let Some(n) = r
+                && seen.insert(Arc::as_ptr(n))
+            {
+                mark(&n.left, seen);
+                mark(&n.right, seen);
+            }
+        }
+        let mut seen = HashSet::new();
+        roots.iter().for_each(|r| mark(r, &mut seen));
+        seen.len()
     }
 }
 fn main() {

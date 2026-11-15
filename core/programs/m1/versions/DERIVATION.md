@@ -5,7 +5,9 @@ Build the seven-node tree with root key 3, children 1 and 5 and leaves
 0+1+2+3+4+5+6=21. Updating 0 to 10 copies nodes 0,1,3, leaf to root.
 Updating 6 to 20 copies nodes 6,5,3. The intermediate copied root 3 then has
 no holder and is released; the copied 0,1 and 6,5 subtrees remain current.
-The union contains 7 original nodes plus copies at 0,1,3,5,6 = 12.
+The union contains 7 original nodes plus copies at 0,1,3,5,6 = 12; both idiomatic
+sides count it by walking the pin and current into a set of nodes, skipping a
+subtree whose head is already in the set.
 Current sum is 21+10+(20-6)=45. Unpin releases the five replaced originals,
 leaving seven current nodes. Dropping current leaves zero. Rejecting draft.node3
 releases both already-built copies before the old roots are inspected.
@@ -43,6 +45,6 @@ results.
 
 ## Source length
 
-Physical lines, including comments and blanks: 138 idiomatic and 188 matched;
+Physical lines, including comments and blanks: 144 idiomatic and 188 matched;
 Rust entry plus shared program.rs: 163 idiomatic and 185 matched.
 Shared support is counted separately in REPORT.md.

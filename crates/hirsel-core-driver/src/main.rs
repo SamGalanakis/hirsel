@@ -417,27 +417,6 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     // error is reported only for a request check accepts.
     let prepared = if native_command {
         let prepare = || -> Result<_, Box<dyn std::error::Error>> {
-            let headers = tempfile::tempdir()?;
-            std::fs::write(
-                headers.path().join("hirsel_core_rt.h"),
-                include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt.h"),
-            )?;
-            std::fs::write(
-                headers.path().join("hirsel_core_rt_host.h"),
-                include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_host.h"),
-            )?;
-            std::fs::write(
-                headers.path().join("hirsel_core_rt_sites.h"),
-                include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_sites.h"),
-            )?;
-            std::fs::write(
-                headers.path().join("hirsel_core_rt_tasks.h"),
-                include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_tasks.h"),
-            )?;
-            std::fs::write(
-                headers.path().join("hirsel_core_rt_isolate.h"),
-                include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_isolate.h"),
-            )?;
             let default_output = if test_command {
                 native_store.join("tests")
             } else {
@@ -455,7 +434,6 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             let mut options = NativeOptions::development(
                 target.clone(),
                 runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
-                headers.path().to_owned(),
                 link,
                 native_store,
                 output_path.unwrap_or(default_output),
@@ -470,7 +448,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             options.directories = directories;
             options.grant_mask = grant_mask;
             options.logical_charge_report = logical_charge_report;
-            Ok((headers, options))
+            Ok(options)
         };
         Some(prepare())
     } else {
@@ -482,7 +460,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 .as_ref()
                 .ok_or("build/run requires an entry")?;
             match &prepared {
-                Some(Ok((_, options))) => product.reachable_for(entry, options)?,
+                Some(Ok(options)) => product.reachable_for(entry, options)?,
                 _ => product.reachable(entry, 65_536)?,
             }
         })
@@ -493,19 +471,19 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
     let mut native_options = if native_command && (test_command || accepted) {
-        let (headers, options) = prepared.expect("a native command prepares its options")?;
+        let options = prepared.expect("a native command prepares its options")?;
         if options.logical_charge_report.is_some() {
             eprintln!(
                 "observation build: root peak reservation includes bound, task and grant reservations (MEM-19); timings are not performance samples"
             );
         }
 
-        Some((headers, options))
+        Some(options)
     } else {
         None
     };
     if test_command {
-        let options = &mut native_options.as_mut().unwrap().1;
+        let options = native_options.as_mut().unwrap();
         let output_dir = options.output.clone();
         let tests: Vec<_> = product
             .tests()
@@ -574,7 +552,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     }
     let mut stopped = None;
     let native = if native_command && accepted {
-        let options = &native_options.as_ref().unwrap().1;
+        let options = native_options.as_ref().unwrap();
         match product.build_reachable(
             selected_entry
                 .as_ref()
@@ -626,8 +604,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 .map(|e| format!("instances: {e:?}"))
         }),
         reachable: reach.as_ref().map(|r| ReachableOutput {
-            bodies: r.bodies.len(),
-            declarations: r.declarations.len(),
+            bodies: r.bodies,
+            declarations: r.declarations,
             census: r.census(),
             first_stops: &r.first_stops,
         }),

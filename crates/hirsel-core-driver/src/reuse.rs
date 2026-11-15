@@ -75,7 +75,7 @@ fn header_identity(item: Item<'_>) -> ContentHash {
     token_identity(item, end, domain)
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Header {
     digest: ContentHash,
     /// The item's source bytes, the body key's `body`.
@@ -108,6 +108,12 @@ impl Headers {
     }
     pub(crate) fn contains_key(&self, path: &DefPath) -> bool {
         self.get(path).is_some()
+    }
+    pub(crate) fn id(&self, path: &DefPath) -> Option<DefinitionId> {
+        self.names.get(path).copied()
+    }
+    pub(crate) fn row(&self, id: DefinitionId) -> Option<&Header> {
+        self.by_id(id)
     }
     fn by_id(&self, id: DefinitionId) -> Option<&Header> {
         self.rows.get(id.0 as usize)?.as_ref()

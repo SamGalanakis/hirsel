@@ -35,7 +35,6 @@ impl CheckProduct {
         let options = &NativeOptions::development(
             target,
             runtime,
-            scratch.join("include"),
             link,
             scratch.join("native"),
             scratch.join("program"),
@@ -48,6 +47,8 @@ impl CheckProduct {
         let mut materialized = crate::instances::InstanceSet::default();
         let mut resolver = hirsel_core_materialize::Resolver::default();
         let mut prebuilt = Prebuilt::default();
+        // No prior reach record: every instance walks its own record or body.
+        let no_damage = std::collections::BTreeSet::new();
         let mut instances = Vec::new();
         let directory = image.directory().map_err(NativeStop::Input)?;
         for definition in directory.definitions.keys() {
@@ -61,7 +62,14 @@ impl CheckProduct {
             match self.instance_step(
                 &key,
                 &mut materialized,
-                inputs.records.as_ref(),
+                inputs.records.as_ref().map(|records| {
+                    let expand = crate::instances::Expand {
+                        prior: None,
+                        changed: &[],
+                        damaged: &no_damage,
+                    };
+                    (records, expand)
+                }),
                 &mut resolver,
                 &mut |_, _| {},
             ) {
@@ -69,7 +77,8 @@ impl CheckProduct {
                 Err(_) => prebuilt.skipped += 1,
             }
         }
-        let objects = self.emit_instances(None, &instances, &materialized, &inputs, options)?;
+        let (objects, _) =
+            self.emit_instances(None, &instances, &materialized, &inputs, None, options)?;
         prebuilt.instances = objects.len();
         prebuilt.compiled = objects.iter().filter(|o| o.compiled).count();
         Ok(prebuilt)

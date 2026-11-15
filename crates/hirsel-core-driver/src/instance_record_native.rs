@@ -173,8 +173,12 @@ fn same_length_ir_damage_refuses_once_then_builds_fresh() {
 /// root limit, the grant mask, the ordered directories and the charge-report
 /// path. One body, one store: each input changed in turn builds a fresh
 /// store's executable. The charge-report path needs the observed runtime, so
-/// its case is in //:core-memory-report. Mutant: a plan input left out of the plan's
-/// encoding, a stale executable, red.
+/// its case is in //:core-memory-report. The reach record's selection and the
+/// executable key take the engine, optimisation and debug rows too (R5), and
+/// the instance limit: a record from a complete walk is not used under a
+/// limit that walk exceeds. Mutant: a plan input left out of the plan's
+/// encoding, a stale executable, red; the limit left out of the selection, a
+/// build where fresh stops, red.
 #[test]
 #[ignore = "explicit native integration target"]
 fn each_plan_input_builds_a_fresh_stores_executable() {
@@ -193,6 +197,11 @@ fn each_plan_input_builds_a_fresh_stores_executable() {
         ("grant mask", NativeOptions { grant_mask: 1 << grant_kind("Clock").unwrap(), ..base() }),
         ("directories", NativeOptions { directories: vec![a.clone(), b.clone()], ..base() }),
         ("directory order", NativeOptions { directories: vec![b.clone(), a.clone()], ..base() }),
+        ("optimize", NativeOptions { optimize: true, ..base() }),
+        ("debug lines", NativeOptions { debug_lines: true, ..base() }),
+        ("backend", NativeOptions { backend: Backend::Llvm, ..base() }),
+        ("output path", NativeOptions { output: dir.path().join("elsewhere"), ..base() }),
+        ("base again", base()),
     ];
     let shared = record_check(APP, &core, dir.path(), "store");
     for (n, (name, options)) in variants.into_iter().enumerate() {
@@ -207,6 +216,18 @@ fn each_plan_input_builds_a_fresh_stores_executable() {
         assert_eq!(built.1, Some(7), "{name}: runs");
         assert!(built == fresh, "{name}: the shared store's executable is a fresh store's");
     }
+    // A record from a complete walk is not used under a limit the walk
+    // exceeds: the build stops where a fresh store's stops.
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let limited = || NativeOptions { instance_limit: 0, ..base() };
+    assert!(shared.build(&entry, &limited()).is_err(), "instance limit: the shared store stops");
+    let fresh = record_check(APP, &core, dir.path(), "fresh-limit");
+    assert!(
+        fresh
+            .build(&entry, &NativeOptions { store: dir.path().join("fresh-native-limit"), ..limited() })
+            .is_err(),
+        "instance limit: a fresh store stops"
+    );
 }
 
 /// The instance records a store holds, with their addresses.

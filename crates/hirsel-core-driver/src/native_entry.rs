@@ -45,15 +45,14 @@ pub(crate) struct Plan<'a> {
     grant_mask: u64,
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
-    sources: &'a SourceMap,
 }
 /// Every link-plan input the environment does not cover, canonically: the
 /// root limit, the grant mask, the ordered directories and the charge-report
 /// path. The plan's other fields are the entry's: `symbol` is the entry's
 /// identity, `layout`, `exit_offset` and `parameters` are read from the entry
 /// body (its record's address and the declaration part), `cleanup` is the
-/// cleanup instance's identity, and `sources` is the request's source map,
-/// which the executable key hashes itself.
+/// cleanup instance's identity. The request's source map is the link's, and
+/// the executable key takes its digest.
 pub(crate) fn policy(options: &NativeOptions) -> (u64, u64, &[String], Option<&[u8]>) {
     (
         options.root_limit,
@@ -71,7 +70,6 @@ impl<'a> Plan<'a> {
         binding: &'a EntryAbi,
         cleanup: Option<String>,
         options: &'a NativeOptions,
-        sources: &'a SourceMap,
     ) -> std::result::Result<Self, NativeStop> {
         let Layout::Fixed(layout) = &binding.recipe.layout else {
             return Err(NativeStop::Entry("Result needs fixed layout".into()));
@@ -109,11 +107,10 @@ impl<'a> Plan<'a> {
                 .logical_charge_report
                 .as_ref()
                 .map(|p| p.as_os_str().as_bytes().to_vec()),
-            sources,
         })
     }
 
-    pub(crate) fn emit(&self, target: &str) -> Result<Vec<u8>> {
+    pub(crate) fn emit(&self, target: &str, sources: &SourceMap) -> Result<Vec<u8>> {
         let mut flags = settings::builder();
         for (name, value) in [
             ("is_pic", "true"),
@@ -138,7 +135,7 @@ impl<'a> Plan<'a> {
             )
             .map_err(error)?,
         );
-        let data = data::write(&mut object, self)?;
+        let data = data::write(&mut object, self, sources)?;
         let signature = signature(&object, &[I64, I64, I64], Some(I8));
         let entry = object
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
@@ -146,7 +143,7 @@ impl<'a> Plan<'a> {
         adapter::emit(&mut object, self, entry, signature)?;
         start::emit(&mut object, self, &data, entry)?;
         let mut product = object.finish();
-        sites::define(&mut product.object, self.sources);
+        sites::define(&mut product.object, sources);
         product.object.write().map_err(error)
     }
 }

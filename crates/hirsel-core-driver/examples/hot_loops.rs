@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "find_byte",
     ];
     let roots: Vec<_> = args
-        .get(5)
+        .get(4)
         .map_or_else(|| defaults.to_vec(), |names| names.split(',').collect());
     for name in roots {
         let entry = DefPath::from_full(&format!("hot@1/loops/{name}")).unwrap();
@@ -50,8 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             debug_lines: false,
             target: "x86_64-unknown-linux-gnu".into(),
             runtime: PathBuf::from(&args[2]),
-            include: PathBuf::from(&args[3]),
-            link: hirsel_core_driver::Link::Driver(PathBuf::from(&args[4])),
+            link: hirsel_core_driver::Link::Driver(PathBuf::from(&args[3])),
             store: out.join("native"),
             output: out.join("unused"),
             root_limit: 1 << 30,
@@ -59,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             directories: vec![],
             grant_mask: 0,
             logical_charge_report: args
-                .get(6)
+                .get(5)
                 .filter(|mode| mode.as_str() == "observe-charge")
                 .map(|_| out.join("logical-charge.json")),
         };
@@ -67,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut paths = vec![];
         for (i, obj) in objects.iter().enumerate() {
             let path = out.join(format!("{name}-{i}.o"));
-            fs::write(&path, &obj.bytes)?;
+            fs::copy(&obj.path, &path)?;
             paths.push(path);
             if obj.instance.definition == entry {
                 names.insert(name.into(),serde_json::json!({"symbol":format!("h{}",obj.instance.digest().0.iter().map(|b|format!("{b:02x}")).collect::<String>()),"objects":[]}));

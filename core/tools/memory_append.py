@@ -17,7 +17,7 @@ def run(cmd,log):
 caller=(root/'crates/hirsel-core-rt/testdata/append.c').read_text()
 rows=[]
 for engine in ['llvm','cranelift']:
- d=work/engine;d.mkdir(exist_ok=True);cmd=[root/'tools/capped',builder,ip,d,rt,root/'crates/hirsel-core-rt/include',cc,'list_push,byte_push,char_push']
+ d=work/engine;d.mkdir(exist_ok=True);cmd=[root/'tools/capped',builder,ip,d,rt,cc,'list_push,byte_push,char_push']
  if engine=='cranelift':cmd.append(engine)
  if not (d/'symbols.json').exists():run(cmd,d/'build.log')
  names=json.loads((d/'symbols.json').read_text())

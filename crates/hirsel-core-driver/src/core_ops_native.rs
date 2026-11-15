@@ -84,7 +84,6 @@ fn core_operations(backend: Backend) {
             target: TARGET.into(),
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            include: root.join("crates/hirsel-core-rt/include"),
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
@@ -166,7 +165,6 @@ fn counted_operations(backend: Backend) {
             target: TARGET.into(),
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            include: root.join("crates/hirsel-core-rt/include"),
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
@@ -236,7 +234,6 @@ fn args_operations(backend: Backend, len_only: bool) {
             target: TARGET.into(),
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            include: root.join("crates/hirsel-core-rt/include"),
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
@@ -314,7 +311,6 @@ fn stream_operations(backend: Backend) {
             target: TARGET.into(),
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            include: root.join("crates/hirsel-core-rt/include"),
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
@@ -409,7 +405,6 @@ fn host_operations(backend: Backend) {
             target: TARGET.into(),
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            include: root.join("crates/hirsel-core-rt/include"),
             link: crate::native::Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
@@ -507,7 +502,6 @@ pub fn proof_clone_run() -> u64 {
         target: TARGET.into(),
         runtime: root
             .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-        include: root.join("crates/hirsel-core-rt/include"),
         link: crate::native::Link::Driver(
             PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
         ),

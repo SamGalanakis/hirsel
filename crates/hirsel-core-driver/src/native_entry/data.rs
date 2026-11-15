@@ -60,7 +60,11 @@ fn views<'a>(object: &mut ObjectModule, strings: impl Iterator<Item = &'a str>) 
     }
     define(object, None, rows, 8, &pointers)
 }
-pub(super) fn write(object: &mut ObjectModule, plan: &Plan<'_>) -> Result<Tables> {
+pub(super) fn write(
+    object: &mut ObjectModule,
+    plan: &Plan<'_>,
+    sources: &hirsel_core_ir::source::SourceMap,
+) -> Result<Tables> {
     let mut requirements = Vec::new();
     for p in &plan.parameters {
         requirements.extend_from_slice(&u64::from(p.kind).to_le_bytes());
@@ -71,7 +75,7 @@ pub(super) fn write(object: &mut ObjectModule, plan: &Plan<'_>) -> Result<Tables
     let directories = views(object, plan.directories.iter().map(String::as_str))?;
     let mut files = Vec::new();
     let mut pointers = Vec::new();
-    for file in &plan.sources.files {
+    for file in &sources.files {
         for string in [&file.path, &file.text] {
             let data = bytes(object, None, string.as_bytes().to_vec(), 1)?;
             pointers.push((files.len() as u32, data));
@@ -81,14 +85,14 @@ pub(super) fn write(object: &mut ObjectModule, plan: &Plan<'_>) -> Result<Tables
     }
     let files = define(object, None, files, 8, &pointers)?;
     let mut items = Vec::new();
-    for item in plan.sources.items.values() {
+    for item in sources.items.values() {
         items.extend_from_slice(&item.file.to_le_bytes());
         items.extend_from_slice(&item.file_offset.to_le_bytes());
     }
     let items = bytes(object, None, items, 4)?;
     let mut table = vec![0; 32];
-    table[8..16].copy_from_slice(&(plan.sources.files.len() as u64).to_le_bytes());
-    table[24..32].copy_from_slice(&(plan.sources.items.len() as u64).to_le_bytes());
+    table[8..16].copy_from_slice(&(sources.files.len() as u64).to_le_bytes());
+    table[24..32].copy_from_slice(&(sources.items.len() as u64).to_le_bytes());
     let sources = define(object, None, table, 8, &[(0, files), (16, items)])?;
     if plan.charge_report.is_some() {
         let mut label = DataDescription::new();

@@ -14,11 +14,7 @@ struct Root {
     debug: Option<ContentHash>,
 }
 
-pub(crate) fn publish(
-    store: &Store,
-    key: ContentHash,
-    native: &NativeObject,
-) -> io::Result<ContentHash> {
+pub(crate) fn publish(store: &Store, key: ContentHash, native: &NativeObject) -> io::Result<Bare> {
     let object = store.put_bare(&native.bytes)?;
     let debug = native
         .debug
@@ -31,17 +27,14 @@ pub(crate) fn publish(
         debug,
     })?)?;
     store.select(&native::selection(key), root)?;
-    Ok(object.address)
+    Ok(object)
 }
 
 pub(crate) fn path(store: &Store, identity: ContentHash) -> std::path::PathBuf {
     store.path(identity)
 }
 
-pub(crate) fn load(
-    store: &Store,
-    key: ContentHash,
-) -> io::Result<Option<(ContentHash, NativeObject)>> {
+pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, NativeObject)>> {
     let Some(identity) = store.selection(&native::selection(key))? else {
         return Ok(None);
     };
@@ -69,7 +62,7 @@ pub(crate) fn load(
         }
         None => None,
     };
-    Ok(Some((root.object.address, NativeObject { bytes, debug })))
+    Ok(Some((root.object, NativeObject { bytes, debug })))
 }
 
 /// A Cranelift development instance's record, under its instance key
@@ -97,13 +90,13 @@ pub(crate) struct Instance {
 pub(crate) const INSTANCE_SCHEMA: u32 = 1;
 
 /// Publish an emitted instance's object, debug rows and record, and select the
-/// record under its key: the same files, and so the same syncs, as `publish`.
+/// record under its key; the object and the debug rows' address.
 pub(crate) fn publish_instance(
     store: &Store,
     key: ContentHash,
     object: &NativeObject,
     mut record: Instance,
-) -> io::Result<ContentHash> {
+) -> io::Result<(Bare, Option<ContentHash>)> {
     record.object = store.put_bare(&object.bytes)?;
     record.debug = object
         .debug
@@ -112,7 +105,7 @@ pub(crate) fn publish_instance(
         .transpose()?;
     let address = store.put(&encode(&record)?)?;
     store.select(&native::selection(key), address)?;
-    Ok(record.object.address)
+    Ok((record.object, record.debug))
 }
 
 /// The record selected under `key`, when it decodes and every closure's hash
@@ -135,24 +128,12 @@ pub(crate) fn load_instance(store: &Store, key: ContentHash) -> io::Result<Optio
     Ok(sound.then_some(record))
 }
 
-/// An instance record's object and debug rows.
-pub(crate) fn load_object(store: &Store, record: &Instance) -> io::Result<Option<NativeObject>> {
-    let Some(bytes) = store.get_bare(record.object)? else {
-        return Ok(None);
-    };
-    let debug = match record.debug {
-        Some(identity) => {
-            let Some(bytes) = store.get(identity)? else {
-                return Ok(None);
-            };
-            let Some(debug) = decode(&bytes) else {
-                return Ok(None);
-            };
-            Some(debug)
-        }
-        None => None,
-    };
-    Ok(Some(NativeObject { bytes, debug }))
+/// Stored debug rows by their record's address; a damaged record is none.
+pub(crate) fn load_debug(
+    store: &Store,
+    address: ContentHash,
+) -> io::Result<Option<hirsel_core_ir::source::NativeDebug>> {
+    Ok(store.get(address)?.and_then(|bytes| decode(&bytes)))
 }
 
 #[cfg(test)]
@@ -191,7 +172,7 @@ mod tests {
             let (loaded, warm) = load(&store, key).unwrap().unwrap();
             assert_eq!(identity, loaded);
             assert_eq!(object, warm);
-            let bytes = std::fs::read(path(&store, loaded)).unwrap();
+            let bytes = std::fs::read(path(&store, loaded.address)).unwrap();
             assert_eq!(bytes, object.bytes);
             let old = store.put(&object.bytes).unwrap();
             store.select(&native::selection(key), old).unwrap();

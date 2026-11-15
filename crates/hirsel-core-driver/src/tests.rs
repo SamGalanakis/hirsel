@@ -1133,7 +1133,7 @@ fn reachable_build_ignores_unreached_bodies_and_declarations_after_disk_reuse() 
     let reachable = product.reachable(&entry, 64).unwrap();
     assert!(reachable.accepted(), "{:?}", reachable.instances);
     assert_eq!(reachable.instances.as_ref().unwrap().len(), 2);
-    assert_eq!(reachable.bodies.len(), 2);
+    assert_eq!(reachable.bodies, 2);
     assert!(reachable.first_stops.is_empty());
     let cached = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
@@ -1225,11 +1225,7 @@ fn reachable_build_keeps_the_declaration_refusal(source: &str) {
     let reachable = product.reachable(&entry, 64).unwrap();
     assert!(!reachable.accepted());
     assert!(!reachable.diagnostics.is_empty());
-    assert!(
-        reachable
-            .declarations
-            .contains(&DefPath::from_full("app@1/main/Broken").unwrap())
-    );
+    assert!(reachable.declares(&DefPath::from_full("app@1/main/Broken").unwrap()));
     assert!(
         reachable
             .first_stops
@@ -1249,7 +1245,7 @@ fn reachable_census_follows_names_beyond_an_incomplete_entry() {
         .reachable(&DefPath::from_full("app@1/main/answer").unwrap(), 64)
         .unwrap();
     assert!(!reachable.accepted());
-    assert_eq!(reachable.bodies.len(), 2);
+    assert_eq!(reachable.bodies, 2);
     assert_eq!(reachable.first_stops.len(), 2);
     assert_eq!(reachable.census().values().sum::<usize>(), 2);
 }

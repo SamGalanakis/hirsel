@@ -125,14 +125,16 @@ impl CheckProduct {
                 )?;
                 (identity, native, true)
             };
-            let object_identity = store.put_bare(&product.object.bytes)?.address;
+            let object = store.put_bare(&product.object.bytes)?;
             objects.push(ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),
                 identity,
-                path: crate::native_object::path(store, object_identity),
-                bytes: product.object.bytes,
+                path: crate::native_object::path(store, object.address),
+                check: object.check,
+                verify: false,
                 debug: product.object.debug,
+                debug_record: None,
                 compiled,
             });
             libraries.push((identity, product.bitcode, product.summary));
@@ -245,10 +247,12 @@ impl CheckProduct {
                 })
                 .sum(),
             instance: instance.clone(),
-            path: crate::native_object::path(store, identity),
-            identity,
-            bytes: object.bytes,
+            path: crate::native_object::path(store, identity.address),
+            identity: identity.address,
+            check: identity.check,
+            verify: false,
             debug: object.debug,
+            debug_record: None,
             compiled,
         });
         Ok(objects)

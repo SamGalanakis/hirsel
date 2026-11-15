@@ -52,19 +52,16 @@ pub(crate) struct InstanceSet {
     /// Each walked instance's key and the store its record lives in, when the
     /// walk was over instance records.
     pub keys: std::collections::BTreeMap<Identity, (ContentHash, Location)>,
-    /// The record of each instance whose record hit.
-    pub hits: std::collections::BTreeMap<
-        Identity,
-        (
-            crate::native_object::Instance,
-            hirsel_core_ir::source::NativeObject,
-        ),
-    >,
+    /// The record of each instance whose record hit. Its object is read
+    /// only by a link, through its descriptor.
+    pub hits: std::collections::BTreeMap<Identity, crate::native_object::Instance>,
+    /// Each instance expanded from the reach record's table, by its index there.
+    pub table: std::collections::BTreeMap<Identity, u32>,
     /// The record fields of each materialised instance, for its record.
     pub fields: std::collections::BTreeMap<Identity, Fields>,
 }
 /// Which store an instance's object and record live in.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Location {
     /// The request's store: a program definition or a glue instance.
     Request,
@@ -103,6 +100,31 @@ impl Records {
         }
     }
 }
+/// The reach record a walk over instance records expands from: an instance
+/// whose definition's row is live keeps its table entry. `damaged` names the
+/// instances whose stored object failed its check, which are rebuilt.
+#[derive(Clone, Copy)]
+pub(crate) struct Expand<'r> {
+    pub prior: Option<&'r crate::reach::Reach>,
+    pub changed: &'r [bool],
+    pub damaged: &'r BTreeSet<Identity>,
+}
+impl Expand<'_> {
+    fn entry(&self, key: &Identity) -> Option<usize> {
+        let prior = self.prior?;
+        if self.damaged.contains(key) {
+            return None;
+        }
+        let entry = prior.instance(key)?;
+        if !hirsel_core_front::is_glue(&key.definition) {
+            let row = prior.row(&key.definition)?;
+            if self.changed[row] {
+                return None;
+            }
+        }
+        Some(entry)
+    }
+}
 pub(crate) struct InstanceBody {
     /// The published definition; None for a glue instance.
     pub product: Option<Arc<DefinitionProduct>>,
@@ -137,7 +159,7 @@ impl InstanceSet {
     /// The source items `key`'s module names: its record's, on a hit.
     pub fn items(&self, key: &Identity) -> io::Result<&[DefPath]> {
         match self.hits.get(key) {
-            Some((record, _)) => Ok(&record.items),
+            Some(record) => Ok(&record.items),
             None => Ok(&self.get(key).ir()?.items),
         }
     }
@@ -213,8 +235,9 @@ impl CheckProduct {
         limit: usize,
         instances: &mut InstanceSet,
         records: &Records,
+        expand: Expand<'_>,
     ) -> Result<Vec<Identity>, InstanceStop> {
-        self.instances_observed(roots, limit, instances, Some(records), |_, _| {})
+        self.instances_observed(roots, limit, instances, Some((records, expand)), |_, _| {})
     }
     /// Measure library loading and mechanical specialization without changing the
     /// native collection path. The ordinary path erases the no-op observer.
@@ -231,7 +254,7 @@ impl CheckProduct {
         roots: impl IntoIterator<Item = Identity>,
         limit: usize,
         instances: &mut InstanceSet,
-        records: Option<&Records>,
+        records: Option<(&Records, Expand<'_>)>,
         mut observe: impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
         let mut resolver = Resolver::default();
@@ -245,12 +268,27 @@ impl CheckProduct {
         &self,
         key: &Identity,
         instances: &mut InstanceSet,
-        records: Option<&Records>,
+        records: Option<(&Records, Expand<'_>)>,
         resolver: &mut Resolver,
         observe: &mut impl FnMut(&Identity, &'static str),
     ) -> Result<Vec<Identity>, InstanceStop> {
         {
             observe(key, "start");
+            if let Some((_, expand)) = records
+                && let Some(i) = expand.entry(key)
+            {
+                // An unchanged instance: its table entry, by M2 rule 1.
+                let prior = expand.prior.unwrap();
+                let entry = &prior.instances[i];
+                observe(key, "table");
+                resolver.add_closures(prior.closures_of(entry));
+                instances.table.insert(key.clone(), i as u32);
+                return Ok(entry
+                    .children
+                    .iter()
+                    .map(|&c| prior.instances[c as usize].identity.clone())
+                    .collect());
+            }
             let input = |message: String| InstanceStop::Input {
                 definition: key.definition.clone(),
                 message,
@@ -283,7 +321,7 @@ impl CheckProduct {
                 Some(product)
             };
             let own = product.as_ref().map(|p| p.record);
-            if let Some(records) = records {
+            if let Some((records, expand)) = records {
                 let location = if glue || self.definitions.contains_key(&key.definition) {
                     Location::Request
                 } else {
@@ -291,23 +329,21 @@ impl CheckProduct {
                 };
                 let instance_key = records.key(key, own).map_err(|e| input(e.to_string()))?;
                 instances.keys.insert(key.clone(), (instance_key, location));
-                let hit =
-                    crate::native_object::load_instance(records.store(location), instance_key)
-                        .map_err(|e| input(e.to_string()))?
-                        .filter(|r| r.identity == *key && r.own == own && r.env == records.digest);
-                let hit = match hit {
-                    Some(record) => {
-                        crate::native_object::load_object(records.store(location), &record)
+                let hit = match expand.damaged.contains(key) {
+                    true => None,
+                    false => {
+                        crate::native_object::load_instance(records.store(location), instance_key)
                             .map_err(|e| input(e.to_string()))?
-                            .map(|object| (record, object))
+                            .filter(|r| {
+                                r.identity == *key && r.own == own && r.env == records.digest
+                            })
                     }
-                    None => None,
                 };
-                if let Some((record, object)) = hit {
+                if let Some(record) = hit {
                     observe(key, "hit");
                     resolver.add_closures(&record.closures);
                     let pending = record.children.clone();
-                    instances.hits.insert(key.clone(), (record, object));
+                    instances.hits.insert(key.clone(), record);
                     return Ok(pending);
                 }
             }

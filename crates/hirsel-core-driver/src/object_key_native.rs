@@ -23,7 +23,7 @@ fn objects_of(
         .into_iter()
         .map(|o| {
             let debug = encode(&o.debug).unwrap();
-            (format!("{:?}", o.instance), (o.compiled, o.bytes, debug))
+            (format!("{:?}", o.instance), (o.compiled, std::fs::read(&o.path).unwrap(), debug))
         })
         .collect()
 }

@@ -22,12 +22,14 @@ mod native_object;
 mod native_sources;
 mod prebuild;
 pub use prebuild::Prebuilt;
+mod reach;
 mod reachability;
 mod test_run;
 mod tool_inputs;
 pub use native::{
     Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, grant_kind,
 };
+pub use reach::ReachCounters;
 pub use reachability::{GapStop, Reachable};
 pub use test_run::{Runner, TestOutcome};
 mod meter;

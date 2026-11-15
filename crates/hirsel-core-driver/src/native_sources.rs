@@ -59,7 +59,7 @@ impl CheckProduct {
     /// the package (`std@1/list.hirsel`), which the module path is. Never a host
     /// path, so an executable does not depend on where the core product is
     /// installed or where the project lives.
-    fn source_name(&self, module: ModuleId) -> String {
+    pub(crate) fn source_name(&self, module: ModuleId) -> String {
         let path = self.index.module_path(module);
         format!(
             "{}@{}/{}.hirsel",

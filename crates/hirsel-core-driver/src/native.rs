@@ -1,8 +1,10 @@
 //! Native products compose the checked body and the two engines directly.
 use super::*;
+use crate::store::Bare;
 use hirsel_core_ir::Identity;
 use hirsel_core_layout::{Layout, Recipe};
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -67,7 +69,6 @@ pub struct NativeOptions {
     pub debug_lines: bool,
     pub target: String,
     pub runtime: PathBuf,
-    pub include: PathBuf,
     pub link: Link,
     pub store: PathBuf,
     pub output: PathBuf,
@@ -87,7 +88,6 @@ impl NativeOptions {
     pub fn development(
         target: String,
         runtime: PathBuf,
-        include: PathBuf,
         link: Link,
         store: PathBuf,
         output: PathBuf,
@@ -98,7 +98,6 @@ impl NativeOptions {
             debug_lines: false,
             target,
             runtime,
-            include,
             link,
             store,
             output,
@@ -148,9 +147,59 @@ pub struct ObjectProduct {
     pub instance: Identity,
     pub identity: ContentHash,
     pub path: PathBuf,
-    pub bytes: Vec<u8>,
+    /// The object's read check (`Bare::check`).
+    pub(crate) check: u64,
+    /// Whether the link checks its bytes through the descriptor it hands the
+    /// linker: a stored object this request neither wrote nor read.
+    pub(crate) verify: bool,
     pub debug: Option<hirsel_core_ir::source::NativeDebug>,
+    /// Stored debug rows: their store and address. A link with debug lines
+    /// reads them when `debug` is not in hand.
+    pub(crate) debug_record: Option<(Store, ContentHash)>,
     pub compiled: bool,
+}
+impl ObjectProduct {
+    /// A stored object named by a record this request did not write.
+    fn stored(instance: Identity, store: &Store, object: Bare, debug: Option<ContentHash>) -> Self {
+        Self {
+            private_variants: 0,
+            instance,
+            identity: object.address,
+            path: crate::native_object::path(store, object.address),
+            check: object.check,
+            verify: true,
+            debug: None,
+            debug_record: debug.map(|d| (store.clone(), d)),
+            compiled: false,
+        }
+    }
+    /// An object this request read and checked, or emitted and wrote.
+    fn fresh(
+        instance: Identity,
+        store: &Store,
+        object: Bare,
+        native: hirsel_core_ir::source::NativeObject,
+        debug: Option<ContentHash>,
+        compiled: bool,
+    ) -> Self {
+        Self {
+            private_variants: 0,
+            instance,
+            identity: object.address,
+            path: crate::native_object::path(store, object.address),
+            check: object.check,
+            verify: false,
+            debug: native.debug,
+            debug_record: debug.map(|d| (store.clone(), d)),
+            compiled,
+        }
+    }
+    fn bare(&self) -> Bare {
+        Bare {
+            address: self.identity,
+            check: self.check,
+        }
+    }
 }
 #[derive(Serialize)]
 pub struct BuildProduct {
@@ -163,6 +212,8 @@ pub struct BuildProduct {
     /// True means diagnostic instrumentation; timings are not performance samples.
     pub observation_mode: bool,
     pub debug_lines: bool,
+    /// The walk's and the link's work counters.
+    pub reach: crate::reach::ReachCounters,
 }
 /// The libLLVM an LLVM object's key takes (`tool_inputs::llvm_library`):
 /// none for Cranelift, which is part of the compiler executable.
@@ -187,9 +238,6 @@ fn publish(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result<ContentH
     let hash = store.put(bytes)?;
     store.select(&selection(key), hash)?;
     Ok(hash)
-}
-fn read_input(path: &Path) -> io::Result<Vec<u8>> {
-    std::fs::read(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
 // A unit is the producer's complete module, including type shapes and finalizers.
 // The cache chooses its granularity; this boundary never strips type/drop inputs.
@@ -296,6 +344,66 @@ pub(crate) fn native_inputs(
     })
 }
 
+/// The table entries a Cranelift development build's objects give the reach
+/// record, with their closures.
+#[derive(Default)]
+pub(crate) struct Table {
+    entries: Vec<crate::reach::Entry>,
+    closures: Vec<Arc<hirsel_core_ir::Closure>>,
+    by_hash: std::collections::BTreeMap<ContentHash, u32>,
+}
+impl Table {
+    #[allow(clippy::too_many_arguments)]
+    fn push<'c>(
+        &mut self,
+        instances: &[Identity],
+        identity: &Identity,
+        own: Option<ContentHash>,
+        location: crate::instances::Location,
+        object: Bare,
+        debug: Option<ContentHash>,
+        children: impl IntoIterator<Item = &'c Identity>,
+        items: Vec<DefPath>,
+        closures: impl IntoIterator<Item = &'c Arc<hirsel_core_ir::Closure>>,
+    ) {
+        let children = children
+            .into_iter()
+            .map(|c| {
+                instances
+                    .binary_search(c)
+                    .expect("a reached instance's children are reached") as u32
+            })
+            .collect();
+        let closures = closures
+            .into_iter()
+            .map(|c| {
+                *self.by_hash.entry(c.hash).or_insert_with(|| {
+                    self.closures.push(Arc::clone(c));
+                    self.closures.len() as u32 - 1
+                })
+            })
+            .collect();
+        self.entries.push(crate::reach::Entry {
+            identity: identity.clone(),
+            own,
+            location,
+            object,
+            debug,
+            children,
+            items,
+            closures,
+        });
+    }
+}
+/// A link's outcome: the build, or the instance whose stored object or debug
+/// rows failed their check and were removed.
+enum Linked {
+    Built(BuildProduct),
+    /// A stored object of this instance failed its check; how many objects
+    /// this pass compiled.
+    Damaged(Identity, usize),
+}
+
 impl CheckProduct {
     /// Dev keeps each checked body as an independent object. LLVM release
     /// composes owned bodies and published inline imports into one codegen unit.
@@ -305,34 +413,40 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable_for(entry, options)?;
-        self.emit_reached(entry, &reached, options)
+        Ok(self.emit_reached(entry, &reached, options)?.0)
     }
+    /// The reached instances' objects in link order, and for a Cranelift
+    /// development build whose walk drafted a reach record, their table.
     fn emit_reached(
         &self,
         entry: &DefPath,
         reached: &Reachable<'_>,
         options: &NativeOptions,
-    ) -> Result<Vec<ObjectProduct>, NativeStop> {
+    ) -> Result<(Vec<ObjectProduct>, Option<Table>), NativeStop> {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
         self.emit_instances(
             Some(entry),
             reached.require()?,
             &reached.materialized,
             inputs,
+            reached.reach.as_ref(),
             options,
         )
     }
     /// Emit `instances` for `options`, each a hit on its stored object or
-    /// compiled and published under its key; `entry` is the program's, which
-    /// only an optimised build, composing one module, reads.
+    /// compiled and published under its key, with the table `reach`'s draft
+    /// gathers; an instance `reach` expanded is read from its prior record.
+    /// `entry` is the program's, which only an optimised build, composing one
+    /// module, reads.
     pub(crate) fn emit_instances(
         &self,
         entry: Option<&DefPath>,
         instances: &[Identity],
         materialized: &crate::instances::InstanceSet,
         inputs: &NativeInputs,
+        reach: Option<&crate::reach::Use>,
         options: &NativeOptions,
-    ) -> Result<Vec<ObjectProduct>, NativeStop> {
+    ) -> Result<(Vec<ObjectProduct>, Option<Table>), NativeStop> {
         if !options.backend.supports_target(&options.target) {
             return Err(NativeStop::Entry(format!(
                 "{:?} engine does not support target {}",
@@ -353,65 +467,123 @@ impl CheckProduct {
                     "an optimised build composes its program's module from an entry".into(),
                 )
             })?;
-            return self.emit_release(
-                entry,
-                instances,
-                materialized,
-                options,
-                inputs.toolchain.runtime,
-                &store,
-                library_store.as_ref(),
-            );
+            return Ok((
+                self.emit_release(
+                    entry,
+                    instances,
+                    materialized,
+                    options,
+                    inputs.toolchain.runtime,
+                    &store,
+                    library_store.as_ref(),
+                )?,
+                None,
+            ));
         }
         let mut objects = Vec::new();
         let mut names = Vec::new();
         if let Some(records) = &inputs.records {
+            let prior = reach.and_then(|r| r.prior.as_ref());
+            let mut table = reach
+                .and_then(|r| r.draft.as_ref())
+                .map(|_| Table::default());
             for instance in instances {
+                if let Some(&i) = materialized.table.get(instance) {
+                    let prior = prior.expect("an expanded instance has its record");
+                    let e = &prior.instances[i as usize];
+                    objects.push(ObjectProduct::stored(
+                        instance.clone(),
+                        records.store(e.location),
+                        e.object,
+                        e.debug,
+                    ));
+                    if let Some(table) = &mut table {
+                        table.push(
+                            instances,
+                            instance,
+                            e.own,
+                            e.location,
+                            e.object,
+                            e.debug,
+                            e.children
+                                .iter()
+                                .map(|&c| &prior.instances[c as usize].identity),
+                            e.items.clone(),
+                            prior.closures_of(e),
+                        );
+                    }
+                    continue;
+                }
                 let (object_key, location) = materialized.keys[instance];
                 let store = records.store(location);
-                let (identity, object, compiled) = if let Some((record, object)) =
-                    materialized.hits.get(instance)
-                {
-                    (record.object.address, object.clone(), false)
-                } else {
-                    let module = materialized.get(instance).ir()?;
-                    let symbols = materialized.link_symbols(instance, &mut names)?;
-                    let object =
-                        emit_unit(module, || symbols, options, object_key).map_err(|message| {
-                            NativeStop::Emit {
-                                definition: instance.definition.clone(),
-                                message,
-                            }
-                        })?;
-                    let fields = &materialized.fields[instance];
-                    let record = crate::native_object::Instance {
-                        schema: crate::native_object::INSTANCE_SCHEMA,
-                        identity: instance.clone(),
-                        own: fields.own,
-                        env: records.digest,
-                        object: Default::default(),
-                        debug: None,
-                        children: fields.children.clone(),
-                        items: module.items.clone(),
-                        closures: fields.closures.clone(),
-                    };
-                    (
-                        crate::native_object::publish_instance(store, object_key, &object, record)?,
-                        object,
-                        true,
-                    )
+                if let Some(record) = materialized.hits.get(instance) {
+                    objects.push(ObjectProduct::stored(
+                        instance.clone(),
+                        store,
+                        record.object,
+                        record.debug,
+                    ));
+                    if let Some(table) = &mut table {
+                        table.push(
+                            instances,
+                            instance,
+                            record.own,
+                            location,
+                            record.object,
+                            record.debug,
+                            &record.children,
+                            record.items.clone(),
+                            &record.closures,
+                        );
+                    }
+                    continue;
+                }
+                let module = materialized.get(instance).ir()?;
+                let symbols = materialized.link_symbols(instance, &mut names)?;
+                let object =
+                    emit_unit(module, || symbols, options, object_key).map_err(|message| {
+                        NativeStop::Emit {
+                            definition: instance.definition.clone(),
+                            message,
+                        }
+                    })?;
+                let fields = &materialized.fields[instance];
+                let record = crate::native_object::Instance {
+                    schema: crate::native_object::INSTANCE_SCHEMA,
+                    identity: instance.clone(),
+                    own: fields.own,
+                    env: records.digest,
+                    object: Default::default(),
+                    debug: None,
+                    children: fields.children.clone(),
+                    items: module.items.clone(),
+                    closures: fields.closures.clone(),
                 };
-                objects.push(ObjectProduct {
-                    private_variants: 0,
-                    instance: instance.clone(),
-                    identity,
-                    path: crate::native_object::path(store, identity),
-                    bytes: object.bytes,
-                    debug: object.debug,
-                    compiled,
-                });
+                let (bare, debug) =
+                    crate::native_object::publish_instance(store, object_key, &object, record)?;
+                if let Some(table) = &mut table {
+                    table.push(
+                        instances,
+                        instance,
+                        fields.own,
+                        location,
+                        bare,
+                        debug,
+                        &fields.children,
+                        module.items.clone(),
+                        &fields.closures,
+                    );
+                }
+                objects.push(ObjectProduct::fresh(
+                    instance.clone(),
+                    store,
+                    bare,
+                    object,
+                    debug,
+                    true,
+                ));
             }
-            return Ok(objects);
+            return Ok((objects, table));
         }
         // LLVM development: the v4 key, the environment, the instance, its
         // body key and its module's hash.
@@ -438,9 +610,9 @@ impl CheckProduct {
                     instance_body.ir_hash(&mut scratch)?,
                 ),
             )?;
-            let (identity, object, compiled) =
-                if let Some((hash, object)) = crate::native_object::load(store, object_key)? {
-                    (hash, object, false)
+            let (bare, object, compiled) =
+                if let Some((bare, object)) = crate::native_object::load(store, object_key)? {
+                    (bare, object, false)
                 } else {
                     let symbols = materialized.link_symbols(instance, &mut names)?;
                     let object =
@@ -456,17 +628,16 @@ impl CheckProduct {
                         true,
                     )
                 };
-            objects.push(ObjectProduct {
-                private_variants: 0,
-                instance: instance.clone(),
-                identity,
-                path: crate::native_object::path(store, identity),
-                bytes: object.bytes,
-                debug: object.debug,
+            objects.push(ObjectProduct::fresh(
+                instance.clone(),
+                store,
+                bare,
+                object,
+                None,
                 compiled,
-            });
+            ));
         }
-        Ok(objects)
+        Ok((objects, None))
     }
     /// Build through the real process runtime. Unsupported checker/entry products
     /// stop explicitly; no alternate scalar-main or interpreter path exists.
@@ -478,46 +649,126 @@ impl CheckProduct {
         let reached = self.reachable_for(entry, options)?;
         self.build_reachable(entry, &reached, options)
     }
-    /// Build `reached`, which `reachable_for` collected for `options`.
+    /// Build `reached`, which `reachable_for` collected for `options`. A stored
+    /// object whose bytes fail their check at the link is removed, and the
+    /// build walks again with that instance rebuilt.
     pub fn build_reachable(
         &self,
         entry: &DefPath,
         reached: &Reachable<'_>,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
+        let mut damaged = BTreeSet::new();
+        let mut compiled = 0;
+        let mut linked = self.build_once(entry, reached, options, &damaged)?;
+        loop {
+            match linked {
+                Linked::Built(mut product) => {
+                    product.reach.objects_refused = damaged.len() as u64;
+                    product.compiled += compiled;
+                    return Ok(product);
+                }
+                Linked::Damaged(instance, before) => {
+                    compiled += before;
+                    if !damaged.insert(instance.clone()) {
+                        return Err(NativeStop::Link(format!(
+                            "rebuilt object of {} failed its check",
+                            instance.definition
+                        )));
+                    }
+                    let again = self.reachable_rebuilding(entry, options, &damaged)?;
+                    linked = self.build_once(entry, &again, options, &damaged)?;
+                }
+            }
+        }
+    }
+    fn build_once(
+        &self,
+        entry: &DefPath,
+        reached: &Reachable<'_>,
+        options: &NativeOptions,
+        damaged: &BTreeSet<Identity>,
+    ) -> Result<Linked, NativeStop> {
         let instances = reached.require()?;
         let inputs = reached
             .native
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("a build needs `reachable_for` its options".into()))?;
-        let mut items = Vec::new();
+        let reach = reached.reach.as_ref();
+        let prior = reach.and_then(|r| r.prior.as_ref());
+        let mut items: Vec<&DefPath> = Vec::new();
         for instance in instances {
-            items.extend(reached.materialized.items(instance)?.iter().cloned());
+            match reached.materialized.table.get(instance) {
+                Some(&i) => items.extend(&prior.unwrap().instances[i as usize].items),
+                None => items.extend(reached.materialized.items(instance)?),
+            }
         }
-        let sources = self.native_sources(&items)?;
-        let mut objects = self.emit_reached(entry, reached, options)?;
-        let (abi, cleanup) = self.bind_entry_native(entry, options, inputs)?;
-        if let Some(cleanup) = cleanup {
-            objects.push(cleanup);
+        let sources = crate::reach::sources_digest(self, &items)?;
+        let (mut objects, table) = self.emit_reached(entry, reached, options)?;
+        let store = Store::new(&options.store)?;
+        let (link, cleanup) = match (reach, prior) {
+            (Some(reach), Some(prior))
+                if reach.entry_live
+                    && prior
+                        .entry
+                        .cleanup
+                        .as_ref()
+                        .is_none_or(|c| !damaged.contains(&c.identity)) =>
+            {
+                let cleanup =
+                    prior.entry.cleanup.as_ref().map(|c| {
+                        ObjectProduct::stored(c.identity.clone(), &store, c.object, c.debug)
+                    });
+                (prior.entry.clone(), cleanup)
+            }
+            _ => {
+                let (abi, cleanup) = self.bind_entry_native(entry, options, inputs, damaged)?;
+                let link = crate::reach::EntryLink {
+                    abi,
+                    cleanup: cleanup.as_ref().map(|o| crate::reach::Cleanup {
+                        identity: o.instance.clone(),
+                        object: o.bare(),
+                        debug: o.debug_record.as_ref().map(|(_, d)| *d),
+                    }),
+                };
+                (link, cleanup)
+            }
+        };
+        objects.extend(cleanup);
+        let mut counters = reached.counters;
+        if let (Some(reach), Some(table)) = (reach, &table)
+            && let Some(draft) = &reach.draft
+        {
+            counters.record_bytes = crate::reach::publish(
+                &store,
+                reach.selection,
+                prior,
+                &reach.constants,
+                draft,
+                &table.entries,
+                &table.closures,
+                &link,
+                sources,
+            )? as u64;
         }
         let entry_plan = crate::native_entry::Plan::new(
             Identity::plain(entry.clone()).symbol(),
-            &abi,
-            objects
-                .iter()
-                .skip(instances.len())
-                .map(|o| o.instance.symbol())
-                .next(),
+            &link.abi,
+            link.cleanup.as_ref().map(|c| c.identity.symbol()),
             options,
-            &sources,
         )?;
-        link(
+        link_objects(
             &entry_plan,
             &objects,
             options,
-            &sources,
+            sources,
+            || {
+                let items: Vec<DefPath> = items.iter().map(|&p| p.clone()).collect();
+                self.native_sources(&items)
+            },
             inputs.toolchain.image,
             inputs.recipe.clone(),
+            counters,
         )
     }
     /// The entry's declaration part, bound by check.
@@ -556,6 +807,7 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
         inputs: &NativeInputs,
+        damaged: &BTreeSet<Identity>,
     ) -> Result<(EntryAbi, Option<ObjectProduct>), NativeStop> {
         let decl = self.entry_decl(entry)?;
         let store = Store::new(&options.store)?;
@@ -570,9 +822,9 @@ impl CheckProduct {
                 &env,
                 &crate::body::ir_hash(&module, &mut Vec::new())?,
             )?;
-            let (identity, object, compiled) =
-                if let Some((identity, object)) = crate::native_object::load(&store, object_key)? {
-                    (identity, object, false)
+            let (bare, object, compiled) =
+                if let Some((bare, object)) = crate::native_object::load(&store, object_key)? {
+                    (bare, object, false)
                 } else {
                     let object = emit_unit(&module, || module.link_symbols(), options, object_key)
                         .map_err(|message| NativeStop::Emit {
@@ -585,15 +837,14 @@ impl CheckProduct {
                         true,
                     )
                 };
-            let object = ObjectProduct {
-                private_variants: 0,
-                instance: cleanup_identity(&module),
-                identity,
-                path: crate::native_object::path(&store, identity),
-                bytes: object.bytes,
-                debug: object.debug,
+            let object = ObjectProduct::fresh(
+                cleanup_identity(&module),
+                &store,
+                bare,
+                object,
+                None,
                 compiled,
-            };
+            );
             return Ok((abi, Some(object)));
         };
         let Ok(product) = self.demand_body(entry) else {
@@ -645,22 +896,21 @@ impl CheckProduct {
         // The cleanup is a function of the entry module: its key takes the
         // entry body's address as its `own`.
         let object_key = records.key(&identity, Some(own))?;
-        let hit = crate::native_object::load_instance(&store, object_key)?
-            .filter(|r| r.identity == identity && r.own == Some(own) && r.env == records.digest);
-        if let Some(record) = hit
-            && let Some(object) = crate::native_object::load_object(&store, &record)?
-        {
+        let hit = match damaged.contains(&identity) {
+            true => None,
+            false => crate::native_object::load_instance(&store, object_key)?.filter(|r| {
+                r.identity == identity && r.own == Some(own) && r.env == records.digest
+            }),
+        };
+        if let Some(record) = hit {
             return Ok((
                 abi,
-                Some(ObjectProduct {
-                    private_variants: 0,
-                    instance: identity,
-                    identity: record.object.address,
-                    path: crate::native_object::path(&store, record.object.address),
-                    bytes: object.bytes,
-                    debug: object.debug,
-                    compiled: false,
-                }),
+                Some(ObjectProduct::stored(
+                    identity,
+                    &store,
+                    record.object,
+                    record.debug,
+                )),
             ));
         }
         let module = match computed {
@@ -688,18 +938,13 @@ impl CheckProduct {
             items: module.items.clone(),
             closures: vec![],
         };
-        let hash = crate::native_object::publish_instance(&store, object_key, &object, record)?;
+        let (bare, debug) =
+            crate::native_object::publish_instance(&store, object_key, &object, record)?;
         Ok((
             abi,
-            Some(ObjectProduct {
-                private_variants: 0,
-                instance: identity,
-                identity: hash,
-                path: crate::native_object::path(&store, hash),
-                bytes: object.bytes,
-                debug: object.debug,
-                compiled: true,
-            }),
+            Some(ObjectProduct::fresh(
+                identity, &store, bare, object, debug, true,
+            )),
         ))
     }
 }
@@ -888,24 +1133,103 @@ fn direct_link(
     command(&mut process).map(|_| ())
 }
 
-fn link(
+/// Raise the soft descriptor limit to the hard limit once, as Go does since
+/// 1.19: a link holds one descriptor per object. The limit a link may use.
+fn descriptor_limit() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit and setrlimit read and write the struct passed.
+        unsafe {
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                return 1024;
+            }
+            if limit.rlim_cur < limit.rlim_max {
+                let raised = libc::rlimit {
+                    rlim_cur: limit.rlim_max,
+                    rlim_max: limit.rlim_max,
+                };
+                if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) == 0 {
+                    limit = raised;
+                }
+            }
+        }
+        limit.rlim_cur
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs between the objects' check and the linker's spawn, with their paths.
+    pub(crate) static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn FnMut(&[PathBuf])>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Open each object once and check a stored one's bytes through its
+/// descriptor. The linker names each by `/proc/<pid>/fd/N` of this process,
+/// which resolves to the checked inode, so no store path is reopened. A stored
+/// object that fails its check is removed.
+fn open_objects(
+    objects: &[ObjectProduct],
+    counters: &mut crate::reach::ReachCounters,
+) -> Result<Result<Vec<std::fs::File>, Identity>, NativeStop> {
+    use std::io::Read;
+    let limit = descriptor_limit();
+    if objects.len() as u64 + 64 > limit {
+        return Err(NativeStop::Link(format!(
+            "{} objects exceed the descriptor limit of {limit}",
+            objects.len()
+        )));
+    }
+    let mut files = Vec::with_capacity(objects.len());
+    let mut bytes = Vec::new();
+    for object in objects {
+        let mut file = match std::fs::File::open(&object.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound && object.verify => {
+                return Ok(Err(object.instance.clone()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if object.verify {
+            bytes.clear();
+            file.read_to_end(&mut bytes)?;
+            counters.objects_verified += 1;
+            if crate::store::checksum(&bytes) != object.check {
+                drop(file);
+                match std::fs::remove_file(&object.path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+                return Ok(Err(object.instance.clone()));
+            }
+        }
+        files.push(file);
+    }
+    #[cfg(test)]
+    AFTER_CHECK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(&objects.iter().map(|o| o.path.clone()).collect::<Vec<_>>());
+        }
+    });
+    Ok(Ok(files))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn link_objects(
     entry_plan: &crate::native_entry::Plan<'_>,
     objects: &[ObjectProduct],
     options: &NativeOptions,
-    sources: &hirsel_core_ir::source::SourceMap,
+    sources_digest: ContentHash,
+    sources: impl FnOnce() -> io::Result<hirsel_core_ir::source::SourceMap>,
     toolchain: ContentHash,
     recipe: crate::tool_inputs::LinkRecipe,
-) -> Result<BuildProduct, NativeStop> {
-    let headers = [
-        "hirsel_core_rt.h",
-        "hirsel_core_rt_host.h",
-        "hirsel_core_rt_tasks.h",
-        "hirsel_core_rt_isolate.h",
-        "hirsel_core_rt_sites.h",
-    ]
-    .map(|n| read_input(&options.include.join(n)))
-    .into_iter()
-    .collect::<io::Result<Vec<_>>>()?;
+    mut counters: crate::reach::ReachCounters,
+) -> Result<Linked, NativeStop> {
     // Development links use lld's cheap string-merging mode. Release keeps
     // the linker default; this spelling is part of the executable key below.
     let link_mode = if options.optimize {
@@ -914,10 +1238,10 @@ fn link(
         "development-link-O0"
     };
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
-    // v3: an executable cached under v2 may have been linked from a damaged
-    // object that `put_bare` kept; none is reused.
+    // v4: the source map enters by its digest, and the runtime headers by the
+    // compiler identity, which embeds them.
     let link_key = key(
-        "hirsel.core-executable.v3",
+        "hirsel.core-executable.v4",
         &(
             compiler_identity()?,
             toolchain,
@@ -925,37 +1249,48 @@ fn link(
             DIRECT_LINK_SUPPORT_LIBS,
             entry_plan,
             &identities,
+            sources_digest,
             &options.target,
             options.backend,
             options.optimize,
             options.debug_lines,
             link_mode,
-            ContentHash::of_parts(
-                "hirsel.core-link-inputs.v2",
-                headers
-                    .iter()
-                    .map(Vec::as_slice)
-                    .chain([toolchain.0.as_slice()]),
-            ),
         ),
     )?;
     let store = Store::new(&options.store)?;
     let (identity, bytes, linked) = if let Some((identity, bytes)) = cached(&store, link_key)? {
         (identity, bytes, false)
     } else {
+        let sources = sources()?;
         let temp = store.scratch()?;
         let entry = temp.path().join("entry.o");
         let bytes = entry_plan
-            .emit(&options.target)
+            .emit(&options.target, &sources)
             .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
-        let mut inputs = Vec::with_capacity(objects.len() + 2);
-        inputs.push(entry.clone());
         let debug = if options.debug_lines {
+            let mut rows = Vec::with_capacity(objects.len());
+            for object in objects {
+                match (&object.debug, &object.debug_record) {
+                    (Some(debug), _) => rows.push(Cow::Borrowed(debug)),
+                    (None, Some((store, address))) => {
+                        match crate::native_object::load_debug(store, *address)? {
+                            Some(debug) => rows.push(Cow::Owned(debug)),
+                            None => {
+                                return Ok(Linked::Damaged(
+                                    object.instance.clone(),
+                                    objects.iter().filter(|o| o.compiled).count(),
+                                ));
+                            }
+                        }
+                    }
+                    (None, None) => {}
+                }
+            }
             let debug = crate::native_debug::bind_side_products(
-                objects.iter().filter_map(|o| o.debug.as_ref()),
-                sources,
+                rows.iter().map(|d| &**d),
+                &sources,
                 &options.target,
             )
             .map_err(|error| NativeStop::Link(format!("native debug binding: {error}")))?;
@@ -963,11 +1298,28 @@ fn link(
         } else {
             None
         };
-        for object in objects {
-            // Native objects are already content-addressed bare files. Pass
-            // those paths directly to ld.lld; load() verified their checksum.
-            inputs.push(object.path.clone());
-        }
+        let files = match open_objects(objects, &mut counters)? {
+            Ok(files) => files,
+            Err(instance) => {
+                return Ok(Linked::Damaged(
+                    instance,
+                    objects.iter().filter(|o| o.compiled).count(),
+                ));
+            }
+        };
+        // The linker opens each checked object through this process's
+        // descriptor table, so it reads the inode that was checked and inherits
+        // nothing: a spawn that cleared close-on-exec would need fork, whose
+        // child holds every thread's writable descriptors until it execs.
+        let pid = std::process::id();
+        let mut inputs = Vec::with_capacity(objects.len() + 3);
+        inputs.push(entry.clone());
+        inputs.extend(files.iter().map(|file| {
+            PathBuf::from(format!(
+                "/proc/{pid}/fd/{}",
+                std::os::fd::AsRawFd::as_raw_fd(file)
+            ))
+        }));
         if let Some(debug) = debug {
             let debug_path = temp.path().join("debug.o");
             std::fs::write(&debug_path, debug)?;
@@ -1024,6 +1376,7 @@ fn link(
                 options.optimize,
             )?;
         }
+        drop(files);
         let bytes = std::fs::read(output)?;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         (publish(&store, link_key, &bytes)?, bytes, true)
@@ -1049,7 +1402,7 @@ fn link(
     std::fs::write(&temp, &bytes)?;
     std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
     temp.persist(&options.output).map_err(|e| e.error)?;
-    Ok(BuildProduct {
+    Ok(Linked::Built(BuildProduct {
         private_variants: objects.iter().map(|o| o.private_variants).sum(),
         executable: options.output.clone(),
         identity,
@@ -1057,7 +1410,8 @@ fn link(
         linked,
         observation_mode: options.logical_charge_report.is_some(),
         debug_lines: options.debug_lines,
-    })
+        reach: counters,
+    }))
 }
 
 #[cfg(test)]
@@ -1100,6 +1454,7 @@ mod tests {
     include!("object_key_native.rs");
     include!("instance_record_native.rs");
     include!("prebuild_native.rs");
+    include!("reach_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();
@@ -1116,7 +1471,6 @@ mod tests {
             target: TARGET.into(),
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            include: root.join("crates/hirsel-core-rt/include"),
             link: Link::Driver(
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
@@ -1199,8 +1553,30 @@ mod tests {
             .unwrap();
         let store = Store::new(&options.store).unwrap();
         std::fs::write(store.path(callee.identity), b"bad object").unwrap();
-        let repaired = product.emit_reachable(&entry, &options).unwrap();
-        assert_eq!(repaired.iter().filter(|o| o.compiled).count(), 1);
+        // The executable's key names the object by identity. A Cranelift
+        // build reads a stored object only to link it, so the executable's
+        // hit reads none and the next link checks each stored object it did
+        // not write: the damaged one is rebuilt, beside the edited caller. An
+        // LLVM development build reads every object it emits, so the damaged
+        // one is rebuilt at once, under the same identity, and the executable
+        // still hits.
+        let (rebuilt, repaired_work) = match backend {
+            Backend::Cranelift => (0, (2, 1)),
+            Backend::Llvm => (1, (1, 0)),
+        };
+        let warm = product.build(&entry, &options).unwrap();
+        assert_eq!((warm.compiled, warm.linked), (rebuilt, false));
+        run_clean(&warm.executable, 8);
+        let caller = edited.replace("add(3u8, 4u8)", "add(3u8, 5u8)");
+        let product = driver
+            .check(source_request(&caller, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        let repaired = product.build(&entry, &options).unwrap();
+        assert_eq!(
+            (repaired.compiled, repaired.reach.objects_refused),
+            repaired_work
+        );
+        run_clean(&repaired.executable, 9);
 
         let overflowing = source.replace("add(3u8, 4u8)", "add(255u8, 1u8)");
         let product = driver
@@ -1426,7 +1802,10 @@ mod tests {
                 .find(|o| o.instance.definition == entry)
                 .unwrap();
             assert!(
-                !own.bytes.windows(name.len()).any(|w| w == name.as_bytes()),
+                !std::fs::read(&own.path)
+                    .unwrap()
+                    .windows(name.len())
+                    .any(|w| w == name.as_bytes()),
                 "the program must inline the published answer body, not reference its object"
             );
             let store = Store::new(
@@ -1444,7 +1823,7 @@ mod tests {
                     crate::native_library::read(&archive, hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA)
                         .expect("one complete native-library product");
                 assert!(product.object.debug.is_none());
-                assert_eq!(product.object.bytes, library.bytes);
+                assert_eq!(product.object.bytes, std::fs::read(&library.path).unwrap());
                 assert!(
                     product.bitcode.starts_with(b"BC\xc0\xde"),
                     "raw LLVM bitcode"

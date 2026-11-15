@@ -1,4 +1,4 @@
-//! Compile timings for `--timings` (docs/building.md, "Compile timings").
+//! Compile timings.
 //! Three measures, kept apart:
 //! - [`Interval`]: wall time of the driver's non-overlapping intervals. A
 //!   nested interval pauses the one it interrupts, so intervals add up to the
@@ -15,8 +15,7 @@ use std::time::{Duration, Instant};
 
 pub mod instructions;
 
-/// A driver interval. Today's driver maps onto them as docs/building.md
-/// describes; an interval it has no step for stays 0.
+/// A driver interval; an interval the driver has no step for stays 0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Interval {
     S0,

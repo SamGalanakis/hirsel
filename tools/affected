@@ -6,11 +6,7 @@
     tools/affected --dry-run  # print the plan only
 
 Changed paths are the committed, staged, unstaged and untracked files since the
-base. Conformance programs run through `tools/corpus` on their directories;
-every other path goes to `tools/consumers`, whose targets run in one
-`buck2 test`. The whole conformance or native gate runs only before a land that
-changes compiler or runtime semantics widely, or on request
-(/workspace/code/hirsel-briefs/host-rules.md).
+base. They go to `tools/consumers`, whose targets run in one `buck2 test`.
 """
 import argparse
 from pathlib import Path
@@ -33,33 +29,22 @@ def changed(base):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--base', help='revision to compare with (default: merge-base with origin/main)')
-    parser.add_argument('--dry-run', action='store_true', help='print the targets and corpus directories only')
+    parser.add_argument('--dry-run', action='store_true', help='print the targets only')
     args = parser.parse_args()
     base = args.base or git('merge-base', 'HEAD', 'origin/main').strip()
     paths = changed(base)
     if not paths:
         print('affected: no changes since ' + base[:12], file=sys.stderr)
         return 0
-    corpus = sorted({str(Path(path).parent) for path in paths
-                     if path.startswith('conformance/') and path.endswith('.hir')})
-    other = [path for path in paths if not (path.startswith('conformance/') and path.endswith('.hir'))]
-    targets = []
-    if other:
-        found = subprocess.run([str(ROOT / 'tools/consumers'), *other], cwd=ROOT, stdout=subprocess.PIPE, text=True)
-        if found.returncode:
-            return found.returncode
-        targets = found.stdout.split()
-    print(f'affected: {len(paths)} changed paths; {len(targets)} targets; corpus {" ".join(corpus) or "none"}',
-          file=sys.stderr)
+    found = subprocess.run([str(ROOT / 'tools/consumers'), *paths], cwd=ROOT, stdout=subprocess.PIPE, text=True)
+    if found.returncode:
+        return found.returncode
+    targets = found.stdout.split()
+    print(f'affected: {len(paths)} changed paths; {len(targets)} targets', file=sys.stderr)
     if args.dry_run:
-        print('\n'.join(targets + corpus))
+        print('\n'.join(targets))
         return 0
-    status = 0
-    if targets:
-        status = subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'test', *targets], cwd=ROOT).returncode
-    if corpus:
-        status = subprocess.run([str(ROOT / 'tools/corpus'), *corpus], cwd=ROOT).returncode or status
-    return status
+    return subprocess.run([str(ROOT / '.buck2/bin/buck2'), 'test', *targets], cwd=ROOT).returncode
 
 
 if __name__ == '__main__':

@@ -6,7 +6,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-hirsel-syntax = { path = "../hirsel-syntax" }
+hirsel-core-ids = { path = "../hirsel-core-ids" }
 
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }

@@ -59,43 +59,26 @@ sleeping waiters replace spinning; process identity and heartbeats add
 recovery for abandoned tickets. These adaptations serve independent
 processes and survive a lane crash on this single Linux host.
 
-Land fetches and rebases onto a captured `origin/main` commit, regenerates
-stale build inventories, and checks the workspace build, Clippy, package and
-example manifests and fmt. One Buck2 build compiles everything those checks
-read (the workspace, every Clippy twin's report and the manifests check's
-checked compiler and std products, its `[inputs]` subtarget): a daemon serves
-one command at a time while another holds a different state, so separate
-concurrent checks would wait for each other. Clippy and the manifests check
-then only read reports and run. The land checkout's daemon keeps 128 remote
-actions in flight, a lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`). The build covers workspace compilation, including test harness compilation;
-it excludes test execution, campaigns, the two-host link check, std images
-and native std precompilation/packaging. The latter are integration artifacts
-covered by main-runs, and never replace the workspace build. At this
-change, the build query selects 200 targets, including all 84 Rust test
-harness build targets, `hirsel-cli-bin-hirsel` and `hirsel-rt`. Compared with
-the old query on the same inventory, exactly `hirsel-std-objects` is removed;
-packaging targets were already excluded through the std image. Build, Clippy and fmt always check their full aggregates. It pushes the exact checked commit SHA, after verifying that HEAD and the
-worktree still match. A red check refuses the push. Source conflicts stop
-and abort the rebase; resolve them yourself and run land again. Land does
-not run other tests or commit generated files. Lands therefore build no release-profile code. It requires the named rejection for the two intentional negative package
-fixtures and generates the ignored JSON-kit hooks as its guide requires. Manual main runs own the API index; the generated-file and independent-line-list
-rules still apply. They have no automatic schedule and are not part of the land
-gate. From an updated checkout, run a chosen profile on current `origin/main`:
+Land fetches and rebases onto a captured `origin/main` commit and screens the tree
+with the checks that take seconds: `prepare.py`, `sync.py --if-stale`, the independent
+line lists (`tools/check-hot-files`), the std API index, the ignored-test homes, fmt
+(Rust and changed Hirsel sources, against the candidate's formatter) and the source
+audits (`//:land-audit-workspace-layering`). It then runs one Buck2 build of everything
+the later checks read: the workspace without test harnesses, the installed toolchain
+bundle, every Clippy twin's report and the `[inputs]` of each core acceptance suite. A
+daemon serves one command at a time while another holds a different state, so separate
+concurrent checks would wait for each other. Clippy then only reads reports. Last, it
+runs the core acceptance suites (`CORE_ACCEPTANCE` in `tools/land`), with `//:test-land`
+when the change touches the land tool, and prints the core cost guard's report when the
+change touches the front end, the core libraries or the M1 programs; a cost red is
+reported, not refused. The land checkout's daemon keeps 128 remote actions in flight, a
+lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`).
 
-```sh
-tools/main-runs --now --tier fast
-tools/main-runs --now --tier ownership-trace
-```
-
-Profiles are `fast`, `full`, `conformance`, `ownership-trace` and `native-smoke`.
-Use `--select` repeatedly for stage-name prefixes within a profile, or for corpus
-directories, cases and prefixes. For example, `--tier fast --select 'workspace tests'`
-runs that stage and tool preparation. Add `--dry-run` to inspect the local selection
-without fetching or executing it. The manual command fetches current main into
-its own runner checkout, always runs when asked even at an unchanged SHA, and
-refuses overlapping runs. Reports retain NEW failures with their last completed
-same-stage commit range, a WRONGLY ACCEPTED section, and known-owner counts.
-The disabled timer is not re-enabled by this command.
+It pushes the exact checked commit SHA, after verifying that HEAD and the worktree
+still match. A red check refuses the push. Source conflicts stop and abort the rebase;
+resolve them yourself and run land again. Land does not commit generated files.
+`tools/sweep` runs the longer native suites (both engines, AArch64, the laws, m2b and
+the land tool's own tests) on current main when asked; it has no automatic schedule.
 
 Before publishing a ticket, land finds and probes Cargo and rustc locally;
 an unavailable toolchain refuses submission with one line. Checks and

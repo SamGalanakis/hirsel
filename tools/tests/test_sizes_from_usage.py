@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Native requests retain PSS, escalation and missing-stage evidence."""
-from collections import defaultdict
+"""Test requests retain PSS, escalation and unobserved evidence."""
 import json
 from pathlib import Path
 import sys
@@ -72,17 +71,12 @@ class NativeSizes(unittest.TestCase):
             found, operations = sizes.runs([usage])
             peaks = sizes.pss_peaks([trace], operations)
             floors = sizes.escalation_floors([trace], operations)
-            rows = sizes.native_rows(found, peaks, floors)
-        self.assertEqual(set(rows), sizes.NATIVE_STAGES)
-        full = rows['gate-native-full']
+            full = sizes.size('gate-native-full', found['gate-native-full'], peaks['gate-native-full'],
+                              floors['gate-native-full'])
         self.assertEqual(full['pss_peak_mib'], 4112)
         self.assertEqual(full['memory_kills'], 0)
         self.assertEqual(full['memory_kb'], 5111808)
         self.assertEqual(full['cpu_count'], 1)
-        for name in sizes.NATIVE_STAGES - {'gate-native-full'}:
-            self.assertEqual(rows[name]['fallback_from'], 'gate-native-full')
-            self.assertEqual(rows[name]['memory_kb'], full['memory_kb'])
-            self.assertEqual(rows[name]['runs'], 0)
 
     def test_pss_margin_rounds_up_and_colored_kills_remain_a_floor(self):
         sample = dict(cpu=1, wall=1, requested_cpu=1, requested_kb=2097152, end=1)
@@ -92,8 +86,6 @@ class NativeSizes(unittest.TestCase):
             path.write_text('Uuid(abc), \x1b[33mreserved_kb\x1b[0m: 2097152')
             floors = sizes.kills(path, {'abc': 'gate-native-full'})
         self.assertEqual(sizes.size('gate-native-full', [sample], [4210843], floors['gate-native-full'])['memory_kb'], 5111808)
-        with self.assertRaisesRegex(ValueError, 'no measured native stage'):
-            sizes.native_rows({}, defaultdict(list), defaultdict(list))
 
     def test_virtual_memory_guard_is_independent_of_resident_reservation(self):
         with tempfile.TemporaryDirectory() as directory:

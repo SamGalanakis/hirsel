@@ -6,7 +6,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "hirsel-core"
+name = "hirsel"
 path = "src/main.rs"
 
 [dependencies]

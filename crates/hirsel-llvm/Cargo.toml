@@ -8,18 +8,10 @@ rust-version.workspace = true
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hirsel_lazy_core)'] }
 
-[features]
-# Instrument emitted code; the compiler itself need not run under TSan.
-native-tsan = []
-
 [dependencies]
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-core-ir = { path = "../hirsel-core-ir" }
-hirsel-graph = { path = "../hirsel-graph" }
-hirsel-core-contract = { path = "../hirsel-core-contract" }
-hirsel-lir = { path = "../hirsel-lir" }
-hirsel-syntax = { path = "../hirsel-syntax" }
 gimli = { version = "=0.33.0", default-features = false, features = ["read", "std"] }
 object = { version = "=0.40.0", default-features = false, features = ["elf", "read_core", "std", "write", "build"] }
 llvm-sys = { version = "=231.0.1", default-features = false, features = ["strict-versioning", "force-dynamic"] }
@@ -34,11 +26,4 @@ hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
-hirsel-cranelift = { path = "../hirsel-cranelift" }
 hirsel-guard = { path = "../hirsel-guard" }
-hirsel-layout = { path = "../hirsel-layout" }
-hirsel-lir = { path = "../hirsel-lir", features = ["testing"] }
-hirsel-heapcheck = { path = "../hirsel-heapcheck" }
-hirsel-run-schema = { path = "../hirsel-run-schema" }
-hirsel-tir = { path = "../hirsel-tir" }
-hirsel-types = { path = "../hirsel-types", features = ["testing"] }

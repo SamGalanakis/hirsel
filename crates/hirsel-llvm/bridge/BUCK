@@ -9,7 +9,7 @@ LLVM_BRIDGE_FLAGS = [
 
 cxx_library(
     name = "bridge",
-    srcs = ["stack_size.cpp", "count_loops.cpp", "checked_copy.cpp"],
+    srcs = ["core_passes.cpp", "checked_copy.cpp"],
     headers = ["aggregate_phi.h", "failure_edges.h", "loop_version.h"],
     header_namespace = "",
     compiler_flags = LLVM_BRIDGE_FLAGS,
@@ -18,8 +18,6 @@ cxx_library(
     visibility = ["PUBLIC"],
 )
 
-export_file(name = "count_loops.cpp", mode = "reference", visibility = ["PUBLIC"])
-export_file(name = "stack_size.cpp", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "aggregate_phi.h", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "failure_edges.h", mode = "reference", visibility = ["PUBLIC"])
 

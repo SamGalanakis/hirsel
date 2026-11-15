@@ -6,9 +6,9 @@
 Run it every few minutes from a scheduler. It fetches origin/main; when main's
 newest commit is older than --minutes and some lane worktree of this
 repository moved its HEAD (committed, rebased, switched) within that window,
-it appends one line to $HIRSEL_MAIN_RUNS/alarms.log (the directory
-tools/main-runs writes to), at most once per window for the same main
-commit. The hourly run's worktrees (tools/main-runs) are not lanes.
+it appends one line to $HIRSEL_MAIN_RUNS/alarms.log (default
+~/.local/state/hirsel/main-runs), at most once per window for the same main
+commit. Worktrees under $HIRSEL_MAIN_WORKTREES are not lanes.
 """
 
 import argparse

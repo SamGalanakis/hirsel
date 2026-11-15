@@ -1,6 +1,6 @@
 # Core driver
 
-`hirsel-core check <package-dir> --libraries core --store <private-store>` reads
+`hirsel check <package-dir> --libraries core --store <private-store>` reads
 new-language `.hirsel` sources. Relative file paths name modules in `app@1`;
 `core/core` and `core/std` name `core@1` and `std@1`. `--inputs <json>` instead accepts
 an explicit resolver `CorpusManifest`. Directory checks select `app@1/main/main` as
@@ -35,7 +35,7 @@ is a cache miss. Records publish before the selection. No old requests,
 old std products, TIR or independent checker enter this crate. The workspace
 layering audit enforces its new-core-only dependency boundary.
 
-`hirsel-core image --libraries core --store <image-dir>` checks library sources
+`hirsel image --libraries core --store <image-dir>` checks library sources
 through that same request path and publishes an immutable image. Rejected or
 incomplete source never produces an image. `//:hirsel-core-image` is the Buck target;
 it invokes this new producer, independently of old precompute. Its success depends
@@ -119,7 +119,7 @@ gaps and tool/resource errors exit 2; an accepted check exits 0.
 Their sum is the independently read counter interval. External process-tree perf
 also counts startup and reporting outside that interval; report that residual.
 
-`hirsel-core build <package-dir> --runtime <libhirsel_core_rt.a> -o program`
+`hirsel build <package-dir> --runtime <libhirsel_core_rt.a> -o program`
 uses the same checked request and collects reachable instances. Development emits
 one object per checked body; LLVM release composes request-owned bodies and
 published inline candidates into one unit. Both link the independently built core runtime. `run` builds and
@@ -230,7 +230,7 @@ relative paths are resolved at executable startup. Repeat the option for more
 directories. `--grant <kind>` explicitly supplies Net, Clock, Random, Stdout,
 Stderr, Stdin, Env, Process or Tasks. Args is always present, including empty argv.
 These options configure the built executable and are part of its link cache key.
-For example, `hirsel-core run ... --dir . --grant Stdout -- input.txt normal`
+For example, `hirsel run ... --dir . --grant Stdout -- input.txt normal`
 grants the current directory and stdout and passes two program arguments.
 Missing grants are diagnosed by build/run before native emission, naming the main
 parameter and the required --grant or --dir option. Declaring a capability
@@ -333,7 +333,7 @@ execution cost, not language-visible event order. This mode currently follows
 the single-worker cooperative scheduler; a future multi-worker scheduler must
 provide a synchronized run observer before using it.
 
-`hirsel-core test <package-dir> --limit <bytes> --runtime <archive>` discovers
+`hirsel test <package-dir> --limit <bytes> --runtime <archive>` discovers
 `@test` functions in the request's source modules, including private functions.
 Installed dependency tests are not rediscovered. Tests take only unmarked
 capabilities, no `Args` or type parameters, and return `Result[(), E]`; only

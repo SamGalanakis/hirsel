@@ -1,5 +1,5 @@
-//! Scalar lowering adapted from this backend's scalar.rs, with CoreIR types and
-//! SEM-2's all-width conversion result/status contract.
+//! Scalar lowering with CoreIR types and SEM-2's all-width conversion
+//! result/status contract.
 use super::function::Function;
 use super::*;
 use cranelift_codegen::ir::{

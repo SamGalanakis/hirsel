@@ -1,17 +1,5 @@
-load("//tools/native-toolchain:pins.bzl", "LINK_KIT", "LLD_SOURCE", "LLVM_DEBS", "NATIVE", "STATIC_LLD", "VALGRIND_DEBS")
-load(":defs.bzl", "link_kit", "runtime_auditor", "overlay_linker", "toolchain_proof", "unpack_toolchain")
-
-http_file(name = "lld-source", urls = [LLD_SOURCE["url"]], sha256 = LLD_SOURCE["sha256"])
-overlay_linker(
-    name = "linker", source = ":lld-source", llvm = "toolchains//:llvm",
-    kit = ":kit", version = LLD_SOURCE["version"],
-    patch_tool = ":patch",
-    headers = [":zlib_headers", ":zstd_headers"],
-    patch = ":lld-input-overlay.patch",
-    main = ":lld-input-main.cpp",
-    exec_compatible_with = ["root//tools/buck2:pool_1_1048576"],
-    visibility = ["PUBLIC"],
-)
+load("//tools/native-toolchain:pins.bzl", "LINK_KIT", "LLVM_DEBS", "NATIVE", "STATIC_LLD", "VALGRIND_DEBS")
+load(":defs.bzl", "link_kit", "toolchain_proof", "unpack_toolchain")
 
 [http_file(name = "llvm-deb-{}".format(i), urls = [pin["url"]], sha256 = pin["sha256"], size_bytes = pin["size"]) for i, pin in enumerate(LLVM_DEBS)]
 [http_file(name = name + "-archive", urls = [pin["url"]], sha256 = pin["sha256"], size_bytes = pin["size"]) for name, pin in NATIVE.items()]
@@ -47,54 +35,7 @@ unpack_toolchain(
 )
 
 export_file(name = "unpack.py")
-export_file(name = "lld_overlay.py")
 export_file(name = "link_kit.py")
 toolchain_proof(name = "proof", tools = [":llvm", ":arm", ":qemu", ":valgrind"], script = "proof.sh")
-toolchain_proof(name = "linker-input-proof", tools = [":linker", "toolchains//:llvm"],
-    script = "linker_input_probe.py", interpreter = "python3")
-toolchain_proof(name = "linker-store-proof", tools = [":linker", "toolchains//:llvm", "root//:hirsel-native-unittest-harness"],
-    script = "linker_store_probe.py", interpreter = "python3")
-toolchain_proof(name = "linker-store-unit-proof", tools = ["toolchains//:llvm", "root//:hirsel-native-unittest-harness"],
-    script = "linker_store_units.py", interpreter = "python3")
-toolchain_proof(name = "source-entry-proof", tools = [":llvm", "root//:hirsel-native-unittest-harness"], script = "source_entry_proof.sh")
 export_file(name = "environment.tsv", visibility = ["PUBLIC"])
 
-export_file(name = "lld-input-main.cpp")
-export_file(name = "lld-input-overlay.patch")
-
-runtime_auditor(name = "runtime-auditor", llvm = ":llvm", builder = "build_runtime_auditor.py", source = "runtime_auditor.c", visibility = ["PUBLIC"])
-toolchain_proof(name = "runtime-auditor-proof", tools = [":llvm", ":runtime-auditor", ":glibc_floor", ":qemu"], script = "runtime_auditor_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "runtime-store-proof", tools = [":llvm", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "runtime_store_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "runtime-identity-proof", tools = [":llvm", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "runtime_identity_proof.sh")
-
-toolchain_proof(name = "executable-plan-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-native-unittest-harness"], script = "executable_plan_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "frozen-kit-proof", tools = [":linker", "toolchains//:llvm", "root//:hirsel-native-unittest-harness"], script = "frozen_kit_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "scratch-linker-proof", tools = [":linker", "toolchains//:llvm", "root//:hirsel-native-unittest-harness"], script = "scratch_linker_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "scratch-transport-units", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-engine-unittest-harness", "root//:hirsel-native-unittest-harness"], script = "scratch_transport_units.sh")
-
-toolchain_proof(name = "scratch-ready-fixture-proof", tools = [":llvm", ":kit", "root//:hirsel-rt-archives", "root//:hirsel-native-unittest-harness"], script = "scratch_ready_fixture_proof.sh")
-toolchain_proof(name = "runtime-discovery-proof", tools = [":llvm", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "runtime_discovery_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "runtime-identity-case-proof", tools = [":llvm", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "runtime_identity_case_proof.py", interpreter = "python3")
-toolchain_proof(name = "platform-capture-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "platform_capture_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "platform-closure-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "platform_closure_proof.py", interpreter = "python3")
-toolchain_proof(name = "platform-record-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-native-unittest-harness"], script = "platform_record_proof.py", interpreter = "python3")
-
-
-
-
-
-
-toolchain_proof(name = "native-bootstrap-link-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-driver-unittest-harness"], script = "native_bootstrap_link_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "native-closed-bootstrap-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-driver-unittest-harness"], script = "native_closed_bootstrap_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "native-bound-bootstrap-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-driver-unittest-harness"], script = "native_bound_bootstrap_proof.py", interpreter = "python3")
-
-toolchain_proof(name = "native-selector-proof", tools = [":llvm", ":linker", ":kit", "root//:hirsel-rt-archives", ":runtime-auditor", ":glibc_floor", ":qemu", "root//:hirsel-driver-unittest-harness"], script = "native_selector_proof.py", interpreter = "python3")

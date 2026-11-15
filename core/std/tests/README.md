@@ -9,11 +9,11 @@ The walker uses the real driver product path, Cranelift dev and LLVM release.
 It prints every selected case as PASS, FAIL, NOT RUN or NOT APPLICABLE with its first cause and
 owner. Zero matches fail; a missing native run never counts as passing.
 
-    python3 core/tools/std_native.py --compiler <hirsel-core> --runtime <core-rt.a>         --filter file --backend both --report /tmp/file-native.json
+    python3 core/tools/std_native.py --compiler <hirsel> --runtime <core-rt.a>         --filter file --backend both --report /tmp/file-native.json
 
 The same walker discovers core/core/tests and core/std/tests. A filter is a module/function prefix (file, file:read, core.list, core.list:law) or source path prefix. Existing std filters retain their spelling; std.file also works.
 Repeat --filter for several prefixes. The compiler and runtime are Buck targets
-hirsel-core-driver-bin-hirsel-core and the shipping hirsel-core-rt-archives.
+hirsel-core-driver-bin-hirsel and the shipping hirsel-core-rt-archives.
 Use core/tools/measurement_artifacts.py to locate the release compiler and archive.
 
 No-argument scalar tests, f(dir), f(out) and f(err) are supported. Dir tests receive
@@ -80,7 +80,7 @@ when evaluator-only laws are selected. This helper checks and assembles a single
 source entry with the existing front test assembly, then evaluates it; selection,
 expectations and reports remain in this walker. Example invocation:
 
-    python3 core/tools/std_native.py --compiler <hirsel-core> --runtime <core-rt.a> --evaluator <hirsel-core-contract-eval> --filter core.deque --backend both --report /tmp/deque-laws.json
+    python3 core/tools/std_native.py --compiler <hirsel> --runtime <core-rt.a> --evaluator <hirsel-core-contract-eval> --filter core.deque --backend both --report /tmp/deque-laws.json
 
 A whole test file may declare evaluator-only laws:
 
@@ -106,7 +106,7 @@ continues to mean the two native engines. Evaluator-only selection needs neither
 a compiler nor a runtime archive:
 
     python3 core/tools/std_native.py --backend evaluator --evaluator <hirsel-core-contract-eval> --report /tmp/evaluator-laws.json
-    python3 core/tools/std_native.py --backend all --compiler <hirsel-core> --runtime <shipping-core-rt.a> --evaluator <hirsel-core-contract-eval> --filter core.walker_finalizer
+    python3 core/tools/std_native.py --backend all --compiler <hirsel> --runtime <shipping-core-rt.a> --evaluator <hirsel-core-contract-eval> --filter core.walker_finalizer
 
 The evaluator uses the same source adapter and exact return/output/failure oracle,
 including private same-module laws. Its demand walk includes type finalizers and
@@ -128,7 +128,7 @@ status and exact cause as before. A wrong result, unexpected failure or crash
 still fails the law. Evaluator adapters remain scalar entries for their model
 comparison; native-only and evaluator-only accounting is unchanged.
 
-Each generated adapter runs through `hirsel-core test --inputs <manifest>`,
+Each generated adapter runs through `hirsel test --inputs <manifest>`,
 with an explicit 64 MiB root limit and the case's grants. The driver discovers
 and executes exactly one adapter in an independent process. The walker checks
 that identity and rejects empty or partial discovery. It compares captured
@@ -141,7 +141,7 @@ request. No adapter is published and ordinary module privacy still applies.
 Run the entire native law corpus on both engines, including evaluator-only laws
 on their declared backend, with one aggregate exit status and no filters:
 
-    python3 core/tools/std_native.py --compiler <hirsel-core> --runtime <shipping-core-rt.a> --evaluator <hirsel-core-contract-eval> --backend both --report /tmp/library-laws.json
+    python3 core/tools/std_native.py --compiler <hirsel> --runtime <shipping-core-rt.a> --evaluator <hirsel-core-contract-eval> --backend both --report /tmp/library-laws.json
 
 This is the same discovery inventory and source adapters as the evaluator walker.
 Every applicable law must run and satisfy its oracle. The command exits 1 for any

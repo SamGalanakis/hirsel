@@ -10,7 +10,7 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
-use hirsel_syntax::ContentHash;
+use hirsel_core_ids::ContentHash;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -1700,6 +1700,3 @@ fn verified_container(
         payload.with_reference(reference)
     })
 }
-
-pub mod programs;
-pub mod registration;

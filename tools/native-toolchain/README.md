@@ -50,59 +50,6 @@ it per land.
 The former LLVM 21 GitHub binary archive was static-only. `check` continues to
 require a shared libLLVM; binary archives are not a fallback.
 
-## Link input capture
-
-`//tools/buck2/native-toolchain:linker` builds the ELF driver from the same
-LLVM release with `../buck2/native-toolchain/lld-input-overlay.patch`. The
-existing LLVM script parser, archive decoder and virtual filesystem supply
-input discovery and replay:
-
-- `--input-overlay=FILE` selects an LLVM YAML VFS, including its ordinary
-  `use-external-names` and `fallthrough` policies.
-- `--input-working-directory=DIR` selects the overlay's logical working
-  directory and requires an overlay.
-- `--capture-inputs-only` stops after input parsing, including archive members
-  and dependent libraries. With `--whole-archive --reproduce=FILE`, the normal
-  LLVM reproducer contains the complete input bytes. Final script expressions
-  and backend work still execute during the actual link.
-
-Logical filenames remain visible to section selectors. Thin members use the
-same virtual filesystem as direct inputs. Capture outputs are ordinary input
-data; native verification remains the consumer's responsibility.
-
-The builder uses the pinned SDK and GNU patch from `native.lock.json`, one
-CPU, and a 1 GiB build allowance. It selects libstdc++'s provided timed-wait
-fallbacks for the SDK's glibc 2.28 headers and packages the resolved loader/DSO
-closure of the linker and archiver alongside them.
-
-```sh
-.buck2/bin/buck2 test //tools/buck2/native-toolchain:linker-input-proof
-```
-
-The proof removes the original inputs before replay. It covers absolute and
-relative inputs and includes, filename section selection, thin archives and
-dependent libraries, final-link assertions, and refusal of uncaptured real
-files and thin members.
-
-The driver's `native::object_queries::capture` stores the packaged linker,
-loader, libraries, invocation and captured input files as ordinary bounded
-product records. `FrozenLinker::capture` accepts archive byte/file limits from
-the caller's admission policy. `CapturedLink::validate` checks the complete
-stored closure before Link reuse; `CapturedLink::link` restores it and invokes
-the same stored tool through a closed LLVM VFS. Output placement is the only
-parameter supplied after capture. External LTO configuration and pass plugins
-are refused by this host object/archive/script helper. Target DSO loading is a
-separate runtime obligation; storing linker inputs does not freeze that loader.
-
-```sh
-.buck2/bin/buck2 test //tools/buck2/native-toolchain:linker-store-unit-proof
-.buck2/bin/buck2 test //tools/buck2/native-toolchain:linker-store-proof
-```
-
-The store proof changes an object at the same path, removes all originals,
-reopens the store and runs both captured executable versions. Archive controls
-cover long filenames, content chunking, bounds, truncation and missing content.
-
 ## Pool execution inputs
 
 `BUCK` downloads LLVM's locked Debian packages and their runtime libraries,
@@ -135,11 +82,8 @@ LLVM's own static configuration against the 2.28 headers. `manifest.json`
 records each file's SHA-256, source and flags, the clang and lld versions and
 the SHA-256 of `ld.lld` and libLLVM; `digest` (the manifest's SHA-256) is the
 kit's identity and enters every build ID. The runtime archive's own
-`compiler_builtins` provides every compiler builtin: linking every archive
-variant whole against the kit leaves no symbol undefined (the driver unit test
-`native::kit::tests::whole_runtime_archives_need_no_builtins_beyond_their_own`),
-so the supplemental builtin list is empty and the kit carries no compiler-rt
-builtins. `:glibc_floor` unpacks the same `libc6` packages as
+`compiler_builtins` provides every compiler builtin, so the kit carries no
+compiler-rt builtins. `:glibc_floor` unpacks the same `libc6` packages as
 `<triple>/` loader and library directories for running executables at the
 floor through that loader (never a link input).
 
@@ -153,8 +97,8 @@ builds a static AArch64 executable and runs it directly with the input qemu
 `VALGRIND_LIB`. It checks the pinned clang/lld versions, requires output markers from both
 executables and an explicit zero-error Valgrind summary, then requires
 Valgrind to refuse a planted 32-byte leak with exit 97. A skipped step fails.
-The per-push native smoke stage includes this proof, so a pin or unpacking
-change cannot land without exercising the tools on a worker.
+Run it after a pin or unpacking change, so the change exercises the tools on a
+worker.
 
 Valgrind's declared libc/debug dependency is included in its input tree.
 The proof's C executable selects that loader and library directory, and

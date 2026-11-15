@@ -47,20 +47,8 @@ MEMORY_MARGIN = 1.2
 ESCALATION = 1.75
 MEMORY_STEP_KB = 65536
 MIN_MEMORY_KB = 131072
-# Conformance shards are single-threaded and ran past their limit on the
-# slower worker class; they keep asking for the fast workers.
-CPU_CLASSES = {
-    "gate-conformance": "fast",
-    # Ran past 600 s on bazelbox-02 and finished on bazelbox-05 (2026-10-20).
-    "gate-native-changed": "fast",
-    "hirsel-cli-test-cli": "fast",
-}
-NATIVE_STAGES = {
-    "gate-native-full", "gate-native-sanitize", "gate-native-hash-sweep",
-    "gate-native-library-c", "gate-native-runtime-c", "gate-native-toolchain-pin",
-    "gate-agree-native-full",
-    "gate-native-cranelift", "gate-native-cranelift-aarch64", "gate-native-history",
-}
+# Targets that must run on the fast worker class (cpu_class in their request).
+CPU_CLASSES = {}
 
 
 def binary(target):
@@ -183,23 +171,6 @@ def escalation_floors(paths, operations):
     return floors
 
 
-def native_rows(found, peaks, floors):
-    """Size measured native stages and explicitly inherit the largest for missing ones."""
-    measured = {name: size(name, samples, peaks[name], floors[name])
-                for name, samples in sorted(found.items())
-                if name in NATIVE_STAGES and samples}
-    if not measured:
-        raise ValueError("no measured native stage to use as a fallback")
-    largest = max(measured, key=lambda name: (
-        measured[name]["memory_kb"], measured[name]["cpu_count"], name))
-    for name in sorted(NATIVE_STAGES - measured.keys()):
-        measured[name] = {key: measured[largest][key]
-                          for key in ("cpu_count", "memory_kb", "cpu_class")}
-        measured[name].update(runs=0, pss_runs=0, memory_kills=0, fallback_from=largest,
-                              window=measured[largest]["window"])
-    return measured
-
-
 def percentile(values, p):
     values = sorted(values)
     return values[math.ceil(len(values) * p) - 1]
@@ -286,13 +257,9 @@ def main():
     parser.add_argument("--until", type=float, default=float("inf"))
     parser.add_argument("--usage", nargs="+", required=True, help="copies of the workers' actions.log")
     parser.add_argument("--pss", nargs="+", required=True, help="copies of the scheduler's usage-event trace files")
-    parser.add_argument("--native-stages", action="store_true",
-                        help="refresh only full native stages, retaining other evidence; missing stages inherit the largest measured request")
     parser.add_argument("--kills", help="the workers' kiln-executor journal lines for memory kills")
     parser.add_argument("--only", nargs="+", help="refresh only these measured binaries, retaining other evidence")
     args = parser.parse_args()
-    if args.native_stages and args.only:
-        parser.error('--only and --native-stages are mutually exclusive')
     found, operations = runs(args.usage, args.since, args.until)
     cpus = {name: size(name, samples, [], [])["cpu_count"] for name, samples in found.items()}
     exact = {s["op"] for samples in found.values() for s in samples if s["exact"]}
@@ -303,20 +270,11 @@ def main():
     for name, reservations in escalation_floors(args.pss, operations).items():
         floors[name] = reservations + [f for f in floors[name] if f > max(reservations)]
     stops = guard_stops()
-    if args.native_stages:
-        rows = json.loads((HERE / "test-sizes.json").read_text())
-        rows.update(native_rows(found, peaks, floors))
-    else:
-        if args.only and (missing := set(args.only) - found.keys()):
-            parser.error('no measurements for: ' + ', '.join(sorted(missing)))
-        rows = json.loads((HERE / "test-sizes.json").read_text())
-        rows.update({name: size(name, samples, peaks[name], floors[name])
-                     for name, samples in sorted(found.items()) if not args.only or name in args.only})
-    if not args.only and any(name in found for name in NATIVE_STAGES):
-        fresh_native = native_rows(found, peaks, floors)
-        for name, row in list(rows.items()):
-            if name not in found and name in fresh_native:
-                rows[name] = fresh_native[name]
+    if args.only and (missing := set(args.only) - found.keys()):
+        parser.error('no measurements for: ' + ', '.join(sorted(missing)))
+    rows = json.loads((HERE / "test-sizes.json").read_text())
+    rows.update({name: size(name, samples, peaks[name], floors[name])
+                 for name, samples in sorted(found.items()) if not args.only or name in args.only})
     for name, (reservations, cpu) in stops.items():
         if name not in rows:
             rows[name] = stopped_row([], 1)

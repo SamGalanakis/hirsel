@@ -1,29 +1,4 @@
 {
-  "gate-native-corpus": [
-    {
-      "cpu_count": 2,
-      "date": "2026-10-20",
-      "reserved_kb": 786432,
-      "needed_kb": 5767168,
-      "stop": "native --corpus shards 3, 8, 10 and 13 of 32 reached the 1536M guard limit under gate-native-cranelift's reservation (resident peaks 1185-1213M, two jobs compiling and running corpus cases); all 16 of 16 shards had passed under its earlier 5632M limit"
-    }
-  ],
-  "hirsel-driver-test-it": [
-    {
-      "cpu_count": 2,
-      "date": "2026-10-19",
-      "reserved_kb": 2883584,
-      "stop": "proof_export::a_sample_of_accepted_programs_round_trips reached the 5632M guard limit in hirsel-driver-test-it-shard-5 (resident peak 5117M) beside the shard's other tests; it passes alone. The binary's measured PSS peak is 4537 MiB"
-    }
-  ],
-  "hirsel-driver-test-it-image": [
-    {
-      "cpu_count": 2,
-      "date": "2026-10-19",
-      "reserved_kb": 2883584,
-      "stop": "precheck::definition_hashes_are_the_same_with_and_without_the_std_precheck reached the 5632M guard limit in hirsel-driver-test-it-shard-5 beside proof_export's workers, before it moved to its own binary, where its prechecked and reference sides run on two threads"
-    }
-  ],
   "hirsel-intern-unittest": [
     {
       "date": "2026-10-19",

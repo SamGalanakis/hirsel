@@ -16,7 +16,7 @@ changes. When the hook is missing or fails, an existing remote
 fails. A changed `.buckconfig.local` stops the checkout's running Buck2 daemon:
 a daemon builds its remote-execution client once, at start, so one started
 before the file was written would send every action to no engine. Running everything on this host is only ever chosen with `--local`: an
-unattended caller (tools/land, tools/main-runs) that silently fell back to it
+unattended caller (tools/land) that silently fell back to it
 would redo every compile, test and toolchain unpack here.
 """
 from pathlib import Path

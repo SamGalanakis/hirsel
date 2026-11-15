@@ -26,8 +26,7 @@ Generation has two parts, each stamped with exactly what it read
 Cargo.lock, the Rust toolchain pin, the Reindeer pin, config and fixups;
 first-party inventory generation reads the manifests, Cargo's target layout,
 the Rust sources it inspects (compile-time includes, `#[path]` modules,
-doctests, `proptest!`, the memory guard, example cases), the corpus manifests,
-and the measurements and pins it renders. Both read this generator's own code.
+doctests, `proptest!`, the memory guard) and the measurements and pins it renders. Both read this generator's own code.
 Either part writes an output only when its bytes change.
 
 Without flags, sync.py regenerates both parts. `--if-stale` regenerates only
@@ -78,106 +77,24 @@ LITERAL = re.compile(r'"([^"\\\n]+)"')
 # (generated.Reads), which first_party_reads() starts afresh.
 READS = generated.Reads(ROOT)
 
-# What the engine's build script reads (crates/hirsel-engine/build.rs), as
-# repository paths: it hashes these into the frozen runtime revision.
+# What each build script reads besides its own file, as repository paths.
 BUILD_SCRIPT_SOURCES = {
-    "hirsel-registry": ["crates/hirsel-registry/build.rs", "crates/hirsel-registry/src/**"],
     "hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs"],
 }
 
 BUILD_SCRIPT_INPUTS = {
     "hirsel-core-diag": ["docs/spec/*.md"],
     "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel"],
-    "hirsel-rt-operations": ["native-tests/library/operations.tsv"],
-    "hirsel-registry": ["crates/hirsel-registry/src/**"],
-    "hirsel-engine": [
-        "crates/hirsel-host-io/src/**",
-        "crates/hirsel-interp/src/**",
-        "crates/hirsel-interp/Cargo.toml",
-        "crates/hirsel-rt/src/**",
-        "crates/hirsel-rt/include/**",
-        "crates/hirsel-rt/Cargo.toml",
-        "crates/hirsel-rt-operations/src/**",
-        "crates/hirsel-rt-operations/Cargo.toml",
-        "crates/hirsel-kernels/src/**",
-        "crates/hirsel-kernels/Cargo.toml",
-        "crates/hirsel-rc/src/library/**",
-        "crates/hirsel-registry/src/section22.txt",
-        "crates/hirsel-registry/src/dictionaries.rs",
-        "crates/hirsel-registry/src/loops.rs",
-        "crates/hirsel-registry/src/heap.rs",
-        "native-tests/library/operations.tsv",
-        "Cargo.lock",
-    ],
 }
 
 # What each crate's tests read at run time outside their crate: repository
 # paths they reach from CARGO_MANIFEST_DIR. A test runs from the project root
 # and sees only its declared inputs on the pool. Those inputs are part of its
 # cached verdict's key.
-MANIFEST_REFERENCE = re.compile(r'"manifest"\s*:\s*"([^"]+)"')
-
-
-@functools.cache
-def corpus_packages() -> list[str]:
-    """The directories of packages the corpus's manifests name outside the
-    corpus and retained stdlib as globs."""
-    found = set()
-    for manifest in READS.glob(ROOT / "conformance", "**/*.json"):
-        for reference in MANIFEST_REFERENCE.findall(READS.text(manifest)):
-            target = (manifest.parent / reference).resolve()
-            try:
-                relative = target.parent.relative_to(ROOT).as_posix()
-            except ValueError:
-                continue
-            if not relative.startswith(("conformance/", "stdlib/")):
-                found.add(relative + "/**")
-    return sorted(found)
-
-
-# Where a data list holds CORPUS_PACKAGES, it means corpus_packages(): read
-# while generating, not on import, so a stamp check reads no manifest.
-CORPUS_PACKAGES = "<corpus packages>"
-
-
-def expand(paths: list[str]) -> list[str]:
-    return [found for path in paths for found in (corpus_packages() if path == CORPUS_PACKAGES else [path])]
-
-
-# A conformance program's manifests reach the stdlib, the package fixtures and
-# some crates' test packages.
-CORPUS_DATA = ["conformance/**", "stdlib/**", CORPUS_PACKAGES]
-
 RUNTIME_DATA = {
     "hirsel-core-ir": ["crates/*/Cargo.toml"],
-    "hirsel-cranelift": ["crates/hirsel-rt/include/**"],
-    "hirsel-cli": [*CORPUS_DATA],
-    "hirsel-conformance": [*CORPUS_DATA, "crates/hirsel-conformance/oracles/**", "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-engine": ["stdlib/**"],
-    "hirsel-driver": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-candidate": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-observation-view": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-project-info": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-native": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-native-queries": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-native-cache": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-native-testing": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
-    "hirsel-host-io": [*CORPUS_DATA],
-    "hirsel-heapcheck": ["native-tests/**", "stdlib/**"],
-    "hirsel-interp": [*CORPUS_DATA],
-    "hirsel-lexer": [*CORPUS_DATA],
-    "hirsel-lir": ["crates/hirsel-rt/include/**", "native-tests/**"],
     # tools/native-toolchain/check reads Cargo.lock's llvm-sys pin.
-    "hirsel-llvm": ["core/core/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-core-rt/include/**", "core/front/**", "Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
-    "hirsel-authority": [*CORPUS_DATA],
-    "hirsel-ownership": [*CORPUS_DATA, "crates/hirsel-driver/tests/fixtures/**"],
-    "hirsel-parser": ["conformance/old-spec/**"],
-    "hirsel-pipeline-tests": [
-        *CORPUS_DATA, "crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/harness/**",
-        "crates/hirsel-rt/include/**", "conformance/old-spec/**", "native-tests/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**",
-    ],
-    "hirsel-rc": [*CORPUS_DATA, "crates/hirsel-rt/include/**", "native-tests/**"],
-    "hirsel-rt": [*CORPUS_DATA, "native-tests/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**", "Cargo.lock"],
+    "hirsel-llvm": ["core/core/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-core-rt/include/**", "core/front/**", "Cargo.lock", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
 }
 
 # What a test binary reads at run time from its own crate, beyond the non-Rust
@@ -198,343 +115,12 @@ TEST_DATA = {
     "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/langarena/**/*.hirsel"],
     "hirsel-cranelift-test-core_native": ["core/front/**", "core/core/**"],
     "hirsel-cranelift-test-core_aarch64": ["core/front/**", "core/core/**"],
-    "hirsel-cli-test-cli": ["tools/capped", "conformance/old-spec/core-library.md", "conformance/old-spec/std-library.md", "docs/dependency-card.schema.json"],
-    "hirsel-driver-test-it": ["crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/include/**"],
-    "hirsel-llvm-test-it": ["crates/hirsel-llvm/tests/native/**"],
-    "hirsel-pipeline-tests-test-front": [],
-    "hirsel-rt-test-it": ["crates/hirsel-rt/include/**"],
-    "hirsel-rt-test-descriptors": ["crates/hirsel-rt/src/**", "crates/hirsel-lir/src/runtime_abi.rs"],
-    "hirsel-driver-test-environment_inventory": ["crates/*/src/**"],
 }
 
-# Ownership repair lab runs its clean package in place.
-
-# Crates whose tests link native programs: each of their test binaries reads
-# the runtime archives it declares in RUNTIME_ARCHIVE_VIEWS (HIRSEL_RUNTIME_ARCHIVES)
-# instead of building them with Cargo.
-NATIVE_TESTS = {'hirsel-cli',
- 'hirsel-conformance',
- 'hirsel-cranelift',
- 'hirsel-driver',
- 'hirsel-llvm',
- 'hirsel-native',
- 'hirsel-native-queries',
- 'hirsel-native-testing',
- 'hirsel-pipeline-tests',
- 'hirsel-rc',
- 'hirsel-rt'}
-RUNTIME_ARCHIVES = "//:hirsel-rt-archives"
-# hirsel_runtime_archives' views, `<arch>-<variant>`: every feature subset on both
-# targets, and memcheck and ownership-trace on x86-64 only (defs.bzl).
-RUNTIME_SUBSETS = ["default", "diagnostic", "system-allocator", "diagnostic+system-allocator", "measurement",
-                   "diagnostic+measurement", "system-allocator+measurement", "diagnostic+system-allocator+measurement"]
-X86_VIEWS = [f"x86_64-{variant}" for variant in RUNTIME_SUBSETS + ["memcheck", "ownership-trace"]]
-AARCH64_VIEWS = [f"aarch64-{variant}" for variant in RUNTIME_SUBSETS]
-
-
-def on_both(*variants: str) -> list[str]:
-    return [f"{arch}-{variant}" for arch in ("x86_64", "aarch64") for variant in variants]
-
-
-# The archives each native consumer links: a test or gate builds only these, so a
-# runtime change rebuilds the views its affected consumers read rather than all 18.
-# A missing archive fails the link by name (crates/hirsel-native/src/link.rs), so a
-# view left out here is a red, never a silent fallback. Whole-crate integration
-# binaries that sweep the feature matrix (masks over RuntimeBuild, the differential
-# matrices on both targets) declare every view.
-# Conformance gates: Toolchain::in_tree_with_runtimes builds every target of a
-# mode's matrix with every runtime it names, the diagnostic archive first
-# (hirsel_native_testing::runtime_builds).
-CRANELIFT_VIEWS = ["x86_64-default", "x86_64-diagnostic"]  # cranelift::matrix(x86-64)
-SMOKE_VIEWS = on_both("default", "diagnostic")  # smoke_matrix plus aarch64, at the glibc floor
-FULL_VIEWS = on_both("default", "diagnostic", "system-allocator")  # full_matrix
-RUNTIME_ARCHIVE_VIEWS = {'hirsel-cli-bin-hirsel-unittest': ['x86_64-default', 'x86_64-ownership-trace', 'aarch64-default'],
- 'hirsel-cli-test-cli': ['x86_64-default',
-                         'x86_64-diagnostic',
-                         'x86_64-system-allocator',
-                         'x86_64-diagnostic+system-allocator',
-                         'x86_64-measurement',
-                         'x86_64-diagnostic+measurement',
-                         'x86_64-system-allocator+measurement',
-                         'x86_64-diagnostic+system-allocator+measurement',
-                         'x86_64-memcheck',
-                         'x86_64-ownership-trace',
-                         'aarch64-default',
-                         'aarch64-diagnostic',
-                         'aarch64-system-allocator',
-                         'aarch64-diagnostic+system-allocator',
-                         'aarch64-measurement',
-                         'aarch64-diagnostic+measurement',
-                         'aarch64-system-allocator+measurement',
-                         'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-conformance-unittest': ['x86_64-default',
-                                 'x86_64-diagnostic',
-                                 'x86_64-system-allocator',
-                                 'aarch64-default',
-                                 'aarch64-diagnostic',
-                                 'aarch64-system-allocator',
-                                 'x86_64-memcheck'],
- 'hirsel-cranelift-unittest': ['x86_64-default',
-                               'x86_64-diagnostic',
-                               'x86_64-system-allocator',
-                               'x86_64-diagnostic+system-allocator',
-                               'x86_64-measurement',
-                               'x86_64-diagnostic+measurement',
-                               'x86_64-system-allocator+measurement',
-                               'x86_64-diagnostic+system-allocator+measurement',
-                               'x86_64-memcheck',
-                               'x86_64-ownership-trace',
-                               'aarch64-default',
-                               'aarch64-diagnostic',
-                               'aarch64-system-allocator',
-                               'aarch64-diagnostic+system-allocator',
-                               'aarch64-measurement',
-                               'aarch64-diagnostic+measurement',
-                               'aarch64-system-allocator+measurement',
-                               'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-driver-unittest': ['x86_64-default',
-                            'x86_64-diagnostic',
-                            'x86_64-system-allocator',
-                            'x86_64-diagnostic+system-allocator',
-                            'x86_64-measurement',
-                            'x86_64-diagnostic+measurement',
-                            'x86_64-system-allocator+measurement',
-                            'x86_64-diagnostic+system-allocator+measurement',
-                            'x86_64-memcheck',
-                            'x86_64-ownership-trace',
-                            'aarch64-default',
-                            'aarch64-diagnostic',
-                            'aarch64-system-allocator',
-                            'aarch64-diagnostic+system-allocator',
-                            'aarch64-measurement',
-                            'aarch64-diagnostic+measurement',
-                            'aarch64-system-allocator+measurement',
-                            'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-driver-test-it': ['x86_64-default',
-                           'x86_64-diagnostic',
-                           'x86_64-system-allocator',
-                           'x86_64-diagnostic+system-allocator',
-                           'x86_64-measurement',
-                           'x86_64-diagnostic+measurement',
-                           'x86_64-system-allocator+measurement',
-                           'x86_64-diagnostic+system-allocator+measurement',
-                           'x86_64-memcheck',
-                           'x86_64-ownership-trace',
-                           'aarch64-default',
-                           'aarch64-diagnostic',
-                           'aarch64-system-allocator',
-                           'aarch64-diagnostic+system-allocator',
-                           'aarch64-measurement',
-                           'aarch64-diagnostic+measurement',
-                           'aarch64-system-allocator+measurement',
-                           'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-driver-test-stack_depth': ['x86_64-default'],
- 'hirsel-driver-test-environment_inventory': ['x86_64-default'],
- 'hirsel-llvm-unittest': ['x86_64-default',
-                          'x86_64-diagnostic',
-                          'x86_64-system-allocator',
-                          'x86_64-diagnostic+system-allocator',
-                          'x86_64-measurement',
-                          'x86_64-diagnostic+measurement',
-                          'x86_64-system-allocator+measurement',
-                          'x86_64-diagnostic+system-allocator+measurement',
-                          'x86_64-memcheck',
-                          'x86_64-ownership-trace',
-                          'aarch64-default',
-                          'aarch64-diagnostic',
-                          'aarch64-system-allocator',
-                          'aarch64-diagnostic+system-allocator',
-                          'aarch64-measurement',
-                          'aarch64-diagnostic+measurement',
-                          'aarch64-system-allocator+measurement',
-                          'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-llvm-test-it': ['x86_64-default',
-                         'x86_64-diagnostic',
-                         'x86_64-system-allocator',
-                         'x86_64-diagnostic+system-allocator',
-                         'x86_64-measurement',
-                         'x86_64-diagnostic+measurement',
-                         'x86_64-system-allocator+measurement',
-                         'x86_64-diagnostic+system-allocator+measurement',
-                         'x86_64-memcheck',
-                         'x86_64-ownership-trace',
-                         'aarch64-default',
-                         'aarch64-diagnostic',
-                         'aarch64-system-allocator',
-                         'aarch64-diagnostic+system-allocator',
-                         'aarch64-measurement',
-                         'aarch64-diagnostic+measurement',
-                         'aarch64-system-allocator+measurement',
-                         'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-native-unittest': ['x86_64-default',
-                            'x86_64-diagnostic',
-                            'x86_64-system-allocator',
-                            'x86_64-diagnostic+system-allocator',
-                            'x86_64-measurement',
-                            'x86_64-diagnostic+measurement',
-                            'x86_64-system-allocator+measurement',
-                            'x86_64-diagnostic+system-allocator+measurement',
-                            'x86_64-memcheck',
-                            'x86_64-ownership-trace',
-                            'aarch64-default',
-                            'aarch64-diagnostic',
-                            'aarch64-system-allocator',
-                            'aarch64-diagnostic+system-allocator',
-                            'aarch64-measurement',
-                            'aarch64-diagnostic+measurement',
-                            'aarch64-system-allocator+measurement',
-                            'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-native-queries-unittest': ['x86_64-default',
-                                    'x86_64-diagnostic',
-                                    'x86_64-system-allocator',
-                                    'x86_64-diagnostic+system-allocator',
-                                    'x86_64-measurement',
-                                    'x86_64-diagnostic+measurement',
-                                    'x86_64-system-allocator+measurement',
-                                    'x86_64-diagnostic+system-allocator+measurement',
-                                    'x86_64-memcheck',
-                                    'x86_64-ownership-trace',
-                                    'aarch64-default',
-                                    'aarch64-diagnostic',
-                                    'aarch64-system-allocator',
-                                    'aarch64-diagnostic+system-allocator',
-                                    'aarch64-measurement',
-                                    'aarch64-diagnostic+measurement',
-                                    'aarch64-system-allocator+measurement',
-                                    'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-native-testing-unittest': ['x86_64-default',
-                                    'x86_64-diagnostic',
-                                    'x86_64-system-allocator',
-                                    'x86_64-diagnostic+system-allocator',
-                                    'x86_64-measurement',
-                                    'x86_64-diagnostic+measurement',
-                                    'x86_64-system-allocator+measurement',
-                                    'x86_64-diagnostic+system-allocator+measurement',
-                                    'x86_64-memcheck',
-                                    'x86_64-ownership-trace',
-                                    'aarch64-default',
-                                    'aarch64-diagnostic',
-                                    'aarch64-system-allocator',
-                                    'aarch64-diagnostic+system-allocator',
-                                    'aarch64-measurement',
-                                    'aarch64-diagnostic+measurement',
-                                    'aarch64-system-allocator+measurement',
-                                    'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-pipeline-tests-test-front': ['x86_64-default',
-                                      'x86_64-diagnostic',
-                                      'x86_64-system-allocator',
-                                      'x86_64-diagnostic+system-allocator',
-                                      'x86_64-measurement',
-                                      'x86_64-diagnostic+measurement',
-                                      'x86_64-system-allocator+measurement',
-                                      'x86_64-diagnostic+system-allocator+measurement',
-                                      'x86_64-memcheck',
-                                      'x86_64-ownership-trace',
-                                      'aarch64-default',
-                                      'aarch64-diagnostic',
-                                      'aarch64-system-allocator',
-                                      'aarch64-diagnostic+system-allocator',
-                                      'aarch64-measurement',
-                                      'aarch64-diagnostic+measurement',
-                                      'aarch64-system-allocator+measurement',
-                                      'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-rc-unittest': ['x86_64-default',
-                        'x86_64-diagnostic',
-                        'x86_64-system-allocator',
-                        'x86_64-diagnostic+system-allocator',
-                        'x86_64-measurement',
-                        'x86_64-diagnostic+measurement',
-                        'x86_64-system-allocator+measurement',
-                        'x86_64-diagnostic+system-allocator+measurement',
-                        'x86_64-memcheck',
-                        'x86_64-ownership-trace',
-                        'aarch64-default',
-                        'aarch64-diagnostic',
-                        'aarch64-system-allocator',
-                        'aarch64-diagnostic+system-allocator',
-                        'aarch64-measurement',
-                        'aarch64-diagnostic+measurement',
-                        'aarch64-system-allocator+measurement',
-                        'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-rt-test-descriptors': ['x86_64-default'],
- 'hirsel-rt-test-it': ['x86_64-default',
-                       'x86_64-diagnostic',
-                       'x86_64-system-allocator',
-                       'x86_64-diagnostic+system-allocator',
-                       'x86_64-measurement',
-                       'x86_64-diagnostic+measurement',
-                       'x86_64-system-allocator+measurement',
-                       'x86_64-diagnostic+system-allocator+measurement',
-                       'x86_64-memcheck',
-                       'x86_64-ownership-trace',
-                       'aarch64-default',
-                       'aarch64-diagnostic',
-                       'aarch64-system-allocator',
-                       'aarch64-diagnostic+system-allocator',
-                       'aarch64-measurement',
-                       'aarch64-diagnostic+measurement',
-                       'aarch64-system-allocator+measurement',
-                       'aarch64-diagnostic+system-allocator+measurement'],
- 'hirsel-conformance-bin-native-unittest': ['x86_64-default']}
-# The deadline replay cells run `hirsel run` on the host.
-REPLAY_VIEWS = ["x86_64-default"]
-
-
-def archive_views(*names: str) -> list[str]:
-    return [f"{RUNTIME_ARCHIVES}[{name}]" for name in names]
-
-# Ordinary std products: precomputed once by the built CLI,
-# then loaded by the tests and campaigns that run std programs (HIRSEL_PRODUCTS).
-PRODUCTS = "//:hirsel-std-products"
-PRODUCT_TESTS = {'hirsel-candidate',
- 'hirsel-cli',
- 'hirsel-conformance',
- 'hirsel-driver',
- 'hirsel-front-phases',
- 'hirsel-native',
- 'hirsel-native-cache',
- 'hirsel-native-queries',
- 'hirsel-native-testing',
- 'hirsel-observation-view',
- 'hirsel-ownership',
- 'hirsel-pipeline-tests',
- 'hirsel-project-info'}
-
-# Cases that call full_matrix (44 configurations) for toolchain or configuration
-# discovery: every run outside the full gate skips them by name, and
-# `-c hirsel.full=true` runs them (tools/buck2/defs.bzl).
-FULL_GATE_SKIPS = {}
-
 # Their tests live in integration/proof targets, not these empty entry points.
-EMPTY_UNIT_HARNESSES = {'hirsel-analysis-canary-unittest',
- 'hirsel-core-driver-bin-hirsel-core-unittest',
+EMPTY_UNIT_HARNESSES = {'hirsel-core-driver-bin-hirsel-unittest',
  'hirsel-core-driver-bin-hirsel-core-request-cost-unittest',
- 'hirsel-core-syntax-bin-hirsel-core-syntax-unittest',
- 'hirsel-authority-unittest',
- 'hirsel-check-protocol-unittest',
- 'hirsel-check-unittest',
- 'hirsel-code-store-unittest',
- 'hirsel-compiler-identity-unittest',
- 'hirsel-fmt-unittest',
- 'hirsel-front-phases-unittest',
- 'hirsel-heaps-loom-unittest',
- 'hirsel-layout-unittest',
- 'hirsel-lexer-unittest',
- 'hirsel-lower-unittest',
- 'hirsel-modes-unittest',
- 'hirsel-native-build-bin-hirsel-native-build-unittest',
- 'hirsel-ownership-unittest',
- 'hirsel-parser-unittest',
- 'hirsel-pipeline-tests-unittest',
- 'hirsel-resolve-unittest',
- 'hirsel-rt-operations-unittest',
- 'hirsel-signature-unittest',
- 'hirsel-syntax-unittest',
- 'hirsel-tir-unittest',
- 'hirsel-type-analysis-unittest'}
-
-# Required startup consumers include these existing full-gate HTTP launches.
-CONSUMER_CASES = {}
+ 'hirsel-core-syntax-bin-hirsel-core-syntax-unittest'}
 
 # Tests that draw random cases. Their binaries run under a seed that is part
 # of the test's action key (TEST_SEED in defs.bzl), so a cached pass covers
@@ -562,33 +148,15 @@ def seeded(source_dir: pathlib.Path, crate_root: pathlib.Path) -> bool:
 # 2026-10-16 the stdlib binary in three shards (75 s each by its table) ran
 # 173-188 s per shard on the pool, and in six shards at most 86 s. The gate
 # keeps every test target near two minutes.
-SHARDED = ['hirsel-driver-unittest',
- 'hirsel-host-io-unittest',
- 'hirsel-native-queries-unittest',
- 'hirsel-native-cache-unittest',
- 'hirsel-native-testing-unittest',
- 'hirsel-native-unittest',
- 'hirsel-driver-test-it',
- 'hirsel-pipeline-tests-test-front',
- 'hirsel-rt-test-it']
+SHARDED = []
 # Example and Free matrix cases each build and exercise programs. Keep one
 # compiled test case per shard, using the launcher's existing equal-cost
 # assignment by name.
 CASE_SHARDED = {}
 SHARD_SECONDS = 40
 COSTS = HERE / "test-costs"
-# The other tables are stale too. Until real gate runs refresh them, the host
-# keeps their coverage advisory rather than starting four measurement campaigns.
-REQUIRED_COSTS = {"hirsel-driver-test-it"}
-
-
-def retained_rust():
-    """Exact selectors of the temporary old-source component corpus."""
-    result = collections.defaultdict(list)
-    for line in READS.text(ROOT / "tools/retained-rust.tsv").splitlines()[1:]:
-        binary, case = line.split("\t")
-        result[binary].append(case)
-    return dict(result)
+# Sharded binaries whose missing cost rows fail the check rather than warn.
+REQUIRED_COSTS = set()
 
 
 def case_cpus() -> dict[str, dict[str, int]]:
@@ -682,94 +250,6 @@ def check_cost_coverage() -> list[str]:
     return cost_coverage(inventory(result.stdout.splitlines()))
 
 
-
-# The corpus campaigns as tests over the whole corpus, so
-# an unchanged corpus and compiler are a cache hit on the pool.
-CORPUS = [
-    "conformance/**",
-    "crates/hirsel-conformance/Cargo.toml",
-    "native-tests/**",
-    "conformance/old-spec/**",
-    "stdlib/**",
-    CORPUS_PACKAGES,
-]
-GATE = dict(cwd="crates/hirsel-conformance")
-# Worst observed seconds per completed run in each of the old sixteen FNV
-# buckets, checked profile, census test-exec-deadline-829 (2026-11-12).
-# Buck reports aggregate corpus timings, not per-case times. Partial runs use
-# their completed corpus-case phase count, so interrupted work is charged too.
-CONFORMANCE_SHARDS = 4
-STD_NATIVE_SHARDS = 4
-NATIVE_CORPUS_SHARDS = 4
-SELECTED_SLICES = 128
-CONFORMANCE_SLICE_PROGRAMS = 6
-NATIVE_SELECTED_SLICES = 512
-NATIVE_SLICE_SECONDS = 600
-NATIVE_CONFIG_SECONDS = 16
-NATIVE_COVER_PARTS = 16
-NATIVE_COVER_PART_SECONDS = 231
-NATIVE_HEAP_PART_SECONDS = 450
-NATIVE_HEAP_FAULT_SECONDS = 480
-NATIVE_HEAP_COSTS = "native-tests/regressions/heap-costs.tsv"
-NATIVE_FULL_SHARDS = 4
-CRANELIFT_SHARDS = 4
-
-def corpus_hash(path: str) -> int:
-    """hirsel-cli-args Shard::holds, including its u64 wrap."""
-    value = 0xcbf29ce484222325
-    for byte in path.encode():
-        value = ((value ^ byte) * 0x100000001b3) & ((1 << 64) - 1)
-    return value
-
-
-def conformance_plan(cases=None, **kwargs):
-    """Four nonempty partitions of the named temporary component corpus."""
-    reads = kwargs.get("reads") or generated.Reads(ROOT)
-    if cases is None:
-        cases = {path: 1 for path in reads.text(ROOT / "conformance/passing.txt").splitlines()
-                 if path and not path.startswith("#")}
-    plan = [dict(index=i + 1, count=CONFORMANCE_SHARDS, seconds=0,
-                 files=sum(corpus_hash(path) % CONFORMANCE_SHARDS == i for path in cases))
-            for i in range(CONFORMANCE_SHARDS)]
-    if any(not part["files"] for part in plan):
-        raise ValueError("retained conformance partition is empty")
-    return plan
-
-
-def conformance_tests(reads=None):
-    reads = reads or generated.Reads(ROOT)
-    paths = [p for p in reads.text(ROOT / "conformance/passing.txt").splitlines()
-             if p and not p.startswith("#")]
-    return [dict(name=f"gate-conformance-shard-{i}",
-                 binary="//:hirsel-conformance-bin-hirsel-conformance",
-                 args=["--check-format", *[arg for p in paths for arg in ("--path", p)],
-                       "--shard", f"{i}/{CONFORMANCE_SHARDS}"], **GATE)
-            for i in range(1, CONFORMANCE_SHARDS + 1)]
-
-
-GATE_TESTS = [
-    dict(name="gate-native-changed", binary="//:hirsel-conformance-bin-native",
-         args=["--retained", "--engine", "llvm"], changed_native=True,
-         runtime_archives=archive_views("x86_64-default", "x86_64-diagnostic"), measured_as="gate-native-smoke", **GATE),
-    dict(name="gate-native-cranelift-changed", binary="//:hirsel-conformance-bin-native",
-         args=["--retained", "--engine", "cranelift"], changed_native=True,
-         runtime_archives=archive_views("x86_64-default", "x86_64-diagnostic"), measured_as="gate-native-smoke", **GATE),
-
-    *(dict(name=f"gate-conformance-selected-shard-{i}",
-           binary="//:hirsel-conformance-bin-hirsel-conformance", args=["--check-format"],
-           selected=["conformance_paths", "--path", i], measured_as="gate-conformance", **GATE)
-      for i in range(1, SELECTED_SLICES + 1)),
-    *(dict(name=f"gate-native-selected-shard-{i}", full=True,
-           binary="//:hirsel-conformance-bin-native", args=["--full"],
-           selected=["native_paths", "--filter", i], runtime_archives=archive_views(*FULL_VIEWS),
-           measured_as="gate-native-full", **GATE)
-      for i in range(1, NATIVE_SELECTED_SLICES + 1)),
-    *(dict(name=f"gate-retained-{engine}-shard-{i}",
-           binary="//:hirsel-conformance-bin-native",
-           args=["--retained", "--engine", engine, "--shard", f"{i}/4"],
-           runtime_archives=archive_views("x86_64-default", "x86_64-diagnostic"), measured_as="gate-native-smoke", **GATE)
-      for engine in ("heap", "llvm", "cranelift") for i in range(1, 5)),
-]
 
 INCLUDE = re.compile(r'\binclude(?:_str|_bytes)?!\(\s*"([^"]+)"\s*\)')
 PATH_ATTR = re.compile(r'#\[path\s*=\s*"([^"]+)"\s*\]')
@@ -1069,13 +549,10 @@ def test_data(binary: str, package: str, package_dir: pathlib.Path, src: pathlib
     TEST_DATA, and the non-Rust files of its own directory. A single-file
     `tests/<name>.rs` has no directory of its own: `tests/` holds its siblings.
     The package manifest keeps the directory the test runs from in its inputs."""
-    paths = expand(RUNTIME_DATA.get(package, [])) + TEST_DATA.get(binary, []) + [relative(package_dir / "Cargo.toml")]
+    paths = RUNTIME_DATA.get(package, []) + TEST_DATA.get(binary, []) + [relative(package_dir / "Cargo.toml")]
     expression = f"glob({starlark(paths, 4)})"
-    if binary in ("hirsel-lir-test-it", "hirsel-driver-test-environment_inventory"):
+    if binary == "hirsel-core-driver-test-layering":
         expression += ' + ["//tools/buck2:workspace-metadata.json"]'
-    if binary == "hirsel-conformance-test-spec_links":
-        # A root glob cannot cross the third-party Buck package boundary.
-        expression += ' + ["//third-party:NOTICES.md"]'
     own = target_dir(package_dir, src)
     if own != package_dir / "tests":
         directory = relative(own)
@@ -1095,86 +572,31 @@ def declared_deps(package: dict, packages: dict) -> list[str]:
 
 
 def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
-    """Only the old runtime uses its feature matrix and startup training."""
     name = package['name']
-    if name != 'hirsel-rt':
-        if name == 'hirsel-core-rt':
-            # A language executable owns its process allocator. The ordinary
-            # rlib remains embeddable beside a host's allocator or hirsel_guard.
-            return (call('hirsel_library', name=f'{name}-standalone',
-                         deps=declared_deps(package, packages),
-                         **{**attrs, 'features': ['standalone']})
-                    + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-archives',
-                                  library=f'//:{name}-standalone',
-                                  archive_name=f"lib{attrs['crate']}.a"))
-        return call('hirsel_core_runtime_archives', name=f'{name}-archives',
-                    library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
-    return call('hirsel_runtime_archives', name=f'{name}-archives',
-                deps=declared_deps(package, packages), feature_deps=feature_deps(package),
-                **{**attrs, 'features': ['default'], 'build_script': None})
-
-
-def feature_deps(package: dict) -> dict[str, list[str]]:
-    """The optional dependencies each feature enables (`dep:x`), transitively."""
-    optional = {d["name"] for d in package["dependencies"] if d["optional"]}
-    result = {}
-    for feature in package["features"]:
-        pending, seen, deps = [feature], set(), set()
-        while pending:
-            item = pending.pop()
-            if item in seen:
-                continue
-            seen.add(item)
-            for value in package["features"].get(item, []):
-                dep = value.removeprefix("dep:").split("/")[0].removesuffix("?")
-                if value.startswith("dep:") or dep in optional:
-                    deps.add(f"//third-party:{dep}")
-                else:
-                    pending.append(value)
-        if deps:
-            result[feature] = sorted(deps)
-    return result
-
-
-def compiler_identity_inputs(meta: dict) -> list[str]:
-    """What the driver's build script hashes into its compiler identity
-    (crates/hirsel-compiler-identity/build.rs): every workspace crate in its normal
-    dependency closure, the lockfile and the toolchain pin."""
-    packages = {p["name"]: p for p in meta["packages"] if p["id"] in set(meta["workspace_members"])}
-    closure, todo = set(), ["hirsel-driver"]
-    while todo:
-        name = todo.pop()
-        if name in closure:
-            continue
-        closure.add(name)
-        todo.extend(d["name"] for d in packages[name]["dependencies"]
-                    if d["kind"] is None and d.get("path") and d["name"] in packages)
-    inputs = []
-    for name in sorted(closure):
-        directory = relative(pathlib.Path(packages[name]["manifest_path"]).parent)
-        inputs += [f"{directory}/Cargo.toml", f"{directory}/build.rs", f"{directory}/src/**", f"{directory}/include/**", f"{directory}/bridge/**"]
-    return inputs + ["Cargo.lock", "rust-toolchain.toml", "native-tests/library/operations.tsv", "tools/native-toolchain/llvm-23.lock", "tools/buck2/llvm-cxx-headers-lock.json"]
+    if name == 'hirsel-core-rt':
+        # A language executable owns its process allocator. The ordinary
+        # rlib remains embeddable beside a host's allocator or hirsel_guard.
+        return (call('hirsel_library', name=f'{name}-standalone',
+                     deps=declared_deps(package, packages),
+                     **{**attrs, 'features': ['standalone']})
+                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-archives',
+                              library=f'//:{name}-standalone',
+                              archive_name=f"lib{attrs['crate']}.a"))
+    return call('hirsel_core_runtime_archives', name=f'{name}-archives',
+                library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
 
 
 def first_party(meta: dict) -> str:
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     members = set(meta["workspace_members"])
-    BUILD_SCRIPT_INPUTS["hirsel-compiler-identity"] = compiler_identity_inputs(meta)
     unguarded = []
-    archive_consumers = set()
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_cranelift_test", "hirsel_core_image", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_test_suite", "hirsel_toolchain_bundle")\n',
-        'load("//tools/buck2:native_selection.bzl", "hirsel_native_selection")\n',
+        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_cranelift_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_test_suite", "hirsel_toolchain_bundle")\n',
     ]
 
     out.append("\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/*.hirsel"])')))
-    out.append("\n" + call("hirsel_script_test", name="test-native-startup-layout",
-                            script="tools/tests/native_startup_layout.py", full=False,
-                            data=Raw('glob(["stdlib/**", "native-tests/**"])'),
-                            runtime_archives=archive_views(*on_both("default")), products=PRODUCTS,
-                            files_env={"HIRSEL_STARTUP_DRIVER_TESTS": "//:hirsel-driver-unittest-harness", "HIRSEL_STARTUP_NATIVE_TESTS": "//:hirsel-native-unittest-harness"}))
     out.append("\n" + call("hirsel_script_test", name="test-fmt", script="tools/tests/fmt.py", full=False, host=True,
                            data=["//tools/buck2:fmt.py"],
                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
@@ -1194,9 +616,7 @@ def first_party(meta: dict) -> str:
                            data=Raw('["tools/consumers", "tools/capped", "//tools/buck2:consumer_results.py", '
                                     '"//tools/buck2:event_logs.py", "//tools/buck2:sync.py", '
                                     '"//tools/buck2:generated.py", "//tools/buck2:action_sizes_from_log.py", '
-                                    '"//tools/buck2:test_sizes_from_usage.py", "//tools/buck2:test_requirements.bzl"] + '
-                                    'glob(["crates/hirsel-cli/tests/**", "crates/hirsel-driver/tests/**", '
-                                    '"stdlib/std@1/*.hir", "conformance/**/*.hir"])')))
+                                    '"//tools/buck2:test_sizes_from_usage.py", "//tools/buck2:test_requirements.bzl"]')))
 
     def label(package_id: str) -> str:
         package = packages[package_id]
@@ -1216,27 +636,18 @@ def first_party(meta: dict) -> str:
                 deps[kind["kind"] or "normal"].add(label(dep["pkg"]))
         common = {"manifest_dir": manifest_dir, "package_name": name, "version": package["version"], "edition": package["edition"]}
 
-        def runtime_views(binary: str) -> list[str]:
-            archive_consumers.add(binary)
-            return archive_views(*RUNTIME_ARCHIVE_VIEWS.get(binary, []))
-
         def test_attrs(binary: str, src: pathlib.Path) -> dict:
-            # Request-lifecycle fixtures and the request-mode law compile
-            # temporary files against std, without corpus or native runtime.
-            requests_only = binary == "hirsel-driver-test-it-resident"
             core_native = binary in ("hirsel-cranelift-test-core_native", "hirsel-cranelift-test-core_aarch64")
             files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-cranelift-runtime-fixtures[aarch64]",
                           "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                           "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"} if binary == "hirsel-cranelift-test-core_aarch64" else
                          {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"} if core_native
                           else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" else None)
-            return dict(data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
-                        runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and not core_native and binary != "hirsel-rt-unittest" else None,
-                        products=PRODUCTS if name in PRODUCT_TESTS and not core_native else None,
+            return dict(data=test_data(binary, name, package_dir, src),
                         files_env=files_env,
-                        native_tools=True if binary == "hirsel-cranelift-test-core_native" else None,
-                        seeded=seeded(target_dir(package_dir, src), src) or None, skips=FULL_GATE_SKIPS.get(binary),
-                        consumer_cases=CONSUMER_CASES.get(binary), retained_cases=retained_rust().get(binary, []))
+                        # hirsel-llvm's target tests link and run AArch64 objects through the pinned cross tools.
+                        native_tools=True if binary in ("hirsel-cranelift-test-core_native", "hirsel-llvm-unittest") else None,
+                        seeded=seeded(target_dir(package_dir, src), src) or None)
 
         lib = next((t for t in package["targets"] if set(t["kind"]) & {"lib", "rlib", "staticlib"}), None)
         build = next((t for t in package["targets"] if t["kind"] == ["custom-build"]), None)
@@ -1251,10 +662,6 @@ def first_party(meta: dict) -> str:
                 srcs=Raw(f"glob({starlark(BUILD_SCRIPT_SOURCES[name], 4)})") if name in BUILD_SCRIPT_SOURCES else [relative(src)],
                 deps=sorted(deps["build"]),
                 inputs=Raw(f"glob({starlark(BUILD_SCRIPT_INPUTS[name], 4)})"),
-                input_paths={f"crates/hirsel-llvm/bridge/{source}":
-                             f"//crates/hirsel-llvm/bridge:{source}"
-                             for source in ("count_loops.cpp", "stack_size.cpp", "aggregate_phi.h", "failure_edges.h", "checked_copy.cpp", "loop_version.h")}
-                            if name == "hirsel-compiler-identity" else None,
                 features=features,
                 **common,
             ))
@@ -1311,9 +718,6 @@ def first_party(meta: dict) -> str:
                     t["name"]: f"//:{name}-bin-{t['name']}"
                     for t in package["targets"] if t["kind"] == ["bin"]
                 }
-                if name == "hirsel-conformance":
-                    # O4 invokes the actual CLI cache-verification switch.
-                    binaries["hirsel"] = "//:hirsel-cli-bin-hirsel"
                 count, costs, case_shards = shards(f"{name}-test-{target['name']}")
                 out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
                                          shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
@@ -1322,8 +726,8 @@ def first_party(meta: dict) -> str:
                             data=["core/tools/m1.py"]))
     # host: the installed-prefix case runs a program that opens a Dir, which needs the host's openat2.
     out.append("\n" + call("hirsel_script_test", name="land-core-library-modes", script="core/tools/gate_library_modes.py", full=False, host=True,
-                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/land-core-library-modes/hirsel-core"],
-                            bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/land-core-library-modes/hirsel"],
+                            bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
                                        "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
@@ -1332,8 +736,8 @@ def first_party(meta: dict) -> str:
     for engine in ("cranelift", "llvm"):
         # host: the files program's cases open a Dir, which needs the host's openat2.
         out.append("\n" + call("hirsel_script_test", name="core-m1-" + engine, script="core/tools/m1.py", full=False, host=True,
-                                args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/core-m1-" + engine + "/hirsel-core"],
-                                bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
+                                args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/core-m1-" + engine + "/hirsel"],
+                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"])')))
     # core-m2b-host: the workloads with a spool directory (M2b slice 4), on the invoking host
@@ -1341,20 +745,20 @@ def first_party(meta: dict) -> str:
     for name, host in (("core-m2b", False), ("core-m2b-host", True)):
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/m2b.py", full=False,
                                 **({"host": True} if host else {}),
-                                args=["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core",
+                                args=["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel",
                                       "--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval"] + (["--host"] if host else []),
-                                bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core",
+                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                           "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m2b/**", "core/corpus/m2b/**", "crates/hirsel-core-rt/include/**"])')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost", script="crates/hirsel-core-front/check-cost.py", full=False, host=True, production=True,
-                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core", "--request-compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core-request-cost"],
-                            bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core", "hirsel-core-request-cost": "//:hirsel-core-driver-bin-hirsel-core-request-cost"},
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel", "--request-compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core-request-cost"],
+                            bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "hirsel-core-request-cost": "//:hirsel-core-driver-bin-hirsel-core-request-cost"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**"]) + ["core/tools/measure.py", "core/tools/m1.py", "tools/capped", "crates/hirsel-core-front/cost-ceilings.json"]')))
     out.append("\n" + call("hirsel_script_test", name="core-front-cost", script="crates/hirsel-core-front/front-cost.py", full=False, host=True, production=True, native_tools=True,
-                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel-core", "--image-profiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel-core-observed", "--buck-tool-inputs"],
-                            bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
-                            front_observer_bin_exes={"hirsel-core-observed": "//:hirsel-core-driver-bin-hirsel-core"},
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel", "--image-profiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel-core-observed", "--buck-tool-inputs"],
+                            bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
+                            front_observer_bin_exes={"hirsel-core-observed": "//:hirsel-core-driver-bin-hirsel"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/langarena/**"]) + ["core/tools/request_cost.py", "core/tools/langarena.py", "core/tools/std_native.py", "core/tools/m1.py", "core/tools/measure.py", "tools/capped", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost-ceilings.json", "tools/native-toolchain/llvm-23.lock"]')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost-unit", script="crates/hirsel-core-front/test-check-cost.py", full=False, host=True,
@@ -1372,8 +776,8 @@ def first_party(meta: dict) -> str:
 
     for phase in ("front", "std", "m1"):
         name = "core-llvm-aarch64-" + phase
-        binaries = {"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"}
-        arguments = ["--phase", phase, "--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core"]
+        binaries = {"hirsel": "//:hirsel-core-driver-bin-hirsel"}
+        arguments = ["--phase", phase, "--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel"]
         if phase == "std":
             binaries["hirsel-core-contract-eval"] = "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"
             arguments += ["--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval"]
@@ -1396,7 +800,7 @@ def first_party(meta: dict) -> str:
         files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-rt/testdata/bookkeeping_stop.c"]')))
     out.append("\n" + call("hirsel_script_test", name="core-memory-report", script="tools/tests/core_memory_report.py", full=False,
-        files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel-core", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
+        files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**", "core/core/**", "core/std/**"]) + ["crates/hirsel-core-rt/testdata/memory_report.c"]')))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
@@ -1411,68 +815,28 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_core_cranelift_test", name="land-core-cranelift-custody",
         case="every_custody_sample_and_injected_admission_matches_evaluator",
         data=["crates/hirsel-cranelift/Cargo.toml"]))
-    for name, binary, cwd, args, data in (
-        ("workspace-layering", "hirsel-lir-test-it", "crates/hirsel-lir", ["dependencies::"],
-         ["//tools/buck2:workspace-metadata.json", "crates/hirsel-lir/Cargo.toml"]),
-        ("runtime-schema", "hirsel-lir-test-it", "crates/hirsel-lir",
-         ["--exact", "schema::runtime_declarations_match_the_landed_c_header"],
-         ["crates/hirsel-lir/Cargo.toml", "crates/hirsel-rt/include/hirsel_rt_v2.h"]),
-        ("runtime-descriptors", "hirsel-rt-test-descriptors", "crates/hirsel-rt", [],
-         Raw('glob(["crates/hirsel-rt/src/**"]) + ["crates/hirsel-rt/Cargo.toml", "crates/hirsel-lir/src/runtime_abi.rs"]')),
-        ("environment-inventory", "hirsel-driver-test-environment_inventory", "crates/hirsel-driver", [],
-         Raw('glob(["crates/*/src/**"]) + ["crates/hirsel-driver/Cargo.toml", "//tools/buck2:workspace-metadata.json"]')),
-    ):
-        out.append("\n" + call("hirsel_source_audit", name="land-audit-" + name,
-                               binary=binary, cwd=cwd, args=args, data=data))
-    if archive_consumers != RUNTIME_ARCHIVE_VIEWS.keys():
-        raise SystemExit("RUNTIME_ARCHIVE_VIEWS must declare exactly the native test binaries; undeclared: "
-                         + (", ".join(sorted(archive_consumers - RUNTIME_ARCHIVE_VIEWS.keys())) or "none")
-                         + "; stale: " + (", ".join(sorted(RUNTIME_ARCHIVE_VIEWS.keys() - archive_consumers)) or "none"))
+    out.append("\n" + call("hirsel_source_audit", name="land-audit-workspace-layering",
+                           binary="hirsel-core-driver-test-layering", cwd="crates/hirsel-core-driver", args=[],
+                           data=["//tools/buck2:workspace-metadata.json", "crates/hirsel-core-driver/Cargo.toml"]))
     if unguarded:
         raise SystemExit("these binary and test roots do not install the memory guard; add "
                          "`hirsel_guard::install!();` (`#[cfg(test)]` in a library): " + ", ".join(unguarded))
-    out.append("\n" + call("hirsel_native_selection", name="native-selection", collector="//:hirsel-conformance-bin-native-select", products=PRODUCTS, data=Raw(f"glob({starlark(expand(CORPUS), 4)})")))
-    for gate in GATE_TESTS + conformance_tests(READS):
-        out.append("\n" + call("hirsel_command_test", **gate, products=PRODUCTS, data=Raw(f"glob({starlark(expand(CORPUS), 4)})")))
     out.append("\n" + call("hirsel_test", name="hirsel-test-tool-profile", crate="test_tool_profile",
                             crate_root="tools/tests/test_tool_profile.rs", srcs=["tools/tests/test_tool_profile.rs"],
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
                             version="0.1.0", edition="2024"))
-    out.append("\n" + call("hirsel_products", name="hirsel-std-products", hirsel="//:hirsel-cli-bin-hirsel",
-                            manifest="stdlib/std@1/hirsel.json", srcs=Raw('glob(["stdlib/std@1/**"])'),
-                            visibility=["PUBLIC"]))
-    out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-cli-bin-hirsel",
-                            products=PRODUCTS, std=Raw('glob(["stdlib/std@1/**"])'), visibility=["PUBLIC"]))
-    out.append("\n" + call("hirsel_link_hosts_test", name="gate-link-hosts", listing="native-tests/link/hosts.txt",
-                            runtime_archives=archive_views(*on_both("default")),
-                            data=Raw('glob(["native-tests/link/**", "stdlib/std@1/**"])')))
-    # Narrow real-I/O sanitizer/overlap probe: normal production dependencies only.
-    out.append("\n" + call("hirsel_binary", name="io-real-workers", bin_name="io-real-workers", crate="io_real_workers",
-                            crate_root="tools/tests/io_real_tsan.rs", srcs=["tools/tests/io_real_tsan.rs"],
-                            deps=["//:hirsel-rt", "//third-party:tempfile"], features=[],
-                            manifest_dir="crates/hirsel-rt", package_name="hirsel-rt", version="0.1.0", edition="2024"))
-    out.append("\n" + call("hirsel_script_test", name="gate-io-real-tsan", script="tools/io_real_tsan.py", full=False,
-                            data=[], sanitizer="thread", files_env={"HIRSEL_IO_REAL_TSAN": ":io-real-workers"}))
-    out.append("\n" + call("hirsel_script_test", name="gate-cpu-pool-tsan", script="tools/workers-tsan", full=False,
-                            data=[], sanitizer="thread", files_env={"HIRSEL_WORKERS_TSAN": ":hirsel-rt-unittest-harness"}))
-    out.append("\n" + call("hirsel_tsan_runtime_archives", name="hirsel-rt-tsan-archives"))
-    out.append("\n" + call("hirsel_script_test", name="test-workers-tsan", script="tools/tests/workers_tsan.py", full=False,
-                            data=["tools/workers-tsan", "tools/tests/workers_tsan.py"]))
-    # GenMC is built on this host by proofs/free/check.sh (pinned, outside Buck2); its models run here.
-    out.append("\n" + call("hirsel_script_test", name="gate-free-genmc", script="proofs/free/check.sh", full=False,
-                            host=True, args=["--prebuilt", "genmc"], data=Raw('glob(["proofs/free/check.sh", "proofs/free/genmc/**", "proofs/loom.sh"])')))
-    out.append("\n" + call("hirsel_script_test", name="gate-core-broker", script="tools/tests/core_broker.py", full=False,
-                            data=["tools/core-broker", "tools/tests/core_broker.py"]))
+    out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
+                            runtimes="//:hirsel-core-rt-archives", visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py", full=False,
                             data=["tools/tests/distribution_notices.py"],
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py"}))
     out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
                             production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs", "core/tools/std_api_index.py",
+                            data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "core/tools/std_api_index.py",
                                   "core/tools/gate_evaluator.py", "core/tools/std_native.py", "core/tools/std_native_owners.json",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
-                                  "//tools/buck2:event_logs.py", "//tools/buck2:conformance.py", "//tools/buck2:rust_environment.py",
+                                  "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py",
                                   "//tools/buck2:priorities.bzl"],
                             files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
     out.append("\n" + call("hirsel_script_test", name="land-core-evaluator", script="core/tools/gate_evaluator.py", full=False,
@@ -1486,8 +850,8 @@ def first_party(meta: dict) -> str:
                             ("core-native-laws-cranelift", ["--backend", "cranelift"]),
                             ("core-native-laws-llvm", ["--backend", "llvm"])):
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/gate_native_laws.py", full=False,
-                                host=True, args=selection + ["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core"],
-                                bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
+                                host=True, args=selection + ["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel"],
+                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py", full=False,
@@ -1509,12 +873,8 @@ def first_party(meta: dict) -> str:
                                        "HIRSEL_TEST_PRIVATE_NATIVE_INPUTS": "//tools/buck2:private_native_inputs.py",
                                        **{f"HIRSEL_TEST_{name.upper()}": f"//tools/buck2:{name}.bzl"
                                           for name in ("platforms", "test_requirements", "test_sizes", "exec_sizes", "priorities")}}))
-    for name, script, data, archives in (
-        ("gate-native-runtime-c", "crates/hirsel-rt/harness/run.sh", ["crates/hirsel-rt/harness/**", "crates/hirsel-rt/include/**"], archive_views(*on_both("default", "diagnostic"))),
-        ("gate-native-library-c", "native-tests/library/run-c.sh", ["native-tests/library/**", "crates/hirsel-rt/include/**", "stdlib/native/**"], archive_views(*on_both("default", "diagnostic"))),
-        ("gate-native-toolchain-pin", "tools/native-toolchain/check", ["tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**", "Cargo.lock"], None),
-    ):
-        out.append("\n" + call("hirsel_script_test", name=name, script=script, data=Raw(f"glob({starlark(data, 4)})"), runtime_archives=archives))
+    out.append("\n" + call("hirsel_script_test", name="gate-native-toolchain-pin", script="tools/native-toolchain/check",
+                            data=Raw(f"glob({starlark(['tools/native-toolchain/llvm-23.lock', 'tools/native-toolchain/check', 'tools/native-toolchain/fixtures/**', 'Cargo.lock'], 4)})")))
     return "".join(out)
 
 
@@ -1524,7 +884,6 @@ def execution_sizes() -> str:
     """Measured requests stay separate from crate BUCK files."""
     data = json.loads(READS.text(HERE / "action-sizes.json"))
     profiles = data["profiles"]
-    # The native-selection observation request (tools/buck2/native_selection.bzl).
     special = data.get("special_requests", {})
     budgets = {(1, 1048576, "")} | {(r["cpu_count"], r["memory_kb"], "fast" if name == "precheck" else "") for name, r in special.items()}
     requests = {}
@@ -1567,11 +926,10 @@ def check_classes(buck: str) -> None:
 
 
 def check_test_data(buck: str) -> None:
-    """Every TEST_DATA and FULL_GATE_SKIPS row names a test binary: a renamed one
-    must not lose its data or start running its full-gate cases."""
-    for binary in [*TEST_DATA, *FULL_GATE_SKIPS]:
+    """Every TEST_DATA row names a test binary: a renamed one must not lose its data."""
+    for binary in TEST_DATA:
         if f'    name = "{binary}",\n' not in buck:
-            raise SystemExit(f"TEST_DATA or FULL_GATE_SKIPS names no test binary: {binary} (tools/buck2/sync.py)")
+            raise SystemExit(f"TEST_DATA names no test binary: {binary} (tools/buck2/sync.py)")
 
 
 def generate(out_root: pathlib.Path, parts=tuple(generated.PARTS)) -> dict[str, generated.Reads]:
@@ -1597,7 +955,6 @@ def generate(out_root: pathlib.Path, parts=tuple(generated.PARTS)) -> dict[str, 
 def write_first_party(meta: dict, out_root: pathlib.Path, resolution: Resolution) -> generated.Reads:
     global READS
     READS = generated.Reads(ROOT)
-    corpus_packages.cache_clear()
     READS.text(out_root / "third-party/units.json")
     cargo_reads(READS, meta, layout=True)
     workspace = {p["id"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
@@ -1636,10 +993,9 @@ def root_buck(meta: dict, resolution: Resolution) -> str:
 def check_production_features(buck: str, policy: dict, strict: bool = False) -> list[str]:
     """Audit generated first-party features along normal and build-script edges.
 
-    Checked, release and dist share these literal attributes. Runtime archives
-    replace their own workspace features with explicit variant selections;
-    their dependencies still use the ordinary library graph. Third-party
-    features are outside this first-party inventory.
+    Checked, release and dist share these literal attributes. A runtime
+    archive's root is its library, so the audit follows the library graph.
+    Third-party features are outside this first-party inventory.
     """
     if set(policy["features"].values()) - {"test-only", "runtime-option"}:
         raise SystemExit("unknown production feature classification")
@@ -1649,10 +1005,10 @@ def check_production_features(buck: str, policy: dict, strict: bool = False) -> 
             continue
         call = statement.value
         if not isinstance(call.func, ast.Name) or call.func.id not in {
-                "hirsel_library", "hirsel_binary", "hirsel_build_script", "hirsel_runtime_archives"}:
+                "hirsel_library", "hirsel_binary", "hirsel_build_script"}:
             continue
         attrs = {k.arg: ast.literal_eval(k.value) for k in call.keywords
-                 if k.arg in {"name", "package_name", "features", "deps", "build_script", "target_deps"}}
+                 if k.arg in {"name", "package_name", "features", "deps", "build_script"}}
         rules[attrs["name"]] = attrs
     findings, errors = [], []
     for root, exceptions in policy["roots"].items():
@@ -1671,8 +1027,7 @@ def check_production_features(buck: str, policy: dict, strict: bool = False) -> 
                     raise SystemExit(f"production feature audit has no classification: {key}")
                 if policy["features"][key] == "test-only":
                     leaks.add(f"{name}/{feature}")
-            dependencies = attrs.get("deps", []) + [dep for deps in attrs.get("target_deps", {}).values() for dep in deps]
-            for dep in dependencies + ([attrs["build_script"]] if attrs.get("build_script") else []):
+            for dep in attrs.get("deps", []) + ([attrs["build_script"]] if attrs.get("build_script") else []):
                 if dep.startswith("//:") or dep.startswith(":"):
                     pending.append(dep.split(":", 1)[1])
         findings += [f"{root}: {leak}" for leak in sorted(leaks)]
@@ -1701,7 +1056,6 @@ def native_toolchain_pins() -> str:
     valgrind_runtime = pins.pop("valgrind_runtime")
     link_kit = pins.pop("link_kit")
     return (HEADER + "LLVM_DEBS = " + json.dumps(llvm, indent=4)
-            + "\nLLD_SOURCE = " + json.dumps({"url": scalars["source_url"], "sha256": scalars["source_sha256"], "version": scalars["llvm_version"]}, indent=4)
             + "\nSTATIC_LLD = " + json.dumps({"url": f"{scalars['deb_pool']}/{lld_asset}", "sha256": lld_sha, "size": int(lld_size)}, indent=4)
             + "\nVALGRIND_DEBS = " + json.dumps(valgrind_runtime, indent=4)
             + "\nLINK_KIT = " + json.dumps(link_kit, indent=4)

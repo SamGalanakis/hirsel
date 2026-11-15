@@ -2,9 +2,7 @@
 # Run one libtest harness (or gate command) as `cargo test` would: from its
 # package directory (HIRSEL_TEST_CWD), with an existing CARGO_TARGET_TMPDIR,
 # the pinned LLVM as LLVM_SYS_231_PREFIX (its bin first on PATH, for tests that
-# run `clang` by name, and its lib on the loader path), the runtime archives as
-# absolute HIRSEL_RUNTIME_ARCHIVES, insta's snapshots under the project root,
-# and test threads and campaign workers bounded by the action's CPU share (at
+# run `clang` by name, and its lib on the loader path), and test threads and campaign workers bounded by the action's CPU share (at
 # most 4 unless the target declares an exact CPU requirement).
 #
 # TEST_SHARD_INDEX=<i> of TEST_TOTAL_SHARDS=<n> (Bazel's variables, i from 0)
@@ -37,31 +35,10 @@ trap cleanup_scratch 0
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-# A test runs the CLI in its own process: never on, or by starting, the
-# workspace's resident compiler (crates/hirsel-cli/src/serve.rs).
-export HIRSEL_DAEMON=off
-export HIRSEL_RESULTS=none@1
-# Gates verify the selected platform fully: no platform record is reused
-# (crates/hirsel-native/src/object_queries/platform/record.rs).
-export HIRSEL_PLATFORM_CAPTURE=cold
 if [ -n "${HIRSEL_TEST_POOL:-}" ]; then
-  # A bless rewrites the files the test reads. A pool action reads a copy of
-  # the checkout that is discarded after the run, so a bless there would
-  # change nothing and could still pass. tools/bless.sh runs blesses on this host.
-  bless=""
-  [ -z "${HIRSEL_BLESS:-}" ] || bless="HIRSEL_BLESS=$HIRSEL_BLESS"
-  case "${INSTA_UPDATE:-}" in always | 1 | force | new | unseen) bless="INSTA_UPDATE=$INSTA_UPDATE" ;; esac
-  for argument in "$@"; do
-    case "$argument" in --bless) bless="$argument" ;; esac
-  done
-  if [ -n "$bless" ]; then
-    echo "test_launcher.sh: $bless on the pool would rewrite a discarded copy of the checkout; run it with tools/bless.sh" >&2
-    exit 2
-  fi
-  # A pool action's work directory is a bind mount of a subdirectory, whose
-  # source ancestry the runtime cannot establish, so it refuses recordings
-  # there (crates/hirsel-rt/src/host_paths.rs). The action's private /dev
-  # tmpfs is mounted at its root: scratch directories and TMPDIR live there.
+  # A pool action's work directory is a bind mount of a subdirectory. The
+  # action's private /dev tmpfs is mounted at its root: scratch directories
+  # and TMPDIR live there.
   scratch="$(python3 "$scratch_owner" create /dev/shm hirsel-test- "$$" "$keep_scratch")"
   mkdir -p "$scratch/target-tmpdir" "$scratch/tmp" "$(dirname "$HIRSEL_TEST_TMPDIR")"
   rm -rf "$HIRSEL_TEST_TMPDIR"
@@ -94,8 +71,6 @@ action_cache="$(cd "$action_cache" && pwd)"
 native_input_materializer=""
 export XDG_CACHE_HOME="$action_cache/cache"
 export XDG_DATA_HOME="$action_cache/data"
-export HIRSEL_RESULTS_DIR="$action_cache/results"
-export HIRSEL_NATIVE_CACHE="$action_cache/runtime"
 mkdir -m 700 "$XDG_CACHE_HOME"
 if [ -n "${LLVM_SYS_231_PREFIX:-}" ]; then
   LLVM_SYS_231_PREFIX="$(cd "$LLVM_SYS_231_PREFIX" && pwd)"
@@ -130,34 +105,11 @@ materialize_native_inputs() {
   export LLVM_SYS_231_PREFIX
   export PATH="$LLVM_SYS_231_PREFIX/bin:$PATH"
   export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-  if [ -n "${HIRSEL_RUNTIME_ARCHIVES:-}" ]; then
-    cp -RL --reflink=auto --preserve=mode,timestamps -- "$HIRSEL_RUNTIME_ARCHIVES" "$private_native_inputs/runtime"
-    HIRSEL_RUNTIME_ARCHIVES="$private_native_inputs/runtime"
-    export HIRSEL_RUNTIME_ARCHIVES
-  fi
 }
 if [ -n "${LLVM_SYS_231_PREFIX:-}" ]; then
   export PATH="$LLVM_SYS_231_PREFIX/bin:${PATH:-/usr/bin:/bin}"
   export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
-if [ -n "${HIRSEL_RUNTIME_ARCHIVES:-}" ]; then
-  HIRSEL_RUNTIME_ARCHIVES="$(cd "$HIRSEL_RUNTIME_ARCHIVES" && pwd)"
-  export HIRSEL_RUNTIME_ARCHIVES
-fi
-if [ -n "${HIRSEL_TEST_PRODUCTS:-}" ]; then
-  HIRSEL_TEST_PRODUCTS="$(realpath "$HIRSEL_TEST_PRODUCTS")"
-  export HIRSEL_TEST_PRODUCTS
-fi
-if [ -n "${HIRSEL_PRODUCTS:-}" ]; then
-  HIRSEL_PRODUCTS="$(realpath "$HIRSEL_PRODUCTS")"
-  export HIRSEL_PRODUCTS
-fi
-
-if [ -n "${HIRSEL_NATIVE_SELECTION:-}" ]; then
-  HIRSEL_NATIVE_SELECTION="$(realpath "$HIRSEL_NATIVE_SELECTION")"
-  export HIRSEL_NATIVE_SELECTION
-fi
-export INSTA_WORKSPACE_ROOT="$root"
 # defs.bzl passes the executor's effective CPU reservation explicitly: a
 # worker's cgroup files need not be visible inside its action sandbox. Never
 # infer a pool reservation from the worker host's CPU count.
@@ -227,16 +179,6 @@ RUST_TEST_THREADS="${RUST_TEST_THREADS:-$jobs}" HIRSEL_JOBS="${HIRSEL_JOBS:-$job
 [ "$HIRSEL_JOBS" -le "$jobs" ] || HIRSEL_JOBS=$jobs
 export RUST_TEST_THREADS HIRSEL_JOBS
 harness="$root/$1"
-if [ -n "${HIRSEL_TEST_RELOCATE:-}" ] && [ -n "${HIRSEL_TEST_POOL:-}" ]; then
-  # The conformance tools keep their scratch beside their executable
-  # (crates/hirsel-conformance/src/native/scratch.rs): run a copy on /dev/shm, at
-  # the same repository path, so its RUNPATH still reaches tools/.
-  moved="$scratch/root"
-  mkdir -p "$moved/$(dirname "$1")"
-  cp "$1" "$moved/$1"
-  ln -sfn "$root/tools" "$moved/tools"
-  harness="$moved/$1"
-fi
 shift
 # Value-taking options from the pinned libtest --help. Keep values quoted,
 # even when they contain spaces or look like flags.
@@ -342,7 +284,7 @@ if [ -n "$costs" ]; then
   if ! "$report_time"; then set -- "$@" -Zunstable-options --report-time; fi
 fi
 test_binary="${HIRSEL_TEST_BINARY:-}"
-unset HIRSEL_TEST_TMPDIR HIRSEL_TEST_CWD HIRSEL_TEST_BIN_EXES HIRSEL_TEST_BIN_EXE_DIR HIRSEL_TEST_COSTS HIRSEL_TEST_POOL HIRSEL_TEST_RELOCATE
+unset HIRSEL_TEST_TMPDIR HIRSEL_TEST_CWD HIRSEL_TEST_BIN_EXES HIRSEL_TEST_BIN_EXE_DIR HIRSEL_TEST_COSTS HIRSEL_TEST_POOL
 unset HIRSEL_TEST_BINARY
 full_gate=false
 ignored=false

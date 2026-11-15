@@ -18,25 +18,17 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 100
-BIG = {'hirsel-driver-test-it-stdlib': 'crates/hirsel-driver/tests/it-stdlib', 'hirsel-driver-test-it': 'crates/hirsel-driver/tests/it', 'hirsel-cli-test-cli': 'crates/hirsel-cli/tests/cli'}
-# These bodies launch native programs and verify replay, rather than merely
-# checking their compilation. The inventory resolves their current shards.
-MUST = {'hirsel-driver-test-it': {'native::zero_parameter_entries_agree_without_host_roots', 'runtime::all_four_projection_controls_propagate_not_granted_without_dummy_capabilities'}, 'hirsel-cli-test-cli': {'program_record::a_build_record_restores_its_executable_and_replays_failures'}}
+# Sharded test binaries whose case names are read from their sources: binary -> test source.
+BIG = {}
 PROOF_HOMES = {}
 RUNTIME = re.compile(r'(?:^|/)(?:startup[^/]*|scheduler[^/]*|pool[^/]*|cpu[^/]*|managed_cores|ordered|launch)(?:[./]|$)')
-# Startup also lives in native entry emission and link-kit construction.
+# Startup also lives in native entry emission and link construction.
 STARTUP_PREFIXES = (
-    'crates/hirsel-rt/src/',
-    'crates/hirsel-driver/src/native',
-    'crates/hirsel-requests/src/',
-    'crates/hirsel-native/src/',
-    'crates/hirsel-native-queries/src/',
-    'crates/hirsel-native-cache/src/',
-    'crates/hirsel-native-testing/src/',
-    'crates/hirsel-host-io/src/',
+    'crates/hirsel-core-rt/src/',
+    'crates/hirsel-core-driver/src/native',
+    'crates/hirsel-core-driver/src/startup_native',
     'crates/hirsel-llvm/src/',
     'crates/hirsel-cranelift/src/',
-    'crates/hirsel-engine/src/queries/native_records',
     'tools/buck2/native-toolchain/link_kit',
 )
 
@@ -297,28 +289,6 @@ class Sources:
         return matched
 
 
-def module_users(root, paths):
-    modules = {file.stem: file for file in (root / 'stdlib/std@1').glob('*.hir')}
-    affected = {Path(path).stem for path in paths if path.startswith('stdlib/std@1/')}
-    if not affected:
-        return affected
-    dependencies = {name: set(re.findall(r'\b([a-z_]\w*)\.', file.read_text()))
-                    for name, file in modules.items()}
-    while True:
-        users = {name for name, imports in dependencies.items() if imports & affected}
-        if users <= affected:
-            return affected
-        affected |= users
-
-
-def corpus_shard(path, count):
-    # hirsel-cli-args/src/lib.rs Shard::holds: FNV-1a of the repository path.
-    value = 0xcbf29ce484222325
-    for byte in path.encode():
-        value = ((value ^ byte) * 0x100000001b3) & ((1 << 64) - 1)
-    return value % count + 1
-
-
 def direct_owners(root, paths):
     expression = ' + '.join('owner(' + json.dumps(path) + ')' for path in paths)
     owners = json.loads(buck(root, 'uquery', expression, '--output-attribute', '^srcs$',
@@ -359,35 +329,25 @@ def distances(graph, owners):
 def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIMIT, cut=None):
     """Affected targets, nearest owner first; the first `limit` (0: all) are kept.
     `cut` receives the targets past the limit."""
-    sys.path.insert(0, str(root / 'tools/buck2'))
-    from sync import conformance_plan
     mapped = assignments(root, graph, inventories)
     def homes(binary, case):
         return {mapped[binary, case]}
 
-    mandatory, ordinary, shards = set(), set(), set()
+    ordinary, shards = set(), set()
     runtime = runtime_change(paths)
     tooling = all(path.startswith('tools/') for path in paths)
     scripts = {target: attrs['harness'] for target, attrs in graph.items()
                if graph.get(attrs.get('harness'), {}).get('script')}
     crates = {Path(path).parts[1].replace('-', '_') for path in paths if path.startswith('crates/')}
-    modules = module_users(root, paths)
     loaded_crates = crates | {target.split(':')[-1].replace('-', '_') for target in graph
                              if crates and (root / 'crates' / target.split(':')[-1] / 'Cargo.toml').is_file()}
-    if runtime:
-        required = MUST
-        for binary, cases in required.items():
-            if missing := cases - inventories.get(binary, set()):
-                raise ValueError(f'{binary}: required launch selectors missing from listing: {sorted(missing)}')
     for target, attrs in graph.items():
         binary = attrs.get('test_binary', '')
         if tooling and target in scripts:
             ordinary.add(target)
         elif crates and binary and binary not in BIG:
             ordinary.add(target)
-    expressions = ([re.escape(crate) for crate in loaded_crates]
-                   + [re.escape(path) for path in paths]
-                   + [r'\b' + re.escape(module) + r'\.' for module in modules])
+    expressions = [re.escape(crate) for crate in loaded_crates] + [re.escape(path) for path in paths]
     pattern = re.compile('|'.join(expressions))
     direct_cases = set()
     test_paths = [path for path in paths if '/tests/' in path]
@@ -398,21 +358,8 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
         if test_pattern:
             direct_cases |= {mapped[binary, name] for name in sources.matching(names, test_pattern)}
         for name in names:
-            if runtime and name in MUST.get(binary, set()):
-                mandatory |= homes(binary, name)
             if name in affected or runtime and re.search(r'pool|ordered|scheduler|cpu|tasks', name):
                 shards |= homes(binary, name)
-    # Resolve std uses in corpus source, including uses through another std module.
-    conformance = sorted((root / 'conformance').rglob('*.hir')) if modules else []
-    chosen = {path for path in paths if path.startswith('conformance/') and path.endswith('.hir')}
-    for file in conformance:
-        if any(re.search(r'\b' + re.escape(module) + r'\.', file.read_text()) for module in modules):
-            chosen.add(file.relative_to(root).as_posix())
-    if chosen:
-        plan = conformance_plan()
-        ordinary |= {f'root//:gate-conformance-shard-{index}' for path in chosen
-                     for index, part in enumerate(plan, 1)
-                     if corpus_shard(path, part['count']) == part['index']}
     # Ownership is established by Buck's source graph, never by test status.
     direct = {}
     for target, attrs in graph.items():
@@ -427,9 +374,7 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
             owner = target if target in owners else harness
             direct[target] = (owners[owner] if isinstance(owners, dict) else
                               'direct test owner' if test_paths else 'direct source owner')
-    limit = limit or len(graph) + len(ordinary | shards | mandatory | direct.keys())
-    if len(mandatory) > limit:
-        raise ValueError(f'{len(mandatory)} mandatory targets exceed the {limit}-target ceiling')
+    limit = limit or len(graph) + len(ordinary | shards | direct.keys())
     distance = distances(graph, owners or {})
 
     # Harnesses declare their crate dependencies flat, so most tests sit two
@@ -439,33 +384,30 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
     def near(target):
         steps = distance.get(target, distance.get(graph.get(target, {}).get('harness'), len(graph)))
         return steps - 1 if target.startswith(own) and steps < len(graph) else steps
-    # Reserve the mandatory set before spending the remaining bound. Direct
-    # owners precede broad shards; each transitive binary still gets a turn.
-    # Give each affected binary a turn before spending the bound on a large
-    # unit-test family. Full conformance shards precede optional harness shards.
+    # Direct owners precede broad shards; each transitive binary gets a turn
+    # before the bound is spent on a large unit-test family.
     groups = {}
     for target in ordinary | shards:
-        if target not in mandatory and target not in direct:
-            family = graph.get(target, {}).get('test_binary', 'conformance')
+        if target not in direct:
+            family = graph.get(target, {}).get('test_binary', target)
             groups.setdefault(family, []).append(target)
     for targets in groups.values():
         targets.sort(key=lambda target: re.sub(r'\d+', lambda m: m[0].zfill(8), target))
     # Nearest owner first: direct owners by distance, then each round of the
     # families, the family nearest the change first.
     owned = sorted(direct, key=lambda target: (near(target), target))
-    selected = owned + sorted(mandatory - direct.keys())
+    selected = list(owned)
     order = sorted(groups, key=lambda family: (min(map(near, groups[family])), family))
     while any(groups.values()):
         for family in order:
             if groups[family]:
                 selected.append(groups[family].pop(0))
-    # Keep the mandatory reservation even when direct ownership itself is broad.
-    retained = set([target for target in owned if target not in mandatory][:limit - len(mandatory)]) | mandatory
+    retained = set()
     for target in selected:
         if len(retained) < limit:
             retained.add(target)
     if reasons is not None:
-        reasons.update({target: direct.get(target, 'mandatory set' if target in mandatory else 'transitive shard')
+        reasons.update({target: direct.get(target, 'transitive shard')
                         + (f' (distance {near(target)})' if near(target) < len(graph) else '')
                         for target in selected})
     if cut is not None:
@@ -506,7 +448,7 @@ def main():
                 if (ROOT / 'crates' / path.relative_to(ROOT).parts[1] / 'src/lib.rs').is_file():
                     seeds.add('set(//:' + package['package']['name'] + ')')
         if runtime_change(paths):
-            seeds.add('set(//:hirsel-rt)')
+            seeds.add('set(//:hirsel-core-rt)')
         sys.path.insert(0, str(ROOT / 'tools/buck2'))
         import generated
         if not (ROOT / '.buck2/bin/buck2').is_file():

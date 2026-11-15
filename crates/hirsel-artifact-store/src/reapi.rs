@@ -28,7 +28,7 @@
 //! the precondition REAPI states for `UpdateActionResult` (`:176-190`).
 
 use crate::{Bytes, Domain, Output, Reference};
-use hirsel_syntax::ContentHash;
+use hirsel_core_ids::ContentHash;
 use sha2::{Digest as _, Sha256};
 use std::fs;
 use std::io::{self, Write};

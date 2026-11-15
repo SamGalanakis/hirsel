@@ -3,7 +3,7 @@
 //! Git idx/MIDX informed the separated planes and chain; no Git code is copied.
 
 use crate::Durability;
-use hirsel_syntax::ContentHash;
+use hirsel_core_ids::ContentHash;
 use std::{io, path::Path, sync::Arc};
 
 #[path = "index/format.rs"]

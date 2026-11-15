@@ -2,7 +2,6 @@
 """tools/land against a scratch origin with fake Buck2 checks: a push rejected
 because main moved goes back to the rebase, and a red check refuses the push."""
 import argparse
-import ast
 import contextlib
 import csv
 import fcntl
@@ -140,7 +139,6 @@ class Land(unittest.TestCase):
                                'tools/land_events.py': (ROOT / 'tools/land_events.py').read_text(),
                                'tools/buck2/generated.py': (ROOT / 'tools/buck2/generated.py').read_text(),
                                'tools/buck2/merging.py': (ROOT / 'tools/buck2/merging.py').read_text(),
-                               'tools/main-runs': (ROOT / 'tools/main-runs').read_text(),
                                'tools/buck2/run_failures.py': (ROOT / 'tools/buck2/run_failures.py').read_text(),
                                'tools/buck2/rust_environment.py': (ROOT / 'tools/buck2/rust_environment.py').read_text(),
                                'tools/buck2/priorities.bzl': (ROOT / 'tools/buck2/priorities.bzl').read_text(),
@@ -151,11 +149,6 @@ class Land(unittest.TestCase):
                                'core/std/example.hirsel': 'pub fn present() -> void {}\n',
                                'core/std/API.md': '| Module | Extends | Ops | Operations |\n| **total** | | | |\n',
                                '.gitignore': '.buck2/\n__pycache__/\n'})
-        # The line-list audit imports main-runs' exact corpus ID expansion.
-        source = (ROOT / 'tools/buck2/conformance.py').read_text()
-        function = next(node for node in ast.parse(source).body
-                        if isinstance(node, ast.FunctionDef) and node.name == 'run_ids')
-        files['tools/buck2/conformance.py'] = 'import re\n' + ast.get_source_segment(source, function) + '\n'
         for name, text in files.items():
             (self.lane / name).parent.mkdir(parents=True, exist_ok=True)
             (self.lane / name).write_text(text)

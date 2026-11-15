@@ -1,6 +1,6 @@
 # Examples
 
-Eight complete programs, the seed of the conformance corpus. Each runs with a root limit
+Eight complete programs. Each runs with a root limit
 of 1,048,576 bytes. **Output** is the exact text the program writes to standard output,
 and **outcome** is how the run ends ([PROG-3](programs.md#prog-3-entry)). Each refusal is an
 edit of the program; the site is `line:column` in the edited program, at the start of the

@@ -8,7 +8,7 @@ requested CPUs and memory for the action.
 
 A budget is (CPU, memory, CPU class). Only the critical-path compiles named in
 CPU_CLASSES (tools/buck2/action_sizes_from_log.py), the std precheck
-(PRECHECK_REQUEST) and the conformance shards (TEST_REQUESTS) ask for
+(PRECHECK_REQUEST) and the TEST_REQUESTS rows marked fast ask for
 `cpu_class=fast`; every other compile, test run and gate shard runs on any worker.
 
 Hirsel lanes queue remote compiles and tests at priority 50, below the pool's
@@ -128,7 +128,7 @@ def pool_budget_name(cpu, memory_kb, cpu_class = ""):
 DIST_LINK_REQUEST = [1, 4194304, ""]
 
 def dist_compile_request(name):
-    if name == "hirsel-cli-bin-hirsel":
+    if name == "hirsel-core-driver-bin-hirsel":
         return DIST_LINK_REQUEST
     return compile_request("release", name)
 

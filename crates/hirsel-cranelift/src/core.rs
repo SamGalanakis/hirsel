@@ -1,8 +1,8 @@
-//! CoreIR emission, independent of the old LIR pipeline.
+//! CoreIR emission.
 //!
 //! Scalars, checked failure and explicit cleanup edges use the frozen CoreIR
 //! function ABI. Native memory calls use the separately declared core runtime C
-//! ABI. This entry never translates CoreIR into old LIR.
+//! ABI.
 
 use cranelift_codegen::ir::{self, AbiParam, InstBuilder, types};
 use cranelift_codegen::settings::{self, Configurable};
@@ -126,8 +126,11 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
         ),
     ]
     .into_iter()
-    .chain(crate::module::STACK_PROBE_SETTINGS)
-    {
+    .chain([
+        ("enable_probestack", "true"),
+        ("probestack_strategy", "inline"),
+        ("probestack_size_log2", "12"),
+    ]) {
         flags.set(name, value).map_err(|e| refuse(e.to_string()))?;
     }
     cranelift_codegen::isa::lookup_by_name(options.target)

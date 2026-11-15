@@ -1,11 +1,9 @@
 {
-  "scope": "First-party features in generated production roots across checked, release and dist, installed toolchains, std production and both runtime architectures. Cargo compilation units also enforce exact external and host-context feature resolution. Explicit diagnostic and sanitizer runtime selections remain intentional.",
+  "scope": "First-party features in generated production roots: the installed driver and the shipping runtime archive library. Cargo compilation units also enforce exact external and host-context feature resolution.",
   "baseline": "Production and package-test compilation units resolve independently; no production exceptions.",
   "features": {
     "hirsel-core-front/cost-profile": "test-only",
     "hirsel-artifact-store/test-support": "test-only",
-    "hirsel-authority/testing": "test-only",
-    "hirsel-cli/native-tsan": "test-only",
     "hirsel-core-front/test-assembly": "test-only",
     "hirsel-core-ir/eval": "test-only",
     "hirsel-core-rt/testing": "test-only",
@@ -14,36 +12,12 @@
     "hirsel-core-rt/mimalloc": "runtime-option",
     "hirsel-core-rt/charge-observation": "runtime-option",
     "hirsel-core-rt/standalone": "runtime-option",
-    "hirsel-cranelift/native-tsan": "test-only",
-    "hirsel-driver/native-tsan": "test-only",
-    "hirsel-engine-admission/test-alloc": "test-only",
-    "hirsel-engine-runtime/test-support": "test-only",
-    "hirsel-free-loom/weak": "test-only",
-    "hirsel-free/tsan": "test-only",
-    "hirsel-heaps-loom/blind-trim": "test-only",
-    "hirsel-heaps-loom/direct-dequeue": "test-only",
     "hirsel-intern/id-salt": "test-only",
-    "hirsel-lir/testing": "test-only",
-    "hirsel-llvm/native-tsan": "test-only",
-    "hirsel-native/native-tsan": "test-only",
     "hirsel-object-storage/testing": "test-only",
-    "hirsel-query-products/test-support": "test-only",
-    "hirsel-rc/testing": "test-only",
-    "hirsel-requests/native-tsan": "test-only",
-    "hirsel-rt/default": "runtime-option",
-    "hirsel-rt/diagnostic": "test-only",
-    "hirsel-rt/measurement": "test-only",
-    "hirsel-rt/memcheck": "test-only",
-    "hirsel-rt/operation-latency": "test-only",
-    "hirsel-rt/ownership-trace": "runtime-option",
-    "hirsel-rt/system-allocator": "runtime-option",
-    "hirsel-rt/tsan": "test-only",
-    "hirsel-syntax/id-salt": "test-only",
-    "hirsel-types/testing": "test-only",
     "hirsel-core-ids/front-observer": "test-only"
   },
   "roots": {
-    "hirsel-cli-bin-hirsel": [],
-    "hirsel-rt-archives": []
+    "hirsel-core-driver-bin-hirsel": [],
+    "hirsel-core-rt-standalone": []
   }
 }

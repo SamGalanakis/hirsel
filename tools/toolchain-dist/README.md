@@ -45,7 +45,7 @@ upstream text paths and hashes, source/build-input hashes, and every bundled
 file's hash. It has no timestamps, checkout paths or host identifiers. Notice
 collection checks that existing file bytes did not change; compiler identity,
 ordinary std products remain untouched. `hirsel-build.json` records the
-notice manifest hash and a canonical digest of the `hirsel-std.products` file map.
+notice manifest hash and a canonical digest of the `core-packages` file map.
 
 The standard bundle does not copy native runtime archives, the link kit, LLVM
 shared libraries, clang or host system libraries. Their external status and

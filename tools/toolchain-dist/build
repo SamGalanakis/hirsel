@@ -45,9 +45,9 @@ def manifest(output, mode):
                   patch_sha256=hashlib.sha256(command('git', 'diff', 'HEAD').encode()).hexdigest(),
                   rustc=command(str(ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc'), '-vV'),
                   profile='dist', pgo=mode, lto='fat', codegen_units=1,
-                  training='retained native hello: check, Cranelift, LLVM',
+                  training='hirsel new project: check, Cranelift, LLVM',
                   hirsel_sha256=digest(output / 'hirsel'),
-                  std_products_sha256=hashlib.sha256(json.dumps({str(p.relative_to(output / 'hirsel-std.products')): digest(p) for p in sorted((output / 'hirsel-std.products').rglob('*')) if p.is_file()}, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+                  core_packages_sha256=hashlib.sha256(json.dumps({str(p.relative_to(output / 'core-packages')): digest(p) for p in sorted((output / 'core-packages').rglob('*')) if p.is_file()}, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
                   notices_sha256=digest(output / 'notices/manifest.json'))
     if mode == 'use':
         record['profdata_sha256'] = digest(output / 'hirsel.profdata')

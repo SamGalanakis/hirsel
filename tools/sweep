@@ -27,7 +27,15 @@ SUITES = (
 UNITTEST_SUITES = {'test-land', 'core-native-laws-cranelift', 'core-native-laws-llvm'}
 
 
+# Script gates that print their own body count: m2b.py's workloads and
+# gate_native_laws.py's laws (one per law and engine).
+COUNTED = re.compile(r'\b(?:m2b|native laws): (\d+) passed\b')
+
+
 def bodies(details, python=False):
+    counted = COUNTED.findall(details)
+    if counted:
+        return int(counted[-1])
     if python:
         counts = re.findall(r'^Ran (\d+) tests? in ', details, re.M)
         ignored = re.findall(r'^(?:OK|FAILED) \([^\n]*skipped=(\d+)', details, re.M)

@@ -16,9 +16,9 @@ selected with `TASKS_STORE=files` (default); durability is `volatile` or `durabl
 never used in comparative results. Both providers implement the same store seam.
 No process-global allocator override. Static assets are the original files.
 
-The official Datastar SDK supplies SSE encoding. Rendering follows `view.hir`,
-including its ids, attributes, signals and escaping. The build script consumes the repository’s pinned Unicode16 casing/property
-tables so tags and search use the same Unicode version. Persistent JSON is compatible
+The official Datastar SDK supplies SSE encoding. Rendering keeps the Hirsel version's
+ids, attributes, signals and escaping. `src/unicode16.rs` checks in the Unicode 16.0.0 casing/property
+tables so tags and search keep a fixed Unicode version. Persistent JSON is compatible
 in both directions (PascalCase enum strings, nullable dates, manual-order array).
 One serialized writer publishes only after saving; failed saves retain the
 in-memory mutation, as in Hirsel. Watch receivers coalesce revisions under

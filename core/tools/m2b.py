@@ -27,7 +27,7 @@ whose `Capacity.available` it prints; `used` is the difference. Any other argume
 goes to the workload's own `main`, so the probe also serves as a pair role. Pair
 cases have no case function and no `used`; they compare stdout only.
 
-Example: m2b.py --compiler hirsel-core --evaluator hirsel-core-contract-eval --runtime libhirsel_core_rt.a
+Example: m2b.py --compiler hirsel --evaluator hirsel-core-contract-eval --runtime libhirsel_core_rt.a
 """
 import argparse
 import json

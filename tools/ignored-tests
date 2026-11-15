@@ -39,7 +39,7 @@ def command(case, environment):
         raise ValueError(f'{case}: required retained inputs: ' + ', '.join(missing))
     validate_retained_paths(case, home, environment)
     return [str(ROOT / 'tools/test-filter'), '-c', 'hirsel.tests=host',
-            re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', home.get('target', '//:hirsel-cli-test-cli')),
+            re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', home['target']),
             *[argument for value in home.get('config', []) for argument in ['-c', value]],
             *[argument for key in home['inputs']
               for argument in ['--env', f'{key}={environment[key]}']], '--',

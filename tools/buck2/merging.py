@@ -8,21 +8,9 @@ resolves a conflict in one with `resolve` where the driver is not installed.
 
 - third-party/NOTICES.md is append-only: hunks where both sides only add
   lines keep main's lines, then the change's;
-- a package manifest (`hirsel.json`) merges structurally: keys, sources and
-  dependencies either side added or removed, so two lanes adding std modules
-  both keep theirs;
 - module declarations use a three-way set merge:
   either side's removal wins and both sides' additions survive;
-- corpus path lists merge as sets, accepting unsorted appends and standalone
-  comments while preserving removals and conflicting expectation changes;
-- a sorted list (SORTED_LISTS: ratchet and expectation lists, one entry per
-  line in the order of its key, the text before a tab or ` | `): where both
-  sides change one stretch, the entries either side added stay, the entries
-  either side removed go, and the stretch is written in key order. Two entries
-  with one key (both sides changed one entry), a stretch out of order, or a
-  comment or blank line in it stays a conflict. Each line of these lists
-  stands alone (a path, or one declaration's blessed signature), so the merge
-  is what regenerating the list on the merged tree writes.
+- known-failures rows merge by identity, keeping the newer row.
 
 Anything else, or a hunk that both sides edit differently, stays a conflict:
 the driver then leaves git's usual conflict markers.
@@ -31,24 +19,12 @@ the driver then leaves git's usual conflict markers.
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
-import json
 import os
 import subprocess
 import sys
 import tempfile
 
 APPEND_ONLY = ('third-party/NOTICES.md',)
-MANIFEST = 'hirsel.json'
-SORTED_LISTS = (
-    'conformance/passing.txt',
-    'conformance/pending.txt',
-    'crates/hirsel-registry/src/review-table.txt',
-    'native-tests/library/operations.tsv',
-    'native-tests/regressions/*.txt',
-)
-# Corpus ratchets are path sets even when lanes append unsorted batches or
-# comments. A path's inline reason is part of its value, not its identity.
-PATH_LISTS = tuple(path for path in SORTED_LISTS if path.endswith(('passing.txt', 'pending.txt')))
 # Whole-line identities, without key or ordering semantics. Keep this in sync
 # with the independent-line patterns in .gitattributes.
 LINE_SETS = ('crates/*/tests/*/modules.rs',)
@@ -60,17 +36,12 @@ class Conflict(Exception):
     """Both sides changed the same part differently."""
 
 
-def sorted_list(path: str) -> bool:
-    return any(fnmatchcase(path, pattern) for pattern in SORTED_LISTS)
-
-
 def line_set(path: str) -> bool:
     return any(fnmatchcase(path, pattern) for pattern in LINE_SETS)
 
 
 def resolvable(path: str) -> bool:
-    return (line_set(path) or path == LEDGER or path in APPEND_ONLY or
-            path.rpartition('/')[2] == MANIFEST or sorted_list(path))
+    return line_set(path) or path == LEDGER or path in APPEND_ONLY
 
 
 def resolve(path: str, base: str | None, ours: str | None, theirs: str | None) -> str | None:
@@ -84,13 +55,7 @@ def resolve(path: str, base: str | None, ours: str | None, theirs: str | None) -
             return merge_ledger(base or '', ours, theirs)
         if line_set(path):
             return merge_line_set(base or '', ours, theirs)
-        if path in APPEND_ONLY:
-            return line_merge(base or '', ours, theirs, appended)
-        if path in PATH_LISTS:
-            return path_list(base or '', ours, theirs)
-        if sorted_list(path):
-            return line_merge(base or '', ours, theirs, sorted_stretch)
-        return manifest(base, ours, theirs)
+        return line_merge(base or '', ours, theirs, appended)
     except Conflict:
         return None
 
@@ -150,48 +115,6 @@ def merge_ledger(base: str, ours: str, theirs: str) -> str:
     return ''.join(line + '\n' for line in comments + merged)
 
 
-def path_list(base: str, ours: str, theirs: str) -> str:
-    """Three-way merge by corpus path, independent of append order/comments.
-
-    Preserve either side's additions and removals. Different changes to the
-    same path's expectation (including delete versus edit) stay conflicts.
-    Sort entries just as ratchet writers do; standalone comments survive too.
-    """
-    def parse(text):
-        entries, comments = {}, []
-        for line in text.splitlines():
-            if not line.strip() or line.startswith('#'):
-                if line not in comments:
-                    comments.append(line)
-                continue
-            path = line.split(' # ', 1)[0]
-            if (not path.endswith('.hir') or any(c.isspace() for c in path)
-                    or path.startswith('/') or '..' in path.split('/') or path in entries):
-                raise Conflict('invalid or duplicate corpus path')
-            entries[path] = line
-        return entries, comments
-
-    parsed = [parse(text) for text in (base, ours, theirs)]
-    ancestor, left, right = [entries for entries, _ in parsed]
-    lines = []
-    for path in sorted(ancestor.keys() | left.keys() | right.keys()):
-        old, a, b = (entries.get(path) for entries in (ancestor, left, right))
-        if a == b:
-            value = a
-        elif a == old:
-            value = b
-        elif b == old:
-            value = a
-        else:
-            raise Conflict('both sides changed one corpus expectation')
-        if value is not None:
-            lines.append(value)
-    old_comments, a_comments, b_comments = [comments for _, comments in parsed]
-    removed = (set(old_comments) - set(a_comments)) | (set(old_comments) - set(b_comments))
-    comments = list(dict.fromkeys(line for line in a_comments + b_comments if line not in removed))
-    return ''.join(line + '\n' for line in comments + lines)
-
-
 def line_merge(base: str, ours: str, theirs: str, stretch) -> str:
     """A three-way line merge whose conflicting hunks `stretch` resolves from
     main's lines, the base's and the change's, and the lines around the hunk."""
@@ -241,83 +164,6 @@ def appended(ours, base, theirs, before, after):
     if base:
         raise Conflict('both sides edit the same lines')
     return ours + theirs
-
-
-def key(line: str) -> str:
-    return line.rstrip('\n').split('\t', 1)[0].split(' | ', 1)[0]
-
-
-def sorted_stretch(ours, base, theirs, before, after):
-    """Both sides' versions of one stretch of a sorted list, as one: what either
-    side added, without what either side removed, in key order between the
-    lines around it."""
-    for side in (ours, base, theirs):
-        if any(not line.endswith('\n') or not line.strip() or line.startswith('#') for line in side):
-            raise Conflict('not a stretch of entries')
-        if [key(line) for line in side] != sorted(key(line) for line in side):
-            raise Conflict('a side is out of key order')
-    removed = (set(base) - set(ours)) | (set(base) - set(theirs))
-    lines = sorted({line for line in ours + theirs if line not in removed}, key=key)
-    keys = [key(line) for line in lines]
-    if len(set(keys)) != len(keys):
-        raise Conflict('both sides changed one entry')
-    if lines and ((before is not None and key(before) >= keys[0]) or (after is not None and keys[-1] >= key(after))):
-        raise Conflict('the stretch is out of order with the lines around it')
-    return lines
-
-
-def manifest(base: str | None, ours: str, theirs: str) -> str:
-    """A structural three-way merge of a package manifest, written as the
-    repository writes them (two-space JSON); a side that is not in that form
-    stays a conflict rather than being reformatted."""
-    values = []
-    for text in (ours, theirs):
-        try:
-            value = json.loads(text)
-        except ValueError as error:
-            raise Conflict(str(error)) from error
-        if canonical(value) != text:
-            raise Conflict('not in canonical form')
-        values.append(value)
-    try:
-        ancestor = json.loads(base) if base else None
-    except ValueError as error:
-        raise Conflict(str(error)) from error
-    return canonical(merge(ancestor, *values))
-
-
-def canonical(value) -> str:
-    return json.dumps(value, indent=2, ensure_ascii=False) + '\n'
-
-
-MISSING = object()
-
-
-def merge(base, ours, theirs):
-    if ours == theirs:
-        return ours
-    if base == ours:
-        return theirs
-    if base == theirs:
-        return ours
-    if isinstance(ours, dict) and isinstance(theirs, dict):
-        base = base if isinstance(base, dict) else {}
-        merged = {}
-        for key in list(ours) + [key for key in theirs if key not in ours]:
-            value = merge(base.get(key, MISSING), ours.get(key, MISSING), theirs.get(key, MISSING))
-            if value is not MISSING:
-                merged[key] = value
-        return merged
-    if isinstance(ours, list) and isinstance(theirs, list):
-        base = base if isinstance(base, list) else []
-        # Entries either side removed go; entries either side added stay,
-        # main's first. Both sides replacing one entry is an edit conflict.
-        added = [entry for entry in theirs if entry not in ours and entry not in base]
-        if (any(entry not in ours and entry not in theirs for entry in base)
-                and added and any(entry not in base for entry in ours)):
-            raise Conflict('both sides replaced the same entry')
-        return [entry for entry in ours if entry in theirs or entry not in base] + added
-    raise Conflict('both sides changed the same value')
 
 
 def install(root) -> None:

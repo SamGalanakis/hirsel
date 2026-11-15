@@ -1,24 +1,19 @@
-"""The repository's generated files, by who writes them. No lane commits one,
-so no rebase can conflict on one.
+"""The repository's generated files. No lane commits one, so no rebase can
+conflict on one.
 
-- BUILD_INPUTS: what sync.py derives from the Cargo workspace and the committed
-  measurements and pins. They are gitignored and generated on demand:
-  bootstrap.py writes them, and every entry point that runs Buck2 (prepare.py,
-  tools/land, tools/main-runs, tools/bless.sh) regenerates the parts whose
-  inputs changed since they were generated (`sync.py --if-stale`). Without them a bare
-  `.buck2/bin/buck2` reads the committed BUCK.unsynced stubs and fails with
-  one line saying to run sync.py.
-- MAIN_WRITTEN: generated pages people read in the repository. They stay
-  committed, and only main's hourly run (tools/main-runs) writes them: it
-  regenerates them and pushes a change to main. tools/land refuses a lane
-  change that touches one.
+BUILD_INPUTS are what sync.py derives from the Cargo workspace and the
+committed measurements and pins. They are gitignored and generated on demand:
+bootstrap.py writes them, and every entry point that runs Buck2 (prepare.py,
+tools/land, tools/sweep) regenerates the parts whose inputs changed since they
+were generated (`sync.py --if-stale`). Without them a bare `.buck2/bin/buck2`
+reads the committed BUCK.unsynced stubs and fails with one line saying to run
+sync.py. tools/land refuses a lane change that touches one.
 
 The stamp records, for each part of the build inputs, what its generation
 read (`Reads`: file contents, existence tests and glob matches, including the
 generator's own code) and the outputs it wrote. A part is stale when an output
 is missing or edited or when anything it read reads differently, so an edit
 to a file generation never reads, such as documentation, regenerates nothing.
-Corpus headers supply swept-run counts for the weighted conformance plan.
 Generation writes an output only when its bytes change.
 """
 
@@ -41,7 +36,6 @@ PARTS = {
                     'tools/buck2/workspace-metadata.json', 'tools/native-toolchain/pins.bzl'),
 }
 BUILD_INPUTS = tuple(sorted(path for outputs in PARTS.values() for path in outputs))
-MAIN_WRITTEN = ()
 STAMP = '.buck2/sync-stamp.json'
 SYNC_HINT = 'run python3 tools/buck2/sync.py'
 
@@ -187,7 +181,7 @@ def require(root: Path) -> None:
 def lane_written(paths) -> list[str]:
     """The generated files among the paths a lane change writes (adds or
     edits): no lane commits them."""
-    return sorted(path for path in paths if path in MAIN_WRITTEN or path in BUILD_INPUTS)
+    return sorted(path for path in paths if path in BUILD_INPUTS)
 
 
 def refusal(paths) -> list[str]:
@@ -196,12 +190,9 @@ def refusal(paths) -> list[str]:
     touched = lane_written(paths)
     if not touched:
         return []
-    pages = [path for path in touched if path in MAIN_WRITTEN]
-    inputs = [path for path in touched if path in BUILD_INPUTS]
     return [f'the change touches generated files, which no lane commits: {", ".join(touched)}',
             'sync.py regenerates the '
             'gitignored build files on demand. Drop them from the change:',
-            *([f'  git checkout $(git merge-base HEAD origin/main) -- {" ".join(pages)}'] if pages else []),
-            *([f'  git rm -q --cached {" ".join(inputs)}'] if inputs else []),
+            f'  git rm -q --cached {" ".join(touched)}',
             '  git commit --amend --no-edit',
             'then tools/land.']

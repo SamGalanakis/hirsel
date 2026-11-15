@@ -134,8 +134,8 @@ fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return(
                 }
                 let context = crate::context::Context::new();
                 let direct = crate::context::Module::parse(&context, "hirsel-core", &ir).unwrap();
-                let machine = crate::context::TargetMachine::new(
-                    &hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu(),
+                let machine = crate::context::TargetMachine::core(
+                    hirsel_core_layout::Target::X86_64Linux,
                     matches!(opt, Optimization::Speed),
                 )
                 .unwrap();
@@ -1292,11 +1292,9 @@ fn numerical_returns_keep_failure_status_and_canonical_bits() {
             let object = hirsel_llvm_lazy::compile_ir(&ir, speed).unwrap();
             let context = crate::context::Context::new();
             let direct = crate::context::Module::parse(&context, "hirsel-core", &ir).unwrap();
-            let machine = crate::context::TargetMachine::new(
-                &hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu(),
-                speed,
-            )
-            .unwrap();
+            let machine =
+                crate::context::TargetMachine::core(hirsel_core_layout::Target::X86_64Linux, speed)
+                    .unwrap();
             direct.set_target(&machine);
             if speed {
                 direct.run_core_passes(&machine).unwrap();

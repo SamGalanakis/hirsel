@@ -17,12 +17,13 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 BUCK2 = ROOT / '.buck2/bin/buck2'
-# The configuration tools/land and tools/main-runs run Buck2 with, so the daemon keeps one state.
+# The configuration tools/land runs Buck2 with, so the daemon keeps one state.
 CONFIG = os.environ.get('HIRSEL_BUCK2_CONFIG', '').split()
 RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
 
 
-SOURCE_ROOTS = ('core/core', 'core/std', 'core/front/cases', 'core/programs/m1', 'core/langarena')
+SOURCE_ROOTS = ('core/core', 'core/std', 'core/front/cases', 'core/programs/m1', 'core/programs/m2b',
+                'core/langarena')
 FIXTURE_EXPECTATION = re.compile(r'^\s*//\s*expect:\s*(?:refuse|gap|resource)\b', re.MULTILINE)
 
 

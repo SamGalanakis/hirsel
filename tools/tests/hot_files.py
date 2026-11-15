@@ -36,8 +36,6 @@ class HotFiles(unittest.TestCase):
         (self.root / 'tools').mkdir()
         self.ledger = self.root / 'tools/known-failures.tsv'
         self.ledger.write_text('first\treason\towner\t2026-10-22\n')
-        # The checker uses main-runs' existing ledger parser.
-        (self.root / 'tools/main-runs').symlink_to(ROOT / 'tools/main-runs')
         (self.root / '.gitattributes').write_text((ROOT / '.gitattributes').read_text())
         driver = self.root / 'tools/buck2/merging.py'
         driver.parent.mkdir()

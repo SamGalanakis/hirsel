@@ -19,7 +19,7 @@ maps, no hidden thread, full u64 generations, u32 edges. Arc uses the default ev
 Record-mode instrumentation is not inferred from the default run.
 
 Build both artifacts with `--target-platforms //tools/buck2:release`, using
-`//:hirsel-core-driver-bin-hirsel-core` and `//:hirsel-core-rt-archives`. Pass the
+`//:hirsel-core-driver-bin-hirsel` and `//:hirsel-core-rt-archives`. Pass the
 shipping view's `x86_64-unknown-linux-gnu/libhirsel_core_rt.a`, not the crate's
 staticlib output. Run named phases with:
 

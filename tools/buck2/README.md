@@ -14,9 +14,7 @@ No lane commits a generated file, so no rebase can conflict on one
   root and `third-party/` `BUCK`, `third-party/Cargo.{toml,lock}` and `lib.rs`,
   `exec_sizes.bzl`, `test_sizes.bzl`, `workspace-metadata.json` and
   `tools/native-toolchain/pins.bzl`. `bootstrap.py` (so `prepare.py`),
-  `tools/land`, `tools/main-runs`, `tools/bless.sh` and
-  the runtime benchmark harness run
-  `sync.py --if-stale`. Generation has two parts, third-party dependencies
+  and `tools/land` run `sync.py --if-stale`. Generation has two parts, third-party dependencies
   (Cargo metadata, then Reindeer) and the first-party inventory (Cargo
   metadata, then source inspection), and a stamp in `.buck2/` records each
   part's outputs and every file, existence test and glob it read. `--if-stale`
@@ -34,9 +32,8 @@ No lane commits a generated file, so no rebase can conflict on one
   byte-identical to the committed ones they replace, so every action key, and
   so remote execution and its cache, is unchanged.
 - **Files many lanes add to merge themselves.** `.gitattributes` gives
-  `third-party/NOTICES.md`, every `hirsel.json` and the sorted ratchet and
-  expectation lists (`SORTED_LISTS` in `merging.py`) the `hirsel` merge
-  driver, which `bootstrap.py` installs in the clone's config: appended rows
+  `third-party/NOTICES.md`, the `modules.rs` registries and
+  `tools/known-failures.tsv` the `hirsel` merge driver, which `bootstrap.py` installs in the clone's config: appended rows
   and entries either side adds stay, entries either side removes go, and only
   two sides changing one entry stays a conflict. Lanes' own rebases and land's
   batch rebase merge them alike.
@@ -65,8 +62,8 @@ the `[buck2_re_client]` endpoint, instance and TLS identity, and
 pool's workers match. When the hook is missing or fails, an existing remote
 `.buckconfig.local` is kept; without one `prepare.py` fails and names the
 missing hook. Only `prepare.py --local` writes `hirsel.execution = local`,
-which runs every action on this host, so an unattended `tools/land` or
-`tools/main-runs` never silently redoes the pool's work here.
+which runs every action on this host, so an unattended `tools/land` never
+silently redoes the pool's work here.
 
 Toolchain preparation runs on the pool like any compile: the third-party crate
 `http_archive`s, the `native_toolchain_unpack`s and the `link_kit`
@@ -79,18 +76,14 @@ result could not be uploaded (`allow_cache_uploads`) anyway.
 
 ## Formatting before a commit
 
-`python3 tools/buck2/fmt.py` formats Rust and checks changed conformance cases;
-`--check` also makes the Rust pass read-only. Case checks never rewrite source
-or move expected diagnostic lines. The selection includes branch commits since
-the merge-base with `origin/main`, staged and unstaged changes, and untracked
-cases. The land screen supplies its batch base explicitly. Archived `reports/`
-files and unchanged cases are excluded, as are std and native library fixtures.
-
-When cases changed, the script builds the candidate's `hirsel-conformance` and
-runs `--format-only --path <case>` for each selected path. This uses the same
-`format_path` seam as `hirsel fmt` and the corpus's exact rule/line exemptions
-for intentional syntax errors; it executes no case programs. A Rust-only change
-needs no formatter binary build.
+`python3 tools/buck2/fmt.py` formats Rust with the pinned rustfmt; `--check`
+makes it read-only. It also checks changed `.hirsel` sources under the core
+library, front-end case and program roots (`SOURCE_ROOTS`) with the candidate's
+`hirsel-core-syntax` formatter, and never rewrites them. Refusal and gap fixtures
+(an `// expect: refuse|gap|resource` comment) are input bytes and excluded. The
+selection includes branch commits since the merge-base with `origin/main`, staged
+and unstaged changes and untracked files; the land screen supplies its batch base
+explicitly. A Rust-only change needs no formatter build.
 
 ## Stale outputs
 
@@ -135,7 +128,7 @@ are relative to that commit:
   after a daemon restart begins inactive (`deferred/artifact_tree.rs`).
   `MaterializerSender::send` cancels a cleaning
   scan before processing new materializer work (`deferred.rs`).
-- `tools/land`, `tools/main-runs` and `prepare.py` do not override these
+- `tools/land` and `prepare.py` do not override these
   keys. `--materializations none` controls requested final outputs, not the
   deferred-write prerequisite. The host remote-config hook writes only
   `[buck2_re_client]` and `[hirsel]`, leaving this `[buck2]` policy intact.
@@ -192,19 +185,13 @@ commands, profile provenance, interleaved measurements and the declined BOLT tri
 
 ```sh
 export CARGO_BUILD_JOBS=4 HIRSEL_JOBS=4 RUST_TEST_THREADS=4
-.buck2/bin/buck2 build --target-platforms //tools/buck2:release //:hirsel-toolchain --show-output # CLI and sibling std image
-.buck2/bin/buck2 test //...                       # every test
-.buck2/bin/buck2 test //:hirsel-lir-unittest //:hirsel-lir-test-it \
-  //:hirsel-lir           # one crate, including doctests
-.buck2/bin/buck2 test -c hirsel.tests=focus //:hirsel-lir-test-it -- --test-arg=layout::packed_fields_are_unaligned_and_align_raises_alignment --test-arg=--exact
-.buck2/bin/buck2 test //:hirsel-pipeline-tests-test-front-retained-2  # one shard of a sharded test binary
-.buck2/bin/buck2 test -c hirsel.tests=host //:hirsel-pipeline-tests-test-front-retained-1   # run tests on this host
-.buck2/bin/buck2 test //:gate-retained-llvm-shard-1   # one of four native slices
-.buck2/bin/buck2 test //:gate-link-hosts            # native-tests/link built here and on a pool worker, byte-compared
-python3 tools/buck2/conformance.py                # 31 component witnesses in four nonempty slices
-.buck2/bin/buck2 build --target-platforms //tools/buck2:release //:hirsel-conformance-bin-native
+.buck2/bin/buck2 build //:hirsel-toolchain --show-output   # the installation prefix
+.buck2/bin/buck2 test //:hirsel-core-syntax-unittest       # one crate's unit tests
+.buck2/bin/buck2 test -c hirsel.tests=focus //:hirsel-core-front-unittest -- --test-arg=tests::m1_program_manifest --test-arg=--exact
+.buck2/bin/buck2 test //:core-driver-native-openat2   # bodies that need the host's openat2, on this host
 python3 tools/buck2/sync.py --if-stale            # the generated build files, after any edit or rebase
-tools/land                                           # rebase, build, Clippy, fmt, push
+tools/affected                                    # every target the change can affect
+tools/land-run /tmp/<lane>-land.log               # rebase, check, push (docs/landing.md)
 ```
 
 [Landing and race retries](../../docs/landing.md) describes the exact-tree checks,
@@ -276,27 +263,11 @@ results, active body names and phase spans, then reaps only its owned descendant
 Descendants keep the executor's process group for memory enforcement. The
 pinned client's outer test timeout remains as described above.
 
-Heavy Buck2 commands run from this host and execute on the pool when one is
-configured. Native changes use a filtered campaign:
-
-```sh
-.buck2/bin/buck2 test //:gate-retained-llvm-shard-1 -- --test-arg=--filter --test-arg=SEM-1-unsigned-add-ok
-```
-
-Native tests receive LLVM 23.1.5, the link kit and glibc 2.28 floor runtime
-(`native-toolchain:kit`, `:glibc_floor`), Arm GNU 14.3.Rel1 with its Linux
-sysroot, static AArch64 qemu and Valgrind as SHA-pinned Buck2 downloads or
-builds from them. No worker
-image changes, PATH lookup or binfmt registration are needed. The launcher
-resolves `LLVM_SYS_231_PREFIX` and each variable of
-`native-toolchain/environment.tsv` (`HIRSEL_AARCH64_CC`, `HIRSEL_AARCH64_SYSROOT`,
-`HIRSEL_QEMU_AARCH64`, `HIRSEL_VALGRIND`, `VALGRIND_LIB`,
-`HIRSEL_VALGRIND_RUNTIME`, `HIRSEL_LINK_KIT`, `HIRSEL_GLIBC_FLOOR`: a path inside
-one toolchain) to absolute input paths before changing directory;
-The driver links with the input
-`ld.lld` and the link kit's line (`crates/hirsel-native/src/kit.rs`),
-never a compiler driver. Native launches preserve the selected
-Valgrind support directory when clearing the child's environment.
+Native tests receive LLVM 23.1.5, the Arm GNU 14.3.Rel1 Linux sysroot and static
+AArch64 qemu as SHA-pinned Buck2 downloads or builds from them. No worker image
+changes, PATH lookup or binfmt registration are needed. The launcher resolves
+`LLVM_SYS_231_PREFIX` and each variable of `native-toolchain/environment.tsv`
+(a path inside one toolchain) to absolute input paths before changing directory.
 
 The opt-in `//:hirsel-core-rt-aarch64-harness` builds a real ARM libtest
 executable. The ordinary runtime unittest harness intentionally remains x86.
@@ -307,12 +278,9 @@ runner without binfmt registration. The ARM C dependencies and linker use the
 pinned cross GCC sysroot; host tool dependencies remain x86. Real-file bodies
 execute their openat2 precondition and fail if it is unavailable.
 
-The full gate's runtime C harness, library C probes and LLVM pin check are
-`//:gate-native-runtime-c`, `//:gate-native-library-c` and
-`//:gate-native-toolchain-pin` under `-c hirsel.full=true`. They run on the
-pool too. Lean still runs on the invoking host. The standalone tool proof is
-`//tools/buck2/native-toolchain:proof`; see
-[the native toolchain](../native-toolchain/README.md).
+The LLVM pin check is `//:gate-native-toolchain-pin` under `-c hirsel.full=true`;
+the standalone tool proof is `//tools/buck2/native-toolchain:proof` (see
+[the native toolchain](../native-toolchain/README.md)).
 
 Target names follow Cargo's targets, all in the root package:
 
@@ -324,56 +292,8 @@ Target names follow Cargo's targets, all in the root package:
 | binary `<bin>` and its unit tests | `//:hirsel-x-bin-<bin>`, `//:hirsel-x-bin-<bin>-unittest` |
 | example `<ex>` | `//:hirsel-x-example-<ex>` |
 | build script | `//:hirsel-x-build-script` |
-| a sharded test binary (`SHARDED` in `sync.py`) | `//:hirsel-x-test-it-shard-<i>` |
-| a corpus campaign | `//:gate-<stage>` (label `gate`) |
-| a conformance shard (`CONFORMANCE_SHARDS`) | `//:gate-conformance-shard-<i>` |
-| a slice of the corpus cases a lane chose (`-c hirsel.conformance_paths`, up to `SELECTED_SLICES`; with `-c hirsel.conformance_paths_split=N` one slice's path-hash shard `i/N`, as `tools/corpus` runs it) | `//:gate-conformance-selected-shard-<i>` |
-| a slice of chosen corpus cases through the full native matrix (`-c hirsel.native_paths`, up to `NATIVE_SELECTED_SLICES`; `_split=S` gives case part `--case-part i/S`, `_parts=K` configuration part `--config-part j/K` of each case's pairwise cover, `_configs=a\|b` only those configurations of the whole matrix, `smoke` the per-push set, as `tools/corpus --native` runs it) | `//:gate-native-selected-shard-<i>` |
-
-| a native component witness slice | `//:gate-retained-{heap,llvm,cranelift}-shard-<1..4>` |
-| a named Rust witness slice | `//:<binary>-retained-<1..4>` |
-
-`python3 tools/buck2/full_gate_counts.py --retained` runs the retained matrix and
-requires all 75 named Rust bodies exactly once, all 31 reference programs and all
-36 native files on each engine. The four scalar PORT files are frozen source data.
-Protected V/depth fixtures remain with their deletion owners, outside this matrix.
-
-## Blessing expectations
-
-`tools/bless.sh <what>...` rewrites checked-in expectations from the code that
-derives them; `tools/bless.sh` with no argument lists every `<what>` and the
-files it writes. Review the diff it prints before committing.
-
-```sh
-tools/bless.sh heap                # native-tests/heap goldens
-tools/bless.sh layout rc-import    # several at once
-tools/bless.sh native-inventory    # registry-derived native declarations, including new ops
-tools/bless.sh all                 # every in-test bless
-```
-
-A test rewrites its expectation when it runs with `HIRSEL_BLESS=1` (insta
-snapshots: `INSTA_UPDATE=always`). The script runs those cases on this host
-(`-c hirsel.tests=host --env HIRSEL_BLESS=1`), where a test reads and writes
-the checkout through its relative `CARGO_MANIFEST_DIR`. It fails unless a
-case ran, then runs the same cases again without the bless, on the pool, which
-fails unless the rewritten files now pass. `exclusions` runs
-`native --full --bless` through `gate-native-full` with explicit host execution.
-
-`native-inventory` generates the table from the registry in the registry inventory
-test, which builds without runtime archives or std products. New operations and
-changed declaration digests can therefore be blessed before a native build.
-Ordinary native builds still reject missing or unreviewed declaration identities.
-
-A pool action reads a copy of the checkout that is discarded afterwards, so a
-bless there writes nothing that lasts: a read-only input fails with a bare
-`PermissionDenied` and a writable one passes. `test_launcher.sh` therefore
-refuses, with exit 2, a pool test run under `HIRSEL_BLESS`, a writing
-`INSTA_UPDATE` or `--bless`.
-
-A new expectation file gets its rewrite under `HIRSEL_BLESS` in the test that
-checks it, and a row in `tools/bless.sh`. A test whose expectation is compiled
-in with `include_str!` returns after writing, since it would compare against
-the old copy.
+| a host-routed openat2 suite | `//:<name>-openat2`, with `//:<name>-pool` for the rest |
+| a script check | `//:gate-<name>` or `//:test-<name>` |
 
 ## How the graph is made
 
@@ -391,8 +311,8 @@ the old copy.
 - A pool test's passing verdict is cached by its action key. Test binaries
   whose sources draw random cases (`proptest!`, `SEEDED` in `sync.py`) run
   under `PROPTEST_RNG_SEED` from `-c hirsel.test_seed` (default 1), which is in
-  that key: a cached pass covers its seed only. `tools/main-runs` draws a new
-  seed each run and prints it; `HIRSEL_TEST_SEED=<n>` reproduces one.
+  that key: a cached pass covers its seed only; `HIRSEL_TEST_SEED=<n>`
+  reproduces one.
 - `cargo_units.py` asks the pinned Cargo for unit-graph v1, without compiling,
   for each package's normal build and its package-local tests. Production
   receives only normal dependency features; tests receive their own declared
@@ -407,8 +327,8 @@ the old copy.
   first-party source inventory needs regeneration. The production feature
   audit admits no exceptions.
 - All first-party targets are in the root package, so a compile action's source
-  tree keeps repository paths and `include_str!("../../../conformance/x")`
-  works unchanged. A target's sources are its directory (`src/`, `tests/it/`,
+  tree keeps repository paths and `include_str!("../../../core/x")` works
+  unchanged. A target's sources are its directory (`src/`, `tests/it/`,
   ...) plus every file its literal `include*!` and `#[path]` references reach
   (and the files an `include_str!(concat!("<prefix>", $arg))` macro names
   through its file's string literals).
@@ -436,20 +356,10 @@ the old copy.
   quota or a smaller caller setting can reduce it; command-line
   `--test-threads` cannot exceed it. Pool actions require the explicit
   reservation, since their sandbox need not expose `cpu.max`.
-  It also runs one shard of a sharded binary,
-  by exact names: the cost table's rows go longest first to the least loaded
-  shard, and a case without a row to the shard its name hashes to, so a
-  case's shard never depends on which other cases exist. It asks the compiled harness to apply
-  caller filters, then applies sharding.
-  The `full_gate_ --ignored` group also emits the unpartitioned compiled case
-  inventory. `full_gate_counts.py --run <command...>` streams Buck2's log and
-  checks every `(binary, case)` appears exactly once, rejecting missing,
-  duplicate, failed or unexpected executions. Both full-gate crate stages in
-  `tools/main-runs` use it independently; `full_gate_counts.py <log>` checks a
-  saved log.
+  It asks the compiled harness to apply caller filters.
 - On the pool an action's work directory is a bind mount of a subdirectory.
   The runtime refuses to record there, since it cannot establish the mount's
-  source ancestry (`crates/hirsel-rt/src/host_paths.rs`), so the launcher puts
+  source ancestry, so the launcher puts
   `CARGO_TARGET_TMPDIR` and `TMPDIR` on the action's private `/dev/shm`.
 - First-party binaries carry an `$ORIGIN`-relative RPATH to
   `tools/buck2/toolchains/llvm-files/lib`, so a test's child processes find
@@ -467,42 +377,11 @@ Their unused Cargo rerun directives are discarded: those directives contain
 absolute action-sandbox paths and filesystem traversal order, so keeping them
 would change consumer input digests under an identical build-script action key.
 
-The runtime archive rule follows Buck2's `RustLinkInfo` native link graph and
-uses LLVM ar's MRI `ADDLIB` interface to include native dependency objects in
-each `libhirsel_rt.a`. This expands ring's thin C/assembly archives on both
-targets, so compiled Hirsel programs still link one self-contained runtime
-archive. `bundle_archive.py` preserves duplicate member names without extracting
-them into a shared directory.
-
-Each archive is also a named view, `//:hirsel-rt-archives[<arch>-<variant>]`
-(for example `x86_64-diagnostic+measurement`, `aarch64-default`), holding that
-archive, its `startup.order` and the triple's builtins. A test links only the
-views it declares: `RUNTIME_ARCHIVE_VIEWS` in `sync.py` lists them per test
-binary and gate, and generation fails when a native test binary has no entry or
-an entry names no binary. A view outside a test's list is absent from its
-`HIRSEL_RUNTIME_ARCHIVES` and fails as "no runtime archive <path>", so building
-one consumer never builds the other archives. The aggregate target still holds
-all of them for the workspace build and the toolchain bundles.
-
-Runtime packages also contain a generated `startup.order` for each target and
-feature set. `startup_order.py train` builds the serial and scoped-pool fixtures
-against the unprofiled x86_64 default archive, then ranks code and read-only
-symbols by first access in Lackey instruction/memory traces; `startup_order.py
-translate` resolves those host Rust names against each target archive in its own
-action, so one archive's order does not wait on the others. Section garbage
-collection is unchanged. The selected Link
-captures this file with its runtime inputs and hashes its contents into the build
-ID. Profile generation runs on the pool with four CPUs and 2 GiB, so the action
-cache shares one training per compiler and runtime between checkouts: the pool
-fixture admits four workers, though Valgrind serializes them onto about one core;
-no profile is checked in. The training stops at 600 s, so a stalled child cannot hold
-its pool slot. The fixtures' own functions never rank. The trained order depends on
-the host only through the runtime's CPU-set probe (9 of 1380 symbols differ between
-a pool worker and a workstation), so one shared training serves every checkout. On the serial
-fixture the order halves start-up page faults (128 to 68 minor faults) and
-whole-process instructions, and cuts task-clock from 0.83 to 0.51 ms.
-`test-native-startup-layout` exercises profile identity, both target CRTs and
-link replay after the original profile has been removed.
+`//:hirsel-core-rt-archives` builds the core runtime's static PIC archive for each
+target from Buck2's `RustLinkInfo` and strips its debug sections
+(`runtime_parts.py`), so compiled Hirsel programs link one self-contained
+`libhirsel_core_rt.a`. Its views `[x86_64]` and `[aarch64]` hold one archive each;
+the aggregate holds both for the workspace build and the toolchain bundle.
 
 ## Toolchains and execution
 
@@ -517,16 +396,15 @@ link replay after the original profile has been removed.
   CPU class)` budget, with a 1 CPU/1 GiB compile default, 1 CPU/512 MiB Clippy
   twins and measured test requests (below), carrying the pool's platform
   properties. Only the critical-path compiles named in `CPU_CLASSES`
-  (`action_sizes_from_log.py`), the std precheck (`PRECHECK_REQUEST`, 1 CPU
-  and 2 GiB) and the conformance shards ask for `cpu_class=fast`; other tests
+  (`action_sizes_from_log.py`) and the std precheck (`PRECHECK_REQUEST`, 1 CPU
+  and 2 GiB) ask for `cpu_class=fast`; other tests
   and gate shards run on any worker. Hirsel lanes queue remote compiles and
   tests at priority 50, below the pool's ordinary lane class (100), above
   its warming class (0), which gets no reserved worker. The scheduler merges
   identical actions at the first submitter's priority. `-c hirsel.priority=N`
   accepts 0-99, or exactly the land value defined in `priorities.bzl`.
   Only tools/land uses 150, so the serial batch every lane waits on queues
-  above ordinary lane work across projects. Main runs (tools/main-runs)
-  use 40, below the lanes. A test run carries its
+  above ordinary lane work across projects. A test run carries its
   own executor (`test_executor` in `platforms.bzl`): Buck2 runs tests with it,
   not with their platform's. The priority is not part of an action key. The
   platforms also include the invoking host for an explicit
@@ -535,8 +413,8 @@ link replay after the original profile has been removed.
 - Profiles (`profile.bzl`): the default target platform is
   `//tools/buck2:checked`, `[profile.checked]`: release O3 with debug
   assertions and overflow checks. Every first-party library and binary, test
-  harnesses and the executables they launch (`CARGO_BIN_EXE` subprocesses,
-  conformance, agreement and native compiler runners) build once in it, so
+  harnesses and the executables they launch (`CARGO_BIN_EXE` subprocesses)
+  build once in it, so
   the land's workspace build and the tests share every action. Integration
   test crates (`tests/`) compile their own code at opt-level 0 over O3
   libraries (`_test_crate_flags` in defs.bzl); unit test crates are the
@@ -552,108 +430,13 @@ link replay after the original profile has been removed.
   Canonicalizing test harnesses on entry also keeps the workspace build and
   tests from compiling the same harness under different reservations.
 
-## Cost-balanced test shards
+## Test shards and exact CPU widths
 
-`hirsel-cli-test-examples` and `hirsel-cli-test-free` use one shard per
-declared test case (`CASE_SHARDED` in `sync.py`), including ignored native
-cases. A Free replay matrix case needs most of one action's 600 s limit, and
-its one-permit cells must not share a CPU with a co-scheduled case. The existing launcher deals
-these equal-cost cases by name, preserving compiled test identities and exact
-filters; run an exact example with `tools/test-filter //:hirsel-cli-test-examples -- NAME --exact`.
-Rerun `sync.py` after adding or removing an example test.
-Each shard uses the examples binary's own measured request in `test_sizes.bzl`.
-Its reservation is independent of CLI integration tests, whose concurrency and
-memory needs differ.
-The gate selects every shard, so independent examples can run in parallel without
-one long action holding the whole examples suite's reservation.
-
-A binary in `SHARDED` (`sync.py`) has a table of measured seconds per case,
-`test-costs/<binary>.tsv`. `sync.py` gives it `ceil(total / (cpu_count *
-SHARD_SECONDS))` shards using its pool grant from `test-sizes.json`, and `test_launcher.sh` deals the table's rows
-longest first to the least loaded shard and a listed case without a row by a
-hash of its name. A case's shard is a function of the table and its name, so
-`tools/consumers` maps changed cases to shards without building a harness. After tests are added, slowed or sped up, re-measure every
-shard of the binary with libtest's timing report and regenerate:
-
-```sh
-.buck2/bin/buck2 test //:hirsel-driver-test-it-stdlib-shard-1 ... -- --env RUSTC_BOOTSTRAP=1 \
-  --test-arg=-Zunstable-options --test-arg=--report-time > /tmp/costs.log 2>&1
-python3 tools/buck2/test_costs.py /tmp/costs.log   # writes the tables, prints walls and slowest cases
-python3 tools/buck2/sync.py
-```
-
-Shard flags partition cases; positional filters intersect that partition.
-A filtered run keeps each measured case on its ordinary owning shard.
-
-`ISOLATED_TEST_CASES` in `test_requirements.bzl` gives an indivisible slow body
-its own `<binary>-isolated-<n>` target with the binary's existing resource request
-and deadline. The launcher removes it after ordinary cost assignment, preserving
-every other partition. Explicit body filters run on their owning shards. Main's
-test query includes the dedicated targets, and full-gate selection cannot make
-one of them execute other bodies. The URI file vectors use this partition to
-avoid spending the stdlib aggregate's deadline on repeated checked executions.
-
-After regenerating stale build files, `sync.py --check` lists each cost-balanced
-binary's unsharded `-inventory` target on the pool, including ignored and
-macro-generated cases, without running test bodies. It fails if more than 5% of the driver's cases have no
-cost row, or if listing fails. The stdlib, front, rc and rt binaries warn at
-the same threshold until real gate results refresh their stale tables; no extra
-measurement campaigns run for them. Stale rows do not contribute to coverage. Prepare the worktree first;
-the listing can build changed harnesses. Measure costs before regenerating the
-graph so `test_costs.py` can recognize a complete set of the old shards and
-remove deleted cases.
-
-Each gate appends every Buck2 TestResult to
-`~/.cache/hirsel-buck2/test-results.tsv`: `gate`, `target`, `shard`,
-`duration_seconds`, `date` (UTC), and `status` (Buck2's numeric status).
-The gate identifier is its unique event-log filename without `.pb.zst`.
-Unsharded targets have an empty shard. This compact file survives the compressed
-event logs' three-day rotation. The host selects the sink with
-`HIRSEL_TEST_HISTORY=/path/to/results.tsv`, or disables it with
-`HIRSEL_TEST_HISTORY=none`. The default file implementation locks concurrent
-appends and flushes on close; it does not fsync each row. Tests can inject a
-simulated sink into `event_logs.test_results`.
-
-Cost-balanced binaries emit libtest's per-case `--report-time` output in normal
-gates, including when their current graph needs only one shard. The launcher
-enables the pinned harness's unstable timing option through `RUSTC_BOOTSTRAP=1`.
-The TSV's additional `case_costs` column holds a JSON object of successful case
-names to seconds (empty for results without timings). Refresh a table from real
-gates without another measurement run:
-
-```sh
-python3 tools/buck2/test_costs.py --from-history --binary hirsel-rt-test-it
-python3 tools/buck2/sync.py
-```
-
-`--binary all` merges every cost-balanced binary; `--since` restricts the
-history and `--report-only` leaves tables untouched. The newest observation of
-each successful case wins; unobserved cases retain their existing cost. Historical
-rows without per-case timings cannot supply missing costs.
-
-For a cheap report-time overhead probe, compile the existing profile harness
-and run its single assertion case, interleaving the command below with the same
-command plus `-Zunstable-options --report-time`. Use ten seeded pairs, hold
-`cpu31-timing.lock` for the session, and record CPU 15's busy share from
-`/proc/stat` around every sample:
-
-```sh
-tools/capped tools/buck2/toolchains/rust-files/bin/rustc --test tools/tests/test_tool_profile.rs -o /tmp/report-time-probe
-tools/capped env RUSTC_BOOTSTRAP=1 taskset -c 31 perf stat -e cycles,instructions,task-clock \
-  /tmp/report-time-probe debug_assertions_are_enabled --exact
-```
-
-Report shard medians and maxima over at least five distinct gates per shard:
-
-```sh
-python3 tools/buck2/test_costs.py --history --since 2026-10-19T20:00:00+00:00
-```
-
-Use `--history /path/to/results.tsv` for another file, `--binary <target>` for
-another binary, or `--min-gates 1` to inspect early data. The report prints
-partial data but exits unsuccessfully until every observed shard has enough
-gates. Gate durations describe pool experience; they are not a cross-session
-performance verdict. Keep before/after histories separate when shard counts change.
+`sync.py` can split a binary (`SHARDED`, by a measured cost table under
+`test-costs/`) or give one shard per declared case (`CASE_SHARDED`), and
+`test_requirements.bzl` can declare exact CPU widths per binary or case
+(`EXACT_TEST_CPUS`, `EXACT_CASE_CPUS`). All four tables are empty: every test
+binary runs as one target with its measured request.
 
 ## Prelude overlay
 
@@ -725,18 +508,14 @@ operation) and the workers' `kiln-executor` journal lines for memory kills:
 ```sh
 python3 tools/buck2/test_sizes_from_usage.py --usage /tmp/usage-*.log \
   --pss /tmp/trace-*.jsonl --kills /tmp/kills.txt
-# Refresh only full native stages, preserving the other measured requests:
-python3 tools/buck2/test_sizes_from_usage.py --native-stages \
-  --usage /tmp/usage-*.log --pss /tmp/trace-*.jsonl --kills /tmp/kills.txt
 # Refresh selected binaries without discarding other measurements:
-python3 tools/buck2/test_sizes_from_usage.py --only hirsel-cli-test-cli \
+python3 tools/buck2/test_sizes_from_usage.py --only hirsel-core-driver-unittest \
   --usage /tmp/usage-*.log --pss /tmp/trace-*.jsonl
 ```
 
 A request is part of the test's action key: resizing reruns those tests once.
-The gate selects the resized binaries directly, and the bounded campaigns whose
-requests changed. Evidence-only changes run tool checks. Full-only stages run
-in main's hourly run; a reservation update never starts a full native campaign.
+The resized binaries' consumers select them directly; evidence-only changes run
+tool checks.
 
 `pool_usage.py` reports, read-only from the same trace and usage rows, the
 pool's reserved CPU-hours by repository and hirsel's reserved against used
@@ -744,7 +523,7 @@ CPU-hours and GiB-hours per lane and target over the last N hours.
 
 It also sums execution wall seconds and CPU seconds per action category,
 excluding queue time. For rustc compile/link phases and target names, it joins
-the shared retained Buck2 event logs. `tools/land` and `tools/main-runs` retain their
+the shared retained Buck2 event logs. `tools/land` retains its
 compressed `.pb.zst` logs, including failed runs, under
 `$HIRSEL_BUCK2_LOG_DIR` (default `~/.cache/hirsel-buck2/event-logs`, shared across
 worktrees). The full suite's helpers use the same recorder. Rotation keeps at
@@ -812,102 +591,9 @@ already queued at 50 keeps 50 when land joins it; new land digests queue at
 150, without preempting running work. Dependency
 symlink trees are assembled in the daemon by the pinned prelude overlay,
 without remote compile-sized helper actions. Clippy twins share ordinary
-dependencies. The fast main run builds the same bounded workspace build set
-as land, then builds test harnesses in its test stage; it does not build full
-campaign dependencies through the root wildcard. Its pool priority remains 40.
+dependencies.
 
 `clippy.py` builds each target's Clippy twin `<name>-clippy`: the same rule on
 its measured single-CPU platform, declared only under `-c hirsel.clippy=true`, so
 Clippy never reserves a compile's request and `buck2 build //:` never
 compiles the twins.
-
-The temporary native selection names the same 36 component files on the heap,
-LLVM and Cranelift. Each engine has four nonempty slices, using the existing path
-hash. These use the default x86-64 configuration; dedicated named Rust tests
-retain their own target, link, replay and fault-injection matrices. The retired
-corpus's mutation, history, topology and broad qualification campaigns are gone.
-
-`native-tests/regressions/native-selection.json` names the retained files.
-On-demand observation collection uses four slices. The ordinary component gate
-reads the named file list directly and does not derive a new cover.
-
-Native program selections use measured per-case costs from
-`tools/buck2/test-costs/gate-native-{changed,cranelift-changed}.tsv`.
-`python3 tools/buck2/native.py <ID>...` packs the slower backend's cost into 600-second slices; programs
-without a measurement, or above that budget, run alone. Both backends run
-every slice in separate pool actions. The helper uses exact `--case` IDs; the
-CLI's `--filter` continues to match substrings. Each selected smoke or parity case runs
-in a fresh process within its action, releasing compiler and interpreter
-state before that worker takes another case. The existing memory cap and shared outer test bound still apply.
-
-Workers print `native case program seconds peak_RSS_KiB`.
-Import a Buck2 log with `python3 tools/buck2/test_costs.py <log>`, or refresh
-from test history with `--from-history <history> --binary gate-native-changed`
-(and `gate-native-cranelift-changed`). Partial selections retain timings for
-unobserved programs. The times guide scheduling; they are not cross-session
-performance comparisons.
-
-## Real I/O ThreadSanitizer control
-
-The opt-in `thread` platform instruments the runtime and its Rust dependencies,
-using an instrumented std built by the exact compiler in `toolchain-lock.json`.
-Prepare std in this checkout, then run the eight-worker control on the pool:
-
-```sh
-HIRSEL_MEMORY_LIMIT=2G HIRSEL_JOBS=2 tools/capped python3 tools/buck2/prepare_tsan.py
-.buck2/bin/buck2 test -c hirsel.sanitizer=thread --target-platforms //tools/buck2:thread //:gate-io-real-tsan
-.buck2/bin/buck2 test -c hirsel.sanitizer=thread --target-platforms //tools/buck2:thread //:gate-cpu-pool-tsan
-```
-
-Proc macros and build scripts keep the ordinary host toolchain. The generated
-`tools/buck2/toolchains/tsan-files/` is private to this checkout and never committed.
-The sanitizer child's address-space guard is lifted for shadow mappings; its
-normal pool RSS reservation still applies. The control refuses an uninstrumented
-binary. `//:io-real-workers` is also a small file-I/O probe: arguments are worker
-count (1/2/4/8) and writes per file (default 16, 64 KiB each, eight files total).
-The CPU control runs the existing scoped-pool unit and race cases with fiber
-annotations. It requires a conflicting-access positive control and executed
-fiber switches under Free and Ordered. This does not instrument emitted mapper
-instructions or certify either native emitter.
-
-`test_requirements.bzl` declares exact CPU counts for harnesses whose assertions
-need a physical width. These override measured CPUs and the focus clamp while
-keeping measured memory and CPU class. The run's executor sends `cpu_count=N`,
-`exact_cpus=N` and `cpu_affinity=exact-v1`. The scheduler must declare the last
-property exact, and only upgraded Kiln workers advertise it. The launcher checks
-that inherited affinity has N CPUs and the visible quota permits N; it refuses
-a narrower grant rather than silently running fewer workers. Ordinary targets
-continue using measured sizing. No runtime worker/topology override is involved.
-
-A width is declared per binary (`EXACT_TEST_CPUS`) or, where only some cases
-need it, per case (`EXACT_CASE_CPUS`, never both). sync.py groups a binary's
-declared cases by width: each width N gets its own exact shards
-`<binary>-cpus-<N>-shard-<i>`, sized from those cases' costs at 40 seconds per
-CPU, and the binary's measured shards deal only its undeclared cases. Every
-action of such a binary carries the table (`HIRSEL_TEST_CASE_CPUS`), and the
-launcher refuses any selection, sharded, filtered or dedicated, that contains
-a case declaring more CPUs than the action holds. The sizing generator counts
-the width groups' runs toward the binary's memory but not its measured CPUs.
-In `hirsel-cli-test-cli` the declared cases are those that run `tools/capped`
-under `HIRSEL_JOBS=4`, prove a placement or assert an effective width of four.
-
-Native CPU pool TSan qualification uses the same W4/W8 physical pool fixtures,
-with instrumented emitted instructions on both backends and a separately
-instrumented runtime, std and fiber annotations. The compiler keeps its normal
-allocator. Prepare the private TSan std as above, then run:
-
-```sh
-.buck2/bin/buck2 test -c hirsel.native_tsan=true //:hirsel-llvm-unittest //:hirsel-cranelift-unittest -- --test-arg=native_tsan
-.buck2/bin/buck2 test -c hirsel.native_tsan=true //:gate-cpu-pool-native-tsan-8
-```
-
-LLVM runs its ThreadSanitizer pass after optimization and runtime fast-path
-expansion. Cranelift annotates each lowered memory access with its actual byte
-range, including narrowed loads/stores and negative offsets, and refuses
-uncovered memory instructions. The emitter controls call the generated code
-from an unsanitized C harness: disjoint cells pass; shared cells must exit 66
-with a race report. These controls do not substitute for a production job-claim
-mutant. Instrumented pool fixtures use 3,000,000 loop iterations and retain the
-same switch-free overlap assertion and probe cap. The x86 fiber switch annotates both ordinary fibers and naked CPU ahead
-handoffs; only CPU ahead certificates are enabled in this sanitizer mode.
-Each policy/emitter pool cell must independently establish overlap.

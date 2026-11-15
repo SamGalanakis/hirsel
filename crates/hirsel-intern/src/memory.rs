@@ -1,4 +1,4 @@
-//! Heap accounting for `--mem-usage` (docs/building.md, "Compile timings").
+//! Heap accounting.
 //! A binary installs a meter that reads its allocator's live heap bytes;
 //! without one, [`metered`] is false and nothing is recorded. Each record
 //! names what holds the bytes: the net bytes a load kept ([`retained`]) or

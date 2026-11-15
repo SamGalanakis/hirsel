@@ -231,6 +231,14 @@ def main():
                         # The granted directory is the one the program reads.
                         invoke('run', str(app), *flags, '--dir', str(work / 'empty'), expected=3)
                         invoke('test', str(app), *flags, '--limit', '67108864')
+                # Another target links through the cross C driver it names, with
+                # the prefix's own ld.lld: never one that driver finds on PATH.
+                arm = Path(os.environ['HIRSEL_TOOLCHAIN_ARM']).resolve()
+                cross = Path(os.environ['HIRSEL_CORE_RT_ARCHIVES']).resolve() / 'aarch64-unknown-linux-gnu/libhirsel_core_rt.a'
+                invoke('std-product', '--install', str(root), '--runtime', str(cross), '--target', 'aarch64-unknown-linux-gnu')
+                self.assertTrue(json.loads(invoke('build', str(app), '--release', '--target', 'aarch64-unknown-linux-gnu',
+                                                  '--cc', str(arm / 'bin/aarch64-none-linux-gnu-gcc'),
+                                                  '-o', str(work / 'program-aarch64'), '--json').stdout)['native']['linked'])
                 self.assertFalse(found.exists(), found.read_text() if found.exists() else '')
                 linker = root / 'bin' / 'ld.lld'
                 linker.unlink()

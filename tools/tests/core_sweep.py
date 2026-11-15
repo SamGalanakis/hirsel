@@ -27,6 +27,11 @@ class Sweep(unittest.TestCase):
         self.assertEqual(SWEEP['bodies'](RUST), 1)
         self.assertEqual(SWEEP['bodies'](PYTHON, python=True), 72)
 
+    def test_script_gates_count_their_printed_bodies(self):
+        # m2b-host printed 31 passed workloads and the sweep counted none.
+        self.assertEqual(SWEEP['bodies']('m2b: 31 passed, 0 expected red, 0 failed\n'), 31)
+        self.assertEqual(SWEEP['bodies']('native laws: 578 passed, 0 failed\nRan 1 test in 9.0s\nOK\n', python=True), 578)
+
     def test_arm_observations_count_only_the_completed_outer_sweep(self):
         self.assertEqual(SWEEP['bodies']('AARCH64_EXECUTED 40\n'), 40)
         self.assertEqual(SWEEP['bodies']('AARCH64_EXECUTED 0\n'), 0)

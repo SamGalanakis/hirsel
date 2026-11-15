@@ -457,10 +457,34 @@ fn find_llvm_library(cc: &Path) -> Option<PathBuf> {
         })
 }
 
+/// An installed compiler's own link editor. A recipe captured through a C
+/// driver handed to it with `--cc` links with that ld.lld, never with one the
+/// driver finds on PATH.
+fn installed_linker() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let installed = crate::installation::Installed::discover(&executable).ok()??;
+    Some(installed.root.join(INSTALLED_LINKER)).filter(|linker| linker.is_file())
+}
+
 fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkRecipe> {
     let driver = cc.to_owned();
     let directory = recipe_directory(&driver)?;
-    let driver_key = driver_file_key(&driver)?;
+    let installed_linker = installed_linker();
+    // The prefix's link editor is part of the recipe's key: a recipe captured
+    // outside an installation is never reused inside one, or from a moved one.
+    let driver_key = match &installed_linker {
+        None => driver_file_key(&driver)?,
+        Some(linker) => {
+            let hash = ContentHash::of_parts(
+                "hirsel.link-driver-installed.v1",
+                [
+                    driver_file_key(&driver)?.as_bytes(),
+                    crate::encode(linker)?.as_slice(),
+                ],
+            );
+            hash.0.iter().map(|b| format!("{b:02x}")).collect()
+        }
+    };
     let path = directory.join(format!("{target}-{driver_key}.json"));
     if !force
         && let Ok(bytes) = std::fs::read(&path)
@@ -588,10 +612,15 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
             }
         }
         argv = filtered;
-        link_tools(cc)?.1.path
+        match installed_linker {
+            Some(linker) => linker,
+            None => link_tools(cc)?.1.path,
+        }
     } else {
         let linker = PathBuf::from(argv.remove(0));
-        if linker.is_file() {
+        if let Some(installed) = installed_linker {
+            installed
+        } else if linker.is_file() {
             linker
         } else if linker.is_absolute() || linker.components().count() > 1 {
             return Err(io::Error::other(format!(

@@ -1,6 +1,0 @@
-# The two-host link gate program set: source or manifest, target and profile.
-# Checkout, native cache and scratch roots differ between hosts for every row.
-native-tests/link/hello.hir x86_64-linux default
-native-tests/link/hello.hir x86_64-linux debug
-native-tests/link/hello.hir aarch64-linux default
-native-tests/link/hello.hir aarch64-linux debug

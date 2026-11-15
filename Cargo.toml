@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "proofs/free/loom", "proofs/heaps/loom"]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,36 +17,17 @@ split-debuginfo = "unpacked"
 [profile.dev.package."*"]
 opt-level = 1
 
-# Crates whose dev opt-level 1 saves more test seconds per run than it adds
-# compile seconds per edit, each measured: the shared data crates, the IR checker, and the native
-# pipeline's contract, LIR and RC crates. Debug assertions and overflow checks
-# stay on. There is no workspace-wide opt-level 1.
+# Workspace crates whose dev opt-level 1 saves more test seconds per run than it adds
+# compile seconds per edit, each measured: the shared data crates. Debug assertions and
+# overflow checks stay on. There is no workspace-wide opt-level 1.
 [profile.dev.package.hirsel-graph]
 opt-level = 1
 [profile.dev.package.hirsel-span]
 opt-level = 1
 [profile.dev.package.hirsel-intern]
 opt-level = 1
-[profile.dev.package.hirsel-diag]
-opt-level = 1
-[profile.dev.package.hirsel-syntax]
-opt-level = 1
-[profile.dev.package.hirsel-types]
-opt-level = 1
-[profile.dev.package.hirsel-type-analysis]
-opt-level = 1
-[profile.dev.package.hirsel-tir]
-opt-level = 1
-[profile.dev.package.hirsel-validate]
-opt-level = 1
-[profile.dev.package.hirsel-core-contract]
-opt-level = 1
-[profile.dev.package.hirsel-lir]
-opt-level = 1
-[profile.dev.package.hirsel-rc]
-opt-level = 1
 
-# Compiler tools used by Buck2 tests and the std precheck. Keep the oracles'
+# Compiler tools used by Buck2 tests. Keep the oracles'
 # debug assertions and integer overflow checks while optimizing the compiler.
 [profile.checked]
 inherits = "release"

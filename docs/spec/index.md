@@ -106,7 +106,5 @@ the comment says.
 
 ## Status
 
-This is the specification of the v1 core language. The compiler and the conformance
-corpus are being moved to it; until they are, the implementation follows the previous
-specification, which is kept unchanged as test data of the old corpus. That copy is
-deleted with the old corpus at M3.
+This is the specification of the v1 core language, which the `hirsel` compiler
+implements. The previous specification and its corpus were deleted at M3.

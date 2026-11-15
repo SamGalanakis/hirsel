@@ -3,7 +3,7 @@
 //! encoding of the component with de Bruijn back-references. Keys depend only
 //! on each node's local content and its edges in successor order, never on
 //! node identities, the order of `nodes` or the order of discovery.
-use hirsel_syntax::ContentHash;
+use hirsel_core_ids::ContentHash;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::Hash;
 

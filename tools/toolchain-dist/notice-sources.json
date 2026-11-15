@@ -1,21 +1,21 @@
 {
   "schema": 1,
-  "root": "root//:hirsel-cli-bin-hirsel",
-  "scope": "Standard Linux release bundle: compiler link inputs (Rust and bundled C/assembly, before dead-code elimination), Rust standard library, std sources and ordinary query products. Build scripts and proc-macro executables are build tools, not linked libraries. Upstream library notices can conservatively cover other targets.",
+  "root": "root//:hirsel-core-driver-bin-hirsel",
+  "scope": "Linux installation prefix (//:hirsel-toolchain): compiler link inputs (Rust and bundled C/assembly, before dead-code elimination), Rust standard library, core packages and runtimes. Build scripts and proc-macro executables are build tools, not linked libraries. Upstream library notices can conservatively cover other targets.",
   "bundle_entries": [
     "hirsel",
-    "hirsel-std.products",
-    "stdlib"
+    "hirsel-core-toolchain.json",
+    "core-packages",
+    "runtime",
+    "link",
+    "lib",
+    "bin"
   ],
   "rust_lock": "tools/buck2/toolchain-lock.json",
   "rust_tree": "tools/buck2/toolchains/rust-files",
   "adapted_source_notices": [
     "third-party/NOTICES.md",
     "third-party/LICENSE.crc32c",
-    "native-tests/library/vectors/LICENSE.cpython",
-    "native-tests/library/vectors/LICENSE.wycheproof",
-    "native-tests/library/vectors/LICENSE.xsum",
-    "native-tests/library/vectors/dectest/CPYTHON-LICENSE.txt",
     "docs/json-merge-patch-LICENSE-MIT.txt"
   ],
   "required_texts": {
@@ -34,24 +34,8 @@
   },
   "external": [
     {
-      "component": "LLVM 23.1.5 and its shared-library dependencies",
-      "status": "Required externally; not copied by hirsel-toolchain. Native --unpack retains Debian usr/share/doc/*/copyright.",
-      "pins": [
-        "tools/native-toolchain/llvm-23.lock",
-        "tools/buck2/llvm-runtime-lock.json"
-      ]
-    },
-    {
-      "component": "Native runtime archives and link kit (glibc startup and static archives, LLVM libunwind and compiler-rt)",
-      "status": "Selected through HIRSEL_RUNTIME_ARCHIVES and HIRSEL_LINK_KIT; not copied by hirsel-toolchain. Adding these to the release bundle requires extending this inventory; unexpected top-level bundle entries are refused.",
-      "pins": [
-        "Cargo.lock",
-        "tools/native-toolchain/native.lock.json"
-      ]
-    },
-    {
-      "component": "Host loader, libc, libm, libgcc_s and other DT_NEEDED libraries",
-      "status": "System dependencies, not copied into the standard bundle."
+      "component": "Host loader, libc, libm, libgcc_s and other DT_NEEDED libraries outside lib/",
+      "status": "System dependencies, not copied into the installation."
     }
   ],
   "archive_omissions": {
@@ -79,5 +63,9 @@
       "upstream": "https://github.com/bytecodealliance/wasmtime/blob/f96eabaa11a06086e4fb779ed1c1688481067ab9/LICENSE",
       "reason": "Published archive omits license text; upstream root license is identical to the same-revision locked donor archive text."
     }
+  },
+  "uncollected_entries": {
+    "lib": "libLLVM and the shared libraries it loads (z3, ICU, libxml2, libffi, libedit, libbsd, zlib, zstd), copied from the pinned Debian packages (tools/native-toolchain/llvm-23.lock, tools/buck2/llvm-runtime-lock.json); their Debian copyright files are not yet collected.",
+    "bin": "bin/ld.lld, the static PIE tools/native-toolchain/build-static-lld makes (llvm-23.lock static_lld); its LLVM and statically linked C library notices are not yet collected."
   }
 }

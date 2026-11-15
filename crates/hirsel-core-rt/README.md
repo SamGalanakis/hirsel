@@ -126,7 +126,7 @@ executes stackful tasks on one worker, switches only at blocking operations or
 explicit checkpoints, and records completed events through SchedulerProvider.
 All root and child stacks have a guard and page-probed language frames. The
 OS adapter runs non-suspending libc calls on a separate guarded host stack.
-The common register switch lives in hirsel-stack and also serves hirsel-rt.
+The common register switch lives in hirsel-stack.
 
 The cross-task memory hooks live in abi_tasks.rs. Task end forwards surviving funding
 to the parent. Cross-task refunds publish one event and enter prepaid pending slots, which

@@ -1,5 +1,4 @@
-//! Direct emission of CoreIR functions, failure edges and storage recipes. No old lowered program,
-//! staging, manifest or receipt participates in this entry point.
+//! Direct emission of CoreIR functions, failure edges and storage recipes.
 
 /// Frozen native memory layout, shared with hirsel-core-rt.
 pub mod memory_layout {

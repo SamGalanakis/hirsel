@@ -3,15 +3,6 @@
 version = 4
 
 [[package]]
-name = "aho-corasick"
-version = "1.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -34,22 +25,6 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
-
-[[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
-name = "base64-simd"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "339abbe78e73178762e23bea9dfd08e697eb3f3301cd4be981c0f78ba5859195"
-dependencies = [
- "outref",
- "vsimd",
-]
 
 [[package]]
 name = "bincode"
@@ -114,17 +89,6 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
-
-[[package]]
-name = "console"
-version = "0.16.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e96a4956774c13c126a8b5af4daa79384f4d826534c95a02d76afb39e2ab64e3"
-dependencies = [
- "encode_unicode",
- "libc",
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "cpufeatures"
@@ -327,12 +291,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
-
-[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -355,16 +313,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "filetime"
-version = "0.2.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
-dependencies = [
- "cfg-if",
- "libc",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -381,21 +329,6 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-
-[[package]]
-name = "generator"
-version = "0.8.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54ade96dc9003043bce7c035c85a9df5a858bfb2039c5a2e6fdf00f324f6c551"
-dependencies = [
- "cc",
- "cfg-if",
- "libc",
- "log",
- "rustversion",
- "windows-link",
- "windows-result",
-]
 
 [[package]]
 name = "generic-array"
@@ -465,7 +398,6 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
- "allocator-api2",
  "foldhash",
 ]
 
@@ -476,166 +408,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hirsel-analysis-canary"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-proof-export",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
-]
-
-[[package]]
 name = "hirsel-artifact-store"
 version = "0.1.0"
 dependencies = [
- "bincode",
  "crc32c",
+ "hirsel-core-ids",
  "hirsel-guard",
- "hirsel-syntax",
  "libc",
  "serde",
  "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-authority"
-version = "0.1.0"
-dependencies = [
- "hirsel-check",
- "hirsel-check-protocol",
- "hirsel-diag",
- "hirsel-engine",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-lexer",
- "hirsel-modes",
- "hirsel-ownership",
- "hirsel-parser",
- "hirsel-registry",
- "hirsel-resolve",
- "hirsel-signature",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-type-analysis",
- "hirsel-types",
- "proptest",
-]
-
-[[package]]
-name = "hirsel-candidate"
-version = "0.1.0"
-dependencies = [
- "hirsel-compiler-identity",
- "hirsel-diag",
- "hirsel-driver",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-store",
- "hirsel-front-phases",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-query-products",
- "hirsel-requests",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "object",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-check"
-version = "0.1.0"
-dependencies = [
- "hirsel-check-protocol",
- "hirsel-diag",
- "hirsel-engine",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-lexer",
- "hirsel-parser",
- "hirsel-registry",
- "hirsel-resolve",
- "hirsel-signature",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-type-analysis",
- "hirsel-types",
- "proptest",
-]
-
-[[package]]
-name = "hirsel-check-protocol"
-version = "0.1.0"
-dependencies = [
- "hirsel-intern",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-types",
- "serde",
-]
-
-[[package]]
-name = "hirsel-cli"
-version = "0.1.0"
-dependencies = [
- "hirsel-candidate",
- "hirsel-cli-args",
- "hirsel-compiler-identity",
- "hirsel-diag",
- "hirsel-driver",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-free",
- "hirsel-front-phases",
- "hirsel-guard",
- "hirsel-host-io",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-native",
- "hirsel-native-queries",
- "hirsel-native-testing",
- "hirsel-observation-view",
- "hirsel-project-info",
- "hirsel-query-products",
- "hirsel-requests",
- "hirsel-rt",
- "hirsel-run-config",
- "hirsel-run-schema",
- "libc",
- "mimalloc",
- "rustls",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-cli-args"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "lexopt",
-]
-
-[[package]]
-name = "hirsel-code-store"
-version = "0.1.0"
-dependencies = [
- "hirsel-codec",
- "hirsel-guard",
- "hirsel-object-storage",
- "hirsel-proof-export",
- "hirsel-syntax",
- "ring",
- "serde_json",
  "tempfile",
 ]
 
@@ -645,52 +426,6 @@ version = "0.1.0"
 dependencies = [
  "hirsel-core-ids",
  "hirsel-guard",
-]
-
-[[package]]
-name = "hirsel-compiler-identity"
-version = "0.1.0"
-dependencies = [
- "sha2",
-]
-
-[[package]]
-name = "hirsel-conformance"
-version = "0.1.0"
-dependencies = [
- "hirsel-candidate",
- "hirsel-cli-args",
- "hirsel-compiler-identity",
- "hirsel-diag",
- "hirsel-driver",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-store",
- "hirsel-front-phases",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-native",
- "hirsel-native-queries",
- "hirsel-native-testing",
- "hirsel-proof-export",
- "hirsel-query-products",
- "hirsel-requests",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-types",
- "serde_json",
-]
-
-[[package]]
-name = "hirsel-core-contract"
-version = "0.1.0"
-dependencies = [
- "hirsel-codec",
- "hirsel-guard",
- "hirsel-syntax",
 ]
 
 [[package]]
@@ -849,236 +584,22 @@ dependencies = [
  "cranelift-module",
  "cranelift-object",
  "gimli",
- "hirsel-core-contract",
  "hirsel-core-front",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
  "hirsel-core-resolve",
  "hirsel-core-syntax",
- "hirsel-graph",
  "hirsel-guard",
  "hirsel-intern",
- "hirsel-lir",
- "hirsel-syntax",
-]
-
-[[package]]
-name = "hirsel-diag"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-span",
- "serde",
- "serde_json",
- "unicode-width",
-]
-
-[[package]]
-name = "hirsel-driver"
-version = "0.1.0"
-dependencies = [
- "base64",
- "bincode",
- "hirsel-artifact-store",
- "hirsel-candidate",
- "hirsel-check",
- "hirsel-check-protocol",
- "hirsel-code-store",
- "hirsel-codec",
- "hirsel-compiler-identity",
- "hirsel-core-contract",
- "hirsel-cranelift",
- "hirsel-diag",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-free",
- "hirsel-front-phases",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-heapcheck",
- "hirsel-host-io",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-layout",
- "hirsel-lexer",
- "hirsel-lir",
- "hirsel-llvm",
- "hirsel-lower",
- "hirsel-native",
- "hirsel-native-cache",
- "hirsel-native-queries",
- "hirsel-native-testing",
- "hirsel-parser",
- "hirsel-project-info",
- "hirsel-proof-export",
- "hirsel-query-products",
- "hirsel-rc",
- "hirsel-registry",
- "hirsel-requests",
- "hirsel-resolve",
- "hirsel-rt",
- "hirsel-rt-operations",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-signature",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "hirsel-validate",
- "libc",
- "object",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-engine"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "hirsel-artifact-store",
- "hirsel-check-protocol",
- "hirsel-diag",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-fmt",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-lexer",
- "hirsel-parser",
- "hirsel-product-codec",
- "hirsel-proof-export",
- "hirsel-query-products",
- "hirsel-registry",
- "hirsel-resolve",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "hirsel-validate",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-engine-admission"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-syntax",
- "hirsel-types",
-]
-
-[[package]]
-name = "hirsel-engine-runtime"
-version = "0.1.0"
-dependencies = [
- "hirsel-artifact-store",
- "hirsel-engine-admission",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-syntax",
- "libc",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "hirsel-engine-store"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "hirsel-artifact-store",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-product-codec",
- "hirsel-query-products",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "hirsel-validate",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-fmt"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-lexer",
- "hirsel-parser",
- "hirsel-span",
- "hirsel-syntax",
-]
-
-[[package]]
-name = "hirsel-free"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
-]
-
-[[package]]
-name = "hirsel-free-loom"
-version = "0.0.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-run-schema",
- "loom",
-]
-
-[[package]]
-name = "hirsel-front-phases"
-version = "0.1.0"
-dependencies = [
- "hirsel-authority",
- "hirsel-check",
- "hirsel-check-protocol",
- "hirsel-compiler-identity",
- "hirsel-diag",
- "hirsel-engine",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-lower",
- "hirsel-ownership",
- "hirsel-query-products",
- "hirsel-signature",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
 ]
 
 [[package]]
 name = "hirsel-graph"
 version = "0.1.0"
 dependencies = [
+ "hirsel-core-ids",
  "hirsel-guard",
- "hirsel-syntax",
 ]
 
 [[package]]
@@ -1086,50 +607,6 @@ name = "hirsel-guard"
 version = "0.1.0"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "hirsel-heapcheck"
-version = "0.1.0"
-dependencies = [
- "hirsel-codec",
- "hirsel-core-contract",
- "hirsel-guard",
- "hirsel-lir",
- "hirsel-syntax",
-]
-
-[[package]]
-name = "hirsel-heaps-loom"
-version = "0.0.0"
-dependencies = [
- "hirsel-guard",
- "loom",
-]
-
-[[package]]
-name = "hirsel-host-io"
-version = "0.1.0"
-dependencies = [
- "hirsel-diag",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-free",
- "hirsel-front-phases",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-registry",
- "hirsel-rt",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "serde_json",
- "sha2",
- "tempfile",
 ]
 
 [[package]]
@@ -1144,91 +621,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "hirsel-interp"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hirsel-core-contract",
- "hirsel-diag",
- "hirsel-free",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-kernels",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "hirsel-validate",
- "sha2",
-]
-
-[[package]]
-name = "hirsel-kernels"
-version = "0.1.0"
-dependencies = [
- "hirsel-core-contract",
- "hirsel-guard",
- "itoa",
- "sha1",
- "sha2",
-]
-
-[[package]]
-name = "hirsel-layout"
-version = "0.1.0"
-dependencies = [
- "hirsel-codec",
- "hirsel-core-contract",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-lir",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
-]
-
-[[package]]
-name = "hirsel-lexer"
-version = "0.1.0"
-dependencies = [
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-span",
- "hirsel-syntax",
-]
-
-[[package]]
-name = "hirsel-lir"
-version = "0.1.0"
-dependencies = [
- "hirsel-artifact-store",
- "hirsel-codec",
- "hirsel-core-contract",
- "hirsel-diag",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-rc",
- "hirsel-rt-operations",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "serde_json",
-]
-
-[[package]]
 name = "hirsel-llvm"
 version = "0.1.0"
 dependencies = [
  "gimli",
- "hirsel-core-contract",
  "hirsel-core-front",
  "hirsel-core-ids",
  "hirsel-core-ir",
@@ -1236,18 +632,9 @@ dependencies = [
  "hirsel-core-resolve",
  "hirsel-core-rt",
  "hirsel-core-syntax",
- "hirsel-cranelift",
- "hirsel-graph",
  "hirsel-guard",
- "hirsel-heapcheck",
  "hirsel-intern",
- "hirsel-layout",
- "hirsel-lir",
  "hirsel-llvm-lazy",
- "hirsel-run-schema",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
  "llvm-sys",
  "object",
 ]
@@ -1267,596 +654,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "hirsel-lower"
-version = "0.1.0"
-dependencies = [
- "hirsel-check-protocol",
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "hirsel-validate",
- "insta",
-]
-
-[[package]]
-name = "hirsel-modes"
-version = "0.1.0"
-dependencies = [
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-types",
-]
-
-[[package]]
-name = "hirsel-native"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hirsel-artifact-store",
- "hirsel-check-protocol",
- "hirsel-codec",
- "hirsel-compiler-identity",
- "hirsel-core-contract",
- "hirsel-cranelift",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-free",
- "hirsel-front-phases",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-heapcheck",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-llvm",
- "hirsel-native-queries",
- "hirsel-proof-export",
- "hirsel-query-products",
- "hirsel-rc",
- "hirsel-registry",
- "hirsel-rt",
- "hirsel-rt-operations",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "hirsel-validate",
- "libc",
- "object",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-native-build"
-version = "0.1.0"
-dependencies = [
- "hirsel-driver",
- "hirsel-engine",
- "hirsel-front-phases",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-native",
- "hirsel-native-queries",
- "hirsel-native-testing",
- "hirsel-requests",
- "serde_json",
-]
-
-[[package]]
-name = "hirsel-native-cache"
-version = "0.1.0"
-dependencies = [
- "hirsel-codec",
- "hirsel-compiler-identity",
- "hirsel-core-contract",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-front-phases",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-native",
- "hirsel-query-products",
- "hirsel-rc",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "hirsel-validate",
- "object",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-native-queries"
-version = "0.1.0"
-dependencies = [
- "hirsel-artifact-store",
- "hirsel-codec",
- "hirsel-compiler-identity",
- "hirsel-core-contract",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-front-phases",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-native",
- "hirsel-native-cache",
- "hirsel-native-testing",
- "hirsel-query-products",
- "hirsel-rc",
- "hirsel-rt",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "hirsel-validate",
- "object",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-native-testing"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hirsel-core-contract",
- "hirsel-cranelift",
- "hirsel-engine",
- "hirsel-engine-store",
- "hirsel-front-phases",
- "hirsel-guard",
- "hirsel-heapcheck",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-lir",
- "hirsel-llvm",
- "hirsel-native",
- "hirsel-native-queries",
- "hirsel-query-products",
- "hirsel-rt",
- "hirsel-rt-operations",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-syntax",
- "libc",
- "object",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "hirsel-object-storage"
 version = "0.1.0"
 dependencies = [
  "hirsel-guard",
  "hirsel-object-storage",
- "hirsel-run-schema",
  "libc",
  "rustls",
- "serde_json",
- "sha2",
- "tempfile",
- "webpki-roots",
-]
-
-[[package]]
-name = "hirsel-observation-view"
-version = "0.1.0"
-dependencies = [
- "hirsel-driver",
- "hirsel-engine",
- "hirsel-guard",
- "hirsel-host-io",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-rt",
- "hirsel-run-schema",
- "hirsel-syntax",
- "hirsel-tir",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-ownership"
-version = "0.1.0"
-dependencies = [
- "hirsel-authority",
- "hirsel-check",
- "hirsel-check-protocol",
- "hirsel-diag",
- "hirsel-driver",
- "hirsel-engine",
- "hirsel-engine-store",
- "hirsel-front-phases",
- "hirsel-guard",
- "hirsel-host-io",
- "hirsel-intern",
- "hirsel-lexer",
- "hirsel-modes",
- "hirsel-parser",
- "hirsel-query-products",
- "hirsel-registry",
- "hirsel-resolve",
- "hirsel-signature",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-type-analysis",
- "hirsel-types",
- "hirsel-validate",
- "proptest",
-]
-
-[[package]]
-name = "hirsel-parser"
-version = "0.1.0"
-dependencies = [
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-lexer",
- "hirsel-span",
- "hirsel-syntax",
- "insta",
- "proptest",
-]
-
-[[package]]
-name = "hirsel-pipeline-tests"
-version = "0.1.0"
-dependencies = [
- "hirsel-analysis-canary",
- "hirsel-artifact-store",
- "hirsel-check-protocol",
- "hirsel-code-store",
- "hirsel-codec",
- "hirsel-compiler-identity",
- "hirsel-core-contract",
- "hirsel-cranelift",
- "hirsel-diag",
- "hirsel-driver",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-front-phases",
- "hirsel-guard",
- "hirsel-heapcheck",
- "hirsel-host-io",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-llvm",
- "hirsel-lower",
- "hirsel-native",
- "hirsel-native-cache",
- "hirsel-native-queries",
- "hirsel-native-testing",
- "hirsel-object-storage",
- "hirsel-proof-export",
- "hirsel-query-products",
- "hirsel-rc",
- "hirsel-registry",
- "hirsel-requests",
- "hirsel-rt",
- "hirsel-rt-operations",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "hirsel-validate",
- "insta",
- "proptest",
- "rustls",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-product-codec"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "hirsel-artifact-store",
- "hirsel-diag",
- "hirsel-engine-admission",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "serde",
-]
-
-[[package]]
-name = "hirsel-project-info"
-version = "0.1.0"
-dependencies = [
- "hirsel-code-store",
- "hirsel-engine",
- "hirsel-front-phases",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-registry",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-types",
- "serde_json",
-]
-
-[[package]]
-name = "hirsel-proof-export"
-version = "0.1.0"
-dependencies = [
- "hirsel-codec",
- "hirsel-diag",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "hirsel-validate",
- "serde_json",
-]
-
-[[package]]
-name = "hirsel-query-products"
-version = "0.1.0"
-dependencies = [
- "hirsel-check-protocol",
- "hirsel-diag",
- "hirsel-engine-admission",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-product-codec",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "serde",
-]
-
-[[package]]
-name = "hirsel-rc"
-version = "0.1.0"
-dependencies = [
- "hirsel-codec",
- "hirsel-core-contract",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-heapcheck",
- "hirsel-intern",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "hirsel-validate",
- "serde",
-]
-
-[[package]]
-name = "hirsel-registry"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "hirsel-artifact-store",
- "hirsel-core-contract",
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-lexer",
- "hirsel-product-codec",
- "hirsel-rt-operations",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "serde",
-]
-
-[[package]]
-name = "hirsel-requests"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hirsel-artifact-store",
- "hirsel-check",
- "hirsel-check-protocol",
- "hirsel-code-store",
- "hirsel-codec",
- "hirsel-compiler-identity",
- "hirsel-core-contract",
- "hirsel-cranelift",
- "hirsel-diag",
- "hirsel-engine",
- "hirsel-engine-admission",
- "hirsel-engine-runtime",
- "hirsel-engine-store",
- "hirsel-free",
- "hirsel-front-phases",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-heapcheck",
- "hirsel-host-io",
- "hirsel-intern",
- "hirsel-interp",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-llvm",
- "hirsel-lower",
- "hirsel-native",
- "hirsel-native-cache",
- "hirsel-native-queries",
- "hirsel-native-testing",
- "hirsel-project-info",
- "hirsel-proof-export",
- "hirsel-query-products",
- "hirsel-rc",
- "hirsel-rt",
- "hirsel-rt-operations",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-signature",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "hirsel-validate",
- "libc",
- "object",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
-]
-
-[[package]]
-name = "hirsel-resolve"
-version = "0.1.0"
-dependencies = [
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-types",
- "proptest",
-]
-
-[[package]]
-name = "hirsel-rt"
-version = "0.1.0"
-dependencies = [
- "base64",
- "base64-simd",
- "hirsel-core-contract",
- "hirsel-free",
- "hirsel-guard",
- "hirsel-kernels",
- "hirsel-layout",
- "hirsel-lir",
- "hirsel-rt",
- "hirsel-rt-operations",
- "hirsel-run-config",
- "hirsel-run-schema",
- "hirsel-stack",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-types",
- "libc",
- "rustls",
- "serde_json",
- "sha2",
- "simdutf8",
- "smallvec",
- "syn 2.0.119",
- "tempfile",
- "webpki-roots",
-]
-
-[[package]]
-name = "hirsel-rt-operations"
-version = "0.1.0"
-dependencies = [
- "hirsel-core-contract",
-]
-
-[[package]]
-name = "hirsel-run-config"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-run-schema",
- "libc",
- "proptest",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "sha2",
-]
-
-[[package]]
-name = "hirsel-run-schema"
-version = "0.1.0"
-dependencies = [
- "hirsel-core-contract",
- "hirsel-guard",
- "rustls",
- "rustls-pki-types",
  "rustls-webpki",
- "serde",
  "serde_json",
  "sha2",
-]
-
-[[package]]
-name = "hirsel-signature"
-version = "0.1.0"
-dependencies = [
- "hirsel-check-protocol",
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-type-analysis",
- "hirsel-types",
+ "tempfile",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1876,83 +685,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hirsel-syntax"
-version = "0.1.0"
-dependencies = [
- "hirsel-core-ids",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-span",
- "hirsel-syntax",
- "serde",
-]
-
-[[package]]
-name = "hirsel-tir"
-version = "0.1.0"
-dependencies = [
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-types",
- "serde",
-]
-
-[[package]]
-name = "hirsel-type-analysis"
-version = "0.1.0"
-dependencies = [
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-syntax",
- "hirsel-types",
-]
-
-[[package]]
-name = "hirsel-types"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "hirsel-codec",
- "hirsel-diag",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-run-schema",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-type-analysis",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "hirsel-validate"
-version = "0.1.0"
-dependencies = [
- "allocator-api2",
- "bincode",
- "hashbrown 0.17.1",
- "hirsel-artifact-store",
- "hirsel-diag",
- "hirsel-graph",
- "hirsel-guard",
- "hirsel-intern",
- "hirsel-product-codec",
- "hirsel-span",
- "hirsel-syntax",
- "hirsel-tir",
- "hirsel-type-analysis",
- "hirsel-types",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1960,18 +692,6 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
-]
-
-[[package]]
-name = "insta"
-version = "1.49.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67d3d2e287e4b86c10b3f3b641033d1f89b74bdb39d05f34952e2b9a6fe21cd"
-dependencies = [
- "console",
- "once_cell",
- "similar",
- "tempfile",
 ]
 
 [[package]]
@@ -1985,12 +705,6 @@ name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
-
-[[package]]
-name = "lexopt"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "803ec87c9cfb29b9d2633f20cba1f488db3fd53f2158b1024cbefb47ba05d413"
 
 [[package]]
 name = "libc"
@@ -2040,28 +754,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "loom"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "419e0dc8046cb947daa77eb95ae174acfbddb7673b4151f56d1eed8e93fbfaca"
-dependencies = [
- "cfg-if",
- "generator",
- "scoped-tls",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "matchers"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
-dependencies = [
- "regex-automata",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2074,15 +766,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
 dependencies = [
  "libmimalloc-sys",
-]
-
-[[package]]
-name = "nu-ansi-term"
-version = "0.50.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
-dependencies = [
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2111,18 +794,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "outref"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
-
-[[package]]
-name = "pin-project-lite"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "ppv-lite86"
@@ -2241,17 +912,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "regex-automata"
-version = "0.4.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
-dependencies = [
- "aho-corasick",
- "memchr",
- "regex-syntax",
-]
-
-[[package]]
 name = "regex-lite"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2340,12 +1000,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustversion"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
 name = "rusty-fork"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2356,12 +1010,6 @@ dependencies = [
  "tempfile",
  "wait-timeout",
 ]
-
-[[package]]
-name = "scoped-tls"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
 name = "semver"
@@ -2413,28 +1061,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_path_to_error"
-version = "0.1.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
-dependencies = [
- "itoa",
- "serde",
- "serde_core",
-]
-
-[[package]]
-name = "sha1"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
-]
-
-[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2446,31 +1072,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "sharded-slab"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
-dependencies = [
- "lazy_static",
-]
-
-[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
-name = "simdutf8"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "smallvec"
@@ -2513,16 +1118,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tar"
-version = "0.4.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
-dependencies = [
- "filetime",
- "libc",
-]
-
-[[package]]
 name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2539,64 +1134,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "thread_local"
-version = "1.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad99c4c6d32803332c548b1af0540b357b3f5fc0be8f6c6bfe8b2e6ae784070"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
-name = "tracing"
-version = "0.1.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
-dependencies = [
- "pin-project-lite",
- "tracing-core",
-]
-
-[[package]]
-name = "tracing-core"
-version = "0.1.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
-dependencies = [
- "once_cell",
- "valuable",
-]
-
-[[package]]
-name = "tracing-log"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
-dependencies = [
- "log",
- "once_cell",
- "tracing-core",
-]
-
-[[package]]
-name = "tracing-subscriber"
-version = "0.3.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
-dependencies = [
- "matchers",
- "nu-ansi-term",
- "once_cell",
- "regex-automata",
- "sharded-slab",
- "smallvec",
- "thread_local",
- "tracing",
- "tracing-core",
- "tracing-log",
 ]
 
 [[package]]
@@ -2618,34 +1155,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
-name = "unicode-width"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
-
-[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "valuable"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
-
-[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vsimd"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "wait-timeout"
@@ -2695,15 +1214,6 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
-
-[[package]]
-name = "windows-result"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
-dependencies = [
- "windows-link",
-]
 
 [[package]]
 name = "windows-sys"

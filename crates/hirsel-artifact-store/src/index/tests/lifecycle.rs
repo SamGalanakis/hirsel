@@ -1,5 +1,5 @@
 use crate::{index::*, pack::index_benchmark_epoch};
-use hirsel_syntax::ContentHash;
+use hirsel_core_ids::ContentHash;
 use std::{fs, path::Path};
 
 fn entry(n: u64) -> Entry {

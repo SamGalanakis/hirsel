@@ -50,21 +50,21 @@ fn defined_attribute(text: &str, name: &str) -> Vec<(String, Option<String>)> {
 #[test]
 fn every_emitted_function_probes_its_frame_within_the_guard() {
     for target in [
-        TargetSpec::x86_64_unknown_linux_gnu(),
-        TargetSpec::aarch64_unknown_linux_gnu(),
+        hirsel_core_layout::Target::X86_64Linux,
+        hirsel_core_layout::Target::Aarch64Linux,
     ] {
-        let machine = TargetMachine::new(&target, true).unwrap();
+        let machine = TargetMachine::core(target, true).unwrap();
         let context = Context::new();
         let module = Module::parse(&context, "probes", IR).unwrap();
         module.set_target(&machine);
         module.emit_object(&machine).unwrap();
-        assert_probes(&module.text(), &target.triple, 2);
+        assert_probes(&module.text(), target.triple(), 2);
     }
     // The lazy C-ABI phase must probe just as the direct Rust phase does.
     // This live 256 KiB frame makes a missing or different probe interval
     // observable in the object even when a program would fault by accident.
     for speed in [false, true] {
-        let machine = TargetMachine::new(&TargetSpec::x86_64_unknown_linux_gnu(), speed).unwrap();
+        let machine = TargetMachine::core(hirsel_core_layout::Target::X86_64Linux, speed).unwrap();
         let context = Context::new();
         let module = Module::parse(&context, "hirsel-core", IR).unwrap();
         module.set_target(&machine);
@@ -224,7 +224,7 @@ fn assert_probes(text: &str, target: &str, count: usize) {
         assert_eq!(kind.as_deref(), Some("inline-asm"), "{target} {function}");
         let size: usize = size.as_deref().unwrap().parse().unwrap();
         assert!(
-            size <= hirsel_lir::runtime_abi::STACK_GUARD_BYTES,
+            size <= STACK_PROBE_BYTES,
             "{target} {function}: probes every {size} bytes"
         );
     }

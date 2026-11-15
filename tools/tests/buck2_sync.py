@@ -94,18 +94,6 @@ class ProductionFeatures(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'no first-party target'):
             sync.check_production_features('', self.policy())
 
-    def test_runtime_variants_override_only_their_own_features(self):
-        graph = (sync.call('hirsel_library', name='runtime', package_name='runtime',
-                           features=['diagnostic'], deps=['//:fixture'])
-                 + sync.call('hirsel_runtime_archives', name='archives', package_name='runtime',
-                             features=['default'], deps=['//:fixture'])
-                 + sync.call('hirsel_library', name='fixture', package_name='fixture', features=[], deps=[]))
-        policy = {'features': {'runtime/diagnostic': 'test-only', 'runtime/default': 'runtime-option',
-                               'fixture/testing': 'test-only'}, 'roots': {'archives': []}}
-        self.assertEqual(sync.check_production_features(graph, policy, strict=True), [])
-        graph = graph.replace('features = [],', 'features = ["testing"],')
-        with self.assertRaisesRegex(SystemExit, 'archives: unapproved test feature fixture/testing'):
-            sync.check_production_features(graph, policy, strict=True)
 
 
 class CargoUnits(unittest.TestCase):
@@ -232,13 +220,6 @@ class CargoUnits(unittest.TestCase):
         self.assertEqual(ast.literal_eval(projected[r.names[keys[1]]]['named_deps']),
                          {'renamed_leaf': '//third-party:' + r.names[keys[0]]})
 
-    def test_arm_archive_dependencies_are_audited(self):
-        graph = (sync.call('hirsel_runtime_archives', name='archives', package_name='runtime', features=[], deps=[],
-                           target_deps={'aarch64-unknown-linux-gnu': ['//:arm-only']})
-                 + sync.call('hirsel_library', name='arm-only', package_name='fixture', features=['testing'], deps=[]))
-        policy = {'features': {'fixture/testing': 'test-only'}, 'roots': {'archives': []}}
-        with self.assertRaisesRegex(SystemExit, 'arm-only/testing'):
-            sync.check_production_features(graph, policy, strict=True)
 
 
 class AtomicScratch(unittest.TestCase):
@@ -344,7 +325,7 @@ class GeneratedParts(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory(prefix='hirsel-sync-')
         cls.root = Path(cls.temp.name).resolve()
         archive = subprocess.run(['git', 'archive', 'HEAD', '--', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml',
-                                  'crates', 'proofs', 'conformance', 'third-party', 'tools/buck2', 'tools/native-toolchain',
+                                  'crates', 'third-party', 'tools/buck2', 'tools/native-toolchain',
                                   'README.md'], cwd=sync.ROOT, check=True, capture_output=True).stdout
         subprocess.run(['tar', '-x', '-C', str(cls.root)], input=archive, check=True)
         cls.addClassCleanup(cls.temp.cleanup)
@@ -397,11 +378,6 @@ class GeneratedParts(unittest.TestCase):
         self.edit('docs/notes.md', 'notes\n')
         self.assertEqual(self.sync('--if-stale'), [])
 
-    def test_a_swept_corpus_case_regenerates_the_weighted_shard_inputs(self):
-        self.edit('conformance/plan-fixture.hir', '// cuts: 1..=40\nfn main() {}\n')
-        self.assertEqual(self.sync('--if-stale'), ['first-party'])
-        self.assertIn('gate-conformance-shard-', self.buck())
-
     def test_a_manifest_edit_regenerates_both_parts_and_rewrites_only_what_changed(self):
         # Cargo's dev profile reaches no Buck configuration: both parts are
         # regenerated from the edited manifest, and neither output changes.
@@ -418,17 +394,6 @@ class GeneratedParts(unittest.TestCase):
         self.assertIn('    name = "hirsel-span-test-added",\n', self.buck())
         self.assertEqual(self.rewritten(), ['BUCK'])
 
-    def test_unit_costs_split_actions_without_changing_the_compiled_library(self):
-        library = self.library('hirsel-driver')
-        self.edit('tools/buck2/test-costs/hirsel-driver-unittest.tsv',
-                  'first::case\t240.0\nsecond::case\t240.0\n')
-        self.assertEqual(self.sync('--if-stale'), ['first-party'])
-        block = next(block.split('\n)\n')[0] for block in self.buck().split('hirsel_test(\n')[1:]
-                     if '    name = "hirsel-driver-unittest",\n' in block.split('\n)\n')[0])
-        self.assertIn('    shards = 2,\n', block)
-        self.assertIn('    costs = "//tools/buck2:test-costs/hirsel-driver-unittest.tsv",\n', block)
-        self.assertEqual(self.library('hirsel-driver'), library)
-
     def library(self, name):
         """The crate's hirsel_library call in the root BUCK."""
         return next(block.split('\n)\n')[0] for block in self.buck().split('hirsel_library(\n')[1:]
@@ -442,137 +407,12 @@ class GeneratedParts(unittest.TestCase):
         self.assertIn('doctests = True', self.library(crate.parents[1].name))
 
 
-class ConformanceShards(unittest.TestCase):
-    def test_four_partitions_cover_every_named_case_once(self):
-        cases = {f'conformance/CASE-{i}.hir': 1 for i in range(24)}
-        plan = sync.conformance_plan(cases)
-        self.assertEqual(len(plan), 4)
-        self.assertTrue(all(part['files'] for part in plan))
-        self.assertEqual(sum(part['files'] for part in plan), len(cases))
-        for name in cases:
-            self.assertEqual(sum(sync.corpus_hash(name) % part['count'] == part['index'] - 1 for part in plan), 1)
-
-    def test_empty_partitions_are_refused(self):
-        for cases in ({}, {'conformance/one.hir': 1}):
-            with self.assertRaisesRegex(ValueError, 'partition is empty'):
-                sync.conformance_plan(cases)
-
-    def test_current_inventory_is_the_named_31_witnesses(self):
-        self.assertEqual(sum(p['files'] for p in sync.conformance_plan()), 31)
-
-
-
 class NativePoolRouting(unittest.TestCase):
-    def test_no_campaign_implicitly_selects_the_host(self):
-        self.assertTrue(sync.GATE_TESTS)
-        for stage in sync.GATE_TESTS + sync.conformance_tests():
-            self.assertFalse(stage.get('host', False), stage['name'])
-
-    def test_retained_engines_have_four_explicit_slices(self):
-        stages = {stage['name']: stage for stage in sync.GATE_TESTS}
-        for engine in ('heap', 'llvm', 'cranelift'):
-            selected = [stages[f'gate-retained-{engine}-shard-{i}'] for i in range(1, 5)]
-            self.assertEqual([s['args'][-1] for s in selected], ['1/4', '2/4', '3/4', '4/4'])
-            self.assertTrue(all('native_selection' not in s for s in selected))
-        self.assertFalse(any('history' in name or 'agree-full' in name for name in stages))
-
-    def test_global_cover_is_opt_in_before_test_runner_filters_arrive(self):
-        source = (sync.ROOT / 'tools/buck2/defs.bzl').read_text()
-        code = source[source.index('def hirsel_command_test('):source.index('def _script_binary_impl(')]
-        for settings, expected in [({}, None), ({'native_selection': 'true'}, '//:native-selection'),
-                                    ({'native_selection': 'derive'}, '//:native-selection'),
-                                    ({'native_selection_file': 'frozen.json'}, '//:native-selection')]:
-            calls = []
-            scope = dict(FULL_GATE=True, TESTS_ON_HOST=False, TEST_SEED='',
-                         read_root_config=lambda section, key, default: settings.get(key, default),
-                         native_tool_inputs=lambda: {}, _test_platform=lambda name: [],
-                         _request=lambda name: [], _stage=lambda name: name,
-                         _rust_test=lambda **kwargs: calls.append(kwargs))
-            exec(code, scope)
-            for name in ['gate-native-full-shard-1', 'gate-agree-native-full-shard-1']:
-                scope['hirsel_command_test'](name, '//:binary', ['--full'], [], '.',
-                                             full=True, native_selection='//:native-selection')
-                self.assertEqual(calls[-1]['native_selection'], expected)
-
-    def test_selected_conformance_forwards_every_prefix_in_each_slice(self):
-        source = (sync.ROOT / 'tools/buck2/defs.bzl').read_text()
-        code = source[source.index('def selected_paths('):source.index('def _script_binary_impl(')]
-        real = 'conformance/SEM/SEM-1-unsigned-add-ok.hir'
-        missing = 'conformance/definitely-not-a-case.hir'
-        calls = []
-        scope = dict(FULL_GATE=False, TESTS_ON_HOST=False, TEST_SEED='',
-                     read_root_config=lambda section, key, default:
-                         f'{real}|{missing};{real}|{real}' if key == 'conformance_paths' else default,
-                     native_tool_inputs=lambda: {}, _test_platform=lambda name: [],
-                     _request=lambda name: [], _stage=lambda name: name,
-                     _rust_test=lambda **kwargs: calls.append(kwargs))
-        exec(code, scope)
-        for index, expected in [(1, [real, missing]), (2, [real, real])]:
-            scope['hirsel_command_test'](f'gate-conformance-selected-shard-{index}',
-                                         '//:binary', ['--check-format'], [], '.',
-                                         selected=('conformance_paths', '--path', index))
-            self.assertEqual(calls[-1]['args'], ['--check-format'] +
-                             [arg for path in expected for arg in ['--path', path]])
-        scope['hirsel_command_test']('gate-conformance-selected-shard-3', '//:binary',
-                                     [], [], '.', selected=('conformance_paths', '--path', 3))
-        self.assertEqual(len(calls), 2)
-        # One slice split N ways: every target keeps every prefix and takes its own shard.
-        scope['read_root_config'] = lambda section, key, default: {
-            'conformance_paths': f'{real}|{missing}', 'conformance_paths_split': '3'}.get(key, default)
-        for index in [1, 2, 3, 4]:
-            scope['hirsel_command_test'](f'gate-conformance-selected-shard-{index}', '//:binary',
-                                         [], [], '.', selected=('conformance_paths', '--path', index))
-        self.assertEqual([call['args'] for call in calls[2:]],
-                         [['--path', real, '--path', missing, '--shard', f'{i}/3'] for i in [1, 2, 3]])
-        # Native slices: every (path shard, configuration part) pair exactly once,
-        # so no case's configuration goes unrun, each with the named configurations.
-        scope['read_root_config'] = lambda section, key, default: {
-            'native_paths': real, 'native_paths_split': '2', 'native_paths_parts': '3',
-            'native_paths_configs': 'x86_64/a|aarch64/b'}.get(key, default)
-        before = len(calls)
-        for index in range(1, 8):
-            scope['hirsel_command_test'](f'gate-native-selected-shard-{index}', '//:binary',
-                                         ['--full'], [], '.', selected=('native_paths', '--filter', index))
-        self.assertEqual([call['args'] for call in calls[before:]],
-                         [['--full', '--filter', real, '--config', 'x86_64/a', '--config', 'aarch64/b',
-                           '--case-part', f'{shard}/2', '--config-part', f'{part}/3']
-                          for part in [1, 2, 3] for shard in [1, 2]])
-
-        # Every case/configuration/fault partition is required exactly once.
-        scope['read_root_config'] = lambda section, key, default: {
-            'native_paths': real, 'native_paths_split': '2', 'native_paths_parts': '3',
-            'native_paths_heap_parts': '4', 'native_paths_configs': 'x86_64/heap+inject'}.get(key, default)
-        before = len(calls)
-        for index in range(1, 26):
-            scope['hirsel_command_test'](f'gate-native-selected-shard-{index}', '//:binary',
-                                         ['--full'], [], '.', selected=('native_paths', '--filter', index))
-        self.assertEqual([call['args'] for call in calls[before:]],
-                         [['--full', '--filter', real, '--config', 'x86_64/heap+inject',
-                           '--case-part', f'{shard}/2', '--config-part', f'{part}/3', '--heap-part', f'{heap}/4']
-                          for heap in [1, 2, 3, 4] for part in [1, 2, 3] for shard in [1, 2]])
-
-        # The rest of a campaign after its probe (part 1/7, corpus) in one
-        # part: the binary needs a --heap-part to carry the skip, so the one
-        # part is 1/1, which leaves out only the probe's sites.
-        scope['read_root_config'] = lambda section, key, default: {
-            'native_paths': real, 'native_paths_heap_skip': '1/7',
-            'native_paths_configs': 'x86_64/heap+inject'}.get(key, default)
-        before = len(calls)
-        for index in range(1, 3):
-            scope['hirsel_command_test'](f'gate-native-selected-shard-{index}', '//:binary',
-                                         ['--full'], [], '.', selected=('native_paths', '--filter', index))
-        self.assertEqual([call['args'] for call in calls[before:]],
-                         [['--full', '--filter', real, '--config', 'x86_64/heap+inject',
-                           '--heap-part', '1/1', '--heap-skip', '1/7']])
-
     def test_generated_tests_have_no_host_partition(self):
         buck = (sync.ROOT / 'BUCK').read_text()
         self.assertNotIn('host_cases =', buck)
         rust_tests = '\n'.join(block.split('\n)\n', 1)[0] for block in buck.split('hirsel_test(\n')[1:])
         self.assertNotIn('host = True', rust_tests)
-        hosts = [block for block in buck.split('\n)\n') if 'host = True' in block]
-        self.assertEqual({block.split('name = "', 1)[1].split('"', 1)[0] for block in hosts},
-                         {'gate-free-genmc', 'test-fmt', 'test-land'})
 
 
 class GuardedRoots(unittest.TestCase):
@@ -605,9 +445,8 @@ class SeededTests(unittest.TestCase):
         buck = (Path(__file__).resolve().parents[2] / 'BUCK').read_text()
         seeded = {m[1] for m in re.finditer(r'hirsel_test\(\n    name = "([^"]+)",(.*?)\n\)', buck, re.S)
                   if 'seeded = True' in m[2]}
-        self.assertIn('hirsel-parser-test-it', seeded)
-        self.assertIn('hirsel-pipeline-tests-test-front', seeded)
-        self.assertNotIn('hirsel-driver-test-it', seeded)
+        self.assertIn('hirsel-intern-unittest', seeded)
+        self.assertNotIn('hirsel-core-driver-unittest', seeded)
 
 
 class ShardSizing(unittest.TestCase):
@@ -625,20 +464,20 @@ class ShardSizing(unittest.TestCase):
     def test_granted_cpus_determine_shards(self):
         with tempfile.TemporaryDirectory() as scratch:
             here = Path(scratch)
-            binary = sync.SHARDED[0]
+            binary = 'binary'
             (here / 'test-costs').mkdir()
             (here / f'test-costs/{binary}.tsv').write_text(''.join(f'case{i}\t40.0\n' for i in range(16)))
             for cpus, expected in [(1, 16), (2, 8), (4, 4)]:
                 (here / 'test-sizes.json').write_text(json.dumps({binary: {'cpu_count': cpus}}))
                 with patch.object(sync, 'HERE', here), patch.object(sync, 'COSTS', here / 'test-costs'), \
-                     patch.object(sync, 'case_cpus', return_value={}):
+                     patch.object(sync, 'SHARDED', [binary]), patch.object(sync, 'case_cpus', return_value={}):
                     self.assertEqual(sync.shards(binary)[0], expected)
             # Declared cases leave the measured shards for their width's own,
             # sized at SHARD_SECONDS per exact CPU; an unmeasured one costs the mean.
             (here / 'test-sizes.json').write_text(json.dumps({binary: {'cpu_count': 1}}))
             declared = {binary: {'case0': 4, 'case1': 4, 'case2': 4, 'case3': 4, 'case4': 4, 'unmeasured': 4, 'case5': 2}}
             with patch.object(sync, 'HERE', here), patch.object(sync, 'COSTS', here / 'test-costs'), \
-                 patch.object(sync, 'case_cpus', return_value=declared):
+                 patch.object(sync, 'SHARDED', [binary]), patch.object(sync, 'case_cpus', return_value=declared):
                 count, _, groups = sync.shards(binary)
             self.assertEqual((count, groups), (10, {2: 1, 4: 2}))
 
@@ -647,12 +486,12 @@ class ShardSizing(unittest.TestCase):
         # cannot split it and only add empty remote actions to the main run.
         with tempfile.TemporaryDirectory() as scratch:
             here = Path(scratch)
-            binary = sync.SHARDED[0]
+            binary = 'binary'
             (here / 'test-costs').mkdir()
             (here / f'test-costs/{binary}.tsv').write_text('native_a\t1700.0\nnative_b\t650.0\n')
             (here / 'test-sizes.json').write_text(json.dumps({binary: {'cpu_count': 2}}))
             with patch.object(sync, 'HERE', here), patch.object(sync, 'COSTS', here / 'test-costs'), \
-                 patch.object(sync, 'case_cpus', return_value={}):
+                 patch.object(sync, 'SHARDED', [binary]), patch.object(sync, 'case_cpus', return_value={}):
                 self.assertEqual(sync.shards(binary)[0], 2)
 
     def test_exactly_five_percent_missing_is_allowed_but_stale_rows_do_not_help(self):
@@ -668,8 +507,10 @@ class ShardSizing(unittest.TestCase):
                 self.assertIn('no case inventory', sync.cost_coverage({})[0])
 
     def test_unrefreshed_binary_warns_without_blocking_the_gate(self):
-        binary = 'hirsel-rt-test-it'
-        with patch.object(sync, 'SHARDED', [binary]), contextlib.redirect_stderr(io.StringIO()) as output:
+        binary = 'binary'
+        with tempfile.TemporaryDirectory() as scratch, patch.object(sync, 'SHARDED', [binary]), \
+                patch.object(sync, 'COSTS', Path(scratch)), contextlib.redirect_stderr(io.StringIO()) as output:
+            (Path(scratch) / f'{binary}.tsv').write_text('old::case\t1\n')
             self.assertEqual(sync.cost_coverage({binary: {'new::case'}}), [])
         self.assertIn(f'warning: {binary}: 1/1 cases', output.getvalue())
 

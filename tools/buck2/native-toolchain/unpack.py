@@ -94,11 +94,6 @@ def unpack(kind, output, archives, linker=None):
         elif kind == "qemu":
             output.mkdir()
             shutil.copy2(tree / "usr/bin/qemu-aarch64", output / "qemu-aarch64")
-        elif kind == "patch":
-            (output / "bin").mkdir(parents=True)
-            shutil.copy2(tree / "usr/bin/patch", output / "bin/patch")
-        elif kind in ("zlib_headers", "zstd_headers"):
-            copy_tree(tree / "usr/include", output / "usr/include")
         elif kind == "valgrind":
             copy_tree(tree / "usr", output)
             place_runtime_debug(output)

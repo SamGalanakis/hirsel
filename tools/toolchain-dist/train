@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train an instrumented compiler on the retained native hello supplier.
+"""Train an instrumented compiler on the project `hirsel new` writes.
 
     tools/toolchain-dist/train --toolchain DIR --work DIR --raw DIR
 
@@ -28,15 +28,14 @@ def main():
     if any(raw.glob('*.profraw')):
         parser.error('raw directory already contains profiles; use a fresh directory')
     compiler = str(args.toolchain.resolve() / 'hirsel')
-    source = str(ROOT / 'native-tests/link/hello.hir')
-    for name, command in [('check', ['check', source]),
-                          *[(backend, ['build', '--backend', backend, source, '-o', str(work / backend)])
+    project = work / 'app'
+    subprocess.run([compiler, 'new', str(project)], cwd=work, check=True, stdout=subprocess.DEVNULL)
+    for name, command in [('check', ['check', str(project)]),
+                          *[(backend, ['build', str(project), '--backend', backend, '-o', str(work / backend)])
                             for backend in ('cranelift', 'llvm')]]:
-        env = dict(os.environ, HIRSEL_DAEMON='off', HIRSEL_PROGRAM_CACHE='off', HIRSEL_RESULTS='none@1',
-                   HIRSEL_JOBS='1', HIRSEL_PRODUCTS=str(args.toolchain.resolve() / 'hirsel-std.products'),
-                   LLVM_PROFILE_FILE=str(raw / (name + '-%m-%p.profraw')))
+        env = dict(os.environ, HIRSEL_JOBS='1', LLVM_PROFILE_FILE=str(raw / (name + '-%m-%p.profraw')))
         subprocess.run([str(ROOT / 'tools/capped'), 'taskset', '-c', str(args.cpu), compiler, *command],
-                       cwd=ROOT, env=env, check=True)
+                       cwd=work, env=env, check=True)
         if not any(p.stat().st_size for p in raw.glob(name + '-*.profraw')):
             raise RuntimeError(f'no nonempty profile from {name}')
     print('train: 3 workloads passed', flush=True)

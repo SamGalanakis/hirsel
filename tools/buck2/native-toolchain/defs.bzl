@@ -11,31 +11,6 @@ only when the pool's CAS lacks it, and not at all on an action-cache hit
 app/buck2_execute/src/re/uploader.rs `find_missing`)."""
 load("//tools/buck2:platforms.bzl", "budget_constraint", "test_budget_name", "test_executor", "test_request")
 
-def _overlay_linker(ctx):
-    output = ctx.actions.declare_output(ctx.label.name, dir = True)
-    command = cmd_args(
-        "python3", ctx.attrs._script,
-        "--source", ctx.attrs.source[DefaultInfo].default_outputs[0],
-        "--llvm", ctx.attrs.llvm[DefaultInfo].default_outputs[0],
-        "--kit", ctx.attrs.kit[DefaultInfo].default_outputs[0],
-        "--version", ctx.attrs.version,
-        "--patch", ctx.attrs.patch, "--main", ctx.attrs.main,
-        "--patch-tool", ctx.attrs.patch_tool[DefaultInfo].default_outputs[0],
-        "--output", output.as_output(),
-    )
-    for dependency in ctx.attrs.headers:
-        command.add("--headers", dependency[DefaultInfo].default_outputs[0])
-    ctx.actions.run(command, category = "native_linker_build")
-    return [DefaultInfo(default_output = output)]
-
-overlay_linker = rule(impl = _overlay_linker, attrs = {
-    "source": attrs.dep(), "llvm": attrs.exec_dep(), "kit": attrs.dep(),
-    "version": attrs.string(), "patch": attrs.source(), "main": attrs.source(),
-    "patch_tool": attrs.exec_dep(),
-    "headers": attrs.list(attrs.exec_dep()),
-    "_script": attrs.source(default = "//tools/buck2/native-toolchain:lld_overlay.py"),
-})
-
 def _unpack(ctx):
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     ctx.actions.run(
@@ -106,17 +81,3 @@ def toolchain_proof(name, tools, script, interpreter = "bash"):
         exec_compatible_with = [budget_constraint(test_budget_name("native-toolchain-proof"))],
         visibility = ["PUBLIC"])
 
-
-def _runtime_auditor(ctx):
-    output = ctx.actions.declare_output(ctx.label.name, dir = True)
-    ctx.actions.run(cmd_args(
-        "python3", ctx.attrs.builder,
-        "--llvm", ctx.attrs.llvm[DefaultInfo].default_outputs[0],
-        "--source", ctx.attrs.source,
-        "--output", output.as_output(),
-    ), category = "runtime_auditor")
-    return [DefaultInfo(default_output = output)]
-
-runtime_auditor = rule(impl = _runtime_auditor, attrs = {
-    "llvm": attrs.dep(), "builder": attrs.source(), "source": attrs.source(),
-})

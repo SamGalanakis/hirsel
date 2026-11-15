@@ -85,35 +85,7 @@ MAX_CPUS = 2
 # Every other compile, every test run and every gate shard runs on any worker.
 # The slowest worker runs the same Rust action about 1.6x slower than the fast
 # ones, which matters only for these. A row routes every action of its target.
-CPU_CLASSES = {
-    "dev": {
-        "hirsel-authority": "fast",
-        "hirsel-check": "fast",
-        "hirsel-driver": "fast",
-        "hirsel-driver-test-it-harness": "fast",
-        "hirsel-engine": "fast",
-        "hirsel-lir": "fast",
-        "hirsel-lir-test-it-harness": "fast",
-        "hirsel-lir-unittest-harness": "fast",
-        "hirsel-ownership": "fast",
-        "hirsel-pipeline-tests-test-front-harness": "fast",
-        "hirsel-rc": "fast",
-        "hirsel-rc-unittest-harness": "fast",
-        "hirsel-types": "fast",
-        "hirsel-types-unittest-harness": "fast",
-        "hirsel-validate": "fast",
-        "hirsel-validate-test-it-harness": "fast",
-        "hirsel-validate-unittest-harness": "fast",
-    },
-    "release": {
-        "hirsel-authority": "fast",
-        "hirsel-check": "fast",
-        "hirsel-driver": "fast",
-        "hirsel-engine": "fast",
-        "hirsel-ownership": "fast",
-        "hirsel-rc": "fast",
-    },
-}
+CPU_CLASSES = {"dev": {}, "release": {}}
 
 # Historical 2026-10-16 calibrations have expired. A future four-CPU request
 # must carry fresh comparative evidence; old probes are not permanent floors.

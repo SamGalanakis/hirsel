@@ -148,6 +148,10 @@ def generate(bundle, graph, metadata, root=ROOT, cargo_home=None, sources=None):
     missing = set(sources['bundle_entries']) - {p.name for p in bundle.iterdir()}
     if missing:
         raise ValueError(f'missing bundle entries: {sorted(missing)}')
+    uncollected = sorted(set(sources.get('uncollected_entries', {})) & {p.name for p in bundle.iterdir()})
+    if uncollected:
+        raise ValueError('bundle entries without collected notices: ' + '; '.join(
+            f'{name}: {sources["uncollected_entries"][name]}' for name in uncollected))
     before = file_inventory(bundle)
     if not before or 'hirsel' not in before:
         raise ValueError('bundle has no compiler')
@@ -226,7 +230,7 @@ def collect(bundle, mode):
     configuration = ['--target-platforms', '//tools/buck2:dist', '-c', 'hirsel.dist_pgo=' + mode]
     graph = json.loads(subprocess.check_output([
         str(ROOT / '.buck2/bin/buck2'), 'cquery', *configuration,
-        'deps(root//:hirsel-cli-bin-hirsel)',
+        'deps(' + json.loads(SOURCES.read_text())['root'] + ')',
         '--output-attribute', r'^(buck\.deps|deps|exported_deps|named_deps|flagged_deps|proc_macro)$', '--json'], cwd=ROOT))
     metadata = json.loads(subprocess.check_output([
         os.environ.get('CARGO', 'cargo'), 'metadata', '--locked', '--format-version', '1',

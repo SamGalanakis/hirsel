@@ -72,21 +72,6 @@ class Consumers(unittest.TestCase):
         selected = consumers.select(ROOT, ['tools/buck2/sync.py'], found, {})
         self.assertEqual(selected, [target])
 
-    def test_many_direct_owners_cannot_evict_mandatory_launches(self):
-        inventories = {binary: set(cases) for binary, cases in consumers.MUST.items()}
-        inventories['hirsel-cli-test-cli'] = {'program_record::a_build_record_restores_its_executable_and_replays_failures'}
-        graph = graph_for(inventories)
-        owners = set()
-        for index in range(consumers.LIMIT + 1):
-            binary = f'a-direct-{index:03}'
-            graph['root//:' + binary] = dict(test_binary=binary)
-            owners.add('root//:' + binary + '-harness')
-        reasons = {}
-        selected = consumers.select(ROOT, ['crates/hirsel-rt/src/pool.rs'], graph, inventories, owners, reasons)
-        mandatory = {target for target, reason in reasons.items() if reason == 'mandatory set'}
-        self.assertTrue(mandatory)
-        self.assertLessEqual(mandatory, set(selected[:consumers.LIMIT]))
-
     def test_the_cap_keeps_the_nearest_owner_and_reports_the_cut(self):
         # place-store-681: 100 of 4,261 kept by name, with no word on what was cut.
         graph = {'root//:lib': {}, 'root//:mid': {'buck.deps': ['root//:lib']},
@@ -99,48 +84,6 @@ class Consumers(unittest.TestCase):
         selected = consumers.select(ROOT, ['crates/hirsel-check/src/lib.rs'], graph, {},
                                     {'root//:lib': 'direct source owner'}, {}, 1, cut)
         self.assertEqual((selected, cut), (['root//:z-near'], ['root//:a-far']))
-
-    def test_cpu_pool_change_selects_native_launches_and_replay_before_other_shards(self):
-        inventories = {binary: set(cases) for binary, cases in consumers.MUST.items()}
-        inventories['hirsel-cli-test-cli'] = {
-            'program_record::a_build_record_restores_its_executable_and_replays_failures',
-            'every_f0_trace_replays_to_its_live_projection_at_every_cut_gap_interpreter',
-        }
-        graph = graph_for(inventories)
-        assignments = consumers.assignments(ROOT, graph, inventories)
-        expected = {assignments[binary, case] for binary, cases in consumers.MUST.items() for case in cases}
-        for path in ('crates/hirsel-rt/src/pool.rs', 'crates/hirsel-rt/src/free_launch.rs',
-                     'crates/hirsel-native/src/kit.rs', 'crates/hirsel-llvm/src/c_entry.rs',
-                     'crates/hirsel-engine/src/queries/native_records.rs',
-                     'tools/buck2/native-toolchain/link_kit.py'):
-            with self.subTest(path=path):
-                selected = consumers.select(ROOT, [path], graph, inventories)
-                self.assertLessEqual(expected, set(selected[:consumers.LIMIT]))
-
-    def test_std_module_selects_the_conformance_shard_that_uses_it(self):
-        path = 'stdlib/std@1/input.hir'
-        corpus = 'conformance/CAP/CAP-1-stdin-lines-run.hir'
-        inventories = {'hirsel-driver-test-it': {'host_io::rust_read_until_vectors_preserve_newlines_unterminated_lines_and_eof'}}
-        graph = graph_for(inventories)
-        selected = consumers.select(ROOT, [path], graph, inventories)
-        mapped = consumers.assignments(ROOT, graph, inventories)
-        self.assertIn(mapped['hirsel-driver-test-it', 'host_io::rust_read_until_vectors_preserve_newlines_unterminated_lines_and_eof'], selected)
-        from sync import conformance_plan
-        index, = [i for i, part in enumerate(conformance_plan(), 1)
-                  if consumers.corpus_shard(corpus, part['count']) == part['index']]
-        target = f'root//:gate-conformance-shard-{index}'
-        self.assertIn(target, selected)
-        self.assertNotIn('root//:hirsel-llvm-unittest', selected)
-
-    def test_module_uses_propagate_through_other_std_modules(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            std = root / 'stdlib/std@1'
-            std.mkdir(parents=True)
-            (std / 'a.hir').write_text('pub fn a() -> () {}')
-            (std / 'b.hir').write_text('pub fn b() -> () { a.a() }')
-            (std / 'c.hir').write_text('pub fn c() -> () { b.b() }')
-            self.assertEqual(consumers.module_users(root, ['stdlib/std@1/a.hir']), {'a', 'b', 'c'})
 
     def test_case_source_follows_helpers_and_loaded_corpus_without_string_braces(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -260,26 +203,6 @@ HIRSEL_TEST_RUNNING laws::receipt elapsed=570.001s
                         'test result: ok. 0 passed; 0 failed; 1 ignored;'):
             for status in (1, 2):
                 self.assertEqual(self.classify(details, {'fixture-shard-1': details}, status), 'uncertain')
-
-    def test_corpus_slices_are_judged_by_the_runners_receipts(self):
-        # testsmash-apply-703: 670 executed cases in 32 tools/corpus slices read
-        # as 32 "zero executed bodies".
-        counts = 'whole corpus: {} validated / {} passing / {} failing / 0 not implemented\n'
-        failing = ('conformance/TEST/TEST-duplicate-bad.hir: expected Reject { rule: RuleId("LANG-4"), '
-                   'line: 1 }; got accept')
-        red = failing + '\n--path requires every selected test to pass\n' + counts.format(20, 19, 1)
-        self.assertEqual(self.classify(counts.format(21, 21, 0), {}, 1), 'pass')
-        self.assertEqual(self.classify(counts.format(0, 0, 0), {}, 1), 'uncertain')
-        self.assertEqual(self.classify(red, {}), 'new')
-        self.assertEqual(self.classify(red, {'fixture::conformance/TEST/TEST-duplicate-bad.hir': failing}),
-                         'known')
-        self.assertEqual(self.classify(red.replace('got accept', 'got LANG-9'),
-                                       {'fixture::conformance/TEST/TEST-duplicate-bad.hir': failing}),
-                         'uncertain')
-        native = ('native: conformance/TEST/TEST-provider-run.hir under x86_64/regions/elide/reuse/flat-walk/heap: '
-                  'ready: no native layout for Inbox (native-unavailable)\n{\n  "configuration_attempts": 2,\n}\n')
-        self.assertEqual(self.classify(native, {}), 'new')
-        self.assertEqual(self.classify(native.split('\n', 1)[1], {}, 1), 'pass')
 
     def test_known_body_does_not_hide_new_failure_in_same_target(self):
         details = self.panic + '\nHIRSEL_TEST_STARTED laws::new\ntest laws::new ... FAILED\n'

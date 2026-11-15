@@ -48,7 +48,7 @@ if args.list:
     for name in selected: print(name + ': test')
 else:
     with open(os.environ['OBSERVED'], 'w') as output:
-        json.dump(dict(argv=sys.argv[1:], bootstrap=os.environ.get('RUSTC_BOOTSTRAP'), threads=os.environ.get('RUST_TEST_THREADS'), jobs=os.environ.get('HIRSEL_JOBS'), llvm=os.environ.get('LLVM_SYS_231_PREFIX'), linker=os.environ.get('HIRSEL_CAPTURE_LINKER'), auditor=os.environ.get('HIRSEL_AUDITOR_PACKAGE'), cases=[name for name in selected
+        json.dump(dict(argv=sys.argv[1:], bootstrap=os.environ.get('RUSTC_BOOTSTRAP'), threads=os.environ.get('RUST_TEST_THREADS'), jobs=os.environ.get('HIRSEL_JOBS'), llvm=os.environ.get('LLVM_SYS_231_PREFIX'), qemu=os.environ.get('HIRSEL_QEMU_AARCH64'), kit=os.environ.get('HIRSEL_LINK_KIT'), cases=[name for name in selected
                   if args.ignored or args.include_ignored or not cases[name]]), output)
     if args.format == 'json':
         print(json.dumps(dict(type='suite', event='started', test_count=len(selected))))
@@ -230,11 +230,11 @@ class PrivateNativeInputs(LauncherFixture):
         self.assertFalse(Path(observed['llvm']).exists())
         self.assertTrue((self.root / 'llvm/lib/libshared.so').exists())
 
-    def test_native_environment_exports_stored_linker_and_auditor_packages(self):
+    def test_native_environment_exports_a_path_inside_each_named_toolchain(self):
         self.source_files()
         environment = self.root / 'native-environment.tsv'
         rows = [line for line in Path(os.environ.get('HIRSEL_TEST_NATIVE_ENVIRONMENT', ROOT / 'tools/buck2/native-toolchain/environment.tsv')).read_text().splitlines()
-                if line.startswith(('HIRSEL_CAPTURE_LINKER\t', 'HIRSEL_AUDITOR_PACKAGE\t'))]
+                if line.startswith(('HIRSEL_QEMU_AARCH64\t', 'HIRSEL_LINK_KIT\t'))]
         self.assertEqual(len(rows), 2)
         environment.write_text('\n'.join(rows) + '\n')
         for _, target, _ in (row.split('\t') for row in rows):
@@ -245,8 +245,8 @@ class PrivateNativeInputs(LauncherFixture):
         result = subprocess.run(['sh', str(LAUNCHER), 'harness', '--exact', 'pool::smoke'], cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         observed = json.loads(self.observed.read_text())
-        self.assertEqual(Path(observed['linker']).resolve(), self.root / 'linker')
-        self.assertEqual(Path(observed['auditor']).resolve(), self.root / 'runtime-auditor')
+        self.assertEqual(Path(observed['qemu']), (self.root / 'qemu').resolve() / 'qemu-aarch64')
+        self.assertEqual(Path(observed['kit']).resolve(), (self.root / 'kit').resolve())
 
     def test_listing_uses_original_sdk_without_materialization(self):
         self.source_files()
@@ -910,27 +910,6 @@ class LauncherSelection(LauncherFixture):
         self.assertEqual(result['argv'], ['pool::other', '--exact'])
 
 
-class LauncherBless(LauncherFixture):
-    """A bless on the pool would rewrite a discarded copy of the checkout."""
-
-    def launch(self, *args, **env):
-        return subprocess.run(['sh', str(LAUNCHER), 'harness', 'pool::other', *args], cwd=self.root,
-                              env=self.env | env, capture_output=True, text=True)
-
-    def test_every_bless_form_fails_on_the_pool(self):
-        for args, env in [((), dict(HIRSEL_BLESS='1')), ((), dict(INSTA_UPDATE='always')),
-                          (('--bless',), {})]:
-            run = self.launch(*args, HIRSEL_TEST_POOL='1', **env)
-            self.assertEqual(run.returncode, 2, (args, env, run.stderr))
-            self.assertIn('discarded copy of the checkout', run.stderr)
-            self.assertFalse(self.observed.exists())
-
-    def test_a_bless_on_this_host_runs(self):
-        run = self.launch(HIRSEL_BLESS='1', INSTA_UPDATE='always')
-        self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(json.loads(self.observed.read_text())['cases'], ['pool::other'])
-
-
 class LauncherMemory(LauncherFixture):
     def limits(self, limit):
         probe = self.root / 'probe'
@@ -972,24 +951,22 @@ class LauncherCache(LauncherFixture):
                 env.pop(key, None)
                 if value is not None:
                     env[key] = value
-            env['HIRSEL_RESULTS_DIR'] = str(shared / 'results')
-            env['HIRSEL_NATIVE_CACHE'] = str(shared / 'runtime')
+            env['XDG_DATA_HOME'] = str(shared / 'data')
             run = self.launch_probe('''
 import json, os
 from pathlib import Path
 cache = Path(os.environ['XDG_CACHE_HOME'])
 assert cache.is_absolute() and cache.is_dir()
 assert cache.stat().st_mode & 0o777 == 0o700
-for key in ('XDG_CACHE_HOME', 'HIRSEL_RESULTS_DIR', 'HIRSEL_NATIVE_CACHE'):
+for key in ('XDG_CACHE_HOME', 'XDG_DATA_HOME'):
     path = Path(os.environ[key]); path.mkdir(parents=True, exist_ok=True)
     (path / 'written').write_text('owned')
-print(json.dumps(dict(cache=str(cache), results=os.environ['HIRSEL_RESULTS_DIR'], runtime=os.environ['HIRSEL_NATIVE_CACHE'])))
+print(json.dumps(dict(cache=str(cache), data=os.environ['XDG_DATA_HOME'])))
 ''', env=env)
             self.assertEqual(run.returncode, 0, run.stderr)
             paths = json.loads(run.stdout)
             action = Path(paths['cache']).parent
-            self.assertEqual(Path(paths['results']).parent, action)
-            self.assertEqual(Path(paths['runtime']).parent, action)
+            self.assertEqual(Path(paths['data']).parent, action)
             self.assertFalse(action.exists())
             self.assertEqual(list(shared.iterdir()), [])
             self.assertEqual(blocked.read_text(), 'not a directory')

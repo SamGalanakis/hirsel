@@ -1,5 +1,5 @@
-//! Scalar lowering uses LLVM overflow and numeric intrinsics like the retained
-//! backend, with CoreIR types and explicit failure successors.
+//! Scalar lowering uses LLVM overflow and numeric intrinsics, with CoreIR types
+//! and explicit failure successors.
 use super::*;
 
 impl FunctionEmitter<'_> {

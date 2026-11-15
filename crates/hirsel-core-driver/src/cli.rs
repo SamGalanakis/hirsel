@@ -354,7 +354,7 @@ fn named(name: &str) -> Result<&'static CommandSpec, String> {
 pub fn help(command: Option<&CommandSpec>) -> String {
     if let Some(command) = command {
         let mut result = format!(
-            "Usage: hirsel-core {}\n\n{}\n\nOptions:\n",
+            "Usage: hirsel {}\n\n{}\n\nOptions:\n",
             command.usage, command.description
         );
         for option in OPTIONS
@@ -370,7 +370,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
         }
         result
     } else {
-        let mut result = "Usage: hirsel-core <command> [options]\n\nCommands:\n".to_owned();
+        let mut result = "Usage: hirsel <command> [options]\n\nCommands:\n".to_owned();
         for command in COMMANDS {
             result.push_str(&format!("  {:<16} {}\n", command.name, command.description));
         }

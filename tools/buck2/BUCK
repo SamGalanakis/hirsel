@@ -147,10 +147,7 @@ platform(
 export_file(name = "test_launcher.sh", src = "test_launcher.sh", visibility = ["PUBLIC"])
 export_file(name = "test_report.py", visibility = ["PUBLIC"])
 export_file(name = "test_executor.py", visibility = ["PUBLIC"])
-export_file(name = "bundle_archive.py", src = "bundle_archive.py", visibility = ["PUBLIC"])
 export_file(name = "runtime_parts.py", src = "runtime_parts.py", visibility = ["PUBLIC"])
-export_file(name = "startup_order.py", visibility = ["PUBLIC"])
-export_file(name = "link_hosts.py", src = "link_hosts.py", visibility = ["PUBLIC"])
 export_file(name = "sync.py", src = "sync.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "prepare.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "cargo_units.py", mode = "reference", visibility = ["PUBLIC"])
@@ -176,7 +173,6 @@ export_file(name = "workspace-metadata.json", mode = "reference", visibility = [
 # Source inputs of the landing race regression test.
 [export_file(name = tool, src = tool, mode = "reference", visibility = ["PUBLIC"]) for tool in [
     "event_logs.py",
-    "conformance.py",
     "generated.py",
     "merging.py",
     "clippy.py",

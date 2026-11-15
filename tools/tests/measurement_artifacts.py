@@ -38,7 +38,7 @@ int main(void) {
     return 0;
 }
 '''
-COMPILER = 'buck-out/v2/art/root/release/__hirsel-core-driver-bin-hirsel-core__/hirsel_core'
+COMPILER = 'buck-out/v2/art/root/release/__hirsel-core-driver-bin-hirsel__/hirsel_core'
 RUNTIME = 'buck-out/v2/art/root/release/__hirsel-core-rt-archives__/hirsel-core-rt-archives'
 FAKE_BUCK = f'''#!/bin/sh
 set -e
@@ -47,7 +47,7 @@ mkdir -p {Path(COMPILER).parent} {RUNTIME}/x86_64-unknown-linux-gnu
 "{CLANG}" -DVERSION='"built first"' -x c program.c -ldl -Wl,--disable-new-dtags \
   -Wl,-rpath,'$ORIGIN/../../../../../../tools/buck2/toolchains/llvm-files/lib' -o {COMPILER}
 printf 'shipping archive' > {RUNTIME}/x86_64-unknown-linux-gnu/libhirsel_core_rt.a
-printf '{{"root//:hirsel-core-driver-bin-hirsel-core":"{COMPILER}","root//:hirsel-core-rt-archives":"{RUNTIME}"}}\\n'
+printf '{{"root//:hirsel-core-driver-bin-hirsel":"{COMPILER}","root//:hirsel-core-rt-archives":"{RUNTIME}"}}\\n'
 '''
 
 

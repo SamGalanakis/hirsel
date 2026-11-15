@@ -105,6 +105,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     meter.finish("output/render");
     std::fs::write(&args[5], serde_json::to_vec_pretty(&meter.result)?)?;
-    // Match hirsel-core's process boundary: outputs remain alive until process exit.
+    // Match hirsel's process boundary: outputs remain alive until process exit.
     std::process::exit(if accepted { 0 } else { 2 });
 }

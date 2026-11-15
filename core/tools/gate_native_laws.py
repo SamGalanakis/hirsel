@@ -41,6 +41,9 @@ def main():
                        args.cc.resolve() if args.cc else None)
             findings = [f"{row['engine']} {row['file']}:{row['line']} {row['test']}: {row['cause']}"
                         for row in rows if row['applicable'] and not row['passed']]
+            # tools/sweep counts this line: one body per law and engine.
+            print(f"native laws: {sum(row['applicable'] and row['passed'] for row in rows)} passed, "
+                  f"{len(findings)} failed", flush=True)
             self.assertFalse(findings, '\n' + '\n'.join(findings))
             self.assertTrue(any(row['applicable'] for row in rows), 'zero laws ran')
 

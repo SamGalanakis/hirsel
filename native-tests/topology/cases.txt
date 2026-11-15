@@ -1,4 +1,0 @@
-# Multi-unit corpus cases run as one object, one object per unit and twenty seeded random
-# partitions (PROG-5): every partition must observe what the reference does.
-conformance/CLO/CLO-2-bound-derived-capability-run.hir
-conformance/DROP/DROP-2-kept-temporary-failure-run.hir

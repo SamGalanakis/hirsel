@@ -69,7 +69,6 @@ class Resolution:
         self.units = {}
         self.names = {}
         self.preferred = {}
-        self.runtime = {}
         self.test_binaries = {}
         fingerprint = hashlib.sha256(json.dumps([meta['packages'], meta['workspace_members'], (root / 'Cargo.toml').read_text(), (root / 'rust-toolchain.toml').read_text()], sort_keys=True).encode()).hexdigest()
         self.cache_path = root / '.buck2/cargo-units.json'
@@ -110,16 +109,6 @@ class Resolution:
                             base = self.base(unit)
                             if base:
                                 self.preferred.setdefault(base, keys[index])
-                    if package['name'] == 'hirsel-rt':
-                        self.runtime['x86_64-unknown-linux-gnu'] = next(keys[i] for i in graph['roots']
-                                                                                    if graph['units'][i]['target']['kind'] != ['custom-build'])
-        # Runtime archives are cross compiled; Cargo must resolve their target
-        # dependency edges separately from the build-script host dependencies.
-        graph = self.graph([env['CARGO'], 'build', '-p', 'hirsel-rt', '--locked',
-                            '--manifest-path', str(root / 'Cargo.toml'), '--target', 'aarch64-unknown-linux-gnu',
-                            '--unit-graph', '-Z', 'unstable-options'], env)
-        keys = self.add(graph)
-        self.runtime['aarch64-unknown-linux-gnu'] = next(keys[i] for i in graph['roots'])
         for key, unit in self.units.items():
             base = self.base(unit)
             if base:
@@ -231,10 +220,6 @@ class Resolution:
                     if name != base and 'doctests' in attrs:
                         fields['doctests'] = False
                     result.append([replace(source, statement, fields, render)])
-            elif call.func.id == 'hirsel_runtime_archives':
-                fields = {'deps': sorted(self.deps(self.runtime['x86_64-unknown-linux-gnu'])),
-                          'target_deps': {triple: sorted(self.deps(key)) for triple, key in self.runtime.items()}}
-                result.append([replace(source, statement, fields, render)])
             else:
                 result.append(source.splitlines(keepends=True)[statement.lineno - 1:statement.end_lineno])
         # The only top-level statements are calls; keep the generated header.

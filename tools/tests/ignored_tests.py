@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Every ignored test has a registered executable home.
 
-An ignored test is a `full_gate_` case (`#[ignore = "full gate..."]`, run by
-both full-gate crate stages of tools/main-runs), a release-only case
-(`cfg_attr(debug_assertions, ignore ...)`, run by the release tests), or a case
-in a module that tools/check-native.sh runs with its ignored tests.
+An ignored test is a `full_gate_` case (`#[ignore = "full gate..."]`), a
+release-only case (`cfg_attr(debug_assertions, ignore ...)`, run by the release
+tests), an AArch64 runtime case of the LLVM backend (//:core-llvm-aarch64-runtime),
+or a body of the driver's native tests module (//:core-driver-native).
 A registered subprocess worker runs through its ordinary bounded parent test.
 Archival audits and host qualifications have exact tools/ignored-tests commands.
-Expectation rewrites are not ignored tests: they run under HIRSEL_BLESS (tools/bless.sh).
 """
 from pathlib import Path
 import argparse
@@ -15,7 +14,6 @@ import json
 import re
 import os
 import runpy
-import shlex
 import subprocess
 import types
 import sys
@@ -24,13 +22,6 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
-# Sources whose ignored cases tools/check-native.sh runs, with the stage's selection.
-NATIVE = [('crates/hirsel-llvm/src/',
-  '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored --skip core::tests::aarch64_)'),
- ('crates/hirsel-llvm/tests/it/',
-  '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored --skip core::tests::aarch64_)'),
- ('crates/hirsel-lir/tests/it/layout.rs',
-  '//:hirsel-lir-test-it -- layout::c_probes_agree_on_both_targets --exact --include-ignored')]
 # These workers require parent-supplied input and cannot run alone in a gate.
 # The aarch64 core::tests bodies need the aarch64 runtime archive; their one home
 # is //:core-llvm-aarch64-runtime's exact selection in tools/buck2/sync.py.
@@ -46,366 +37,10 @@ DRIVER_NATIVE = {'crates/hirsel-core-driver/src/native.rs'} | {
 DELEGATED = {('crates/hirsel-artifact-store/src/index/tests/races.rs', 'cooperating_child'): ('multiprocess_common_pin_publication_and_live_staging_gc_owner',
                                                                                   'child')}
 REPLAY_ACTIONS = set()
-# These Buck proof targets supply their own immutable tool inputs, rather than
-# the archival runner's environment. Each probe checks exact identity/counts.
-PROOFS = {'object_queries::platform::closure_tests::selected_virtual_inputs_keep_scripts_thin_members_and_absolute_dso_names': {'source': 'crates/hirsel-native/tests/native-validation/platform_closure.rs',
-                                                                                                                       'target': '//tools/buck2/native-toolchain:platform-closure-proof',
-                                                                                                                       'probe': 'tools/buck2/native-toolchain/platform_closure_proof.py',
-                                                                                                                       'arguments': ['/original '
-                                                                                                                                     'pinned '
-                                                                                                                                     'llvm',
-                                                                                                                                     '/original '
-                                                                                                                                     'packaged '
-                                                                                                                                     'linker',
-                                                                                                                                     '/selected '
-                                                                                                                                     'kit',
-                                                                                                                                     '/selected '
-                                                                                                                                     'runtime',
-                                                                                                                                     '/selected '
-                                                                                                                                     'auditors',
-                                                                                                                                     '/selected '
-                                                                                                                                     'floor',
-                                                                                                                                     '/selected '
-                                                                                                                                     'qemu',
-                                                                                                                                     '/selected '
-                                                                                                                                     'harness'],
-                                                                                                                       'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                                              'pinned '
-                                                                                                                                                              'llvm',
-                                                                                                                                       'HIRSEL_CAPTURE_LINKER': '/original '
-                                                                                                                                                                'packaged '
-                                                                                                                                                                'linker',
-                                                                                                                                       'HIRSEL_LINK_KIT': '/selected '
-                                                                                                                                                          'kit',
-                                                                                                                                       'HIRSEL_RUNTIME_ARCHIVES': '/selected '
-                                                                                                                                                                  'runtime',
-                                                                                                                                       'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                                                 'auditors',
-                                                                                                                                       'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                                             'floor',
-                                                                                                                                       'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                                              'qemu/qemu-aarch64'}},
- 'requests::native_bootstrap::tests::actual_native_bootstrap_links_both_backends_and_restores_after_runtime_drop': {'source': 'crates/hirsel-requests/src/native_bootstrap/tests.rs',
-                                                                                                                    'target': '//tools/buck2/native-toolchain:native-bootstrap-link-proof',
-                                                                                                                    'probe': 'tools/buck2/native-toolchain/native_bootstrap_link_proof.py',
-                                                                                                                    'arguments': ['/original '
-                                                                                                                                  'pinned '
-                                                                                                                                  'llvm',
-                                                                                                                                  '/original '
-                                                                                                                                  'packaged '
-                                                                                                                                  'linker',
-                                                                                                                                  '/selected '
-                                                                                                                                  'kit',
-                                                                                                                                  '/selected '
-                                                                                                                                  'runtime',
-                                                                                                                                  '/selected '
-                                                                                                                                  'auditors',
-                                                                                                                                  '/selected '
-                                                                                                                                  'floor',
-                                                                                                                                  '/selected '
-                                                                                                                                  'qemu',
-                                                                                                                                  '/selected '
-                                                                                                                                  'harness'],
-                                                                                                                    'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                                           'pinned '
-                                                                                                                                                           'llvm',
-                                                                                                                                    'HIRSEL_CAPTURE_LINKER': '/original '
-                                                                                                                                                             'packaged '
-                                                                                                                                                             'linker',
-                                                                                                                                    'HIRSEL_LINK_KIT': '/selected '
-                                                                                                                                                       'kit',
-                                                                                                                                    'HIRSEL_RUNTIME_ARCHIVES': '/selected '
-                                                                                                                                                               'runtime',
-                                                                                                                                    'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                                              'auditors',
-                                                                                                                                    'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                                          'floor',
-                                                                                                                                    'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                                           'qemu/qemu-aarch64'}},
- 'requests::native_bootstrap::tests::actual_native_bootstrap_uses_selected_closed_runtime_on_link_and_reopen': {'source': 'crates/hirsel-requests/src/native_bootstrap/tests.rs',
-                                                                                                                'target': '//tools/buck2/native-toolchain:native-closed-bootstrap-proof',
-                                                                                                                'probe': 'tools/buck2/native-toolchain/native_closed_bootstrap_proof.py',
-                                                                                                                'arguments': ['/original '
-                                                                                                                              'pinned '
-                                                                                                                              'llvm',
-                                                                                                                              '/original '
-                                                                                                                              'packaged '
-                                                                                                                              'linker',
-                                                                                                                              '/selected '
-                                                                                                                              'kit',
-                                                                                                                              '/selected '
-                                                                                                                              'runtime',
-                                                                                                                              '/selected '
-                                                                                                                              'auditors',
-                                                                                                                              '/selected '
-                                                                                                                              'floor',
-                                                                                                                              '/selected '
-                                                                                                                              'qemu',
-                                                                                                                              '/selected '
-                                                                                                                              'harness'],
-                                                                                                                'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                                       'pinned '
-                                                                                                                                                       'llvm',
-                                                                                                                                'HIRSEL_CAPTURE_LINKER': '/original '
-                                                                                                                                                         'packaged '
-                                                                                                                                                         'linker',
-                                                                                                                                'HIRSEL_LINK_KIT': '/selected '
-                                                                                                                                                   'kit',
-                                                                                                                                'HIRSEL_RUNTIME_ARCHIVES': '/selected '
-                                                                                                                                                           'runtime',
-                                                                                                                                'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                                          'auditors',
-                                                                                                                                'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                                      'floor',
-                                                                                                                                'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                                       'qemu/qemu-aarch64'}},
- 'object_queries::platform::tests::selected_platform_closes_runtime_before_keys_and_replays_without_originals': {'source': 'crates/hirsel-native/tests/native-validation/platform_capture.rs',
-                                                                                                                 'target': '//tools/buck2/native-toolchain:platform-capture-proof',
-                                                                                                                 'probe': 'tools/buck2/native-toolchain/platform_capture_proof.py',
-                                                                                                                 'arguments': ['/original '
-                                                                                                                               'pinned '
-                                                                                                                               'llvm',
-                                                                                                                               '/original '
-                                                                                                                               'packaged '
-                                                                                                                               'linker',
-                                                                                                                               '/selected '
-                                                                                                                               'kit',
-                                                                                                                               '/selected '
-                                                                                                                               'runtime',
-                                                                                                                               '/selected '
-                                                                                                                               'auditors',
-                                                                                                                               '/selected '
-                                                                                                                               'floor',
-                                                                                                                               '/selected '
-                                                                                                                               'qemu',
-                                                                                                                               '/selected '
-                                                                                                                               'harness'],
-                                                                                                                 'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                                        'pinned '
-                                                                                                                                                        'llvm',
-                                                                                                                                 'HIRSEL_CAPTURE_LINKER': '/original '
-                                                                                                                                                          'packaged '
-                                                                                                                                                          'linker',
-                                                                                                                                 'HIRSEL_LINK_KIT': '/selected '
-                                                                                                                                                    'kit',
-                                                                                                                                 'HIRSEL_RUNTIME_ARCHIVES': '/selected '
-                                                                                                                                                            'runtime',
-                                                                                                                                 'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                                           'auditors',
-                                                                                                                                 'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                                       'floor',
-                                                                                                                                 'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                                        'qemu/qemu-aarch64'}},
- 'requests::native_bootstrap::tests::actual_native_bootstrap_binds_run_identity_and_delivers_live_output': {'source': 'crates/hirsel-requests/src/native_bootstrap/tests.rs',
-                                                                                                            'target': '//tools/buck2/native-toolchain:native-bound-bootstrap-proof',
-                                                                                                            'probe': 'tools/buck2/native-toolchain/native_bound_bootstrap_proof.py',
-                                                                                                            'arguments': ['/original '
-                                                                                                                          'pinned '
-                                                                                                                          'llvm',
-                                                                                                                          '/original '
-                                                                                                                          'packaged '
-                                                                                                                          'linker',
-                                                                                                                          '/selected '
-                                                                                                                          'kit',
-                                                                                                                          '/selected '
-                                                                                                                          'runtime',
-                                                                                                                          '/selected '
-                                                                                                                          'auditors',
-                                                                                                                          '/selected '
-                                                                                                                          'floor',
-                                                                                                                          '/selected '
-                                                                                                                          'qemu',
-                                                                                                                          '/selected '
-                                                                                                                          'harness'],
-                                                                                                            'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                                   'pinned '
-                                                                                                                                                   'llvm',
-                                                                                                                            'HIRSEL_CAPTURE_LINKER': '/original '
-                                                                                                                                                     'packaged '
-                                                                                                                                                     'linker',
-                                                                                                                            'HIRSEL_LINK_KIT': '/selected '
-                                                                                                                                               'kit',
-                                                                                                                            'HIRSEL_RUNTIME_ARCHIVES': '/selected '
-                                                                                                                                                       'runtime',
-                                                                                                                            'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                                      'auditors',
-                                                                                                                            'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                                  'floor',
-                                                                                                                            'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                                   'qemu/qemu-aarch64'}},
- 'requests::native_selection::tests::actual_native_selector_coalesces_build_and_bound_run_without_a_retained_controller': {'source': 'crates/hirsel-requests/src/native_selection/tests.rs',
-                                                                                                                           'target': '//tools/buck2/native-toolchain:native-selector-proof',
-                                                                                                                           'probe': 'tools/buck2/native-toolchain/native_selector_proof.py',
-                                                                                                                           'arguments': ['/original '
-                                                                                                                                         'pinned '
-                                                                                                                                         'llvm',
-                                                                                                                                         '/original '
-                                                                                                                                         'packaged '
-                                                                                                                                         'linker',
-                                                                                                                                         '/selected '
-                                                                                                                                         'kit',
-                                                                                                                                         '/selected '
-                                                                                                                                         'runtime',
-                                                                                                                                         '/selected '
-                                                                                                                                         'auditors',
-                                                                                                                                         '/selected '
-                                                                                                                                         'floor',
-                                                                                                                                         '/selected '
-                                                                                                                                         'qemu',
-                                                                                                                                         '/selected '
-                                                                                                                                         'harness'],
-                                                                                                                           'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                                                  'pinned '
-                                                                                                                                                                  'llvm',
-                                                                                                                                           'HIRSEL_CAPTURE_LINKER': '/original '
-                                                                                                                                                                    'packaged '
-                                                                                                                                                                    'linker',
-                                                                                                                                           'HIRSEL_LINK_KIT': '/selected '
-                                                                                                                                                              'kit',
-                                                                                                                                           'HIRSEL_RUNTIME_ARCHIVES': '/selected '
-                                                                                                                                                                      'runtime',
-                                                                                                                                           'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                                                     'auditors',
-                                                                                                                                           'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                                                 'floor',
-                                                                                                                                           'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                                                  'qemu/qemu-aarch64'}},
- 'object_queries::capture::tests::packaged_capture_replays_changed_inputs_without_originals': {'source': 'crates/hirsel-native/tests/native-validation/link_capture.rs',
-                                                                                               'target': '//tools/buck2/native-toolchain:linker-store-proof',
-                                                                                               'probe': 'tools/buck2/native-toolchain/linker_store_probe.py'},
- 'kit::tests::stored_linker_replays_shared_executable_plans_for_both_targets': {'source': 'crates/hirsel-native/src/kit.rs',
-                                                                                'target': '//tools/buck2/native-toolchain:executable-plan-proof',
-                                                                                'probe': 'tools/buck2/native-toolchain/executable_plan_proof.py',
-                                                                                'arguments': ['/original '
-                                                                                              'pinned llvm',
-                                                                                              '/original '
-                                                                                              'packaged '
-                                                                                              'linker',
-                                                                                              '/selected kit',
-                                                                                              '/selected '
-                                                                                              'runtime',
-                                                                                              '/selected '
-                                                                                              'harness'],
-                                                                                'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                       'pinned '
-                                                                                                                       'llvm',
-                                                                                                'HIRSEL_CAPTURE_LINKER': '/original '
-                                                                                                                         'packaged '
-                                                                                                                         'linker',
-                                                                                                'HIRSEL_LINK_KIT': '/selected '
-                                                                                                                   'kit',
-                                                                                                'HIRSEL_RUNTIME_ARCHIVES': '/selected '
-                                                                                                                           'runtime'}},
- 'kit::tests::frozen_kit_binds_transitive_leaf_edits_and_plans_without_originals': {'source': 'crates/hirsel-native/src/kit.rs',
-                                                                                    'target': '//tools/buck2/native-toolchain:frozen-kit-proof',
-                                                                                    'probe': 'tools/buck2/native-toolchain/frozen_kit_proof.py'},
- 'object_queries::capture::tests::large_tool_snapshots_and_replays_under_none_and_unwritable_with_original_ram_cap': {'source': 'crates/hirsel-native/tests/native-validation/link_capture.rs',
-                                                                                                                      'target': '//tools/buck2/native-toolchain:scratch-linker-proof',
-                                                                                                                      'probe': 'tools/buck2/native-toolchain/scratch_linker_proof.py'},
- 'object_queries::runtime::tests::actual_runtime_products_reopen_changed_leaf_versions_and_refuse_missing_closure': {'source': 'crates/hirsel-native/tests/native-validation/runtime_products.rs',
-                                                                                                                     'target': '//tools/buck2/native-toolchain:runtime-store-proof',
-                                                                                                                     'probe': 'tools/buck2/native-toolchain/runtime_store_proof.py',
-                                                                                                                     'arguments': ['/original '
-                                                                                                                                   'pinned '
-                                                                                                                                   'llvm',
-                                                                                                                                   '/selected '
-                                                                                                                                   'auditor',
-                                                                                                                                   '/selected '
-                                                                                                                                   'floor',
-                                                                                                                                   '/selected '
-                                                                                                                                   'qemu',
-                                                                                                                                   '/selected '
-                                                                                                                                   'harness'],
-                                                                                                                     'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                                            'pinned '
-                                                                                                                                                            'llvm',
-                                                                                                                                     'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                                               'auditor',
-                                                                                                                                     'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                                           'floor',
-                                                                                                                                     'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                                            'qemu/qemu-aarch64'}},
- 'object_queries::runtime::tests::equal_bytes_keep_distinct_loaded_libraries_and_shared_aliases': {'source': 'crates/hirsel-native/tests/native-validation/runtime_products.rs',
-                                                                                                   'target': '//tools/buck2/native-toolchain:runtime-identity-case-proof',
-                                                                                                   'probe': 'tools/buck2/native-toolchain/runtime_identity_case_proof.py',
-                                                                                                   'arguments': ['/original '
-                                                                                                                 'pinned '
-                                                                                                                 'llvm',
-                                                                                                                 '/selected '
-                                                                                                                 'auditor',
-                                                                                                                 '/selected '
-                                                                                                                 'floor',
-                                                                                                                 '/selected '
-                                                                                                                 'qemu',
-                                                                                                                 '/selected '
-                                                                                                                 'harness'],
-                                                                                                   'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                          'pinned '
-                                                                                                                                          'llvm',
-                                                                                                                   'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                             'auditor',
-                                                                                                                   'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                         'floor',
-                                                                                                                   'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                          'qemu/qemu-aarch64'}},
- 'object_queries::runtime::tests::actual_loader_discovers_transitive_runtime_inputs_and_closes_replay': {'source': 'crates/hirsel-native/tests/native-validation/runtime_products.rs',
-                                                                                                         'target': '//tools/buck2/native-toolchain:runtime-discovery-proof',
-                                                                                                         'probe': 'tools/buck2/native-toolchain/runtime_discovery_proof.py',
-                                                                                                         'arguments': ['/original '
-                                                                                                                       'pinned '
-                                                                                                                       'llvm',
-                                                                                                                       '/selected '
-                                                                                                                       'auditor',
-                                                                                                                       '/selected '
-                                                                                                                       'floor',
-                                                                                                                       '/selected '
-                                                                                                                       'qemu',
-                                                                                                                       '/selected '
-                                                                                                                       'harness'],
-                                                                                                         'environment': {'LLVM_SYS_231_PREFIX': '/original '
-                                                                                                                                                'pinned '
-                                                                                                                                                'llvm',
-                                                                                                                         'HIRSEL_AUDITOR_PACKAGE': '/selected '
-                                                                                                                                                   'auditor',
-                                                                                                                         'HIRSEL_GLIBC_FLOOR': '/selected '
-                                                                                                                                               'floor',
-                                                                                                                         'HIRSEL_QEMU_AARCH64': '/selected '
-                                                                                                                                                'qemu/qemu-aarch64'}}}
-PROOFS['object_queries::platform::record::tests::a_platform_record_is_reused_until_switched_off_aged_or_shown_wrong'] = {
-    'source': 'crates/hirsel-native/tests/native-validation/platform_record.rs',
-    'target': '//tools/buck2/native-toolchain:platform-record-proof',
-    'probe': 'tools/buck2/native-toolchain/platform_record_proof.py',
-    'arguments': ['/original pinned llvm', '/original packaged linker', '/selected kit', '/selected runtime', '/selected auditors', '/selected floor', '/selected qemu', '/selected harness'],
-    'environment': {'LLVM_SYS_231_PREFIX': '/original pinned llvm', 'HIRSEL_CAPTURE_LINKER': '/original packaged linker',
-                    'HIRSEL_LINK_KIT': '/selected kit', 'HIRSEL_RUNTIME_ARCHIVES': '/selected runtime',
-                    'HIRSEL_AUDITOR_PACKAGE': '/selected auditors', 'HIRSEL_GLIBC_FLOOR': '/selected floor',
-                    'HIRSEL_QEMU_AARCH64': '/selected qemu/qemu-aarch64'},
-}
 EXPLICIT = json.loads((ROOT / 'tools/ignored-tests.json').read_text())
-RETAINED = set()
-for row in (ROOT / 'tools/retained-rust.tsv').read_text().splitlines()[1:]:
-    target, selector = row.split('\t')
-    module = selector.split('::')[0]
-    if '-test-' in target:
-        crate, suite = target.split('-test-', 1)
-        path = f'crates/{crate}/tests/{suite}/{module}.rs'
-    else:
-        path = f'crates/{target.removesuffix("-unittest")}/src/{module}.rs'
-    RETAINED.add((path, selector.rsplit('::', 1)[-1]))
 
 ATTRIBUTE = re.compile(r'^[ \t]*#\[(ignore\b[^\]]*)\]|^[ \t]*#\[cfg_attr\(\s*([^,]+),\s*ignore\b', re.M)
 FUNCTION = re.compile(r'\bfn\s+(\w+)')
-
-
-def native_covers(path, name, prefix, selection):
-    """The source home must also select this libtest name, not just its file."""
-    arguments = shlex.split(selection.split('$(libtest ', 1)[1].split(')', 1)[0] if '$(libtest ' in selection
-                            else selection.split(' -- ', 1)[-1])
-    skips = [value for flag, value in zip(arguments, arguments[1:]) if flag == '--skip']
-    filters = [argument for argument in arguments if not argument.startswith('--') and argument not in skips]
-    qualified = f'{Path(path).stem}::{name}'
-    return (path.startswith(prefix) and (not filters or any(f in qualified for f in filters))
-            and not any(s.split('::', 1)[-1] in qualified for s in skips))
 
 
 def arguments(text, start):
@@ -463,8 +98,6 @@ def orphans(sources):
                     continue
             elif attribute[2].strip() == 'debug_assertions':
                 continue
-            if (path, name) in RETAINED:
-                continue
             if (path, name) in DELEGATED:
                 continue
             if path == 'crates/hirsel-llvm/src/core/tests.rs' and name in AARCH64_RUNTIME:
@@ -475,14 +108,9 @@ def orphans(sources):
                 continue
             if (path, name) in REPLAY_ACTIONS:
                 continue
-            if any(home['source'] == path and case.rsplit('::', 1)[-1] == name
-                   for case, home in PROOFS.items()):
-                continue
             home = next((home for case, home in EXPLICIT.items()
                          if home['source'] == path and case.rsplit('::', 1)[-1] == name), None)
             if home:
-                continue
-            if any(native_covers(path, name, prefix, selection) for prefix, selection in NATIVE):
                 continue
             found.append((path, name))
     return found
@@ -522,13 +150,6 @@ class IgnoredTests(unittest.TestCase):
         sources = {str(p.relative_to(ROOT)): p.read_text() for p in ROOT.glob('crates/**/*.rs')}
         self.assertEqual(orphans(sources), [])
 
-    def test_each_native_home_is_a_check_native_selection(self):
-        script = (ROOT / 'tools/check-native.sh').read_text()
-        for prefix, selection in NATIVE:
-            self.assertIn(selection, script, prefix)
-            self.assertTrue(list(ROOT.glob(prefix + '*')), prefix)
-
-
     def test_registered_runner_requires_original_inputs_and_selects_exactly_one_body(self):
         runner = runpy.run_path(str(ROOT / 'tools/ignored-tests'))
         case = 'fixture::control'
@@ -542,41 +163,6 @@ class IgnoredTests(unittest.TestCase):
             for environment in ({}, {'FIXTURE_PATH': ''}):
                 with self.assertRaises(ValueError):
                     runner['command'](case, environment)
-
-    def test_buck_proof_homes_forward_tools_and_require_one_exact_execution(self):
-        for case, home in PROOFS.items():
-            self.assertIn(case.rsplit('::', 1)[-1], [name for _, name in ignored_declarations((ROOT / home['source']).read_text())])
-            self.assertEqual(orphans({home['source']: '#[ignore]\nfn unregistered() {}'}), [(home['source'], 'unregistered')])
-            self.assertIn('tests/native-validation/link_capture.rs', (ROOT / 'crates/hirsel-native/src/object_queries/capture.rs').read_text())
-            target = (ROOT / 'tools/buck2/native-toolchain/BUCK').read_text()
-            self.assertIn(f'name = "{home["target"].rsplit(":", 1)[-1]}"', target)
-            self.assertIn(f'script = "{Path(home["probe"]).name}", interpreter = "python3"', target)
-            declaration = next(line for line in target.splitlines()
-                               if f'name = "{home["target"].rsplit(":", 1)[-1]}"' in line)
-            tools = re.search(r'tools = \[([^\]]*)\]', declaration)[1]
-            self.assertEqual(len(re.findall(r'"[^"]+"', tools)), len(home.get('arguments', [0, 0, 0])), case)
-            probe = runpy.run_path(str(ROOT / home['probe']))
-            arguments = home.get('arguments', ['/original packaged linker', '/original pinned llvm', '/selected harness'])
-            selected, environment = probe['command'](arguments, {'KEEP': 'original'})
-            self.assertEqual(selected, [arguments[-1], '--ignored', '--exact', case, '--test-threads=1', '--nocapture'])
-            forwarded = home.get('environment', {'HIRSEL_CAPTURE_LINKER': arguments[0], 'LLVM_SYS_231_PREFIX': arguments[1]})
-            for key, value in forwarded.items():
-                self.assertEqual(environment[key], value)
-            self.assertEqual(environment['LD_LIBRARY_PATH'], '/original pinned llvm/lib')
-            self.assertEqual(environment['KEEP'], 'original')
-            for status, output, expected in [
-                (0, f'test {case} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;', 0),
-                (0, 'test result: ok. 0 passed; 0 failed; 0 ignored;', 1),
-                (0, 'test result: ok. 0 passed; 0 failed; 1 ignored;', 1),
-                (0, 'test other ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;', 1),
-                (0, f'test {case} ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored;', 1),
-                (32, 'test result: FAILED. 0 passed; 1 failed; 0 ignored;', 32),
-            ]:
-                with patch.object(subprocess, 'run', return_value=types.SimpleNamespace(returncode=status, stdout=output)) as run, patch('builtins.print'):
-                    self.assertEqual(probe['main'](arguments), expected)
-                    self.assertEqual(run.call_args.args[0], selected)
-                    for key, value in forwarded.items():
-                        self.assertEqual(run.call_args.kwargs['env'][key], value)
 
     def test_explicit_runner_refuses_zero_execution_and_propagates_failures(self):
         runner = runpy.run_path(str(ROOT / 'tools/ignored-tests'))
@@ -622,7 +208,6 @@ class IgnoredTests(unittest.TestCase):
                                       '#[test]\n#[cfg_attr(debug_assertions, ignore = "release")]\nfn release() {}\n'
                                       '#[test]\n#[cfg_attr(miri, ignore)]\nfn miri() {}\n'
                                       '#[test]\n#[ignore = "full gate"]\n#[should_panic]\nfn full_gate_b() {}\n',
-            'crates/hirsel-lir/tests/it/layout.rs': '#[test]\n#[ignore = "native"]\nfn c_probes_agree_on_both_targets() {}\n',
         }
         self.assertEqual(orphans(sources), [('crates/a/tests/it/x.rs', 'misnamed'),
                                             ('crates/a/tests/it/x.rs', 'tool'),

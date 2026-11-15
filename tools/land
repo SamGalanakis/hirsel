@@ -23,11 +23,10 @@ full. Transient push failures retry the same checked commit once while main
 is unchanged, fetching to resolve ambiguous completion. A red check
 refuses the push and prints its first error.
 
-The lane runs the other tests its change can break, and
-tools/main-runs runs a chosen suite or selection on current main when requested
-by hand; it has no automatic schedule. Each push is appended
-to `hirsel-landings.jsonl` in the common git directory, from which main-runs
-names the lane of a commit.
+Land builds the installed toolchain bundle before pushing. The lane runs
+the other tests its change can break, and tools/sweep runs every suite on
+current main when requested by hand; it has no automatic schedule. Each push
+is appended to `hirsel-landings.jsonl` in the common git directory.
 """
 
 from contextlib import contextmanager
@@ -66,17 +65,14 @@ CONFIG = ['-c', 'hirsel.clippy=true', '-c', f'hirsel.priority={LAND_PRIORITY}']
 ENV = {'HIRSEL_BUCK2_CONFIG': ' '.join(CONFIG), 'GIT_EDITOR': 'true',
        'HIRSEL_VALIDATE_STAGES': '1', 'HIRSEL_BUCK2_RE_CONCURRENCY': '128',
        'HIRSEL_PLATFORM_CAPTURE': 'cold'}
-# The workspace without tests, Clippy twins, campaign targets, the two-host
-# link build (it holds a host-wide lock), ordinary std product
-# precomputation (integration artifacts, not workspace compilation).
+# The workspace without tests, Clippy twins and campaign targets.
 # Test harnesses stay out: each one's Clippy twin (CLIPPY_TWINS) checks the same
 # crate, sources and dependencies, so linking it again on every batch at checked
 # O3 only re-proves the link. Explicit CORE_ACCEPTANCE inputs below add the
 # harnesses the gate actually executes to this same workspace build.
 BUILD_SET = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-clippy$", root//:)'
              ' - attrregexfilter(name, "-harness$", root//:)'
-             ' - attrfilter(labels, gate, root//:) - kind("_link_hosts_local", root//:)'
-             ' - rdeps(root//:, kind("_hirsel_products", root//:))')
+             ' - attrfilter(labels, gate, root//:)')
 # tools/buck2/clippy.py's query: the twins whose reports Clippy reads.
 CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
 # These reuse the existing harnesses with source data only.
@@ -582,8 +578,8 @@ def full(tree, base, screened=False):
     if report is None:
         # Buck2 serves one command at a time when another holds a different
         # state (a running `buck2 test` refuses even a same-config query), so
-        # one build compiles everything the checks read: the workspace and
-        # the Clippy reports.
+        # one build compiles everything the checks read: the workspace
+        # (with the toolchain bundle) and the Clippy reports.
         # Clippy then reads the compiled reports.
         queries = [run([BUCK2, 'uquery', *CONFIG, expression]) for expression in (BUILD_SET, CLIPPY_TWINS)]
         if any(query.returncode or not query.stdout.strip() for query in queries):
@@ -684,21 +680,15 @@ def rebase(base, *selection):
     `selection` is `upstream commit` for a batch ticket: its commits after
     origin/main, replayed onto the batch so far without moving any branch.
     Ignored build inventories are removed from Git and sync.py regenerates
-    them before checks. Committed pages keep main's generated version: their
-    sole writer, main-runs, regenerates them on main after the push. Never
-    create a lane commit containing a guessed or hand-merged generated page.
+    them before checks.
     """
     result = git('rebase', *(['--onto', base, *selection] if selection else [base]))
     while result.returncode:
         conflicts = git('diff', '--name-only', '--diff-filter=U').stdout.splitlines()
-        if not conflicts or any(path not in generated.BUILD_INPUTS + generated.MAIN_WRITTEN
-                                for path in conflicts):
+        if not conflicts or any(path not in generated.BUILD_INPUTS for path in conflicts):
             return result
         for path in conflicts:
-            if path in generated.BUILD_INPUTS:
-                resolved = git('rm', '-f', '--ignore-unmatch', '--', path)
-            else:
-                resolved = git('restore', f'--source={base}', '--staged', '--worktree', '--', path)
+            resolved = git('rm', '-f', '--ignore-unmatch', '--', path)
             if resolved.returncode:
                 return resolved
             say(f'resolved generated conflict in {path}; its generator owns regeneration')

@@ -4,7 +4,7 @@ use super::{
     invalid,
 };
 use crate::Durability;
-use hirsel_syntax::ContentHash;
+use hirsel_core_ids::ContentHash;
 use std::{
     fs::File,
     io::{self, Read},

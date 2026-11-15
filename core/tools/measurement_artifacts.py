@@ -28,7 +28,7 @@ import tempfile
 from std_native import wait_load
 
 ROOT = Path(__file__).resolve().parents[2]
-COMPILER_TARGET = '//:hirsel-core-driver-bin-hirsel-core'
+COMPILER_TARGET = '//:hirsel-core-driver-bin-hirsel'
 RUNTIME_TARGET = '//:hirsel-core-rt-archives'
 PLATFORM = 'x86_64-unknown-linux-gnu'
 RUNTIME_VIEW = 'buck-out/v2/art/root/*/__hirsel-core-rt-archives__/hirsel-core-rt-archives/' + PLATFORM + '/libhirsel_core_rt.a'

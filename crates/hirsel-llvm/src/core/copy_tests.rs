@@ -7,11 +7,7 @@ const COPY: &str = include_str!("../../tests/core_runtime/checked-copy.ll");
 fn optimized(source: &str) -> (String, Vec<u8>) {
     let context = Context::new();
     let module = Module::parse(&context, "hirsel-core", source).unwrap();
-    let machine = TargetMachine::new(
-        &hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu(),
-        true,
-    )
-    .unwrap();
+    let machine = TargetMachine::core(hirsel_core_layout::Target::X86_64Linux, true).unwrap();
     module.set_target(&machine);
     module.verify().unwrap();
     module.run_core_passes(&machine).unwrap();

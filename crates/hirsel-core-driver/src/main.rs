@@ -709,7 +709,7 @@ fn main() {
     match run() {
         Ok(never) => match never {},
         Err(e) => {
-            eprintln!("hirsel-core: {e}");
+            eprintln!("hirsel: {e}");
             std::process::exit(2);
         }
     }

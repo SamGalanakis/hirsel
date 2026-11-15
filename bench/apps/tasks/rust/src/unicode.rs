@@ -1,6 +1,6 @@
 //! Unicode16 data shared with the Hirsel app. ASCII keeps Rust's fast path;
 //! non-ASCII uses full, locale-independent mappings and exact L/Nd categories.
-include!(concat!(env!("OUT_DIR"), "/unicode16.rs"));
+include!("unicode16.rs");
 fn scalar(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes([0, data[offset], data[offset + 1], data[offset + 2]])
 }

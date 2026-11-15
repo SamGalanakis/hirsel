@@ -421,7 +421,7 @@ impl S3Objects {
                 Some(path) if Path::new(path).is_absolute() => {
                     let pem = std::fs::read(path)
                         .map_err(|e| format!("objects.s3@1 roots {path}: {e}"))?;
-                    hirsel_run_schema::tls::pem_roots(&pem)
+                    pem_roots(&pem)
                         .ok_or_else(|| format!("objects.s3@1 roots {path} holds no trust anchor"))?
                 }
                 Some(_) => return Err("objects.s3@1 roots is an absolute PEM file path".into()),
@@ -687,4 +687,20 @@ impl ObjectStorage for S3Objects {
         check_key(key)?;
         self.client.lock().expect("s3 client").delete_raw(key)
     }
+}
+
+/// Parse every PEM certificate as a trust anchor, using the same parser as rustls's
+/// RootCertStore::add. An empty bundle, malformed PEM or malformed certificate is invalid.
+fn pem_roots(pem: &[u8]) -> Option<Vec<rustls::pki_types::TrustAnchor<'static>>> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    let roots = CertificateDer::pem_slice_iter(pem)
+        .map(|cert| {
+            Some(
+                webpki::anchor_from_trusted_cert(&cert.ok()?)
+                    .ok()?
+                    .to_owned(),
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!roots.is_empty()).then_some(roots)
 }

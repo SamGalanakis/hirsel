@@ -236,6 +236,20 @@ impl CheckProduct {
     ) -> Result<Vec<Identity>, InstanceStop> {
         let mut resolver = Resolver::default();
         collect_instances(roots, limit, |key| {
+            self.instance_step(key, instances, records, &mut resolver, &mut observe)
+        })
+    }
+    /// Walk one instance: its record on a hit, else its materialised body,
+    /// into `instances`; the instances it reaches.
+    pub(crate) fn instance_step(
+        &self,
+        key: &Identity,
+        instances: &mut InstanceSet,
+        records: Option<&Records>,
+        resolver: &mut Resolver,
+        observe: &mut impl FnMut(&Identity, &'static str),
+    ) -> Result<Vec<Identity>, InstanceStop> {
+        {
             observe(key, "start");
             let input = |message: String| InstanceStop::Input {
                 definition: key.definition.clone(),
@@ -365,6 +379,6 @@ impl CheckProduct {
             });
             observe(key, "dependencies");
             Ok(pending.into_iter().collect())
-        })
+        }
     }
 }

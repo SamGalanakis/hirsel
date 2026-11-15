@@ -443,34 +443,33 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             } else {
                 PathBuf::from("program")
             };
-            let options = NativeOptions {
-                backend: backend.unwrap_or(if release {
-                    Backend::Llvm
-                } else {
-                    Backend::Cranelift
-                }),
-                optimize: release,
-                debug_lines: debug_lines.unwrap_or(false),
-                target: target.clone(),
-                runtime: runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
-                include: headers.path().to_owned(),
-                link: match (cc, &installed) {
-                    (Some(cc), _) => Link::Driver(hirsel_core_driver::link_driver(&cc)?),
-                    (None, Some(installed)) => Link::Installed(installed.link(&target).ok_or_else(
-                        || format!("this installation links its host target only, not {target}; pass --cc"),
-                    )?),
-                    (None, None) => Link::Driver(hirsel_core_driver::link_driver(&pinned().ok_or(
-                        "no link driver: this compiler is not installed and LLVM_SYS_231_PREFIX is unset; pass --cc",
-                    )?)?),
-                },
-                store: native_store,
-                output: output_path.unwrap_or(default_output),
-                root_limit,
-                instance_limit: 65_536,
-                directories,
-                grant_mask,
-                logical_charge_report,
+            let link = match (cc, &installed) {
+                (Some(cc), _) => Link::Driver(hirsel_core_driver::link_driver(&cc)?),
+                (None, Some(installed)) => Link::Installed(installed.link(&target).ok_or_else(
+                    || format!("this installation links its host target only, not {target}; pass --cc"),
+                )?),
+                (None, None) => Link::Driver(hirsel_core_driver::link_driver(&pinned().ok_or(
+                    "no link driver: this compiler is not installed and LLVM_SYS_231_PREFIX is unset; pass --cc",
+                )?)?),
             };
+            let mut options = NativeOptions::development(
+                target.clone(),
+                runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
+                headers.path().to_owned(),
+                link,
+                native_store,
+                output_path.unwrap_or(default_output),
+            );
+            if release {
+                options.backend = Backend::Llvm;
+                options.optimize = true;
+            }
+            options.backend = backend.unwrap_or(options.backend);
+            options.debug_lines = debug_lines.unwrap_or(options.debug_lines);
+            options.root_limit = root_limit;
+            options.directories = directories;
+            options.grant_mask = grant_mask;
+            options.logical_charge_report = logical_charge_report;
             Ok((headers, options))
         };
         Some(prepare())

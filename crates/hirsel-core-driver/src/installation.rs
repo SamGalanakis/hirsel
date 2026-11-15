@@ -305,13 +305,52 @@ pub fn publish(
         && let (Some(recipe), Some(archive)) = (installed.link(target), installed.runtime(target))
     {
         let _ = crate::tool_inputs::toolchain(
-            &crate::native::Link::Installed(recipe),
+            &crate::native::Link::Installed(recipe.clone()),
             target,
             &archive,
         );
         meter.finish("install/tool input sighting");
+        if std {
+            prebuild(&installed, target, &archive, recipe, meter)?;
+        }
     }
     Ok(product)
+}
+
+/// Prebuild the installed std image's plain instances for a development
+/// request on the linked host, through the check and emission that request
+/// runs, into the image's store.
+fn prebuild(
+    installed: &Installed,
+    target: &str,
+    archive: &Path,
+    recipe: PathBuf,
+    meter: &mut Meter,
+) -> io::Result<()> {
+    let Some(image) = installed.product("std")? else {
+        return Ok(());
+    };
+    let scratch = tempfile::tempdir()?;
+    let request = crate::CheckRequest {
+        inputs: crate::CorpusManifest {
+            core: image.directory()?.inputs.core.clone(),
+            packages: vec![],
+        },
+        store: scratch.path().join("request"),
+        library: crate::LibraryInput::Image(image),
+        entry: None,
+    };
+    let product = crate::Driver::default().check(request, meter)?;
+    product
+        .prebuild(
+            target.to_owned(),
+            archive.to_owned(),
+            crate::native::Link::Installed(recipe),
+            &scratch.path().join("prebuild"),
+        )
+        .map_err(|stop| io::Error::other(format!("prebuilding the installed std: {stop}")))?;
+    meter.finish("install/prebuild");
+    Ok(())
 }
 
 /// Copy this compiler into the prefix with its RPATH set to `$ORIGIN/lib`,

@@ -20,6 +20,8 @@ mod native_facts;
 mod native_library;
 mod native_object;
 mod native_sources;
+mod prebuild;
+pub use prebuild::Prebuilt;
 mod reachability;
 mod test_run;
 mod tool_inputs;

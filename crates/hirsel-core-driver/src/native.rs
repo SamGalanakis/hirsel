@@ -80,6 +80,36 @@ pub struct NativeOptions {
     /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
     pub logical_charge_report: Option<PathBuf>,
 }
+impl NativeOptions {
+    /// A request's options before its flags: the development engine
+    /// (Cranelift), unoptimised, without line tables or charge report. An
+    /// installation prebuilds for exactly these.
+    pub fn development(
+        target: String,
+        runtime: PathBuf,
+        include: PathBuf,
+        link: Link,
+        store: PathBuf,
+        output: PathBuf,
+    ) -> Self {
+        Self {
+            backend: Backend::Cranelift,
+            optimize: false,
+            debug_lines: false,
+            target,
+            runtime,
+            include,
+            link,
+            store,
+            output,
+            root_limit: 64 * 1024 * 1024,
+            instance_limit: 65_536,
+            directories: vec![],
+            grant_mask: 0,
+            logical_charge_report: None,
+        }
+    }
+}
 #[derive(Debug)]
 pub enum NativeStop {
     Check(String),
@@ -275,12 +305,32 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable_for(entry, options)?;
-        self.emit_instances(entry, &reached, options)
+        self.emit_reached(entry, &reached, options)
     }
-    fn emit_instances(
+    fn emit_reached(
         &self,
         entry: &DefPath,
         reached: &Reachable<'_>,
+        options: &NativeOptions,
+    ) -> Result<Vec<ObjectProduct>, NativeStop> {
+        let inputs = reached.native.as_ref().expect("a build's reachable set");
+        self.emit_instances(
+            Some(entry),
+            reached.require()?,
+            &reached.materialized,
+            inputs,
+            options,
+        )
+    }
+    /// Emit `instances` for `options`, each a hit on its stored object or
+    /// compiled and published under its key; `entry` is the program's, which
+    /// only an optimised build, composing one module, reads.
+    pub(crate) fn emit_instances(
+        &self,
+        entry: Option<&DefPath>,
+        instances: &[Identity],
+        materialized: &crate::instances::InstanceSet,
+        inputs: &NativeInputs,
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         if !options.backend.supports_target(&options.target) {
@@ -289,9 +339,6 @@ impl CheckProduct {
                 options.backend, options.target
             )));
         }
-        let instances = reached.require()?;
-        let materialized = &reached.materialized;
-        let inputs = reached.native.as_ref().expect("a build's reachable set");
         let store = Store::new(&options.store)?;
         let library_store = self
             .image
@@ -301,6 +348,11 @@ impl CheckProduct {
         // Callable code variants are LLVM-release only. Dev and evaluator keep
         // the shared semantic bodies; the dev measurements show no gain here.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
+            let entry = entry.ok_or_else(|| {
+                NativeStop::Entry(
+                    "an optimised build composes its program's module from an entry".into(),
+                )
+            })?;
             return self.emit_release(
                 entry,
                 instances,
@@ -443,7 +495,7 @@ impl CheckProduct {
             items.extend(reached.materialized.items(instance)?.iter().cloned());
         }
         let sources = self.native_sources(&items)?;
-        let mut objects = self.emit_instances(entry, reached, options)?;
+        let mut objects = self.emit_reached(entry, reached, options)?;
         let (abi, cleanup) = self.bind_entry_native(entry, options, inputs)?;
         if let Some(cleanup) = cleanup {
             objects.push(cleanup);
@@ -1047,6 +1099,7 @@ mod tests {
     include!("facts_native.rs");
     include!("object_key_native.rs");
     include!("instance_record_native.rs");
+    include!("prebuild_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

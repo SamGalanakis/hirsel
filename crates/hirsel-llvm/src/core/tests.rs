@@ -2937,7 +2937,9 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::Sync | HostOp::SyncDir => &["u64"],
             _ => &["u64", "ptr"],
         };
-        let results: &[&str] = if op.waits() {
+        let results: &[&str] = if op == HostOp::Random {
+            &[]
+        } else if op.waits() {
             &["u64", "u8", "u32", "u64"]
         } else {
             &["u64"]
@@ -2955,19 +2957,34 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let outputs = typed(results, params.len());
+        let returned = (params.len()..params.len() + results.len())
+            .map(|i| format!("v{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let call = if results.is_empty() {
+            format!("call rt.{} g0 ({})", op.name(), names(params.len()))
+        } else {
+            format!(
+                "{} = call rt.{} g0 ({})",
+                outputs,
+                op.name(),
+                names(params.len())
+            )
+        };
+        let ret = if returned.is_empty() {
+            "return".to_owned()
+        } else {
+            format!("return {returned}")
+        };
         let source = format!(
-            "core v1\nsig g0 = ({}) -> ({})\ninst n0 = tests@0/provider/{} [] []\nfn f0 = n0 g0 {{\nb0({}):\n {} = call rt.{} g0 ({})\n return {}\n}}\n",
+            "core v1\nsig g0 = ({}) -> ({})\ninst n0 = tests@0/provider/{} [] []\nfn f0 = n0 g0 {{\nb0({}):\n {}\n {}\n}}\n",
             params.join(", "),
             results.join(", "),
             op.name(),
             typed(params, 0),
-            typed(results, params.len()),
-            op.name(),
-            names(params.len()),
-            (params.len()..params.len() + results.len())
-                .map(|i| format!("v{i}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            call,
+            ret
         );
         let module = text::parse(&source).unwrap();
         wf::module(&module).unwrap();

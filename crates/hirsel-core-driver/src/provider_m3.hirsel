@@ -84,9 +84,9 @@ fn try_receive_sequence()->bool waits {
     if !close_sender(take tx) {return false}
     match channel.try_receive(rx) { Error(Closed)=>true, _=>false }
 }
-fn random_sequence(r:Random)->bool waits {
+fn random_sequence(r:Random)->bool {
     let mut b:Bytes=result.unwrap(list.with_capacity(4))
-    result.unwrap(host.random(r,mut b))
+    host.random(r,mut b)
     list.len(b)==4 && b[0]==b'\xa0' && b[1]==b'\xa1' && b[2]==b'\xa2' && b[3]==b'\xa3'
 }
 type IssueInput:send { f:HostFile, tx:Sender[u64], write:bool }

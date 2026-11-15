@@ -47,7 +47,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             | REMOVE
             | REMOVE_TREE
             | SYNC_DIR
-            | RANDOM
+            | crate::provider::RANDOM
             | WALL_MS
             | MONO_NS
             | crate::provider::STDOUT
@@ -70,7 +70,9 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             }
             _ => unreachable!(),
         };
-        if matches!(op, READ | MKDTEMP | RANDOM) && request.buffer.len != buffer.len {
+        if matches!(op, READ | MKDTEMP | crate::provider::RANDOM)
+            && request.buffer.len != buffer.len
+        {
             // Only these rows write the length; spare-capacity checks guarantee
             // owned mutable storage. They never change data or capacity.
             (*operand).len = request.buffer.len;

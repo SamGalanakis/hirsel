@@ -814,7 +814,7 @@ impl HostOp {
     }
     /// Whether the operation waits (a cancellation point, so it can fail).
     pub const fn waits(self) -> bool {
-        !matches!(self, HostOp::WallMs | HostOp::MonoNs)
+        !matches!(self, HostOp::WallMs | HostOp::MonoNs | HostOp::Random)
     }
 }
 
@@ -859,6 +859,7 @@ impl RtOp {
     /// | `host_close`, `host_try_lock`, `host_unlock` | `HostFile: u64` | outcome |
     /// | `host_sync` | `HostFile: u64` | outcome |
     /// | `host_sync_dir` | `Dir: u64` | outcome |
+    /// | `host_random` | `Random: u64`, buffer `ptr` | |
     /// | `host_mkdir`, `host_remove`, `host_remove_tree` | `Dir: u64`, path `ptr` | outcome |
     /// | `host_mkdtemp` | `Dir: u64`, name `ptr` | outcome |
     /// | `host_wall_ms`, `host_mono_ns` | `Clock: u64` | `u64` |
@@ -933,6 +934,7 @@ impl RtOp {
                     | HostOp::Unlock
                     | HostOp::Sync
                     | HostOp::SyncDir => (vec![V(u64_)], outcome),
+                    HostOp::Random => (vec![V(u64_), V(p)], vec![]),
                     HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
                     _ => (vec![V(u64_), V(p)], outcome),
                 }

@@ -165,7 +165,9 @@ impl Function<'_, '_, '_> {
                 if op.waits() {
                     self.call_failure(values[4], call.fail)?;
                 }
-                let n = if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+                let n = if op == HostOp::Random {
+                    0
+                } else if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
                     1
                 } else {
                     4

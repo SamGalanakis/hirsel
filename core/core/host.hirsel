@@ -28,7 +28,7 @@ pub fn sync(mut f: HostFile) -> Result[(), IoError] waits
 // Flush directory entry updates (fsync on the granted directory).
 pub fn sync_dir(d: Dir) -> Result[(), IoError] waits
 
-pub fn random(r: Random, mut b: Bytes) -> Result[(), IoError] waits
+pub fn random(r: Random, mut b: Bytes)
 
 pub fn wall_ms(c: Clock) -> u64
 

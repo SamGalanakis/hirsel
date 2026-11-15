@@ -120,19 +120,29 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
                 })
                 .collect()
         };
-        writeln!(
-            source,
-            "struct r{} value={} (ctx,{},0); uint64_t values[{}]={{0}}; if(!value.status) {{",
-            f.signature.0,
-            module.identity(f.instance).symbol(),
-            args.join(","),
-            sig.results.len()
-        )
-        .unwrap();
-        for j in 0..sig.results.len() {
-            writeln!(source, "values[{j}]=(uint64_t)value.v{j};").unwrap();
+        if sig.results.is_empty() {
+            writeln!(
+                source,
+                "uint8_t status={} (ctx,{},0); uint64_t values[0]={{0}}; require(status==0);",
+                module.identity(f.instance).symbol(),
+                args.join(",")
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                source,
+                "struct r{} value={} (ctx,{},0); uint64_t values[{}]={{0}}; if(!value.status) {{",
+                f.signature.0,
+                module.identity(f.instance).symbol(),
+                args.join(","),
+                sig.results.len()
+            )
+            .unwrap();
+            for j in 0..sig.results.len() {
+                writeln!(source, "values[{j}]=(uint64_t)value.v{j};").unwrap();
+            }
+            source.push_str("}\n");
         }
-        source.push_str("}\n");
         if let Some((op, _)) = run.matrix
             && sig.params.len() >= 2
             && op != HostOp::SleepUntil
@@ -144,12 +154,16 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             };
             writeln!(source, "require(operand.data==operand_bytes && operand.capacity==64 && operand.len=={len});").unwrap();
         }
-        writeln!(
-            source,
-            "emit(ctx,value.status,values,{}); return 0; }}",
-            sig.results.len()
-        )
-        .unwrap();
+        if sig.results.is_empty() {
+            writeln!(source, "emit(ctx,status,values,0); return 0; }}").unwrap();
+        } else {
+            writeln!(
+                source,
+                "emit(ctx,value.status,values,{}); return 0; }}",
+                sig.results.len()
+            )
+            .unwrap();
+        }
         main.push_str(
             "{ memset(&world,0,sizeof world); HirselCoreEntryGrant grants[1]={{0,&provider,7}};\n",
         );
@@ -286,15 +300,33 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
         let returned = (0..results.len())
             .map(|j| format!("v{}", params.len() + j))
             .collect::<Vec<_>>();
+        let call = if results.is_empty() {
+            format!(
+                "call rt.{} g{i} ({}){}",
+                op.name(),
+                arguments.join(","),
+                if op.waits() { " fail b1" } else { "" }
+            )
+        } else {
+            format!(
+                "{} = call rt.{} g{i} ({}){}",
+                output.join(","),
+                op.name(),
+                arguments.join(","),
+                if op.waits() { " fail b1" } else { "" }
+            )
+        };
+        let return_line = if returned.is_empty() {
+            "return".to_owned()
+        } else {
+            format!("return {}", returned.join(","))
+        };
         writeln!(
             source,
-            "b0({}):\n  {} = call rt.{} g{i} ({}){}\n  return {}",
+            "b0({}):\n  {}\n  {}",
             input.join(","),
-            output.join(","),
-            op.name(),
-            arguments.join(","),
-            if op.waits() { " fail b1" } else { "" },
-            returned.join(",")
+            call,
+            return_line
         )
         .unwrap();
         if op.waits() {
@@ -318,7 +350,9 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
             let outcome = if failing {
                 Outcome::Failed(vec!["Cancelled".into()])
             } else {
-                Outcome::Returned(if op.waits() {
+                Outcome::Returned(if op == HostOp::Random {
+                    vec![]
+                } else if op.waits() {
                     vec![0x1011121314151617, 5, 0x89abcdef, 0x2122232425262728]
                 } else {
                     vec![0x1011121314151617]

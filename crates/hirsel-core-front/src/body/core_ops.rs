@@ -2376,12 +2376,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             | HostOp::Remove
             | HostOp::RemoveTree
             | HostOp::Stdout
-            | HostOp::Stderr => {
+            | HostOp::Stderr
+            | HostOp::Random => {
                 args[1] = Arg::Value(vals[1]?);
                 2
             }
             _ => 1,
         };
+        if op == HostOp::Random {
+            let _ = self.runtime_row(RtOp::Host(op), &args[..2], n)?;
+            return None;
+        }
         if op == HostOp::Close {
             // Explicit CLOSE consumes on error and pre-issue cancellation too.
             // Its failure cleanup must not close the same key a second time.

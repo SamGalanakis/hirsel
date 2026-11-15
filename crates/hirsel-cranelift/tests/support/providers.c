@@ -21,7 +21,7 @@ static struct world world;
 static uint8_t operand_bytes[64]="abc";
 static int is_file(uint8_t op) { return (op>=1 && op<=5) || op==16; }
 static int has_operand(uint8_t op) {
-    return op==0 || op==1 || op==2 || (op>=6 && op<=9) || (op>=12 && op<14);
+    return op==0 || op==1 || op==2 || (op>=6 && op<=9) || (op>=12 && op<14) || op==18;
 }
 static int has_path(uint8_t op) { return op==0 || op==6 || op==8 || op==9 || op==14; }
 static void require(int condition) { if(!condition) abort(); }

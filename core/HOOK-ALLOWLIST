@@ -26,6 +26,8 @@ core@1/channel/receive
 core@1/channel/send
 core@1/channel/sender
 core@1/channel/try_send
+# DECISIONS.md 2026-11-16 (CONC-5 / CONC-10, S5c)
+core@1/channel/try_receive
 core@1/char/from_u32
 core@1/char/to_u32
 core@1/code/callable
@@ -166,6 +168,8 @@ core@1/host/read
 core@1/host/remove
 core@1/host/remove_tree
 core@1/host/rename
+# DECISIONS.md 2026-11-16 (CAP-5 / CAP-8, S5c)
+core@1/host/random
 core@1/host/sleep_until
 core@1/host/sync
 core@1/host/sync_dir

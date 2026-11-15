@@ -27,6 +27,8 @@ https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
 
 - `build-static-lld DIR`, `static-lld-elf-only.patch`: build the toolchain image's
   `bin/ld.lld` (the lock's `static_lld` record). See below.
+- `build-libllvm DIR ARTIFACTS`, `engine_llvm.py`: build the compiler's engine libLLVM
+  (the lock's `engine_llvm` record, not yet pinned) and guard it. See below.
 
 ## Static ld.lld
 
@@ -49,6 +51,29 @@ it per land.
 
 The former LLVM 21 GitHub binary archive was static-only. `check` continues to
 require a shared libLLVM; binary archives are not a fallback.
+
+## Engine libLLVM
+
+`build-libllvm` builds a libLLVM 23.1.5 for the compiler alone from the locked source
+archive: profile-guided and ThinLTO, X86 and AArch64, zlib only. Its optimised builds
+cost about 0.64 of the deb library's instructions warm and load none of z3, ICU,
+libxml2, libedit, libffi or zstd. It runs three stages: an IR-instrumented library;
+`engine_llvm.py train`, which builds the training programs through it (the LangArena
+suite, every M1 program and the documents layout family, all generated from the
+repository's own input helpers); and the profile-guided build.
+
+Its guard, `engine_llvm.py guard`, builds the training programs and four held-out ones
+(the graph and json layout families, the M2b table and dispatch_cross_package workloads)
+through the deb library and the new one with the same compiler. It fails unless every
+executable's `.text` is byte-identical and the warm build cost geomean is below the deb
+library's and no worse than the lock's previous `engine_llvm_guard` ratio. `check` is the
+install pin check above; this guard is separate because it needs a built compiler.
+
+Run `build-libllvm DIR ARTIFACTS` once per pin change on an x86_64 Ubuntu 24.04 host.
+It takes about 2.7 CPU-hours at 12 jobs. Then upload `DIR/libLLVM.so.23.1` under the
+printed asset name and write both printed records into `llvm-23.lock`. Nothing rebuilds
+it per land. `build-libllvm DIR ARTIFACTS plain` builds the same configuration without
+profile or ThinLTO (about 0.88 warm): the fallback if a profile build fails its guard.
 
 ## Pool execution inputs
 

@@ -28,8 +28,9 @@ count/recovery/release operations join the domain order. Mutable shared handles 
 separate authority-bearing types, excluded from shareable/stabledata; mutex payloads
 contain no authority-bearing handles/grants, access is a scoped exclusive callback with no
 authority, a failed callback permanently hides/releases its payload, and safe atomics are
-sequentially consistent." *v1:* MEM-15, CONC-11, CONC-12; mutexes and atomics are later,
-and no later shared mutable type may hand out a view of storage that another handle can
+sequentially consistent." *v1:* MEM-15, CONC-11, CONC-12, CONC-13; mutexes are later, and
+atomics are not planned: publication is `Latest`, whose operations are sequentially
+consistent events that hand out no view, and counting needs nothing shared. No later shared mutable type may hand out a view of storage that another handle can
 write, move or free while the view lives ([OWN-8](ownership.md#own-8-views)), through a
 non-locking `get_mut`-style accessor or any other.
 
@@ -227,7 +228,7 @@ allocator chunk size becomes a logical capacity (MEM-28).
 
 ## Not in v1
 
-User-made shared limits; mutexes, atomics and cells; weak counted references; catching
+User-made shared limits; mutexes and cells; atomics, which are not planned (R3); weak counted references; catching
 failures other than by `isolate`; deadlines and timeouts on operations other than `host.sleep_until`; task sets and selection; `@noalloc`; compile-time
 evaluation beyond `const`; unsafe code and foreign functions; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list and map

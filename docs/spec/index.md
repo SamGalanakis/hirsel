@@ -51,7 +51,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Memory](memory.md) | MEM-1 to MEM-18, MEM-29 |
 | [Budgets](budgets.md) | MEM-19 to MEM-28 |
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
-| [Tasks](tasks.md) | CONC-1 to CONC-12 |
+| [Tasks](tasks.md) | CONC-1 to CONC-13 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-8 |
 | [Semantics](semantics.md) | SEM-1 to SEM-10 |
 | [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 |

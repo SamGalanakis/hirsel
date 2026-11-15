@@ -116,6 +116,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | task | 256 + its result's size + 32 for its primary cause cell + its reserved limit `n` |
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |
 | channel | capacity × item size + 64 |
+| `Latest` root | 16 |
 | `log.new` node | 24 |
 | a log's entries | as `List[E]` storage |
 | `isolate` | 32 for its cause cell, from the current limit (inside a finalizer, its grant); refunded when `body` returns, and when a caught failure leaves the current obligation's cell unused ([FAIL-16](failure.md#fail-16-isolation)) |
@@ -129,13 +130,14 @@ selected value's bytes when its type is streamable and the whole copied blob oth
 Creating a resource admits its cause cell, and can therefore fail with `Capacity`; then
 nothing was admitted, so nothing is refunded, and the literal's fields come back in its
 error ([T1.2](ownership.md#own-26-the-transition-table)). This holds unless
-it is **mechanical**: its cleanup can never add a cause. Exactly four resources are
-mechanical, and they have no cause cell: `Sender`, `Receiver`, `Task` and `HostFile`. The
-first three run no finalizer; their cleanup closes a channel or ends a child (CONC-8), and
+it is **mechanical**: its cleanup can never add a cause. Exactly five resources are
+mechanical, and they have no cause cell: `Sender`, `Receiver`, `Task`, `Latest` and
+`HostFile`. The first four run no finalizer; their cleanup closes a channel, ends a child
+(CONC-8) or releases a `Latest` root (CONC-13), and
 a cause raised while it drops queued items or a result goes into the cell of the value whose
 finalizer raised it. `HostFile`'s finalizer closes the host file and ignores the outcome
 ([core](core.md)). Every other resource, and every capability that is a
-resource, admits its cell; `channel.sender` admits nothing.
+resource, admits its cell; `channel.sender` and `latest.handle` admit nothing.
 
 Sizes are logical, never an engine's: scalars are their widths, `bool` 1, `char` 4, `()` 0; a
 record or tuple is the sum of its fields; a variant type, plain or own, is 8 plus its largest

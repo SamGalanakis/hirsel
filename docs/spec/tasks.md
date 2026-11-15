@@ -152,10 +152,16 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 
 A run has one total order of **events**: spawn, task end, cancellation requests and their
 observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every `try_receive` decision, every
-change of a channel's sender count, `join`, channel close, every charge or refund that
+change of a channel's sender count, `join`, channel close, every `latest.publish` and
+`latest.read` and every change of a `Latest` root's handle count (CONC-13), every charge or refund that
 crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), every `Arc`
 creation, share, release and `try_unwrap`, and every admission that returns `Capacity`
 ([MEM-21](budgets.md#mem-21-admission)). Each operation observes the state that the order gives.
+That list follows one rule: an operation whose result can depend on the order of tasks is
+an event, and one whose result cannot, such as a change to a value only its own task
+reaches, is not. So only events need sequencing when tasks run in parallel, and no
+operation observes a state that no prefix of the order gives: no weaker ordering is
+visible.
 The order is chosen by the scheduler provider at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); with the same inputs and the same
 recorded choices, every task behaves identically on every engine.
@@ -190,12 +196,46 @@ succeeds in exactly the runs whose order puts it after every other holder's rele
 
 ### CONC-12: No shared mutable state
 
-v1 has no mutable value reachable from two tasks: no mutable statics, no cells, no
-mutexes and no atomics. Top-level `const` values are plain and immutable.
+v1 has no mutable value reachable from two tasks, except a `Latest` root (CONC-13), which
+holds an `Arc`: no mutable statics, no cells, no mutexes, no atomics, and no write through
+the view an `Arc` gives ([OWN-12](ownership.md#own-12-assignment)). Top-level `const` values are plain and immutable.
 
 ```hirsel
 const LIMIT: u64 = 64
 ```
 ```hirsel
 var hits: u64 = 0                                        // refused: LANG-5, no mutable statics
+```
+```hirsel
+type Hits: shareable + send { n: u64 }
+fn bump(mut a: Arc[Hits]) { a.n += 1 }                   // refused: OWN-12, not writable
+```
+
+### CONC-13: Latest
+
+`Latest[T]`, for `T: shareable + send`, is a handle to a root that holds one `Arc[T]`.
+`latest.new(take a: Arc[T]) -> Result[Latest[T], (Capacity, Arc[T])]` admits the root, 16
+bytes, from the current limit, to which it stays charged
+([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), and returns its first handle;
+on `Capacity` the error owns `a`. A handle is a `send` resource, mechanical
+([MEM-24](budgets.md#mem-24-logical-charges)) and neither `shareable` nor stable, so no
+`Arc` holds one. `latest.handle(h)` adds a handle, admits nothing and cannot fail; a handle
+count past `2^64 − 1` is a run stop ([FAIL-15](failure.md#fail-15-run-stops)).
+`latest.publish(h, take a)` makes `a` the root's `Arc` and releases the share the root
+held, and `latest.read(h) -> Arc[T]` returns a new share of the root's `Arc`
+([MEM-16](memory.md#mem-16-counting)). Neither waits, fails or admits, and neither is a
+cancellation point, so a cancelled task never leaves one half done. Each is an event
+(CONC-10): a `read` returns what the last `publish` before it in the event order put in
+the root, or what `new` did. No operation hands out a view of the root, so a `publish`
+never changes what a reader holds: a version lives while any share of it does, and its
+last release, in whichever task, frees it and refunds it to the limit that created it
+(CONC-11). Cleaning the last handle releases the root's share and refunds the root; a
+task's cleanup cleans the handles it owns, as it cleans every resource.
+
+```hirsel unbuilt
+type Config: shareable + send { routes: List[String] }
+fn reload(h: Latest[Config], take c: Config) -> Result[(), Capacity] {
+  match arc.new(take c) { Ok(take a) => { latest.publish(h, take a); Ok(()) }, Error((e, _)) => Error(e) }
+}
+fn routes(h: Latest[Config]) -> u64 { let c = latest.read(h); list.len(c.routes) }
 ```

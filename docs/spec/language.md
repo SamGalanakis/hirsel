@@ -198,8 +198,11 @@ type parameters and regions are found in one forward visit of that call, in this
 2. Each argument, left to right, is checked against its parameter type with what is fixed
    so far filled in. An argument that is itself a call takes that partly known type as its
    expected type, a hole constraining nothing, and its own result may fill holes.
-3. Last, each unsuffixed literal argument is checked against its now fixed parameter type,
-   so `f(1, x)` with `x: u8` types `1` as `u8`.
+3. Last, each argument that is an unsuffixed literal, or a tuple or `[..]` array whose
+   every component is such an argument, at any depth, is checked against its now fixed
+   parameter type, so `f(1, x)` with `x: u8` types `1` as `u8`, and `apply((1, 2, 5),
+   transfer)` types the tuple from `transfer`. A tuple or array with any other component is
+   checked at step 2.
 
 So `let xs: List[u64] = result.unwrap(list.with_capacity(5))` fixes `unwrap`'s `T`, then
 `with_capacity`'s `T`, then `unwrap`'s `E` as `Capacity`. A parameter determined twice

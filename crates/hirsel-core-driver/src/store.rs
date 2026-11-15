@@ -30,7 +30,7 @@ const BODY_HEADER: usize = 28;
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
 // Codec bound bits and the codec contextual symbol change declaration products.
-const VERSION: u32 = 33;
+const VERSION: u32 = 34;
 const HEADER: usize = 12;
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;

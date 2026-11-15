@@ -178,6 +178,10 @@ pub enum NodeKind {
     Closure,
     ScopedClosure,
     Error,
+    /// SEM-10 codec representation and its two owner functions.
+    CodecVia,
+    RemovedField,
+    RemovedVariant,
 }
 /// `token` is the defining name, operator, literal or projection token, according to kind.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

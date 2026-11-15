@@ -1,0 +1,23 @@
+type Missing { n: u64 }
+type X: codec via Missing (to: x_view, from: x_from) { n: Missing }
+fn x_view(x: X) -> View[Missing] in x { view x.n }
+fn x_from(take n: Missing) -> Result[X, ()] { Ok(X(n: n)) }
+type Y: codec via u64 (to: y_view, from: y_from) { n: u64 }
+fn y_view(x: Y) -> u64 { x.n }
+fn y_from(n: u64) -> Result[Y, ()] { Ok(Y(n: n)) }
+type Z: codec via u64 (to: z_view, from: z_from) { n: u64 }
+fn z_view(mut x: Z) -> View[u64] in x { view x.n }
+fn z_from(take n: u64) -> u64 { n }
+type MissingBound: shareable via u64 (to: mb_view, from: mb_from) { n: u64 }
+fn mb_view(x: MissingBound) -> View[u64] in x { view x.n }
+fn mb_from(take n: u64) -> Result[MissingBound, ()] { Ok(MissingBound(n: n)) }
+type Both: codec via u64 (to: both_view, from: both_from) { n: u64, removed gone: u64 }
+fn both_view(x: Both) -> View[u64] in x { view x.n }
+fn both_from(take n: u64) -> Result[Both, ()] { Ok(Both(n: n)) }
+// expect: refuse OWN-4 at 2:19
+// expect: refuse SEM-10 at 5:28
+// expect: refuse SEM-10 at 5:42
+// expect: refuse SEM-10 at 8:28
+// expect: refuse SEM-10 at 8:42
+// expect: refuse SEM-10 at 11:30
+// expect: refuse SEM-10 at 14:69

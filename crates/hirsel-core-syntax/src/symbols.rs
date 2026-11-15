@@ -23,6 +23,10 @@ pub mod sym {
     pub const STREAMABLE: Symbol = Symbol(110);
     pub const CLONE: Symbol = Symbol(111);
     pub const CODEC: Symbol = Symbol(112);
+    pub const VIA: Symbol = Symbol(113);
+    pub const TO: Symbol = Symbol(114);
+    pub const FROM: Symbol = Symbol(115);
+    pub const REMOVED: Symbol = Symbol(116);
     pub const FN: Symbol = Symbol(1);
     pub const LET: Symbol = Symbol(2);
     pub const MUT: Symbol = Symbol(3);
@@ -287,6 +291,7 @@ impl Default for Symbols {
         strings.push(Arc::from("streamable"));
         strings.push(Arc::from("clone"));
         strings.push(Arc::from("codec"));
+        strings.extend(["via", "to", "from", "removed"].map(Arc::from));
         let mut single = empty_single();
         for (i, s) in strings.iter().enumerate().skip(1) {
             if let [b] = s.as_bytes() {
@@ -455,6 +460,10 @@ fn fixed_symbol(text: &str) -> Option<Symbol> {
         "streamable" => sym::STREAMABLE,
         "clone" => sym::CLONE,
         "codec" => sym::CODEC,
+        "via" => sym::VIA,
+        "to" => sym::TO,
+        "from" => sym::FROM,
+        "removed" => sym::REMOVED,
         _ => return None,
     })
 }

@@ -1219,6 +1219,32 @@ fn integer_and_float_bounds_imply_their_types_bounds() {
 }
 
 #[test]
+fn codec_overrides_and_tombstones() {
+    let mut report = vec![];
+    for name in ["schema-accepted", "schema-refused", "via-refused"] {
+        report.extend(
+            run_case(&root().join(format!("cases/body/codec-{name}.hirsel")))
+                .into_iter()
+                .map(|f| format!("{name}: {f}")),
+        );
+    }
+    let source =
+        std::fs::read_to_string(root().join("cases/body/codec-schema-accepted.hirsel")).unwrap();
+    let (index, inputs) = program_inputs(&source);
+    let p = Program::declare(&index, &inputs);
+    let shape = p.decls.iter().find(|d| d.path.0.name == "Shape").unwrap();
+    assert_eq!((shape.wire_position(0), shape.wire_position(1)), (0, 3));
+    assert_eq!(shape.codec().unwrap().removed.len(), 2);
+    let first = p
+        .decls
+        .iter()
+        .find(|d| d.path.0.name == "DeletedFirst")
+        .unwrap();
+    assert_eq!(first.wire_position(0), 1);
+    assert!(report.is_empty(), "{}", report.join("\n"));
+}
+
+#[test]
 fn codec_bounds_and_field_defaults() {
     let mut report = vec![];
     for name in [

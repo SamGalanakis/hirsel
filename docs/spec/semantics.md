@@ -366,23 +366,23 @@ fn files() -> codec.Codec[Pair[HostFile]] { codec.of() }   // refused: LANG-12, 
 ```hirsel
 type Note { pinned: bool = false }                    // refused: SEM-10, Note does not declare codec
 ```
-```hirsel unbuilt
+```hirsel
 pub opaque type Email: codec via String (to: text, from: parse) { text: String }
 fn text(e: Email) -> View[String] in e { view e.text }
 fn parse(take s: String) -> Result[Email, String] {
   match string.next_scalar(s, 0) { Some(_) => Ok(Email(text: s)), None => Error(s) }   // "" is Value(i)
 }
 ```
-```hirsel unbuilt
+```hirsel
 type RangeWire: codec { lo: u64, hi: u64 }
 pub opaque type Range: codec via RangeWire (to: wire, from: check) { w: RangeWire }
 fn wire(r: Range) -> View[RangeWire] in r { view r.w }
 fn check(take w: RangeWire) -> Result[Range, ()] { if w.lo <= w.hi { Ok(Range(w: w)) } else { Error(()) } }
 ```
-```hirsel unbuilt
+```hirsel
 pub type Row: codec { id: u64, removed note: String, name: String, pinned: bool = false }
 pub type Shape: codec = Circle(u64) | removed Square(u64) | Line(u64, u64)   // Line has tag 2
 ```
-```hirsel unbuilt
+```hirsel
 pub type Tag: codec { id: u64, removed note: String, note: u64 }   // refused: SEM-10, note is removed
 ```

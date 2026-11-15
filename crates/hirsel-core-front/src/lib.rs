@@ -11,6 +11,7 @@
 hirsel_guard::install!();
 
 mod body;
+pub mod codec_decls;
 mod constants;
 pub use constants::{ConstData, ConstValue, Constant};
 mod decls;

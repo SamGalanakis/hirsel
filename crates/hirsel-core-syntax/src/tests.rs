@@ -889,3 +889,19 @@ fn codec_bound_and_literal_defaults_roundtrip() {
         );
     }
 }
+
+#[test]
+fn codec_override_and_tombstone_roundtrip() {
+    for source in [
+        "pub opaque type Email: codec via String (to: text, from: parse) { text: String }",
+        "type Row: codec { id: u64, removed note: String, pinned: bool = false }",
+        "type Shape: codec = Circle(u64) | removed Square(u64) | Line(u64, u64)",
+        "type First: codec = removed Old | New",
+        "type Context { removed: u64, via: u64, from: bool, to: char }",
+    ] {
+        formatted(source, ParseMode::Source);
+    }
+    for word in [sym::VIA, sym::TO, sym::FROM, sym::REMOVED] {
+        assert!(!keyword_symbol(word));
+    }
+}

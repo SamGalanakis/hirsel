@@ -579,6 +579,12 @@ impl NameIndex {
                 NodeKind::Fields | NodeKind::Variants => {
                     let start = self.member_names.len() as u32;
                     for &child in item.tree.children(child) {
+                        if matches!(
+                            item.tree.node(child).kind,
+                            NodeKind::RemovedField | NodeKind::RemovedVariant
+                        ) {
+                            continue;
+                        }
                         if let Some(t) = item.tree.node(child).token {
                             let s = item.symbol(t);
                             self.member_names.push(s);

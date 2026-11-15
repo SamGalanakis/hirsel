@@ -323,11 +323,30 @@ pub struct TypeDecl {
     /// `grant bytes n` (MEM-27): the limit its finalizer runs under; 0 if undeclared.
     pub grant: u64,
     pub compact: Option<Width>,
-    /// `@twin(P)` (MEM-17): the paired type as written, and the attribute's site.
-    pub twin: Option<(TyId, Site)>,
+    /// Sparse declaration features share one absent word and one stored option.
+    pub extra: Option<Box<DeclExtra>>,
     pub summary: Summary,
 }
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct DeclExtra {
+    /// `@twin(P)` (MEM-17): the paired type as written and its attribute site.
+    pub twin: Option<(TyId, Site)>,
+    /// SEM-10 schema-only declarations, absent from value layout.
+    pub codec: Option<Box<crate::codec_decls::CodecDecl>>,
+}
 impl TypeDecl {
+    pub fn codec(&self) -> Option<&crate::codec_decls::CodecDecl> {
+        self.extra.as_ref().and_then(|e| e.codec.as_deref())
+    }
+    fn codec_mut(&mut self) -> &mut crate::codec_decls::CodecDecl {
+        self.extra
+            .get_or_insert_default()
+            .codec
+            .get_or_insert_default()
+    }
+    pub fn twin(&self) -> Option<&(TyId, Site)> {
+        self.extra.as_ref().and_then(|e| e.twin.as_ref())
+    }
     /// What the declaration's own type may hold with its parameters rigid (OWN-2): its
     /// fields' categories, and each parameter named in them per [`param_holds`].
     pub fn holds_rigid(&self) -> u8 {
@@ -653,7 +672,12 @@ impl Program<'_> {
                     clone_body: None,
                     grant,
                     compact,
-                    twin: None,
+                    extra: (declared & CODEC != 0).then(|| {
+                        Box::new(DeclExtra {
+                            twin: None,
+                            codec: Some(Box::default()),
+                        })
+                    }),
                     summary: Summary::default(),
                 });
                 self.by_path.entry(path).or_insert(Def::Type(id));
@@ -840,9 +864,15 @@ impl Program<'_> {
         for &c in item.tree.children(item.root) {
             let n = item.tree.node(c);
             match n.kind {
+                NodeKind::CodecVia => {
+                    let children = item.tree.children(c);
+                    let ty = self.lower_ty(at, children[0], &generics);
+                    self.decls[d.index()].codec_mut().via =
+                        Some(crate::codec_decls::CodecVia { ty, node: c });
+                }
                 NodeKind::Fields => {
                     let mut fields = vec![];
-                    for &f in item.tree.children(c) {
+                    for (position, &f) in item.tree.children(c).iter().enumerate() {
                         let fnode = item.tree.node(f);
                         let name = item
                             .tree
@@ -855,13 +885,33 @@ impl Program<'_> {
                         } else {
                             ty
                         };
-                        fields.push(FieldDecl {
+                        let field = FieldDecl {
                             name,
                             ty,
                             site: self.site(at, f),
-                        });
+                        };
+                        if fnode.kind == NodeKind::RemovedField {
+                            let site = field.site;
+                            self.decls[d.index()].codec_mut().removed.push(
+                                crate::codec_decls::RemovedDecl {
+                                    name: field.name.clone(),
+                                    position: position as u32,
+                                    variant: false,
+                                    fields: vec![field],
+                                    site,
+                                },
+                            );
+                        } else {
+                            fields.push(field);
+                        }
                         if let Some(&default) = item.tree.children(f).get(1) {
-                            if self.decls[d.index()].declared & CODEC == 0 {
+                            if fnode.kind == NodeKind::RemovedField {
+                                self.refusals.push(refusal(
+                                    "SEM-10",
+                                    self.site(at, default),
+                                    "a removed field has no default",
+                                ));
+                            } else if self.decls[d.index()].declared & CODEC == 0 {
                                 self.refusals.push(refusal(
                                     "SEM-10",
                                     self.site(at, default),
@@ -876,7 +926,7 @@ impl Program<'_> {
                 }
                 NodeKind::Variants => {
                     let mut cases = vec![];
-                    for &v in item.tree.children(c) {
+                    for (position, &v) in item.tree.children(c).iter().enumerate() {
                         let vnode = item.tree.node(v);
                         let name = item
                             .tree
@@ -903,11 +953,24 @@ impl Program<'_> {
                                 site: self.site(at, tnode),
                             });
                         }
-                        cases.push(CaseDecl {
-                            name,
-                            labelled,
-                            fields,
-                        });
+                        if vnode.kind == NodeKind::RemovedVariant {
+                            let site = self.site(at, v);
+                            self.decls[d.index()].codec_mut().removed.push(
+                                crate::codec_decls::RemovedDecl {
+                                    name,
+                                    position: position as u32,
+                                    variant: true,
+                                    fields,
+                                    site,
+                                },
+                            );
+                        } else {
+                            cases.push(CaseDecl {
+                                name,
+                                labelled,
+                                fields,
+                            });
+                        }
                     }
                     body = DeclBody::Variant(cases);
                 }
@@ -917,7 +980,7 @@ impl Program<'_> {
                     let path = item.tree.children(c)[0];
                     let ty = self.lower_ty(at, path, &[]);
                     let site = self.site(at, c);
-                    self.decls[d.index()].twin = Some((ty, site));
+                    self.decls[d.index()].extra.get_or_insert_default().twin = Some((ty, site));
                 }
                 NodeKind::TypePath
                 | NodeKind::TypeArguments
@@ -1595,6 +1658,7 @@ impl Program<'_> {
         self.encodings();
         self.holds();
         self.check_declared_bounds();
+        self.check_codec_declarations();
         self.check_twins();
         let pending = std::mem::take(&mut self.pending);
         for p in pending {
@@ -1936,6 +2000,22 @@ impl Program<'_> {
                 }
             }
             self.decls[d].summary.bound_params = mentioned;
+            if self.decls[d].codec().is_some() {
+                let params = (0..self.decls[d].generics.len())
+                    .filter(|&i| {
+                        mentions_for_bound(
+                            &self.decls,
+                            &self.types,
+                            DeclId(d as u32),
+                            i as u32,
+                            &mut vec![],
+                            true,
+                        )
+                    })
+                    .map(|i| i as u32)
+                    .collect();
+                self.decls[d].codec_mut().params = params;
+            }
         }
     }
 
@@ -2104,7 +2184,12 @@ impl Program<'_> {
                     ));
                 }
                 let have = has_bounds(&self.decls, &self.types, f.ty, &params);
-                let missing = declared & !have;
+                let field_bounds = if decl.codec().is_some_and(|c| c.via.is_some()) {
+                    declared & !CODEC
+                } else {
+                    declared
+                };
+                let missing = field_bounds & !have;
                 if missing != 0 {
                     let b = bound_names(missing);
                     out.push(
@@ -2130,14 +2215,14 @@ impl Program<'_> {
     /// the same order and each pair of types pairs.
     fn check_twins(&mut self) {
         for d in self.decls.base_len()..self.decls.len() {
-            let Some((ty, site)) = self.decls[d].twin.clone() else {
+            let Some((ty, site)) = self.decls[d].twin().copied() else {
                 continue;
             };
             let why = match self.types.kind(ty) {
                 TyKind::Error => continue,
                 TyKind::Adt(e, xs) if xs.is_empty() && self.decls[e.index()].role.is_none() => {
                     let e = *e;
-                    let other = self.decls[e.index()].twin.as_ref().map(|(t, _)| *t);
+                    let other = self.decls[e.index()].twin().map(|(t, _)| *t);
                     if !self.decls[d].generics.is_empty() {
                         Some("a twin declaration is not generic".to_owned())
                     } else if e.index() == d {
@@ -2250,7 +2335,7 @@ impl Tarjan<'_> {
 
 /// The declared twin of `d`, either way round (MEM-17: the pair is symmetric).
 pub fn twin_of(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, d: DeclId) -> Option<DeclId> {
-    let named = |x: DeclId| match decls[x.index()].twin.as_ref().map(|(ty, _)| t.kind(*ty)) {
+    let named = |x: DeclId| match decls[x.index()].twin().map(|(ty, _)| t.kind(*ty)) {
         Some(TyKind::Adt(e, xs)) if xs.is_empty() => Some(*e),
         _ => None,
     };
@@ -2401,6 +2486,16 @@ fn mentions(
     i: u32,
     seen: &mut Vec<(DeclId, u32)>,
 ) -> bool {
+    mentions_for_bound(decls, t, d, i, seen, false)
+}
+fn mentions_for_bound(
+    decls: &crate::Rows<TypeDecl>,
+    t: &Types,
+    d: DeclId,
+    i: u32,
+    seen: &mut Vec<(DeclId, u32)>,
+    codec: bool,
+) -> bool {
     if seen.contains(&(d, i)) {
         return false;
     }
@@ -2428,25 +2523,39 @@ fn mentions(
         ty: TyId,
         i: u32,
         seen: &mut Vec<(DeclId, u32)>,
+        codec: bool,
     ) -> bool {
         match t.kind(ty) {
             TyKind::Param(p) => *p == i,
-            TyKind::Tuple(xs) => xs.iter().any(|&x| ty_mentions(decls, t, x, i, seen)),
+            TyKind::Tuple(xs) => xs.iter().any(|&x| ty_mentions(decls, t, x, i, seen, codec)),
             TyKind::Anchored(x, _) | TyKind::View(x) | TyKind::Array(x, _) => {
-                ty_mentions(decls, t, *x, i, seen)
+                ty_mentions(decls, t, *x, i, seen, codec)
             }
             TyKind::Adt(d, xs) => xs.iter().enumerate().any(|(p, &x)| {
-                ty_mentions(decls, t, x, i, seen)
-                    && mentions(decls, t, *d, p as u32, &mut seen.clone())
+                ty_mentions(decls, t, x, i, seen, codec)
+                    && mentions_for_bound(decls, t, *d, p as u32, &mut seen.clone(), codec)
             }),
             _ => false,
         }
     }
+    if codec && let Some(schema) = decl.codec() {
+        if let Some(via) = &schema.via {
+            return ty_mentions(decls, t, via.ty, i, seen, codec);
+        }
+        if schema
+            .removed
+            .iter()
+            .flat_map(|r| &r.fields)
+            .any(|f| ty_mentions(decls, t, f.ty, i, seen, codec))
+        {
+            return true;
+        }
+    }
     match decl.body {
-        DeclBody::Alias(ty) => ty_mentions(decls, t, ty, i, seen),
+        DeclBody::Alias(ty) => ty_mentions(decls, t, ty, i, seen, codec),
         _ => decl
             .all_fields()
-            .any(|f| ty_mentions(decls, t, f.ty, i, seen)),
+            .any(|f| ty_mentions(decls, t, f.ty, i, seen, codec)),
     }
 }
 
@@ -2615,6 +2724,13 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                         let mut bounds = decl.declared & !PLAIN;
                         for &i in &decl.summary.bound_params {
                             bounds &= has_bounds(decls, t, args[i as usize], params);
+                        }
+                        if let Some(codec) = decl.codec() {
+                            let mut codec_bound = decl.declared & CODEC;
+                            for &i in &codec.params {
+                                codec_bound &= has_bounds(decls, t, args[i as usize], params);
+                            }
+                            bounds = bounds & !CODEC | codec_bound;
                         }
                         bounds
                     }

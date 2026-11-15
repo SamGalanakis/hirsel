@@ -1,0 +1,122 @@
+pub opaque type Email: codec via String(to: text, from: parse) {
+    text: String
+}
+
+fn text(e: Email) -> View[String] in e {
+    view e.text
+}
+
+fn parse(take s: String) -> Result[Email, String] {
+    match string.next_scalar(s, 0) {
+        Some(_) => Ok(Email(text: s)),
+        None => Error(s)
+    }
+}
+
+type RangeWire: codec {
+    lo: u64,
+    hi: u64
+}
+
+pub opaque type Range: codec via RangeWire(to: wire, from: check) {
+    w: RangeWire
+}
+
+fn wire(r: Range) -> View[RangeWire] in r {
+    view r.w
+}
+
+fn check(take w: RangeWire) -> Result[Range, ()] {
+    if w.lo <= w.hi {
+        Ok(Range(w: w))
+    } else {
+        Error(())
+    }
+}
+
+pub type Row: codec {
+    id: u64,
+    removed note: String,
+    name: String,
+    pinned: bool = false
+}
+
+pub type Shape: codec = Circle(u64) | removed Square(u64) | removed Triangle | Line(u64, u64)
+
+type DeletedFirst: codec = removed Old(Hostless) | New(u64)
+
+type Hostless: codec {
+    n: u64
+}
+
+type CodecWire[T]: codec via List[T] (to: values, from: wrap) {
+    xs: List[T]
+}
+
+fn values[T](x: CodecWire[T]) -> View[List[T]] in x {
+    view x.xs
+}
+
+fn wrap[T](take xs: List[T]) -> Result[CodecWire[T], ()] {
+    Ok(CodecWire(xs: xs))
+}
+
+fn needs[T: codec](x: T) -> u64 {
+    1u64
+}
+
+pub fn schema() -> u64 {
+    let row = Row(id: 3u64, name: "ok", pinned: false)
+    let s = Line(4u64, 5u64)
+    let sum = match s {
+        Circle(n) => n,
+        Line(a, b) => a + b
+    }
+    let t = New(6u64)
+    let n = match t {
+        New(x) => x
+    }
+    row.id + sum + n
+}
+
+pub fn via() -> u64 {
+    let e = match parse("a") {
+        Ok(e) => e,
+        Error(_) => return 0u64
+    }
+    let r = match check(RangeWire(lo: 1u64, hi: 2u64)) {
+        Ok(r) => r,
+        Error(_) => return 0u64
+    }
+    let xs: List[u64] = list.new()
+    let c = CodecWire(xs: xs)
+    needs(e) + needs(r) + needs(c)
+}
+
+// expect: run schema() = 18
+// expect: run via() = 3
+// expect: size Row 33
+type Hidden[T]: codec via u64(to: hidden_to, from: hidden_from) {
+    n: u64,
+    hidden: T
+}
+
+fn hidden_to[T](x: Hidden[T]) -> View[u64] in x {
+    view x.n
+}
+
+fn hidden_from[T](take n: u64) -> Result[Hidden[T], ()] {
+    Error(())
+}
+
+fn codec_hidden(x: Hidden[HostFile]) -> u64 {
+    needs(x)
+}
+
+type Outer[T]: codec {
+    hidden: Hidden[T]
+}
+
+fn nested_hidden(x: Outer[HostFile]) -> u64 {
+    needs(x)
+}

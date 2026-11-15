@@ -553,6 +553,24 @@ impl Parser<'_> {
         }
         if self.eat(sym::COLON) {
             c.push(self.bounds(false)?);
+            if self.eat(sym::VIA) {
+                let start = self.pos - 1;
+                let ty = self.ty()?;
+                self.expect(sym::LPAREN)?;
+                self.expect(sym::TO)?;
+                self.expect(sym::COLON)?;
+                let start_to = self.pos;
+                let to_name = self.name()?;
+                let to = self.node(start_to, NodeKind::Path, Some(to_name), &[]);
+                self.expect(sym::COMMA)?;
+                self.expect(sym::FROM)?;
+                self.expect(sym::COLON)?;
+                let start_from = self.pos;
+                let from_name = self.name()?;
+                let from = self.node(start_from, NodeKind::Path, Some(from_name), &[]);
+                self.expect(sym::RPAREN)?;
+                c.push(self.node(start, NodeKind::CodecVia, None, &[ty, to, from]));
+            }
         }
         if self.eat(sym::GRANT) {
             let st = self.pos - 1;
@@ -575,6 +593,10 @@ impl Parser<'_> {
                     return self.fail("LANG-5", "unclosed fields");
                 }
                 let fs = self.pos;
+                let removed = self.at(sym::REMOVED) && self.word(1) != sym::COLON;
+                if removed {
+                    self.bump();
+                }
                 let n = self.name()?;
                 self.expect(sym::COLON)?;
                 let t = self.ty()?;
@@ -582,15 +604,25 @@ impl Parser<'_> {
                 if self.eat(sym::EQ) {
                     children.push(self.field_default()?);
                 }
-                fields.push(self.node(fs, NodeKind::Field, Some(n), &children));
+                fields.push(self.node(
+                    fs,
+                    if removed {
+                        NodeKind::RemovedField
+                    } else {
+                        NodeKind::Field
+                    },
+                    Some(n),
+                    &children,
+                ));
                 self.entry_end(sym::RBRACE)?;
             }
             c.push(self.node(st, NodeKind::Fields, None, &fields));
         } else if self.eat(sym::EQ) {
             let st = self.pos;
             // LANG-9: a single bare name aliases; payload parentheses or | makes a variant.
-            if self.token(0).kind == TokenKind::Ident
-                && matches!(self.word(1), sym::LPAREN | sym::PIPE)
+            if (self.at(sym::REMOVED) && self.token(1).kind == TokenKind::Ident)
+                || (self.token(0).kind == TokenKind::Ident
+                    && matches!(self.word(1), sym::LPAREN | sym::PIPE))
             {
                 let mut vs: Nodes = smallvec![self.variant()?];
                 while self.eat(sym::PIPE) {
@@ -646,6 +678,10 @@ impl Parser<'_> {
     }
     fn variant(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
+        let removed = self.at(sym::REMOVED) && self.token(1).kind == TokenKind::Ident;
+        if removed {
+            self.bump();
+        }
         let n = self.name()?;
         let mut c: Nodes = smallvec![];
         let mut labelled = None;
@@ -682,7 +718,16 @@ impl Parser<'_> {
                 Ok(p.node(st, NodeKind::Payload, label, &[ty]))
             })?;
         }
-        Ok(self.node(s, NodeKind::Variant, Some(n), &c))
+        Ok(self.node(
+            s,
+            if removed {
+                NodeKind::RemovedVariant
+            } else {
+                NodeKind::Variant
+            },
+            Some(n),
+            &c,
+        ))
     }
     fn generics(&mut self) -> Parsed<NodeId> {
         let s = self.pos;

@@ -1,0 +1,32 @@
+type NoCodec { removed old: String }
+type BadDefault: codec { removed old: String = "x" }
+type BadPayload: codec = Live | removed Old(HostFile)
+type Duplicate: codec { removed note: String, note: u64 }
+type DuplicateVariant: codec = First | removed Old | Old
+type DuplicateDead: codec { removed n: u64, removed n: u64 }
+type LiveFirst: codec { n: u64, removed n: u64 }
+type Gone: codec { id: u64, removed note: String }
+type Choice: codec = Yes | removed No(u64)
+fn construct() -> Gone { Gone(id: 1u64, note: "x") }
+fn access(x: Gone) -> u64 { list.len(x.note) }
+fn variant() -> Choice { No(0u64) }
+fn pattern(x: Choice) -> u64 { match x { Yes => 1u64, No(_) => 0u64 } }
+// expect: refuse LANG-7 at 12:26
+// expect: refuse SEM-10 at 2:48
+// expect: refuse SEM-10 at 1:16
+// expect: refuse OWN-4 at 3:45
+// expect: refuse SEM-10 at 4:47
+// expect: refuse SEM-10 at 5:54
+// expect: refuse SEM-10 at 6:45
+// expect: refuse SEM-10 at 7:33
+// expect: refuse LANG-11 at 10:41
+// expect: compared LANG-11 at 10:41 | 2 arguments | 1 argument
+// expect: refuse LANG-9 at 11:38
+// expect: refuse LANG-7 at 13:55
+
+type OldGeneric[T]: codec { n: u64, removed old: T }
+fn needs[T: codec](x: T) -> u64 { 1u64 }
+fn bad(x: OldGeneric[HostFile]) -> u64 { needs(x) }
+// expect: refuse LANG-17 at 13:55
+// expect: refuse LANG-12 at 29:48
+// expect: compared LANG-12 at 29:48 | app@1/main/OldGeneric[core@1/core/HostFile] | codec

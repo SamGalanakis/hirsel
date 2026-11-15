@@ -1,16 +1,27 @@
 //! Content-addressed records in one envelope, committed by atomic rename.
 //! Disk bytes are external input; a damaged record is a cache miss.
+//!
+//! Every byte a read uses is covered by an xxh3-64 checksum it verifies:
+//! records and selections carry theirs in the frame, a bare object's sits
+//! beside its address in the record that names it (`Bare`). SHA-256 is
+//! computed once, at write, only to name content. Nothing is synced: a torn,
+//! short, zero-filled or missing file after a power loss fails its check or
+//! is absent, so it is a miss and is rebuilt.
 use hirsel_core_ids::ContentHash;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use twox_hash::XxHash3_64;
 
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
 /// A body record's envelope: `BODY_MAGIC VERSION head_len ir_len head ir_hash
-/// ir address`. The address covers everything before the IR; a read checks
-/// the IR against `ir_hash`, so each IR byte is hashed once either way.
+/// ir prefix_check ir_check address`. The address names everything before
+/// the IR, and `ir_hash` names the IR; a head read checks the prefix alone,
+/// a full read checks both parts.
 const BODY_MAGIC: &[u8; 8] = b"HBODY\0\0\0";
 /// `BODY_MAGIC`, `VERSION` and the two lengths.
 const BODY_HEADER: usize = 28;
@@ -18,14 +29,20 @@ const BODY_HEADER: usize = 28;
 /// framed as one part. A body record's IR part is hashed by it, and so is a
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
-const VERSION: u32 = 31;
+const VERSION: u32 = 32;
 const HEADER: usize = 12;
-const TRAILER: usize = 40;
+/// The payload length, the checksum of everything before it, and the address.
+const TRAILER: usize = 48;
+/// A body's two checksums and its address.
+const BODY_TRAILER: usize = 48;
+/// A selection: the selected address and its checksum.
+const SELECTION: usize = 40;
+/// Temporaries, beside the records on the same filesystem (`Store::new`).
+const TMP: &str = "tmp";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 thread_local! {
-    /// Every durable write this thread made: each is a create, write, file
-    /// sync and rename, or a directory sync.
+    /// Every file this thread published: each is a create, write and rename.
     pub(crate) static WRITES: std::cell::RefCell<Vec<Durable>> = const { std::cell::RefCell::new(vec![]) };
 }
 #[cfg(test)]
@@ -34,7 +51,6 @@ pub(crate) enum Durable {
     Record,
     Bare,
     Selection,
-    DirectorySync,
 }
 fn wrote(_what: &str) {
     #[cfg(test)]
@@ -42,10 +58,24 @@ fn wrote(_what: &str) {
         w.push(match _what {
             "record" => Durable::Record,
             "bare" => Durable::Bare,
-            "selection" => Durable::Selection,
-            _ => Durable::DirectorySync,
+            _ => Durable::Selection,
         })
     });
+}
+/// The read check of every stored byte.
+pub(crate) fn checksum(bytes: &[u8]) -> u64 {
+    XxHash3_64::oneshot(bytes)
+}
+fn word(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+/// A bare object's address and the checksum a read verifies: the record that
+/// names the object carries both, so the object's own bytes stay the plain
+/// file a linker reads.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Bare {
+    pub address: ContentHash,
+    pub check: u64,
 }
 
 /// Position in an archive payload, independent of its file envelope.
@@ -86,24 +116,17 @@ impl Body {
         let hash_at = BODY_HEADER.checked_add(head_len)?;
         let ir_at = hash_at.checked_add(32)?;
         let end = ir_at.checked_add(ir_len)?;
-        if end.checked_add(32)? != size || bytes[end..] != key.0 {
+        if end.checked_add(BODY_TRAILER)? != size || bytes[end + 16..] != key.0 {
             return None;
         }
-        let digest = || Sha256::digest(&bytes[..ir_at]);
-        let address = match image {
-            Some(image) => image.digest(ir_at, digest),
-            None => digest(),
+        let check = |at: usize, part: &[u8]| {
+            let sum = || checksum(part);
+            word(&bytes, at) == image.map_or_else(sum, |image| image.digest(part.len(), sum))
         };
-        if address[..] != key.0 {
+        if !check(end, &bytes[..ir_at]) || !check(end + 8, &bytes[ir_at..end]) {
             return None;
         }
-        let ir_hash = match image {
-            Some(image) => image.digest(ir_len, || Store::ir_hash(&bytes[ir_at..end])),
-            None => Store::ir_hash(&bytes[ir_at..end]),
-        };
-        if ir_hash.0[..] != bytes[hash_at..ir_at] {
-            return None;
-        }
+        let ir_hash = ContentHash(bytes[hash_at..ir_at].try_into().unwrap());
         Some(Self {
             bytes,
             ir: ir_at..end,
@@ -156,18 +179,152 @@ pub struct Store {
     root: PathBuf,
     image: bool,
 }
+/// A file in `<store>/tmp`, exclusively locked from its create until it is
+/// renamed into place or removed. Opening a store removes every temporary it
+/// can lock without blocking, so a crashed writer's leftovers go and a live
+/// writer's stay.
+struct Temporary {
+    path: PathBuf,
+    file: File,
+}
+fn lock(file: &File, flags: libc::c_int) -> io::Result<bool> {
+    loop {
+        // SAFETY: `file` owns an open descriptor for the whole call.
+        if unsafe { libc::flock(file.as_raw_fd(), flags) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EWOULDBLOCK) => return Ok(false),
+            _ => return Err(error),
+        }
+    }
+}
+/// True when `path` still names the inode `file` holds: a store opened
+/// between a temporary's create and its lock may have removed it.
+fn still_named(path: &Path, file: &File) -> io::Result<bool> {
+    let held = file.metadata()?;
+    Ok(match fs::symlink_metadata(path) {
+        Ok(named) => named.ino() == held.ino() && named.dev() == held.dev(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e),
+    })
+}
+/// A scratch directory in `<store>/tmp`, locked like a `Temporary` and
+/// removed with everything in it when dropped.
+pub(crate) struct Scratch {
+    path: PathBuf,
+    _lock: File,
+}
+impl Scratch {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
 impl Store {
     pub fn new(root: &Path) -> io::Result<Self> {
         fs::create_dir_all(root)?;
-        Ok(Self {
+        let store = Self {
             root: root.to_owned(),
             image: false,
-        })
+        };
+        store.sweep()?;
+        Ok(store)
     }
     pub(crate) fn image(root: &Path) -> io::Result<Self> {
         let mut store = Self::new(root)?;
         store.image = true;
         Ok(store)
+    }
+    /// Remove each temporary no live writer holds. `tmp` is normally empty or
+    /// absent, so this is one directory read.
+    fn sweep(&self) -> io::Result<()> {
+        let entries = match fs::read_dir(self.root.join(TMP)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let path = entry?.path();
+            let Ok(file) = File::open(&path) else {
+                continue;
+            };
+            if !lock(&file, libc::LOCK_EX | libc::LOCK_NB)? || !still_named(&path, &file)? {
+                continue;
+            }
+            let removed = if file.metadata()?.is_dir() {
+                fs::remove_dir_all(&path)
+            } else {
+                fs::remove_file(&path)
+            };
+            match removed {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    fn tmp_name(&self) -> PathBuf {
+        self.root.join(TMP).join(format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+    /// Create `make(path)` under `tmp` and lock what `open(path)` returns,
+    /// retrying when a concurrent sweep removed it before the lock.
+    fn locked<T>(
+        &self,
+        make: impl Fn(&Path) -> io::Result<T>,
+        open: impl Fn(&Path, &T) -> io::Result<File>,
+    ) -> io::Result<(PathBuf, T, File)> {
+        loop {
+            let path = self.tmp_name();
+            let made = match make(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir_all(self.root.join(TMP))?;
+                    continue;
+                }
+                made => made?,
+            };
+            let file = open(&path, &made)?;
+            lock(&file, libc::LOCK_EX)?;
+            if still_named(&path, &file)? {
+                return Ok((path, made, file));
+            }
+        }
+    }
+    fn temporary(&self) -> io::Result<Temporary> {
+        let (path, file, _) = self.locked(
+            |path| OpenOptions::new().create_new(true).write(true).open(path),
+            |_, file| file.try_clone(),
+        )?;
+        Ok(Temporary { path, file })
+    }
+    /// A locked scratch directory under `tmp`, removed when dropped.
+    pub(crate) fn scratch(&self) -> io::Result<Scratch> {
+        let (path, (), lock) =
+            self.locked(|path| fs::create_dir(path), |path, ()| File::open(path))?;
+        Ok(Scratch { path, _lock: lock })
+    }
+    /// Write `bytes` to a temporary and rename it to `path`. Nothing is
+    /// synced (module documentation).
+    fn publish(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let mut temporary = self.temporary()?;
+        let result = temporary
+            .file
+            .write_all(bytes)
+            .and_then(|()| fs::rename(&temporary.path, path));
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary.path);
+        }
+        result
     }
     pub fn path(&self, key: ContentHash) -> PathBuf {
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -183,30 +340,19 @@ impl Store {
         self.archive(|writer| writer.write_all(bytes))
     }
     /// Publish an ELF/object payload under its raw content hash. Unlike an
-    /// archive record, the file is passed directly to native linkers by path.
+    /// archive record, the file is passed directly to native linkers by path,
+    /// so its checksum travels in the record that names it.
     /// The bytes always replace the file by a rename: a file already at the
     /// path may be one whose check just failed, and an existing name says
     /// nothing about its bytes.
-    pub(crate) fn put_bare(&self, bytes: &[u8]) -> io::Result<ContentHash> {
-        let hash = ContentHash(sha2::Sha256::digest(bytes).into());
-        let path = self.path(hash);
-        let temporary = self.temporary();
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            fs::rename(&temporary, &path)?;
-            wrote("bare");
-            wrote("directory");
-            File::open(&self.root)?.sync_all()
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result.map(|()| hash)
+    pub(crate) fn put_bare(&self, bytes: &[u8]) -> io::Result<Bare> {
+        let bare = Bare {
+            address: ContentHash(Sha256::digest(bytes).into()),
+            check: checksum(bytes),
+        };
+        self.publish(&self.path(bare.address), bytes)?;
+        wrote("bare");
+        Ok(bare)
     }
     pub(crate) fn archive(
         &self,
@@ -216,7 +362,6 @@ impl Store {
         emit(&mut writer)?;
         let (hash, bytes) = Self::frame(&writer.buffer);
         self.write_framed(hash, &bytes)?;
-        self.sync_directory()?;
         Ok(hash)
     }
     /// The envelope of one payload and its address: the digest of the header,
@@ -242,6 +387,8 @@ impl Store {
         let payload = (bytes.len() - HEADER) as u64;
         bytes.extend_from_slice(&payload.to_le_bytes());
         let hash = ContentHash(Sha256::digest(&bytes).into());
+        let check = checksum(&bytes);
+        bytes.extend_from_slice(&check.to_le_bytes());
         bytes.extend_from_slice(&hash.0);
         Ok((hash, bytes))
     }
@@ -256,7 +403,7 @@ impl Store {
         head: &[u8],
         fill: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
     ) -> io::Result<(ContentHash, ContentHash, Vec<u8>)> {
-        let mut bytes = Vec::with_capacity(BODY_HEADER + head.len() + 32 + 64 + 32);
+        let mut bytes = Vec::with_capacity(BODY_HEADER + head.len() + 32 + 64 + BODY_TRAILER);
         bytes.extend_from_slice(BODY_MAGIC);
         bytes.extend_from_slice(&VERSION.to_le_bytes());
         bytes.extend_from_slice(&(head.len() as u64).to_le_bytes());
@@ -272,12 +419,15 @@ impl Store {
         bytes[hash_at..ir_at].copy_from_slice(&ir_hash.0);
         hirsel_core_front::cost_scope!("non-check", "archive write and digest");
         let address = ContentHash(Sha256::digest(&bytes[..ir_at]).into());
+        let checks = [checksum(&bytes[..ir_at]), checksum(&bytes[ir_at..])];
+        for check in checks {
+            bytes.extend_from_slice(&check.to_le_bytes());
+        }
         bytes.extend_from_slice(&address.0);
         Ok((address, ir_hash, bytes))
     }
-    /// A body record read back under its address. Nothing escapes until its
-    /// address and its IR hash both check; a short, long, foreign or damaged
-    /// file is `None`.
+    /// A body record read back under its address. Nothing escapes until both
+    /// its checksums check; a short, long, foreign or damaged file is `None`.
     pub(crate) fn get_body(&self, key: ContentHash) -> io::Result<Option<Body>> {
         let image = crate::meter::ImageRead::start(self.image);
         let Some(bytes) = self.read_whole(key, image.as_ref())? else {
@@ -289,9 +439,9 @@ impl Store {
     /// its IR.
     ///
     /// A head read checks BODY_MAGIC, VERSION, both lengths, the exact file
-    /// length, the trailer address and the prefix address over exactly the
-    /// head bytes. It returns only fields the address covers, and nothing
-    /// derived from IR. `get_body` alone verifies `ir_hash` and decodes IR.
+    /// length, the trailer address and the prefix checksum over exactly the
+    /// head bytes. It returns only fields the prefix covers, and nothing
+    /// derived from IR. `get_body` alone checks the IR and decodes it.
     pub(crate) fn get_body_head(&self, key: ContentHash) -> io::Result<Option<Head>> {
         let image = crate::meter::ImageRead::start(self.image);
         let mut file = match File::open(self.path(key)) {
@@ -310,24 +460,27 @@ impl Store {
         if &header[..8] != BODY_MAGIC || header[8..12] != VERSION.to_le_bytes() {
             return Ok(None);
         }
-        let length = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().unwrap());
-        let (head_len, ir_len) = (length(12), length(20));
+        let (head_len, ir_len) = (word(&header, 12), word(&header, 20));
         let Some(prefix) = (BODY_HEADER as u64)
             .checked_add(head_len)
             .and_then(|n| n.checked_add(32))
         else {
             return Ok(None);
         };
-        if prefix.checked_add(ir_len).and_then(|n| n.checked_add(32)) != Some(size) {
+        if prefix
+            .checked_add(ir_len)
+            .and_then(|n| n.checked_add(BODY_TRAILER as u64))
+            != Some(size)
+        {
             return Ok(None);
         }
         let Ok(prefix) = usize::try_from(prefix) else {
             return Ok(None);
         };
-        let mut trailer = [0u8; 32];
-        file.seek(SeekFrom::Start(size - 32))?;
+        let mut trailer = [0u8; BODY_TRAILER];
+        file.seek(SeekFrom::Start(size - BODY_TRAILER as u64))?;
         file.read_exact(&mut trailer)?;
-        if trailer != key.0 {
+        if trailer[16..] != key.0 {
             return Ok(None);
         }
         let mut bytes = Vec::new();
@@ -337,14 +490,14 @@ impl Store {
         file.seek(SeekFrom::Start(BODY_HEADER as u64))?;
         file.read_exact(&mut bytes[BODY_HEADER..])?;
         if let Some(image) = &image {
-            image.bytes(BODY_HEADER + 32 + (prefix - BODY_HEADER));
+            image.bytes(BODY_TRAILER + (prefix - BODY_HEADER));
         }
-        let digest = || Sha256::digest(&bytes);
-        let address = match &image {
-            Some(image) => image.digest(prefix, digest),
-            None => digest(),
+        let sum = || checksum(&bytes);
+        let check = match &image {
+            Some(image) => image.digest(prefix, sum),
+            None => sum(),
         };
-        if address[..] != key.0 {
+        if check != word(&trailer, 0) {
             return Ok(None);
         }
         let ir_hash = ContentHash(bytes[prefix - 32..].try_into().unwrap());
@@ -385,28 +538,11 @@ impl Store {
         }
         Ok((bytes.len() == size).then_some(bytes))
     }
-    /// Write and sync one framed record under its address. The directory entry
-    /// is made durable by a later `sync_directory`, once per publication.
+    /// Publish one framed record under its address.
     pub(crate) fn write_framed(&self, hash: ContentHash, bytes: &[u8]) -> io::Result<()> {
-        let temporary = self.temporary();
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            wrote("record");
-            fs::rename(&temporary, self.path(hash))
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(temporary);
-        }
-        result
-    }
-    pub(crate) fn sync_directory(&self) -> io::Result<()> {
-        wrote("directory");
-        File::open(&self.root)?.sync_all()
+        self.publish(&self.path(hash), bytes)?;
+        wrote("record");
+        Ok(())
     }
     pub fn get(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
         let image = crate::meter::ImageRead::start(self.image);
@@ -419,13 +555,13 @@ impl Store {
             return Ok(None);
         }
         let end = size - TRAILER;
-        if u64::from_le_bytes(bytes[end..end + 8].try_into().unwrap()) != (end - HEADER) as u64
-            || bytes[end + 8..] != key.0
-            || image.as_ref().map_or_else(
-                || Sha256::digest(&bytes[..end + 8]),
-                |image| image.digest(end + 8, || Sha256::digest(&bytes[..end + 8])),
-            )[..]
-                != key.0
+        let sum = || checksum(&bytes[..end + 8]);
+        if word(&bytes, end) != (end - HEADER) as u64
+            || bytes[end + 16..] != key.0
+            || word(&bytes, end + 8)
+                != image
+                    .as_ref()
+                    .map_or_else(sum, |image| image.digest(end + 8, sum))
         {
             return Ok(None);
         }
@@ -433,52 +569,74 @@ impl Store {
         bytes.truncate(end - HEADER);
         Ok(Some(bytes))
     }
-    pub(crate) fn get_bare(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
-        let path = self.path(key);
-        let bytes = match fs::read(path) {
+    pub(crate) fn get_bare(&self, bare: Bare) -> io::Result<Option<Vec<u8>>> {
+        let bytes = match fs::read(self.path(bare.address)) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        if ContentHash(sha2::Sha256::digest(&bytes).into()) != key {
-            return Ok(None);
-        }
-        Ok(Some(bytes))
+        Ok((checksum(&bytes) == bare.check).then_some(bytes))
     }
     pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {
-        match fs::read(self.root.join(name)) {
-            Ok(b) => Ok(<[u8; 32]>::try_from(b.as_slice()).ok().map(ContentHash)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e),
+        let bytes = match fs::read(self.root.join(name)) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if bytes.len() != SELECTION || word(&bytes, 32) != checksum(&bytes[..32]) {
+            return Ok(None);
         }
+        Ok(Some(ContentHash(bytes[..32].try_into().unwrap())))
     }
     pub(crate) fn select(&self, name: &str, key: ContentHash) -> io::Result<()> {
-        self.atomic(&self.root.join(name), &key.0)
+        let mut bytes = [0u8; SELECTION];
+        bytes[..32].copy_from_slice(&key.0);
+        bytes[32..].copy_from_slice(&checksum(&key.0).to_le_bytes());
+        self.publish(&self.root.join(name), &bytes)?;
+        wrote("selection");
+        Ok(())
     }
-    fn temporary(&self) -> PathBuf {
-        self.root.join(format!(
-            ".write-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
-    pub(crate) fn atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let temporary = self.temporary();
-        let result = (|| {
-            let mut f = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            f.write_all(bytes)?;
-            f.sync_all()?;
-            fs::rename(&temporary, path)?;
-            wrote("selection");
-            wrote("directory");
-            File::open(&self.root)?.sync_all()
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(temporary);
-        }
-        result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+    /// Law: opening a store removes every temporary no writer holds, file or
+    /// scratch directory, and keeps each one a live writer holds.
+    #[test]
+    fn opening_removes_leftover_temporaries_and_keeps_live_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        let left = || {
+            let mut names: Vec<_> = std::fs::read_dir(&tmp)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let store = Store::new(dir.path()).unwrap();
+        let live = store.temporary().unwrap();
+        let scratch = store.scratch().unwrap();
+        std::fs::write(scratch.path().join("program"), b"linking").unwrap();
+        // A crashed writer's file and scratch directory: nothing holds them.
+        std::fs::write(tmp.join("1-0"), b"torn").unwrap();
+        std::fs::create_dir(tmp.join("1-1")).unwrap();
+        std::fs::write(tmp.join("1-1/entry.o"), b"").unwrap();
+        Store::new(dir.path()).unwrap();
+        let name = |p: &std::path::Path| p.file_name().unwrap().to_str().unwrap().to_owned();
+        let mut live_names = vec![name(&live.path), name(scratch.path())];
+        live_names.sort();
+        assert_eq!(
+            left(),
+            live_names,
+            "the live writer's temporaries alone stay"
+        );
+        assert!(scratch.path().join("program").exists());
+        // Its writer gone without a rename, the temporary is a leftover.
+        drop(live);
+        drop(scratch);
+        Store::new(dir.path()).unwrap();
+        assert_eq!(left(), Vec::<String>::new());
     }
 }

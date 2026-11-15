@@ -18,7 +18,7 @@ a path that left a file of the request; file records hold each module's namespac
 map and anchor map. One rename of the `program-index` selection publishes the
 root node, rows, tombstones and maps together. A request reads the whole index,
 never a whole product, and writes only the records that changed. Disk reads check
-version, length and digest. Lookups treat a tombstone as not found.
+version, length and checksum. Lookups treat a tombstone as not found.
 Resolver scratch is not retained or encoded; definition keys retain its observed
 lookup fingerprint and one hash of the transitive signature components. A body's
 own part of its key is its item's source bytes: record sites and IR anchors are
@@ -30,7 +30,7 @@ No old std products, old requests, TIR or independent checker enter this path.
 
 A warm in-memory snapshot performs no source checking. Requests reuse unchanged
 definition products from memory or from their records, including refusals. Products are trusted in memory.
-External disk records check format version, exact length and content digest; damage
+External disk records check format version, exact length and checksum; damage
 is a cache miss. Records publish before the selection. No old requests,
 old std products, TIR or independent checker enter this crate. The workspace
 layering audit enforces its new-core-only dependency boundary.
@@ -104,7 +104,7 @@ External record failures cross the infallible table APIs as a private typed
 unwind and become ordinary IO errors at driver/image boundaries; compiler
 panics are not caught as cache misses. These compiler APIs require unwinding;
 the native program runtime is unaffected. All disk records retain the existing
-version, exact-length and content-digest boundary.
+version, exact-length and checksum boundary.
 
 `collect_instances` collects reachable distinct instances without source rechecking,
 with an explicit compiler-resource stop for growing instance families. The checked
@@ -127,7 +127,7 @@ executes it, forwarding arguments after `--` and returning its process status.
 
 LLVM release publishes each canonical library unit as one native product: its
 public object, raw LLVM bitcode captured before any pass, and its import summary.
-The existing native selection and store digest cover all three atomically. A
+The existing native selection and store checksum cover all three atomically. A
 partial product or an older object-only product is a miss and is rebuilt. Warm
 application builds load bitcode directly and emit LLVM text only for their own
 units. The application key includes the imported product identities and
@@ -245,10 +245,17 @@ results are cleaned before the outcome is reported.
 The driver trusts three things beyond what it checks. Each is a contract, not a
 gap to be closed later.
 
-- **Store records are trusted beyond their hash.** A record whose format version,
-  length and content digest check is used as written. The digest catches damage,
-  not intent: a record crafted to carry a matching digest is outside the threat
-  model. A store is as trusted as the user account that writes it.
+- **Store records are trusted beyond their checksum.** Every byte a read uses is
+  covered by an xxh3-64 checksum: a record or selection carries it in its frame,
+  and a bare object's sits beside its address in the record that names it. A
+  record whose format version, length and checksum check is used as written.
+  SHA-256 is computed once, at write, only to name content. The checksum catches
+  damage, not intent: a record crafted to carry a matching checksum is outside the
+  threat model. A store is as trusted as the user account that writes it.
+- **The store is never synced.** Writers rename a locked temporary from
+  `<store>/tmp` into place; opening a store removes each temporary no writer
+  holds. After a power loss a torn, short, zero-filled or missing record fails
+  its check or is absent, so it is a miss and is rebuilt.
 - **Tool inputs are trusted by the two-sighting stat rule.** The link driver or
   installed recipe, link
   editor, runtime archive and every file the link recipe names are hashed when

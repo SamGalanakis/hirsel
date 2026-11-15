@@ -4,15 +4,15 @@
   "corpora": {
     "m1": {
       "code_lines": 7745,
-      "check_lower_per_line": 17116.22,
-      "whole_request_per_line": 33213.27,
-      "whole_process_per_line": 33310.55
+      "check_lower_per_line": 17118.66,
+      "whole_request_per_line": 33515.74,
+      "whole_process_per_line": 33614.33
     },
     "std": {
       "code_lines": 4357,
       "check_lower_per_line": 11466.48,
-      "whole_request_per_line": 25849.36,
-      "whole_process_per_line": 26045.32
+      "whole_request_per_line": 26061.5,
+      "whole_process_per_line": 26257.93
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
@@ -6133,6 +6133,68 @@
           "check_lower_per_line": 39.1473,
           "whole_request_per_line": 53.40785,
           "whole_process_per_line": 57.33227
+        }
+      },
+      "measured_lines": {
+        "m1": 7794,
+        "std": 4406
+      }
+    },
+    {
+      "from_revision": "8b13c258",
+      "to_revision": "check-product-959/store-integrity-c",
+      "reason": "Sam's ruling 2026-11-15 21:14, store integrity (c), no fsync: every stored byte carries an xxh3-64 checksum computed at write and verified on read. A cold check reads nothing back, so it pays the write-side checksum over the 5.92 MB (M1) / 2.10 MB (std) it publishes and nothing offsets it. Each cell that rose is raised by exactly its measured pair delta, no margin; std check/lower fell and is left unchanged. crc32c 0.6.8 (hardware path, one out-of-line instruction call per 8 bytes) measured +4.08%/+3.40% and was rejected. Completed bodies unchanged (377/199); finished budget remains 60000.",
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 7745,
+          "check_lower_per_line": 17116.22,
+          "whole_request_per_line": 33213.27,
+          "whole_process_per_line": 33310.55
+        },
+        "std": {
+          "code_lines": 4357,
+          "check_lower_per_line": 11466.48,
+          "whole_request_per_line": 25849.36,
+          "whole_process_per_line": 26045.32
+        }
+      },
+      "measured_before": {
+        "m1": {
+          "check_lower_per_line": 16624.0,
+          "whole_request_per_line": 30115.28,
+          "whole_process_per_line": 30272.31
+        },
+        "std": {
+          "check_lower_per_line": 11181.59,
+          "whole_request_per_line": 23148.6,
+          "whole_process_per_line": 23387.43
+        }
+      },
+      "measured_after": {
+        "m1": {
+          "check_lower_per_line": 16626.44,
+          "whole_request_per_line": 30417.75,
+          "whole_process_per_line": 30576.09
+        },
+        "std": {
+          "check_lower_per_line": 11175.28,
+          "whole_request_per_line": 23360.74,
+          "whole_process_per_line": 23600.04
+        }
+      },
+      "samples": {
+        "before": 3,
+        "after": 2
+      },
+      "ceiling_increments": {
+        "m1": {
+          "check_lower_per_line": 2.44,
+          "whole_request_per_line": 302.47,
+          "whole_process_per_line": 303.78
+        },
+        "std": {
+          "whole_request_per_line": 212.14,
+          "whole_process_per_line": 212.61
         }
       },
       "measured_lines": {

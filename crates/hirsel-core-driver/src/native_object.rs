@@ -1,4 +1,5 @@
 //! Code and source-neutral rows share one native cache selection and envelope.
+use crate::store::Bare;
 use crate::{Store, decode, encode, native};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::source::NativeObject;
@@ -9,28 +10,28 @@ pub(crate) const SCHEMA: u32 = 2;
 #[derive(Serialize, Deserialize)]
 struct Root {
     schema: u32,
-    object: ContentHash,
+    object: Bare,
     debug: Option<ContentHash>,
 }
 
 pub(crate) fn publish(
     store: &Store,
     key: ContentHash,
-    object: &NativeObject,
+    native: &NativeObject,
 ) -> io::Result<ContentHash> {
-    let object_identity = store.put_bare(&object.bytes)?;
-    let debug = object
+    let object = store.put_bare(&native.bytes)?;
+    let debug = native
         .debug
         .as_ref()
         .map(|debug| encode(debug).and_then(|bytes| store.put(&bytes)))
         .transpose()?;
     let root = store.put(&encode(&Root {
         schema: SCHEMA,
-        object: object_identity,
+        object,
         debug,
     })?)?;
     store.select(&native::selection(key), root)?;
-    Ok(object_identity)
+    Ok(object.address)
 }
 
 pub(crate) fn path(store: &Store, identity: ContentHash) -> std::path::PathBuf {
@@ -68,7 +69,7 @@ pub(crate) fn load(
         }
         None => None,
     };
-    Ok(Some((root.object, NativeObject { bytes, debug })))
+    Ok(Some((root.object.address, NativeObject { bytes, debug })))
 }
 
 /// A Cranelift development instance's record, under its instance key
@@ -85,7 +86,7 @@ pub(crate) struct Instance {
     pub own: Option<ContentHash>,
     /// The digest of the encoded environment the key was made with.
     pub env: ContentHash,
-    pub object: ContentHash,
+    pub object: Bare,
     pub debug: Option<ContentHash>,
     /// The instances the module calls outside itself, sorted and deduplicated.
     pub children: Vec<hirsel_core_ir::Identity>,
@@ -111,7 +112,7 @@ pub(crate) fn publish_instance(
         .transpose()?;
     let address = store.put(&encode(&record)?)?;
     store.select(&native::selection(key), address)?;
-    Ok(record.object)
+    Ok(record.object.address)
 }
 
 /// The record selected under `key`, when it decodes and every closure's hash
@@ -190,7 +191,7 @@ mod tests {
             let (loaded, warm) = load(&store, key).unwrap().unwrap();
             assert_eq!(identity, loaded);
             assert_eq!(object, warm);
-            let bytes = store.get_bare(loaded).unwrap().unwrap();
+            let bytes = std::fs::read(path(&store, loaded)).unwrap();
             assert_eq!(bytes, object.bytes);
             let old = store.put(&object.bytes).unwrap();
             store.select(&native::selection(key), old).unwrap();

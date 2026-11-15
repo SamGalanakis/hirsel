@@ -202,10 +202,7 @@ impl Publication {
             store.write_framed(*hash, bytes)?;
         }
         if changed {
-            store.sync_directory()?;
             store.select(SELECTION, root)?;
-        } else if !writes.is_empty() {
-            store.sync_directory()?;
         }
         Ok(root)
     }

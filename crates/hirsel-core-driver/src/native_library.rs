@@ -156,7 +156,10 @@ mod tests {
         assert_eq!(product.summary.functions[0].instructions, 17);
         assert!(product.summary.facts[0].params[0].sealed);
         assert!(!product.summary.facts[0].params[0].place_blind);
-        let files = std::fs::read_dir(dir.path()).unwrap().count();
+        let files = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name() != "tmp")
+            .count();
         assert_eq!(files, 2, "one archive and its existing native selection");
     }
     #[test]

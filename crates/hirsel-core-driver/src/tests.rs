@@ -94,13 +94,14 @@ fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
     assert_eq!(demanded.ir_hash(), full(demanded.ir().unwrap()), "image");
 }
 /// The body frame, against a hand-built envelope: `HBODY VERSION head_len
-/// ir_len head ir_hash ir address`, the address the SHA-256 of everything
-/// before the IR. Any changed byte, a truncation, a trailing byte or an
-/// impossible length reads as nothing; a changed IR byte keeps the address,
-/// so only the IR hash refuses it. The head read (`get_body_head`) refuses the
-/// same frames except a changed IR byte, which it never reads: a same-length
-/// IR damage is found by the IR read. An ordinary read refuses a body frame
-/// and a body read an ordinary one, and neither accepts VERSION 30.
+/// ir_len head ir_hash ir prefix_check ir_check address`, the address the
+/// SHA-256 of everything before the IR and the checks the xxh3-64 of that
+/// prefix and of the IR. Any changed byte, a truncation, a trailing byte or
+/// an impossible length reads as nothing; a changed IR byte keeps the address,
+/// so only the IR check refuses it. The head read (`get_body_head`) refuses the
+/// same frames except a changed IR or IR-check byte, which it never reads: a
+/// same-length IR damage is found by the IR read. An ordinary read refuses a
+/// body frame and a body read an ordinary one, and neither accepts VERSION 31.
 #[test]
 fn a_body_record_reads_back_only_whole() {
     use sha2::Digest;
@@ -109,13 +110,16 @@ fn a_body_record_reads_back_only_whole() {
     let (head, ir) = (b"a head".as_slice(), b"the module bytes".as_slice());
     let ir_hash = ContentHash::of_parts("hirsel.core-ir.v1", [ir]);
     let mut expected = b"HBODY\0\0\0".to_vec();
-    expected.extend(31u32.to_le_bytes());
+    expected.extend(32u32.to_le_bytes());
     expected.extend((head.len() as u64).to_le_bytes());
     expected.extend((ir.len() as u64).to_le_bytes());
     expected.extend(head);
     expected.extend(ir_hash.0);
     let address = ContentHash(sha2::Sha256::digest(&expected).into());
+    let prefix_check = twox_hash::XxHash3_64::oneshot(&expected);
     expected.extend(ir);
+    expected.extend(prefix_check.to_le_bytes());
+    expected.extend(twox_hash::XxHash3_64::oneshot(ir).to_le_bytes());
     expected.extend(address.0);
     let framed = Store::frame_body(head, |b| {
         b.extend_from_slice(ir);
@@ -131,7 +135,8 @@ fn a_body_record_reads_back_only_whole() {
         std::fs::write(store.path(address), bytes).unwrap();
         store.get_body_head(address).unwrap()
     };
-    let ir_at = expected.len() - 32 - ir.len();
+    let ir_at = expected.len() - 48 - ir.len();
+    let ir_check = expected.len() - 40..expected.len() - 32;
     let whole = read(&expected).unwrap();
     assert_eq!(
         (
@@ -145,7 +150,7 @@ fn a_body_record_reads_back_only_whole() {
         let mut flipped = expected.clone();
         flipped[at] ^= 1;
         assert!(read(&flipped).is_none(), "byte {at}");
-        let in_ir = (ir_at..ir_at + ir.len()).contains(&at);
+        let in_ir = (ir_at..ir_at + ir.len()).contains(&at) || ir_check.contains(&at);
         assert_eq!(read_head(&flipped).is_some(), in_ir, "head read, byte {at}");
     }
     for len in 0..expected.len() {
@@ -165,9 +170,9 @@ fn a_body_record_reads_back_only_whole() {
         assert!(read_head(&long).is_none(), "head read, length at {at}");
     }
     let mut old = expected.clone();
-    old[8..12].copy_from_slice(&30u32.to_le_bytes());
-    assert!(read(&old).is_none(), "VERSION 30 body");
-    assert!(read_head(&old).is_none(), "head read, VERSION 30 body");
+    old[8..12].copy_from_slice(&31u32.to_le_bytes());
+    assert!(read(&old).is_none(), "VERSION 31 body");
+    assert!(read_head(&old).is_none(), "head read, VERSION 31 body");
     std::fs::write(store.path(address), &expected).unwrap();
     assert_eq!(
         store.get(address).unwrap(),
@@ -180,9 +185,9 @@ fn a_body_record_reads_back_only_whole() {
         "a body read of an ordinary record"
     );
     let mut bytes = std::fs::read(store.path(ordinary)).unwrap();
-    bytes[8..12].copy_from_slice(&29u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&31u32.to_le_bytes());
     std::fs::write(store.path(ordinary), bytes).unwrap();
-    assert_eq!(store.get(ordinary).unwrap(), None, "VERSION 29 record");
+    assert_eq!(store.get(ordinary).unwrap(), None, "VERSION 31 record");
 }
 #[test]
 fn refused_body_is_published_and_unreached_demand_is_explicit() {
@@ -215,20 +220,67 @@ fn refused_body_is_published_and_unreached_demand_is_explicit() {
             .contains("outside reached")
     );
 }
+/// Each stored kind against its hand-built frame: a record is `HCORE VERSION
+/// payload len check address`, a selection `address check`, and a bare object
+/// its plain bytes under the checksum its referrer holds (each check the
+/// xxh3-64 of what precedes it). Every flipped byte, the checksum field's
+/// included, and every power-loss shape (short, zero-filled, missing) reads as
+/// nothing; the whole frame reads back.
 #[test]
 fn damaged_disk_bytes_are_a_miss() {
+    use sha2::Digest;
+    use twox_hash::XxHash3_64;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path()).unwrap();
-    let key = store.put(b"published payload").unwrap();
-    let good = std::fs::read(store.path(key)).unwrap();
-    for offset in [0, 8, 12, good.len() - 40, good.len() - 1] {
-        let mut damaged = good.clone();
-        damaged[offset] ^= 1;
-        std::fs::write(store.path(key), damaged).unwrap();
-        assert!(store.get(key).unwrap().is_none());
+    let payload = b"published payload";
+    let mut record = b"HCORE\0\0\0".to_vec();
+    record.extend(32u32.to_le_bytes());
+    record.extend(payload);
+    record.extend((payload.len() as u64).to_le_bytes());
+    let key = ContentHash(sha2::Sha256::digest(&record).into());
+    record.extend(XxHash3_64::oneshot(&record).to_le_bytes());
+    record.extend(key.0);
+    assert_eq!(store.put(payload).unwrap(), key);
+    assert_eq!(std::fs::read(store.path(key)).unwrap(), record);
+    let mut selection = key.0.to_vec();
+    selection.extend(XxHash3_64::oneshot(&key.0).to_le_bytes());
+    store.select("live", key).unwrap();
+    assert_eq!(std::fs::read(dir.path().join("live")).unwrap(), selection);
+    let object = b"\x7fELF object bytes".as_slice();
+    let bare = store.put_bare(object).unwrap();
+    assert_eq!(bare.check, XxHash3_64::oneshot(object));
+    let kinds: [(&str, PathBuf, &[u8], &dyn Fn() -> bool); 3] = [
+        ("record", store.path(key), &record, &|| {
+            store.get(key).unwrap().is_some()
+        }),
+        ("selection", dir.path().join("live"), &selection, &|| {
+            store.selection("live").unwrap() == Some(key)
+        }),
+        ("bare object", store.path(bare.address), object, &|| {
+            store.get_bare(bare).unwrap().is_some()
+        }),
+    ];
+    for (kind, path, good, reads) in kinds {
+        let write = |bytes: &[u8]| std::fs::write(&path, bytes).unwrap();
+        for at in 0..good.len() {
+            let mut damaged = good.to_vec();
+            damaged[at] ^= 1;
+            write(&damaged);
+            assert!(!reads(), "{kind}: byte {at}");
+        }
+        for len in 0..good.len() {
+            write(&good[..len]);
+            assert!(!reads(), "{kind}: {len} bytes");
+        }
+        write(&vec![0; good.len()]);
+        assert!(!reads(), "{kind}: zero-filled");
+        std::fs::remove_file(&path).unwrap();
+        assert!(!reads(), "{kind}: missing");
+        write(good);
+        assert!(reads(), "{kind}: whole");
     }
-    std::fs::write(store.path(key), &good[..good.len() - 1]).unwrap();
-    assert!(store.get(key).unwrap().is_none());
+    assert_eq!(store.get(key).unwrap().unwrap(), payload);
+    assert_eq!(store.get_bare(bare).unwrap().unwrap(), object);
 }
 
 #[test]
@@ -501,7 +553,12 @@ fn failed_archive_write_keeps_previous_root_and_removes_temporary() {
         store.get(old).unwrap().unwrap(),
         b"previous complete result"
     );
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    // The record, the selection and `tmp`, which holds no temporary.
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("tmp")).unwrap().count(),
+        0
+    );
 }
 
 #[test]
@@ -2031,8 +2088,8 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
         // Every write the request made. With under 48 rows the trie is the
         // root over one leaf per first nibble of H(path): each changed row
         // rewrites its leaf. Records: the rechecked bodies, the changed file
-        // records, those leaves and the root; then one publication directory
-        // sync and the selection rename with its own directory sync.
+        // records, those leaves and the root; then the selection. Nothing is
+        // synced (`store`).
         let leaves: std::collections::BTreeSet<u8> = built
             .rechecked
             .iter()
@@ -2047,28 +2104,27 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
             })
             .collect();
         let mut expected = vec![store::Durable::Record; rechecked.len() + files + leaves.len() + 1];
-        expected.extend([
-            store::Durable::DirectorySync,
-            store::Durable::Selection,
-            store::Durable::DirectorySync,
-        ]);
+        expected.push(store::Durable::Selection);
         assert_eq!(writes, expected, "{kind}: writes");
     }
 }
 
 /// An envelope with `payload` and a correct length, but the trailer (the
-/// address) of `old`: only the digest tells it from the record it replaces.
+/// checksum and address) of `old`: only the checksum tells it from the
+/// record it replaces.
 fn under_old_address(old: &[u8], payload: &[u8]) -> Vec<u8> {
     let mut bytes = old[..12].to_vec();
     bytes.extend_from_slice(payload);
     bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&old[old.len() - 32..]);
+    bytes.extend_from_slice(&old[old.len() - 40..]);
     bytes
 }
 
 /// §2g record cases. Law: a damaged record, or a record of another toolchain,
 /// is a miss and a rebuild whose publication equals a fresh build's; never a
 /// different product. Oracle: a fresh build of the same sources in a new store.
+/// The store is never synced, so a power loss can leave any record a live
+/// selection names short, zero-filled or missing: each is such a miss.
 #[test]
 fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
     let fresh_dir = tempfile::tempdir().unwrap();
@@ -2088,6 +2144,12 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
         "corrupted body payload, valid envelope",
         "another toolchain",
         "body records under each other's rows",
+        "zero-filled root",
+        "zero-filled body",
+        "empty body",
+        "missing root",
+        "missing body",
+        "zero-filled selection",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
@@ -2123,10 +2185,10 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                     .unwrap()
                     .map(|e| e.unwrap().path())
                     .find(|f| {
-                        let Some(bytes) = std::fs::read(f).ok().filter(|b| b.len() > 52) else {
+                        let Some(bytes) = std::fs::read(f).ok().filter(|b| b.len() > 60) else {
                             return false;
                         };
-                        let payload = &bytes[12..bytes.len() - 40];
+                        let payload = &bytes[12..bytes.len() - 48];
                         // Node::Leaf is the second variant of the node encoding.
                         payload[..4] == [1, 0, 0, 0]
                             && decode::<Vec<(DefPath, check_index::Row)>>(&payload[4..])
@@ -2134,7 +2196,7 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                     })
                     .unwrap();
                 let bytes = std::fs::read(&leaf).unwrap();
-                let payload = &bytes[12..bytes.len() - 40];
+                let payload = &bytes[12..bytes.len() - 48];
                 let mut rows: Vec<(DefPath, check_index::Row)> = decode(&payload[4..]).unwrap();
                 leaf_rows = rows.iter().map(|r| r.0.0.name.clone()).collect();
                 leaf_rows.sort_unstable();
@@ -2157,6 +2219,36 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                 vec!["dispatch"]
             }
             "another toolchain" => names(&fresh),
+            "zero-filled root" | "zero-filled body" | "empty body" => {
+                let file = if case.ends_with("root") {
+                    store.path(base.root)
+                } else {
+                    body(&dispatch)
+                };
+                let len = if case == "empty body" {
+                    0
+                } else {
+                    std::fs::metadata(&file).unwrap().len() as usize
+                };
+                std::fs::write(&file, vec![0; len]).unwrap();
+                if case.ends_with("root") {
+                    names(&fresh)
+                } else {
+                    vec!["dispatch"]
+                }
+            }
+            "missing root" => {
+                std::fs::remove_file(store.path(base.root)).unwrap();
+                names(&fresh)
+            }
+            "missing body" => {
+                std::fs::remove_file(body(&dispatch)).unwrap();
+                vec!["dispatch"]
+            }
+            "zero-filled selection" => {
+                std::fs::write(path.join(check_index::SELECTION), [0; 40]).unwrap();
+                names(&fresh)
+            }
             // Valid body records referenced in each other's places: a body
             // record must name the path and key of the row that cites it.
             "body records under each other's rows" => {

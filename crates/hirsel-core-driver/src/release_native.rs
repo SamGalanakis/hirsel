@@ -125,7 +125,7 @@ impl CheckProduct {
                 )?;
                 (identity, native, true)
             };
-            let object_identity = store.put_bare(&product.object.bytes)?;
+            let object_identity = store.put_bare(&product.object.bytes)?.address;
             objects.push(ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),

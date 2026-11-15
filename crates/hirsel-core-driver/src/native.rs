@@ -320,7 +320,7 @@ impl CheckProduct {
                 let (identity, object, compiled) = if let Some((record, object)) =
                     materialized.hits.get(instance)
                 {
-                    (record.object, object.clone(), false)
+                    (record.object.address, object.clone(), false)
                 } else {
                     let module = materialized.get(instance).ir()?;
                     let symbols = materialized.link_symbols(instance, &mut names)?;
@@ -337,7 +337,7 @@ impl CheckProduct {
                         identity: instance.clone(),
                         own: fields.own,
                         env: records.digest,
-                        object: ContentHash::default(),
+                        object: Default::default(),
                         debug: None,
                         children: fields.children.clone(),
                         items: module.items.clone(),
@@ -603,8 +603,8 @@ impl CheckProduct {
                 Some(ObjectProduct {
                     private_variants: 0,
                     instance: identity,
-                    identity: record.object,
-                    path: crate::native_object::path(&store, record.object),
+                    identity: record.object.address,
+                    path: crate::native_object::path(&store, record.object.address),
                     bytes: object.bytes,
                     debug: object.debug,
                     compiled: false,
@@ -630,7 +630,7 @@ impl CheckProduct {
             identity: identity.clone(),
             own: Some(own),
             env: records.digest,
-            object: ContentHash::default(),
+            object: Default::default(),
             debug: None,
             children: vec![],
             items: module.items.clone(),
@@ -891,7 +891,7 @@ fn link(
     let (identity, bytes, linked) = if let Some((identity, bytes)) = cached(&store, link_key)? {
         (identity, bytes, false)
     } else {
-        let temp = tempfile::tempdir_in(&options.store)?;
+        let temp = store.scratch()?;
         let entry = temp.path().join("entry.o");
         let bytes = entry_plan
             .emit(&options.target)
@@ -913,7 +913,7 @@ fn link(
         };
         for object in objects {
             // Native objects are already content-addressed bare files. Pass
-            // those paths directly to ld.lld; load() verified their digest.
+            // those paths directly to ld.lld; load() verified their checksum.
             inputs.push(object.path.clone());
         }
         if let Some(debug) = debug {

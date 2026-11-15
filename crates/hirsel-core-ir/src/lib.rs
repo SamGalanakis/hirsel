@@ -859,9 +859,10 @@
 //! bytes, or static bytes, which nothing writes, throughout one activation. An
 //! emitter may rely on that, and may ignore it. An address without a role makes
 //! no claim.
-//! - A **carrier type** is an own record whose one field is a `seq` of a scalar:
-//!   `String`, `Bytes`, `List` of a scalar. Its buffer holds scalars, never a
-//!   carrier.
+//! - A **carrier type** is an own record whose one field is a `seq` of a plain
+//!   element (a scalar, an array of plain elements, or an own record or variant of
+//!   plain fields with no finalizer or clone body): `String`, `Bytes`, `List` of
+//!   one. Its buffer holds plain bytes, never a carrier or a pointer.
 //! - `Carrier(root)`: bytes of the carrier held in a slot of a carrier type, or
 //!   lent by a `mut` or `take` parameter of one (Loans). The address reaches it
 //!   through `pointer` values, `field 0` and constant `byte` steps, and stays
@@ -907,7 +908,7 @@
 //! This is what the language already guarantees. Slots are distinct. A `mut` or
 //! `take` place overlaps no other argument (Loans) and lies outside the callee's
 //! frame. A buffer is separately owned storage (OWN-3), static bytes or a view of
-//! either, and it holds scalars. So two sealed parameters' buffers are disjoint at
+//! either, and it holds plain bytes. So two sealed parameters' buffers are disjoint at
 //! entry, and no other carrier's buffer overlaps theirs except where both hold
 //! the same static bytes. Counted headers, map storage, queues, region
 //! records and provider handles have no role. LLVM can take one alias domain per

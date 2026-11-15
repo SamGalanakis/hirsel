@@ -172,6 +172,27 @@ impl<'a> Program<'a> {
         debug_assert_eq!(PRELUDE[slot], name);
         *self.core_declarations[slot].get_or_init(|| self.core_decl_uncached(name))
     }
+    /// The core function `module.name`, when the program has core.
+    pub(crate) fn core_fn(&self, module: &str, name: &str) -> Option<usize> {
+        let key = self.index.core?;
+        let package = &self.index.packages[key.0 as usize];
+        let path = DefPath(hirsel_core_ids::ItemPath {
+            package: hirsel_core_ids::PackageId {
+                name: self.index.symbols.text(package.name).into(),
+                version: self.index.symbols.text(package.version).into(),
+            },
+            modules: vec![module.into()],
+            name: name.into(),
+        });
+        match self
+            .by_path
+            .get(&path)
+            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(&path)))?
+        {
+            Def::Fn(f) => Some(*f as usize),
+            Def::Type(_) => None,
+        }
+    }
     fn core_decl_uncached(&self, name: &str) -> Option<DeclId> {
         let path = prelude_path(self.index, name)?;
         match self

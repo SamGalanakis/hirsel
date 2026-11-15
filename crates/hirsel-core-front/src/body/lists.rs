@@ -712,23 +712,137 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    /// `put_last`: the element goes in at `len` and `len` grows by one. The source
-    /// `push` calls it only after a full test (growth.rs), so `len < capacity` holds.
-    pub(super) fn list_put_last(
+    /// `push`, expanded in place: a full test, a cold call to the source `grow` in
+    /// its true arm (growth.rs), then the element stored within capacity. The taken
+    /// element stays the caller's temporary until the store or the `Error((c, x))`
+    /// install consumes it, so a raise from `grow` drops it once (A1 cleanup).
+    pub(super) fn list_push(
         &mut self,
         item: TyId,
         header: ValueId,
         value: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let Some(carrier) = self.list_carrier(item, n) else {
+            self.gap(n, "a push onto a List without its carrier row is not built");
+            return None;
+        };
+        let rep = self.rep_at(item, n)?;
+        let out_id = self.place_row(result, "a push result without a place is not built", n)?;
+        let TyKind::Adt(_, args) = self.t.kind(result) else {
+            self.gap(n, "a push result that is not a Result is not built");
+            return None;
+        };
+        let error_ty = args[1];
+        let error_id = self.place_row(error_ty, "a push error without a place is not built", n)?;
+        let (Some(capacity), Some(result_decl), Some(grow)) = (
+            self.p.core_decl("Capacity"),
+            self.p.core_decl("Result"),
+            self.p.core_fn("list", "grow"),
+        ) else {
+            self.gap(
+                n,
+                "push without core's Capacity, Result and list.grow is not built",
+            );
+            return None;
+        };
+        let cap_ty = self.t.mk(TyKind::Adt(capacity, vec![]));
+        let grown_ty = self.t.mk(TyKind::Adt(result_decl, vec![UNIT, cap_ty]));
+        let cap_id = self.place_row(cap_ty, "a Capacity without a place is not built", n)?;
+        let grown_id =
+            self.place_row(grown_ty, "a reserve result without a place is not built", n)?;
+        let to = self.new_slot(PlaceTy::Declared(out_id), n);
+        let full = self.full_test(header, carrier, n);
+        let (grow_block, store, failed, done) = (
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+        );
+        self.list_branch(full, grow_block, store, n);
+        self.start(grow_block);
+        let cold = self.is_full_test(Some(full));
+        let grown = self.true_arm(cold, |cx| {
+            cx.emit_call(grow, &[item], &[Some(header)], grown_ty, n)
+        })?;
+        let from = self.address(
+            AddressBase::Value(grown),
+            &[],
+            PlaceTy::Declared(grown_id),
+            n,
+        );
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: from,
+            },
+            n,
+        );
+        let ok_tag = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
+        let ok = self.list_compare(CompareOp::Eq, tag, ok_tag, n);
+        self.list_branch(ok, store, failed, n);
+        self.start(failed);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        let error = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(error_id),
+            n,
+        );
+        let cap = self.address(
+            AddressBase::Address(error),
+            &[Step::Field(0)],
+            PlaceTy::Declared(cap_id),
+            n,
+        );
+        let old_cap = self.address(
+            AddressBase::Address(from),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(cap_id),
+            n,
+        );
+        let source = self.pointer(old_cap, n);
+        self.copy_to(cap, source, cap_id, n);
+        if let Some(place) = rep.stored() {
+            let at = self.address(AddressBase::Address(error), &[Step::Field(1)], place, n);
+            self.install(at, rep, value, n);
+        }
+        self.jump(done, &[], n);
+        self.start(store);
+        self.put_last(item, carrier, rep, header, value, n)?;
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(done, &[], n);
+        self.start(done);
+        let value = self.pointer(to, n);
+        self.temp(result, Some(value));
+        Some(value)
+    }
+
+    /// The element goes in at `len` and `len` grows by one; `len < capacity` holds.
+    /// A zero-sized element stores nothing and still grows `len`.
+    fn put_last(
+        &mut self,
+        item: TyId,
+        carrier: TypeId,
+        rep: Rep,
+        header: ValueId,
+        value: Option<ValueId>,
         n: NodeId,
     ) -> Option<()> {
-        let carrier = self.list_carrier(item, n)?;
-        let rep = match self.rep(item) {
-            Ok(rep) => rep,
-            Err(what) => {
-                self.gap(n, what);
-                return None;
-            }
-        };
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let element = self.list_element(item, header, len, n)?;

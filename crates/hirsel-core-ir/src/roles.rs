@@ -592,7 +592,7 @@ impl<'a> Seal<'a> {
                 (Some((r, false)), Some(Loc::Carrier(_, 0))) => Some((r, true)),
                 // Any other pointer in a carrier is followed as the carrier itself.
                 (Some((r, false)), _) => Some((r, false)),
-                // A buffer holds scalars, never a carrier's pointer.
+                // A buffer holds plain elements, never a carrier's pointer.
                 (Some((_, true)) | None, _) => None,
             },
             Def::Fresh => self.installed[v.index()].map(|r| (r, true)),

@@ -4,6 +4,9 @@
 // expect: run returned_input() = 73231 trace 7
 // expect: run stored_input() = 7 trace 7
 // expect: run grant_failure() = fail Capacity
+// A drop has no grant, so grow raises out of a push there: the taken element is
+// the caller's until a store consumes it, so the raise drops it exactly once.
+// expect: run raised_push() = fail Capacity trace 7
 fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)] {
     list.push(mut xs, take x)
 }
@@ -68,6 +71,23 @@ fn grant_failure() -> u64 {
     let xs: List[u64] = result.unwrap(list.with_capacity(1))
     match Grow(xs: take xs) {
         Ok(_g) => 0u64,
+        Error(_) => 999
+    }
+}
+
+resource type Pusher {
+    xs: List[Mark],
+    x: Option[Mark]
+} drop(p) {
+    if let Some(x) = replace(mut p.x, None) {
+        let _ = list.push(mut p.xs, take x)
+    }
+}
+
+fn raised_push() -> u64 {
+    let x = result.unwrap(Mark(id: 7))
+    match Pusher(xs: list.new(), x: Some(take x)) {
+        Ok(_p) => 0u64,
         Error(_) => 999
     }
 }

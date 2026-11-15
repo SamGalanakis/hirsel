@@ -2,8 +2,9 @@
 //! the front lowers both words a full test reads (`len`/`capacity` of a List,
 //! `slots`/`capacity` of a Map): a source `==` between the used word and the
 //! capacity word of one place is a full test, and every call lowered in the
-//! true arm of an `if` on it is marked `cold` on its CallSite. The flag is a
-//! hint with no behaviour (core-ir CallSite::cold).
+//! true arm of an `if` on it is marked `cold` on its CallSite. `list.push` is
+//! expanded in place as the same full test and true arm. The flag is a hint with
+//! no behaviour (core-ir CallSite::cold).
 use super::*;
 use rustc_hash::FxHashSet;
 
@@ -104,5 +105,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// Whether an `if` on `condition` takes its true arm only when full.
     pub(super) fn is_full_test(&self, condition: Option<ValueId>) -> bool {
         condition.is_some_and(|c| self.growth.full.contains(&c))
+    }
+    /// The full test of the own List `header` points at (its row `carrier`), as
+    /// the source `list.len(xs) == list.capacity(xs)` lowers it.
+    pub(super) fn full_test(&mut self, header: ValueId, carrier: TypeId, n: NodeId) -> ValueId {
+        let len = self.fill_word(header, Some(carrier), FillWord::Used, n);
+        let cap = self.fill_word(header, Some(carrier), FillWord::Capacity, n);
+        let result = self.list_compare(CompareOp::Eq, len, cap, n);
+        self.note_equal(result, len, cap);
+        result
+    }
+    /// Lower `arm` as the true arm of an `if` whose condition is a full test when
+    /// `full`: every call in it is then cold.
+    pub(super) fn true_arm<R>(&mut self, full: bool, arm: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = self.growth.cold;
+        self.growth.cold |= full;
+        let r = arm(self);
+        self.growth.cold = outer;
+        r
     }
 }

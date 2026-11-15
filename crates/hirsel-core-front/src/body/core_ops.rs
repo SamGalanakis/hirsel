@@ -206,8 +206,7 @@ operations! {
     ("list", "reserve", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "get", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "slice", Lane::Value, "A", "core-check-calls-910", false),
-    ("list", "push", Lane::PendingCode, "A", "core-check-calls-910", false),
-    ("list", "put_last", Lane::Value, "A", "core-check-calls-910", true),
+    ("list", "push", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "grow", Lane::PendingCode, "A", "core-check-calls-910", true),
     ("list", "pop", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "set", Lane::Value, "A", "core-check-calls-910", false),
@@ -1289,7 +1288,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     || entry.module == "map"
                     || entry.module == "list"
                         && (entry.name.starts_with("slots_")
-                            || matches!(entry.name, "Hole" | "put_last" | "grow"))
+                            || matches!(entry.name, "Hole" | "grow"))
                     || matches!(entry.module, "deque" | "heap")
             );
         }

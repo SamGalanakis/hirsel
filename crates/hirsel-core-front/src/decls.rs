@@ -929,10 +929,8 @@ impl Program<'_> {
     fn default_field_root(&mut self, ty: TyId, generics: &[Generic]) -> TyId {
         let stable = match self.types.kind(ty) {
             TyKind::Adt(d, _) => {
-                self.decls[d.index()].repr == Repr::Stable
-                    || self.decls[d.index()]
-                        .role
-                        .is_some_and(|r| r.kind() == Kind::Stable)
+                let decl = &self.decls[d.index()];
+                decl.repr == Repr::Stable || decl.role.is_some_and(|r| r.kind() == Kind::Stable)
             }
             TyKind::Param(i) => generics[*i as usize].bounds & ENCODED != 0,
             _ => false,
@@ -1206,7 +1204,8 @@ impl Program<'_> {
             // The resolver already refused a missing name.
             _ => return ERROR,
         };
-        let generic_count = self.decls[decl.index()].generics.len();
+        let d = &self.decls[decl.index()];
+        let generic_count = d.generics.len();
         if args.len() != generic_count {
             self.refusals.push(
                 refusal(
@@ -1214,7 +1213,7 @@ impl Program<'_> {
                     site,
                     format!(
                         "`{}` takes {generic_count} type arguments, {} written",
-                        self.decls[decl.index()].path.0.name,
+                        d.path.0.name,
                         args.len()
                     ),
                 )
@@ -1226,7 +1225,6 @@ impl Program<'_> {
             return ERROR;
         }
         let arg_tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
-        let d = &self.decls[decl.index()];
         let role = d.role;
         if !d.structural {
             for (i, (t, s)) in args.iter().enumerate() {
@@ -1278,7 +1276,7 @@ impl Program<'_> {
         if role == Some(Role::View) {
             return self.types.intern(TyKind::View(arg_tys[0]));
         }
-        let alias = self.is_alias(decl);
+        let alias = self.is_alias(decl, d);
         if alias && let Some(top) = self.alias_stack.last_mut() {
             top.1 = Some(site);
         }
@@ -1297,11 +1295,11 @@ impl Program<'_> {
     }
 
     /// Whether a declaration is an alias, read from its syntax (LANG-9).
-    fn is_alias(&self, d: DeclId) -> bool {
+    fn is_alias(&self, d: DeclId, decl: &TypeDecl) -> bool {
         if self.alias_visit(d) == Visit::Done as u8 {
-            return matches!(self.decls[d.index()].body, DeclBody::Alias(_));
+            return matches!(decl.body, DeclBody::Alias(_));
         }
-        let item = self.item(self.decls[d.index()].at);
+        let item = self.item(decl.at);
         item.tree.children(item.root).iter().any(|&c| {
             matches!(
                 item.tree.node(c).kind,
@@ -2430,8 +2428,12 @@ fn join(a: Kind, b: Kind) -> Kind {
 /// The kind of a type (OWN-3). `params` are the bounds of the enclosing definition's
 /// type parameters.
 pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> Kind {
+    kind_row(decls, t, t.kind(ty), params)
+}
+
+fn kind_row(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, row: &TyKind, params: &[u16]) -> Kind {
     crate::cost_scope!("query", "kind computation");
-    match t.kind(ty) {
+    match row {
         TyKind::Error | TyKind::Hole | TyKind::Never | TyKind::Unit | TyKind::Scalar(_) => {
             Kind::Plain
         }
@@ -2486,9 +2488,10 @@ pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[
 
 /// Whether `let` copies a value of this type (OWN-3).
 pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
-    match kind(decls, t, ty, params) {
+    let row = t.kind(ty);
+    match kind_row(decls, t, row, params) {
         Kind::Plain | Kind::Stable => true,
-        Kind::Scoped => match t.kind(ty) {
+        Kind::Scoped => match row {
             TyKind::Anchored(x, _) => copyable(decls, t, *x, params),
             TyKind::View(_) => true,
             TyKind::Tuple(xs) => xs.iter().all(|&x| copyable(decls, t, x, params)),
@@ -2517,8 +2520,9 @@ pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params
 
 /// The bounds a type has (OWN-4, SEM-7).
 pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> u16 {
+    let row = t.kind(ty);
     let all = PLAIN | SHAREABLE | SEND | KEY | ORDERED;
-    let plain_extra = if kind(decls, t, ty, params) == Kind::Plain {
+    let plain_extra = if kind_row(decls, t, row, params) == Kind::Plain {
         PLAIN | SHAREABLE | SEND
     } else {
         0
@@ -2528,7 +2532,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
             .fold(all, |b, &x| b & has_bounds(decls, t, x, params))
     };
     plain_extra
-        | match t.kind(ty) {
+        | match row {
             TyKind::Error | TyKind::Hole => all | INTEGER | FLOAT | ENCODED,
             TyKind::Never | TyKind::Unit => all,
             TyKind::Scalar(Scalar::F32 | Scalar::F64) => PLAIN | SHAREABLE | SEND | FLOAT | ENCODED,
@@ -3117,12 +3121,13 @@ fn derive_encoding(
 }
 
 fn stable_field(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> bool {
-    match t.kind(ty) {
+    let row = t.kind(ty);
+    match row {
         TyKind::Tuple(xs) => xs.iter().all(|&x| stable_field(decls, t, x, params)),
         TyKind::Adt(d, xs) if is_core_prelude(&decls[d.index()].path, &["Option"]) => {
             xs.iter().all(|&x| stable_field(decls, t, x, params))
         }
-        _ => matches!(kind(decls, t, ty, params), Kind::Plain | Kind::Stable),
+        _ => matches!(kind_row(decls, t, row, params), Kind::Plain | Kind::Stable),
     }
 }
 fn unrooted_stable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> bool {
@@ -3130,11 +3135,10 @@ fn unrooted_stable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> 
         TyKind::Anchored(_, _) => false,
         TyKind::Tuple(xs) => xs.iter().any(|&x| unrooted_stable(decls, t, x)),
         TyKind::Adt(d, xs) => {
-            decls[d.index()].repr == Repr::Stable
-                || decls[d.index()]
-                    .role
-                    .is_some_and(|r| r.kind() == Kind::Stable)
-                || decls[d.index()]
+            let decl = &decls[d.index()];
+            decl.repr == Repr::Stable
+                || decl.role.is_some_and(|r| r.kind() == Kind::Stable)
+                || decl
                     .summary
                     .bound_params
                     .iter()

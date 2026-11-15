@@ -21,7 +21,7 @@
           "index": 510931,
           "resolve": 10720112,
           "input counts": 586539,
-          "declarations": 10781487,
+          "declarations": 10689794,
           "body keys/new": 5707299,
           "body keys/for_body": 13053611,
           "body keys": 18760910,
@@ -63,7 +63,7 @@
         "index": 7.530159647475259,
         "resolve": 157.90948213615226,
         "input counts": 8.639745719858412,
-        "declarations": 158.88463483348986,
+        "declarations": 158.42967070915935,
         "body keys/new": 84.10749115076212,
         "body keys/for_body": 192.36726143177057,
         "body keys": 276.4747525825327,
@@ -93,7 +93,7 @@
           "index": 354803,
           "resolve": 5054217,
           "input counts": 304386,
-          "declarations": 7578354,
+          "declarations": 7581015,
           "body keys/new": 3602127,
           "body keys/for_body": 5937975,
           "body keys": 9540102,
@@ -135,7 +135,7 @@
         "index": 10.28851078358846,
         "resolve": 146.55598828780168,
         "input counts": 8.826039947646958,
-        "declarations": 219.9396801912024,
+        "declarations": 219.71759370901592,
         "body keys/new": 104.54105730381836,
         "body keys/for_body": 172.3325556251067,
         "body keys": 276.87361292892507,
@@ -165,7 +165,7 @@
           "index": 600147,
           "resolve": 8969198,
           "input counts": 296471,
-          "declarations": 4691372,
+          "declarations": 3936966,
           "body keys/new": 2538700,
           "body keys/for_body": 8558364,
           "body keys": 11097064,
@@ -207,7 +207,7 @@
         "index": 17.146057975073518,
         "resolve": 256.2274191289735,
         "input counts": 8.46380058815292,
-        "declarations": 134.0204453157821,
+        "declarations": 131.46912197171264,
         "body keys/new": 72.52485646268029,
         "body keys/for_body": 244.49236801568406,
         "body keys": 317.01722447836437,
@@ -611,6 +611,41 @@
       },
       "compiler_sha256": "4e3e139b77a4701304bf873c3397f9dd7d47714630104701bea902a4a9b1ce84",
       "evidence": "core-syntax-891/row-reads/{baseline-gate,candidate-cost,differential-complete}.log"
+    },
+    {
+      "reason": "Borrow TypeDecl rows across naming, alias tests and stable-root queries, and retain TypeEntry kinds across kind/copyability/bounds queries. No cache or stored representation; canonical products and diagnostics equal over 547 inputs. Subtract only this pair's measured declaration savings; all other ceilings and fixed targets unchanged.",
+      "commit_range": "eb8735ee..declaration-row-borrows",
+      "declarations": {
+        "m1": {
+          "before": 10721308,
+          "after": 10689794,
+          "saving": 31514,
+          "tokens": 69267,
+          "before_limit": 158.88463483348986,
+          "after_limit": 158.42967070915935
+        },
+        "std": {
+          "before": 7588832,
+          "after": 7581015,
+          "saving": 7817,
+          "tokens": 35198,
+          "before_limit": 219.9396801912024,
+          "after_limit": 219.71759370901592
+        },
+        "suite-edit": {
+          "before": 4028061,
+          "after": 3936966,
+          "saving": 91095,
+          "tokens": 35705,
+          "before_limit": 134.0204453157821,
+          "after_limit": 131.46912197171264
+        }
+      },
+      "identities": {
+        "before": "b51e3f0d88417422fe1ad8a2ad31039a00ca3594849f2cb76c06d753cb997245",
+        "after": "21aca453d9c37f0cbdbfd2ebcab894b706c7dd62dcad5b9005333db8fde32a6c"
+      },
+      "evidence": "core-check-callables-913/row-reads/; /tmp/913-row-reads-{before,after}.log"
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

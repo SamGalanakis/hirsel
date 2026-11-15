@@ -216,8 +216,8 @@ static OPTIONS: &[OptionSpec] = &[
         Cc,
         ["--cc"],
         Some("PROGRAM"),
-        ["build", "run", "test"],
-        "Select the C linker driver."
+        ["build", "run", "test", "core-product", "std-product"],
+        "Select the C linker driver; an install records it for its requests."
     ),
     option!(
         Target,

@@ -101,8 +101,7 @@ def main():
 
         def test_native_link_uses_objects_without_c_compilation(self):
             runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
-            prefix = os.environ.get('LLVM_SYS_231_PREFIX')
-            real_cc = Path(prefix) / 'bin/clang' if prefix else Path(shutil.which('cc'))
+            real_cc = Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
             with tempfile.TemporaryDirectory(prefix='hirsel-entry-object-') as temporary:
                 work = Path(temporary)
                 app = work / 'app'
@@ -110,7 +109,9 @@ def main():
                 calls, cc = work / 'calls.jsonl', work / 'link-only'
                 cc.write_text('#!/usr/bin/python3\nimport json,os,pathlib,sys\n'
                     + 'args=sys.argv[1:]\n'
-                    + 'if any(a in {"-c","-S","-E","-x"} or pathlib.Path(a).suffix in {".c",".cc",".cpp",".s",".S"} for a in args):\n'
+                    # `-###` is the recipe capture's dry run: it prints the
+                    # link command and compiles nothing.
+                    + 'if "-###" not in args and any(a in {"-c","-S","-E","-x"} or pathlib.Path(a).suffix in {".c",".cc",".cpp",".s",".S"} for a in args):\n'
                     + ' sys.stderr.write("C compilation forbidden by direct-object oracle\\n");sys.exit(69)\n'
                     + 'for a in args:\n'
                     + ' if pathlib.Path(a).name=="entry.o": assert pathlib.Path(a).read_bytes()[:4]==b"\\x7fELF"\n'
@@ -180,6 +181,47 @@ def main():
                 previous = selection.read_bytes()
                 invoke(installed, 'std-product', '--install', str(moved), '--runtime', str(work / 'missing.a'), expected=2)
                 self.assertEqual(selection.read_bytes(), previous)
+
+        def test_an_installed_compiler_links_through_its_recorded_driver_never_cc_on_path(self):
+            # Ruling 6: the install pins the driver; a request never looks
+            # for `cc` on PATH, and a recorded driver that is gone refuses.
+            runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+            real_cc = Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
+            with tempfile.TemporaryDirectory(prefix='hirsel-driver-') as temporary:
+                work = Path(temporary)
+                root, app, decoy = work / 'toolchain', work / 'app', work / 'path-bin'
+                root.mkdir()
+                decoy.mkdir()
+                installed = root / 'hirsel'
+                shutil.copy2(compiler, installed)
+                pinned, used = work / 'pinned' / 'bin' / 'clang', work / 'pinned.log'
+                pinned.parent.mkdir(parents=True)
+                pinned.write_text('#!/bin/sh\necho x >> ' + repr(str(used)) + '\nexec ' + repr(str(real_cc)) + ' "$@"\n')
+                pinned.chmod(0o755)
+                found = work / 'path-cc.log'
+                (decoy / 'cc').write_text('#!/bin/sh\necho x >> ' + repr(str(found)) + '\nexit 1\n')
+                (decoy / 'cc').chmod(0o755)
+                plain = {k: v for k, v in os.environ.items() if k != 'LLVM_SYS_231_PREFIX'}
+                plain['PATH'] = str(decoy) + os.pathsep + plain.get('PATH', '')
+                plain['XDG_CACHE_HOME'] = str(work / 'cache')
+                def invoke(*arguments, env, expected=0):
+                    result = subprocess.run([str(installed), *arguments], cwd=work, env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    return result
+                invoke('std-product', '--install', str(root), '--runtime', str(runtime),
+                       env={**plain, 'LLVM_SYS_231_PREFIX': str(pinned.parent.parent)})
+                invoke('new', str(app), env=plain)
+                built = json.loads(invoke('build', str(app), '--json', '-o', str(work / 'program'), env=plain).stdout)
+                self.assertTrue(built['native']['linked'])
+                ran = subprocess.run([str(work / 'program')], capture_output=True)
+                self.assertEqual((ran.returncode, ran.stdout, ran.stderr), (0, b'', b''))
+                self.assertTrue(used.exists())
+                self.assertFalse(found.exists())
+                recorded = pinned.resolve()
+                pinned.unlink()
+                refused = invoke('build', str(app), '--json', '-o', str(work / 'program'), env=plain, expected=2)
+                self.assertIn(f'the installed link driver {recorded} is missing', refused.stderr)
+                self.assertFalse(found.exists())
 
         def test_fmt_checks_writes_and_refuses_without_partial_changes(self):
             with tempfile.TemporaryDirectory(prefix='hirsel-fmt-') as temporary:

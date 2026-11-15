@@ -142,7 +142,10 @@ facts read by their emitter.
 
 `--backend cranelift|llvm` selects an engine. Development builds and runs default
 to Cranelift; `--release` defaults to LLVM with optimization. `--cc`, `--target`
-and `--limit` name the C linker driver, target and root logical limit. The current
+and `--limit` name the C linker driver, target and root logical limit. Without
+`--cc` a request links through the driver its installation recorded, else the
+pinned LLVM's `$LLVM_SYS_231_PREFIX/bin/clang`; it never looks for `cc` on PATH.
+A recorded driver that is gone, or no driver at all, is a named refusal. The current
 native targets are x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu;
 cross execution requires explicit --emulator and --sysroot inputs. `--json` includes the executable,
 compiled-object count, link count and explicit stage stop.
@@ -234,6 +237,32 @@ parameter does not configure its grant. For example, a main with Stdout needs
 after main cleanup and diagnostics, then the bootstrap frees process metadata.
 All four runtime headers are embedded and included in link keys. Owned error
 results are cleaned before the outcome is reported.
+
+## Trust contracts
+
+The driver trusts three things beyond what it checks. Each is a contract, not a
+gap to be closed later.
+
+- **Store records are trusted beyond their hash.** A record whose format version,
+  length and content digest check is used as written. The digest catches damage,
+  not intent: a record crafted to carry a matching digest is outside the threat
+  model. A store is as trusted as the user account that writes it.
+- **Tool inputs are trusted by the two-sighting stat rule.** The link driver, link
+  editor, runtime archive and every file the link recipe names are hashed when
+  first seen. A file seen again with the same stat and bytes at least two seconds
+  later (boot clock) is settled, and a settled file whose stat still matches is
+  trusted without reading it. This rule does not defend four cases:
+  1. a write through an already-writable shared mapping, which moves no
+     timestamp until writeback;
+  2. a filesystem whose timestamp granularity is coarser than two seconds;
+  3. a file clock set back so that a later edit repeats an earlier timestamp
+     exactly;
+  4. an input changed during the request that reads it.
+- **Libraries that LLVM itself loads are not keyed.** The libLLVM the compiler
+  opens is part of every LLVM object key. Anything that library loads in turn
+  (its own shared-library dependencies, plugins) is not. If one of those changes
+  under an unchanged libLLVM, clear the caches to rebuild: the request's
+  `--store` and `$XDG_CACHE_HOME/hirsel` (by default `~/.cache/hirsel`).
 
 ## Native compilation units
 
@@ -353,7 +382,9 @@ With no registered runtime, env reports null and native commands require --runti
 `std-product --install ROOT --runtime ARCHIVE [--target TRIPLE]` publishes the
 ordinary new package image under ROOT/core-packages and registers it beside the
 future copied compiler in hirsel-core-toolchain.json. `core-product` has the same
-registration option. Runtime bytes are stored under a content-derived relative
+registration option. The install records its link driver, `--cc` or the pinned
+LLVM's clang, canonically; that driver is the installation's, and later requests
+use it whatever PATH holds. Runtime bytes are stored under a content-derived relative
 path; the small selection file commits last. A failed publication preserves the
 previous registration. --store and --image cannot combine with --install;
 product --runtime/--target require --install. The future distribution assembler

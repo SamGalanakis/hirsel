@@ -113,9 +113,11 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut emulator = None;
     let mut sysroot = None;
     let mut target = "x86_64-unknown-linux-gnu".to_owned();
-    let mut cc = std::env::var_os("LLVM_SYS_231_PREFIX")
-        .map(|p| PathBuf::from(p).join("bin/clang"))
-        .unwrap_or_else(|| PathBuf::from("cc"));
+    // The C link driver: --cc, else the one an installation recorded, else
+    // the pinned LLVM's clang. Never a `cc` found on PATH.
+    let mut cc = None;
+    let pinned =
+        || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
     let run_args = invocation.arguments;
     let mut directories = Vec::new();
     let mut grant_mask = 0;
@@ -165,7 +167,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             Opt::LogicalChargeReport => {
                 logical_charge_report = Some(PathBuf::from(value));
             }
-            Opt::Cc => cc = PathBuf::from(value),
+            Opt::Cc => cc = Some(PathBuf::from(value)),
             Opt::Target => {
                 explicit_target = true;
                 target = value;
@@ -314,7 +316,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                     root,
                     command == "std-product",
                     runtime.as_deref().map(|runtime| (runtime, target.as_str())),
-                    &cc,
+                    cc.clone().or_else(pinned).as_deref(),
                     &mut meter,
                 )?
             } else if command == "std-product" {
@@ -461,7 +463,18 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             target,
             runtime: runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
             include: headers.path().to_owned(),
-            cc: hirsel_core_driver::link_driver(&cc)?,
+            cc: hirsel_core_driver::link_driver(&match cc {
+                Some(cc) => cc,
+                None => installed
+                    .as_ref()
+                    .map(|installed| installed.driver())
+                    .transpose()?
+                    .flatten()
+                    .or_else(pinned)
+                    .ok_or(
+                        "no link driver: this compiler's installation records none and LLVM_SYS_231_PREFIX is unset; pass --cc",
+                    )?,
+            })?,
             store: native_store,
             output: output_path.unwrap_or(default_output),
             root_limit,

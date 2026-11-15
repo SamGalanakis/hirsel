@@ -13,6 +13,10 @@ struct Registration {
     version: u32,
     products: BTreeMap<String, PathBuf>,
     runtimes: BTreeMap<String, PathBuf>,
+    /// The C link driver this installation was made with, canonical. A
+    /// request without `--cc` links through it, never a `cc` found on PATH.
+    #[serde(default)]
+    driver: Option<PathBuf>,
 }
 pub struct Installed {
     pub root: PathBuf,
@@ -54,6 +58,23 @@ impl Installed {
             .get(target)
             .map(|path| self.root.join(path))
     }
+    /// The link driver recorded at install. A recorded driver that is gone
+    /// is this installation's error, never a reason to look on PATH.
+    pub fn driver(&self) -> io::Result<Option<PathBuf>> {
+        let Some(driver) = &self.registration.driver else {
+            return Ok(None);
+        };
+        if !driver.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "the installed link driver {} is missing; reinstall the toolchain or pass --cc",
+                    driver.display()
+                ),
+            ));
+        }
+        Ok(Some(driver.clone()))
+    }
     /// Open a registered library product by its package identity. A registered
     /// path that is missing or damaged is an installation error; callers must
     /// not silently fall back to source for a named installed product.
@@ -89,6 +110,7 @@ pub fn register(
     name: &str,
     image: &CoreImage,
     runtime: Option<(&Path, &str)>,
+    driver: Option<&Path>,
 ) -> io::Result<()> {
     let root = crate::product::normalized(root);
     std::fs::create_dir_all(&root)?;
@@ -120,6 +142,9 @@ pub fn register(
         file.write_all(&bytes)?;
         file.persist(path)?;
         registration.runtimes.insert(target.to_owned(), relative);
+    }
+    if let Some(driver) = driver {
+        registration.driver = Some(driver.to_owned());
     }
     let mut file = tempfile::NamedTempFile::new_in(&root)?;
     serde_json::to_writer_pretty(&mut file, &registration).map_err(io::Error::other)?;
@@ -193,9 +218,12 @@ pub fn publish(
     root: &Path,
     std: bool,
     runtime: Option<(&Path, &str)>,
-    cc: &Path,
+    cc: Option<&Path>,
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
+    // The driver is pinned before anything is published: one that cannot be
+    // resolved refuses the install rather than leaving requests to guess.
+    let driver = cc.map(crate::tool_inputs::link_driver).transpose()?;
     let cache = crate::product::normalized(root).join("core-packages");
     let product = if std {
         PackageProduct::bundled_std(&cache, meter)?
@@ -207,6 +235,7 @@ pub fn publish(
         if std { "std" } else { "core" },
         &product.image,
         runtime,
+        driver.as_deref(),
     )?;
     // Sight the registered runtime's toolchain inputs now, as a request
     // would find them (the compiler beside the registration, canonical), so
@@ -216,9 +245,10 @@ pub fn publish(
     if let Some((_, target)) = runtime
         && let Some(installed) = Installed::at(&crate::product::normalized(root))?
         && let Some(archive) = installed.runtime(target)
-        && let (Ok(cc), Ok(archive)) = (crate::tool_inputs::link_driver(cc), archive.canonicalize())
+        && let Some(cc) = &driver
+        && let Ok(archive) = archive.canonicalize()
     {
-        let _ = crate::tool_inputs::toolchain(&cc, target, &archive);
+        let _ = crate::tool_inputs::toolchain(cc, target, &archive);
         meter.finish("install/tool input sighting");
     }
     Ok(product)

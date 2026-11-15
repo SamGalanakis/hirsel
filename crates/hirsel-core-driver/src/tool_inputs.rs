@@ -296,10 +296,10 @@ fn find_llvm_library(cc: &Path) -> Option<PathBuf> {
 }
 
 fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkRecipe> {
-    let mut driver = cc.to_owned();
-    let mut directory = recipe_directory(&driver)?;
-    let mut driver_key = driver_file_key(&driver)?;
-    let mut path = directory.join(format!("{target}-{driver_key}.json"));
+    let driver = cc.to_owned();
+    let directory = recipe_directory(&driver)?;
+    let driver_key = driver_file_key(&driver)?;
+    let path = directory.join(format!("{target}-{driver_key}.json"));
     if !force
         && let Ok(bytes) = std::fs::read(&path)
         && let Ok(mut recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
@@ -331,7 +331,7 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         }
     }
     let capture_dir = tempfile::tempdir_in(&directory)?;
-    let mut synthetic_source = capture_dir.path().join("recipe.c");
+    let synthetic_source = capture_dir.path().join("recipe.c");
     std::fs::write(&synthetic_source, "int main(void) { return 0; }\n")?;
     let capture = |driver: &Path, source: &Path, output: &Path| {
         let mut command = Command::new(driver);
@@ -345,30 +345,13 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         }
         command.arg(source).arg("-o").arg(output).output()
     };
-    let mut output = capture(
+    // The selected driver is the one captured: a driver that cannot capture
+    // is refused, never swapped for another clang.
+    let output = capture(
         &driver,
         &synthetic_source,
         &capture_dir.path().join("recipe"),
     )?;
-    if !output.status.success()
-        && let Some(prefix) = std::env::var_os("LLVM_SYS_231_PREFIX")
-    {
-        let candidate = PathBuf::from(prefix).join("bin/clang");
-        if candidate.is_file() && candidate != driver {
-            driver = candidate;
-            directory = recipe_directory(&driver)?;
-            driver_key = driver_file_key(&driver)?;
-            path = directory.join(format!("{target}-{driver_key}.json"));
-            let fallback_source = capture_dir.path().join("recipe-fallback.c");
-            std::fs::write(&fallback_source, "int main(void) { return 0; }\n")?;
-            output = capture(
-                &driver,
-                &fallback_source,
-                &capture_dir.path().join("recipe"),
-            )?;
-            synthetic_source = fallback_source;
-        }
-    }
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "link recipe capture failed through {}: {}",

@@ -82,10 +82,10 @@ impl<'a> Plan<'a> {
             layout,
             exit_offset: binding.exit_offset,
             parameters,
-            cleanup: binding
-                .cleanup
-                .as_ref()
-                .map(|m| hirsel_cranelift::core::symbol(m.instances.last().unwrap())),
+            cleanup: binding.cleanup.as_ref().map(|m| {
+                m.identity(hirsel_core_ir::InstanceId(m.instances.len() as u32 - 1))
+                    .symbol()
+            }),
             root_limit: options.root_limit,
             grant_mask: options.grant_mask,
             directories: &options.directories,

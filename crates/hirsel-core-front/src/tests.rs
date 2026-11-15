@@ -273,7 +273,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                 eprintln!(
                     "Map instance {} {:?}: {} instructions, {} terminators",
                     key.definition,
-                    key.types,
+                    module.argument_names(key),
                     body.insts.len(),
                     body.terminators.len()
                 );
@@ -288,11 +288,14 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         let mut checked = 0;
         for f in &module.functions {
             let key = &module.instances[f.instance.index()];
-            let expected = match (key.definition.0.name.as_str(), key.types.as_slice()) {
-                ("hold", [t]) if t == "u32" => (44, 16, 8),
-                ("hold", [t]) if t == "()" => (40, 8, 8),
-                ("hold", [t]) if t == "app@1/main/Big" => (104, 72, 8),
-                ("hold_only", [t]) if t == "u32" => (36, 4, 4),
+            let expected = match (
+                key.definition.0.name.as_str(),
+                module.argument_names(key).as_slice(),
+            ) {
+                ("hold", [t]) if *t == "u32" => (44, 16, 8),
+                ("hold", [t]) if *t == "()" => (40, 8, 8),
+                ("hold", [t]) if *t == "app@1/main/Big" => (104, 72, 8),
+                ("hold_only", [t]) if *t == "u32" => (36, 4, 4),
                 _ => continue,
             };
             let Some(b) = &f.body else { continue };
@@ -333,9 +336,9 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                     let key = &module.instances[f.instance.index()];
                     key.definition.0.name == name
                         && if generic {
-                            key.types == ["u64"]
+                            module.argument_names(key) == ["u64"]
                         } else {
-                            key.types.is_empty()
+                            module.argument_names(key).is_empty()
                         }
                 })
                 .unwrap()
@@ -969,7 +972,7 @@ fn scalar_instances_use_closed_signatures() {
     wf::module(module).unwrap();
     for f in &module.functions {
         let key = &module.instances[f.instance.index()];
-        if !key.definition.package_is("app", "1") || key.types.is_empty() {
+        if !key.definition.package_is("app", "1") || module.argument_names(key).is_empty() {
             continue;
         }
         let sig = &module.signatures[f.signature.index()];
@@ -979,7 +982,7 @@ fn scalar_instances_use_closed_signatures() {
                 let row = module
                     .types
                     .iter()
-                    .find(|t| t.name == key.types[0])
+                    .find(|t| t.name == module.argument_names(key)[0])
                     .unwrap();
                 match row.carried {
                     hirsel_core_ir::Carried::Value(t) => {
@@ -1627,7 +1630,7 @@ fn generic_call_keys_separate_widths_and_reuse_equal_instances() {
     for (function, ty) in [(byte, "u8"), (word, "u64")] {
         let function = &module.functions[function.index()];
         let key = &module.instances[function.instance.index()];
-        assert_eq!(key.types, [ty]);
+        assert_eq!(module.argument_names(key), [ty]);
         assert_eq!(key.dictionaries, [format!("key[{ty}]")]);
     }
 }
@@ -1979,7 +1982,7 @@ fn list_index_iteration_and_failure_cleanup() {
                     eprintln!(
                         "Map instance {} {:?}: {} instructions, {} terminators",
                         key.definition,
-                        key.types,
+                        emitter.module.argument_names(key),
                         body.insts.len(),
                         body.terminators.len()
                     );
@@ -3381,7 +3384,7 @@ fn run() -> u64 {
         .iter()
         .find(|f| {
             let key = &emitter.module.instances[f.instance.index()];
-            key.definition.0.name == "compare" && key.types == ["u64"]
+            key.definition.0.name == "compare" && emitter.module.argument_names(key) == ["u64"]
         })
         .unwrap();
     assert!(!instance.body.as_ref().unwrap().slots.iter().any(|ty| matches!(ty,
@@ -3443,10 +3446,12 @@ fn terminal_prefix_is_derived_after_generic_substitution() {
     let mut checked = 0;
     for function in &emitter.module.functions {
         let key = &emitter.module.instances[function.instance.index()];
-        if !matches!(key.definition.0.name.as_str(), "wrap" | "buffered") || key.types.is_empty() {
+        if !matches!(key.definition.0.name.as_str(), "wrap" | "buffered")
+            || emitter.module.argument_names(key).is_empty()
+        {
             continue;
         }
-        let plain = key.types == ["u64"];
+        let plain = emitter.module.argument_names(key) == ["u64"];
         let body = function.body.as_ref().unwrap();
         for inst in &body.insts {
             if let Inst::Alloc { kind, overflow, .. } = inst {

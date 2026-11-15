@@ -192,6 +192,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         child.fd = std::borrow::Cow::Owned(fd);
         child.entry = false;
+        child.generated = true;
         if let Some(template) = self.nested.get(&raw) {
             child.nested.insert(raw, template.clone());
         }

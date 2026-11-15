@@ -1,9 +1,8 @@
 //! Native products compose the checked body and the two engines directly.
 use super::*;
-use hirsel_core_ir::InstanceKey;
+use hirsel_core_ir::Identity;
 use hirsel_core_layout::{Layout, Recipe};
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -97,7 +96,7 @@ impl From<io::Error> for NativeStop {
 }
 pub struct ObjectProduct {
     pub private_variants: usize,
-    pub instance: InstanceKey,
+    pub instance: Identity,
     pub identity: ContentHash,
     pub path: PathBuf,
     pub bytes: Vec<u8>,
@@ -147,12 +146,14 @@ fn read_input(path: &Path) -> io::Result<Vec<u8>> {
 // The cache chooses its granularity; this boundary never strips type/drop inputs.
 fn emit_unit(
     module: &Module,
+    symbols: impl FnOnce() -> Vec<String>,
     options: &NativeOptions,
     object_key: ContentHash,
 ) -> Result<hirsel_core_ir::source::NativeObject, String> {
     match options.backend {
         Backend::Cranelift => hirsel_cranelift::core::emit_object_with_charge_observation(
             module,
+            &symbols(),
             &hirsel_core_layout::compute(&module.types).expect("producer layouts"),
             &hirsel_cranelift::core::Options {
                 target: &options.target,
@@ -182,28 +183,6 @@ fn emit_unit(
     }
 }
 
-/// Recipe glue may be present in several independent definition products. Its
-/// instance identity names one symbol; later units import the first definition.
-/// The bodies a unit leaves to an earlier one, by ascending function index.
-fn dropped(module: &Module, emitted: &mut HashSet<InstanceKey>) -> Vec<u32> {
-    let mut dropped = Vec::new();
-    for (i, function) in module.functions.iter().enumerate() {
-        if function.body.is_some()
-            && !emitted.insert(module.instances[function.instance.index()].clone())
-        {
-            dropped.push(i as u32);
-        }
-    }
-    dropped
-}
-fn without<'a>(module: &'a Module, dropped: &[u32]) -> Cow<'a, Module> {
-    let mut result = Cow::Borrowed(module);
-    for &i in dropped {
-        result.to_mut().functions[i as usize].body = None;
-    }
-    result
-}
-
 impl CheckProduct {
     /// Dev keeps each checked body as an independent object. LLVM release
     /// composes owned bodies and published inline imports into one codegen unit.
@@ -226,7 +205,7 @@ impl CheckProduct {
     fn emit_instances(
         &self,
         entry: &DefPath,
-        reached: &[InstanceKey],
+        reached: &[Identity],
         materialized: &crate::instances::InstanceSet,
         options: &NativeOptions,
         toolchain: crate::tool_inputs::Toolchain,
@@ -258,23 +237,25 @@ impl CheckProduct {
         }
         let llvm = engine_library(options.backend)?;
         let mut objects = Vec::new();
-        let mut emitted = HashSet::new();
         let mut scratch = Vec::new();
+        let mut names = Vec::new();
         for instance in reached {
-            let store = if !self.definitions.contains_key(&instance.definition) {
+            // An image's definitions keep their objects in its store; a glue
+            // instance has no definition and is the request's.
+            let store = if !self.definitions.contains_key(&instance.definition)
+                && !hirsel_core_front::is_glue(&instance.definition)
+            {
                 library_store.as_ref().unwrap_or(&store)
             } else {
                 &store
             };
             let instance_body = materialized.get(instance);
-            let body = &instance_body.product;
             let module = instance_body.ir();
-            let dropped = dropped(module, &mut emitted);
-            // The unit is the module, less the dropped bodies: its hash and
-            // that set name it. A published body's hit encodes nothing; a
-            // materialized one encodes its module once, into `scratch`.
+            // The unit is the instance's module: its identity and hash name it. A
+            // published body's hit encodes nothing; a materialized one encodes its
+            // module once, into `scratch`.
             let object_key = key(
-                "hirsel.core-object.v3",
+                "hirsel.core-object.v4",
                 &(
                     crate::native_object::SCHEMA,
                     compiler_identity()?,
@@ -288,19 +269,21 @@ impl CheckProduct {
                     matches!(options.backend, Backend::Llvm)
                         && !hirsel_llvm_lazy::core::facts_enabled(),
                     &instance,
-                    &body.key,
+                    instance_body.product.as_ref().map(|p| &p.key),
                     instance_body.ir_hash(&mut scratch)?,
-                    &dropped,
                 ),
             )?;
             let (identity, object, compiled) =
                 if let Some((hash, object)) = crate::native_object::load(store, object_key)? {
                     (hash, object, false)
                 } else {
-                    let object = emit_unit(&without(module, &dropped), options, object_key)
-                        .map_err(|message| NativeStop::Emit {
-                            definition: instance.definition.clone(),
-                            message,
+                    let symbols = || materialized.link_symbols(instance, &mut names);
+                    let object =
+                        emit_unit(module, symbols, options, object_key).map_err(|message| {
+                            NativeStop::Emit {
+                                definition: instance.definition.clone(),
+                                message,
+                            }
                         })?;
                     (
                         crate::native_object::publish(store, object_key, &object)?,
@@ -358,7 +341,7 @@ impl CheckProduct {
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
             let store = Store::new(&options.store)?;
             let object_key = key(
-                "hirsel.core-entry-cleanup.v3",
+                "hirsel.core-entry-cleanup.v4",
                 &(
                     crate::native_object::SCHEMA,
                     compiler_identity()?,
@@ -374,25 +357,26 @@ impl CheckProduct {
                     crate::body::ir_hash(module, &mut Vec::new())?,
                 ),
             )?;
-            let (identity, object, compiled) = if let Some((identity, object)) =
-                crate::native_object::load(&store, object_key)?
-            {
-                (identity, object, false)
-            } else {
-                let object =
-                    emit_unit(module, options, object_key).map_err(|message| NativeStop::Emit {
+            let (identity, object, compiled) =
+                if let Some((identity, object)) = crate::native_object::load(&store, object_key)? {
+                    (identity, object, false)
+                } else {
+                    let object = emit_unit(module, || module.link_symbols(), options, object_key)
+                        .map_err(|message| NativeStop::Emit {
                         definition: entry.clone(),
                         message,
                     })?;
-                (
-                    crate::native_object::publish(&store, object_key, &object)?,
-                    object,
-                    true,
-                )
-            };
+                    (
+                        crate::native_object::publish(&store, object_key, &object)?,
+                        object,
+                        true,
+                    )
+                };
             objects.push(ObjectProduct {
                 private_variants: 0,
-                instance: module.instances.last().unwrap().clone(),
+                instance: module.identity(hirsel_core_ir::InstanceId(
+                    module.instances.len() as u32 - 1,
+                )),
                 identity,
                 path: crate::native_object::path(&store, identity),
                 bytes: object.bytes,
@@ -427,13 +411,8 @@ impl CheckProduct {
         options: &'a NativeOptions,
         sources: &'a hirsel_core_ir::source::SourceMap,
     ) -> Result<crate::native_entry::Plan<'a>, NativeStop> {
-        let instance = InstanceKey {
-            definition: entry.clone(),
-            types: vec![],
-            dictionaries: vec![],
-        };
         crate::native_entry::Plan::new(
-            hirsel_cranelift::core::symbol(&instance),
+            Identity::plain(entry.clone()).symbol(),
             self.entry_binding(entry)?,
             options,
             sources,
@@ -765,40 +744,6 @@ fn link(
 mod tests {
     use super::*;
 
-    #[test]
-    fn generated_glue_has_one_object_definition() {
-        fn unit(name: &str) -> Module {
-            hirsel_core_ir::text::parse(&format!(
-                r#"core v1
-sig g0 = () -> (u64)
-inst n0 = app@1/main/{name} [] []
-inst n1 = core@1/map/$key_equal ["u64"] []
-fn f0 = n0 g0 {{
-b0:
- v0: u64 = call f1 g0 ()
- return v0
-}}
-fn f1 = n1 g0 {{
-b0:
- v0: u64 = const 17
- return v0
-}}
-"#
-            ))
-            .unwrap()
-        }
-        let a = unit("a");
-        let b = unit("b");
-        let mut emitted = HashSet::new();
-        assert!(dropped(&a, &mut emitted).is_empty());
-        let selected = without(&b, &dropped(&b, &mut emitted));
-        assert!(selected.functions[0].body.is_some());
-        assert!(selected.functions[1].body.is_none());
-        assert!(
-            b.functions[1].body.is_some(),
-            "immutable source product remains complete"
-        );
-    }
     fn source_request(source: &str, dir: &Path) -> CheckRequest {
         let mut request = crate::tests::request(source, dir);
         let core = dir.join("core.hirsel");
@@ -854,7 +799,8 @@ b0:
             store: dir.join("native"),
             output: dir.join("program"),
             root_limit: 1_048_576,
-            instance_limit: 64,
+            // Glue operations are instances of their own: a program's walk counts each.
+            instance_limit: 256,
             directories: vec![],
             grant_mask: 0,
             logical_charge_report: None,

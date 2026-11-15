@@ -105,6 +105,13 @@ impl ContentHash {
         })
         .expect("content hash stream")
     }
+
+    /// The hash of `value`'s encoding (the encoding the store hashes IR with) as
+    /// the one part under `domain`.
+    pub fn of_encoded(domain: &str, value: &(impl serde::Serialize + ?Sized)) -> Self {
+        let bytes = bincode::serialize(value).expect("content hash encoding");
+        Self::of_parts(domain, [&bytes[..]])
+    }
 }
 
 /// Builder for the length-framed parts consumed by [`ContentHash::of_parts_stream`].

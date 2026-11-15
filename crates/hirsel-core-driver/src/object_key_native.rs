@@ -1,5 +1,5 @@
-// A development object is keyed by its module's hash, `ir_hash`, and the
-// glue bodies it leaves to an earlier unit. Oracle for every case: a fresh
+// A development object is keyed by its instance's identity and its module's
+// hash, `ir_hash`. Oracle for every case: a fresh
 // emission of the same request into empty stores, from the same source
 // files (debug lines name them). An object's bytes embed its key.
 fn object_request(source: &str, dir: &Path, store: &str) -> CheckRequest {
@@ -73,8 +73,8 @@ const SHAPE: &str = "type P { a: u8 }\nfn id[T](take x: T) -> T { x }\nfn get(p:
 /// development engines. One native store serves debug lines off, on and off
 /// again: a changed setting misses every object, the same setting hits.
 /// A last request changes a field of the shape `id[P]` is materialised with:
-/// its instance key and its generic body's key stay equal, so only its
-/// module's hash can miss.
+/// the shape's closure, and so the instance's identity, changes with it, so
+/// the instance misses under a new identity.
 #[test]
 #[ignore = "explicit native integration target"]
 fn dev_objects_served_from_the_store_are_fresh_emissions() {
@@ -115,8 +115,10 @@ fn dev_objects_served_from_the_store_are_fresh_emissions() {
             assert!(objects.keys().any(|i| i.contains("name: \"get\"")), "{case}");
         }
         let edited = objects_of(&check(&shaped), &options(false));
+        let reshaped = edited.keys().find(|i| i.contains("name: \"id\"")).unwrap();
+        assert_ne!(reshaped, &generic, "{backend:?}: the reshaped generic keeps its identity");
         assert!(
-            compiled_names(&edited).contains(&generic.as_str()),
+            compiled_names(&edited).contains(&reshaped.as_str()),
             "{backend:?}: the reshaped generic misses"
         );
         assert_eq!(
@@ -312,13 +314,14 @@ fn a_body_record_with_another_module_part_misses_its_object() {
     }
 }
 
-/// A newly reached instance that sorts first takes over the key glue
-/// (`$key_hash`, `$key_fold`, `$key_equal`) `map.insert` defined: `map.get`
-/// now defines it, and `map.insert`'s object, its module and key unchanged,
-/// must be the one that leaves it out, on both development engines.
+/// Key glue (`$key_hash`, `$key_fold`, `$key_equal`) is an instance of its own,
+/// so a newly reached instance that sorts first and calls the same glue
+/// (`map.get` beside `map.insert`) changes no existing object: every object
+/// the first build made, `map.insert`'s and the glue's among them, hits, on
+/// both development engines.
 #[test]
 #[ignore = "explicit native integration target"]
-fn glue_taken_over_by_a_first_sorting_instance_leaves_the_old_owner() {
+fn a_new_caller_of_shared_glue_leaves_every_existing_object_a_hit() {
     let b = r#"fn b() -> u64 {
   let mut m: Map[String, u64] = map.new()
   let _ = map.insert(mut m, result.unwrap(string.from("k")), 2u64)
@@ -347,13 +350,16 @@ fn glue_taken_over_by_a_first_sorting_instance_leaves_the_old_owner() {
     };
     let cold = check(&base);
     run_clean(&cold.build(&entry, &options).unwrap().executable, 0);
+    let first = objects_of(&cold, &options);
+    assert!(first.keys().any(|i| i.contains("name: \"$key_hash\"")), "{backend:?}: {first:?}");
     let product = check(&both);
     let edited = objects_of(&product, &options);
-    let insert = edited
-        .iter()
-        .find(|(i, _)| i.contains("name: \"insert\""))
-        .unwrap();
-    assert!(insert.1.0, "{backend:?}: the old owner's object misses");
+    // `b`'s source is unchanged, but `main`, which calls `a`, is edited.
+    for (instance, (compiled, _, _)) in &edited {
+        if first.contains_key(instance) && !instance.contains("name: \"main\"") {
+            assert!(!compiled, "{backend:?}: {instance} misses");
+        }
+    }
     assert_eq!(
         without_compiled(&edited),
         fresh_objects(&both, dir.path(), &options, 0)

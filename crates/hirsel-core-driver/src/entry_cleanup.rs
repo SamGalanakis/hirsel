@@ -24,7 +24,7 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
     let instance = InstanceId(module.instances.len() as u32);
     module.instances.push(InstanceKey {
         definition: path,
-        types: vec![],
+        arguments: vec![],
         dictionaries: vec![],
     });
     let signature = SigId(module.signatures.len() as u32);

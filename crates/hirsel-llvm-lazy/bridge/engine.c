@@ -593,6 +593,12 @@ static void local_imports(LLVMModuleRef module) {
     finish_worker_debug(debug);
 }
 
+// A unit's public bodies: its root and the bodies it carries, which every unit
+// that carries one defines weak by its code identity.
+static int public_body(LLVMValueRef f) {
+    LLVMLinkage linkage = LLVMGetLinkage(f);
+    return LLVMCountBasicBlocks(f) && (linkage == LLVMExternalLinkage || linkage == LLVMWeakODRLinkage);
+}
 static size_t import_instructions(LLVMValueRef f) {
     size_t count = 0;
     for (LLVMBasicBlockRef b = LLVMGetFirstBasicBlock(f); b; b = LLVMGetNextBasicBlock(b))
@@ -691,13 +697,13 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             LLVMDisposeMemoryBuffer(bitcode);
             size_t count = 0;
             for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f))
-                if (LLVMCountBasicBlocks(f) && LLVMGetLinkage(f) == LLVMExternalLinkage) ++count;
+                if (public_body(f)) ++count;
             summary->data = calloc(count ? count : 1, sizeof(*summary->data));
             if (!summary->data) abort();
             summary->len = count;
             size_t row = 0;
             for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f)) {
-                if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMExternalLinkage) continue;
+                if (!public_body(f)) continue;
                 size_t len;
                 const char *name = LLVMGetValueName2(f, &len);
                 char *implementation = malloc(len + 12);
@@ -714,7 +720,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         }
         if (units[i].imported) {
             for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f)) {
-                if (LLVMCountBasicBlocks(f) && LLVMGetLinkage(f) == LLVMExternalLinkage) {
+                if (public_body(f)) {
                     size_t len;
                     const char *name = LLVMGetValueName2(f, &len);
                     if (imports_len == imports_capacity) {
@@ -743,7 +749,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         LLVMSetLinkage(LLVMGetNamedFunction(module, imports[i]), LLVMAvailableExternallyLinkage);
     if (export_count) {
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {
-            if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMExternalLinkage) continue;
+            if (!public_body(f)) continue;
             size_t len;
             const char *name = LLVMGetValueName2(f, &len);
             int exported = 0;

@@ -1,6 +1,6 @@
 //! Build acceptance uses demanded definitions; package check keeps every diagnostic.
 use super::*;
-use hirsel_core_ir::InstanceKey;
+use hirsel_core_ir::Identity;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Serialize)]
@@ -21,7 +21,7 @@ pub struct Reachable<'a> {
     /// Resource refusals the build needs: the product's, and instance collection's.
     pub resources: Vec<ResourceRefusal>,
     pub first_stops: Vec<GapStop>,
-    pub instances: Result<Vec<InstanceKey>, InstanceStop>,
+    pub instances: Result<Vec<Identity>, InstanceStop>,
     pub(crate) materialized: crate::instances::InstanceSet,
 }
 impl Reachable<'_> {
@@ -31,7 +31,7 @@ impl Reachable<'_> {
             && self.resources.is_empty()
             && self.instances.is_ok()
     }
-    pub(crate) fn require(&self) -> Result<&[InstanceKey], NativeStop> {
+    pub(crate) fn require(&self) -> Result<&[Identity], NativeStop> {
         if !self.diagnostics.is_empty() || !self.incomplete.is_empty() {
             let stop = self.first_stops.first().unwrap();
             return Err(NativeStop::Check(format!(
@@ -60,20 +60,22 @@ impl CheckProduct {
     }
     fn reachable_inner(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
         let mut materialized = crate::instances::InstanceSet::default();
-        let instances = self.instances_into(
-            [InstanceKey {
-                definition: entry.clone(),
-                types: vec![],
-                dictionaries: vec![],
-            }],
-            limit,
-            &mut materialized,
-        );
+        let instances =
+            self.instances_into([Identity::plain(entry.clone())], limit, &mut materialized);
         let image_directory = self.image.as_ref().map(|i| i.directory()).transpose()?;
         let mut bodies = BTreeSet::new();
         let mut unavailable = BTreeSet::new();
         let mut declarations = BTreeSet::new();
         let mut pending = BTreeSet::from([(entry.clone(), true)]);
+        // A glue instance has no definition; the hooks its body calls are reached
+        // instances of their own.
+        pending.extend(
+            instances
+                .iter()
+                .flatten()
+                .filter(|i| !hirsel_core_front::is_glue(&i.definition))
+                .map(|i| (i.definition.clone(), true)),
+        );
         // LANG-20 evaluates every source constant before a body, including unused
         // ones. Installed constants already carry their published value.
         for (id, definition) in self
@@ -121,15 +123,14 @@ impl CheckProduct {
                 let product = self.demand_body(&path)?;
                 if let Some(function) = product.check.function {
                     let ir = product.ir();
-                    let functions = crate::instances::external_functions(ir, function);
-                    pending.extend(functions.into_iter().map(|f| {
-                        (
-                            ir.instances[ir.functions[f.index()].instance.index()]
-                                .definition
-                                .clone(),
-                            true,
-                        )
-                    }));
+                    let functions = hirsel_core_materialize::external_functions(ir, function);
+                    pending.extend(
+                        functions
+                            .into_iter()
+                            .map(|f| &ir.instances[ir.functions[f.index()].instance.index()])
+                            .filter(|key| !hirsel_core_front::is_glue(&key.definition))
+                            .map(|key| (key.definition.clone(), true)),
+                    );
                 } else if let Some(header) = self.headers.get(&path) {
                     // Failed lowering has no call graph. Keep its resolved references
                     // for diagnostics/census rather than hiding everything after its gap.
@@ -277,9 +278,6 @@ impl CheckProduct {
                     (p, "body has no complete native product".to_owned())
                 }
                 InstanceStop::OutsideReached(p) => (p, "body is unavailable".to_owned()),
-                InstanceStop::MaterializationRequired(k) => {
-                    (&k.definition, "generic instance materialization".to_owned())
-                }
                 InstanceStop::Input {
                     definition,
                     message,

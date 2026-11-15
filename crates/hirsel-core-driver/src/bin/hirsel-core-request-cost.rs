@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let library_bodies_after_check = checked.image.as_ref().map_or(0, |i| i.decoded_bodies());
     let mut instance_details = Vec::new();
     if args.len() == 7 && accepted {
-        use hirsel_core_ir::InstanceKey;
+        use hirsel_core_ir::Identity;
         use hirsel_intern::instructions::InstructionCounter;
         let counter = InstructionCounter::open()?;
         let mut previous = counter.read()?;
@@ -64,11 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         meter.finish("instance/setup");
         checked
             .observe_instances(
-                [InstanceKey {
-                    definition: DefPath::from_full(&args[1]).unwrap(),
-                    types: vec![],
-                    dictionaries: vec![],
-                }],
+                [Identity::plain(DefPath::from_full(&args[1]).unwrap())],
                 100_000,
                 |key, phase| {
                     let now = counter.read().unwrap();
@@ -87,7 +83,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         meter.finish("instance/collection");
         for row in &mut instance_details {
             // Observation order is collection order, which need not be sorted.
-            let observed: InstanceKey = serde_json::from_value(row["key"].clone())?;
+            let observed: Identity = serde_json::from_value(row["key"].clone())?;
+            // A glue instance has no published body.
+            row["glue"] = hirsel_core_front::is_glue(&observed.definition).into();
+            if hirsel_core_front::is_glue(&observed.definition) {
+                continue;
+            }
             let body = checked.demand_body(&observed.definition)?;
             row["library"] = (!checked.definitions.contains_key(&observed.definition)).into();
             row["generic"] = body.check.template.is_some().into();

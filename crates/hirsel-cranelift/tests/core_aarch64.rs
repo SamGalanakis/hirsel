@@ -124,7 +124,9 @@ fn consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
             .bytes
         },
         |module, function| {
-            symbol(&module.instances[module.functions[function.index()].instance.index()])
+            module
+                .identity(module.functions[function.index()].instance)
+                .symbol()
         },
     );
 }

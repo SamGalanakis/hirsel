@@ -731,6 +731,7 @@ dependencies = [
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
+ "hirsel-core-materialize",
  "hirsel-core-resolve",
  "hirsel-core-syntax",
  "hirsel-cranelift",
@@ -790,6 +791,16 @@ version = "0.1.0"
 dependencies = [
  "hirsel-guard",
  "serde",
+]
+
+[[package]]
+name = "hirsel-core-materialize"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-front",
+ "hirsel-core-ids",
+ "hirsel-core-ir",
+ "rustc-hash",
 ]
 
 [[package]]

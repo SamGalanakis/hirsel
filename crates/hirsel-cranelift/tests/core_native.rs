@@ -21,7 +21,9 @@ fn native_allocator_refusals_are_reported_run_stops() {
             .bytes
         },
         |module, function| {
-            symbol(&module.instances[module.functions[function.index()].instance.index()])
+            module
+                .identity(module.functions[function.index()].instance)
+                .symbol()
         },
     );
 }
@@ -773,8 +775,8 @@ int main(void) {{
 }}
 "#,
         header = include_str!("../../hirsel-core-rt/include/hirsel_core_rt.h"),
-        ordinary = symbol(&module.instances[0]),
-        counted = symbol(&module.instances[1])
+        ordinary = module.identity(hirsel_core_ir::InstanceId(0)).symbol(),
+        counted = module.identity(hirsel_core_ir::InstanceId(1)).symbol()
     );
     assert!(link_run(&scratch, &source).is_empty());
 }
@@ -841,8 +843,8 @@ int main(void) {{
   return 0;
 }}
 "#,
-        cleanup = symbol(&module.instances[0]),
-        propagate = symbol(&module.instances[1])
+        cleanup = module.identity(hirsel_core_ir::InstanceId(0)).symbol(),
+        propagate = module.identity(hirsel_core_ir::InstanceId(1)).symbol()
     );
     assert!(link_run(&scratch, &source).is_empty());
 }
@@ -927,7 +929,7 @@ int main(void) {{
   return 0;
 }}
 "#,
-        body = symbol(&module.instances[2]),
+        body = module.identity(hirsel_core_ir::InstanceId(2)).symbol(),
     );
     assert!(link_run(&scratch, &source).is_empty());
 }
@@ -1063,7 +1065,7 @@ int main(void) {{
  hirsel_core_context_free(ctx);return 0;
 }}
 "#,
-        function = symbol(&module.instances[0])
+        function = module.identity(hirsel_core_ir::InstanceId(0)).symbol()
     );
     assert!(link_run(&scratch, &source).is_empty());
 }
@@ -1086,8 +1088,8 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
         fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
         let source = format!(
             "#include <stdint.h>\nextern uint8_t {}(void*,void*,uint64_t);\nint main(void) {{ uint64_t node[2]={{UINT64_MAX,7}}; {}(0,node,0);return 0; }}\n",
-            symbol(&module.instances[0]),
-            symbol(&module.instances[0])
+            module.identity(hirsel_core_ir::InstanceId(0)).symbol(),
+            module.identity(hirsel_core_ir::InstanceId(0)).symbol()
         );
         let run = Command::new(link_program(&scratch, &source))
             .output()

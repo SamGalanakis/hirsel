@@ -1167,33 +1167,66 @@ pub struct Signature {
     pub never: bool,
 }
 
-/// The identity of one instantiation (see the crate docs, "Instances").
+/// One instantiation as a row of its module (see the crate docs, "Instances"): its
+/// type arguments are rows of the same module, so the row means nothing apart from
+/// the module; [`Module::identity`] is its module-independent identity.
 #[derive(
     serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
 )]
 pub struct InstanceKey {
     pub definition: DefPath,
-    /// Canonical text of each closed type argument, in parameter order.
-    pub types: Vec<String>,
+    /// Each closed type argument as a row of this module, in parameter order.
+    pub arguments: Vec<TypeId>,
     /// Canonical text of the implementation chosen for each constraint, in order.
     pub dictionaries: Vec<String>,
 }
-impl InstanceKey {
-    /// The content identity the link name and caches use.
+
+/// An instantiation apart from any module: its definition, its ordered dictionaries
+/// and the closure hash of each type argument ([`Closure`]).
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
+)]
+pub struct Identity {
+    pub definition: DefPath,
+    pub dictionaries: Vec<String>,
+    pub closures: Vec<ContentHash>,
+}
+impl Identity {
+    /// The non-generic definition `definition`.
+    pub fn plain(definition: DefPath) -> Self {
+        Self {
+            definition,
+            dictionaries: vec![],
+            closures: vec![],
+        }
+    }
+    /// The content identity the link name and caches use: a versioned, length-framed
+    /// SHA-256 of the identity's encoding.
     pub fn digest(&self) -> ContentHash {
         let definition = self.definition.to_string();
         let counts =
-            [self.types.len() as u64, self.dictionaries.len() as u64].map(u64::to_le_bytes);
+            [self.dictionaries.len() as u64, self.closures.len() as u64].map(u64::to_le_bytes);
         let parts = [definition.as_bytes(), &counts[0], &counts[1]]
             .into_iter()
-            .chain(
-                self.types
-                    .iter()
-                    .chain(&self.dictionaries)
-                    .map(String::as_bytes),
-            );
-        ContentHash::of_parts("hirsel.core-instance.v0", parts)
+            .chain(self.dictionaries.iter().map(String::as_bytes))
+            .chain(self.closures.iter().map(|c| &c.0[..]));
+        ContentHash::of_parts("hirsel.core-symbol.v1", parts)
     }
+    /// The link name: `h` and the 64 hex digits of [`Self::digest`].
+    pub fn symbol(&self) -> String {
+        symbol(self.digest())
+    }
+}
+/// `h` and the 64 hex digits of `digest`.
+pub fn symbol(digest: ContentHash) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut name = String::with_capacity(65);
+    name.push('h');
+    for byte in digest.0 {
+        name.push(HEX[(byte >> 4) as usize] as char);
+        name.push(HEX[(byte & 15) as usize] as char);
+    }
+    name
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
@@ -1221,58 +1254,190 @@ pub struct Module {
     pub signatures: Vec<Signature>,
     pub instances: Vec<InstanceKey>,
     pub functions: Vec<Function>,
-    /// Private native code identities, separate from PROG-5 semantic instances.
-    /// Source products leave this empty; an optimiser may emit several code bodies
-    /// for one instance without changing the identity of its function values.
+    /// Callable code variants' identities, separate from PROG-5 semantic instances:
+    /// an optimiser may emit several code bodies for one instance without changing
+    /// the identity of its function values.
     pub code_variants: std::collections::BTreeMap<FuncId, ContentHash>,
 }
 impl Module {
+    /// The identity of function `function`'s code: a code variant's, or its
+    /// instance's [`Identity::digest`].
     pub fn code_identity(&self, function: FuncId) -> ContentHash {
         self.code_variants
             .get(&function)
             .copied()
             .unwrap_or_else(|| {
-                self.instances[self.functions[function.index()].instance.index()].digest()
+                self.identity(self.functions[function.index()].instance)
+                    .digest()
             })
+    }
+    /// The link name of every function, in function order: `h` and the hex of its
+    /// [`Self::code_identity`]. Each row's closure is taken once.
+    pub fn link_symbols(&self) -> Vec<String> {
+        let mut closures = std::collections::HashMap::<TypeId, ContentHash>::new();
+        self.functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                if let Some(&code) = self.code_variants.get(&FuncId(i as u32)) {
+                    return symbol(code);
+                }
+                let key = &self.instances[f.instance.index()];
+                symbol(
+                    Identity {
+                        definition: key.definition.clone(),
+                        dictionaries: key.dictionaries.clone(),
+                        closures: key
+                            .arguments
+                            .iter()
+                            .map(|&t| *closures.entry(t).or_insert_with(|| self.closure(t).hash))
+                            .collect(),
+                    }
+                    .digest(),
+                )
+            })
+            .collect()
+    }
+    /// The module-independent identity of instance row `instance`.
+    pub fn identity(&self, instance: InstanceId) -> Identity {
+        let key = &self.instances[instance.index()];
+        Identity {
+            definition: key.definition.clone(),
+            dictionaries: key.dictionaries.clone(),
+            closures: key
+                .arguments
+                .iter()
+                .map(|&t| self.closure(t).hash)
+                .collect(),
+        }
+    }
+    /// The canonical text of row `ty`, for diagnostics only: identities never read it.
+    pub fn type_name(&self, ty: TypeId) -> &str {
+        &self.types[ty.index()].name
+    }
+    /// The row names of `key`'s type arguments, for diagnostics and tests.
+    pub fn argument_names(&self, key: &InstanceKey) -> Vec<&str> {
+        key.arguments.iter().map(|&t| self.type_name(t)).collect()
+    }
+    /// Instance row `instance` rendered with its arguments' row names, for diagnostics.
+    pub fn render_instance(&self, instance: InstanceId) -> String {
+        let key = &self.instances[instance.index()];
+        let mut out = key.definition.to_string();
+        if !key.arguments.is_empty() {
+            out.push('[');
+            for (i, &t) in key.arguments.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(self.type_name(t));
+            }
+            out.push(']');
+        }
+        out
     }
 }
 
-/// A row of [`Module::shape_closure`]: the shape with every row it names replaced by
-/// that row's position in the closure, and its finalizer and clone body by their
-/// instance keys.
-pub type ClosureRow = (Shape, [Option<InstanceKey>; 2]);
+/// A hook of a closure row: its definition and dictionaries, each type argument as a
+/// closure position, and its signature with every declared row and `dest` as a
+/// position.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ClosureHook {
+    pub definition: DefPath,
+    pub dictionaries: Vec<String>,
+    pub arguments: Vec<u32>,
+    pub signature: Signature,
+}
+
+/// A row of a [`Closure`]: the shape with every row it names replaced by that row's
+/// closure position and its hooks unset, and its finalizer and clone body as hooks.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ClosureRow {
+    pub shape: Shape,
+    pub hooks: [Option<ClosureHook>; 2],
+}
+
+/// The rows a root row reaches, independent of any module's numbering: positions are
+/// first-visit order from the root (position 0), over fields, then `held`, then hook
+/// type arguments, then hook signature rows. Two rows of two modules are one type
+/// exactly when their closures are equal; `hash` names it.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Closure {
+    pub rows: Vec<ClosureRow>,
+    pub hash: ContentHash,
+}
+impl Closure {
+    /// The closure of `rows`, hashed over their encoding (the encoding the store
+    /// hashes IR with).
+    pub fn new(rows: Vec<ClosureRow>) -> Self {
+        let hash = ContentHash::of_encoded("hirsel.core-closure.v1", &rows);
+        Self { rows, hash }
+    }
+}
 
 impl Module {
-    /// The rows `root` reaches through its fields, in first-visit order, independent
-    /// of this table's numbering: two modules hold one type exactly when its closures
-    /// are equal. A row is reused by name across modules (first owner), so every row
-    /// of one name must have one closure.
-    pub fn shape_closure(&self, root: TypeRef) -> Vec<ClosureRow> {
-        let mut order = HashMap::<TypeRef, u32>::new();
+    /// The closure of row `root` ([`Closure`]).
+    pub fn closure(&self, root: TypeId) -> Closure {
+        let mut order = HashMap::<u32, u32>::new();
         let mut rows: Vec<Option<ClosureRow>> = vec![];
-        let mut pending = vec![root];
-        order.insert(root, 0);
+        let mut pending = vec![root.0];
+        order.insert(root.0, 0);
         rows.push(None);
+        let visit = |r: u32,
+                     order: &mut HashMap<u32, u32>,
+                     rows: &mut Vec<Option<ClosureRow>>,
+                     pending: &mut Vec<u32>| {
+            let next = order.len() as u32;
+            *order.entry(r).or_insert_with(|| {
+                rows.push(None);
+                pending.push(r);
+                next
+            })
+        };
         while let Some(t) = pending.pop() {
-            let mut shape = self.types[t.index()].clone();
-            shape.map_refs(&mut |r| {
-                let next = order.len() as u32;
-                let i = *order.entry(r).or_insert_with(|| {
-                    rows.push(None);
-                    pending.push(r);
-                    next
-                });
-                TypeRef(i)
-            });
-            let key = |f: Option<FuncRef>| {
-                f.map(|f| self.instances[self.functions[f.0 as usize].instance.index()].clone())
+            let mut shape = self.types[t as usize].clone();
+            shape.map_refs(&mut |r| TypeRef(visit(r.0, &mut order, &mut rows, &mut pending)));
+            let hook = |f: Option<FuncRef>,
+                        order: &mut HashMap<u32, u32>,
+                        rows: &mut Vec<Option<ClosureRow>>,
+                        pending: &mut Vec<u32>| {
+                let f = &self.functions[f?.0 as usize];
+                let key = &self.instances[f.instance.index()];
+                let arguments = key
+                    .arguments
+                    .iter()
+                    .map(|a| visit(a.0, order, rows, pending))
+                    .collect();
+                let mut signature = self.signatures[f.signature.index()].clone();
+                for param in &mut signature.params {
+                    if let Param::Address {
+                        place: PlaceTy::Declared(id),
+                        ..
+                    } = param
+                    {
+                        *id = TypeId(visit(id.0, order, rows, pending));
+                    }
+                }
+                signature.dest = signature
+                    .dest
+                    .map(|id| TypeId(visit(id.0, order, rows, pending)));
+                Some(ClosureHook {
+                    definition: key.definition.clone(),
+                    dictionaries: key.dictionaries.clone(),
+                    arguments,
+                    signature,
+                })
             };
-            let glue = [key(shape.finalizer.take()), key(shape.clone.take())];
-            rows[order[&t] as usize] = Some((shape, glue));
+            let hooks = [
+                hook(shape.finalizer.take(), &mut order, &mut rows, &mut pending),
+                hook(shape.clone.take(), &mut order, &mut rows, &mut pending),
+            ];
+            rows[order[&t] as usize] = Some(ClosureRow { shape, hooks });
         }
-        rows.into_iter()
-            .map(|r| r.expect("every visited row is filled"))
-            .collect()
+        Closure::new(
+            rows.into_iter()
+                .map(|r| r.expect("every visited row is filled"))
+                .collect(),
+        )
     }
 }
 

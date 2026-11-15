@@ -313,29 +313,18 @@ fn scalar_core_instances_match_closed_bodies() {
             .collect::<Vec<_>>()
     );
     for (module, name, types) in [
-        ("list", "sum", vec!["u64".to_owned()]),
-        ("map", "get", vec!["u64".to_owned(), "u64".to_owned()]),
+        ("list", "sum", vec!["u64"]),
+        ("map", "get", vec!["u64", "u64"]),
     ] {
         let definition = DefPath::from_full(&format!("core@1/{module}/{name}")).unwrap();
-        let key = reached
-            .instances
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|k| k.definition == definition && k.types == types)
-            .unwrap()
-            .clone();
-        let closed = hirsel_core_ir::InstanceKey {
-            definition: DefPath::from_full(&format!("core@1/{module}/{name}_closed")).unwrap(),
-            types: vec![],
-            dictionaries: vec![],
-        };
+        let key = reached.materialized.named(&definition, &types).unwrap();
+        let closed = hirsel_core_ir::Identity::plain(DefPath::from_full(&format!("core@1/{module}/{name}_closed")).unwrap());
         let a = reached.materialized.get(&key).ir();
         let b = reached.materialized.get(&closed).ir();
-        let find = |m: &Module, k: &hirsel_core_ir::InstanceKey| {
+        let find = |m: &Module, k: &hirsel_core_ir::Identity| {
             m.functions
                 .iter()
-                .position(|f| &m.instances[f.instance.index()] == k)
+                .position(|f| &m.identity(f.instance) == k)
                 .unwrap()
         };
         let af = &a.functions[find(a, &key)];

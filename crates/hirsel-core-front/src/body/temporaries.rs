@@ -171,10 +171,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let start = self.b.insts.len();
         let setup_len = self.entry_setup.len() - old.len as usize;
         self.b.insts.append(&mut self.entry_setup);
-        self.b.inst_anchors.extend(std::iter::repeat_n(
-            Some(self.anchor(self.header)),
-            setup_len,
-        ));
+        self.b
+            .inst_anchors
+            .extend(std::iter::repeat_n(self.anchor(self.header), setup_len));
         self.b
             .inst_anchors
             .extend_from_within(old.start as usize..(old.start + old.len) as usize);

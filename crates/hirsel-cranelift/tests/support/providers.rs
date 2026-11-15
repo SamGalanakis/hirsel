@@ -119,7 +119,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             source,
             "struct r{} value={} (ctx,{},0); uint64_t values[{}]={{0}}; if(!value.status) {{",
             f.signature.0,
-            symbol(&module.instances[f.instance.index()]),
+            module.identity(f.instance).symbol(),
             args.join(","),
             sig.results.len()
         )

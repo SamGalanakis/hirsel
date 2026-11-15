@@ -1,13 +1,16 @@
 //! Reachable native instances are collected separately from one-pass source checking.
+//! Each is named by its [`Identity`] and built by `hirsel_core_materialize` from its
+//! arguments' closures, which the walk's [`Resolver`] finds by hash.
 use super::*;
-use hirsel_core_ir::{Callee, Inst, InstanceKey};
+use hirsel_core_ir::Identity;
+use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstanceStop {
     Resource {
         limit: usize,
-        next: InstanceKey,
+        next: Identity,
     },
     OutsideReached(DefPath),
     Input {
@@ -15,17 +18,14 @@ pub enum InstanceStop {
         message: String,
     },
     Incomplete(DefPath),
-    /// Materialization of type/dictionary arguments belongs to the emitter. The
-    /// current source checker emits only closed, non-generic function bodies.
-    MaterializationRequired(InstanceKey),
 }
 /// The emitter supplies mechanical instance dependencies. In particular, a growing
 /// f[T] -> f[List[T]] family stops as a compiler resource outcome, not a language rule.
 pub fn collect_instances(
-    roots: impl IntoIterator<Item = InstanceKey>,
+    roots: impl IntoIterator<Item = Identity>,
     limit: usize,
-    mut dependencies: impl FnMut(&InstanceKey) -> Result<Vec<InstanceKey>, InstanceStop>,
-) -> Result<Vec<InstanceKey>, InstanceStop> {
+    mut dependencies: impl FnMut(&Identity) -> Result<Vec<Identity>, InstanceStop>,
+) -> Result<Vec<Identity>, InstanceStop> {
     let mut pending: BTreeSet<_> = roots.into_iter().collect();
     let mut reached = BTreeSet::new();
     while let Some(key) = pending.pop_first() {
@@ -45,224 +45,188 @@ pub fn collect_instances(
 /// Nongeneric bodies keep the already-published module by reference.
 #[derive(Default)]
 pub(crate) struct InstanceSet {
-    rows: std::collections::BTreeMap<InstanceKey, usize>,
+    rows: std::collections::BTreeMap<Identity, usize>,
     bodies: Vec<InstanceBody>,
 }
 pub(crate) struct InstanceBody {
-    pub product: Arc<DefinitionProduct>,
+    /// The published definition; None for a glue instance.
+    pub product: Option<Arc<DefinitionProduct>>,
     module: Option<Module>,
+    pub function: hirsel_core_ir::FuncId,
+    /// The module's signature-only rows the walk reached, by ascending row, with
+    /// the instance each names.
+    externals: Vec<(hirsel_core_ir::FuncId, Identity)>,
 }
 impl InstanceBody {
     pub fn ir(&self) -> &Module {
-        self.module.as_ref().unwrap_or(self.product.ir())
+        match (&self.module, &self.product) {
+            (Some(module), _) => module,
+            (None, Some(product)) => product.ir(),
+            (None, None) => unreachable!("a glue instance is materialised"),
+        }
     }
     /// A published body's module is hashed in its record; a materialized
     /// one is hashed here, by the same rule, through the caller's `scratch`.
     pub fn ir_hash(&self, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {
-        match &self.module {
-            Some(module) => crate::body::ir_hash(module, scratch),
-            None => Ok(self.product.ir_hash()),
+        match (&self.module, &self.product) {
+            (Some(module), _) => crate::body::ir_hash(module, scratch),
+            (None, Some(product)) => Ok(product.ir_hash()),
+            (None, None) => unreachable!("a glue instance is materialised"),
         }
     }
 }
 impl InstanceSet {
-    pub fn get(&self, key: &InstanceKey) -> &InstanceBody {
+    pub fn get(&self, key: &Identity) -> &InstanceBody {
         &self.bodies[self.rows[key]]
+    }
+    /// `key`'s module's [`Module::link_symbols`]. Its root and every external row
+    /// the walk reached name an instance of this set, whose symbol `names` holds
+    /// once per set row, so no row's closure is taken again; a callable code
+    /// variant names its variant, and any other row is named by its module.
+    pub fn link_symbols(&self, key: &Identity, names: &mut Vec<Option<String>>) -> Vec<String> {
+        names.resize(self.bodies.len(), None);
+        let mut name = |identity: &Identity| -> String {
+            match self.rows.get(identity) {
+                Some(&row) => names[row].get_or_insert_with(|| identity.symbol()).clone(),
+                None => identity.symbol(),
+            }
+        };
+        let body = self.get(key);
+        let module = body.ir();
+        (0..module.functions.len() as u32)
+            .map(hirsel_core_ir::FuncId)
+            .map(|f| {
+                if let Some(&code) = module.code_variants.get(&f) {
+                    hirsel_core_ir::symbol(code)
+                } else if f == body.function {
+                    name(key)
+                } else if let Ok(i) = body.externals.binary_search_by_key(&f, |(g, _)| *g) {
+                    name(&body.externals[i].1)
+                } else {
+                    hirsel_core_ir::symbol(module.code_identity(f))
+                }
+            })
+            .collect()
+    }
+    /// The materialised instance of `definition` whose type arguments' row names are
+    /// `arguments`, for tests that name an instance by its source text.
+    #[cfg(test)]
+    pub fn named(&self, definition: &DefPath, arguments: &[&str]) -> Option<Identity> {
+        self.rows.iter().find_map(|(identity, &row)| {
+            let body = &self.bodies[row];
+            let module = body.ir();
+            let key = &module.instances[module.functions[body.function.index()].instance.index()];
+            (&identity.definition == definition && module.argument_names(key) == arguments)
+                .then(|| identity.clone())
+        })
     }
 }
 impl CheckProduct {
     pub fn instances(
         &self,
-        roots: impl IntoIterator<Item = InstanceKey>,
+        roots: impl IntoIterator<Item = Identity>,
         limit: usize,
-    ) -> Result<Vec<InstanceKey>, InstanceStop> {
+    ) -> Result<Vec<Identity>, InstanceStop> {
         self.instances_into(roots, limit, &mut InstanceSet::default())
     }
     pub(crate) fn instances_into(
         &self,
-        roots: impl IntoIterator<Item = InstanceKey>,
+        roots: impl IntoIterator<Item = Identity>,
         limit: usize,
         instances: &mut InstanceSet,
-    ) -> Result<Vec<InstanceKey>, InstanceStop> {
-        self.instances_observed(roots, limit, instances, None, |_, _| {})
-    }
-    /// Record the closure (`Module::shape_closure`) of every shape name reached from
-    /// `roots` into `closures`, which may span several calls and products.
-    pub fn shape_closures(
-        &self,
-        roots: impl IntoIterator<Item = InstanceKey>,
-        limit: usize,
-        closures: &mut ShapeClosures,
-    ) -> Result<(), InstanceStop> {
-        self.instances_observed(
-            roots,
-            limit,
-            &mut InstanceSet::default(),
-            Some(closures),
-            |_, _| {},
-        )
-        .map(drop)
+    ) -> Result<Vec<Identity>, InstanceStop> {
+        self.instances_observed(roots, limit, instances, |_, _| {})
     }
     /// Measure library loading and mechanical specialization without changing the
     /// native collection path. The ordinary path erases the no-op observer.
     pub fn observe_instances(
         &self,
-        roots: impl IntoIterator<Item = InstanceKey>,
+        roots: impl IntoIterator<Item = Identity>,
         limit: usize,
-        observe: impl FnMut(&InstanceKey, &'static str),
-    ) -> Result<Vec<InstanceKey>, InstanceStop> {
-        self.instances_observed(roots, limit, &mut InstanceSet::default(), None, observe)
+        observe: impl FnMut(&Identity, &'static str),
+    ) -> Result<Vec<Identity>, InstanceStop> {
+        self.instances_observed(roots, limit, &mut InstanceSet::default(), observe)
     }
     fn instances_observed(
         &self,
-        roots: impl IntoIterator<Item = InstanceKey>,
+        roots: impl IntoIterator<Item = Identity>,
         limit: usize,
         instances: &mut InstanceSet,
-        mut closures: Option<&mut ShapeClosures>,
-        mut observe: impl FnMut(&InstanceKey, &'static str),
-    ) -> Result<Vec<InstanceKey>, InstanceStop> {
-        // A concrete argument names a shape published by the caller that requested
-        // it. Numeric indices keep these references independent of mutable storage.
-        let mut shapes =
-            std::collections::BTreeMap::<String, (usize, hirsel_core_layout::TypeRef)>::new();
+        mut observe: impl FnMut(&Identity, &'static str),
+    ) -> Result<Vec<Identity>, InstanceStop> {
+        let mut resolver = Resolver::default();
         collect_instances(roots, limit, |key| {
             observe(key, "start");
-            let installed = self
-                .image
-                .as_ref()
-                .map(|i| i.has_body(&key.definition))
-                .transpose()
-                .map_err(|e| InstanceStop::Input {
-                    definition: key.definition.clone(),
-                    message: e.to_string(),
-                })?
-                .unwrap_or(false);
-            if !self.definitions.contains_key(&key.definition) && !installed {
-                return Err(InstanceStop::OutsideReached(key.definition.clone()));
-            }
-            let product = self
-                .demand_body(&key.definition)
-                .map_err(|e| InstanceStop::Input {
-                    definition: key.definition.clone(),
-                    message: e.to_string(),
-                })?;
-            if !product.check.refusals.is_empty() || !product.incomplete.is_empty() {
-                return Err(InstanceStop::Incomplete(key.definition.clone()));
-            }
-            let Some(mut function) = product.check.function else {
-                return Err(InstanceStop::Incomplete(key.definition.clone()));
+            let input = |message: String| InstanceStop::Input {
+                definition: key.definition.clone(),
+                message,
             };
-            observe(key, "load");
-            let module = if let Some(template) = &product.check.template {
-                let arguments = key
-                    .types
-                    .iter()
-                    .map(|name| {
-                        let &(owner, root) =
-                            shapes.get(name).ok_or_else(|| InstanceStop::Input {
-                                definition: key.definition.clone(),
-                                message: format!("unpublished instance type {name}"),
-                            })?;
-                        Ok((instances.bodies[owner].ir(), root))
-                    })
-                    .collect::<Result<Vec<_>, InstanceStop>>()?;
-                let (ir, row) = hirsel_core_front::materialize(
-                    product.ir(),
-                    function,
-                    template,
-                    key,
-                    &arguments,
-                )
-                .map_err(|message| InstanceStop::Input {
-                    definition: key.definition.clone(),
-                    message,
-                })?;
-                function = row;
-                Some(ir)
-            } else if !key.types.is_empty() || !key.dictionaries.is_empty() {
-                return Err(InstanceStop::MaterializationRequired(key.clone()));
+            let arguments = resolver.arguments(key).map_err(|hash| {
+                input(format!(
+                    "no closure {} reached this instance",
+                    hirsel_core_ir::symbol(hash)
+                ))
+            })?;
+            let (product, built) = if hirsel_core_front::is_glue(&key.definition) {
+                observe(key, "load");
+                let built =
+                    hirsel_core_materialize::materialize_glue(key, &arguments).map_err(input)?;
+                (None, built)
             } else {
-                None
+                let installed = self
+                    .image
+                    .as_ref()
+                    .map(|i| i.has_body(&key.definition))
+                    .transpose()
+                    .map_err(|e| input(e.to_string()))?
+                    .unwrap_or(false);
+                if !self.definitions.contains_key(&key.definition) && !installed {
+                    return Err(InstanceStop::OutsideReached(key.definition.clone()));
+                }
+                let product = self
+                    .demand_body(&key.definition)
+                    .map_err(|e| input(e.to_string()))?;
+                if !product.check.refusals.is_empty() || !product.incomplete.is_empty() {
+                    return Err(InstanceStop::Incomplete(key.definition.clone()));
+                }
+                let Some(function) = product.check.function else {
+                    return Err(InstanceStop::Incomplete(key.definition.clone()));
+                };
+                observe(key, "load");
+                let own = Published {
+                    module: product.ir(),
+                    function,
+                    template: product.check.template.as_ref(),
+                };
+                let built =
+                    hirsel_core_materialize::materialize(&own, key, &arguments).map_err(input)?;
+                (Some(product), built)
             };
             observe(key, "materialize");
+            resolver.add(&built.children);
+            let externals: Vec<_> = built
+                .children
+                .into_iter()
+                .map(
+                    |Child {
+                         function, identity, ..
+                     }| (function, identity),
+                )
+                .collect();
+            let pending = externals
+                .iter()
+                .map(|(_, identity)| identity.clone())
+                .collect::<BTreeSet<_>>();
             let row = instances.bodies.len();
             instances.rows.insert(key.clone(), row);
-            instances.bodies.push(InstanceBody { product, module });
-            let ir = instances.bodies[row].ir();
-            for (i, shape) in ir.types.iter().enumerate() {
-                let t = hirsel_core_layout::TypeRef(i as u32);
-                shapes.entry(shape.name.clone()).or_insert((row, t));
-                if let Some(c) = closures.as_deref_mut()
-                    && !shape.name.contains('$')
-                {
-                    let closure = ir.shape_closure(t);
-                    match c.first.get(&shape.name) {
-                        Some(first) if *first != closure => {
-                            c.conflicts.insert(shape.name.clone());
-                        }
-                        Some(_) => {}
-                        None => {
-                            c.first.insert(shape.name.clone(), closure);
-                        }
-                    }
-                }
-            }
-            let pending = external_functions(ir, function)
-                .into_iter()
-                .map(|f| ir.instances[ir.functions[f.index()].instance.index()].clone())
-                .collect::<BTreeSet<_>>();
-            let pending = pending.into_iter().collect();
+            instances.bodies.push(InstanceBody {
+                product,
+                module: built.module,
+                function: built.function,
+                externals,
+            });
             observe(key, "dependencies");
-            Ok(pending)
+            Ok(pending.into_iter().collect())
         })
     }
-}
-
-/// Each reached shape name's first closure, and the names a later row disagrees with.
-/// Rows are reused across instance bodies by name, which is sound only if one name is
-/// one type (FORM #109), so a land gate requires `conflicts` to be empty.
-#[derive(Default)]
-pub struct ShapeClosures {
-    first: std::collections::BTreeMap<String, Vec<hirsel_core_ir::ClosureRow>>,
-    pub conflicts: BTreeSet<String>,
-}
-
-/// Generated closure bodies share their producer's module; only signature-only rows
-/// require another source product.
-pub(crate) fn external_functions(
-    module: &hirsel_core_ir::Module,
-    root: hirsel_core_ir::FuncId,
-) -> BTreeSet<hirsel_core_ir::FuncId> {
-    let mut pending = vec![root];
-    // A unit's layouts generate drop glue, including nested List/Rc fields.
-    // Its finalizers are dependencies even without a Call or FunctionRef.
-    // Generic materialization imports the argument's finalizer into this table.
-    pending.extend(
-        module
-            .types
-            .iter()
-            .filter_map(|shape| shape.finalizer.map(|f| hirsel_core_ir::FuncId(f.0))),
-    );
-    let mut visited = BTreeSet::new();
-    let mut external = BTreeSet::new();
-    while let Some(function) = pending.pop() {
-        if !visited.insert(function) {
-            continue;
-        }
-        let Some(body) = &module.functions[function.index()].body else {
-            external.insert(function);
-            continue;
-        };
-        for call in &body.calls {
-            if let Callee::Direct(f) = call.callee {
-                pending.push(f);
-            }
-        }
-        for inst in &body.insts {
-            if let Inst::FunctionRef { function, .. } = inst {
-                pending.push(*function);
-            }
-        }
-    }
-    external
 }

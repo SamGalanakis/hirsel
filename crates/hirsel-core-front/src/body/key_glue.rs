@@ -190,47 +190,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             };
             let function = if has_param(&self.t, ty) {
-                let name = self.e.module.types[id.index()].name.clone();
                 let function = self.e.add_function_abi(
                     InstanceKey {
                         definition: op.definition(),
-                        types: vec![name],
+                        arguments: vec![id],
                         dictionaries: vec![],
                     },
                     op.signature(&self.e.module.types, id),
-                    // A clone writes through `to`, so both its places stay addresses.
-                    match op {
-                        KeyOp::Clone | KeyOp::CloneIn(_) | KeyOp::CloneTwin(_) => {
-                            scalar_abi::SignatureAbi {
-                                params: vec![false; 2],
-                                result: false,
-                            }
-                        }
-                        KeyOp::NeedsDrop => scalar_abi::SignatureAbi {
-                            params: vec![],
-                            result: true,
-                        },
-                        KeyOp::Encode => scalar_abi::SignatureAbi {
-                            params: vec![false; 3],
-                            result: false,
-                        },
-                        KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_) => {
-                            scalar_abi::SignatureAbi {
-                                params: vec![true; 2],
-                                result: true,
-                            }
-                        }
-                        _ => scalar_abi::SignatureAbi {
-                            params: vec![true],
-                            result: true,
-                        },
-                    },
+                    op.abi(),
                 );
                 self.e
                     .generic_calls
                     .entry(function)
                     .or_insert_with(|| GenericCall {
-                        arguments: vec![NameRecipe::of(self.p, &self.t, ty)],
                         dictionaries: vec![],
                         operation: Some((op, id)),
                     });
@@ -250,6 +222,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 }
 
+/// `op` at `ty` with every operation it reaches derived into `module` (test assembly,
+/// where one module is the whole program).
 pub(super) fn ensure(module: &mut Module, ty: TypeId, op: KeyOp) -> Result<FuncId, &'static str> {
     let recipes =
         hirsel_core_layout::compute(&module.types).map_err(|_| "key recipe is not built")?;
@@ -257,8 +231,108 @@ pub(super) fn ensure(module: &mut Module, ty: TypeId, op: KeyOp) -> Result<FuncI
         module,
         recipes,
         active: vec![],
+        only: None,
     }
     .function(ty, op)
+}
+
+/// `op`'s glue at `ty` as a signature-only row of `module`: the glue is an instance
+/// of its own, materialised from `ty`'s closure ([`derive_glue`]), never a body copied
+/// into its callers.
+pub(super) fn glue_row(module: &mut Module, ty: TypeId, op: KeyOp) -> FuncId {
+    Derive::row(module, ty, op)
+}
+
+/// Whether `op` at `ty` derives, so that a closed caller is refused where it is
+/// checked rather than where it is built.
+pub(super) fn derivable(module: &Module, ty: TypeId, op: KeyOp) -> Result<(), &'static str> {
+    ensure(&mut module.clone(), ty, op).map(drop)
+}
+
+/// `op`'s body at `ty`, alone: every other operation it calls is a signature-only row,
+/// an instance of its own.
+pub fn derive_glue(module: &mut Module, ty: TypeId, op: KeyOp) -> Result<FuncId, &'static str> {
+    let recipes =
+        hirsel_core_layout::compute(&module.types).map_err(|_| "key recipe is not built")?;
+    Derive {
+        module,
+        recipes,
+        active: vec![],
+        only: Some((ty, op)),
+    }
+    .function(ty, op)
+}
+
+impl KeyOp {
+    /// Which of the operation's address parameters, and whether its result, follow
+    /// the argument rows' carriage. A clone writes through `to`, so both its places
+    /// stay addresses.
+    pub(super) fn abi(self) -> scalar_abi::SignatureAbi {
+        let (params, result) = match self {
+            Self::Clone | Self::CloneIn(_) | Self::CloneTwin(_) => (vec![false; 2], false),
+            Self::NeedsDrop => (vec![], true),
+            Self::Encode => (vec![false; 3], false),
+            Self::Equal | Self::Order | Self::Ordered(_) => (vec![true; 2], true),
+            Self::Hash | Self::Fold => (vec![true], true),
+        };
+        scalar_abi::SignatureAbi { params, result }
+    }
+    /// The operation's address signature at `ty`, and the signature of its row: the
+    /// address one sealed by [`Self::abi`]. Every row of a glue instance, in its own
+    /// module and in a caller's, has the sealed one.
+    fn sealed(self, module: &Module, ty: TypeId) -> (Signature, Signature) {
+        let place = self.signature(&module.types, ty);
+        let mut sealed = place.clone();
+        scalar_abi::Plan::signature(module, &mut sealed, &self.abi());
+        (place, sealed)
+    }
+}
+
+fn signature_id(module: &mut Module, sig: Signature) -> SigId {
+    if let Some(i) = module.signatures.iter().position(|s| *s == sig) {
+        return SigId(i as u32);
+    }
+    module.signatures.push(sig);
+    SigId(module.signatures.len() as u32 - 1)
+}
+
+impl KeyOp {
+    /// The glue operation instance row `key` names, if it is glue: its argument rows
+    /// are the operation's type and, for a clone into another type, that type.
+    pub fn of(key: &InstanceKey) -> Option<(Self, TypeId)> {
+        let op = Self::named(&key.definition, || key.arguments.get(1).map(|u| u.0))?;
+        Some((op, *key.arguments.first()?))
+    }
+    /// The operation `definition` names, with `second` its second type argument.
+    fn named(definition: &DefPath, second: impl Fn() -> Option<u32>) -> Option<Self> {
+        let d = &definition.0;
+        if d.package.name != "core" || !d.name.starts_with('$') {
+            return None;
+        }
+        Some(match (d.modules.as_slice(), d.name.as_str()) {
+            ([m], "$key_hash") if m == "map" => Self::Hash,
+            ([m], "$key_fold") if m == "map" => Self::Fold,
+            ([m], "$key_equal") if m == "map" => Self::Equal,
+            ([m], "$compare") if m == "order" => Self::Order,
+            ([m], "$lt") if m == "order" => Self::Ordered(CompareOp::Lt),
+            ([m], "$le") if m == "order" => Self::Ordered(CompareOp::Le),
+            ([m], "$gt") if m == "order" => Self::Ordered(CompareOp::Gt),
+            ([m], "$ge") if m == "order" => Self::Ordered(CompareOp::Ge),
+            ([m], "$clone") if m == "core" => Self::Clone,
+            ([m], "$clone_in") if m == "core" => Self::CloneIn(second()?),
+            ([m], "$clone_twin") if m == "core" => Self::CloneTwin(second()?),
+            ([m], "$encode") if m == "span" => Self::Encode,
+            ([m], "$needs_drop") if m == "core" => Self::NeedsDrop,
+            _ => return None,
+        })
+    }
+}
+
+/// Whether `definition` is a glue operation: an instance materialised from its
+/// arguments' closures alone ([`super::templates::materialize_glue`]), with no
+/// published definition.
+pub fn is_glue(definition: &DefPath) -> bool {
+    KeyOp::named(definition, || Some(0)).is_some()
 }
 
 fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
@@ -289,12 +363,9 @@ pub(super) fn inline_scalar(module: &Module, ty: TypeId, op: KeyOp) -> bool {
 /// Whether the key operation `key` works on a variant row with a field: its word does
 /// not order as its value does.
 fn word_with_field(module: &Module, key: &InstanceKey) -> bool {
-    key.types.first().is_some_and(|name| {
-        module.types.iter().any(|row| {
-            &row.name == name
-                && matches!(&row.body, ShapeBody::Variant(cases)
-                    if cases.iter().any(|c| !c.fields.is_empty()))
-        })
+    key.arguments.first().is_some_and(|row| {
+        matches!(&module.types[row.index()].body,
+            ShapeBody::Variant(cases) if cases.iter().any(|c| !c.fields.is_empty()))
     })
 }
 
@@ -492,49 +563,54 @@ pub(super) struct Derive<'a> {
     pub(super) module: &'a mut Module,
     pub(super) recipes: Vec<Recipe>,
     active: Vec<(TypeId, KeyOp)>,
+    /// The one operation whose body is derived; None derives every one reached.
+    only: Option<(TypeId, KeyOp)>,
 }
 impl Derive<'_> {
-    pub(super) fn function(&mut self, ty: TypeId, op: KeyOp) -> Result<FuncId, &'static str> {
-        let mut types = vec![self.module.types[ty.index()].name.clone()];
+    /// The row of `op` at `ty` in `module`, added signature-only when it is missing.
+    fn row(module: &mut Module, ty: TypeId, op: KeyOp) -> FuncId {
+        let mut arguments = vec![ty];
         if let KeyOp::CloneIn(u) | KeyOp::CloneTwin(u) = op {
-            types.push(self.module.types[u as usize].name.clone());
+            arguments.push(TypeId(u));
         }
         let key = InstanceKey {
             definition: op.definition(),
-            types,
+            arguments,
             dictionaries: vec![],
         };
-        let row = if let Some(i) = self
-            .module
+        if let Some(i) = module
             .functions
             .iter()
-            .position(|f| self.module.instances[f.instance.index()] == key)
+            .position(|f| module.instances[f.instance.index()] == key)
         {
-            let row = FuncId(i as u32);
-            if self.module.functions[i].body.is_some() || self.active.contains(&(ty, op)) {
-                return Ok(row);
-            }
-            row
-        } else {
-            let sig = op.signature(&self.module.types, ty);
-            let signature = if let Some(i) = self.module.signatures.iter().position(|s| *s == sig) {
-                SigId(i as u32)
-            } else {
-                let id = SigId(self.module.signatures.len() as u32);
-                self.module.signatures.push(sig);
-                id
-            };
-            let instance = InstanceId(self.module.instances.len() as u32);
-            self.module.instances.push(key);
-            let row = FuncId(self.module.functions.len() as u32);
-            self.module.functions.push(Function {
-                instance,
-                signature,
-                body: None,
-            });
-            row
-        };
+            return FuncId(i as u32);
+        }
+        let (_, sealed) = op.sealed(module, ty);
+        let signature = signature_id(module, sealed);
+        let instance = InstanceId(module.instances.len() as u32);
+        module.instances.push(key);
+        let row = FuncId(module.functions.len() as u32);
+        module.functions.push(Function {
+            instance,
+            signature,
+            body: None,
+        });
+        row
+    }
+    pub(super) fn function(&mut self, ty: TypeId, op: KeyOp) -> Result<FuncId, &'static str> {
+        let row = Self::row(self.module, ty, op);
+        if self.module.functions[row.index()].body.is_some()
+            || self.active.contains(&(ty, op))
+            || self.only.is_some_and(|only| only != (ty, op))
+        {
+            return Ok(row);
+        }
         self.active.push((ty, op));
+        // The body is built at the operation's address signature and sealed to the
+        // row's (`KeyOp::sealed`), whatever the row carries now.
+        let (place, sealed) = op.sealed(self.module, ty);
+        let old = signature_id(self.module, place);
+        self.module.functions[row.index()].signature = old;
         let mut c = Code::new(if op == KeyOp::NeedsDrop {
             &[]
         } else if op == KeyOp::Hash {
@@ -653,24 +729,10 @@ impl Derive<'_> {
         let returns = PoolRange::push(&mut c.body.pools.values, [result]);
         c.end(Terminator::Return(returns));
         order_instructions(&mut c.body);
-        let old = self.module.functions[row.index()].signature;
         let mut sig = self.module.signatures[old.index()].clone();
-        let abi = scalar_abi::SignatureAbi {
-            params: sig
-                .params
-                .iter()
-                .map(|p| matches!(p, Param::Address { .. }))
-                .collect(),
-            result: true,
-        };
-        let plan = scalar_abi::Plan::signature(self.module, &mut sig, &abi);
-        let signature = if let Some(i) = self.module.signatures.iter().position(|s| *s == sig) {
-            SigId(i as u32)
-        } else {
-            let id = SigId(self.module.signatures.len() as u32);
-            self.module.signatures.push(sig);
-            id
-        };
+        let plan = scalar_abi::Plan::signature(self.module, &mut sig, &op.abi());
+        debug_assert_eq!(sig, sealed);
+        let signature = signature_id(self.module, sig);
         let old_calls = c.body.calls.iter().map(|c| c.signature).collect::<Vec<_>>();
         let mut plans = HashMap::default();
         for &id in &old_calls {
@@ -2534,7 +2596,7 @@ fn text()->bool { let a="a"; let b="b"; less(view a,view b) }
                         key,
                         body.insts.len()
                     );
-                    if key.types == ["u64"]
+                    if e.module.argument_names(key) == ["u64"]
                         && matches!(key.definition.0.name.as_str(), "less" | "equal")
                     {
                         assert_eq!(calls, 0);

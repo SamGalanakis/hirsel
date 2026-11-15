@@ -63,14 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let entry =
             hirsel_core_ids::DefPath::from_full(args.get(at + 1).ok_or("missing instance entry")?)
                 .ok_or("invalid instance entry")?;
-        Some(product.instances(
-            [hirsel_core_ir::InstanceKey {
-                definition: entry,
-                types: vec![],
-                dictionaries: vec![],
-            }],
-            65_536,
-        ))
+        Some(product.instances([hirsel_core_ir::Identity::plain(entry)], 65_536))
     } else {
         None
     };

@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_core_ir::{FuncId, InstanceKey, eval};
+use hirsel_core_ir::{FuncId, eval};
 
 pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
@@ -95,7 +95,7 @@ fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
 /// before the IR. Any changed byte, a truncation, a trailing byte or an
 /// impossible length reads as nothing; a changed IR byte keeps the address,
 /// so only the IR hash refuses it. An ordinary read refuses a body frame and
-/// a body read an ordinary one, and neither accepts VERSION 28.
+/// a body read an ordinary one, and neither accepts VERSION 29.
 #[test]
 fn a_body_record_reads_back_only_whole() {
     use sha2::Digest;
@@ -104,7 +104,7 @@ fn a_body_record_reads_back_only_whole() {
     let (head, ir) = (b"a head".as_slice(), b"the module bytes".as_slice());
     let ir_hash = ContentHash::of_parts("hirsel.core-ir.v1", [ir]);
     let mut expected = b"HBODY\0\0\0".to_vec();
-    expected.extend(29u32.to_le_bytes());
+    expected.extend(30u32.to_le_bytes());
     expected.extend((head.len() as u64).to_le_bytes());
     expected.extend((ir.len() as u64).to_le_bytes());
     expected.extend(head);
@@ -145,8 +145,8 @@ fn a_body_record_reads_back_only_whole() {
         assert!(read(&long).is_none(), "length at {at}");
     }
     let mut old = expected.clone();
-    old[8..12].copy_from_slice(&28u32.to_le_bytes());
-    assert!(read(&old).is_none(), "VERSION 28 body");
+    old[8..12].copy_from_slice(&29u32.to_le_bytes());
+    assert!(read(&old).is_none(), "VERSION 29 body");
     std::fs::write(store.path(address), &expected).unwrap();
     assert_eq!(
         store.get(address).unwrap(),
@@ -159,9 +159,9 @@ fn a_body_record_reads_back_only_whole() {
         "a body read of an ordinary record"
     );
     let mut bytes = std::fs::read(store.path(ordinary)).unwrap();
-    bytes[8..12].copy_from_slice(&28u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&29u32.to_le_bytes());
     std::fs::write(store.path(ordinary), bytes).unwrap();
-    assert_eq!(store.get(ordinary).unwrap(), None, "VERSION 28 record");
+    assert_eq!(store.get(ordinary).unwrap(), None, "VERSION 29 record");
 }
 #[test]
 fn refused_body_is_published_and_unreached_demand_is_explicit() {
@@ -750,17 +750,14 @@ fn prog7_machine_refusal_spans_point_into_current_file_bytes() {
 }
 #[test]
 fn instance_collection_is_finite_deduplicated_and_order_independent() {
-    use hirsel_core_ir::InstanceKey;
+    use hirsel_core_ids::ContentHash;
+    use hirsel_core_ir::Identity;
     let definition = |name: &str| DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
-    let key = |name: &str| InstanceKey {
-        definition: definition(name),
-        types: vec![],
-        dictionaries: vec![],
-    };
+    let key = |name: &str| Identity::plain(definition(name));
     let a = key("a");
     let b = key("b");
     let leaf = key("leaf");
-    let edges = |k: &InstanceKey| {
+    let edges = |k: &Identity| {
         Ok(if *k == a || *k == b {
             vec![leaf.clone(), leaf.clone()]
         } else {
@@ -771,14 +768,14 @@ fn instance_collection_is_finite_deduplicated_and_order_independent() {
         collect_instances([a.clone(), b.clone()], 3, edges).unwrap(),
         collect_instances([b.clone(), a.clone()], 3, edges).unwrap()
     );
-    let root = InstanceKey {
+    let root = Identity {
         definition: definition("growing"),
-        types: vec!["u64".into()],
         dictionaries: vec![],
+        closures: vec![ContentHash([0; 32])],
     };
     let stop = collect_instances([root], 8, |key| {
         let mut next = key.clone();
-        next.types[0] = format!("List[{}]", key.types[0]);
+        next.closures[0] = ContentHash::of_parts("list", [&key.closures[0].0[..]]);
         Ok(vec![next])
     })
     .unwrap_err();
@@ -801,11 +798,7 @@ fn checked_instance_collection_follows_calls_without_body_rechecks() {
         .keys()
         .find(|p| p.0.name == "root")
         .unwrap();
-    let root = hirsel_core_ir::InstanceKey {
-        definition: root.clone(),
-        types: vec![],
-        dictionaries: vec![],
-    };
+    let root = hirsel_core_ir::Identity::plain(root.clone());
     let instances = product.instances([root], 8).unwrap();
     assert_eq!(
         instances
@@ -968,11 +961,7 @@ fn installed_image_instances_are_demanded_without_source_rechecks() {
         .unwrap();
     assert!(product.accepted(), "{:?}", product.diagnostics);
     assert_eq!(image.decoded_bodies(), 0);
-    let key = hirsel_core_ir::InstanceKey {
-        definition: DefPath::from_full("app@1/main/caller").unwrap(),
-        types: vec![],
-        dictionaries: vec![],
-    };
+    let key = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/caller").unwrap());
     let instances = product.instances([key], 8).unwrap();
     assert_eq!(instances.len(), 2);
     assert_eq!(image.decoded_bodies(), 1);
@@ -1046,11 +1035,7 @@ fn incomplete_source_is_not_an_emittable_instance() {
         )
         .unwrap();
     assert!(!product.incomplete.is_empty());
-    let key = hirsel_core_ir::InstanceKey {
-        definition: DefPath::from_full("app@1/main/root").unwrap(),
-        types: vec![],
-        dictionaries: vec![],
-    };
+    let key = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/root").unwrap());
     assert!(matches!(
         product.instances([key], 8),
         Err(InstanceStop::Incomplete(_))
@@ -1239,11 +1224,7 @@ fn indirect_instances_follow_the_values_function_references() {
         "fn leaf(x: u64) -> u64 { x + 1 }\nfn apply(cb: fn(u64) -> u64, x: u64) -> u64 { cb(x) }\nfn root() -> u64 { let cb: fn(u64) -> u64 = leaf; apply(cb, 41) }\n",
         dir.path()), &mut Meter::new(false)).unwrap();
     assert!(product.accepted());
-    let root = hirsel_core_ir::InstanceKey {
-        definition: DefPath::from_full("app@1/main/root").unwrap(),
-        types: vec![],
-        dictionaries: vec![],
-    };
+    let root = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/root").unwrap());
     let instances = product.instances([root], 8).unwrap();
     assert_eq!(
         instances
@@ -1256,7 +1237,6 @@ fn indirect_instances_follow_the_values_function_references() {
 
 #[test]
 fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
-    use hirsel_core_ir::InstanceKey;
     let dir = tempfile::tempdir().unwrap();
     let source = "fn id[T](take x: T) -> T { x }\nfn forward[T](take x: T) -> T { id(take x) }\nfn discard[T](take x: T) {}\nfn byte() -> u8 { forward(7u8) }\nfn root() -> u64 { forward(72623859790382856u64) }\n";
     let fresh = Driver::default()
@@ -1279,11 +1259,7 @@ fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
     assert_eq!(keys.len(), 3);
     for name in ["id", "forward"] {
         let path = DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
-        let key = InstanceKey {
-            definition: path.clone(),
-            types: vec!["u64".into()],
-            dictionaries: vec![],
-        };
+        let key = reached.materialized.named(&path, &["u64"]).unwrap();
         assert!(keys.contains(&key));
         let source = cached.demand(&path).unwrap();
         let template = source.check.template.as_ref().unwrap();
@@ -1317,16 +1293,8 @@ fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
             .iter()
             .any(|i| matches!(i, hirsel_core_ir::Inst::Drop { .. }))
     );
-    let byte = InstanceKey {
-        definition: DefPath::from_full("app@1/main/byte").unwrap(),
-        types: vec![],
-        dictionaries: vec![],
-    };
-    let roots = InstanceKey {
-        definition: root,
-        types: vec![],
-        dictionaries: vec![],
-    };
+    let byte = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/byte").unwrap());
+    let roots = hirsel_core_ir::Identity::plain(root);
     assert_eq!(cached.instances([byte, roots], 16).unwrap().len(), 6);
 }
 
@@ -1374,11 +1342,7 @@ fn closure_instances_include_calls_inside_the_generated_body() {
     let dir = tempfile::tempdir().unwrap();
     let product=Driver::default().check(request("fn leaf(x: u64) -> u64 {x + 1}\nfn root() -> u64 {let cb: fn(u64) -> u64 = fn(x: u64) {leaf(x)}; cb(41)}\n",dir.path()),&mut Meter::new(false)).unwrap();
     assert!(product.accepted());
-    let root = hirsel_core_ir::InstanceKey {
-        definition: DefPath::from_full("app@1/main/root").unwrap(),
-        types: vec![],
-        dictionaries: vec![],
-    };
+    let root = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/root").unwrap());
     let instances = product.instances([root], 8).unwrap();
     assert_eq!(
         instances
@@ -1647,11 +1611,9 @@ fn indexed_combined_libraries_keep_existing_module_extensions() {
     );
     let reached = product
         .instances(
-            [hirsel_core_ir::InstanceKey {
-                definition: DefPath::from_full("app@1/main/f").unwrap(),
-                types: vec![],
-                dictionaries: vec![],
-            }],
+            [hirsel_core_ir::Identity::plain(
+                DefPath::from_full("app@1/main/f").unwrap(),
+            )],
             16,
         )
         .unwrap();
@@ -2235,9 +2197,15 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
 /// one name is one type. Before one canonical encoding a substituted `String` field
 /// was `Inline(String)` in one body and `Seq(u8)` in another, so a holder's layout
 /// came from whichever body published the name first. Every monomorphic definition
-/// of LangArena, std and the Core corpus (M1 programs, front cases) is a root.
+/// of LangArena, std and the Core corpus (M1 and M2b programs, front cases) is a root.
+///
+/// Every unit that carries a body defines it weak under its code identity and the
+/// linker keeps one, so each code identity must name one Core IR body, anchors
+/// included, across every unit of a product (`carried_law`). A callable adapter
+/// anchored at the site that named its function, as before `generated`, broke it on
+/// M2b's tx: `transfer$callable` differed between `bench` and `commit`.
 #[test]
-fn every_reached_shape_name_has_one_closure() {
+fn every_reached_instance_imports_its_closures() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -2276,10 +2244,11 @@ fn every_reached_shape_name_has_one_closure() {
         let source = std::fs::read_to_string(&case.file).unwrap();
         requests.push((case.file.display().to_string(), request(&source, &case_dir)));
     }
+    requests.extend(m2b_requests(&root, dir.path()));
     let mut built = 0;
     for (name, request) in requests {
-        // Names are one type within a product; separate cases reuse `app/main/P`.
-        let mut closures = ShapeClosures::default();
+        let mut carried = crate::carried_law::Carried::default();
+        let mut added = std::collections::HashSet::new();
         let product = Driver::default()
             .check(request, &mut Meter::new(false))
             .unwrap();
@@ -2294,27 +2263,109 @@ fn every_reached_shape_name_has_one_closure() {
                         && p.check.template.is_none()
                 })
             })
-            .map(|d| hirsel_core_ir::InstanceKey {
-                definition: d.clone(),
-                types: vec![],
-                dictionaries: vec![],
-            })
+            .map(|d| hirsel_core_ir::Identity::plain(d.clone()))
             .collect();
         for root in roots {
             // A root whose reach includes an unfinished body is not a program.
-            match product.shape_closures([root], 1 << 20, &mut closures) {
-                Ok(()) => built += 1,
+            // Every closure a reached call names imports into its instance; a row of
+            // the same name with another closure would stop the walk as an input.
+            let mut set = crate::instances::InstanceSet::default();
+            match product.instances_into([root], 1 << 20, &mut set) {
+                Ok(reached) => {
+                    built += 1;
+                    for instance in reached {
+                        if added.insert(instance.clone()) {
+                            carried.add(set.get(&instance).ir());
+                        }
+                    }
+                }
                 Err(InstanceStop::Incomplete(_) | InstanceStop::OutsideReached(_)) => {}
                 Err(stop) => panic!("{name}: {stop:?}"),
             }
         }
-        assert!(
-            closures.conflicts.is_empty(),
-            "{name}: {:?}",
-            closures.conflicts
-        );
+        if let Some(conflict) = carried.conflict.take() {
+            panic!("{name}: {conflict}");
+        }
     }
     eprintln!("roots built {built}");
+}
+
+/// Each M2b workload's program as core/tools/m2b.py builds it: core and std from
+/// their installed sources, then the workload's package closure, with an entry's
+/// `use` choosing a package by `id`.
+fn m2b_requests(root: &Path, dir: &Path) -> Vec<(String, CheckRequest)> {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("core/programs/m2b/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    let installed = |name: &str, dependencies: Vec<PackageId>| PackageManifest {
+        package: package(name),
+        sources: corpus_files(&root.join("core").join(name), false)
+            .into_iter()
+            .map(|s| hirsel_core_resolve::ModuleSource {
+                signatures: true,
+                ..s
+            })
+            .collect(),
+        dependencies,
+    };
+    let packages = manifest["packages"].as_array().unwrap();
+    let by_name = |name: &str| {
+        packages.iter().find(|p| {
+            p.get("id")
+                .and_then(|i| i.as_str())
+                .unwrap_or(p["package"]["name"].as_str().unwrap())
+                == name
+        })
+    };
+    let mut requests = Vec::new();
+    for entry in manifest["entries"].as_array().unwrap() {
+        let workload = entry["workload"].as_str().unwrap();
+        let mut inputs = CorpusManifest {
+            core: package("core"),
+            packages: vec![
+                installed("core", vec![]),
+                installed("std", vec![package("core")]),
+            ],
+        };
+        let mut pending = vec![entry["package"]["name"].as_str().unwrap().to_string()];
+        let mut reached = std::collections::BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            let name = entry
+                .get("use")
+                .and_then(|u| u.get(&name))
+                .and_then(|n| n.as_str())
+                .map_or(name, str::to_string);
+            let Some(package) = by_name(&name) else {
+                continue;
+            };
+            if !reached.insert(name) {
+                continue;
+            }
+            for d in package["dependencies"].as_array().unwrap() {
+                pending.push(d["name"].as_str().unwrap().to_string());
+            }
+        }
+        for name in reached {
+            let mut package = by_name(&name).unwrap().clone();
+            package.as_object_mut().unwrap().remove("id");
+            let mut package: PackageManifest = serde_json::from_value(package).unwrap();
+            for source in &mut package.sources {
+                source.file = root.join(&source.file);
+            }
+            inputs.packages.push(package);
+        }
+        requests.push((
+            format!("m2b {workload}"),
+            CheckRequest {
+                inputs,
+                store: dir.join(format!("m2b-{workload}")),
+                library: LibraryInput::Sources,
+                entry: None,
+            },
+        ));
+    }
+    requests
 }
 
 /// One module per file; `pkg/m` puts module `m` in package `pkg`, which the
@@ -2909,14 +2960,13 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
         .unwrap();
     let keys = reached.instances.as_ref().unwrap();
     for (definition, types) in [
-        ("core@1/deque/push_back", vec!["u64".into()]),
+        ("core@1/deque/push_back", vec!["u64"]),
         ("std@1/io/write", vec![]),
     ] {
-        let key = InstanceKey {
-            definition: DefPath::from_full(definition).unwrap(),
-            types,
-            dictionaries: vec![],
-        };
+        let key = reached
+            .materialized
+            .named(&DefPath::from_full(definition).unwrap(), &types)
+            .unwrap();
         assert!(keys.contains(&key), "{definition} not reached: {keys:?}");
         let ir = hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir()).unwrap();
         assert!(
@@ -2925,11 +2975,7 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
             "{definition}: no cold call\n{ir}"
         );
     }
-    let key = InstanceKey {
-        definition: DefPath::from_full("app@1/main/lens").unwrap(),
-        types: vec![],
-        dictionaries: vec![],
-    };
+    let key = hirsel_core_ir::Identity::plain(DefPath::from_full("app@1/main/lens").unwrap());
     let ir = hirsel_llvm_lazy::core::emit_ir(reached.materialized.get(&key).ir()).unwrap();
     let ranges: Vec<_> = ir
         .lines()

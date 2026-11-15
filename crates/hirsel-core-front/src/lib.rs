@@ -22,7 +22,10 @@ mod own;
 mod test_functions;
 mod types;
 
-pub use body::{CoreCheck, Counts, Emitter, GenericTemplate, materialize};
+pub use body::{
+    CoreCheck, Counts, Emitter, GenericTemplate, import_instance, is_glue, materialize,
+    materialize_glue,
+};
 pub use decls::*;
 pub use types::*;
 

@@ -386,3 +386,19 @@ pub fn case_cross_same() -> u64 {
 pub fn case_cross_sum() -> u64 {
     lib.lib.sum_of(code.describe(repeat))
 }
+
+pub fn case_cross_eq_same() -> u64 {
+    if code.describe(lib.lib.echo) == lib.lib.echo_code() {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn case_cross_eq_other() -> u64 {
+    if code.describe(lib.lib.mute) == lib.lib.echo_code() {
+        1
+    } else {
+        0
+    }
+}

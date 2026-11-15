@@ -3,10 +3,10 @@
 use super::*;
 
 fn exports<'a>(
-    entry: &InstanceKey,
+    entry: &Identity,
     modules: impl IntoIterator<Item = (&'a Module, bool)>,
 ) -> Vec<String> {
-    let mut exports = std::collections::BTreeSet::from([format!("h{}", selection(entry.digest()))]);
+    let mut exports = std::collections::BTreeSet::from([entry.symbol()]);
     // A cached library object may call a request-owned dictionary/finalizer.
     // Those references cross the native-object boundary even if an inline copy
     // of the library body disappears from the consuming codegen unit.
@@ -30,7 +30,7 @@ impl CheckProduct {
     pub(super) fn emit_release(
         &self,
         entry: &DefPath,
-        reached: &[InstanceKey],
+        reached: &[Identity],
         materialized: &crate::instances::InstanceSet,
         options: &NativeOptions,
         runtime: ContentHash,
@@ -40,17 +40,18 @@ impl CheckProduct {
         let compiler = compiler_identity()?;
         // Release is LLVM's alone: every object here is libLLVM's output.
         let llvm = crate::tool_inputs::llvm_library()?;
-        let mut emitted = HashSet::new();
         let mut modules: Vec<_> = reached
             .iter()
-            .map(|instance| {
-                let module = materialized.get(instance).ir();
-                without(module, &dropped(module, &mut emitted))
-            })
+            .map(|instance| Cow::Borrowed(materialized.get(instance).ir()))
             .collect();
+        // A glue instance has no definition, so no image publishes it.
         let mut imported: Vec<_> = reached
             .iter()
-            .map(|i| library_store.is_some() && !self.definitions.contains_key(&i.definition))
+            .map(|i| {
+                library_store.is_some()
+                    && !self.definitions.contains_key(&i.definition)
+                    && !hirsel_core_front::is_glue(&i.definition)
+            })
             .collect();
         let body_identities = crate::callable_variants::prepare(
             &mut modules,
@@ -90,7 +91,7 @@ impl CheckProduct {
                     !hirsel_llvm_lazy::core::facts_enabled(),
                     runtime,
                     instance,
-                    &materialized.get(instance).product.key,
+                    materialized.get(instance).product.as_ref().map(|p| &p.key),
                     &**ir,
                 ),
                 &[&consumed[i]],
@@ -273,11 +274,7 @@ fn f1 = n1 g0 extern
 "#,
         )
         .unwrap();
-        let entry = InstanceKey {
-            definition: DefPath::from_full("app@1/main/main").unwrap(),
-            types: vec![],
-            dictionaries: vec![],
-        };
+        let entry = Identity::plain(DefPath::from_full("app@1/main/main").unwrap());
         let roots = exports(&entry, [(&library, true)]);
         assert!(roots.contains(&hirsel_llvm_lazy::core::symbol(
             &library,

@@ -428,7 +428,7 @@ fn emit_module(
         });
         let attrs = FnAttrs {
             linkage: if has_status {
-                Linkage::External
+                Linkage::WeakOdr
             } else {
                 Linkage::Internal
             },

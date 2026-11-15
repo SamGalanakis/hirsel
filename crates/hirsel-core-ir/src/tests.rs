@@ -317,25 +317,27 @@ fn samples_behave_as_derived_by_hand() {
     }
 }
 
-/// Bug: two instances of one generic share a link name (types or dictionaries left
+/// Bug: two instances of one generic share a link name (closures or dictionaries left
 /// out of the digest, or the boundary between them not encoded).
 #[test]
-fn instance_identity_separates_types_and_dictionaries() {
+fn instance_identity_separates_closures_and_dictionaries() {
     let path = hirsel_core_ids::DefPath::from_full("p@0/m/f").unwrap();
-    let key = |types: &[&str], dicts: &[&str]| InstanceKey {
+    let closure = |b: u8| hirsel_core_ids::ContentHash([b; 32]);
+    let id = |closures: &[u8], dicts: &[&str]| Identity {
         definition: path.clone(),
-        types: types.iter().map(|s| s.to_string()).collect(),
+        closures: closures.iter().map(|&b| closure(b)).collect(),
         dictionaries: dicts.iter().map(|s| s.to_string()).collect(),
     };
-    let keys = [
-        key(&["u32"], &[]),
-        key(&["u64"], &[]),
-        key(&["u32", "eq"], &[]),
-        key(&["u32"], &["eq"]),
-        key(&[], &["u32", "eq"]),
+    let ids = [
+        id(&[1], &[]),
+        id(&[2], &[]),
+        id(&[1, 2], &[]),
+        id(&[1], &["eq"]),
+        id(&[], &["eq"]),
+        id(&[], &["eq", "eq"]),
     ];
-    for (i, a) in keys.iter().enumerate() {
-        for b in &keys[i + 1..] {
+    for (i, a) in ids.iter().enumerate() {
+        for b in &ids[i + 1..] {
             assert_ne!(a.digest(), b.digest(), "{a:?} and {b:?} collide");
         }
     }

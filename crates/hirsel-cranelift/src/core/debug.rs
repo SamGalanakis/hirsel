@@ -38,6 +38,7 @@ fn row(rows: &mut Vec<LineRow>, offset: u64, source: Option<NativeLocation>) {
 pub(super) fn function(
     input: &c::Module,
     function: &c::Function,
+    linkage: String,
     id: cranelift_module::FuncId,
     code: &cranelift_codegen::CompiledCode,
 ) -> FunctionRows {
@@ -87,7 +88,7 @@ pub(super) fn function(
     }
     FunctionRows {
         function: id,
-        linkage: symbol(instance),
+        linkage,
         name: instance.definition.to_string(),
         declaration: item.map(|item| NativeLocation { item, start: 0 }),
         size,

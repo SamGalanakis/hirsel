@@ -17,7 +17,7 @@ pub(crate) fn key(
     compiler: ContentHash,
     entry: &DefPath,
     modules: &[ContentHash],
-    instances: &[hirsel_core_ir::InstanceKey],
+    instances: &[hirsel_core_ir::Identity],
     recorded: &[ContentHash],
 ) -> io::Result<ContentHash> {
     native::key(
@@ -131,11 +131,9 @@ mod tests {
     // graph onto its relevant parameter; string.push has no held core body.
     fn core_facts() -> Vec<BodyFacts> {
         vec![BodyFacts {
-            code: hirsel_core_ir::InstanceKey {
-                definition: DefPath::from_full("core@1/string/truncate").unwrap(),
-                types: vec![],
-                dictionaries: vec![],
-            }
+            code: hirsel_core_ir::Identity::plain(
+                DefPath::from_full("core@1/string/truncate").unwrap(),
+            )
             .digest(),
             params: vec![hirsel_core_ir::roles::ParamFacts {
                 sealed: false,

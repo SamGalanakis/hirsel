@@ -68,8 +68,9 @@ mod templates;
 mod temporaries;
 mod types;
 mod writers;
+pub use key_glue::is_glue;
 use templates::{AllocationLayout, CopySize, GenericCall, NameRecipe};
-pub use templates::{GenericTemplate, materialize};
+pub use templates::{GenericTemplate, import_instance, materialize, materialize_glue};
 mod values;
 use types::*;
 pub(crate) use types::{float_bits, float_suffix, int_magnitude, int_suffix};
@@ -267,7 +268,7 @@ impl Emitter {
         let (sig, abi) = self.signature_recipe(p, f)?;
         let key = InstanceKey {
             definition: p.fns[f].path.clone(),
-            types: vec![],
+            arguments: vec![],
             dictionaries: vec![],
         };
         let func = self.add_function_abi(key, sig, abi);
@@ -312,26 +313,25 @@ impl Emitter {
         let (arguments, signed) = (&erased[..], &rooted[..]);
         // An anchor bounds lifetime without changing a layout. Instance identities
         // name the published row, exactly as the materializer looks it up.
-        let types: Vec<_> = arguments
+        let rows: Vec<_> = arguments
             .iter()
             .map(|&ty| {
-                let row = self
-                    .type_row(p, t, ty)
-                    .ok_or("values of this type are not built")?;
-                Ok(self.module.types[row.index()].name.clone())
+                self.type_row(p, t, ty)
+                    .ok_or("values of this type are not built")
             })
             .collect::<Result<_, &'static str>>()?;
         let mut dictionaries = vec![];
-        for (generic, ty) in fd.generics.iter().zip(&types) {
+        for (generic, &row) in fd.generics.iter().zip(&rows) {
             for bit in 0..u16::BITS {
                 if generic.bounds & (1 << bit) != 0 {
+                    let ty = &self.module.types[row.index()].name;
                     dictionaries.push(format!("{}[{ty}]", crate::decls::bound_names(1 << bit)));
                 }
             }
         }
         let key = InstanceKey {
             definition: fd.path.clone(),
-            types,
+            arguments: rows,
             dictionaries,
         };
         if let Some(&function) = self.funcs.get(&key) {
@@ -340,17 +340,13 @@ impl Emitter {
         let (signature, abi) = self.signature_inst(p, t, f, signed)?;
         let function = self.add_function_abi(key, signature, abi);
         if arguments.iter().any(|&ty| has_param(t, ty)) {
-            let names: Vec<_> = arguments
-                .iter()
-                .map(|&ty| NameRecipe::of(p, t, ty))
-                .collect();
             let mut dictionaries = vec![];
-            for (generic, name) in fd.generics.iter().zip(&names) {
+            for (generic, &ty) in fd.generics.iter().zip(arguments) {
                 for bit in 0..u16::BITS {
                     if generic.bounds & (1 << bit) != 0 {
                         dictionaries.push(NameRecipe::dictionary(
                             &crate::decls::bound_names(1 << bit),
-                            name,
+                            &NameRecipe::of(p, t, ty),
                         ));
                     }
                 }
@@ -358,7 +354,6 @@ impl Emitter {
             self.generic_calls.insert(
                 function,
                 GenericCall {
-                    arguments: names,
                     dictionaries,
                     operation: None,
                 },
@@ -371,7 +366,7 @@ impl Emitter {
     pub fn function(&mut self, path: &DefPath, sig: Signature) -> FuncId {
         let key = InstanceKey {
             definition: path.clone(),
-            types: vec![],
+            arguments: vec![],
             dictionaries: vec![],
         };
         self.add_function(key, sig)
@@ -379,21 +374,19 @@ impl Emitter {
     fn add_function(&mut self, key: InstanceKey, sig: Signature) -> FuncId {
         self.add_function_abi(key, sig, scalar_abi::SignatureAbi::default())
     }
-    /// `op`'s glue at closed row `ty`. The glue is derived on the module itself, so
-    /// the rows it adds are registered here: a later request for one of those
-    /// instances, closed or the placeholder of a type generic only in its regions
-    /// (whose name, carrying no region, is already closed), is that row and not a
-    /// second one (one row per instance; FORM #117).
+    /// `op`'s glue at closed row `ty`: a signature-only row, an instance of its own
+    /// whose body is derived where it is materialised. The row is registered here,
+    /// so a later request for that instance, closed or the placeholder of a type
+    /// generic only in its regions (whose name, carrying no region, is already
+    /// closed), is that row and not a second one (one row per instance; FORM #117).
     fn glue(&mut self, ty: TypeId, op: key_glue::KeyOp) -> Result<FuncId, &'static str> {
-        let start = self.module.functions.len();
-        let glue = key_glue::ensure(&mut self.module, ty, op);
-        for (i, function) in self.module.functions.iter().enumerate().skip(start) {
-            let key = &self.module.instances[function.instance.index()];
-            if !self.funcs.contains_key(key) {
-                self.funcs.insert(key.clone(), FuncId(i as u32));
-            }
+        key_glue::derivable(&self.module, ty, op)?;
+        let glue = key_glue::glue_row(&mut self.module, ty, op);
+        let key = &self.module.instances[self.module.functions[glue.index()].instance.index()];
+        if !self.funcs.contains_key(key) {
+            self.funcs.insert(key.clone(), glue);
         }
-        glue
+        Ok(glue)
     }
     fn add_function_abi(
         &mut self,
@@ -1029,6 +1022,9 @@ struct Cx<'c, 'a, 'e> {
     /// body puts this signature back, so the next [`Emitter::seal`] converts the body.
     emitted: Option<SigId>,
     ir_item: ItemId,
+    /// The body is generated (a callable adapter): its code is decided by its
+    /// identity alone, so it carries no source anchors of the body that made it.
+    generated: bool,
     cur: Option<BlockId>,
     open: Vec<Inst>,
     open_anchors: Vec<Option<Anchor>>,
@@ -1170,6 +1166,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             has_static_item_value: false,
             emitted: None,
             ir_item,
+            generated: false,
             cur: None,
             open: vec![],
             open_anchors: vec![],
@@ -1538,13 +1535,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn live(&self) -> bool {
         self.cur.is_some()
     }
-    fn anchor(&self, n: NodeId) -> Anchor {
+    fn anchor(&self, n: NodeId) -> Option<Anchor> {
         let s = self.item.tree.node(n).origin.span;
-        Anchor {
+        (!self.generated).then_some(Anchor {
             item: self.ir_item,
             start: s.start,
             end: s.end,
-        }
+        })
     }
     fn value(&mut self, t: Ty) -> ValueId {
         self.b.values.push(t);
@@ -1557,7 +1554,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             if let Inst::FunctionRef { result, function } = i {
                 self.function_values.insert(result, function);
                 self.open.push(Inst::FunctionRef { result, function });
-                self.open_anchors.push(Some(self.anchor(n)));
+                self.open_anchors.push(self.anchor(n));
                 return;
             }
             if let Inst::Call { call } = i
@@ -1566,7 +1563,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.b.calls[call.index()].cold = true;
             }
             self.open.push(i);
-            self.open_anchors.push(Some(self.anchor(n)));
+            self.open_anchors.push(self.anchor(n));
         }
     }
     fn konst(&mut self, t: Ty, bits: u64, n: NodeId) -> Option<ValueId> {
@@ -1902,7 +1899,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let insts = PoolRange::new(self.b.insts.len() as u32, self.open.len() as u32);
         self.b.insts.append(&mut self.open);
         self.b.inst_anchors.append(&mut self.open_anchors);
-        let anchor = n.map(|n| self.anchor(n));
+        let anchor = n.and_then(|n| self.anchor(n));
         let blk = &mut self.b.blocks[c.index()];
         blk.insts = insts;
         blk.anchor = anchor;

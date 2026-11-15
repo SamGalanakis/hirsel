@@ -1,0 +1,17 @@
+[package]
+name = "hirsel-core-materialize"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The driver's instance and native tests are this crate's tests.
+[lib]
+test = false
+doctest = false
+
+[dependencies]
+rustc-hash = "2"
+hirsel-core-front = { path = "../hirsel-core-front" }
+hirsel-core-ids = { path = "../hirsel-core-ids" }
+hirsel-core-ir = { path = "../hirsel-core-ir" }

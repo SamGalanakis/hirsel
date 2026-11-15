@@ -22,8 +22,8 @@ type t2 = own "()" nothing { }
 sig g0 = (u64, u64) -> (bool)
 sig g1 = (&view t1, &view t1) -> (bool)
 sig g2 = () -> (bool, bool)
-inst n0 = samples@0/rows/less ["u64"] []
-inst n1 = samples@0/rows/less ["W"] []
+inst n0 = samples@0/rows/less [t0] []
+inst n1 = samples@0/rows/less [t1] []
 inst n2 = samples@0/rows/two [] []
 fn f0 = n0 g0 {
 b0(v0: u64, v1: u64):

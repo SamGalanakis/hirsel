@@ -10,7 +10,7 @@
 //! static d0 = align 1 hex 6869            ; read-only data
 //! sig g0 = (i32, &view t0) -> (i32) dest t0 ; params: scalar, ptr or &mut/view/take tN
 //! sig g1 = (u64) -> never                 ; FORM v1: a function whose result is Never
-//! inst n0 = app@1/main/add ["i32"] []     ; instance key: definition, types, dictionaries
+//! inst n0 = app@1/main/add [t0] []        ; instance row: definition, argument rows, dictionaries
 //! fn f0 = n0 g0 extern                    ; defined in another module
 //! fn f1 = n1 g1 {
 //!   slot s0 = i32
@@ -309,7 +309,7 @@ impl Printer {
             self.line(&format!("sig g{i} = ({params}) -> {results}{dest}"));
         }
         for (i, k) in m.instances.iter().enumerate() {
-            let types = list(&k.types, |t| quote(t));
+            let types = list(&k.arguments, |t| format!("t{}", t.0));
             let dicts = list(&k.dictionaries, |d| quote(d));
             self.line(&format!("inst n{i} = {} [{types}] [{dicts}]", k.definition));
         }
@@ -1843,12 +1843,12 @@ impl Parser {
                     let t = l.next()?;
                     let definition = DefPath::from_full(t)
                         .ok_or_else(|| format!("bad definition path `{t}`"))?;
-                    let types = l.seq("[", "]", Line::string)?;
+                    let arguments = l.seq("[", "]", |l| l.id('t').map(TypeId))?;
                     let dictionaries = l.seq("[", "]", Line::string)?;
                     l.end()?;
                     self.module.instances.push(InstanceKey {
                         definition,
-                        types,
+                        arguments,
                         dictionaries,
                     });
                 }

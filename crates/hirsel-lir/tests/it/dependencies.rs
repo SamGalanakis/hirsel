@@ -60,6 +60,8 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-core-syntax", Class::Data),
     ("hirsel-core-resolve", Class::Implementation),
     ("hirsel-core-front", Class::Implementation),
+    // One instance's module from its identity and its arguments' closures.
+    ("hirsel-core-materialize", Class::Implementation),
     ("hirsel-core-driver", Class::Wiring),
     ("hirsel-core-contract-eval", Class::Tool),
     ("hirsel-core-ir", Class::Data),
@@ -200,6 +202,7 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-core-syntax"
                 | "hirsel-core-resolve"
                 | "hirsel-core-front"
+                | "hirsel-core-materialize"
                 | "hirsel-core-ir"
                 | "hirsel-core-layout"
                 | "hirsel-intern"
@@ -208,6 +211,16 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-cranelift"
                 | "hirsel-llvm-lazy"
         ),
+        _ if from == "hirsel-core-materialize" => {
+            matches!(
+                to,
+                "hirsel-core-front"
+                    | "hirsel-core-ids"
+                    | "hirsel-core-ir"
+                    | "hirsel-guard"
+                    | "hirsel-graph"
+            )
+        }
         _ if from == "hirsel-core-resolve" => matches!(
             to,
             "hirsel-core-syntax" | "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph"

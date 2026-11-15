@@ -2,7 +2,7 @@
 //! remain type keyed; a private symbol binds only immutable callable code words.
 use crate::instances::InstanceSet;
 use crate::{ContentHash, DefPath, InstanceStop, NativeStop};
-use hirsel_core_ir::{Callee, FuncId, Function, Inst, InstanceKey, Module, SigId};
+use hirsel_core_ir::{Callee, FuncId, Function, Identity, Inst, Module, SigId};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,45 +16,50 @@ struct Target {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 struct Known {
-    instance: InstanceKey,
+    instance: Identity,
     // A generated closure belongs to its checked source product, not to an
     // independently demanded definition. Edits of that product change this key.
     owner: ContentHash,
+    /// The code identity of the body: a unit's root's is its instance's, and a
+    /// body a unit carries has its own.
+    code: ContentHash,
 }
 #[derive(Serialize)]
 struct Variant<'a> {
-    base: &'a InstanceKey,
+    base: &'a Identity,
     bindings: &'a BTreeMap<u32, Known>,
 }
 pub(crate) fn prepare<'m>(
     modules: &mut Vec<Cow<'m, Module>>,
     imported: &mut Vec<bool>,
-    reached: &[InstanceKey],
+    reached: &[Identity],
     materialized: &InstanceSet,
     entry: &DefPath,
     limit: usize,
 ) -> Result<Vec<ContentHash>, NativeStop> {
     let mut originals = BTreeMap::new();
+    let mut bodies = BTreeMap::new();
     let mut eligible = BTreeSet::new();
     let mut owners = Vec::with_capacity(modules.len());
     for (unit, (m, instance)) in modules.iter().zip(reached).enumerate() {
-        let product = &materialized.get(instance).product;
+        let body = materialized.get(instance);
+        let product = body.product.as_ref();
         owners.push(crate::native::key(
             "hirsel.callable-owner.v1",
-            &product.key,
+            &product.map(|p| &p.key),
         )?);
-        if product.check.template.is_some() {
+        if product.is_some_and(|p| p.check.template.is_some()) {
             eligible.insert(instance.clone());
         }
+        // A unit's root is its instance; every other body is the unit's own copy,
+        // found by its private code identity.
         for (i, f) in m.functions.iter().enumerate() {
+            let function = FuncId(i as u32);
+            if function == body.function {
+                originals.insert(m.identity(f.instance), Target { unit, function });
+            }
             if f.body.is_some() {
-                originals.insert(
-                    m.instances[f.instance.index()].clone(),
-                    Target {
-                        unit,
-                        function: FuncId(i as u32),
-                    },
-                );
+                bodies.insert(m.code_identity(function), Target { unit, function });
             }
         }
     }
@@ -70,6 +75,7 @@ pub(crate) fn prepare<'m>(
         modules,
         imported,
         originals,
+        bodies,
         owners,
         eligible,
         root,
@@ -83,9 +89,10 @@ pub(crate) fn prepare<'m>(
 fn collect<'m>(
     modules: &mut Vec<Cow<'m, Module>>,
     imported: &mut Vec<bool>,
-    originals: BTreeMap<InstanceKey, Target>,
+    originals: BTreeMap<Identity, Target>,
+    bodies: BTreeMap<ContentHash, Target>,
     owners: Vec<ContentHash>,
-    eligible: BTreeSet<InstanceKey>,
+    eligible: BTreeSet<Identity>,
     root: Target,
     semantic_count: usize,
     limit: usize,
@@ -96,6 +103,7 @@ fn collect<'m>(
         modules,
         imported,
         originals,
+        bodies,
         owners,
         eligible,
         variants: BTreeMap::new(),
@@ -137,9 +145,11 @@ fn collect<'m>(
 struct Work<'a, 'm> {
     modules: &'a mut Vec<Cow<'m, Module>>,
     imported: &'a mut Vec<bool>,
-    originals: BTreeMap<InstanceKey, Target>,
+    originals: BTreeMap<Identity, Target>,
+    /// Every body of every unit, by code identity.
+    bodies: BTreeMap<ContentHash, Target>,
     owners: Vec<ContentHash>,
-    eligible: BTreeSet<InstanceKey>,
+    eligible: BTreeSet<Identity>,
     variants: BTreeMap<ContentHash, Target>,
     pending: Vec<(Target, BTreeMap<u32, Known>)>,
     live: BTreeSet<ContentHash>,
@@ -147,17 +157,21 @@ struct Work<'a, 'm> {
     limit: usize,
 }
 impl Work<'_, '_> {
-    fn instance(&self, t: Target) -> &InstanceKey {
-        let m = &self.modules[t.unit];
-        &m.instances[m.functions[t.function.index()].instance.index()]
+    /// The semantic instance of `f` in `unit`.
+    fn identity(&self, unit: usize, f: FuncId) -> Identity {
+        let m = &self.modules[unit];
+        m.identity(m.functions[f.index()].instance)
+    }
+    fn instance(&self, t: Target) -> Identity {
+        self.identity(t.unit, t.function)
     }
     fn known(&self, unit: usize, f: FuncId) -> Option<Known> {
-        let m = &self.modules[unit];
-        let instance = &m.instances[m.functions[f.index()].instance.index()];
-        let t = self.originals.get(instance)?;
+        let code = self.modules[unit].code_identity(f);
+        let t = self.bodies.get(&code)?;
         Some(Known {
-            instance: instance.clone(),
             owner: self.owners[t.unit],
+            instance: self.identity(unit, f),
+            code,
         })
     }
     fn request(
@@ -169,7 +183,7 @@ impl Work<'_, '_> {
         let hash = crate::native::key(
             "hirsel.callable-code.v1",
             &Variant {
-                base: instance,
+                base: &instance,
                 bindings: &bindings,
             },
         )?;
@@ -179,7 +193,7 @@ impl Work<'_, '_> {
         if self.semantic_count + self.variants.len() >= self.limit {
             return Err(NativeStop::Instances(InstanceStop::Resource {
                 limit: self.limit,
-                next: instance.clone(),
+                next: instance,
             }));
         }
         let mut module = self.modules[base.unit].clone().into_owned();
@@ -203,40 +217,44 @@ impl Work<'_, '_> {
         self.pending.push((target, bindings));
         Ok(target)
     }
-    fn import(&mut self, unit: usize, target: Target, signature: SigId) -> FuncId {
+    fn import(
+        &mut self,
+        unit: usize,
+        target: Target,
+        signature: SigId,
+    ) -> Result<FuncId, NativeStop> {
         let identity = self.modules[target.unit].code_identity(target.function);
-        let instance = self.instance(target).clone();
-        if let Some(i) = self.modules[unit]
-            .functions
-            .iter()
-            .enumerate()
-            .find_map(|(i, _)| {
-                (self.modules[unit].code_identity(FuncId(i as u32)) == identity).then_some(i)
-            })
+        if let Some(i) = (0..self.modules[unit].functions.len())
+            .find(|&i| self.modules[unit].code_identity(FuncId(i as u32)) == identity)
         {
-            return FuncId(i as u32);
+            return Ok(FuncId(i as u32));
         }
+        // The instance's type rows are imported from its own unit by closure: a
+        // row of another unit is numbered otherwise. Imported signatures use the
+        // call site's already-closed type table.
+        let source = &self.modules[target.unit];
+        let instance = source.identity(source.functions[target.function.index()].instance);
+        let key = &source.instances[source.functions[target.function.index()].instance.index()];
+        let closures: Vec<_> = key.arguments.iter().map(|&t| source.closure(t)).collect();
+        let closures: Vec<_> = closures.iter().collect();
         let m = self.modules[unit].to_mut();
-        let row = m
-            .instances
-            .iter()
-            .position(|k| *k == instance)
-            .unwrap_or_else(|| {
-                m.instances.push(instance);
-                m.instances.len() - 1
-            });
+        let row =
+            hirsel_core_front::import_instance(m, &instance, &closures).map_err(|message| {
+                NativeStop::Emit {
+                    definition: instance.definition.clone(),
+                    message,
+                }
+            })?;
         let function = FuncId(m.functions.len() as u32);
         m.functions.push(Function {
-            instance: hirsel_core_ir::InstanceId(row as u32),
+            instance: row,
             signature,
             body: None,
         });
-        // Imported signatures use the call site's already-closed type table.
-        // TypeIds from another unit must never be copied into this one.
-        if identity != m.instances[row].digest() {
+        if identity != instance.digest() {
             m.code_variants.insert(function, identity);
         }
-        function
+        Ok(function)
     }
     fn visit(&mut self, target: Target, bindings: &BTreeMap<u32, Known>) -> Result<(), NativeStop> {
         let unit = target.unit;
@@ -246,7 +264,7 @@ impl Work<'_, '_> {
             || body.calls.iter().any(|call| match call.callee {
                 Callee::Direct(f) => self
                     .eligible
-                    .contains(&m.instances[m.functions[f.index()].instance.index()]),
+                    .contains(&m.identity(m.functions[f.index()].instance)),
                 _ => false,
             });
         let mut edits = Vec::new();
@@ -261,15 +279,15 @@ impl Work<'_, '_> {
                             None => None,
                         };
                         if let Some(k) = known {
-                            edits.push((i, self.originals[&k.instance], None));
+                            edits.push((i, self.bodies[&k.code], None));
                         }
                     }
                     Callee::Direct(f) => {
-                        let key = &m.instances[m.functions[f.index()].instance.index()];
-                        if !self.eligible.contains(key) {
+                        let key = m.identity(m.functions[f.index()].instance);
+                        if !self.eligible.contains(&key) {
                             continue;
                         }
-                        let base = self.originals[key];
+                        let base = self.originals[&key];
                         let b = self.modules[base.unit].functions[base.function.index()]
                             .body
                             .as_ref()
@@ -307,7 +325,7 @@ impl Work<'_, '_> {
                 .unwrap()
                 .calls[i]
                 .signature;
-            let f = self.import(unit, to, sig);
+            let f = self.import(unit, to, sig)?;
             self.modules[unit].to_mut().functions[target.function.index()]
                 .body
                 .as_mut()
@@ -338,10 +356,14 @@ impl Work<'_, '_> {
                 .filter_map(|s| s.finalizer.map(|f| FuncId(f.0))),
         );
         for f in dependencies {
+            if let Some(&t) = self.bodies.get(&m.code_identity(f)) {
+                self.pending.push((t, BTreeMap::new()));
+                continue;
+            }
             if m.code_variants.contains_key(&f) {
                 continue;
             }
-            let t = self.originals[&m.instances[m.functions[f.index()].instance.index()]];
+            let t = self.originals[&m.identity(m.functions[f.index()].instance)];
             self.pending.push((t, BTreeMap::new()));
         }
         Ok(())
@@ -359,9 +381,10 @@ mod tests {
 sig g0 = () -> (u64)
 sig g1 = (ptr, u64) -> (u64)
 sig g2 = (ptr, u64) -> (u64)
+type t0 = own "u64" value u64 { 0: u64 }
 inst n0 = app@1/main/root [] []
-inst n1 = lib@1/main/forward ["u64"] []
-inst n2 = lib@1/main/recurse ["u64"] []
+inst n1 = lib@1/main/forward [t0] []
+inst n2 = lib@1/main/recurse [t0] []
 inst n3 = app@1/main/callback [] []
 fn f0 = n0 g0 {
 b0:
@@ -406,27 +429,29 @@ b0(v0: ptr, v1: u64):
     fn run(m: &Module, limit: usize) -> Result<Vec<Cow<'_, Module>>, NativeStop> {
         let mut units = vec![Cow::Borrowed(m)];
         let mut imported = vec![true];
+        let target = |i: usize| Target {
+            unit: 0,
+            function: FuncId(i as u32),
+        };
         let originals = m
             .functions
             .iter()
             .enumerate()
-            .map(|(i, f)| {
-                (
-                    m.instances[f.instance.index()].clone(),
-                    Target {
-                        unit: 0,
-                        function: FuncId(i as u32),
-                    },
-                )
-            })
+            .map(|(i, f)| (m.identity(f.instance), target(i)))
             .collect();
-        let eligible = [m.instances[1].clone(), m.instances[2].clone()]
+        let bodies = (0..m.functions.len())
+            .filter(|&i| m.functions[i].body.is_some())
+            .map(|i| (m.code_identity(FuncId(i as u32)), target(i)))
+            .collect();
+        let eligible = [1, 2]
+            .map(|i| m.identity(hirsel_core_ir::InstanceId(i)))
             .into_iter()
             .collect();
         collect(
             &mut units,
             &mut imported,
             originals,
+            bodies,
             vec![ContentHash::default()],
             eligible,
             Target {
@@ -469,9 +494,10 @@ b0(v0: ptr, v1: u64):
                 .iter()
                 .all(|c| matches!(c.callee, Callee::Direct(_)))
         );
-        assert_ne!(units[1].code_identity(FuncId(4)), m.instances[1].digest());
+        let forward = m.identity(hirsel_core_ir::InstanceId(1)).digest();
+        assert_ne!(units[1].code_identity(FuncId(4)), forward);
         // The original row continues to denote the unspecialised function value.
-        assert_eq!(units[1].code_identity(FuncId(1)), m.instances[1].digest());
+        assert_eq!(units[1].code_identity(FuncId(1)), forward);
     }
     #[test]
     fn private_growth_spends_the_existing_instance_limit() {
@@ -567,9 +593,15 @@ fn unknown(f: fn(u64) -> u64) -> u64 { forward(41u64, f) }
             let entry = DefPath::from_full(&format!("app@1/main/{entry}")).unwrap();
             let reached = product.reachable(&entry, 64).unwrap();
             let keys = reached.require().unwrap();
-            let mut modules = keys
+            let mut modules: Vec<_> = keys
                 .iter()
                 .map(|k| Cow::Borrowed(reached.materialized.get(k).ir()))
+                .collect();
+            // Bodies a unit carries already have their own code identity; only the
+            // collector's variants are new.
+            let carried: BTreeSet<_> = modules
+                .iter()
+                .flat_map(|m| m.code_variants.values().copied())
                 .collect();
             let mut imported = vec![false; keys.len()];
             prepare(
@@ -589,7 +621,8 @@ fn unknown(f: fn(u64) -> u64) -> u64 { forward(41u64, f) }
                         .iter()
                         .enumerate()
                         .filter(|(_, f)| f.body.is_some())
-                        .filter_map(|(i, _)| m.code_variants.get(&FuncId(i as u32))))
+                        .filter_map(|(i, _)| m.code_variants.get(&FuncId(i as u32)))
+                        .filter(|code| !carried.contains(code)))
                     .count(),
                 expected
             );

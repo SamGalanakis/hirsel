@@ -18,3 +18,15 @@ pub fn sum_of[F](s: StaticFn[F]) -> u64 {
     }
     t
 }
+
+pub fn echo(b: Bytes) -> Result[Bytes, Capacity] {
+    Ok(list.new())
+}
+
+pub fn mute(b: Bytes) -> Result[Bytes, Capacity] {
+    Ok(list.new())
+}
+
+pub fn echo_code() -> StaticFn[fn(Bytes) -> Result[Bytes, Capacity]] {
+    code.describe(echo)
+}

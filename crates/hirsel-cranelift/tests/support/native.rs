@@ -83,7 +83,7 @@ fn declare_functions(source: &mut String, module: &c::Module) {
         write!(
             source,
             "extern {result} {}(void*",
-            symbol(&module.instances[f.instance.index()])
+            module.identity(f.instance).symbol()
         )
         .unwrap();
         if s.dest.is_some() {
@@ -294,7 +294,7 @@ fn execute_cases_with_bindings(
                     )
                 })
                 .unwrap_or_default();
-            write!(source, "}}; static uint8_t run{}(HirselCoreContext *ctx,void *destination,void *input) {{ struct input{} *args=input; {returned_place} *({result}*)destination={} (ctx", f.0, f.0, symbol(&module.instances[function.instance.index()])).unwrap();
+            write!(source, "}}; static uint8_t run{}(HirselCoreContext *ctx,void *destination,void *input) {{ struct input{} *args=input; {returned_place} *({result}*)destination={} (ctx", f.0, f.0, module.identity(function.instance).symbol()).unwrap();
             if signature.dest.is_some() {
                 source.push_str(",returned_place");
             }
@@ -488,7 +488,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                     source,
                     "struct r{} value = {}(ctx",
                     function.signature.0,
-                    symbol(&module.instances[function.instance.index()])
+                    module.identity(function.instance).symbol()
                 )
                 .unwrap();
                 if s.dest.is_some() {
@@ -498,7 +498,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                 write!(
                     source,
                     "{result}{}(ctx",
-                    symbol(&module.instances[function.instance.index()])
+                    module.identity(function.instance).symbol()
                 )
                 .unwrap();
                 if s.dest.is_some() {
@@ -1291,10 +1291,10 @@ b0(v0: u64):
         let mut addends = Vec::new();
         for section in file.sections() {
             for (_, relocation) in section.relocations() {
-                if let cranelift_object::object::RelocationTarget::Symbol(symbol) =
+                if let cranelift_object::object::RelocationTarget::Symbol(target) =
                     relocation.target()
                     && file
-                        .symbol_by_index(symbol)
+                        .symbol_by_index(target)
                         .unwrap()
                         .name()
                         .unwrap()
@@ -1372,7 +1372,7 @@ b0(v0: u64):
             );
         }
         for (index, sequence) in debug.sequences.iter().enumerate() {
-            let name = symbol(&module.instances[index]);
+            let name = module.identity(hirsel_core_ir::InstanceId(index as u32)).symbol();
             let function = file.symbol_by_name(&name).unwrap();
             assert_eq!(sequence.range.begin, function.address());
             assert_eq!(sequence.range.end - sequence.range.begin, function.size());

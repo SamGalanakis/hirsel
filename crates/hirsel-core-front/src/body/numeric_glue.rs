@@ -74,10 +74,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 });
             }
             let definition = DefPath::core(&format!("int.${}", g.path.0.name));
+            let mut arguments = Vec::with_capacity(tys.len());
+            for &ty in tys {
+                arguments.push(self.e.type_row(self.p, &mut self.t, ty)?);
+            }
             let function = self.e.add_function_abi(
                 InstanceKey {
                     definition,
-                    types: tys.iter().map(|&ty| self.name(ty)).collect(),
+                    arguments,
                     dictionaries: vec![],
                 },
                 Signature {
@@ -96,10 +100,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .entry(function)
                 .or_insert_with(|| GenericCall {
                     operation: None,
-                    arguments: tys
-                        .iter()
-                        .map(|&ty| NameRecipe::of(self.p, &self.t, ty))
-                        .collect(),
                     dictionaries: vec![],
                 });
             let abi = NumericAbi {

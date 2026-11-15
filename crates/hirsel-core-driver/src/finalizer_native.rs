@@ -32,7 +32,7 @@ fn finalizer_entry(backend: Backend, carrier: &str) {
         assert!(instances.iter().any(|k| k.definition == DefPath::from_full(finalizer).unwrap()), "missing finalizer: {instances:?}");
         assert!(instances.iter().any(|k| k.definition == DefPath::from_full("app@1/main/divide").unwrap()), "missing finalizer callee: {instances:?}");
         if carrier == "generic" {
-            assert!(instances.iter().any(|k| k.definition.0.name == "dispose" && !k.types.is_empty()));
+            assert!(instances.iter().any(|k| k.definition.0.name == "dispose" && !k.closures.is_empty()));
         }
         let output = Command::new(&built.executable).output().unwrap();
         assert_eq!(output.status.code(), Some(if divisor == 0 { 101 } else { 7 }), "{carrier}: {:?}", output);

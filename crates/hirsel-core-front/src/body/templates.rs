@@ -3,7 +3,8 @@
 //! Layout rows and size constants are substituted, then scalar addresses become
 //! values. Source is never opened here.
 use super::*;
-use hirsel_core_layout::{Body as ShapeBody, FieldTy, FuncRef, Shape};
+use hirsel_core_ir::{Closure, ClosureHook, Identity};
+use hirsel_core_layout::{Body as ShapeBody, FieldTy, FuncRef};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -142,30 +143,35 @@ impl NameRecipe {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GenericCall {
     pub operation: Option<(key_glue::KeyOp, TypeId)>,
-    pub arguments: Vec<NameRecipe>,
     pub dictionaries: Vec<NameRecipe>,
 }
 
-/// An instance's type arguments are shapes already published by their owner modules,
-/// not source types. This is the only additional input specialization needs from its
-/// caller. A resource argument's finalizer is named by its owner's function row and
-/// imported by instance key (FAIL-11).
+/// The instance `identity` of the generic body `function` of `source`, whose type
+/// arguments are `arguments` (the closure of each, in parameter order): the closures'
+/// rows are imported into a copy of `source` and the body is substituted. No shape is
+/// read from any other module, and none is found by a name alone.
 pub fn materialize(
     source: &Module,
     function: FuncId,
     template: &GenericTemplate,
-    key: &InstanceKey,
-    arguments: &[(&Module, TypeRef)],
+    identity: &Identity,
+    arguments: &[&Closure],
 ) -> Result<(Module, FuncId), String> {
-    crate::cost_scope!("instance", format!("{key:?}"));
+    crate::cost_scope!("instance", format!("{:?}", identity.definition));
     if arguments.len() != template.parameters.len() {
         return Err("the entry has undetermined generic type arguments".into());
     }
     let mut module = source.clone();
+    let mut names = Names::of(&module);
     let roots = arguments
         .iter()
-        .map(|&(owner, root)| import_type(&mut module, owner, root, &mut HashMap::default()))
-        .collect::<Vec<_>>();
+        .map(|closure| import(&mut module, &mut names, closure))
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = InstanceKey {
+        definition: identity.definition.clone(),
+        arguments: roots.clone(),
+        dictionaries: identity.dictionaries.clone(),
+    };
     // A body that calls its own instance (a region-only generic's recursion erases to
     // the instance's own key, MEM-6) already holds a signature-only row of that key:
     // the body fills it, so the unit defines one function per link name.
@@ -173,7 +179,7 @@ pub fn materialize(
     let target = match module
         .functions
         .iter()
-        .position(|g| g.body.is_none() && &module.instances[g.instance.index()] == key)
+        .position(|g| g.body.is_none() && module.instances[g.instance.index()] == key)
     {
         Some(row) => {
             module.functions[row].signature = signature;
@@ -181,7 +187,7 @@ pub fn materialize(
         }
         None => {
             let instance = InstanceId(module.instances.len() as u32);
-            module.instances.push(key.clone());
+            module.instances.push(key);
             module.functions.push(Function {
                 instance,
                 signature,
@@ -190,7 +196,7 @@ pub fn materialize(
             FuncId(module.functions.len() as u32 - 1)
         }
     };
-    fill(&mut module, function, target, template, &roots)?;
+    fill(&mut module, &mut names, function, target, template, &roots)?;
     fn retire(module: &mut Module, source: FuncId, template: &GenericTemplate) {
         module.functions[source.index()].body = None;
         for (&nested, template) in &template.nested {
@@ -198,76 +204,185 @@ pub fn materialize(
         }
     }
     retire(&mut module, function, template);
-    // A shape at the template's rigid parameters (`$i`) is dead once substituted; its
-    // finalizer's or clone body's rigid instance must not become a dependency of this
-    // unit.
-    let rigid = |module: &Module, f: Option<FuncRef>| {
-        f.is_some_and(|f| {
-            let key = &module.instances[module.functions[f.0 as usize].instance.index()];
-            key.types.iter().any(|name| name.contains('$'))
-        })
-    };
-    for t in 0..module.types.len() {
-        if rigid(&module, module.types[t].finalizer) {
-            module.types[t].finalizer = None;
-        }
-        if rigid(&module, module.types[t].clone) {
-            module.types[t].clone = None;
-        }
-    }
+    clear_rigid(&mut module);
     Ok((module, target))
 }
 
-fn import_type(
-    module: &mut Module,
-    owner: &Module,
-    root: TypeRef,
-    seen: &mut HashMap<TypeRef, TypeRef>,
-) -> TypeId {
-    if let Some(&row) = seen.get(&root) {
-        return TypeId(row.0);
-    }
-    let shape = &owner.types[root.index()];
-    if let Some(row) = module.types.iter().position(|s| s.name == shape.name) {
-        return TypeId(row as u32);
-    }
-    let row = TypeRef(module.types.len() as u32);
-    seen.insert(root, row);
-    module.types.push(shape.clone());
-    let mut shape = shape.clone();
-    shape.map_refs(&mut |id| TypeRef(import_type(module, owner, id, seen).0));
-    shape.finalizer = shape
-        .finalizer
-        .map(|f| FuncRef(import_function(module, owner, FuncId(f.0)).0));
-    shape.clone = shape
-        .clone
-        .map(|f| FuncRef(import_function(module, owner, FuncId(f.0)).0));
-    module.types[row.index()] = shape;
-    TypeId(row.0)
+/// The glue instance `identity` (an operation of [`key_glue::KeyOp::of`]): a module
+/// of its arguments' closures and the operation's one derived body. Every other
+/// operation the body calls is a signature-only row, an instance of its own.
+pub fn materialize_glue(
+    identity: &Identity,
+    arguments: &[&Closure],
+) -> Result<(Module, FuncId), String> {
+    let mut module = Module::default();
+    let mut names = Names::of(&module);
+    let roots = arguments
+        .iter()
+        .map(|closure| import(&mut module, &mut names, closure))
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = InstanceKey {
+        definition: identity.definition.clone(),
+        arguments: roots,
+        dictionaries: identity.dictionaries.clone(),
+    };
+    let (op, ty) = key_glue::KeyOp::of(&key)
+        .ok_or_else(|| format!("{} is not a glue operation", identity.definition))?;
+    let f = key_glue::derive_glue(&mut module, ty, op).map_err(str::to_owned)?;
+    Ok((module, f))
 }
 
-/// The row of `owner`'s function `f` in `module`: the row with its instance key, or a
-/// new signature-only row the instance collector resolves as any other callee.
-fn import_function(module: &mut Module, owner: &Module, f: FuncId) -> FuncId {
-    let from = &owner.functions[f.index()];
-    let key = &owner.instances[from.instance.index()];
+/// Whether instance `key` names a template's rigid parameter (`$i`).
+fn rigid(module: &Module, key: &InstanceKey) -> bool {
+    key.arguments
+        .iter()
+        .any(|t| module.types[t.index()].name.contains('$'))
+}
+
+/// The row of instance `identity` in `module`, its arguments' closures imported:
+/// the module's row of that instance, or a new one. A row is never copied from
+/// another module, whose type rows are numbered otherwise.
+pub fn import_instance(
+    module: &mut Module,
+    identity: &Identity,
+    arguments: &[&Closure],
+) -> Result<InstanceId, String> {
+    let mut names = Names::of(module);
+    let key = InstanceKey {
+        definition: identity.definition.clone(),
+        arguments: arguments
+            .iter()
+            .map(|closure| import(module, &mut names, closure))
+            .collect::<Result<_, _>>()?,
+        dictionaries: identity.dictionaries.clone(),
+    };
+    Ok(match module.instances.iter().position(|k| *k == key) {
+        Some(row) => InstanceId(row as u32),
+        None => {
+            module.instances.push(key);
+            InstanceId(module.instances.len() as u32 - 1)
+        }
+    })
+}
+
+/// A shape at a template's rigid parameters (`$i`) is dead once substituted; its
+/// finalizer's or clone body's rigid instance must not become a dependency of the
+/// unit. Closures are taken only after this clear.
+fn clear_rigid(module: &mut Module) {
+    let rigid = |module: &Module, f: Option<FuncRef>| {
+        f.is_some_and(|f| {
+            rigid(
+                module,
+                &module.instances[module.functions[f.0 as usize].instance.index()],
+            )
+        })
+    };
+    for t in 0..module.types.len() {
+        if rigid(module, module.types[t].finalizer) {
+            module.types[t].finalizer = None;
+        }
+        if rigid(module, module.types[t].clone) {
+            module.types[t].clone = None;
+        }
+    }
+}
+
+/// The materialising module's own row names. A module's producer gives each name one
+/// row (lowering's `of`); rows that enter from a closure are checked against the
+/// module's row of their name before they share it ([`import`]).
+pub(super) struct Names(HashMap<String, TypeId>);
+impl Names {
+    pub(super) fn of(module: &Module) -> Self {
+        let mut names = HashMap::default();
+        for (i, shape) in module.types.iter().enumerate() {
+            names.entry(shape.name.clone()).or_insert(TypeId(i as u32));
+        }
+        Self(names)
+    }
+    fn get(&self, name: &str) -> Option<TypeId> {
+        self.0.get(name).copied()
+    }
+    fn add(&mut self, name: String, row: TypeId) {
+        self.0.entry(name).or_insert(row);
+    }
+}
+
+/// The rows of `closure` in `module`: each position is the module's row of its name or
+/// a new row; then the module's closure of the root must be `closure` itself, so a row
+/// of the same name that is another type is refused rather than shared.
+fn import(module: &mut Module, names: &mut Names, closure: &Closure) -> Result<TypeId, String> {
+    let mut rows = Vec::with_capacity(closure.rows.len());
+    let mut fresh = vec![];
+    for (position, row) in closure.rows.iter().enumerate() {
+        rows.push(match names.get(&row.shape.name) {
+            Some(existing) => existing,
+            None => {
+                let id = TypeId(module.types.len() as u32);
+                module.types.push(row.shape.clone());
+                names.add(row.shape.name.clone(), id);
+                fresh.push((position, id));
+                id
+            }
+        });
+    }
+    for (position, id) in fresh {
+        let row = &closure.rows[position];
+        let mut shape = row.shape.clone();
+        shape.map_refs(&mut |r| TypeRef(rows[r.index()].0));
+        let [finalizer, clone] = &row.hooks;
+        shape.finalizer = finalizer
+            .as_ref()
+            .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
+        shape.clone = clone
+            .as_ref()
+            .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
+        module.types[id.index()] = shape;
+    }
+    let root = rows[0];
+    if module.closure(root).hash != closure.hash {
+        return Err(format!(
+            "instance argument {}: this module's row of that name is another type",
+            closure.rows[0].shape.name
+        ));
+    }
+    Ok(root)
+}
+
+/// The row of a closure row's hook in `module`: the row of its instance, or a new
+/// signature-only row the instance collector resolves as any other callee.
+fn import_hook(module: &mut Module, rows: &[TypeId], hook: &ClosureHook) -> FuncId {
+    let key = InstanceKey {
+        definition: hook.definition.clone(),
+        arguments: hook.arguments.iter().map(|&p| rows[p as usize]).collect(),
+        dictionaries: hook.dictionaries.clone(),
+    };
     if let Some(row) = module
         .functions
         .iter()
-        .position(|g| &module.instances[g.instance.index()] == key)
+        .position(|g| module.instances[g.instance.index()] == key)
     {
         return FuncId(row as u32);
     }
-    let signature = &owner.signatures[from.signature.index()];
-    let signature = match module.signatures.iter().position(|s| s == signature) {
+    let mut signature = hook.signature.clone();
+    for param in &mut signature.params {
+        if let Param::Address {
+            place: PlaceTy::Declared(id),
+            ..
+        } = param
+        {
+            *id = rows[id.index()];
+        }
+    }
+    signature.dest = signature.dest.map(|id| rows[id.index()]);
+    let signature = match module.signatures.iter().position(|s| *s == signature) {
         Some(i) => SigId(i as u32),
         None => {
-            module.signatures.push(signature.clone());
+            module.signatures.push(signature);
             SigId(module.signatures.len() as u32 - 1)
         }
     };
     let instance = InstanceId(module.instances.len() as u32);
-    module.instances.push(key.clone());
+    module.instances.push(key);
     module.functions.push(Function {
         instance,
         signature,
@@ -278,6 +393,7 @@ fn import_function(module: &mut Module, owner: &Module, f: FuncId) -> FuncId {
 
 struct Substitution<'a> {
     module: &'a mut Module,
+    rows: &'a mut Names,
     parameters: &'a [Option<TypeId>],
     arguments: &'a [TypeId],
     names: Vec<String>,
@@ -304,13 +420,13 @@ impl Substitution<'_> {
         };
         let mut shape = self.module.types[old.index()].clone();
         shape.name = name.render(&self.names);
-        if let Some(row) = self.module.types.iter().position(|s| s.name == shape.name) {
-            let ty = TypeId(row as u32);
+        if let Some(ty) = self.rows.get(&shape.name) {
             self.types.insert(old, ty);
             return ty;
         }
         let row = TypeId(self.module.types.len() as u32);
         self.types.insert(old, row);
+        self.rows.add(shape.name.clone(), row);
         self.module.types.push(shape.clone());
         shape.held = shape.held.map(|held| self.field(&held, false));
         self.module.types[row.index()].held = shape.held.clone();
@@ -408,11 +524,11 @@ impl Substitution<'_> {
             return id;
         }
         let function = self.module.functions[old.index()].clone();
-        let key = &self.module.instances[function.instance.index()];
+        let key = self.module.instances[function.instance.index()].clone();
         if let Some(template) = self.nested.get(&old) {
             let key = InstanceKey {
                 definition: key.definition.clone(),
-                types: self.names.clone(),
+                arguments: self.arguments.to_vec(),
                 dictionaries: vec![],
             };
             if let Some(i) = self
@@ -434,7 +550,7 @@ impl Substitution<'_> {
                 body: None,
             });
             self.functions.insert(old, row);
-            if let Err(error) = fill(self.module, old, row, template, self.arguments) {
+            if let Err(error) = fill(self.module, self.rows, old, row, template, self.arguments) {
                 self.error = Some(error);
             }
             return row;
@@ -444,11 +560,7 @@ impl Substitution<'_> {
         };
         let key = InstanceKey {
             definition: key.definition.clone(),
-            types: call
-                .arguments
-                .iter()
-                .map(|name| name.render(&self.names))
-                .collect(),
+            arguments: key.arguments.iter().map(|&t| self.ty(t)).collect(),
             dictionaries: call
                 .dictionaries
                 .iter()
@@ -459,16 +571,9 @@ impl Substitution<'_> {
             self.signature(function.signature);
             let ty = self.ty(ty);
             if !key_glue::inline_scalar(self.module, ty, op) {
-                return match key_glue::ensure(self.module, ty, op) {
-                    Ok(row) => {
-                        self.functions.insert(old, row);
-                        row
-                    }
-                    Err(error) => {
-                        self.error = Some(error.into());
-                        old
-                    }
-                };
+                let row = key_glue::glue_row(self.module, ty, op);
+                self.functions.insert(old, row);
+                return row;
             }
         }
         if let Some(id) = self
@@ -520,6 +625,7 @@ impl Substitution<'_> {
 
 fn fill(
     module: &mut Module,
+    rows: &mut Names,
     source: FuncId,
     target: FuncId,
     template: &GenericTemplate,
@@ -536,6 +642,7 @@ fn fill(
         .collect();
     let mut s = Substitution {
         module,
+        rows,
         parameters: &template.parameters,
         arguments,
         names,
@@ -708,23 +815,27 @@ impl Emitter {
             let function = &self.module.functions[f.index()];
             let key = &self.module.instances[function.instance.index()];
             if function.body.is_none()
-                && !key.types.is_empty()
+                && let Some((op, ty)) = key_glue::KeyOp::of(key)
+                && !rigid(&self.module, key)
+            {
+                // A glue row is an instance of its own: derive it in place. A
+                // region-only generic's call row is its instance's row (MEM-6).
+                key_glue::ensure(&mut self.module, ty, op).map_err(str::to_owned)?;
+            } else if function.body.is_none()
+                && !key.arguments.is_empty()
                 && !self.generic_calls.contains_key(&f)
                 && let Some((source, template)) = self.templates.get(&key.definition).cloned()
             {
-                let arguments = key
-                    .types
-                    .iter()
-                    .map(|name| {
-                        self.module
-                            .types
-                            .iter()
-                            .position(|ty| &ty.name == name)
-                            .map(|i| TypeId(i as u32))
-                            .ok_or_else(|| format!("unpublished instance type {name}"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                fill(&mut self.module, source, f, &template, &arguments)?;
+                let arguments = key.arguments.clone();
+                let mut rows = Names::of(&self.module);
+                fill(
+                    &mut self.module,
+                    &mut rows,
+                    source,
+                    f,
+                    &template,
+                    &arguments,
+                )?;
             }
             if !sources.contains(&f)
                 && let Some(body) = &self.module.functions[f.index()].body
@@ -806,6 +917,7 @@ impl Emitter {
 mod tests {
     use super::*;
     use hirsel_core_ir::wf;
+    use hirsel_core_layout::Shape;
 
     /// FAIL-11 through materialization: a resource argument's finalizer is its owner's
     /// function row, which the generic's own module does not have, at an index of the
@@ -844,12 +956,13 @@ mod tests {
         }
         let (source, template) = eat.unwrap();
         let mut owner = owner.module;
-        let key = owner
+        let instance = owner
             .instances
             .iter()
-            .find(|k| k.definition.0.name == "eat" && !k.types.is_empty())
-            .unwrap()
-            .clone();
+            .position(|k| k.definition.0.name == "eat" && !k.arguments.is_empty())
+            .unwrap();
+        let identity = owner.identity(InstanceId(instance as u32));
+        let root = owner.instances[instance].arguments[0];
         // The owner's rows sit one function later than its own numbering would put them.
         owner.functions.insert(0, owner.functions[0].clone());
         for shape in &mut owner.types {
@@ -857,30 +970,24 @@ mod tests {
                 f.0 += 1;
             }
         }
-        let root = owner
-            .types
-            .iter()
-            .position(|s| s.name == key.types[0])
-            .unwrap();
-        let finalizer = |m: &Module, ty: usize| {
-            let f = m.types[ty].finalizer.unwrap();
-            m.instances[m.functions[f.0 as usize].instance.index()].clone()
+        let finalizer = |m: &Module, ty: TypeId| {
+            let f = m.types[ty.index()].finalizer.unwrap();
+            m.render_instance(m.functions[f.0 as usize].instance)
         };
-        let (module, _) = materialize(
+        let (module, target) = materialize(
             &generic.module,
             source,
             &template,
-            &key,
-            &[(&owner, TypeRef(root as u32))],
+            &identity,
+            &[&owner.closure(root)],
         )
         .unwrap();
         wf::module(&module).unwrap();
-        let imported = module
-            .types
-            .iter()
-            .position(|s| s.name == key.types[0])
-            .unwrap();
-        assert_eq!(finalizer(&module, imported), finalizer(&owner, root));
+        let key = &module.instances[module.functions[target.index()].instance.index()];
+        assert_eq!(
+            finalizer(&module, key.arguments[0]),
+            finalizer(&owner, root)
+        );
     }
 
     #[test]
@@ -936,23 +1043,18 @@ mod tests {
         // source-level sizeof feature. The record's logical 9 bytes pad to 16.
         for (logical, expected) in [(true, 9), (false, 16)] {
             template.copies = vec![CopySize { value, ty, logical }];
-            let key = InstanceKey {
-                definition: p.fns[f].path.clone(),
-                types: vec!["Padded".into()],
-                dictionaries: vec![],
-            };
             let owner = Module {
                 types: vec![shape.clone()],
                 ..Module::default()
             };
-            let (module, target) = materialize(
-                &emitter.module,
-                source,
-                &template,
-                &key,
-                &[(&owner, TypeRef(0))],
-            )
-            .unwrap();
+            let closure = owner.closure(TypeId(0));
+            let identity = Identity {
+                definition: p.fns[f].path.clone(),
+                dictionaries: vec![],
+                closures: vec![closure.hash],
+            };
+            let (module, target) =
+                materialize(&emitter.module, source, &template, &identity, &[&closure]).unwrap();
             let report = hirsel_core_ir::eval::run(&module, target, &[0], u64::MAX);
             assert_eq!(
                 report.outcome,
@@ -975,23 +1077,18 @@ mod tests {
             ty,
             logical: true,
         }];
-        let key = InstanceKey {
-            definition: p.fns[f].path.clone(),
-            types: vec!["Empty".into()],
-            dictionaries: vec![],
-        };
         let owner = Module {
             types: vec![empty],
             ..Module::default()
         };
-        let (module, target) = materialize(
-            &emitter.module,
-            source,
-            &template,
-            &key,
-            &[(&owner, TypeRef(0))],
-        )
-        .unwrap();
+        let closure = owner.closure(TypeId(0));
+        let identity = Identity {
+            definition: p.fns[f].path.clone(),
+            dictionaries: vec![],
+            closures: vec![closure.hash],
+        };
+        let (module, target) =
+            materialize(&emitter.module, source, &template, &identity, &[&closure]).unwrap();
         assert_eq!(
             hirsel_core_ir::eval::run(&module, target, &[0], u64::MAX).outcome,
             hirsel_core_ir::eval::Outcome::Returned(vec![0])

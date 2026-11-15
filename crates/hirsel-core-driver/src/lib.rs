@@ -9,6 +9,8 @@ pub mod installation;
 mod product;
 pub use product::PackageProduct;
 mod callable_variants;
+#[cfg(test)]
+mod carried_law;
 mod check_index;
 mod instances;
 mod native;
@@ -27,7 +29,7 @@ pub use test_run::{Runner, TestOutcome};
 mod meter;
 pub use diagnostics::{Diagnostic, IncompleteDiagnostic, ResourceDiagnostic, SourceSite};
 pub use image::{CoreImage, LibraryInput};
-pub use instances::{InstanceStop, ShapeClosures, collect_instances};
+pub use instances::{InstanceStop, collect_instances};
 mod reuse;
 mod store;
 use bincode::Options;
@@ -53,6 +55,8 @@ use std::sync::Arc;
 
 #[cfg(test)]
 hirsel_guard::install!();
+#[cfg(test)]
+mod closure_laws;
 #[cfg(test)]
 mod tests;
 

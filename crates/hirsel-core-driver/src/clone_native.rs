@@ -59,7 +59,7 @@ fn clone_product(backend: Backend) {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let reached = product.reachable(&entry, 64).unwrap();
     assert!(reached.accepted(), "{}", serde_json::to_string(&reached.first_stops).unwrap());
-    assert!(reached.instances.as_ref().unwrap().iter().any(|i| i.definition == path && !i.types.is_empty()));
+    assert!(reached.instances.as_ref().unwrap().iter().any(|i| i.definition == path && !i.closures.is_empty()));
     assert!(product.tests().next().is_none());
     let built = product.build(&entry, &native_options(backend, app.path())).unwrap();
     run_clean(&built.executable, 0);

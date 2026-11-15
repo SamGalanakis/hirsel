@@ -500,6 +500,7 @@ impl FunctionEmitter<'_> {
         self.abi = Return::internal_on_target(self.abi.target, &sig.results);
         let (params, locals) = self.abi.parameters(sig, facts);
         let attrs = FnAttrs {
+            linkage: Linkage::WeakOdr,
             subprogram: debug.map(|(scope, _)| scope),
             ..FnAttrs::default()
         };

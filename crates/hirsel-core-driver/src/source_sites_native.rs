@@ -161,3 +161,55 @@ fn failure_sites_relocated_cranelift() { failure_sites_relocated(Backend::Cranel
 #[test]
 #[ignore = "explicit native integration target"]
 fn failure_sites_relocated_llvm() { failure_sites_relocated(Backend::Llvm); }
+
+// A function value's adapter is generated code, so a core callee that fails through
+// it reports the nearest non-core caller's site (driver README): the call through the
+// value, not the place the value was named. Every unit that carries one adapter
+// defines it weak, so a site read from the adapter's own text would be whichever
+// maker's copy the linker kept: with two makers, one of them never run. Positions
+// are hand-counted in each source.
+fn failure_sites_adapter(backend: Backend, optimize: bool, debug_lines: bool) {
+    const APPLY: &str = "fn apply(f: fn(take Option[u64]) -> u64, x: Option[u64]) -> u64 {\n    f(x)\n}\n";
+    let cases = [
+        // One maker, a core callee: the call `f(x)`, 2:5.
+        ("pub fn main() -> Result[(), Exit] {\n    let none: Option[u64] = None\n    if apply(option.unwrap, none) == 0u64 { Ok(()) } else { Error(Exit(status: 7)) }\n}\n", 2, 5),
+        // A user callee fails in its own item, 5:5.
+        ("fn mine(take x: Option[u64]) -> u64 {\n    option.unwrap(x)\n}\npub fn main() -> Result[(), Exit] {\n    let none: Option[u64] = None\n    if apply(mine, none) == 0u64 { Ok(()) } else { Error(Exit(status: 7)) }\n}\n", 5, 5),
+        // Two units make one adapter and only `second` runs: still `f(x)`, 2:5.
+        ("fn first() -> u64 {\n    let none: Option[u64] = None\n    apply(option.unwrap, none)\n}\nfn second() -> u64 {\n    let none: Option[u64] = None\n    apply(option.unwrap, none)\n}\npub fn main(argv: Args) -> Result[(), Exit] {\n    let v = if args.len(argv) > 5u64 { first() } else { second() }\n    if v == 0u64 { Ok(()) } else { Error(Exit(status: 7)) }\n}\n", 2, 5),
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for (i, (main, line, column)) in cases.into_iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = source_request(&format!("{APPLY}{main}"), dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "case {i}: {:?} {:?}", product.diagnostics, product.incomplete);
+        let mut options = native_options(backend, dir.path());
+        options.optimize = optimize;
+        options.debug_lines = debug_lines;
+        let built = product.build(&entry, &options).unwrap();
+        let output = Command::new(&built.executable).output().unwrap();
+        assert_eq!(output.status.code(), Some(101), "case {i}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("Unwrap at app@1/main.hirsel:{line}:{column}\n"),
+            "case {i}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_adapter_cranelift_dev() { failure_sites_adapter(Backend::Cranelift, false, false); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_adapter_cranelift_dev_lines() { failure_sites_adapter(Backend::Cranelift, false, true); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_adapter_llvm_dev() { failure_sites_adapter(Backend::Llvm, false, false); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_adapter_llvm_release_lines() { failure_sites_adapter(Backend::Llvm, true, true); }

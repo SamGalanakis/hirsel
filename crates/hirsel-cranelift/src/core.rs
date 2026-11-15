@@ -69,19 +69,6 @@ pub struct Options<'a> {
 /// A relocatable object. Its symbols use CoreIR instance identities.
 pub use c::source::NativeObject as Object;
 
-/// The external name of a closed CoreIR instance.
-pub fn symbol(instance: &InstanceKey) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut name = [0u8; 65];
-    name[0] = b'h';
-    for (i, byte) in instance.digest().0.into_iter().enumerate() {
-        name[1 + i * 2] = HEX[(byte >> 4) as usize];
-        name[2 + i * 2] = HEX[(byte & 15) as usize];
-    }
-    // SAFETY: the prefix and every table entry are ASCII.
-    unsafe { String::from_utf8_unchecked(name.to_vec()) }
-}
-
 fn unsupported(message: impl Into<String>) -> Error {
     Error::Unsupported(message.into())
 }
@@ -168,7 +155,16 @@ pub fn emit_object_with_layouts(
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
 ) -> Result<Object> {
-    emit(input, layouts, options, object_key, false, false, &())
+    emit(
+        input,
+        &input.link_symbols(),
+        layouts,
+        options,
+        object_key,
+        false,
+        false,
+        &(),
+    )
 }
 
 /// Native fixture entry. Trace instrumentation is absent from ordinary emission.
@@ -193,6 +189,7 @@ pub fn emit_object_for_test_observed(
 ) -> Result<Object> {
     emit(
         input,
+        &input.link_symbols(),
         layouts,
         options,
         object_key,
@@ -211,11 +208,23 @@ pub fn emit_object_profiled(
     object_key: hirsel_core_ids::ContentHash,
     observer: &impl profile::Observer,
 ) -> Result<Object> {
-    emit(input, layouts, options, object_key, false, false, observer)
+    emit(
+        input,
+        &input.link_symbols(),
+        layouts,
+        options,
+        object_key,
+        false,
+        false,
+        observer,
+    )
 }
 /// Optional diagnostic emission; timings of these objects are not performance samples.
+/// `symbols` are `input`'s [`c::Module::link_symbols`], which a caller that already
+/// holds its rows' identities names without recomputing their closures.
 pub fn emit_object_with_charge_observation(
     input: &c::Module,
+    symbols: &[String],
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
@@ -223,6 +232,7 @@ pub fn emit_object_with_charge_observation(
 ) -> Result<Object> {
     emit(
         input,
+        symbols,
         layouts,
         options,
         object_key,
@@ -233,6 +243,7 @@ pub fn emit_object_with_charge_observation(
 }
 fn emit(
     input: &c::Module,
+    symbols: &[String],
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
@@ -270,14 +281,16 @@ fn emit(
     };
     let declarations = observer.enter("declarations");
     let mut functions = Vec::with_capacity(input.functions.len());
-    for f in &input.functions {
-        let name = symbol(&input.instances[f.instance.index()]);
+    debug_assert_eq!(symbols.len(), input.functions.len());
+    for (f, name) in input.functions.iter().zip(symbols) {
         functions.push(
             object
                 .declare_function(
-                    &name,
+                    name,
+                    // Every unit that carries a body defines it weak by its code
+                    // identity; the linker keeps one.
                     if f.body.is_some() {
-                        Linkage::Export
+                        Linkage::Preemptible
                     } else {
                         Linkage::Import
                     },
@@ -353,6 +366,7 @@ fn emit(
             debug_functions.push(debug::function(
                 input,
                 f,
+                symbols[f.instance.index()].clone(),
                 functions[index],
                 context.compiled_code().unwrap(),
             ));

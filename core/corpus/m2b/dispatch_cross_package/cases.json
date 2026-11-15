@@ -1,5 +1,7 @@
 [
   {"name": "cross_len", "value": 103, "used": 0},
   {"name": "cross_same", "value": 1, "used": 0},
-  {"name": "cross_sum", "value": 488096, "used": 0}
+  {"name": "cross_sum", "value": 488096, "used": 0},
+  {"name": "cross_eq_same", "value": 1, "used": 0},
+  {"name": "cross_eq_other", "value": 0, "used": 0}
 ]

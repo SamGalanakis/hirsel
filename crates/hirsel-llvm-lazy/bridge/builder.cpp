@@ -113,7 +113,7 @@ static LLVMValueRef global_ref(HirselLlvmBuilder *u, const char *name, size_t le
                                   GlobalValue::ExternalWeakLinkage, nullptr, "");
     return wrap(slot);
 }
-static const GlobalValue::LinkageTypes linkages[] = {GlobalValue::ExternalLinkage, GlobalValue::InternalLinkage, GlobalValue::PrivateLinkage};
+static const GlobalValue::LinkageTypes linkages[] = {GlobalValue::ExternalLinkage, GlobalValue::InternalLinkage, GlobalValue::PrivateLinkage, GlobalValue::WeakODRLinkage};
 static void resolve(HirselLlvmBuilder *u, StringRef symbol, GlobalValue *definition) {
     auto it = u->forward.find(symbol);
     if (it == u->forward.end()) return;

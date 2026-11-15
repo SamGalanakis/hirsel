@@ -59,3 +59,55 @@ fn unit() -> u8 {
     id(());
     3
 }
+
+// LANG-11 step 3: only aggregates made entirely of bare literals wait for
+// their callback to fix A. 1 + 2 + 5 = 8; the array sums to 3; the nested
+// tuple sums to 6. A single bare number already waits for its typed sibling.
+// expect: run literal_tuple() = 8
+// expect: run literal_array() = 3
+// expect: run literal_nested() = 6
+// expect: run literal_single() = 1
+// expect: run literal_float() = 3.5
+fn apply[A, R](arg: A, body: fn(A) -> R) -> R {
+    body(arg)
+}
+
+fn transfer(a: (u64, u64, i64)) -> u64 {
+    a.0 + a.1 + int.truncate(a.2)
+}
+
+fn array_sum(a: Inline[u64, 2]) -> u64 {
+    a[0] + a[1]
+}
+
+fn nested_sum(a: ((u64, u64), u64)) -> u64 {
+    a.0 .0 + a.0 .1 + a.1
+}
+
+fn float_sum(a: (f64, f64)) -> f64 {
+    a.0 + a.1
+}
+
+fn first[T: plain](a: T, x: T) -> T {
+    a
+}
+
+fn literal_tuple() -> u64 {
+    apply((1, 2, 5), transfer)
+}
+
+fn literal_array() -> u64 {
+    apply([1, 2], array_sum)
+}
+
+fn literal_nested() -> u64 {
+    apply(((1, 2), 3), nested_sum)
+}
+
+fn literal_single() -> u64 {
+    int.widen(first(1, 2u8))
+}
+
+fn literal_float() -> f64 {
+    apply((1.0, 2.5), float_sum)
+}

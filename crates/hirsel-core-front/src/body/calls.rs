@@ -15,6 +15,28 @@ pub(super) struct CallScratch {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// LANG-11 step 3 extends the existing literal-operand deferral only to
+    /// tuples and arrays whose leaves are all unsuffixed numeric literals.
+    /// Mixed aggregates and constructor calls still infer left to right.
+    fn defer_call_argument(&mut self, n: NodeId) -> bool {
+        match self.kind(n) {
+            NodeKind::Tuple | NodeKind::Array => self.literal_call_aggregate(n),
+            NodeKind::Group => self.defer_call_argument(self.kids(n)[0]),
+            _ => !self.synthesises(n),
+        }
+    }
+
+    fn literal_call_aggregate(&self, n: NodeId) -> bool {
+        match self.kind(n) {
+            NodeKind::Literal => self.unsuffixed_number(n),
+            NodeKind::Tuple | NodeKind::Array | NodeKind::Group => self
+                .kids(n)
+                .iter()
+                .all(|&child| self.literal_call_aggregate(child)),
+            _ => false,
+        }
+    }
+
     // ---- calls
     pub(super) fn call(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
@@ -238,7 +260,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             // A literal operand waits for the other arguments and the result (LANG-21).
-            if !self.synthesises(e) {
+            if self.defer_call_argument(e) {
                 later.push((i, e));
                 continue;
             }
@@ -328,7 +350,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             match self.known_rooted(g.params[i].ty, found, roots) {
                 Some(t) => vals[i] = self.expr(e, expect(t)).1,
                 None => {
-                    self.refuse("LANG-11", e, "an unsuffixed number needs an expected type");
+                    self.refuse(
+                        "LANG-11",
+                        e,
+                        "a literal argument needs a fixed parameter type; suffix its numbers",
+                    );
                 }
             }
         }

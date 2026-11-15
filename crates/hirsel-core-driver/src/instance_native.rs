@@ -160,7 +160,7 @@ fn scalar_callable_instances(backend: Backend) {
     for (case, check) in [
         (
             include_str!("../../../core/front/cases/body/generic-instances.hirsel"),
-            "width()==72623859790382856u64 && wrapped()==72623859790382856u64 && pair()==145247719580765712u64 && swapped()==9u8 && unit()==3u8",
+            "width()==72623859790382856u64 && wrapped()==72623859790382856u64 && pair()==145247719580765712u64 && swapped()==9u8 && unit()==3u8 && literal_tuple()==8u64 && literal_array()==3u64 && literal_nested()==6u64 && literal_single()==1u64 && float.to_bits64(literal_float())==4615063718147915776u64",
         ),
         (
             include_str!("../../../core/front/cases/body/generic-callable-abi.hirsel"),

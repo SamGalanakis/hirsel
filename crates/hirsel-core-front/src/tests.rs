@@ -1591,6 +1591,15 @@ fn sibling_main_wrapper_executes_the_sibling_body() {
     );
 }
 
+/// LANG-11: only arguments made entirely of bare literals wait for inference.
+#[test]
+fn literal_aggregate_call_inference() {
+    for case in ["generic-instances", "call-undetermined"] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
+
 /// PROG-5: type widths distinguish instances; equal requests name the same callee.
 #[test]
 fn generic_call_keys_separate_widths_and_reuse_equal_instances() {

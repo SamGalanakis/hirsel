@@ -905,6 +905,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             scratch.vals.push(value);
             self.anchor_field(n, anchors::Component::Field(i as u32), field);
         }
+        // A refused component has no aggregate layout. Propagate the refusal
+        // without publishing an error-shaped tuple or an emission gap.
+        if scratch.tys.contains(&ERROR) {
+            self.call_scratch.push(scratch);
+            return (ERROR, None);
+        }
         let ty = self.t.mk(TyKind::Tuple(scratch.tys.clone()));
         let value = match self.rep(ty) {
             Ok(Rep::Place(id)) if self.live() => {

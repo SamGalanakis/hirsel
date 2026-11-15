@@ -1,3 +1,31 @@
 // LANG-11: T of `int.truncate` is left undetermined; the literal has no expected type.
 // expect: refuse LANG-11 at 3:29
 fn f() -> u8 { int.truncate(300) }
+
+// Mixed or suffixed aggregates stay at step 2. Their bare component needs a
+// suffix before the callback to the right can fix the whole parameter.
+fn apply[A, R](arg: A, body: fn(A) -> R) -> R { body(arg) }
+fn sum(a: (u64, u64)) -> u64 { a.0 + a.1 }
+fn mixed(x: u64) -> u64 { apply((x, 1), sum) }
+fn suffixed() -> u64 { apply((1u64, 2), sum) }
+
+// A fixed u8 rejects 256 at that literal, rather than at the aggregate or call.
+fn narrow(a: (u8, u8)) -> u64 { 0 }
+fn overflow() -> u64 { apply((1, 256), narrow) }
+
+// An all-literal aggregate supplies no type if every parameter stays open.
+fn discard[A](arg: A) {}
+fn unresolved() { discard(((1, 2), 3)) }
+
+// A record constructor is an ordinary call at step 2, even with bare payloads.
+type Pair[T: plain] { a: T, b: T }
+fn record_sum(p: Pair[u64]) -> u64 { p.a + p.b }
+fn record() -> u64 { apply(Pair(a: 1, b: 2), record_sum) }
+
+// expect: refuse LANG-11 at 9:37
+// expect: refuse LANG-11 at 10:37
+// expect: refuse LANG-3 at 14:34
+// expect: compared LANG-3 at 14:34 | 256 | u8
+// expect: refuse LANG-11 at 18:27
+// expect: refuse LANG-11 at 23:36
+// expect: refuse LANG-11 at 23:42

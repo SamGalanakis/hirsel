@@ -9,6 +9,7 @@ fn program_facts_source_changes(backend: Backend) {
     options.optimize = matches!(backend, Backend::Llvm);
     let mut driver = Driver::default();
     let mut caller_key = None;
+    let mut consumed = Vec::new();
     for (lend, status) in [
         ("string.truncate(mut s, 1)", 1),
         ("result.unwrap(string.push(mut s, \"x\"))", 4),
@@ -27,8 +28,24 @@ fn program_facts_source_changes(backend: Backend) {
             assert_eq!(&key, previous, "a callee body edit must keep the caller's check key");
         }
         caller_key = Some(key);
+        let before = facts_selections(&options.store);
         let built = checked.build(&entry,&options).unwrap();
         run_clean(&built.executable,status);
+        if matches!(backend, Backend::Llvm) {
+            // The caller's rows (its body's and its declarations') in what the
+            // release emitter consumed for this program.
+            let ir = &checked.demand(&caller).unwrap().ir;
+            let f = ir.functions.iter().position(|f| f.body.is_some()).unwrap();
+            let code = ir.code_identity(hirsel_core_ir::FuncId(f as u32));
+            let fresh: Vec<_> = facts_selections(&options.store).difference(&before).cloned().collect();
+            let [name] = fresh.as_slice() else { panic!("one fresh facts selection, got {fresh:?}") };
+            let store = Store::new(&options.store).unwrap();
+            let bytes = store.get(store.selection(name).unwrap().unwrap()).unwrap().unwrap();
+            let rows = decode::<Vec<Vec<hirsel_core_ir::roles::BodyFacts>>>(&bytes).unwrap();
+            let caller_rows: Vec<_> = rows.concat().into_iter().filter(|r| r.code == code).map(|r| r.params).collect();
+            assert!(!caller_rows.is_empty(), "the caller is in the consumed rows");
+            consumed.push(caller_rows);
+        }
         let warm = Driver::default().check(request,&mut Meter::new(false)).unwrap();
         assert!(warm.rechecked.is_empty());
         let built = warm.build(&entry,&options).unwrap();
@@ -36,6 +53,16 @@ fn program_facts_source_changes(backend: Backend) {
         assert!(!built.linked);
         run_clean(&built.executable,status);
     }
+    if let [truncate, push] = consumed.as_slice() {
+        // The two lend bodies give s different facts; the caller's body is
+        // unchanged, and its consumed rows must take the callee's change.
+        assert_ne!(truncate, push, "a callee's fact change must reach its unchanged caller's consumed rows");
+    }
+}
+fn facts_selections(store: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(store).map_or_else(|_| Default::default(), |entries| {
+        entries.map(|e| e.unwrap().file_name().into_string().unwrap()).filter(|n| n.starts_with("facts-")).collect()
+    })
 }
 #[test]
 #[ignore = "explicit native integration target"]

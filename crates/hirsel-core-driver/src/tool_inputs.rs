@@ -99,17 +99,17 @@ fn recipe_directory(driver: &Path) -> io::Result<PathBuf> {
 
 fn identity(program: &Path, search: &OsStr, store: &Store) -> io::Result<Tool> {
     let path = selected(program, search)?;
-    let m = path.metadata()?;
+    let m = recipe_stat(&path)?;
     let revision = (
         &path,
-        m.dev(),
-        m.ino(),
-        m.len(),
-        m.mode(),
-        m.mtime(),
-        m.mtime_nsec(),
-        m.ctime(),
-        m.ctime_nsec(),
+        m.dev,
+        m.ino,
+        m.len,
+        m.mode,
+        m.mtime,
+        m.mtime_nsec,
+        m.ctime,
+        m.ctime_nsec,
     );
     let key = ContentHash::of_parts(
         "hirsel.host-tool-revision.v1",
@@ -136,8 +136,11 @@ fn identity(program: &Path, search: &OsStr, store: &Store) -> io::Result<Tool> {
             "hirsel.host-tool-content.v1",
             [std::fs::read(&path)?.as_slice()],
         );
-        let hash = store.put(&content.0)?;
-        store.select(&selection, hash)?;
+        // An unsettled revision may name another content later in its tick.
+        if settled(&m) {
+            let hash = store.put(&content.0)?;
+            store.select(&selection, hash)?;
+        }
         content
     };
     Ok(Tool { path, content })
@@ -577,8 +580,11 @@ fn refresh_recipe_inputs(recipe: &mut LinkRecipe) -> io::Result<RecipeInputs> {
         if ContentHash::of_bytes(&bytes) != input.content {
             return Ok(RecipeInputs::Changed);
         }
-        input.stat = stat;
-        inputs = RecipeInputs::Restated;
+        let stat = recorded(stat);
+        if stat != input.stat {
+            input.stat = stat;
+            inputs = RecipeInputs::Restated;
+        }
     }
     Ok(inputs)
 }
@@ -591,12 +597,50 @@ fn publish(directory: &Path, path: &Path, value: &impl Serialize) -> io::Result<
 }
 
 fn recipe_file(path: &Path) -> io::Result<RecipeFile> {
+    // Stat before reading: a change after the stat moves the stat again.
+    let stat = recorded(recipe_stat(path)?);
     let bytes = std::fs::read(path)?;
     Ok(RecipeFile {
         path: path.to_owned(),
         content: ContentHash::of_bytes(&bytes),
-        stat: recipe_stat(path)?,
+        stat,
     })
+}
+
+/// How long after a file's last change its stat stays untrusted. Filesystems
+/// stamp changes from a coarse clock (a kernel tick, a whole second on some),
+/// so an equal-length rewrite inside one tick keeps every stat field (Git's
+/// "racily clean" entry). Two seconds covers every Linux filesystem's stamp.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(test)]
+thread_local! {
+    /// The time a test says the request runs at; real time when unset.
+    pub(crate) static CLOCK: std::cell::Cell<Option<std::time::SystemTime>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn now() -> std::time::SystemTime {
+    #[cfg(test)]
+    if let Some(now) = CLOCK.get() {
+        return now;
+    }
+    std::time::SystemTime::now()
+}
+
+fn settled(stat: &RecipeStat) -> bool {
+    let changed = std::time::UNIX_EPOCH
+        + std::time::Duration::new(stat.ctime.max(0) as u64, stat.ctime_nsec.max(0) as u32);
+    now().duration_since(changed).is_ok_and(|age| age > SETTLE)
+}
+
+/// The stat a record keeps. An unsettled one is marked so that no live stat
+/// equals it: the next request re-hashes the file instead of trusting it.
+fn recorded(mut stat: RecipeStat) -> RecipeStat {
+    if !settled(&stat) {
+        stat.ctime_nsec = -1;
+    }
+    stat
 }
 
 fn recipe_stat(path: &Path) -> io::Result<RecipeStat> {
@@ -807,6 +851,8 @@ mod tests {
             std::fs::copy(file, &copy).unwrap();
             std::fs::rename(&copy, file).unwrap();
         }
+        // Every file changed just now; a request two seconds on may trust its stat.
+        CLOCK.set(Some(std::time::SystemTime::now() + SETTLE + SETTLE));
         assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
         let directory = recipe_directory(&cc).unwrap();
         let key = driver_file_key(&cc).unwrap();
@@ -832,6 +878,7 @@ mod tests {
             written,
             "an unchanged toolchain record is not rewritten"
         );
+        CLOCK.set(None);
     }
 
     #[test]
@@ -875,35 +922,74 @@ mod tests {
         assert_eq!(toolchain(&cc, target, &first).unwrap(), first_identity);
     }
 
-    #[test]
-    fn recipe_input_stat_change_rehashes_only_when_content_changes() {
-        let work = tempfile::tempdir().unwrap();
-        let input = work.path().join("crt.o");
-        std::fs::write(&input, b"same bytes").unwrap();
-        let mut recipe = LinkRecipe {
+    fn recipe(input: &Path) -> LinkRecipe {
+        LinkRecipe {
             schema: LINK_RECIPE_SCHEMA,
             target: "x86_64-unknown-linux-gnu".into(),
-            linker: input.clone(),
+            linker: input.to_owned(),
             args: vec![INPUT_MARKER.into()],
-            files: vec![recipe_file(&input).unwrap()],
+            files: vec![recipe_file(input).unwrap()],
             source_files: vec![],
             identity: ContentHash::of_bytes(b"recipe"),
+        }
+    }
+
+    #[test]
+    fn recipe_input_stat_change_rehashes_only_when_content_changes() {
+        // Times are set explicitly: each write gets its own mtime, and the clock
+        // stands past every change's settle window.
+        let work = tempfile::tempdir().unwrap();
+        let input = work.path().join("crt.o");
+        let start = std::time::SystemTime::now();
+        let write = |bytes: &[u8], age: u64| {
+            std::fs::write(&input, bytes).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&input)
+                .unwrap()
+                .set_modified(start - std::time::Duration::from_secs(age))
+                .unwrap();
         };
+        CLOCK.set(Some(start + SETTLE + SETTLE));
+        write(b"same bytes", 30);
+        let mut recipe = recipe(&input);
+        let refresh = |recipe: &mut LinkRecipe| refresh_recipe_inputs(recipe).unwrap();
+        assert_eq!(refresh(&mut recipe), RecipeInputs::Current);
+        write(b"same bytes", 20);
         assert_eq!(
-            refresh_recipe_inputs(&mut recipe).unwrap(),
-            RecipeInputs::Current
-        );
-        std::fs::write(&input, b"same bytes").unwrap();
-        assert_eq!(
-            refresh_recipe_inputs(&mut recipe).unwrap(),
+            refresh(&mut recipe),
             RecipeInputs::Restated,
             "touch-only replacement must reuse"
         );
-        std::fs::write(&input, b"changed bytes").unwrap();
         assert_eq!(
-            refresh_recipe_inputs(&mut recipe).unwrap(),
+            refresh(&mut recipe),
+            RecipeInputs::Current,
+            "a restated record is not restated again"
+        );
+        write(b"diff bytes", 10);
+        assert_eq!(
+            refresh(&mut recipe),
             RecipeInputs::Changed,
             "changed content must miss"
         );
+        CLOCK.set(None);
+    }
+
+    #[test]
+    fn an_edit_inside_the_recorded_stats_tick_is_changed() {
+        // Filesystems stamp changes from a coarse clock: an equal-length rewrite
+        // right after a stat was recorded keeps every stat field. The record must
+        // not vouch for content it cannot tell apart.
+        let work = tempfile::tempdir().unwrap();
+        let input = work.path().join("crt.o");
+        for _ in 0..20 {
+            std::fs::write(&input, b"first").unwrap();
+            let mut recipe = recipe(&input);
+            std::fs::write(&input, b"later").unwrap();
+            assert_eq!(
+                refresh_recipe_inputs(&mut recipe).unwrap(),
+                RecipeInputs::Changed
+            );
+        }
     }
 }

@@ -320,7 +320,7 @@ def main():
                 self.assertEqual(replaced.returncode, 0, replaced.stdout + replaced.stderr)
                 self.assertIn('replacement-emulator', replaced.stderr)
                 self.assertEqual(json.loads(replaced.stdout)['native']['compiled'], 0)
-                self.assertFalse(json.loads(replaced.stdout)['native']['linked'])
+                self.assertFalse(json.loads(replaced.stdout)['native']['linked'], f'first: {first.stdout}\nreplaced: {replaced.stdout}\n{replaced.stderr}')
                 selected_root.unlink()
                 empty = work / 'empty-root'
                 empty.mkdir()

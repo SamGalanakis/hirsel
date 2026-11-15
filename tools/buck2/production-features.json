@@ -3,7 +3,6 @@
   "baseline": "Production and package-test compilation units resolve independently; no production exceptions.",
   "features": {
     "hirsel-core-front/cost-profile": "test-only",
-    "hirsel-artifact-store/test-support": "test-only",
     "hirsel-core-front/test-assembly": "test-only",
     "hirsel-core-ir/eval": "test-only",
     "hirsel-core-rt/testing": "test-only",
@@ -13,7 +12,6 @@
     "hirsel-core-rt/charge-observation": "runtime-option",
     "hirsel-core-rt/standalone": "runtime-option",
     "hirsel-intern/id-salt": "test-only",
-    "hirsel-object-storage/testing": "test-only",
     "hirsel-core-ids/front-observer": "test-only"
   },
   "roots": {

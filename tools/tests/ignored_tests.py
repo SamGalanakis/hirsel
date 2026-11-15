@@ -34,8 +34,7 @@ _DRIVER_TESTS = (_DRIVER / 'native.rs').read_text().split('\nmod tests {', 1)[1]
 assert any('name="core-driver-native", data=' in line for line in (ROOT / 'tools/buck2/sync.py').read_text().splitlines())
 DRIVER_NATIVE = {'crates/hirsel-core-driver/src/native.rs'} | {
     f'crates/hirsel-core-driver/src/{name}' for name in re.findall(r'include!\("(\w+\.rs)"\)', _DRIVER_TESTS)}
-DELEGATED = {('crates/hirsel-artifact-store/src/index/tests/races.rs', 'cooperating_child'): ('multiprocess_common_pin_publication_and_live_staging_gc_owner',
-                                                                                  'child')}
+DELEGATED = {}
 REPLAY_ACTIONS = set()
 EXPLICIT = json.loads((ROOT / 'tools/ignored-tests.json').read_text())
 

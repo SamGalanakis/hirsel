@@ -18,8 +18,6 @@ enum Class {
     Implementation,
     /// Dependency-free utilities any layer may consume.
     LeafUtility,
-    /// Shared persistent bytes, independent of compiler phase implementations.
-    Storage,
     /// The driver composes implementation crates.
     Wiring,
     /// Tools beside the compiler: never a compiler dependency.
@@ -31,8 +29,6 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-stack", Class::LeafUtility),
     ("hirsel-span", Class::Data),
     ("hirsel-intern", Class::Data),
-    ("hirsel-artifact-store", Class::Storage),
-    ("hirsel-object-storage", Class::Storage),
     ("hirsel-core-ids", Class::Data),
     ("hirsel-core-diag", Class::Data),
     ("hirsel-core-syntax", Class::Data),
@@ -118,13 +114,10 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
         }
         (Class::LeafUtility, _) => false,
         (_, Class::LeafUtility) => true,
-        // Storage access is explicit: no compiler crate acquires ambient
-        // persistence through a data edge.
-        (_, Class::Storage) => false,
         (_, Class::Data) => true,
         (Class::Wiring, Class::Implementation) => true,
         (Class::Tool, Class::Wiring | Class::Implementation) => true,
-        (Class::Data | Class::Storage | Class::Implementation, _) => false,
+        (Class::Data | Class::Implementation, _) => false,
         (_, Class::Tool) => false,
         (Class::Wiring, Class::Wiring) => false,
     };
@@ -259,15 +252,6 @@ fn layering_controls() {
     assert!(check_edge("hirsel-cranelift", "hirsel-core-front", Kind::Production).is_err());
     assert!(check_edge("hirsel-cranelift", "hirsel-core-front", Kind::Dev).is_ok());
     assert!(check_edge("hirsel-core-ir", "hirsel-cranelift", Kind::Production).is_err());
-    assert!(
-        check_edge(
-            "hirsel-core-front",
-            "hirsel-artifact-store",
-            Kind::Production
-        )
-        .is_err()
-    );
-    assert!(check_edge("hirsel-artifact-store", "hirsel-core-front", Kind::Build).is_err());
     assert!(check_edge("hirsel-guard", "hirsel-core-ids", Kind::Production).is_err());
     assert!(
         check_edge(

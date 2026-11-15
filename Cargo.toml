@@ -20,10 +20,6 @@ opt-level = 1
 # Workspace crates whose dev opt-level 1 saves more test seconds per run than it adds
 # compile seconds per edit, each measured: the shared data crates. Debug assertions and
 # overflow checks stay on. There is no workspace-wide opt-level 1.
-[profile.dev.package.hirsel-graph]
-opt-level = 1
-[profile.dev.package.hirsel-span]
-opt-level = 1
 [profile.dev.package.hirsel-intern]
 opt-level = 1
 

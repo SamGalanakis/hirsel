@@ -27,13 +27,10 @@ enum Class {
 }
 
 const CRATES: &[(&str, Class)] = &[
-    // Data rather than a leaf utility: its content keys are ContentHash values.
-    ("hirsel-graph", Class::Data),
     ("hirsel-guard", Class::LeafUtility),
     ("hirsel-stack", Class::LeafUtility),
     ("hirsel-span", Class::Data),
     ("hirsel-intern", Class::Data),
-    ("hirsel-codec", Class::Data),
     ("hirsel-artifact-store", Class::Storage),
     ("hirsel-object-storage", Class::Storage),
     ("hirsel-core-ids", Class::Data),
@@ -54,12 +51,7 @@ const CRATES: &[(&str, Class)] = &[
 ];
 
 /// Shared utilities and data crates that take no external production dependency.
-const NO_EXTERNAL_PRODUCTION: &[&str] = &[
-    "hirsel-graph",
-    "hirsel-core-ir",
-    "hirsel-core-layout",
-    "hirsel-codec",
-];
+const NO_EXTERNAL_PRODUCTION: &[&str] = &["hirsel-core-ir", "hirsel-core-layout"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Kind {
@@ -101,21 +93,16 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-core-layout"
                 | "hirsel-intern"
                 | "hirsel-guard"
-                | "hirsel-graph"
                 | "hirsel-cranelift"
                 | "hirsel-llvm-lazy"
         ),
         _ if from == "hirsel-core-materialize" => matches!(
             to,
-            "hirsel-core-front"
-                | "hirsel-core-ids"
-                | "hirsel-core-ir"
-                | "hirsel-guard"
-                | "hirsel-graph"
+            "hirsel-core-front" | "hirsel-core-ids" | "hirsel-core-ir" | "hirsel-guard"
         ),
         _ if from == "hirsel-core-resolve" => matches!(
             to,
-            "hirsel-core-syntax" | "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph"
+            "hirsel-core-syntax" | "hirsel-core-ids" | "hirsel-guard"
         ),
         _ if from == "hirsel-core-front" => matches!(
             to,
@@ -125,10 +112,9 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-core-syntax"
                 | "hirsel-core-resolve"
                 | "hirsel-guard"
-                | "hirsel-graph"
         ),
         _ if from == "hirsel-core-syntax" => {
-            matches!(to, "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph")
+            matches!(to, "hirsel-core-ids" | "hirsel-guard")
         }
         (Class::LeafUtility, _) => false,
         (_, Class::LeafUtility) => true,
@@ -282,7 +268,7 @@ fn layering_controls() {
         .is_err()
     );
     assert!(check_edge("hirsel-artifact-store", "hirsel-core-front", Kind::Build).is_err());
-    assert!(check_edge("hirsel-guard", "hirsel-graph", Kind::Production).is_err());
+    assert!(check_edge("hirsel-guard", "hirsel-core-ids", Kind::Production).is_err());
     assert!(
         check_edge(
             "hirsel-core-driver",

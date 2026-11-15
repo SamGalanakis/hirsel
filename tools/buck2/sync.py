@@ -89,7 +89,6 @@ BUILD_SCRIPT_INPUTS = {
 # and sees only its declared inputs on the pool. Those inputs are part of its
 # cached verdict's key.
 RUNTIME_DATA = {
-    "hirsel-core-ir": ["crates/*/Cargo.toml"],
     # tools/native-toolchain/check reads Cargo.lock's llvm-sys pin.
     "hirsel-llvm": ["core/core/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-core-rt/include/**", "core/front/**", "Cargo.lock", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
 }

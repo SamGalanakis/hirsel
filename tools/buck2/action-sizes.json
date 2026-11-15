@@ -83,81 +83,6 @@
           1794356973
         ]
       },
-      "hirsel-codec": {
-        "cpu_count": 1,
-        "mean_cores": 0.9350822108934799,
-        "memory_kb": 196608,
-        "p95_cores": 1.0847518867924528,
-        "p99_peak_bytes": 53710848,
-        "phases": {
-          "check": {
-            "cpu_seconds": 8.715,
-            "max_wall_seconds": 0.954,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 14,
-            "wall_seconds": 10.379
-          },
-          "diag": {
-            "cpu_seconds": 3.466,
-            "max_wall_seconds": 1.614,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 6,
-            "wall_seconds": 4.715
-          },
-          "metadata [pic]": {
-            "cpu_seconds": 27.401,
-            "max_wall_seconds": 1.732,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 37,
-            "wall_seconds": 34.11
-          },
-          "rlib [pic]": {
-            "cpu_seconds": 30.119,
-            "max_wall_seconds": 2.349,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 37,
-            "wall_seconds": 37.113
-          }
-        },
-        "pss_peak_bytes": 138775552,
-        "samples": 94,
-        "window": [
-          1794276985,
-          1794356954
-        ]
-      },
-      "hirsel-codec-unittest-harness": {
-        "cpu_count": 1,
-        "mean_cores": 1.294523911671924,
-        "memory_kb": 262144,
-        "p95_cores": 1.5762610738255034,
-        "p99_peak_bytes": 101396480,
-        "phases": {
-          "link [pic]": {
-            "cpu_seconds": 20.518,
-            "max_wall_seconds": 4.923,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 5,
-            "wall_seconds": 16.6
-          }
-        },
-        "pss_peak_bytes": 179913728,
-        "samples": 5,
-        "window": [
-          1794276884,
-          1794356960
-        ]
-      },
       "hirsel-cranelift": {
         "cpu_count": 1,
         "mean_cores": 1.3990573169647487,
@@ -231,81 +156,6 @@
         "window": [
           1794276932,
           1794359465
-        ]
-      },
-      "hirsel-graph": {
-        "cpu_count": 1,
-        "mean_cores": 1.179414765100671,
-        "memory_kb": 262144,
-        "p95_cores": 1.5654493150684932,
-        "p99_peak_bytes": 99905536,
-        "phases": {
-          "check": {
-            "cpu_seconds": 9.405,
-            "max_wall_seconds": 1.682,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 16,
-            "wall_seconds": 12.008
-          },
-          "diag": {
-            "cpu_seconds": 4.009,
-            "max_wall_seconds": 1.472,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 6,
-            "wall_seconds": 5.527
-          },
-          "metadata [pic]": {
-            "cpu_seconds": 26.923,
-            "max_wall_seconds": 1.76,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 36,
-            "wall_seconds": 33.583
-          },
-          "rlib [pic]": {
-            "cpu_seconds": 86.19,
-            "max_wall_seconds": 3.538,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 36,
-            "wall_seconds": 68.235
-          }
-        },
-        "pss_peak_bytes": 193134592,
-        "samples": 94,
-        "window": [
-          1794276986,
-          1794356953
-        ]
-      },
-      "hirsel-graph-unittest-harness": {
-        "cpu_count": 2,
-        "mean_cores": 1.6139593129139074,
-        "memory_kb": 262144,
-        "p95_cores": 1.7262503623188405,
-        "p99_peak_bytes": 101335040,
-        "phases": {
-          "link [pic]": {
-            "cpu_seconds": 38.993,
-            "max_wall_seconds": 6.261,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 6,
-            "wall_seconds": 24.954
-          }
-        },
-        "pss_peak_bytes": 219267072,
-        "samples": 6,
-        "window": [
-          1794276884,
-          1794356962
         ]
       },
       "hirsel-guard": {
@@ -4468,66 +4318,6 @@
           1794356961
         ]
       },
-      "hirsel-codec": {
-        "cpu_count": 1,
-        "mean_cores": 0.9451583291010665,
-        "memory_kb": 196608,
-        "p95_cores": 1.0263970802919709,
-        "p99_peak_bytes": 53100544,
-        "phases": {
-          "check": {
-            "cpu_seconds": 6.11,
-            "max_wall_seconds": 1.684,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 10,
-            "wall_seconds": 8.462
-          },
-          "metadata [pic]": {
-            "cpu_seconds": 2.457,
-            "max_wall_seconds": 0.992,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 3,
-            "wall_seconds": 2.829
-          },
-          "metadata [static]": {
-            "cpu_seconds": 12.495,
-            "max_wall_seconds": 1.55,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 14,
-            "wall_seconds": 15.262
-          },
-          "rlib": {
-            "cpu_seconds": 13.068,
-            "max_wall_seconds": 1.541,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 14,
-            "wall_seconds": 15.02
-          },
-          "rlib [pic]": {
-            "cpu_seconds": 3.09,
-            "max_wall_seconds": 1.66,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 3,
-            "wall_seconds": 3.542
-          }
-        },
-        "pss_peak_bytes": 120027136,
-        "samples": 44,
-        "window": [
-          1794276988,
-          1794356956
-        ]
-      },
       "hirsel-cranelift": {
         "cpu_count": 1,
         "mean_cores": 1.4964275388368211,
@@ -4559,39 +4349,6 @@
         "window": [
           1794323773,
           1794361986
-        ]
-      },
-      "hirsel-graph": {
-        "cpu_count": 1,
-        "mean_cores": 1.1749427773343974,
-        "memory_kb": 196608,
-        "p95_cores": 1.2949509505703423,
-        "p99_peak_bytes": 69169152,
-        "phases": {
-          "metadata [pic]": {
-            "cpu_seconds": 2.784,
-            "max_wall_seconds": 0.909,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 4,
-            "wall_seconds": 3.181
-          },
-          "rlib [pic]": {
-            "cpu_seconds": 11.938,
-            "max_wall_seconds": 2.986,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 4,
-            "wall_seconds": 10.449
-          }
-        },
-        "pss_peak_bytes": 131066880,
-        "samples": 8,
-        "window": [
-          1794323748,
-          1794356956
         ]
       },
       "hirsel-guard": {

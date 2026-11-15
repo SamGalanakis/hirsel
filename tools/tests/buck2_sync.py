@@ -381,16 +381,16 @@ class GeneratedParts(unittest.TestCase):
         # Cargo's dev profile reaches no Buck configuration: both parts are
         # regenerated from the edited manifest, and neither output changes.
         manifest = (self.root / 'Cargo.toml').read_text()
-        old = '[profile.dev.package.hirsel-span]\nopt-level = 1\n'
+        old = '[profile.dev.package.hirsel-intern]\nopt-level = 1\n'
         self.assertIn(old, manifest)
-        self.edit('Cargo.toml', manifest.replace(old, '[profile.dev.package.hirsel-span]\nopt-level = 2\n'))
+        self.edit('Cargo.toml', manifest.replace(old, '[profile.dev.package.hirsel-intern]\nopt-level = 2\n'))
         self.assertEqual(self.sync('--if-stale'), list(sync.generated.PARTS))
         self.assertEqual(self.rewritten(), [])
 
     def test_an_added_test_file_adds_its_target_without_rerunning_reindeer(self):
-        self.edit('crates/hirsel-span/tests/added.rs', 'hirsel_guard::install!();\n\n#[test]\nfn added() {}\n')
+        self.edit('crates/hirsel-intern/tests/added.rs', 'hirsel_guard::install!();\n\n#[test]\nfn added() {}\n')
         self.assertEqual(self.sync('--if-stale'), ['first-party'])
-        self.assertIn('    name = "hirsel-span-test-added",\n', self.buck())
+        self.assertIn('    name = "hirsel-intern-test-added",\n', self.buck())
         self.assertEqual(self.rewritten(), ['BUCK'])
 
     def library(self, name):

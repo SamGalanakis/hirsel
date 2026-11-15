@@ -421,14 +421,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hirsel-codec"
-version = "0.1.0"
-dependencies = [
- "hirsel-core-ids",
- "hirsel-guard",
-]
-
-[[package]]
 name = "hirsel-core-contract-eval"
 version = "0.1.0"
 dependencies = [
@@ -593,14 +585,6 @@ dependencies = [
  "hirsel-core-syntax",
  "hirsel-guard",
  "hirsel-intern",
-]
-
-[[package]]
-name = "hirsel-graph"
-version = "0.1.0"
-dependencies = [
- "hirsel-core-ids",
- "hirsel-guard",
 ]
 
 [[package]]

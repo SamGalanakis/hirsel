@@ -7239,3 +7239,314 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
         }
     }
 }
+
+// S3 journal payloads are decoded exactly before their effects are applied.
+pub type CallRecord: codec {
+    key: Bytes,
+    args: Bytes,
+    stream: Bytes
+}
+
+type JournalOp: shareable + send {
+    key: Bytes,
+    value: Option[Bytes]
+}
+
+type JournalCommit {
+    branch: u32,
+    version: u64,
+    at: u64,
+    data: List[JournalOp],
+    streams: List[JournalOp],
+    call: Option[CallRecord]
+}
+
+fn journal_ops(file: String, raw: Bytes, mut at: u64) -> Result[List[JournalOp], Error] {
+    let count = disk_count(file, raw, mut at, 5)?
+    let mut ops: List[JournalOp] = list.new()
+    for i in 0u64 .. count {
+        let kind = disk_number(file, raw, mut at, 1)?
+        if kind != 1 && kind != 2 { return Error(disk_fault(file, at - 1, Malformed)) }
+        let key = disk_blob(file, raw, mut at, 4096)?
+        let value = if kind == 1 { Some(disk_blob(file, raw, mut at, 1048576)?) } else { None }
+        capacity(result.capacity_only(list.push(mut ops, JournalOp(key: take key, value: take value))))?
+    }
+    Ok(take ops)
+}
+
+fn journal_decode(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
+    let mut at = 0u64
+    let branch: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
+    let head = disk_number(file, raw, mut at, 8)?
+    let wall = disk_number(file, raw, mut at, 8)?
+    let sections = disk_number(file, raw, mut at, 1)?
+    if sections == 0 || sections > 3 { return Error(disk_fault(file, at - 1, Malformed)) }
+    let mut seen = 0u64
+    let mut data: List[JournalOp] = list.new()
+    let mut streams: List[JournalOp] = list.new()
+    let mut call: Option[CallRecord] = None
+    for section in 0u64 .. sections {
+        let tag = disk_number(file, raw, mut at, 1)?
+        if tag > 2 { return Error(disk_fault(file, at - 1, Malformed)) }
+        let mask = 1u64 << tag
+        if seen & mask != 0 { return Error(disk_fault(file, at - 1, Malformed)) }
+        seen |= mask
+        if tag == 0 {
+            data = journal_ops(file, raw, mut at)?
+        } else if tag == 1 {
+            streams = journal_ops(file, raw, mut at)?
+        } else {
+            let key = disk_blob(file, raw, mut at, 16777280)?
+            let args = disk_blob(file, raw, mut at, 16777280)?
+            let stream = disk_blob(file, raw, mut at, 16777280)?
+            call = Some(CallRecord(key: take key, args: take args, stream: take stream))
+        }
+    }
+    if at != list.len(raw) { return Error(disk_fault(file, at, Malformed)) }
+    if let Some(c) = call {
+        let mut matching = false
+        for op in streams {
+            if op.key == c.stream { matching = true }
+        }
+        if !matching { return Error(disk_fault(file, at, Malformed)) }
+    }
+    Ok(JournalCommit(branch: branch, version: head, at: wall, data: take data, streams: take streams, call: take call))
+}
+
+// L10/L12: hand-laid payload with both state sections and a CALL. The call
+// follows its stream op; section ordering carries no semantic distinction.
+pub fn journal_law_payload() -> bool {
+    let mut payload: Bytes = list.new()
+    result.unwrap(le(mut payload, 3, 4))
+    result.unwrap(le(mut payload, 257, 8))
+    result.unwrap(le(mut payload, 1234, 8))
+    result.unwrap(le(mut payload, 3, 1))
+    result.unwrap(le(mut payload, 2, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("entry")))
+    result.unwrap(blob(mut payload, string.as_bytes("arguments")))
+    result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    result.unwrap(le(mut payload, 0, 1))
+    result.unwrap(le(mut payload, 2, 4))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("key")))
+    result.unwrap(blob(mut payload, string.as_bytes("value")))
+    result.unwrap(le(mut payload, 2, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("gone")))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(le(mut payload, 1, 4))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    result.unwrap(blob(mut payload, string.as_bytes("reply")))
+    let got = result.unwrap(journal_decode("j-7", payload))
+    if got.branch != 3 || got.version != 257 || got.at != 1234 || list.len(got.data) != 2 || list.len(got.streams) != 1 { return false }
+    if got.data[0].key != string.as_bytes("key") { return false }
+    match got.data[0].value { Some(v) => if v != string.as_bytes("value") { return false }, None => return false }
+    if got.data[1].key != string.as_bytes("gone") || got.data[1].value != None { return false }
+    if got.streams[0].key != string.as_bytes("stream") { return false }
+    match got.streams[0].value { Some(v) => if v != string.as_bytes("reply") { return false }, None => return false }
+    match got.call {
+        Some(c) => if c.key != string.as_bytes("entry") || c.args != string.as_bytes("arguments") || c.stream != string.as_bytes("stream") { return false },
+        None => return false
+    }
+    for i in 0u64 .. list.len(payload) {
+        if !disk_corrupt(journal_decode("j-7", list.slice(payload, 0, i))) { return false }
+    }
+    let mut trailing = result.unwrap(copied(payload))
+    result.unwrap(list.push(mut trailing, 0u8))
+    if !disk_corrupt(journal_decode("j-7", trailing)) { return false }
+    // A checked call record without the named stream op cannot be replayed.
+    let mut no_reply = result.unwrap(copied(payload))
+    let _ = list.set(mut no_reply, 48, 120u8)
+    if !disk_corrupt(journal_decode("j-7", no_reply)) { return false }
+    // Two sections with the same tag are malformed, including an empty one.
+    let mut duplicate: Bytes = list.new()
+    result.unwrap(le(mut duplicate, 0, 4))
+    result.unwrap(le(mut duplicate, 1, 8))
+    result.unwrap(le(mut duplicate, 2, 8))
+    result.unwrap(le(mut duplicate, 2, 1))
+    for i in 0u64 .. 2 {
+        result.unwrap(le(mut duplicate, 0, 1))
+        result.unwrap(le(mut duplicate, 0, 4))
+    }
+    disk_corrupt(journal_decode("j-7", duplicate))
+}
+
+@test
+fn journal_test_payload() -> Result[(), ()] {
+    if journal_law_payload() { Ok(()) } else { Error(()) }
+}
+
+type JournalSegment {
+    end: u64,
+    commits: List[JournalCommit]
+}
+
+// Middle segments stop at the next HEADER's prev_end. Only the last segment
+// reads beyond its durable boundary, stopping at the first physically bad frame.
+fn journal_segment(file: String, id: StoreId, seq: u64, raw: Bytes, boundary: Option[u64], last: bool) -> Result[JournalSegment, Error] {
+    let header = disk_read_header(file, raw, 2, Some(seq), Some(id))?
+    let durable_end = match boundary { Some(d) => d, None => 72u64 }
+    if durable_end < 72 || durable_end > list.len(raw) { return Error(disk_fault(file, list.len(raw), Truncated)) }
+    let stop = if last { list.len(raw) } else { durable_end }
+    let mut at = 72u64
+    let mut commits: List[JournalCommit] = list.new()
+    while at < stop {
+        let read_frame = disk_read_frame(file, header.context, raw, at)
+        let frame = match take read_frame {
+            Ok(f) => f,
+            Error(Corrupt(take fault)) => {
+                let torn = match fault.why {
+                    Truncated => true, Flags => true, Checksum => true, Malformed => true, Kind(0) => true,
+                    _ => false
+                }
+                if !last || at < durable_end || !torn { return Error(Corrupt(take fault)) }
+                break
+            },
+            Error(take e) => return Error(take e)
+        }
+        if at < durable_end && frame.end > durable_end { return Error(disk_fault(file, at, Truncated)) }
+        if frame.kind == 0x0011 {
+            let payload = list.slice(raw, frame.payload, frame.end)
+            let commit = journal_decode(file, payload)?
+            capacity(result.capacity_only(list.push(mut commits, take commit)))?
+        }
+        at = frame.end
+    }
+    Ok(JournalSegment(end: at, commits: take commits))
+}
+
+fn journal_empty_commit(ctx: DiskContext, offset: u64, head: u64) -> Bytes {
+    let mut payload: Bytes = list.new()
+    result.unwrap(le(mut payload, 0, 4))
+    result.unwrap(le(mut payload, head, 8))
+    result.unwrap(le(mut payload, head + 100, 8))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(le(mut payload, 0, 1))
+    result.unwrap(le(mut payload, 0, 4))
+    result.unwrap(disk_seal(ctx, offset, 0x0011, 1, payload))
+}
+
+// L3/L10/L11/L12: the durable boundary is an independently calculated offset,
+// never the decoder's returned end. Every truncation of the second42-byte frame
+// is a valid torn last tail when d=114, and corruption when d=156.
+pub fn journal_law_segment() -> bool {
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 2, seq: 7)
+    let header = result.unwrap(disk_header_bytes(ctx, 0))
+    let first = journal_empty_commit(ctx, 72, 1)
+    let second = journal_empty_commit(ctx, 114, 2)
+    let mut raw = result.unwrap(copied(header))
+    result.unwrap(list.append(mut raw, first))
+    result.unwrap(list.append(mut raw, second))
+    if list.len(raw) != 156 { return false }
+    let got = result.unwrap(journal_segment("j-7", id, 7, raw, Some(114), true))
+    if got.end != 156 || list.len(got.commits) != 2 || got.commits[0].version != 1 || got.commits[1].version != 2 { return false }
+    let middle = result.unwrap(journal_segment("j-7", id, 7, raw, Some(114), false))
+    if middle.end != 114 || list.len(middle.commits) != 1 { return false }
+    for n in 114u64 .. 156 {
+        let tail = list.slice(raw, 0, n)
+        let partial = result.unwrap(journal_segment("j-7", id, 7, tail, Some(114), true))
+        if partial.end != 114 || list.len(partial.commits) != 1 { return false }
+        if !disk_corrupt(journal_segment("j-7", id, 7, tail, Some(156), true)) { return false }
+    }
+    for n in 72u64 .. 114 {
+        let mut broken = result.unwrap(copied(raw))
+        let changed = broken[n] ^ 1u8
+        let _ = list.set(mut broken, n, changed)
+        if !disk_corrupt(journal_segment("j-7", id, 7, broken, Some(114), true)) { return false }
+        let torn = result.unwrap(journal_segment("j-7", id, 7, broken, None, true))
+        if torn.end != 72 || list.len(torn.commits) != 0 { return false }
+    }
+    if !disk_corrupt(journal_segment("j-7", id, 7, raw, Some(115), true)) { return false }
+    let empty: Bytes = list.new()
+    let optional = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
+    let shifted = journal_empty_commit(ctx, 88, 1)
+    let mut extended = result.unwrap(copied(header))
+    result.unwrap(list.append(mut extended, optional))
+    result.unwrap(list.append(mut extended, shifted))
+    let future = result.unwrap(journal_segment("j-7", id, 7, extended, None, true))
+    if future.end != 130 || list.len(future.commits) != 1 { return false }
+    let required = result.unwrap(disk_seal(ctx, 156, 0x0040, 1, empty))
+    result.unwrap(list.append(mut raw, required))
+    match journal_segment("j-7", id, 7, raw, Some(114), true) {
+        Error(Unsupported(0x0040)) => true,
+        _ => false
+    }
+}
+
+@test
+fn journal_test_segment() -> Result[(), ()] {
+    if journal_law_segment() { Ok(()) } else { Error(()) }
+}
+
+type JournalReplay {
+    roots: Roots,
+    head: u64,
+    at: u64,
+    next_node: u64
+}
+
+fn journal_apply_ops(mut ids: u64, tree: std.omap.OMap[Bytes, Arc[Bytes]], ops: List[JournalOp]) -> Result[std.omap.OMap[Bytes, Arc[Bytes]], Error] {
+    let mut current = std.omap.snapshot(tree)
+    for op in ops {
+        match op.value {
+            Some(value) => {
+                let key = copied(op.key)?
+                let shared = capacity(result.capacity_only(arc.new(copied(value)?)))?
+                let (take updated, _) = capacity(result.capacity_only(std.omap.insert(mut ids, current, take key, take shared)))?
+                current = take updated
+            },
+            None => {
+                current = capacity(std.omap.remove(mut ids, current, op.key))?
+            }
+        }
+    }
+    Ok(take current)
+}
+
+fn journal_apply(file: String, mut replay: JournalReplay, commit: JournalCommit) -> Result[(), Error] {
+    if commit.branch != 0 || commit.version != replay.head + 1 { return Error(disk_fault(file, 0, Gap(commit.version))) }
+    let data = journal_apply_ops(mut replay.next_node, replay.roots.data, commit.data)?
+    let streams = journal_apply_ops(mut replay.next_node, replay.roots.streams, commit.streams)?
+    replay.roots.data = take data
+    replay.roots.streams = take streams
+    replay.head = commit.version
+    replay.at = commit.at
+    Ok(())
+}
+
+// L3/L10/L18c: replay applies both state trees, keeps the catalog and uses the
+// frame's branch/version/at. An unknown branch or a repeated version is Gap.
+pub fn journal_law_apply() -> bool {
+    let mut replay = JournalReplay(roots: empty_roots(), head: 0, at: 0, next_node: 0)
+    for head in 1u64 .. 4 {
+        let key = result.unwrap(physical(1, key_word(7)))
+        let mut data: List[JournalOp] = list.new()
+        result.unwrap(list.push(mut data, JournalOp(key: result.unwrap(copied(key)), value: Some(key_word(head * 10)))))
+        let mut streams: List[JournalOp] = list.new()
+        result.unwrap(list.push(mut streams, JournalOp(key: result.unwrap(copied(string.as_bytes("stream"))), value: Some(key_word(head)))))
+        let commit = JournalCommit(branch: 0, version: head, at: 100 + head, data: take data, streams: take streams, call: None)
+        result.unwrap(journal_apply("j-7", mut replay, commit))
+        if replay.head != head || replay.at != 100 + head { return false }
+        match std.omap.get(replay.roots.data, key) { Some(v) => if decode_word(v) != head * 10 { return false }, None => return false }
+        match std.omap.get(replay.roots.streams, string.as_bytes("stream")) { Some(v) => if decode_word(v) != head { return false }, None => return false }
+    }
+    let saved = std.omap.snapshot(replay.roots.data)
+    let duplicate = JournalCommit(branch: 0, version: 3, at: 103, data: list.new(), streams: list.new(), call: None)
+    match journal_apply("j-7", mut replay, duplicate) { Error(Corrupt(f)) => match f.why { Gap(3) => {}, _ => return false }, _ => return false }
+    let foreign_branch = JournalCommit(branch: 1, version: 4, at: 104, data: list.new(), streams: list.new(), call: None)
+    match journal_apply("j-7", mut replay, foreign_branch) { Error(Corrupt(f)) => match f.why { Gap(4) => {}, _ => return false }, _ => return false }
+    let key = result.unwrap(physical(1, key_word(7)))
+    let mut deletes: List[JournalOp] = list.new()
+    result.unwrap(list.push(mut deletes, JournalOp(key: result.unwrap(copied(key)), value: None)))
+    let removed = JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), call: None)
+    result.unwrap(journal_apply("j-7", mut replay, removed))
+    if std.omap.len(replay.roots.data) != 0 || std.omap.len(saved) != 1 || replay.head != 4 || replay.at != 104 { return false }
+    if std.omap.len(replay.roots.catalog) != 0 || std.omap.len(replay.roots.streams) != 1 { return false }
+    match std.omap.get(saved, key) { Some(v) => decode_word(v) == 30, None => false }
+}
+
+@test
+fn journal_test_apply() -> Result[(), ()] {
+    if journal_law_apply() { Ok(()) } else { Error(()) }
+}

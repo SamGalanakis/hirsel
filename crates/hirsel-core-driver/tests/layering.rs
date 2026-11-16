@@ -34,6 +34,7 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-core-syntax", Class::Data),
     ("hirsel-core-ir", Class::Data),
     ("hirsel-core-layout", Class::Data),
+    ("hirsel-core-net", Class::Data),
     ("hirsel-core-resolve", Class::Implementation),
     ("hirsel-core-front", Class::Implementation),
     // One instance's module from its identity and its arguments' closures.
@@ -88,6 +89,7 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-core-materialize"
                 | "hirsel-core-ir"
                 | "hirsel-core-layout"
+                | "hirsel-core-net"
                 | "hirsel-intern"
                 | "hirsel-guard"
                 | "hirsel-cranelift"
@@ -253,6 +255,11 @@ fn layering_controls() {
     assert!(check_edge("hirsel-cranelift", "hirsel-core-front", Kind::Production).is_err());
     assert!(check_edge("hirsel-cranelift", "hirsel-core-front", Kind::Dev).is_ok());
     assert!(check_edge("hirsel-core-ir", "hirsel-cranelift", Kind::Production).is_err());
+    assert!(check_edge("hirsel-core-ir", "hirsel-core-net", Kind::Production).is_ok());
+    assert!(check_edge("hirsel-core-rt", "hirsel-core-net", Kind::Production).is_ok());
+    assert!(check_edge("hirsel-core-driver", "hirsel-core-net", Kind::Production).is_ok());
+    assert!(check_edge("hirsel-core-front", "hirsel-core-net", Kind::Production).is_err());
+    assert!(check_edge("hirsel-core-net", "hirsel-core-rt", Kind::Production).is_err());
     assert!(check_edge("hirsel-guard", "hirsel-core-ids", Kind::Production).is_err());
     assert!(
         check_edge(

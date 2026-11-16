@@ -67,11 +67,13 @@ pub opaque type Db {
     following: Option[Latest[Snapshot]],
     acks: Option[Receiver[Ack]],
     journaled: u64,
+    inflight: u64,
+    acked_bytes: u64,
     checkpointed: u64,
     poison: Option[IoError],
     journal: Option[Sender[JournalMsg]],
     pending: Option[Bytes],
-    journal_task: Option[Task[()]]
+    journal_task: Option[Task[Result[(), Error]]]
 }
 
 pub type Branch {
@@ -175,7 +177,7 @@ pub fn memory(c: Clock, r: Random, o: Options) -> Db {
 }
 
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, disk: list.new(), clock: c, roots: empty_roots(), next_node: 0, next_table: 1, head: 0, file_seq: 1, file_end: 72, frame_seq: 0, at: 0, resident: 0, ceiling: o.resident_limit, retained: false, following: None, acks: None, journaled: 0, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None)
+    Db(store: id, disk: list.new(), clock: c, roots: empty_roots(), next_node: 0, next_table: 1, head: 0, file_seq: 1, file_end: 72, frame_seq: 0, at: 0, resident: 0, ceiling: o.resident_limit, retained: false, following: None, acks: None, journaled: 0, inflight: 0, acked_bytes: 0, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None)
 }
 
 pub fn identity(db: Db) -> StoreId {
@@ -236,6 +238,7 @@ pub fn run[R, A](mut db: Db, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> R
 }
 
 pub fn run_on[R, A](mut db: Db, b: Branch, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    journal_poll(mut db)?
     healthy(db)?
     if !same(b.store, db.store) {
         return Error(Foreign)
@@ -250,6 +253,16 @@ pub fn run_on[R, A](mut db: Db, b: Branch, body: scoped[view] fn(mut Tx) -> Resu
     if let Some(take raw) = frame {
         if let Some(sender) = db.journal {
             let _ = channel.send(sender, Frame(take raw, db.frame_seq))
+        }
+    }
+    if list.len(db.disk) != 0 && db.file_end - 72 >= db.disk[0].options.checkpoint_bytes {
+        let roots = share_roots(db.roots)
+        let head = db.head
+        let live = db.resident
+        match disk_begin_cut(mut db, roots, head, live) {
+            Error(Full(_)) => {},
+            Error(take e) => return Error(take e),
+            Ok(_) => {}
         }
     }
     take outcome
@@ -303,14 +316,17 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
             match take result {
                 Error(take a) => Ok(Aborted(Undone(value: take a, ticket: None))),
                 Ok(take value) => {
-                    if wrote && live > db.ceiling {
-                        return Ok(Refused(Capacity(requested: live, available: db.ceiling)))
+                    let frame_size = match frame { Some(raw) => list.len(raw), None => 0u64 }
+                    let admitted = int.saturating_add(live, int.saturating_add(db.inflight, frame_size))
+                    if admitted > db.ceiling && (wrote || frame_size != 0) {
+                        return Ok(Refused(Capacity(requested: admitted, available: db.ceiling)))
                     }
                     if let Some(_) = db.journal {
                         if let Some(raw) = frame {
                             db.file_end += list.len(raw)
                         }
                         db.pending = take frame
+                        db.inflight += frame_size
                         db.frame_seq += 1
                     }
                     db.roots = take roots
@@ -342,22 +358,12 @@ pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits {
             return disk_wait_cut(mut db, generation)
         }
     }
-    if let Some(receiver) = db.acks {
+    journal_poll(mut db)?
+    let has_journal = match db.acks { Some(_) => true, None => false }
+    if has_journal {
         while !covered(db, t.mark) {
-            let ack = result.unwrap(channel.receive(receiver))
-            match ack {
-                Journaled(n, _) => {
-                    db.journaled = n
-                },
-                Checkpointed(n, live) => {
-                    db.checkpointed = n;
-                    db.resident = live
-                },
-                Broken(e) => {
-                    db.poison = Some(e);
-                    return Error(Poisoned(e))
-                }
-            }
+            let ack = journal_receive(db)
+            journal_ack(mut db, take ack)?
         }
     }
     Ok(())
@@ -392,16 +398,23 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     }
     let _ = replace(mut owned.journal, None)
     let writer = replace(mut owned.journal_task, None)
+    if let Some(_) = owned.poison { let _ = replace(mut owned.acks, None) }
     if let Some(take worker) = writer {
-        result.unwrap(task.join(take worker))
+        match result.unwrap(task.join(take worker)) {
+            Error(Io(e)) => if let None = owned.poison { owned.poison = Some(e) },
+            Error(take e) => if let None = failure { failure = Some(take e) },
+            Ok(()) => {}
+        }
     }
     while let Some(ack) = close_ack(owned) {
         match ack {
             Broken(e) => if let None = owned.poison {
                 owned.poison = Some(e)
             },
-            Journaled(n, _) => {
+            Journaled(n, bytes_out) => {
                 owned.journaled = n
+                owned.inflight -= bytes_out - owned.acked_bytes
+                owned.acked_bytes = bytes_out
             },
             Checkpointed(n, _) => {
                 owned.checkpointed = n
@@ -6567,8 +6580,6 @@ type DiskConnection {
     d: Dir,
     open: u64,
     options: Options,
-    segment: Option[HostFile],
-    end_file: Option[HostFile],
     pending: Option[DiskPending],
     refused_cut: Option[(u64, Capacity)],
     cut_live: u64,
@@ -6592,9 +6603,8 @@ fn healthy(db: Db) -> Result[(), Error] {
     }
 }
 
-// T1: kept private until S3 supplies the journal. Package laws exercise the
-// same open/close/cut code; no cut-in-close or durable(Journal) adapter exists.
-fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
+// S3 makes the disk opener public with its journal and final durability path.
+pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
     let session = disk_session(tasks, d, r, options)?
     let DiskSession(lock: take lock, startup: take startup, send: take send, acks: take acks, worker: take worker) = take session
     let DiskStartup(store: id, roots: take roots, live: live, head: head, at: at, next_node: next_node, next_table: next_table, generation: generation, seq: seq, segment: take segment, end_file: take end_file) = take startup
@@ -6607,7 +6617,24 @@ fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[D
     db.file_seq = seq
     db.resident = live
     db.checkpointed = generation
-    capacity(result.capacity_only(list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, segment: Some(take segment), end_file: Some(take end_file), pending: None, refused_cut: None, cut_live: live, send: take send, acks: take acks, worker: take worker))))?
+    capacity(result.capacity_only(list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, pending: None, refused_cut: None, cut_live: live, send: take send, acks: take acks, worker: take worker))))?
+    let (frames, queued): (Sender[JournalMsg], Receiver[JournalMsg]) = capacity(channel.new(128))?
+    let (journal_acks, journal_received): (Sender[Ack], Receiver[Ack]) = capacity(channel.new(128))?
+    let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = capacity(channel.new(1))?
+    let max_bytes: u64 = int.widen(options.group_bytes)
+    let reserve = if max_bytes > 16777296 { max_bytes } else { 16777296u64 }
+    let input = JournalWorker(d: d, store: id, seq: seq, segment: take segment, end_file: take end_file,
+                              group_commits: options.group_commits, group_bytes: options.group_bytes,
+                              receive: take queued, send: take journal_acks, ready: take ready)
+    let writer = match task.spawn(tasks, bytes reserve + 65536, take input, journal_worker) {
+        Ok(take writer) => take writer,
+        Error((capacity_fault, _)) => return Error(Full(capacity_fault))
+    }
+    capacity(result.unwrap(channel.receive(waiting)))?
+    db.journal = Some(take frames)
+    db.acks = Some(take journal_received)
+    db.journal_task = Some(take writer)
+
     Ok(take db)
 }
 
@@ -6660,11 +6687,13 @@ fn disk_wait_cut(mut db: Db, generation: u64) -> Result[(), Error] waits {
     Ok(())
 }
 
-fn disk_rotate(mut connection: DiskConnection, id: StoreId, seq: u64, previous: u64) -> Result[(), Error] waits {
-    let (take segment, take end_file) = disk_new_segment(connection.d, id, seq, previous)?
-    let _ = replace(mut connection.segment, Some(take segment))
-    let _ = replace(mut connection.end_file, Some(take end_file))
-    Ok(())
+fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), Error] waits {
+    let d = db.disk[0].d
+    let (take segment, take end_file) = disk_new_segment(d, id, seq, previous)?
+    if let Some(sender) = db.journal {
+        let _ = channel.send(sender, Rotate(take segment, take end_file))
+    }
+    journal_poll(mut db)
 }
 
 fn disk_send(connection: DiskConnection, take cut: DiskCut) -> bool waits {
@@ -6674,7 +6703,7 @@ fn disk_send(connection: DiskConnection, take cut: DiskCut) -> bool waits {
     }
 }
 
-fn disk_request_cut(mut db: Db, roots: Roots, head: u64, live: u64) -> Result[Ticket, Error] waits {
+fn disk_begin_cut(mut db: Db, roots: Roots, head: u64, live: u64) -> Result[Ticket, Error] waits {
     healthy(db)?
     if let Some(p) = disk_pending(db) {
         disk_wait_cut(mut db, p.generation)?
@@ -6683,14 +6712,23 @@ fn disk_request_cut(mut db: Db, roots: Roots, head: u64, live: u64) -> Result[Ti
     let seq = db.file_seq + 1
     let previous = db.file_end
     let id = db.store
-    disk_rotate(mut db.disk[0], id, seq, previous)?
+    match disk_rotate(mut db, id, seq, previous) {
+        Error(Io(e)) => { if let None = db.poison { db.poison = Some(e) }; return Error(Poisoned(option.unwrap(db.poison))) },
+        Error(take e) => return Error(take e),
+        Ok(()) => {}
+    }
     db.file_seq = seq
     db.file_end = 72
     let cut = DiskCut(generation: generation, roots: share_roots(roots), head: head, at: db.at, next_node: db.next_node + 1, next_table: db.next_table, first_live: seq)
     db.disk[0].pending = Some(DiskPending(generation: generation, head: head, resident: live))
     let _ = disk_send(db.disk[0], take cut)
-    disk_wait_cut(mut db, generation)?
     Ok(Ticket(store: db.store, open: open_number(db), mark: Cut(generation)))
+}
+
+fn disk_request_cut(mut db: Db, roots: Roots, head: u64, live: u64) -> Result[Ticket, Error] waits {
+    let ticket = disk_begin_cut(mut db, roots, head, live)?
+    if let Cut(generation) = ticket.mark { disk_wait_cut(mut db, generation)? }
+    Ok(ticket)
 }
 
 pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits {
@@ -6707,10 +6745,8 @@ pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits {
 }
 
 fn disk_close_connection(take connection: DiskConnection) -> Result[(), Error] waits {
-    let DiskConnection(lock: take lock, d: _, open: _, options: _, segment: take segment, end_file: take end_file, pending: _, refused_cut: _, cut_live: _, send: _, acks: _, worker: take worker) = take connection
+    let DiskConnection(lock: take lock, d: _, open: _, options: _, pending: _, refused_cut: _, cut_live: _, send: _, acks: _, worker: take worker) = take connection
     let joined = task.join(take worker)
-    let _ = take segment
-    let _ = take end_file
     let _ = take lock
     result.unwrap(take joined)
 }
@@ -7506,14 +7542,14 @@ fn journal_test_apply() -> Result[(), ()] {
 
 // The lookahead needs only the next HEADER's prev_end. Read that prefix, not
 // a second whole segment, while the current segment's buffer is retained.
-fn journal_header(d: Dir, id: StoreId, seq: u64) -> Result[Option[DiskHeader], Error] waits {
+fn journal_header(d: Dir, id: StoreId, seq: u64, flush: bool) -> Result[Option[DiskHeader], Error] waits {
     let path = capacity(disk_path("j-", seq, ""))?
     let mut file = match host.open(d, path, Read) {
         Ok(take file) => take file,
         Error(NotFound) => return Ok(None),
         Error(e) => return Error(Io(e))
     }
-    disk_io(host.sync(mut file))?
+    if flush { disk_io(host.sync(mut file))? }
     let mut raw: Bytes = capacity(list.with_capacity(72))?
     while list.len(raw) < 72 {
         let mut chunk: Bytes = capacity(list.with_capacity(72 - list.len(raw)))?
@@ -7540,19 +7576,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, take initial: JournalReplay)
             Error(Io(NotFound)) => return Error(disk_fault(path, 0, Header)),
             Error(take e) => return Error(take e)
         }
-        let next_header = journal_header(d, id, seq + 1)
-        let following = match take next_header {
-            Ok(h) => h,
-            Error(Corrupt(_)) => {
-                let next_path = capacity(disk_path("j-", seq + 1, ""))?
-                let beyond_path = capacity(disk_path("j-", seq + 2, ""))?
-                if disk_exists(d, beyond_path)? || disk_end(d, id, seq + 1)? != None {
-                    return Error(disk_fault(next_path, 0, Header))
-                }
-                None
-            },
-            Error(take e) => return Error(take e)
-        }
+        let following = journal_following(d, id, seq, true)?
         let boundary = match following {
             Some(h) => Some(h.prev_end),
             None => disk_end(d, id, seq)?
@@ -7727,11 +7751,67 @@ type JournalWorker: send {
     ready: Sender[Result[(), Capacity]]
 }
 
-fn journal_write_end(d: Dir, id: StoreId, seq: u64, end: u64, mut end_file: Option[HostFile]) -> Result[(), Error] waits {
+type JournalBuffers {
+    group: Bytes,
+    end_bytes: Bytes,
+    binding: Bytes,
+    name: String
+}
+
+fn journal_set(mut raw: Bytes, at: u64, value: u64, width: u64) {
+    for i in 0u64 .. width { raw[at + i] = int.truncate(value >> (i * 8)) }
+}
+
+fn journal_fixed_check(binding: Bytes, raw: Bytes, at: u64, length: u64) -> u64 {
+    let mut state = std.check.start()
+    std.check.add(mut state, binding, 0, 33)
+    std.check.add(mut state, raw, at, at + 8)
+    std.check.add(mut state, raw, at + 16, at + 16 + length)
+    std.check.finish(state)
+}
+
+fn journal_buffers(reserve: u64) -> Result[JournalBuffers, Capacity] {
+    let group: Bytes = list.with_capacity(reserve)?
+    let mut end_bytes: Bytes = list.with_capacity(96)?
+    list.fill(mut end_bytes, 96, 0u8)?
+    let mut binding: Bytes = list.with_capacity(33)?
+    list.fill(mut binding, 33, 0u8)?
+    let name = string.with_capacity(32)?
+    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take binding, name: take name))
+}
+
+// END's bytes, checksum binding and name all reuse storage admitted at spawn.
+fn journal_write_end(d: Dir, id: StoreId, seq: u64, end: u64, mut end_file: Option[HostFile], mut raw: Bytes, mut binding: Bytes, mut name: String) -> Result[(), Error] waits {
+    journal_set(mut binding, 0, id.hi, 8)
+    journal_set(mut binding, 8, id.lo, 8)
+    journal_set(mut binding, 16, 4, 1)
+    journal_set(mut binding, 17, seq, 8)
+    journal_set(mut binding, 25, 0, 8)
+    journal_set(mut raw, 0, 1, 2)
+    journal_set(mut raw, 2, 1, 2)
+    journal_set(mut raw, 4, 56, 4)
+    let magic = string.as_bytes("HIRSTORE")
+    for i in 0u64 .. 8 { raw[16 + i] = magic[i] }
+    journal_set(mut raw, 24, 1, 4)
+    journal_set(mut raw, 28, 4, 1)
+    journal_set(mut raw, 32, id.hi, 8)
+    journal_set(mut raw, 40, id.lo, 8)
+    journal_set(mut raw, 56, seq, 8)
+    let header_check = journal_fixed_check(binding, raw, 0, 56)
+    journal_set(mut raw, 8, header_check, 8)
+    journal_set(mut raw, 72, 0x0012, 2)
+    journal_set(mut raw, 74, 1, 2)
+    journal_set(mut raw, 76, 8, 4)
+    journal_set(mut raw, 88, end, 8)
+    journal_set(mut binding, 25, 72, 8)
+    let end_check = journal_fixed_check(binding, raw, 72, 8)
+    journal_set(mut raw, 80, end_check, 8)
+    string.truncate(mut name, 0)
+    result.unwrap(string.push(mut name, "j-"))
+    result.unwrap(string.push_u64(mut name, seq))
+    result.unwrap(string.push(mut name, ".end"))
     let previous = replace(mut end_file, None)
     if let Some(take file) = take previous { disk_io(host.close(take file))? }
-    let name = result.unwrap(disk_path("j-", seq, ".end"))
-    let raw = journal_end_bytes(id, seq, end)
     let mut file = disk_io(host.open(d, name, Write))?
     match host.write(mut file, raw) { Ok(()) => {}, Error(e) => return Error(Io(e.error)) }
     disk_io(host.sync(mut file))?
@@ -7739,7 +7819,7 @@ fn journal_write_end(d: Dir, id: StoreId, seq: u64, end: u64, mut end_file: Opti
     Ok(())
 }
 
-fn journal_loop(take input: JournalWorker, take reserved: Bytes) -> Result[(), Error] waits {
+fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Result[(), Error] waits {
     let JournalWorker(d: d, store: id, seq: initial_seq, segment: take segment, end_file: take end_file,
                       group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take send, ready: _) = take input
     let mut segment_file = take segment
@@ -7748,7 +7828,11 @@ fn journal_loop(take input: JournalWorker, take reserved: Bytes) -> Result[(), E
     let mut end = 72u64
     let mut written = 0u64
     let mut groups = 0u64
+    let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding, name: take initial_name) = take scratch
     let mut buffer = take reserved
+    let mut end_bytes = take initial_end
+    let mut binding = take initial_binding
+    let mut end_name = take initial_name
     let mut deferred: Option[JournalMsg] = None
     loop {
         let held = replace(mut deferred, None)
@@ -7794,7 +7878,7 @@ fn journal_loop(take input: JournalWorker, take reserved: Bytes) -> Result[(), E
         }
         let rotate_now = match rotating { Some(_) => true, None => false }
         if idle || closing || rotate_now || groups == 64 {
-            journal_write_end(d, id, seq, end, mut end_file_slot)?
+            journal_write_end(d, id, seq, end, mut end_file_slot, mut end_bytes, mut binding, mut end_name)?
             groups = 0
         }
         if let Some((take new_file, take new_end)) = take rotating {
@@ -7818,7 +7902,7 @@ fn journal_loop(take input: JournalWorker, take reserved: Bytes) -> Result[(), E
 fn journal_worker(take input: JournalWorker) -> Result[(), Error] waits {
     let requested: u64 = int.widen(input.group_bytes)
     let reserve = if requested > 16777296 { requested } else { 16777296u64 }
-    let allocation: Result[Bytes, Capacity] = list.with_capacity(reserve)
+    let allocation = journal_buffers(reserve)
     let reserved = match take allocation {
         Ok(take buffer) => take buffer,
         Error(c) => { let _ = channel.send(input.ready, Error(c)); return Ok(()) }
@@ -7852,7 +7936,11 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     let max_bytes = if mode == 2 { 41u32 } else { 100u32 }
     let input = JournalWorker(d: d, store: id, seq: 7, segment: take segment, end_file: take end_file,
                               group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take acks, ready: take ready)
-    let worker = result.unwrap(task.spawn(tasks, bytes 16842832, take input, journal_worker))
+    let worker = if mode == 0 {
+        result.unwrap(task.spawn(tasks, bytes 16842832, take input, journal_worker_zero))
+    } else {
+        result.unwrap(task.spawn(tasks, bytes 16842832, take input, journal_worker))
+    }
     result.unwrap(result.unwrap(channel.receive(waiting)))
     let _ = take send
     result.unwrap(result.unwrap(task.join(take worker)))
@@ -7892,4 +7980,220 @@ pub fn journal_law_worker(d: Dir, tasks: Tasks) -> bool waits {
 @test
 fn journal_test_worker(d: Dir, tasks: Tasks) -> Result[(), ()] waits {
     if journal_law_worker(d, tasks) { Ok(()) } else { Error(()) }
+}
+
+fn journal_receive(db: Db) -> Ack waits {
+    match db.acks {
+        Some(receiver) => result.unwrap(channel.receive(receiver)),
+        None => fail("journal receiver")
+    }
+}
+
+fn journal_ack(mut db: Db, take ack: Ack) -> Result[(), Error] {
+    match take ack {
+        Journaled(n, bytes_out) => {
+            db.journaled = n
+            db.inflight -= bytes_out - db.acked_bytes
+            db.acked_bytes = bytes_out
+            Ok(())
+        },
+        Broken(e) => {
+            if let None = db.poison { db.poison = Some(e) }
+            Error(Poisoned(option.unwrap(db.poison)))
+        },
+        Checkpointed(n, live) => { db.checkpointed = n; db.resident = live; Ok(()) }
+    }
+}
+
+fn journal_poll(mut db: Db) -> Result[(), Error] {
+    while let Some(take ack) = close_ack(db) { journal_ack(mut db, take ack)? }
+    healthy(db)
+}
+
+// L18c/L21a: commits without an explicit cut survive close and reopen, and
+// close releases LOCK. A subsequent cut retires their live journal segment.
+pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.checkpoint_task_bytes = 1048576
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = shape(t)
+    let before = db.file_seq
+    let saved = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 7, 70) }))
+    let ci = match take saved {
+        Committed(done) => {
+            result.unwrap(durable(mut db, done.ticket))
+            done.info
+        },
+        _ => return false
+    }
+    if db.journaled != 1 || db.inflight != 0 { return false }
+    if !typed_put(mut db, t, 8, 80) { return false }
+    if db.file_seq != before { return false }
+    result.unwrap(close(take db))
+    let mut reopened = result.unwrap(open(tasks, d, c, r, options))
+    if reopened.head != ci.id.version + 1 || reopened.at < ci.at { return false }
+    if result.unwrap(get(snapshot(reopened), sh, 7)) != Some(70u64) || result.unwrap(get(snapshot(reopened), sh, 8)) != Some(80u64) { return false }
+    let path = result.unwrap(disk_path("j-", before, ""))
+    if !result.unwrap(disk_exists(d, path)) { return false }
+    let cut = result.unwrap(checkpoint(mut reopened))
+    result.unwrap(durable(mut reopened, cut))
+    if result.unwrap(disk_exists(d, path)) { return false }
+    result.unwrap(close(take reopened))
+    let final_db = result.unwrap(open(tasks, d, c, r, options))
+    if result.unwrap(get(snapshot(final_db), sh, 7)) != Some(70u64) || result.unwrap(get(snapshot(final_db), sh, 8)) != Some(80u64) { return false }
+    result.unwrap(close(take final_db))
+    true
+}
+
+@test
+fn journal_test_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_db(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+pub fn journal_law_end_storage(d: Dir) -> bool waits {
+    let id = StoreId(hi: 1, lo: 2)
+    let mut scratch = result.unwrap(journal_buffers(1024))
+    let mut file: Option[HostFile] = None
+    for seq in [7u64, 257u64] {
+        let attempt = bound bytes 0 {
+            journal_write_end(d, id, seq, 198, mut file, mut scratch.end_bytes, mut scratch.binding, mut scratch.name)
+        }
+        match take attempt { Ok(Ok(())) => {}, _ => return false }
+        if result.unwrap(disk_end(d, id, seq)) != Some(198u64) { return false }
+    }
+    true
+}
+
+
+
+
+
+@test
+fn journal_test_end_storage(d: Dir) -> Result[(), ()] waits {
+    if journal_law_end_storage(disk_test_directory(d)) { Ok(()) } else { Error(()) }
+}
+
+// The law alone gives the running loop zero new bytes after its startup.
+// Production reserves its root once and relies on the preallocated buffers.
+fn journal_worker_zero(take input: JournalWorker) -> Result[(), Error] waits {
+    let reserved = capacity(journal_buffers(16777296))?
+    let _ = channel.send(input.ready, Ok(()))
+    let attempt = bound bytes 0 { journal_loop(take input, take reserved) }
+    capacity(take attempt)?
+}
+
+fn journal_following(d: Dir, id: StoreId, seq: u64, flush: bool) -> Result[Option[DiskHeader], Error] waits {
+    let next_header = journal_header(d, id, seq + 1, flush)
+    match take next_header {
+            Ok(h) => Ok(h),
+            Error(Corrupt(_)) => {
+                let next_path = capacity(disk_path("j-", seq + 1, ""))?
+                let beyond_path = capacity(disk_path("j-", seq + 2, ""))?
+                if disk_exists(d, beyond_path)? || disk_end(d, id, seq + 1)? != None {
+                    return Error(disk_fault(next_path, 0, Header))
+                }
+                Ok(None)
+            },
+            Error(take e) => return Error(take e)
+        }
+
+}
+
+pub fn recorded(db: Db, b: Branch, wanted: u64) -> Result[Option[CallRecord], Error] waits {
+    healthy(db)?
+    if !same(db.store, b.store) { return Error(Foreign) }
+    if b.id != 0 { return Error(Missing("branch")) }
+    if list.len(db.disk) == 0 { return Ok(None) }
+    let d = db.disk[0].d
+    let manifest_bytes = disk_read_file(d, "MANIFEST", 68157528)?
+    let manifest_value = disk_read_manifest("MANIFEST", manifest_bytes)?
+    let mut seq = manifest_value.1.first_live
+    loop {
+        let path = capacity(disk_path("j-", seq, ""))?
+        let raw = match disk_read_file(d, path, 18446744073709551615) {
+            Ok(take bytes_in) => take bytes_in,
+            Error(Io(NotFound)) => return Ok(None),
+            Error(take e) => return Error(take e)
+        }
+        let following = journal_following(d, db.store, seq, false)?
+        let boundary = match following { Some(h) => Some(h.prev_end), None => disk_end(d, db.store, seq)? }
+        let last = match following { Some(_) => false, None => true }
+        let segment = journal_segment(path, db.store, seq, raw, boundary, last)?
+        let JournalSegment(end: _, commits: take commits) = take segment
+        for take commit in take commits {
+            if commit.branch == b.id && commit.version == wanted {
+                let JournalCommit(branch: _, version: _, at: _, data: _, streams: _, call: take call) = take commit
+                return Ok(take call)
+            }
+        }
+        if last { return Ok(None) }
+        seq += 1
+    }
+}
+
+// L24's S3 half writes the specified CALL frame directly. record/reply are
+// S5's producers; the S3 reader retains no call record in resident trees.
+pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.checkpoint_task_bytes = 1048576
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    let db = result.unwrap(open(tasks, d, c, r, options))
+    let id = db.store
+    let seq = db.file_seq
+    result.unwrap(close(take db))
+    let mut payload: Bytes = list.new()
+    result.unwrap(le(mut payload, 0, 4))
+    result.unwrap(le(mut payload, 1, 8))
+    result.unwrap(le(mut payload, 101, 8))
+    result.unwrap(le(mut payload, 2, 1))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(le(mut payload, 1, 4))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    let mut stream_value: Bytes = list.new()
+    result.unwrap(le(mut stream_value, 1, 8))
+    result.unwrap(le(mut stream_value, 2, 1))
+    result.unwrap(list.append(mut stream_value, string.as_bytes("reply")))
+    result.unwrap(blob(mut payload, stream_value))
+    result.unwrap(le(mut payload, 2, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("entry")))
+    result.unwrap(blob(mut payload, string.as_bytes("arguments")))
+    result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    if list.len(payload) != 88 { return false }
+    let raw = result.unwrap(disk_seal(DiskContext(store: id, role: 2, seq: seq), 72, 0x0011, 1, payload))
+    let path = result.unwrap(disk_path("j-", seq, ""))
+    let mut file = result.unwrap(host.open(d, path, Append))
+    result.unwrap(host.write(mut file, raw))
+    result.unwrap(host.sync(mut file))
+    result.unwrap(host.close(take file))
+    let end_path = result.unwrap(disk_path("j-", seq, ".end"))
+    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 176)))
+    let mut reopened = result.unwrap(open(tasks, d, c, r, options))
+    let b = main_branch(reopened)
+    match result.unwrap(recorded(reopened, b, 1)) {
+        Some(call_record) => if call_record.key != string.as_bytes("entry") || call_record.args != string.as_bytes("arguments") || call_record.stream != string.as_bytes("stream") { return false },
+        None => return false
+    }
+    if let Some(_) = result.unwrap(recorded(reopened, b, 0)) { return false }
+    if let Some(_) = result.unwrap(recorded(reopened, b, 2)) { return false }
+    let foreign_branch = Branch(store: StoreId(hi: id.hi ^ 1u64, lo: id.lo), id: 0)
+    match recorded(reopened, foreign_branch, 1) { Error(Foreign) => {}, _ => return false }
+    let cut = result.unwrap(checkpoint(mut reopened))
+    result.unwrap(durable(mut reopened, cut))
+    if let Some(_) = result.unwrap(recorded(reopened, b, 1)) { return false }
+    if std.omap.len(reopened.roots.streams) != 1 { return false }
+    result.unwrap(close(take reopened))
+    let in_memory = memory(c, r, options)
+    let memory_branch = main_branch(in_memory)
+    match result.unwrap(recorded(in_memory, memory_branch, 1)) { None => true, Some(_) => false }
+}
+
+@test
+fn journal_test_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_recorded(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
 }

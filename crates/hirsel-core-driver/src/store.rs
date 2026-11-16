@@ -387,6 +387,33 @@ impl Store {
         capacity: usize,
         fill: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
     ) -> io::Result<(ContentHash, Vec<u8>)> {
+        Self::envelope(capacity, fill, |bytes| {
+            ContentHash(Sha256::digest(bytes).into())
+        })
+    }
+    /// Publish `payload` framed under `key`, an address its caller derives
+    /// from the payload's inputs, never from its bytes: the frame's checksum
+    /// guards the bytes on every read and no digest of them is computed. A
+    /// key's payload is a function of its inputs, so a rewrite replaces the
+    /// file by a rename and a reader sees one whole frame or none.
+    pub(crate) fn put_keyed(&self, key: ContentHash, payload: &[u8]) -> io::Result<()> {
+        let (_, bytes) = Self::envelope(
+            HEADER + payload.len() + TRAILER,
+            |bytes| {
+                bytes.extend_from_slice(payload);
+                Ok(())
+            },
+            |_| key,
+        )?;
+        self.write_framed(key, &bytes)
+    }
+    /// The envelope of the payload `fill` appends, under the address
+    /// `address` gives for the header, payload and length bytes.
+    fn envelope(
+        capacity: usize,
+        fill: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
+        address: impl FnOnce(&[u8]) -> ContentHash,
+    ) -> io::Result<(ContentHash, Vec<u8>)> {
         let mut bytes = Vec::with_capacity(capacity);
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&VERSION.to_le_bytes());
@@ -394,7 +421,7 @@ impl Store {
         hirsel_core_front::cost_scope!("non-check", "archive write and digest");
         let payload = (bytes.len() - HEADER) as u64;
         bytes.extend_from_slice(&payload.to_le_bytes());
-        let hash = ContentHash(Sha256::digest(&bytes).into());
+        let hash = address(&bytes);
         let check = checksum(&bytes);
         bytes.extend_from_slice(&check.to_le_bytes());
         bytes.extend_from_slice(&hash.0);

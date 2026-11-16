@@ -1,4 +1,4 @@
-// The reach record (hirsel.core-reach.v1). Law: a build in a primed store is
+// The reach record (hirsel.core-reach.v2). Law: a build in a primed store is
 // the build of the same sources and options into an empty store: the same
 // executable bytes and exit status. On a no-change request it walks nothing
 // (no instance on the M2 path, no object checked, no link); on a one-body edit
@@ -197,8 +197,7 @@ fn reach_records(root: &Path) -> Vec<PathBuf> {
                 .map(|i| u8::from_str_radix(name.get(i * 2..i * 2 + 2)?, 16).ok())
                 .collect::<Option<Vec<u8>>>()?;
             let record = store.get(ContentHash(bytes.try_into().ok()?)).ok()??;
-            crate::decode::<crate::reach::Reach>(&record)
-                .filter(|r| r.schema == crate::reach::REACH_SCHEMA)
+            crate::reach::decode_record(&record)
                 .map(|_| path)
         })
         .collect()

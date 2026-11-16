@@ -208,6 +208,8 @@ pub struct BuildProduct {
     /// Native implementation copies, never semantic type instances.
     pub private_variants: usize,
     pub executable: PathBuf,
+    /// The executable's key: its objects' identities, the entry plan, the
+    /// sources digest and the link inputs. Its record is stored under it.
     pub identity: ContentHash,
     pub compiled: usize,
     pub linked: bool,
@@ -230,16 +232,14 @@ pub(crate) fn key(domain: &str, value: &impl Serialize) -> io::Result<ContentHas
 pub(super) fn selection(hash: ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
-fn cached(store: &Store, key: ContentHash) -> io::Result<Option<(ContentHash, Vec<u8>)>> {
-    let Some(hash) = store.selection(&selection(key))? else {
-        return Ok(None);
-    };
-    Ok(store.get(hash)?.map(|bytes| (hash, bytes)))
+/// A keyed record, an executable or an entry record, is stored framed under
+/// its key: its bytes are a function of the key's inputs and are checked on
+/// every read, so no digest of them names them.
+fn cached(store: &Store, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
+    store.get(key)
 }
-fn publish(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result<ContentHash> {
-    let hash = store.put(bytes)?;
-    store.select(&selection(key), hash)?;
-    Ok(hash)
+fn publish(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result<()> {
+    store.put_keyed(key, bytes)
 }
 // A unit is the producer's complete module, including type shapes and finalizers.
 // The cache chooses its granularity; this boundary never strips type/drop inputs.
@@ -350,7 +350,7 @@ pub(crate) fn native_inputs(
 /// record, with their closures.
 #[derive(Default)]
 pub(crate) struct Table {
-    entries: Vec<crate::reach::Entry>,
+    entries: Vec<crate::reach::Fresh>,
     closures: Vec<Arc<hirsel_core_ir::Closure>>,
     by_hash: std::collections::BTreeMap<ContentHash, u32>,
 }
@@ -364,16 +364,20 @@ impl Table {
         location: crate::instances::Location,
         object: Bare,
         debug: Option<ContentHash>,
-        children: impl IntoIterator<Item = &'c Identity>,
+        children: impl IntoIterator<Item = (Option<u32>, &'c Identity)>,
         items: Vec<DefPath>,
         closures: impl IntoIterator<Item = &'c Arc<hirsel_core_ir::Closure>>,
     ) {
+        // A child's position in the prior record is its position here when
+        // the instance there is the same.
         let children = children
             .into_iter()
-            .map(|c| {
-                instances
+            .map(|(hint, c)| match hint {
+                Some(k) if instances.get(k as usize) == Some(c) => k,
+                _ => instances
                     .binary_search(c)
-                    .expect("a reached instance's children are reached") as u32
+                    .expect("a reached instance's children are reached")
+                    as u32,
             })
             .collect();
         let closures = closures
@@ -385,7 +389,7 @@ impl Table {
                 })
             })
             .collect();
-        self.entries.push(crate::reach::Entry {
+        self.entries.push(crate::reach::Fresh {
             identity: identity.clone(),
             own,
             location,
@@ -489,8 +493,12 @@ impl CheckProduct {
             let mut table = reach
                 .and_then(|r| r.draft.as_ref())
                 .map(|_| Table::default());
-            for instance in instances {
-                if let Some(&i) = materialized.table.get(instance) {
+            // A hit's instances are its record's, in order.
+            let hit = reach.is_some_and(|r| r.hit);
+            let mut expansions = materialized.expansions(instances);
+            for (k, instance) in instances.iter().enumerate() {
+                let expanded = expansions.next().flatten().or(hit.then_some(k as u32));
+                if let Some(i) = expanded {
                     let prior = prior.expect("an expanded instance has its record");
                     let e = &prior.instances[i as usize];
                     objects.push(ObjectProduct::stored(
@@ -509,8 +517,8 @@ impl CheckProduct {
                             e.debug,
                             e.children
                                 .iter()
-                                .map(|&c| &prior.instances[c as usize].identity),
-                            e.items.clone(),
+                                .map(|&c| (Some(c), &prior.instances[c as usize].identity)),
+                            prior.items(e).cloned().collect(),
                             prior.closures_of(e),
                         );
                     }
@@ -533,7 +541,7 @@ impl CheckProduct {
                             location,
                             record.object,
                             record.debug,
-                            &record.children,
+                            record.children.iter().map(|c| (None, c)),
                             record.items.clone(),
                             &record.closures,
                         );
@@ -571,7 +579,7 @@ impl CheckProduct {
                         location,
                         bare,
                         debug,
-                        &fields.children,
+                        fields.children.iter().map(|c| (None, c)),
                         module.items.clone(),
                         &fields.closures,
                     );
@@ -714,13 +722,35 @@ impl CheckProduct {
         let reach = reached.reach.as_ref();
         let prior = reach.and_then(|r| r.prior.as_ref());
         let mut items: Vec<&DefPath> = Vec::new();
-        for instance in instances {
-            match reached.materialized.table.get(instance) {
-                Some(&i) => items.extend(&prior.unwrap().instances[i as usize].items),
+        let hit = reach.is_some_and(|r| r.hit);
+        let mut expansions = reached.materialized.expansions(instances);
+        for (k, instance) in instances.iter().enumerate() {
+            let expanded = expansions.next().flatten().or(hit.then_some(k as u32));
+            match expanded {
+                Some(i) => {
+                    let prior = prior.unwrap();
+                    items.extend(prior.items(&prior.instances[i as usize]))
+                }
                 None => items.extend(reached.materialized.items(instance)?),
             }
         }
-        let sources = crate::reach::sources_digest(self, &items)?;
+        // A hit's items are its record's: with the same request files they
+        // have the record's sources, and the rows are built only for a link.
+        let files = reach
+            .map(|_| crate::reach::files_digest(self))
+            .transpose()?;
+        let recorded = prior
+            .filter(|p| hit && Some(p.files) == files)
+            .map(|p| p.sources);
+        let source_rows = match recorded {
+            Some(_) => None,
+            None => Some(self.source_rows(&items)?),
+        };
+        let sources = match (&source_rows, recorded) {
+            (Some(rows), _) => crate::reach::sources_digest(self, rows)?,
+            (None, Some(sources)) => sources,
+            (None, None) => unreachable!("rows are built without a recorded digest"),
+        };
         let (mut objects, table) = self.emit_reached(entry, reached, options)?;
         let store = Store::new(&options.store)?;
         let (link, cleanup) = match (reach, prior) {
@@ -765,7 +795,7 @@ impl CheckProduct {
                 &table.entries,
                 &table.closures,
                 &link,
-                sources,
+                (sources, files.expect("a record is drafted with its reach")),
             )? as u64;
         }
         let entry_plan = crate::native_entry::Plan::new(
@@ -779,9 +809,9 @@ impl CheckProduct {
             &objects,
             options,
             sources,
-            || {
-                let items: Vec<DefPath> = items.iter().map(|&p| p.clone()).collect();
-                self.native_sources(&items)
+            || match &source_rows {
+                Some(rows) => self.source_map(rows),
+                None => self.source_map(&self.source_rows(&items)?),
             },
             inputs.toolchain.image,
             inputs.recipe.clone(),
@@ -1004,7 +1034,7 @@ struct EntryRecord {
 const ENTRY_SCHEMA: u32 = 1;
 fn entry_record(store: &Store, key: ContentHash) -> io::Result<Option<EntryRecord>> {
     Ok(cached(store, key)?
-        .and_then(|(_, bytes)| crate::decode::<EntryRecord>(&bytes))
+        .and_then(|bytes| crate::decode::<EntryRecord>(&bytes))
         .filter(|r| r.schema == ENTRY_SCHEMA))
 }
 /// A cleanup module's own instance: its last.
@@ -1302,8 +1332,8 @@ fn link_objects(
         ),
     )?;
     let store = Store::new(&options.store)?;
-    let (identity, bytes, linked) = if let Some((identity, bytes)) = cached(&store, link_key)? {
-        (identity, bytes, false)
+    let (bytes, linked) = if let Some(bytes) = cached(&store, link_key)? {
+        (bytes, false)
     } else {
         let sources = sources()?;
         let temp = store.scratch()?;
@@ -1418,7 +1448,8 @@ fn link_objects(
         drop(files);
         let bytes = std::fs::read(output)?;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
-        (publish(&store, link_key, &bytes)?, bytes, true)
+        publish(&store, link_key, &bytes)?;
+        (bytes, true)
     };
     if let Some(parent) = options
         .output
@@ -1444,7 +1475,7 @@ fn link_objects(
     Ok(Linked::Built(BuildProduct {
         private_variants: objects.iter().map(|o| o.private_variants).sum(),
         executable: options.output.clone(),
-        identity,
+        identity: link_key,
         compiled: objects.iter().filter(|o| o.compiled).count(),
         linked,
         observation_mode: options.logical_charge_report.is_some(),

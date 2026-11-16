@@ -718,6 +718,13 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
             .map(|(k, v)| (k, v))
             .chain(self.own.iter())
     }
+    /// The value appended over the published prefix, if any.
+    pub fn own_get<Q: Eq + std::hash::Hash + ?Sized>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+    {
+        self.own.get(key)
+    }
     pub fn own_iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.own.iter()
     }

@@ -157,12 +157,6 @@ pub(crate) fn llvm_library() -> io::Result<ContentHash> {
         .copied()
         .map_err(|e| io::Error::new(e.kind(), e.to_string()))
 }
-/// Capture the link editor command once beside the selected toolchain. The
-/// capture is the only C-driver use in the direct-link path; subsequent builds
-/// invoke the recorded lld argv themselves.
-pub(crate) fn link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
-    capture_link_recipe(cc, target, false, &search())
-}
 
 /// Recapture is reserved for a recipe whose previously recorded toolchain
 /// input disappeared.  Ordinary builds never invoke the C driver. An
@@ -354,9 +348,8 @@ fn driver_toolchain(
     target: &str,
     runtime: &Path,
 ) -> io::Result<(Toolchain, LinkRecipe)> {
-    let recipe = link_recipe(cc, target)?;
+    let (recipe, key) = capture_keyed_link_recipe(cc, target, false, &search())?;
     let root = recipe_directory(cc)?;
-    let key = driver_file_key(cc)?;
     let path = root.join(format!("toolchain-{target}-{key}.json"));
     let mut paths = vec![cc.canonicalize()?, runtime.to_owned()];
     if let Some(lib) = find_llvm_library(cc) {
@@ -441,8 +434,8 @@ struct EditorName {
 }
 const EDITOR_NAME_SCHEMA: u32 = 1;
 
-fn editor_name_path(directory: &Path, target: &str, driver: &Path) -> io::Result<PathBuf> {
-    Ok(directory.join(format!("editor-{target}-{}.json", driver_file_key(driver)?)))
+fn editor_name_path(directory: &Path, target: &str, driver_key: &str) -> PathBuf {
+    directory.join(format!("editor-{target}-{driver_key}.json"))
 }
 
 /// The recipe file of `driver` linking through `linker`. The link editor is
@@ -453,15 +446,12 @@ fn editor_name_path(directory: &Path, target: &str, driver: &Path) -> io::Result
 fn recipe_path(
     directory: &Path,
     target: &str,
-    driver: &Path,
+    driver_key: &str,
     linker: &Path,
 ) -> io::Result<(PathBuf, String)> {
     let hash = ContentHash::of_parts(
         "hirsel.link-recipe-key.v1",
-        [
-            driver_file_key(driver)?.as_bytes(),
-            crate::encode(&linker)?.as_slice(),
-        ],
+        [driver_key.as_bytes(), crate::encode(&linker)?.as_slice()],
     );
     let key: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
     Ok((directory.join(format!("{target}-{key}.json")), key))
@@ -473,14 +463,14 @@ fn recipe_path(
 fn selected_editor(
     directory: &Path,
     target: &str,
-    driver: &Path,
+    driver_key: &str,
     installed: Option<&Path>,
     search: &OsStr,
 ) -> io::Result<Option<PathBuf>> {
     if let Some(installed) = installed {
         return Ok(Some(installed.to_owned()));
     }
-    let recorded = std::fs::read(editor_name_path(directory, target, driver)?)
+    let recorded = std::fs::read(editor_name_path(directory, target, driver_key))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<EditorName>(&bytes).ok())
         .filter(|record| record.schema == EDITOR_NAME_SCHEMA);
@@ -498,6 +488,31 @@ fn capture_link_recipe(
     force: bool,
     search: &OsStr,
 ) -> io::Result<LinkRecipe> {
+    capture_keyed_link_recipe(cc, target, force, search).map(|(recipe, _)| recipe)
+}
+
+/// Capture the link editor command once beside the selected toolchain, with
+/// the driver's file key, hashed once for both. The capture is the only
+/// C-driver use in the direct-link path; subsequent builds invoke the recorded
+/// lld argv themselves.
+fn capture_keyed_link_recipe(
+    cc: &Path,
+    target: &str,
+    force: bool,
+    search: &OsStr,
+) -> io::Result<(LinkRecipe, String)> {
+    let driver = cc.to_owned();
+    let driver_key = driver_file_key(&driver)?;
+    capture_link_recipe_with(cc, target, force, search, &driver_key).map(|r| (r, driver_key))
+}
+
+fn capture_link_recipe_with(
+    cc: &Path,
+    target: &str,
+    force: bool,
+    search: &OsStr,
+    file_key: &str,
+) -> io::Result<LinkRecipe> {
     let driver = cc.to_owned();
     let directory = recipe_directory(&driver)?;
     let installed_linker = installed_linker();
@@ -505,12 +520,12 @@ fn capture_link_recipe(
         && let Some(linker) = selected_editor(
             &directory,
             target,
-            &driver,
+            file_key,
             installed_linker.as_deref(),
             search,
         )?
     {
-        let (path, _) = recipe_path(&directory, target, &driver, &linker)?;
+        let (path, _) = recipe_path(&directory, target, file_key, &linker)?;
         if let Ok(bytes) = std::fs::read(&path)
             && let Ok(mut recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
             && recipe.schema == LINK_RECIPE_SCHEMA
@@ -618,7 +633,7 @@ fn capture_link_recipe(
         }
         _ => name,
     };
-    let (path, driver_key) = recipe_path(&directory, target, &driver, &linker)?;
+    let (path, driver_key) = recipe_path(&directory, target, file_key, &linker)?;
     let mut source_files = Vec::new();
     let mut compiled_objects = std::collections::HashMap::new();
     for (index, line) in stderr.lines().enumerate() {
@@ -747,7 +762,7 @@ fn capture_link_recipe(
         };
         publish(
             &directory,
-            &editor_name_path(&directory, target, &driver)?,
+            &editor_name_path(&directory, target, file_key),
             &record,
         )?;
     }
@@ -1197,7 +1212,7 @@ mod tests {
         let target = "x86_64-unknown-linux-gnu";
         let key = driver_file_key(&cc).unwrap();
         let identity = driver_toolchain(&cc, target, &runtime);
-        let recipe = link_recipe(&cc, target);
+        let recipe = capture_link_recipe(&cc, target, false, &search());
         read_only(0o755).unwrap();
         let cache = PackageProduct::default_cache().join("link-recipes");
         for name in [
@@ -1335,7 +1350,8 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let refused = link_recipe(&cc, "x86_64-unknown-linux-gnu").unwrap_err();
+        let refused =
+            capture_link_recipe(&cc, "x86_64-unknown-linux-gnu", false, &search()).unwrap_err();
         assert!(refused.to_string().contains("cannot replay"), "{refused}");
     }
 

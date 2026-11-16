@@ -20,7 +20,7 @@ use crate::store::Bare;
 use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const REACH_SCHEMA: u32 = 1;
+pub(crate) const REACH_SCHEMA: u32 = 2;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -46,9 +46,23 @@ pub(crate) struct Node {
 pub(crate) type Graph = BTreeMap<(DefPath, bool), (Vec<(DefPath, bool)>, bool)>;
 
 /// One instance of the table, in link order: the instance record's fields
-/// with its children and closures as indices.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// with its children and closures as indices, and its items as indices of
+/// the record's paths.
+#[derive(Clone, Debug)]
 pub(crate) struct Entry {
+    pub identity: Identity,
+    pub own: Option<ContentHash>,
+    pub location: Location,
+    pub object: Bare,
+    pub debug: Option<ContentHash>,
+    pub children: Vec<u32>,
+    pub items: Vec<u32>,
+    pub closures: Vec<u32>,
+}
+
+/// An instance of a new record's table, before its paths are numbered.
+#[derive(Clone, Debug)]
+pub(crate) struct Fresh {
     pub identity: Identity,
     pub own: Option<ContentHash>,
     pub location: Location,
@@ -75,11 +89,12 @@ pub(crate) struct EntryLink {
     pub cleanup: Option<Cleanup>,
 }
 
-#[derive(Serialize, Deserialize)]
 pub(crate) struct Reach {
-    pub schema: u32,
-    /// The vector, sorted by path.
-    pub rows: Vec<(DefPath, Row)>,
+    /// Every path the record names: the vector's first, sorted, so row `i`
+    /// is of `paths[i]`; identities and items name theirs by index.
+    pub paths: Vec<DefPath>,
+    /// The vector's rows, in path order.
+    pub rows: Vec<Row>,
     pub constants: Vec<DefPath>,
     /// The header walk's nodes, sorted by row and kind.
     pub graph: Vec<Node>,
@@ -89,19 +104,103 @@ pub(crate) struct Reach {
     pub entry: EntryLink,
     /// [`sources_digest`] of the instances' items.
     pub sources: ContentHash,
+    /// [`files_digest`] of the request that wrote it: a hit whose request
+    /// files are these has these sources.
+    pub files: ContentHash,
 }
 
-/// [`Reach`] as it is written: the same fields in the same order, by reference.
-#[derive(Serialize)]
-struct Written<'a> {
+/// The record's bytes: each path once, every other path an index of it, in
+/// bincode's variable-length integers. Each parameter is owned when read and
+/// borrowed when written.
+#[derive(Serialize, Deserialize)]
+struct Stored<P, R, E, N, C, L> {
     schema: u32,
-    rows: Vec<(&'a DefPath, &'a Row)>,
-    constants: &'a [DefPath],
-    graph: &'a [Node],
-    instances: &'a [Entry],
-    closures: &'a [Arc<Closure>],
-    entry: &'a EntryLink,
+    paths: Vec<P>,
+    rows: Vec<R>,
+    constants: Vec<u32>,
+    graph: N,
+    instances: Vec<E>,
+    closures: C,
+    entry: L,
     sources: ContentHash,
+    files: ContentHash,
+}
+/// One table instance as stored: its identity's definition by index.
+#[derive(Serialize, Deserialize)]
+struct StoredEntry<S, H, U> {
+    definition: u32,
+    dictionaries: S,
+    closure_hashes: H,
+    own: Option<ContentHash>,
+    location: Location,
+    object: Bare,
+    debug: Option<ContentHash>,
+    children: U,
+    items: Vec<u32>,
+    closures: U,
+}
+type Read = Stored<
+    DefPath,
+    Row,
+    StoredEntry<Vec<String>, Vec<ContentHash>, Vec<u32>>,
+    Vec<Node>,
+    Vec<Arc<Closure>>,
+    EntryLink,
+>;
+fn options() -> impl bincode::Options {
+    use bincode::Options;
+    bincode::DefaultOptions::new().with_varint_encoding()
+}
+pub(crate) fn decode_record(bytes: &[u8]) -> Option<Reach> {
+    use bincode::Options;
+    let read: Read = options()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize(bytes)
+        .ok()?;
+    if read.schema != REACH_SCHEMA {
+        return None;
+    }
+    let path = |i: u32| read.paths.get(i as usize);
+    let instances = read
+        .instances
+        .into_iter()
+        .map(|e| {
+            Some(Entry {
+                identity: Identity {
+                    definition: path(e.definition)?.clone(),
+                    dictionaries: e.dictionaries,
+                    closures: e.closure_hashes,
+                },
+                own: e.own,
+                location: e.location,
+                object: e.object,
+                debug: e.debug,
+                children: e.children,
+                items: e.items,
+                closures: e.closures,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let constants = read
+        .constants
+        .iter()
+        .map(|&i| path(i).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    let count = read.paths.len() as u32;
+    let indices_in_range = read.rows.len() <= read.paths.len()
+        && instances.iter().all(|e| e.items.iter().all(|&i| i < count));
+    indices_in_range.then_some(Reach {
+        paths: read.paths,
+        rows: read.rows,
+        constants,
+        graph: read.graph,
+        instances,
+        closures: read.closures,
+        entry: read.entry,
+        sources: read.sources,
+        files: read.files,
+    })
 }
 
 /// The work counters of one request's walk and link, in the stage meter.
@@ -125,14 +224,16 @@ pub struct ReachCounters {
 pub(crate) struct WalkRows<'a> {
     product: &'a CheckProduct,
     base: usize,
-    pub(crate) rows: BTreeMap<DefPath, Row>,
+    /// Asked once per header the walk reads, so hashed; sorted once, by
+    /// [`Draft::walked`].
+    pub(crate) rows: rustc_hash::FxHashMap<DefPath, Row>,
 }
 impl<'a> WalkRows<'a> {
     pub(crate) fn new(product: &'a CheckProduct) -> Self {
         Self {
             product,
             base: product.index.definitions.base_len(),
-            rows: BTreeMap::new(),
+            rows: Default::default(),
         }
     }
     fn record(&mut self, path: &DefPath) {
@@ -162,7 +263,11 @@ fn live(product: &CheckProduct, base: usize, path: &DefPath) -> Row {
 }
 /// Whether `row`, recorded for `path`, is the live row.
 fn current(product: &CheckProduct, base: usize, path: &DefPath, row: &Row) -> bool {
-    let id = product.headers.id(path);
+    let id = match row.id {
+        Some(id) => Some(hirsel_core_resolve::DefinitionId(id))
+            .filter(|&id| product.headers.names_recorded(base, id, path)),
+        None => product.headers.id(path),
+    };
     id.map(|id| id.0) == row.id
         && product.definitions.get(path).map(|d| d.record) == row.own
         && match id.filter(|id| id.0 as usize >= base) {
@@ -177,11 +282,20 @@ impl Reach {
         let base = product.index.definitions.base_len();
         self.rows
             .iter()
-            .map(|(path, row)| !current(product, base, path, row))
+            .zip(&self.paths)
+            .map(|(row, path)| !current(product, base, path, row))
             .collect()
     }
+    /// The path of vector row `row`.
+    pub(crate) fn row_path(&self, row: usize) -> &DefPath {
+        &self.paths[row]
+    }
     pub(crate) fn row(&self, path: &DefPath) -> Option<usize> {
-        self.rows.binary_search_by(|(p, _)| p.cmp(path)).ok()
+        self.paths[..self.rows.len()].binary_search(path).ok()
+    }
+    /// The items of `entry`.
+    pub(crate) fn items<'r>(&'r self, entry: &'r Entry) -> impl Iterator<Item = &'r DefPath> {
+        entry.items.iter().map(|&i| &self.paths[i as usize])
     }
     pub(crate) fn instance(&self, identity: &Identity) -> Option<usize> {
         self.instances
@@ -217,7 +331,7 @@ impl Reach {
     pub(crate) fn edges(&self, node: &Node) -> Vec<(DefPath, bool)> {
         node.edges
             .iter()
-            .map(|&(row, body)| (self.rows[row as usize].0.clone(), body))
+            .map(|&(row, body)| (self.row_path(row as usize).clone(), body))
             .collect()
     }
 }
@@ -235,8 +349,9 @@ pub(crate) enum Draft {
     },
 }
 impl Draft {
-    pub(crate) fn walked(rows: BTreeMap<DefPath, Row>, graph: &Graph) -> Self {
-        let rows: Vec<_> = rows.into_iter().collect();
+    pub(crate) fn walked(rows: rustc_hash::FxHashMap<DefPath, Row>, graph: &Graph) -> Self {
+        let mut rows: Vec<_> = rows.into_iter().collect();
+        rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         let index = |path: &DefPath| -> u32 {
             rows.binary_search_by(|(p, _)| p.cmp(path))
                 .expect("the walk records every node it reaches") as u32
@@ -283,12 +398,12 @@ pub(crate) fn patched(product: &CheckProduct, prior: &Reach, changed: &[bool]) -
             .iter()
             .enumerate()
             .filter(|(_, c)| **c)
-            .map(|(i, _)| (i, live(product, base, &prior.rows[i].0)))
+            .map(|(i, _)| (i, live(product, base, prior.row_path(i))))
             .collect(),
     }
 }
 
-/// The selection: `hirsel.core-reach.v1` over the environment digest, the
+/// The selection: `hirsel.core-reach.v2` over the environment digest, the
 /// image, the entry and its declaration part, whether it is a test, the
 /// entry policy and the instance limit.
 pub(crate) fn selection(
@@ -307,7 +422,7 @@ pub(crate) fn selection(
         return Ok(None);
     };
     crate::native::key(
-        "hirsel.core-reach.v1",
+        "hirsel.core-reach.v2",
         &(
             records.digest,
             product.image.as_ref().map(|i| i.identity),
@@ -321,22 +436,17 @@ pub(crate) fn selection(
     .map(Some)
 }
 
-/// The record selected under `key`, and its size; a damaged or foreign one
+/// The record stored under `key`, and its size; a damaged or foreign one
 /// is a miss.
 pub(crate) fn load(store: &Store, key: ContentHash) -> io::Result<Option<(Reach, usize)>> {
-    let Some(address) = store.selection(&crate::native::selection(key))? else {
+    let Some(bytes) = store.get(key)? else {
         return Ok(None);
     };
-    let Some(bytes) = store.get(address)? else {
-        return Ok(None);
-    };
-    Ok(decode::<Reach>(&bytes)
-        .filter(|r| r.schema == REACH_SCHEMA)
-        .map(|r| (r, bytes.len())))
+    Ok(decode_record(&bytes).map(|r| (r, bytes.len())))
 }
 
-/// Write the record of `draft` with its table, entry link and sources, and
-/// select it under `key`; its size.
+/// Write the record of `draft` with its table, entry link and sources under
+/// `key`; its size.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     store: &Store,
@@ -344,69 +454,104 @@ pub(crate) fn publish(
     prior: Option<&Reach>,
     constants: &[DefPath],
     draft: &Draft,
-    instances: &[Entry],
+    instances: &[Fresh],
     closures: &[Arc<Closure>],
     entry: &EntryLink,
-    sources: ContentHash,
+    (sources, files): (ContentHash, ContentHash),
 ) -> io::Result<usize> {
+    use bincode::Options;
     let (rows, graph): (Vec<(&DefPath, &Row)>, &[Node]) = match draft {
         Draft::Walked { rows, graph } => (rows.iter().map(|(p, r)| (p, r)).collect(), graph),
         Draft::Patched { rows: patch } => {
             let prior = prior.expect("a patched vector has its record");
-            let mut rows: Vec<_> = prior.rows.iter().map(|(p, r)| (p, r)).collect();
+            let mut rows: Vec<_> = (0..prior.rows.len())
+                .map(|i| (prior.row_path(i), &prior.rows[i]))
+                .collect();
             for (i, row) in patch {
                 rows[*i].1 = row;
             }
             (rows, &prior.graph)
         }
     };
-    let bytes = encode(&Written {
+    // Paths are numbered in first-use order: the rows' (sorted and
+    // distinct) by position, then each other path as it is first named.
+    let mut paths: Vec<&DefPath> = rows.iter().map(|(p, _)| *p).collect();
+    let mut numbers: rustc_hash::FxHashMap<&DefPath, u32> = Default::default();
+    numbers.reserve(paths.len() + instances.len());
+    numbers.extend(paths.iter().enumerate().map(|(i, p)| (*p, i as u32)));
+    let mut index = |path| {
+        *numbers.entry(path).or_insert_with(|| {
+            paths.push(path);
+            paths.len() as u32 - 1
+        })
+    };
+    let constants: Vec<u32> = constants.iter().map(&mut index).collect();
+    let entries: Vec<_> = instances
+        .iter()
+        .map(|e| StoredEntry {
+            definition: index(&e.identity.definition),
+            dictionaries: &e.identity.dictionaries,
+            closure_hashes: &e.identity.closures,
+            own: e.own,
+            location: e.location,
+            object: e.object,
+            debug: e.debug,
+            children: &e.children,
+            items: e.items.iter().map(&mut index).collect(),
+            closures: &e.closures,
+        })
+        .collect();
+    let stored = Stored {
         schema: REACH_SCHEMA,
-        rows,
+        rows: rows.iter().map(|(_, r)| *r).collect(),
         constants,
         graph,
-        instances,
+        instances: entries,
         closures,
         entry,
         sources,
-    })?;
-    let address = store.put(&bytes)?;
-    store.select(&crate::native::selection(key), address)?;
+        files,
+        paths,
+    };
+    let bytes = options().serialize(&stored).map_err(io::Error::other)?;
+    store.put_keyed(key, &bytes)?;
     Ok(bytes.len())
 }
 
-/// The digest of the source map `native_sources(items)` builds: each item's
-/// path, file and offset, and each file's name and text. A request file's text
-/// is its bytes' hash; an image file's is the image's.
+/// What a source map rests on besides the image (which the record's key
+/// names) and its items: each request file's module, name and text. Equal
+/// files give each item the same module and offset.
+pub(crate) fn files_digest(product: &CheckProduct) -> io::Result<ContentHash> {
+    let files: Vec<_> = product
+        .files
+        .iter()
+        .map(|f| (f.module, product.source_name(f.module), f.source))
+        .collect();
+    crate::native::key("hirsel.core-reach-files.v1", &files)
+}
+
+/// The digest of the source map `source_map(rows)` builds: each item's path,
+/// file and offset, and each file's name and text. A request file's text is
+/// its bytes' hash; an image file's is the image's.
 pub(crate) fn sources_digest(
     product: &CheckProduct,
-    items: &[&DefPath],
+    rows: &[crate::native_sources::SourceRow<'_>],
 ) -> io::Result<ContentHash> {
-    let mut rows = Vec::new();
     let mut modules = BTreeMap::new();
-    for path in items.iter().copied().collect::<BTreeSet<_>>() {
-        let header = product.headers.get(path).ok_or_else(|| {
-            io::Error::other(format!("native source item is not indexed: {path}"))
-        })?;
-        let (module, item) = header.anchor;
-        let own = product.files.iter().find(|file| file.module == module);
-        let file_offset = match own {
-            Some(file) => file.syntax.items[item as usize].file_offset,
-            None => product
-                .image
-                .as_ref()
-                .ok_or_else(|| io::Error::other("native source has no package image"))?
-                .file_offset(module, item)?,
-        };
-        if !modules.contains_key(&module) {
+    for row in rows {
+        modules.entry(row.module).or_insert_with(|| {
+            let own = product.files.iter().find(|file| file.module == row.module);
             let text = match own {
                 Some(file) => file.source,
                 None => product.image.as_ref().unwrap().identity,
             };
-            modules.insert(module, (product.source_name(module), own.is_some(), text));
-        }
-        rows.push((path, module, file_offset));
+            (product.source_name(row.module), own.is_some(), text)
+        });
     }
+    let rows: Vec<_> = rows
+        .iter()
+        .map(|r| (r.path, r.module, r.file_offset))
+        .collect();
     crate::native::key(
         "hirsel.core-source-map.v1",
         &(rows, modules.into_iter().collect::<Vec<_>>()),

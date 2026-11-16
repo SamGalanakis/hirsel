@@ -153,6 +153,19 @@ impl InstanceBody {
     }
 }
 impl InstanceSet {
+    /// Each of `instances`' index in the reach record's table, if expanded,
+    /// by one walk of both: `instances` is in identity order, as the table is.
+    pub(crate) fn expansions<'a>(
+        &'a self,
+        instances: &'a [Identity],
+    ) -> impl Iterator<Item = Option<u32>> + 'a {
+        debug_assert!(instances.is_sorted());
+        let mut table = self.table.iter().peekable();
+        instances.iter().map(move |instance| {
+            while table.next_if(|(k, _)| *k < instance).is_some() {}
+            table.next_if(|(k, _)| *k == instance).map(|(_, &i)| i)
+        })
+    }
     pub fn get(&self, key: &Identity) -> &InstanceBody {
         &self.bodies[self.rows[key]]
     }

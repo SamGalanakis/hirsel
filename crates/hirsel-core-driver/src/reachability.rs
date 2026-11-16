@@ -104,7 +104,7 @@ impl Reached<'_> {
                 .graph
                 .iter()
                 .filter(|n| n.body)
-                .map(|n| reach.rows[n.row as usize].0.clone())
+                .map(|n| reach.row_path(n.row as usize).clone())
                 .collect(),
         }
     }
@@ -119,7 +119,7 @@ impl Reached<'_> {
                 .graph
                 .iter()
                 .filter(|n| n.unavailable)
-                .map(|n| reach.rows[n.row as usize].0.clone())
+                .map(|n| reach.row_path(n.row as usize).clone())
                 .collect(),
         }
     }
@@ -178,10 +178,7 @@ impl CheckProduct {
             if let (true, Some(held)) = (hit, &prior) {
                 let (bodies, declarations) = held.counts();
                 let instances = held.instances.iter().map(|e| e.identity.clone()).collect();
-                let mut materialized = crate::instances::InstanceSet::default();
-                materialized.table = (0..held.instances.len() as u32)
-                    .map(|i| (held.instances[i as usize].identity.clone(), i))
-                    .collect();
+                let materialized = crate::instances::InstanceSet::default();
                 return Ok(Reachable {
                     bodies,
                     declarations,
@@ -390,7 +387,7 @@ impl CheckProduct {
                 let mut same = true;
                 for node in &prior.graph {
                     if changed[node.row as usize] {
-                        let path = &prior.rows[node.row as usize].0;
+                        let path = prior.row_path(node.row as usize);
                         let live = self.expand(
                             &mut rows,
                             path,

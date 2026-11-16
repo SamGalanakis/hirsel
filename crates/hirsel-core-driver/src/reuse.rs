@@ -112,6 +112,17 @@ impl Headers {
     pub(crate) fn id(&self, path: &DefPath) -> Option<DefinitionId> {
         self.names.get(path).copied()
     }
+    /// Whether `id(path)` is `id`, for a row recorded against this image
+    /// (the reach record's key names it). The image fixes its own names, and a
+    /// request names only its own definitions, which follow the image's
+    /// (`base`), so an image id is still the path's unless the request now
+    /// names the path itself. This skips the probe of the image's name map.
+    pub(crate) fn names_recorded(&self, base: usize, id: DefinitionId, path: &DefPath) -> bool {
+        if (id.0 as usize) < base {
+            return self.names.own_get(path).is_none();
+        }
+        self.id(path) == Some(id)
+    }
     pub(crate) fn row(&self, id: DefinitionId) -> Option<&Header> {
         self.by_id(id)
     }

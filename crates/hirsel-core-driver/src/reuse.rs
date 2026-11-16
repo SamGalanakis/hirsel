@@ -11,8 +11,9 @@ use std::collections::BTreeSet;
 /// program input the body's checking and lowering read. The rule: lowering reads
 /// the program only through
 /// - its own item (`body`);
-/// - the names it resolves, their header closures and the core prelude's
-///   (`signatures`), and its lookups outside the item (`lookups`);
+/// - the names it resolves, their header closures, the core prelude's and those of
+///   std's structural codec makers (`signatures`), and its lookups outside the item
+///   (`lookups`);
 /// - the compiler, core and package namespaces (`environment`);
 /// - and one field per form whose lowering reads beyond its resolved names,
 ///   present only for bodies that name that form: `functions`, `twins` and
@@ -258,6 +259,9 @@ pub(crate) struct Keys {
     // (`hirsel_core_front::PRELUDE`), and their closures' hash once per request.
     prelude: Vec<usize>,
     prelude_closure: std::cell::OnceCell<ContentHash>,
+    // The prelude's closures with std's structural codec makers', once per
+    // request (`Keys::prelude_reads`).
+    prelude_reads: std::cell::OnceCell<ContentHash>,
     /// Every module of the request in order, with its items' header digests in
     /// order: with the environment, entry and image, what a body's key reads
     /// outside its own item (see `lib.rs`, the key shape).
@@ -509,6 +513,7 @@ impl Keys {
             texts: Default::default(),
             prelude: vec![],
             prelude_closure: Default::default(),
+            prelude_reads: Default::default(),
             items: ContentHash::default(),
             forms: vec![],
             form_bits: vec![],
@@ -770,6 +775,46 @@ impl Keys {
         );
         Ok(*self.prelude_closure.get_or_init(|| hash))
     }
+    /// What every body reads beside its names: the prelude's closures
+    /// (`prelude_closure`) and the closures of std's structural codec makers
+    /// (`hirsel_core_front::STRUCTURAL_CODECS`), each or its absence, in every std
+    /// the index holds. Laying out a closed codec List, Map, Option or Result row
+    /// makes its maker the row's codec hook, so every body reads them as it reads
+    /// the prelude; std is not core's image, so this part is the request's, not
+    /// sealed with the prelude's. One component, once per request.
+    fn prelude_reads(&self, index: &NameIndex) -> io::Result<ContentHash> {
+        if let Some(hash) = self.prelude_reads.get() {
+            return Ok(*hash);
+        }
+        let prelude = self.prelude_closure(index)?;
+        let mut makers = vec![];
+        if let (Some(std), Some(codec)) = (index.symbols.find("std"), index.symbols.find("codec")) {
+            for p in index.packages.iter().filter(|p| p.name == std) {
+                let module = index.child(p.root, codec);
+                for (_, maker) in hirsel_core_front::STRUCTURAL_CODECS {
+                    let id = module.and_then(|m| {
+                        index
+                            .symbols
+                            .find(maker)
+                            .and_then(|name| index.definition(m, name))
+                    });
+                    makers.push(match id {
+                        Some(id) => Some(self.closure(index, id.0 as usize)?),
+                        None => None,
+                    });
+                }
+            }
+        }
+        // Without std the component is the prelude's own hash.
+        let hash = match makers.is_empty() {
+            true => prelude,
+            false => ContentHash::of_parts(
+                "hirsel.prelude-reads.v1",
+                [&prelude.0[..], &encode(&makers)?[..]],
+            ),
+        };
+        Ok(*self.prelude_reads.get_or_init(|| hash))
+    }
     /// The key shape: the environment, every module's item headers in order,
     /// and `request` (entry, image identity, library mode and parse modes).
     /// Two requests with one shape resolve every unchanged item alike and
@@ -835,7 +880,7 @@ impl Keys {
                 }
                 components.push(self.closure(index, id)?);
             }
-            components.push(self.prelude_closure(index)?);
+            components.push(self.prelude_reads(index)?);
             components.sort_unstable();
             components.dedup();
             crate::meter::count(crate::meter::Count::BodyKeys, 1);

@@ -121,6 +121,7 @@ pub struct Program<'a> {
     /// Aliases being lowered, each with its reference continuing the chain.
     pub(crate) alias_stack: Vec<(DeclId, Option<Site>)>,
     core_declarations: [std::sync::OnceLock<Option<DeclId>>; PRELUDE.len()],
+    structural_codecs: std::sync::OnceLock<Vec<(DeclId, u32)>>,
 }
 
 /// The core types lowering builds, matches or lays out without the program naming
@@ -153,6 +154,17 @@ pub const SIBLING_READS: [(&str, &str, &str, &[&str]); 2] = [
     // `codec.of[T]` at a built-in T calls T's maker (body/calls.rs `codec_of`,
     // and body/templates.rs `codec_maker` at an instance).
     ("std", "codec", "of", &body::BUILTIN_CODEC_MAKERS),
+];
+/// The core prelude types whose codec is std's structural maker, each with that
+/// maker in `std.codec` (EXPANSION 9.1). Laying out a closed codec row of one of
+/// them reads its maker (the row's codec hook, layout.rs `structural_codec`), and
+/// so does `of` at one, so every body's reuse key hashes the makers' closures beside
+/// the prelude's (the driver's `Keys::for_body`).
+pub const STRUCTURAL_CODECS: [(&str, &str); 4] = [
+    ("List", "of_list"),
+    ("Map", "of_map"),
+    ("Option", "of_option"),
+    ("Result", "of_result"),
 ];
 /// The path of the core prelude type `name`, when the index has core.
 fn prelude_path(index: &NameIndex, name: &str) -> Option<DefPath> {
@@ -211,6 +223,35 @@ impl<'a> Program<'a> {
             Def::Fn(f) => Some(*f as usize),
             Def::Type(_) => None,
         }
+    }
+    /// [`STRUCTURAL_CODECS`] as the program's rows: each core type's declaration with
+    /// its std maker's function. Empty when the program has no std.
+    pub(crate) fn structural_codecs(&self) -> &[(DeclId, u32)] {
+        self.structural_codecs.get_or_init(|| {
+            let Some(package) = self
+                .index
+                .packages
+                .iter()
+                .find(|p| self.index.symbols.text(p.name) == "std")
+            else {
+                return vec![];
+            };
+            let package = hirsel_core_ids::PackageId {
+                name: "std".into(),
+                version: self.index.symbols.text(package.version).into(),
+            };
+            STRUCTURAL_CODECS
+                .into_iter()
+                .filter_map(|(ty, maker)| {
+                    let path = DefPath(hirsel_core_ids::ItemPath {
+                        package: package.clone(),
+                        modules: vec!["codec".into()],
+                        name: maker.into(),
+                    });
+                    Some((self.core_decl(ty)?, self.function_id(&path)? as u32))
+                })
+                .collect()
+        })
     }
     fn core_decl_uncached(&self, name: &str) -> Option<DeclId> {
         let path = prelude_path(self.index, name)?;
@@ -330,6 +371,7 @@ impl<'a> Program<'a> {
             alias_state: vec![],
             alias_stack: vec![],
             core_declarations: std::array::from_fn(|_| std::sync::OnceLock::new()),
+            structural_codecs: std::sync::OnceLock::new(),
         };
         p.register();
         p.lower_headers();

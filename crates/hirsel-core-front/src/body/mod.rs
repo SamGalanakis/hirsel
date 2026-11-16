@@ -74,6 +74,7 @@ pub use templates::{
     BUILTIN_CODEC_MAKERS, GenericTemplate, NamePart, import_instance, materialize, materialize_glue,
 };
 mod values;
+pub(crate) use calls::holds_tuple;
 use types::*;
 pub(crate) use types::{float_bits, float_suffix, int_magnitude, int_suffix};
 
@@ -320,7 +321,10 @@ impl Emitter {
             })
             .collect::<Result<_, &'static str>>()?;
         let mut dictionaries = vec![];
-        for (generic, &row) in fd.generics.iter().zip(&rows) {
+        for ((generic, &row), &ty) in fd.generics.iter().zip(&rows).zip(arguments) {
+            if generic.bounds & crate::decls::CODEC != 0 && has_param(t, ty) {
+                self.structural_codec(p, t, ty, row);
+            }
             for bit in 0..u16::BITS {
                 if generic.bounds & (1 << bit) != 0 {
                     let ty = &self.module.types[row.index()].name;
@@ -359,6 +363,28 @@ impl Emitter {
             );
         }
         Ok((function, self.module.functions[function.index()].signature))
+    }
+
+    /// Gives the row of `ty`, a List, Map, Option or Result that holds a parameter and no
+    /// tuple, std's maker at its arguments as its codec hook, when an instance takes the
+    /// row for a `codec`-bound parameter: `of` there reaches the maker once substitution
+    /// instantiates the hook with the row. A closed row has its hook from layout
+    /// (`layout::Shapes::structural_codec`), since a closed row's hook is part of it in the
+    /// closure hash; a generic row gets one only where it is asked for, as hooking every
+    /// generic row builds makers whose bodies lay out further generic rows without end.
+    fn structural_codec(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId, row: TypeId) {
+        if self.module.types[row.index()].codec.is_some() || holds_tuple(t, ty) {
+            return;
+        }
+        let TyKind::Adt(d, args) = t.kind(ty).clone() else {
+            return;
+        };
+        let Some(&(_, maker)) = p.structural_codecs().iter().find(|(x, _)| *x == d) else {
+            return;
+        };
+        if let Ok((func, _)) = self.instance(p, t, maker as usize, &args) {
+            self.module.types[row.index()].codec = Some(hirsel_core_layout::FuncRef(func.0));
+        }
     }
 
     /// The function row of a non-generic definition.
@@ -459,6 +485,7 @@ impl Emitter {
             of: &mut self.types,
             module: true,
             hooks: vec![],
+            codecs: p.structural_codecs(),
         };
         let r = f(&mut s);
         if r.is_none() {
@@ -482,7 +509,16 @@ impl Emitter {
                     self.hook_row(p, f as usize)
                 }
             } else {
-                self.instance(p, t, f as usize, &arguments).ok()?.0
+                match self.instance(p, t, f as usize, &arguments) {
+                    Ok((func, _)) => func,
+                    // A maker is reached only by a call of `of`, which requires the
+                    // bound; a row whose maker is not built has none.
+                    Err(_) if hook == crate::layout::Hook::Codec => {
+                        self.module.types[row.index()].codec = None;
+                        continue;
+                    }
+                    Err(_) => return None,
+                }
             };
             let func = Some(hirsel_core_layout::FuncRef(func.0));
             let shape = &mut self.module.types[row.index()];

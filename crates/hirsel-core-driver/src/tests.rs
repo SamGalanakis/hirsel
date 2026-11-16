@@ -2698,44 +2698,54 @@ fn resolution_edges_rebuild_like_fresh() {
 
 /// A body's lowering reads program inputs beyond the names it resolves, and its
 /// key holds each (`DefinitionKey`): MEM-17 finds an untwinned type's twin among
-/// every declaration (`twins`), and `codec.of[u64]` calls std's `of_u64` by a
-/// path it builds (`siblings`). Each edit, checked over the base's store,
-/// reports and publishes what an empty store does. Oracle: the fresh check,
-/// whose verdict is hand-derived (a rival twin of `Row` declared first takes
-/// `thaw`'s selection; std without `of_u64` builds no codec of u64). Red on a
-/// key without either field (`twins` or `siblings` None): the stored record of
-/// `thaw` or `c` was reused.
+/// every declaration (`twins`), `codec.of[u64]` calls std's `of_u64` by a
+/// path it builds (`siblings`), and a closed `List[u64]` row's codec hook is
+/// std's `of_list` (`signatures`, beside the prelude). Each edit, checked over
+/// the base's store, reports and publishes what an empty store does. Oracle:
+/// the fresh check, whose verdict is hand-derived (a rival twin of `Row`
+/// declared first takes `thaw`'s selection; std without `of_u64` builds no
+/// codec of u64; without `of_list` a list row has no codec hook). Red on a key
+/// without one of them: the stored record of `thaw`, `c` or `l` was reused.
 #[test]
 fn program_inputs_rebuild_bodies_like_fresh() {
     const ROW: &str = "type Row { n: u64 }\n";
     const THAW: &str = "@twin(Row) stable type RowS { n: u64 }\nfn thaw(s: RowS) -> Result[Row, Capacity] { clone(s) }\n";
     const CODEC: &str = "fn c() -> std.codec.Codec[u64] { std.codec.of() }\n";
+    const LIST: &str = "fn l(take xs: List[u64]) -> List[u64] { xs }\n";
     let one = format!("{ROW}{THAW}");
     let rival = format!("{ROW}@twin(Row) stable type RowT {{ n: u64 }}\n{THAW}");
     let libraries = tempfile::tempdir().unwrap();
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
-    // A copy of core and std whose std has no `of_u64`.
-    let renamed = libraries.path().join("renamed");
-    let mut pending = vec![PathBuf::new()];
-    while let Some(at) = pending.pop() {
-        std::fs::create_dir_all(renamed.join(&at)).unwrap();
-        for top in ["core", "std"].iter().filter(|_| at.as_os_str().is_empty()) {
-            pending.push(PathBuf::from(top));
-        }
-        if at.as_os_str().is_empty() {
-            continue;
-        }
-        for entry in std::fs::read_dir(shipped.join(&at)).unwrap() {
-            let relative = at.join(entry.unwrap().file_name());
-            if shipped.join(&relative).is_dir() {
-                pending.push(relative);
-            } else {
-                let text = std::fs::read_to_string(shipped.join(&relative)).unwrap();
-                let text = text.replace("pub fn of_u64() ->", "pub fn of_u64_renamed() ->");
-                std::fs::write(renamed.join(&relative), text).unwrap();
+    // Copies of core and std whose std lacks one maker: `of_u64`, or `of_list`.
+    let without = |maker: &str, next: char| {
+        let copy = libraries.path().join(maker);
+        let mut pending = vec![PathBuf::new()];
+        while let Some(at) = pending.pop() {
+            std::fs::create_dir_all(copy.join(&at)).unwrap();
+            for top in ["core", "std"].iter().filter(|_| at.as_os_str().is_empty()) {
+                pending.push(PathBuf::from(top));
+            }
+            if at.as_os_str().is_empty() {
+                continue;
+            }
+            for entry in std::fs::read_dir(shipped.join(&at)).unwrap() {
+                let relative = at.join(entry.unwrap().file_name());
+                if shipped.join(&relative).is_dir() {
+                    pending.push(relative);
+                } else {
+                    let text = std::fs::read_to_string(shipped.join(&relative)).unwrap();
+                    let text = text.replace(
+                        &format!("pub fn {maker}{next}"),
+                        &format!("pub fn {maker}_renamed{next}"),
+                    );
+                    std::fs::write(copy.join(&relative), text).unwrap();
+                }
             }
         }
-    }
+        copy
+    };
+    let renamed = without("of_u64", '(');
+    let no_list = without("of_list", '[');
     let cases = [
         (
             "a rival twin arrives",
@@ -2759,6 +2769,18 @@ fn program_inputs_rebuild_bodies_like_fresh() {
             "std's u64 maker returns",
             (&renamed, &CODEC.to_owned()),
             (&shipped, &CODEC.to_owned()),
+            true,
+        ),
+        (
+            "std's List maker leaves",
+            (&shipped, &LIST.to_owned()),
+            (&no_list, &LIST.to_owned()),
+            true,
+        ),
+        (
+            "std's List maker returns",
+            (&no_list, &LIST.to_owned()),
+            (&shipped, &LIST.to_owned()),
             true,
         ),
     ];
@@ -3231,7 +3253,8 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
 
 /// LANG-12 at `std.codec.of()`: a closed type without `codec`, and a generic body's
 /// parameter that does not declare it, are refused at the call that fixes T, not
-/// resolved to a maker nor left as a gap. The call is rewritten to T's codec, so a
+/// resolved to a maker nor left as a gap; so is a List or Map whose element is not
+/// `codec`, which has a std maker (`of_list`, `of_map`) otherwise. The call is rewritten to T's codec, so a
 /// rewrite placed before the bound check would accept or gap instead.
 #[test]
 fn codec_of_without_the_bound_is_refused_at_the_call() {
@@ -3240,7 +3263,9 @@ fn codec_of_without_the_bound_is_refused_at_the_call() {
     std::fs::create_dir(&app).unwrap();
     let source = "type Plain { n: u64 }\n\
                   fn closed() -> std.codec.Codec[Plain] { std.codec.of() }\n\
-                  fn open[T]() -> std.codec.Codec[T] { std.codec.of() }\n";
+                  fn open[T]() -> std.codec.Codec[T] { std.codec.of() }\n\
+                  fn listed() -> std.codec.Codec[List[Plain]] { std.codec.of() }\n\
+                  fn mapped() -> std.codec.Codec[Map[u64, Option[Plain]]] { std.codec.of() }\n";
     std::fs::write(app.join("main.hirsel"), source).unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut request = CheckRequest::program(&app, &root, &dir.path().join("store")).unwrap();
@@ -3282,7 +3307,8 @@ fn derived_codec_refusals_point_at_the_declaration() {
                   type Held: codec { a: u64, f: Plain }\n\
                   type Sum: codec = A | B(Plain)\n\
                   type Late: codec { s: i64 = \"x\" }\n\
-                  type Pairs: codec { t: (u64, u64) }\n";
+                  type Pairs: codec { t: (u64, u64) }\n\
+                  fn nested() -> std.codec.Codec[List[Option[(u64, u64)]]] { std.codec.of() }\n";
     std::fs::write(app.join("main.hirsel"), source).unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut request = CheckRequest::program(&app, &root, &dir.path().join("store")).unwrap();
@@ -3313,7 +3339,7 @@ fn derived_codec_refusals_point_at_the_declaration() {
             ("OWN-4".to_string(), (b, b + 5)),
         ]
     );
-    let gaps: Vec<_> = product
+    let mut gaps: Vec<_> = product
         .machine_incomplete()
         .unwrap()
         .into_iter()
@@ -3322,11 +3348,10 @@ fn derived_codec_refusals_point_at_the_declaration() {
             ((s.start as usize, s.end as usize), g.message.to_string())
         })
         .collect();
+    gaps.sort();
+    let gap = "the codec of this type is not built".to_string();
     assert_eq!(
         gaps,
-        vec![(
-            span("Pairs"),
-            "the codec of this type is not built".to_string()
-        )]
+        vec![(span("Pairs"), gap.clone()), (span("std.codec.of()"), gap)]
     );
 }

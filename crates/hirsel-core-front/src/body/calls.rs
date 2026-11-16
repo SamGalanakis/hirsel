@@ -1012,8 +1012,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Ok(row)
     }
 
-    /// A call of `std.codec.of` (SEM-10, EXPANSION 9.1) whose T is closed or structural:
-    /// a call of T's codec maker. At a type parameter it is None, and the call stays a
+    /// A call of `std.codec.of` (SEM-10, EXPANSION 9.1) whose T is not a parameter: a
+    /// call of T's codec maker, std's for a scalar, String, List, Map, Option or Result. At a type parameter it is None, and the call stays a
     /// call of `of`'s instance row, which substitution replaces by the instance's maker.
     fn codec_of(
         &mut self,
@@ -1037,6 +1037,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let TyKind::Adt(d, args) = self.t.kind(ty).clone()
             && let Some(maker) = self.p.decls[d.index()].codec().and_then(|c| c.maker)
         {
+            return Some(self.emit_call(maker as usize, &args, vals, result, n));
+        }
+        // A core List, Map, Option or Result's maker is std's `of_list` and the rest at
+        // its arguments; one that holds a tuple waits on the tuple's.
+        if let TyKind::Adt(d, args) = self.t.kind(ty).clone()
+            && let Some(&(_, maker)) = self.p.structural_codecs().iter().find(|(x, _)| *x == d)
+        {
+            if holds_tuple(&self.t, ty) {
+                self.gap(n, "the codec of this type is not built");
+                return Some(None);
+            }
             return Some(self.emit_call(maker as usize, &args, vals, result, n));
         }
         // A sibling read of `of` (`crate::SIBLING_READS`).
@@ -2040,6 +2051,15 @@ fn contained(
 }
 
 /// Whether `path` is `std.codec.of`, whose calls name a maker per instance.
+/// Whether `ty` is or holds a tuple, whose codec is not built.
+pub(crate) fn holds_tuple(t: &impl TyRead, ty: TyId) -> bool {
+    match t.kind(ty) {
+        TyKind::Tuple(_) => true,
+        TyKind::Adt(_, args) => args.iter().any(|&x| holds_tuple(t, x)),
+        TyKind::Anchored(x, _) | TyKind::View(x) | TyKind::Array(x, _) => holds_tuple(t, *x),
+        _ => false,
+    }
+}
 pub(super) fn is_codec_of(path: &DefPath) -> bool {
     path.0.package.name == "std" && path.0.modules == ["codec"] && path.0.name == "of"
 }

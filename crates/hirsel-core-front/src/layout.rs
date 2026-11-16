@@ -46,6 +46,8 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     /// The rows whose hook `.1` is the program's function `.2` at the type's arguments
     /// `.3` (its instance when the type is generic), for the caller to name.
     pub hooks: Vec<(TypeRef, Hook, u32, Vec<TyId>)>,
+    /// The core types whose codec maker is std's ([`crate::Program::structural_codecs`]).
+    pub codecs: &'p [(DeclId, u32)],
 }
 
 /// A row's declared function: its finalizer (`Shape::finalizer`), its clone body
@@ -58,6 +60,32 @@ pub(crate) enum Hook {
 }
 
 impl<T: TyRead> Shapes<'_, T> {
+    /// The codec hook of the row `r` of the closed type `ty`, `d` at `args`, when `d` is
+    /// a core type whose maker is std's (List, Map, Option, Result) and `ty` is `codec`:
+    /// that maker at `args`, named by the caller ([`Self::hooks`]), so `of` through a
+    /// generic body reaches it at the instance's argument row. Every such row of a body
+    /// module gets it here, since a closed row's hook is part of it in the closure hash. A
+    /// row holding a parameter gets one where an instance asks for it (body/mod.rs
+    /// `structural_codec`); a row holding a tuple has none (its codec is not built).
+    fn structural_codec(
+        &mut self,
+        r: TypeRef,
+        d: DeclId,
+        ty: TyId,
+        args: &[TyId],
+    ) -> Option<FuncRef> {
+        let &(_, maker) = self.codecs.iter().find(|(x, _)| *x == d)?;
+        if !self.module
+            || has_param(&*self.types, ty)
+            || crate::body::holds_tuple(&*self.types, ty)
+            || crate::decls::has_bounds(self.decls, &*self.types, ty, &[]) & crate::decls::CODEC
+                == 0
+        {
+            return None;
+        }
+        self.hooks.push((r, Hook::Codec, maker, args.to_vec()));
+        Some(FuncRef(u32::MAX))
+    }
     /// The shape of a closed type held inline, or None when the layout crate has no
     /// field type for some part of it (recorded as a gap by the caller).
     pub fn shape(&mut self, ty: TyId) -> Option<TypeRef> {
@@ -184,10 +212,12 @@ impl<T: TyRead> Shapes<'_, T> {
                         let items = FieldTy::Seq(Box::new(self.field(args[0])?));
                         let held = Some(items.clone());
                         let body = record(vec![("items", items)]);
+                        self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
                         return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     Some(Role::Map) => {
                         let entries = self.map_field(&args)?;
+                        self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
                         return self.fill(
                             r,
                             ty,
@@ -336,6 +366,9 @@ impl<T: TyRead> Shapes<'_, T> {
                 let finalizer = hook(Hook::Finalizer, decl.finalizer);
                 let codec = hook(Hook::Codec, decl.codec().and_then(|c| c.maker));
                 self.shapes[r.index()].codec = codec;
+                if codec.is_none() {
+                    self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
+                }
                 self.shapes[r.index()].grant = decl.grant;
                 let held = (decl.repr == Repr::Stable).then_some(FieldTy::Stable(r));
                 (repr, body, finalizer, held)
@@ -731,6 +764,7 @@ pub(crate) fn recipes(p: &mut Program) {
         of: &mut of,
         module: false,
         hooks: vec![],
+        codecs: &[],
     };
     let mut roots = vec![];
     for (i, decl) in s.decls.own_iter().enumerate() {

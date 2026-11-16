@@ -1,4 +1,5 @@
-// Codec measurement: workload (rows, floats, strings) x mode (setup, encode, decode).
+// Codec measurement: workload (rows through `of[List[Account]]`, floats, strings, rows as
+// a derived record's field) x mode (setup, encode, decode).
 // setup builds n values and encodes them once; encode re-encodes them r times; decode
 // decodes the one encoding r times. A mode's cost less setup's is r passes. The check
 // reads only the count and the last value, so a decode pass costs the decode alone.
@@ -8,21 +9,11 @@ pub type Account: codec {
     balance: i64
 }
 
-fn rows_encode(x: List[Account], mut out: Bytes) -> Result[(), Capacity] {
-    std.codec.put_list(x, std.codec.of(), mut out)
-}
-
-fn rows_decode(b: Bytes, mut at: u64) -> Result[List[Account], std.codec.Stop] {
-    std.codec.take_list(b, mut at, std.codec.of())
-}
-
-fn rows_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[Account]]) -> Result[(), Capacity] {
-    let a: std.codec.Codec[Account] = std.codec.of()
-    std.codec.schema_list(mut s, a)
-}
-
-fn rows() -> std.codec.Codec[List[Account]] {
-    std.codec.make(rows_encode, rows_decode, rows_schema, 8)
+// One field, so its bytes are the list's: the derive's inline put_list path. Both rows
+// routes take Account's derived codec; a second Account codec in the program would share
+// put_list[Account] with it and leave the element codec a run-time value.
+pub type Ledger: codec {
+    accounts: List[Account]
 }
 
 fn floats_encode(x: List[f64], mut out: Bytes) -> Result[(), Capacity] {
@@ -92,6 +83,10 @@ fn check_rows(xs: List[Account]) -> u64 {
     list.len(xs) + last.id + string.byte_len(last.owner)
 }
 
+fn check_ledger(l: Ledger) -> u64 {
+    check_rows(l.accounts)
+}
+
 fn check_floats(xs: List[f64]) -> u64 {
     list.len(xs) + (float.to_bits64(xs[list.len(xs) - 1]) & 0xff)
 }
@@ -101,7 +96,7 @@ fn check_strings(xs: List[String]) -> u64 {
 }
 
 fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, Capacity] {
-    if work == 0 {
+    if work == 0 || work == 3 {
         let mut xs: List[Account] = list.with_capacity(n)?
         let mut k: u64 = 0
         while k < n {
@@ -113,7 +108,13 @@ fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, Capacity] {
             }
             k += 1
         }
-        run(rows(), xs, mode, r, check_rows)
+        if work == 0 {
+            let c: std.codec.Codec[List[Account]] = std.codec.of()
+            run(c, xs, mode, r, check_rows)
+        } else {
+            let c: std.codec.Codec[Ledger] = std.codec.of()
+            run(c, Ledger(accounts: take xs), mode, r, check_ledger)
+        }
     } else if work == 1 {
         let mut xs: List[f64] = list.with_capacity(n)?
         let mut k: u64 = 0

@@ -139,7 +139,8 @@ fn main() {
     let a: Vec<u64> = env::args().skip(1).map(|s| s.parse().unwrap_or(0)).collect();
     let (work, mode, n, r) = (a[0], a[1], a[2], a[3]);
     let v = match work {
-        0 => {
+        // 3 is Hirsel's other route to the same bytes.
+        0 | 3 => {
             let xs: Vec<Account> = (0..n).map(|k| Account { id: k, owner: owner(k), balance: k as i64 - 50000 }).collect();
             run(&xs, mode, r, |xs| { let a = &xs[xs.len() - 1]; xs.len() as u64 + a.id + a.owner.len() as u64 })
         }

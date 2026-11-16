@@ -1,10 +1,10 @@
 # std.codec against a hand-written Rust codec of the same format
 
 Sources:
-- Hirsel side: `core/twins/codec/codec.hirsel`, which uses `std.codec`. `Account` declares `codec`, so its codec is the derived one (put/take per field); the list codecs are `make` over `put_list`/`take_list`. The numbers below were taken with the hand-written Account codec, the same text the derive emits.
+- Hirsel side: `core/twins/codec/codec.hirsel`, which uses `std.codec`. Rows take `Account`'s derived codec through `of[List[Account]]` (std's `of_list`); the floats and strings codecs are hand-written the way the derive writes a field, `put_list`/`take_list` over a codec.
 - Rust twin: `core/twins/codec/codec.rs`, the same bytes through a `Codec` trait (monomorphised, `Vec::extend_from_slice`), with the same decode checks (bounds, the count against the bytes left, UTF-8, canonical NaN).
 
-`codec WORK MODE N R`: WORK 0 is N rows `{id: u64, owner: String, balance: i64}`, 1 is N f64s, 2 is N strings, each one List; MODE 0 builds and encodes once, 1 also encodes R times, 2 also decodes R times. Both sides print the same checksum.
+`codec WORK MODE N R`: WORK 0 is N rows `{id: u64, owner: String, balance: i64}`, 1 is N f64s, 2 is N strings, each one List, and 3 is the rows as the one field of a derived record (the same bytes; Rust runs 3 as 0); MODE 0 builds and encodes once, 1 also encodes R times, 2 also decodes R times. Both sides print the same checksum.
 
 Method:
 - The release compiler (sha256 a411c956…) and the shipping fat-LTO runtime (sha256 8ac12360…) are pinned by `core/tools/measurement_artifacts.py`.
@@ -35,3 +35,16 @@ Method:
 ## Decode
 
 Inlined into one loop per list; the excess over Rust is the reload of `b`'s data pointer from the stack each element (register pressure in the large function) and `push`'s capacity test, which Rust also has. Rows decode wall (1.58) exceeds its instruction ratio (1.20): the 100,000 strings each allocate, and from_utf8 is 6.9 percent and malloc and free about 40 percent of a strings decode profile.
+
+## `of[List[Account]]` against the derived field (std-codec-of-1008)
+
+Measured 2026-11-16 with the compiler at sha256 194a8bb6…, the same runtime, N=100,000, R=20, median of 5 (/tmp/std-codec-1008-m6.json; script measure3.py beside measure2.py, which takes the works as a list).
+
+| one pass, rows | Hirsel LLVM, instructions | Rust opt 3 | ratio |
+|---|---:|---:|---:|
+| encode, `of[List[Account]]` (work 0) | 14.6M | 5.3M | 2.75 |
+| encode, derived field (work 3) | 14.6M | 5.3M | 2.75 |
+| decode, `of[List[Account]]` | 67.24M | 55.64M | 1.21 |
+| decode, derived field | 67.24M | 55.64M | 1.21 |
+
+The two routes run the same code: `of_list`'s encoder is `put_list` over `of[Account]`, and LLVM folds both to one loop. The hand-written row codec of the table above measured 14.4M encode on this compiler; the derived Account codec is 2 instructions a row more. Wall medians were 1.01/1.14 ms encode and 5.82/6.16 ms decode against Rust's 0.35-0.60 and 3.47-4.74 ms. Rust's two identical routes differ by up to 40 percent at load 16-20, so only the instruction ratios are evidence. Keep one Account codec in the program: a hand codec beside the derived one shares `put_list[Account]` between two codec values, LLVM no longer folds the element codec, and encode reads 19.0M.

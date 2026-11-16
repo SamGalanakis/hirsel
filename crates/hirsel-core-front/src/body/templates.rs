@@ -965,11 +965,17 @@ impl Emitter {
         }
         // Substitution adds rows to the module alone; a later check of one of their
         // definitions (std's `of_u64`, demanded only through `of[$0]`) must find that
-        // row, not make a second one the call never reaches.
+        // row, not make a second one the call never reaches. So must a later check
+        // that names one of the type rows it added (`Codec[u8]`, from `of_list[u8]`).
         for (i, function) in self.module.functions.iter().enumerate() {
             let key = &self.module.instances[function.instance.index()];
             if !self.funcs.contains_key(key) {
                 self.funcs.insert(key.clone(), FuncId(i as u32));
+            }
+        }
+        for (i, shape) in self.module.types.iter().enumerate() {
+            if !self.types.contains_key(&shape.name) {
+                self.types.insert(shape.name.clone(), TypeRef(i as u32));
             }
         }
         Ok(())

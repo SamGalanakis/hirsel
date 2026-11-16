@@ -216,10 +216,10 @@
         "image index": 203.79778742473042
       },
       "image_per_token": {
-        "records_opened": 0.0024646408066097184,
-        "bytes_read": 10.084441954908277,
-        "digests": 0.0024646408066097184,
-        "digest_bytes": 9.985856322643887,
+        "records_opened": 0.002492648088503011,
+        "bytes_read": 10.209802548662653,
+        "digests": 0.002492648088503011,
+        "digest_bytes": 10.110096625122532,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.03113849600896233,
@@ -897,6 +897,48 @@
       "evidence": [
         "core-derive-codec-1017/logs/slice1-tests.log",
         "core-derive-codec-1017/logs/slice1-basecost.log"
+      ]
+    },
+    {
+      "reason": "std's structural codec makers (std-codec-of-1008: of_list, of_option, of_map and of_result, which `of` resolves to at List, Option, Map and Result) are the codec hook of each closed tuple-free List, Map, Option and Result codec row a body module lays out, as a nominal codec row's derived maker is, and every body's reuse key hashes their closures beside the prelude's (one component per request): suite-edit's image opens one more record and reads the makers' longer std.codec records. The suite-edit image cells it moves receive the observation; every other cell is unchanged.",
+      "changes": {
+        "suite-edit": {
+          "records_opened": {
+            "before": 0.0024646408066097184,
+            "after": 0.002492648088503011
+          },
+          "bytes_read": {
+            "before": 10.084441954908277,
+            "after": 10.209802548662653
+          },
+          "digests": {
+            "before": 0.0024646408066097184,
+            "after": 0.002492648088503011
+          },
+          "digest_bytes": {
+            "before": 9.985856322643887,
+            "after": 10.110096625122532
+          }
+        }
+      },
+      "observation": {
+        "local": {
+          "records_opened": 89,
+          "bytes_read": 364541,
+          "digests": 89,
+          "digest_bytes": 360981,
+          "tokens": 35705
+        },
+        "base_local": {
+          "records_opened": 88,
+          "bytes_read": 360065,
+          "digests": 88,
+          "digest_bytes": 356545,
+          "tokens": 35705
+        }
+      },
+      "evidence": [
+        "std-codec-1008/evidence/front-cost-structural.log"
       ]
     }
   ],

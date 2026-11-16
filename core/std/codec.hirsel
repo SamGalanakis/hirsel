@@ -561,11 +561,96 @@ fn describe_string(mut s: Schema, _c: Codec[String]) -> Result[(), Capacity] {
 }
 
 /// T's codec. The checker resolves each call by the instance's T (SEM-10): to the built-in
-/// codec below for a scalar, `()` and String, and to the codec it generated from T's
-/// declaration for a nominal type. No instance of `of` is ever built, so this body, which
-/// only states the signature in checked Hirsel, never runs.
+/// codec below for a scalar, `()` and String, to the structural codec below for List,
+/// Option, Map and Result, and to the codec it generated from T's declaration for a nominal
+/// type. A tuple, or a type holding one, has no codec yet: `of` there is a gap. No instance
+/// of `of` is ever built, so this body, which only states the signature in checked Hirsel,
+/// never runs.
 pub fn of[T: codec]() -> Codec[T] {
     of()
+}
+
+// The structural codecs: `of` resolves to these at List, Option, Map and Result (Bytes is
+// List[u8]). Each is the field path itself, put_list and the rest with `of()` for the
+// elements, so a value encodes as the same type does as a field.
+/// The codec of List[E]: the u64 count, then each element. Ex: `let c: Codec[List[u64]] = codec.of()`
+pub fn of_list[E: codec]() -> Codec[List[E]] {
+    Codec(encoder: list_encode, decoder: list_decode, describer: describe_list, smallest: 8)
+}
+
+/// The codec of Option[E]: tag 0 for None, or tag 1 then the value.
+pub fn of_option[E: codec]() -> Codec[Option[E]] {
+    Codec(encoder: option_encode, decoder: option_decode, describer: describe_option, smallest: 4)
+}
+
+/// The codec of Map[K, V]: the u64 count, then key and value per entry in insertion order.
+pub fn of_map[K: key + codec, V: codec]() -> Codec[Map[K, V]] {
+    Codec(encoder: map_encode, decoder: map_decode, describer: describe_map, smallest: 8)
+}
+
+/// The codec of Result[T, E]: tag 0 then the Ok value, or tag 1 then the Error value.
+pub fn of_result[T: codec, E: codec]() -> Codec[Result[T, E]] {
+    Codec(encoder: result_encode, decoder: result_decode, describer: describe_result, smallest: 4)
+}
+
+fn list_encode[E: codec](xs: List[E], mut out: Bytes) -> Result[(), Capacity] {
+    put_list(xs, of(), mut out)
+}
+
+fn list_decode[E: codec](b: Bytes, mut at: u64) -> Result[List[E], Stop] {
+    let c: Codec[E] = of()
+    take_list(b, mut at, c)
+}
+
+fn describe_list[E: codec](mut s: Schema, _c: Codec[List[E]]) -> Result[(), Capacity] {
+    let c: Codec[E] = of()
+    schema_list(mut s, c)
+}
+
+fn option_encode[E: codec](x: Option[E], mut out: Bytes) -> Result[(), Capacity] {
+    put_option(x, of(), mut out)
+}
+
+fn option_decode[E: codec](b: Bytes, mut at: u64) -> Result[Option[E], Stop] {
+    let c: Codec[E] = of()
+    take_option(b, mut at, c)
+}
+
+fn describe_option[E: codec](mut s: Schema, _c: Codec[Option[E]]) -> Result[(), Capacity] {
+    let c: Codec[E] = of()
+    schema_option(mut s, c)
+}
+
+fn map_encode[K: key + codec, V: codec](m: Map[K, V], mut out: Bytes) -> Result[(), Capacity] {
+    put_map(m, of(), of(), mut out)
+}
+
+fn map_decode[K: key + codec, V: codec](b: Bytes, mut at: u64) -> Result[Map[K, V], Stop] {
+    let ck: Codec[K] = of()
+    let cv: Codec[V] = of()
+    take_map(b, mut at, ck, cv)
+}
+
+fn describe_map[K: key + codec, V: codec](mut s: Schema, _c: Codec[Map[K, V]]) -> Result[(), Capacity] {
+    let ck: Codec[K] = of()
+    let cv: Codec[V] = of()
+    schema_map(mut s, ck, cv)
+}
+
+fn result_encode[T: codec, E: codec](x: Result[T, E], mut out: Bytes) -> Result[(), Capacity] {
+    put_result(x, of(), of(), mut out)
+}
+
+fn result_decode[T: codec, E: codec](b: Bytes, mut at: u64) -> Result[Result[T, E], Stop] {
+    let ct: Codec[T] = of()
+    let ce: Codec[E] = of()
+    take_result(b, mut at, ct, ce)
+}
+
+fn describe_result[T: codec, E: codec](mut s: Schema, _c: Codec[Result[T, E]]) -> Result[(), Capacity] {
+    let ct: Codec[T] = of()
+    let ce: Codec[E] = of()
+    schema_result(mut s, ct, ce)
 }
 
 // The built-in codecs: core.md's codec rows. `of` resolves to these at scalar types.

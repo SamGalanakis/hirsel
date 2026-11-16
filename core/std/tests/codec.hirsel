@@ -1923,7 +1923,7 @@ fn dordered[T: ordered](take p: DPair[T]) -> Result[DOrdered[T], ()] {
     }
 }
 
-// A via over a List has no `of[R]` to go through (std has no list codec value): not derived.
+// A via over a List: R's codec is std's of_list at T (structural_of).
 type DNonEmpty[T]: codec via List[T] (to: dnon_items, from: dnonempty) {
     items: List[T]
 }
@@ -1979,4 +1979,121 @@ fn derived_via() -> (bool, bool, u64, (u64, u64), u64, bool, (bool, u64, u64, bo
     let s: codec.Codec[DOrdered[String]] = codec.of()
     let generic = (again(g, ok), outcome(g, bad), codec.least(g), again(s, unhex("0100000000000000 61 0100000000000000 62")), outcome(s, unhex("0100000000000000 62 0100000000000000 61")))
     (written, schema, codec.least(c), (drange_at(bad, 0), drange_at(late, 4)), read, other, generic)
+}
+
+// The structural codecs (EXPANSION 7, 9.1): `of` at a List, Option, Map, Result or Bytes,
+// or a nest of them, is std's of_list and the rest, which write what the derive writes for
+// the same type as a field. SHold holds one of each.
+type SHold: codec {
+    xs: List[u64],
+    o: Option[String],
+    m: Map[String, u64],
+    r: Result[u64, String],
+    b: Bytes,
+    n: List[Option[String]]
+}
+
+// c is the codec of a type whose schema is `root` alone (no definitions): x's bytes
+// are `hex`, every prefix of them is Truncated, the schema and fingerprint are that
+// root's, least is `least`, and `of` through a generic body (generic_of) agrees.
+fn structural[T: codec](c: codec.Codec[T], x: T, hex: String, root: String, least: u64) -> bool {
+    let mut want = unhex("01 0000000000000000")
+    result.unwrap(list.append(mut want, unhex(root)))
+    enc(c, x) == unhex(hex) && prefixes(c, unhex(hex)) && result.unwrap(codec.schema(c)) == want && result.unwrap(codec.fingerprint(c)) == codec.fingerprint_of(want) && codec.least(c) == least && same_codec(c, generic_of(), x)
+}
+
+fn sample() -> SHold {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 1))
+    result.unwrap(list.push(mut xs, 2))
+    let mut m: Map[String, u64] = map.new()
+    result.unwrap(map.insert(mut m, result.unwrap(string.from("a")), 1))
+    result.unwrap(map.insert(mut m, result.unwrap(string.from("b")), 2))
+    let mut b: Bytes = list.new()
+    result.unwrap(list.push(mut b, 0xab))
+    result.unwrap(list.push(mut b, 0xcd))
+    let mut n: List[Option[String]] = list.new()
+    result.unwrap(list.push(mut n, Some(result.unwrap(string.from("a")))))
+    result.unwrap(list.push(mut n, None))
+    SHold(xs: xs, o: Some(result.unwrap(string.from("hé"))), m: m, r: Error(result.unwrap(string.from("x"))), b: b, n: n)
+}
+
+// Each field of sample() through `of` at its type, by hand: List[u64] [1, 2]; Option[String]
+// Some("hé") (tag 1, then the string); Map[String, u64] {"a": 1, "b": 2} in insertion
+// order; Result[u64, String] Error("x") (tag 1) and Ok(7) (tag 0); Bytes [ab, cd] as
+// List[u8]; List[Option[String]] [Some("a"), None]. Schema opcodes: 14 List, 15 Map,
+// 16 Option, 17 Result, 3 u8, 6 u64, 13 String. Least: 8 for List and Map, 4 for Option
+// and Result. Then SHold's derived bytes are the six fields' in order, its schema the one
+// definition whose six field types are those roots, and its least their sum, 40. Refused
+// through the makers: a map key repeated (Duplicate at the second key, 25), an Option or
+// Result tag 2 (Invalid at 0). A maker with another element codec, tag order, opcode or
+// least, or an `of` that misses a maker at a closed type or through a generic, fails it.
+// expect: run structural_of() = ((true, true, true, true, true, true, true), (true, true, true), (4025, 2000, 2000))
+fn structural_of() -> ((bool, bool, bool, bool, bool, bool, bool), (bool, bool, bool), (u64, u64, u64)) {
+    let h = sample()
+    let xs: codec.Codec[List[u64]] = codec.of()
+    let o: codec.Codec[Option[String]] = codec.of()
+    let m: codec.Codec[Map[String, u64]] = codec.of()
+    let r: codec.Codec[Result[u64, String]] = codec.of()
+    let b: codec.Codec[Bytes] = codec.of()
+    let n: codec.Codec[List[Option[String]]] = codec.of()
+    let ok: Result[u64, String] = Ok(7)
+    let fields = (structural(xs, h.xs, "0200000000000000 0100000000000000 0200000000000000", "0e06", 8), structural(o, h.o, "01000000 0300000000000000 68c3a9", "100d", 4), structural(m, h.m, "0200000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0200000000000000", "0f0d06", 8), structural(r, h.r, "01000000 0100000000000000 78", "11060d", 4), structural(r, ok, "00000000 0700000000000000", "11060d", 4), structural(b, h.b, "0200000000000000 abcd", "0e03", 8), structural(n, h.n, "0200000000000000 01000000 0100000000000000 61 00000000", "0e100d", 8))
+    let c: codec.Codec[SHold] = codec.of()
+    let mut whole: Bytes = list.new()
+    result.unwrap(list.append(mut whole, enc(xs, h.xs)))
+    result.unwrap(list.append(mut whole, enc(o, h.o)))
+    result.unwrap(list.append(mut whole, enc(m, h.m)))
+    result.unwrap(list.append(mut whole, enc(r, h.r)))
+    result.unwrap(list.append(mut whole, enc(b, h.b)))
+    result.unwrap(list.append(mut whole, enc(n, h.n)))
+    let schema = unhex("01 0100000000000000 1500000000000000 7374642e74657374732e636f6465632e53486f6c64 0000000000000000 00 0600000000000000 00 0200000000000000 7873 0e06 00 0100000000000000 6f 100d 00 0100000000000000 6d 0f0d06 00 0100000000000000 72 11060d 00 0100000000000000 62 0e03 00 0100000000000000 6e 0e100d 13 0000000000000000")
+    let held = (enc(c, h) == whole, result.unwrap(codec.schema(c)) == schema, codec.least(c) == 40)
+    let refused = (outcome(m, unhex("0200000000000000 0100000000000000 61 0100000000000000 0100000000000000 61 0200000000000000")), outcome(o, unhex("02000000")), outcome(r, unhex("02000000 0700000000000000")))
+    (fields, held, refused)
+}
+
+fn dnonempty_at(b: Bytes) -> u64 {
+    let c: codec.Codec[DNonEmpty[u64]] = codec.of()
+    match codec.decode(c, b) {
+        Ok(Ok(x)) => list.len(x.items),
+        Ok(Error(e)) => code(e),
+        Error(_) => 9999
+    }
+}
+
+// A via over a List derives (EXPANSION 7): DNonEmpty[u64] [3] is List[u64]'s bytes, every
+// prefix Truncated; its schema is the via frame by hand: one definition, its path, one
+// type argument (u64, 06), kind 2 and the wire List[u64] (0e06), then the root (13, 0);
+// least 8 (List's). An empty list is Value at 0, and two elements read back as two.
+// expect: run structural_via() = (true, true, 8, 7000, 2)
+fn structural_via() -> (bool, bool, u64, u64, u64) {
+    let c: codec.Codec[DNonEmpty[u64]] = codec.of()
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 3))
+    let one = unhex("0100000000000000 0300000000000000")
+    let written = enc(c, result.unwrap(dnonempty(take xs))) == one && prefixes(c, one)
+    let schema = unhex("01 0100000000000000 1900000000000000 7374642e74657374732e636f6465632e444e6f6e456d707479 0100000000000000 06 02 0e06 13 0000000000000000")
+    (written, result.unwrap(codec.schema(c)) == schema, codec.least(c), dnonempty_at(unhex("0000000000000000")), dnonempty_at(unhex("0200000000000000 0300000000000000 0400000000000000")))
+}
+
+// `of` two generic bodies deep: the row List[T] or DPair[T] is made where `two_deep`'s T
+// is substituted, so its maker is the generic row's hook at that T.
+fn two_deep[T: codec](take x: T, take y: T, take z: T, list_hex: String, pair_hex: String) -> bool {
+    let l: codec.Codec[List[T]] = generic_of()
+    let p: codec.Codec[DPair[T]] = generic_of()
+    let mut xs: List[T] = list.new()
+    result.unwrap(list.push(mut xs, take z))
+    enc(l, xs) == unhex(list_hex) && enc(p, DPair(left: take x, right: take y)) == unhex(pair_hex)
+}
+
+// expect: run structural_through() = (true, true)
+fn structural_through() -> (bool, bool) {
+    let a = two_deep(5u64, 6u64, 7u64, "0100000000000000 0700000000000000", "0500000000000000 0600000000000000")
+    let b = two_deep(owned("a"), owned("b"), owned("c"), "0100000000000000 0100000000000000 63", "0100000000000000 61 0100000000000000 62")
+    (a, b)
+}
+
+fn owned(x: String) -> String {
+    result.unwrap(string.from(x))
 }

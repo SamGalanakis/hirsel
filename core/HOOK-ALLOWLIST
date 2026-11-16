@@ -96,6 +96,7 @@ core@1/core/Stdout
 core@1/core/String
 # DECISIONS.md 2026-11-16 ruling: replay core (REPLAY-SPEC v2 §9)
 core@1/core/Tape
+core@1/core/OutOfTime
 core@1/core/Task
 core@1/core/Tasks
 core@1/core/Text

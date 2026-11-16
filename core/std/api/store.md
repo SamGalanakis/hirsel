@@ -85,8 +85,12 @@ journal acks. It returns a CALL section from live segments. Compaction is
 measured by the latest cut this Db has taken, with the previous cut restored
 when a refusal is learned. A covering cut or memory mode gives None. A journal
 failure is retained on the write-notice channel, so repeated calls return the
-same `Poisoned` error. CALL carries key, args and stream; the frame supplies
-CallInfo and the stream operation supplies position. Public stream producers
+same `Poisoned` error. CALL carries key, args, stream and revision; the frame
+supplies CallInfo and the stream operation supplies position. `revision` is the
+32 bytes `code.revision` gave for the entry that ran, or None when the program
+has no revisions. It is written as a u32 length of 0 or 32, any other length is
+`Corrupt(Malformed)`, and a Some that is not 32 bytes is `Missing("revision")`
+before anything commits. Public stream producers
 belong to S5. Pins, forks and migration belong to S4.
 
 `//:core-store-s1` selects the package's evaluator and native laws, including

@@ -1052,6 +1052,8 @@ fn encode_sections(ci: CallInfo, ops: std.omap.OMap[Bytes, Option[Bytes]], strea
         blob(mut payload, c.key)?
         blob(mut payload, c.args)?
         blob(mut payload, c.stream)?
+        // AD1: u32 length 0 for None, 32 for Some.
+        if let Some(r) = c.revision { blob(mut payload, r)? } else { le(mut payload, 0, 4)? }
     }
     disk_seal(DiskContext(store: ci.id.store, role: 2, seq: seq), offset, 0x0011, 1, payload)
 }
@@ -7261,7 +7263,19 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
 pub type CallRecord: codec {
     key: Bytes,
     args: Bytes,
-    stream: Bytes
+    stream: Bytes,
+    // AD1: code.revision of the entry that ran, exactly 32 bytes; None only
+    // when the program was assembled without revisions. Never 32 zero bytes.
+    revision: Option[Bytes]
+}
+
+// AD1: record's check. A Some that is not code.revision's 32 bytes is refused
+// before anything is committed.
+fn call_checked(c: CallRecord) -> Result[(), Error] {
+    if let Some(r) = c.revision {
+        if list.len(r) != 32 { return Error(Missing("revision")) }
+    }
+    Ok(())
 }
 
 type JournalOp: shareable + send {
@@ -7316,7 +7330,14 @@ fn journal_decode(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
             let key = disk_blob(file, raw, mut at, 16777280)?
             let args = disk_blob(file, raw, mut at, 16777280)?
             let stream = disk_blob(file, raw, mut at, 16777280)?
-            call = Some(CallRecord(key: take key, args: take args, stream: take stream))
+            let revision_at = at
+            let revision_bytes = disk_blob(file, raw, mut at, 32)?
+            let revision: Option[Bytes] = match list.len(revision_bytes) {
+                0 => None,
+                32 => Some(take revision_bytes),
+                _ => return Error(disk_fault(file, revision_at, Malformed))
+            }
+            call = Some(CallRecord(key: take key, args: take args, stream: take stream, revision: take revision))
         }
     }
     if at != list.len(raw) { return Error(disk_fault(file, at, Malformed)) }
@@ -7328,6 +7349,21 @@ fn journal_decode(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
         if !matching { return Error(disk_fault(file, at, Malformed)) }
     }
     Ok(JournalCommit(branch: branch, version: head, at: wall, data: take data, streams: take streams, call: take call))
+}
+
+// AD1 (vi): the hand-written revision 0x00, 0x01, ..., 0x1f.
+fn revision_vector() -> Bytes {
+    let mut r: Bytes = result.unwrap(list.with_capacity(32))
+    for i in 0u64 .. 32 { result.unwrap(list.push(mut r, int.truncate(i))) }
+    r
+}
+
+fn revision_is_vector(got: Option[Bytes]) -> bool {
+    match got { Some(r) => r == revision_vector(), None => false }
+}
+
+fn revision_is_none(got: Option[Bytes]) -> bool {
+    match got { Some(_) => false, None => true }
 }
 
 // L10/L12: hand-laid payload with both state sections and a CALL. The call
@@ -7342,6 +7378,7 @@ pub fn journal_law_payload() -> bool {
     result.unwrap(blob(mut payload, string.as_bytes("entry")))
     result.unwrap(blob(mut payload, string.as_bytes("arguments")))
     result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    result.unwrap(blob(mut payload, revision_vector()))
     result.unwrap(le(mut payload, 0, 1))
     result.unwrap(le(mut payload, 2, 4))
     result.unwrap(le(mut payload, 1, 1))
@@ -7362,8 +7399,22 @@ pub fn journal_law_payload() -> bool {
     if got.streams[0].key != string.as_bytes("stream") { return false }
     match got.streams[0].value { Some(v) => if v != string.as_bytes("reply") { return false }, None => return false }
     match got.call {
-        Some(c) => if c.key != string.as_bytes("entry") || c.args != string.as_bytes("arguments") || c.stream != string.as_bytes("stream") { return false },
+        Some(c) => if c.key != string.as_bytes("entry") || c.args != string.as_bytes("arguments") || c.stream != string.as_bytes("stream") || !revision_is_vector(c.revision) { return false },
         None => return false
+    }
+    // AD1: the revision field is bytes 54..90 (u32 32 then 0x00..0x1f). Length
+    // 0 reads as None; length 1 is malformed.
+    for size in 0u64 .. 2 {
+        let mut other: Bytes = result.unwrap(copied(list.slice(payload, 0, 54)))
+        result.unwrap(le(mut other, size, 4))
+        if size == 1 { result.unwrap(list.push(mut other, 0u8)) }
+        result.unwrap(list.append(mut other, list.slice(payload, 90, list.len(payload))))
+        let read_back = journal_decode("j-7", other)
+        if size == 1 {
+            match read_back { Error(Corrupt(fault)) => match fault.why { Malformed => {}, _ => return false }, _ => return false }
+        } else {
+            match result.unwrap(take read_back).call { Some(c) => if !revision_is_none(c.revision) { return false }, None => return false }
+        }
     }
     for i in 0u64 .. list.len(payload) {
         if !disk_corrupt(journal_decode("j-7", list.slice(payload, 0, i))) { return false }
@@ -8216,7 +8267,8 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(blob(mut payload, string.as_bytes("entry")))
     result.unwrap(blob(mut payload, string.as_bytes("arguments")))
     result.unwrap(blob(mut payload, string.as_bytes("stream")))
-    if list.len(payload) != 88 { return false }
+    result.unwrap(blob(mut payload, revision_vector()))
+    if list.len(payload) != 124 { return false }
     let raw = result.unwrap(disk_seal(DiskContext(store: id, role: 2, seq: seq), 72, 0x0011, 1, payload))
     let path = result.unwrap(disk_path("j-", seq, ""))
     let mut file = result.unwrap(host.open(d, path, Append))
@@ -8224,11 +8276,11 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(host.sync(mut file))
     result.unwrap(host.close(take file))
     let end_path = result.unwrap(disk_path("j-", seq, ".end"))
-    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 176)))
+    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 212)))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
     let b = main_branch(reopened)
     match result.unwrap(recorded(reopened, b, 1)) {
-        Some(call_record) => if call_record.key != string.as_bytes("entry") || call_record.args != string.as_bytes("arguments") || call_record.stream != string.as_bytes("stream") { return false },
+        Some(call_record) => if call_record.key != string.as_bytes("entry") || call_record.args != string.as_bytes("arguments") || call_record.stream != string.as_bytes("stream") || !revision_is_vector(call_record.revision) { return false },
         None => return false
     }
     if let Some(_) = result.unwrap(recorded(reopened, b, 0)) { return false }
@@ -8455,12 +8507,19 @@ pub fn journal_law_call_vector() -> bool {
     result.unwrap(list.fill(mut entry_key, 32, 1u8))
     let mut args: Bytes = list.new()
     result.unwrap(list.fill(mut args, 16, 2u8))
-    let call = Some(CallRecord(key: take entry_key, args: take args, stream: take stream))
+    let call = Some(CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector())))
     let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: 257), at: 1234, seed: 0)
     let raw = result.unwrap(encode_sections(ci, data, streams, call, 7, 72))
-    let expected: Inline[u8, 205] =[17, 0, 1, 0, 189, 0, 0, 0, 68, 148, 246, 4, 102, 101, 74, 150, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 3, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 34, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 0, 0, 0, 1, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 17, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 3, 3, 3, 3, 3, 3, 3, 3, 2, 32, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48]
-    if list.len(raw) != 205 { return false }
-    for i in 0u64 .. 205 { if raw[i] != expected[i] { return false } }
+    // Python struct + libxxhash 0.8.2 (store-build-1010 call_vector_v220.py):
+    // the v2.19 frame with revision u32 32 ++ 0x00..0x1f after the stream.
+    let expected: Inline[u8, 241] =[17, 0, 1, 0, 225, 0, 0, 0, 63, 59, 110, 82, 251, 191, 229, 196, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 3, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 34, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 0, 0, 0, 1, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 17, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 3, 3, 3, 3, 3, 3, 3, 3, 2, 32, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 32, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    if list.len(raw) != 241 { return false }
+    for i in 0u64 .. 241 { if raw[i] != expected[i] { return false } }
+    // None is a zero length: 4 bytes, not 36, and reads back as None.
+    let none = Some(CallRecord(key: take entry_key, args: take args, stream: take stream, revision: None))
+    let bare = result.unwrap(encode_sections(ci, data, streams, none, 7, 72))
+    if list.len(bare) != 209 { return false }
+    match result.unwrap(journal_decode("j-7", list.slice(bare, 16, 209))).call { Some(c) => if !revision_is_none(c.revision) { return false }, None => return false }
     true
 }
 
@@ -8471,7 +8530,7 @@ fn journal_test_call_vector() -> Result[(), ()] {
 
 // S3's producer fixture feeds the final three-section encoder and the normal
 // handoff. S5 adds record/reply's public validation on this same frame shape.
-fn journal_fixture_call(mut db: Db, large: bool) -> Ticket waits {
+fn journal_fixture_call(mut db: Db, large: bool, take revision: Option[Bytes]) -> Result[Ticket, Error] waits {
     let stream = result.unwrap(copied(string.as_bytes("stream00")))
     let mut value: Bytes = list.new()
     result.unwrap(le(mut value, 1, 8))
@@ -8484,7 +8543,9 @@ fn journal_fixture_call(mut db: Db, large: bool) -> Ticket waits {
     result.unwrap(list.fill(mut entry_key, 32, 1u8))
     let mut args: Bytes = list.new()
     result.unwrap(list.fill(mut args, 16, 2u8))
-    let call = Some(CallRecord(key: take entry_key, args: take args, stream: take stream))
+    let checked = CallRecord(key: take entry_key, args: take args, stream: take stream, revision: take revision)
+    call_checked(checked)?
+    let call = Some(take checked)
     let ci = call_info(db.store, 0, db.head + 1, db.at + 1, db.at)
     let data: std.omap.OMap[Bytes, Option[Bytes]] = std.omap.new()
     let raw = result.unwrap(encode_sections(ci, data, streams, call, db.file_seq, db.file_end))
@@ -8506,7 +8567,7 @@ fn journal_fixture_call(mut db: Db, large: bool) -> Ticket waits {
     db.frame_seq += 1
     let ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
     if let Some(sender) = db.journal { result.unwrap(channel.send(sender, Frame(take raw, db.frame_seq))) }
-    ticket
+    Ok(ticket)
 }
 
 fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool) -> bool waits {
@@ -8514,13 +8575,21 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
     options.resident_limit = 4194304
     if refuse { options.checkpoint_task_bytes = 131072 }
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    let _ = journal_fixture_call(mut db, refuse)
+    // AD1: a revision of 31 or 33 bytes is refused and commits nothing.
+    for size in [31u64, 33u64] {
+        let mut wrong: Bytes = list.new()
+        result.unwrap(list.fill(mut wrong, size, 7u8))
+        let before = db.head
+        match journal_fixture_call(mut db, refuse, Some(take wrong)) { Error(Missing(name)) => if name != "revision" { return false }, _ => return false }
+        if db.head != before { return false }
+    }
+    let _ = result.unwrap(journal_fixture_call(mut db, refuse, Some(revision_vector())))
     let head = db.head
     let branch = main_branch(db)
     // The journal has not had a blocking turn since handoff. Only the
     // write barrier makes this answer independent of when it drains.
     match result.unwrap(recorded(db, branch, head)) {
-        Some(captured) => if list.len(captured.key) != 32 || list.len(captured.args) != 16 || captured.stream != string.as_bytes("stream00") { return false },
+        Some(captured) => if list.len(captured.key) != 32 || list.len(captured.args) != 16 || captured.stream != string.as_bytes("stream00") || !revision_is_vector(captured.revision) { return false },
         None => return false
     }
     let roots = share_roots(db.roots)

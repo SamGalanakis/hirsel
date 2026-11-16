@@ -786,6 +786,24 @@ impl Driver {
             });
         }
         meter.finish("index");
+        // The gate (OPTION-L L2): the shape reads the environment and every
+        // item header, never a resolution, so it is decided before resolve.
+        // The store selects this shape's record of declared tables, or not.
+        let shape = reuse::Shape::new(&index, &modules, &resolution_inputs, compiler)?;
+        publication.shape = shape.key(&encode(&(
+            &request.entry,
+            image.as_ref().map(|i| i.identity),
+            produce,
+            reachable_only,
+            sources.iter().map(|s| s.1).collect::<Vec<bool>>(),
+        ))?);
+        let layer = layers::Layer::read(&store, publication.shape)?;
+        meter.result.layer_class = Some(if layer.selected {
+            meter::LayerClass::Fast
+        } else {
+            meter::LayerClass::Fallback
+        });
+        meter.finish("gate");
         let mut resolution_scratch = ResolutionScratch::default();
         let resolutions: Vec<Vec<Arc<Resolution>>> = modules
             .iter()
@@ -853,8 +871,7 @@ impl Driver {
                     &index,
                     &modules,
                     &resolutions,
-                    &resolution_inputs,
-                    compiler_identity()?,
+                    &shape,
                     image.as_ref().map(|i| i.identity),
                     image_directory.as_ref().map(|i| &*i.headers),
                     image_directory.as_ref().map(|i| &i.anchors),
@@ -865,8 +882,7 @@ impl Driver {
                 &index,
                 &modules,
                 &resolutions,
-                &resolution_inputs,
-                compiler_identity()?,
+                &shape,
                 image.as_ref().map(|i| i.identity),
                 image_directory.as_ref().map(|i| &*i.headers),
                 image_directory.as_ref().map(|i| &i.anchors),
@@ -874,17 +890,9 @@ impl Driver {
         };
         // A body whose own source is unchanged under the prior shape keeps the
         // key its record holds: no closure walk and no lookup rows.
-        publication.shape = keys.shape(&encode(&(
-            &request.entry,
-            image.as_ref().map(|i| i.identity),
-            produce,
-            reachable_only,
-            sources.iter().map(|s| s.1).collect::<Vec<bool>>(),
-        ))?);
         let same_shape = prior.shape == Some(publication.shape);
         // The fast path: the store's record of this shape's declared tables
         // stands in for declaration.
-        let layer = layers::Layer::read(&store, publication.shape)?;
         let mut layer_record = None;
         {
             let installed = if layer.selected {

@@ -258,10 +258,6 @@ pub(crate) struct Keys {
     // The prelude's closures with std's structural codec makers', once per
     // request (`Keys::prelude_reads`).
     prelude_reads: std::cell::OnceCell<ContentHash>,
-    /// Every module of the request in order, with its items' header digests in
-    /// order: with the environment, entry and image, what a body's key reads
-    /// outside its own item (see `lib.rs`, the key shape).
-    pub(crate) items: ContentHash,
     /// The forms whose lowering reads a program input beyond their names
     /// (see `DefinitionKey`), by definition, as the index holds them.
     forms: Vec<(DefinitionId, Form)>,
@@ -335,21 +331,21 @@ fn forms(index: &NameIndex) -> (Vec<(DefinitionId, Form)>, Vec<Siblings>) {
     }
     (forms, siblings)
 }
-impl Keys {
-    pub fn new(
+/// The gate's inputs (OPTION-L L2): the environment, and every module's
+/// identity and item header digests in order. Both read the manifests and the
+/// parse, and a module's path from the index, never a resolution, so the gate
+/// decides after the index and before resolve.
+pub(crate) struct Shape {
+    environment: ContentHash,
+    items: ContentHash,
+}
+impl Shape {
+    pub(crate) fn new(
         index: &NameIndex,
         modules: &[ModuleInput],
-        resolutions: &[Vec<Arc<Resolution>>],
         inputs: &CorpusManifest,
         compiler: ContentHash,
-        image: Option<ContentHash>,
-        image_headers: Option<&Headers>,
-        image_anchors: Option<&hirsel_core_ids::published::Map<crate::ItemAt, DefPath>>,
     ) -> io::Result<Self> {
-        let mut headers = image_headers.cloned().unwrap_or_default();
-        headers.rows.resize(index.definitions.len(), None);
-        let mut keys = Self::bare(index, Headers::default());
-        let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut namespaces: Vec<_> = inputs
             .packages
             .iter()
@@ -360,14 +356,54 @@ impl Keys {
             "hirsel.core-environment.v1",
             [&encode(&(compiler, &inputs.core, namespaces))?[..]],
         );
+        let items = ContentHash::of_parts_stream("hirsel.key-items.v1", |parts| {
+            for m in modules {
+                let module = ContentHash::of_parts(
+                    "hirsel.key-identity.module.v1",
+                    [&encode(&index.module_path(m.id))?[..]],
+                );
+                parts.part_byte_slice(0, &module.0);
+                for item in m.syntax.items() {
+                    parts.part_byte_slice(1, &header_identity(item).0);
+                }
+            }
+            Ok(())
+        })?;
+        Ok(Self { environment, items })
+    }
+    /// The key shape: the environment, every module's item headers in order,
+    /// and `request` (entry, image identity, library mode and parse modes).
+    /// Two requests with one shape resolve every unchanged item alike and
+    /// derive every closure alike, so an unchanged body keeps its key: its
+    /// candidate sets, negative, ambiguous and shadowed probes, prelude, and
+    /// generic, glue, clone-hook and drop edges all read headers, manifests or
+    /// the image, never another item's body.
+    pub(crate) fn key(&self, request: &[u8]) -> ContentHash {
+        ContentHash::of_parts(
+            "hirsel.key-shape.v1",
+            [&self.environment.0[..], &self.items.0[..], request],
+        )
+    }
+}
+impl Keys {
+    pub fn new(
+        index: &NameIndex,
+        modules: &[ModuleInput],
+        resolutions: &[Vec<Arc<Resolution>>],
+        shape: &Shape,
+        image: Option<ContentHash>,
+        image_headers: Option<&Headers>,
+        image_anchors: Option<&hirsel_core_ids::published::Map<crate::ItemAt, DefPath>>,
+    ) -> io::Result<Self> {
+        let mut headers = image_headers.cloned().unwrap_or_default();
+        headers.rows.resize(index.definitions.len(), None);
+        let mut keys = Self::bare(index, Headers::default());
+        let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut hooks = vec![];
-        let mut items = vec![];
         let mut twins = vec![];
         for (m, rows) in modules.iter().zip(resolutions) {
-            items.push((0u8, keys.module_identity(index, m.id)?));
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
                 let digest = header_identity(item);
-                items.push((1u8, digest));
                 let end = header_end(item);
                 let Some(definition) = index.item_definition(m.id, m.source, ordinal as u32, item)
                 else {
@@ -466,13 +502,7 @@ impl Keys {
         }
         keys.headers = headers;
         keys.anchors = anchors;
-        keys.environment = environment;
-        keys.items = ContentHash::of_parts_stream("hirsel.key-items.v1", |parts| {
-            for (tag, hash) in &items {
-                parts.part_byte_slice(*tag, &hash.0);
-            }
-            Ok(())
-        })?;
+        keys.environment = shape.environment;
         keys.twins = ContentHash::of_parts("hirsel.key-twins.v1", [&encode(&(image, twins))?[..]]);
         (keys.forms, keys.siblings) = forms(index);
         if let Some(last) = keys.forms.iter().map(|f| f.0.0 as usize).max() {
@@ -497,7 +527,6 @@ impl Keys {
             prelude: vec![],
             prelude_closure: Default::default(),
             prelude_reads: Default::default(),
-            items: ContentHash::default(),
             forms: vec![],
             form_bits: vec![],
             twins: ContentHash::default(),
@@ -802,19 +831,6 @@ impl Keys {
             ),
         };
         Ok(*self.prelude_reads.get_or_init(|| hash))
-    }
-    /// The key shape: the environment, every module's item headers in order,
-    /// and `request` (entry, image identity, library mode and parse modes).
-    /// Two requests with one shape resolve every unchanged item alike and
-    /// derive every closure alike, so an unchanged body keeps its key: its
-    /// candidate sets, negative, ambiguous and shadowed probes, prelude, and
-    /// generic, glue, clone-hook and drop edges all read headers, manifests or
-    /// the image, never another item's body.
-    pub fn shape(&self, request: &[u8]) -> ContentHash {
-        ContentHash::of_parts(
-            "hirsel.key-shape.v1",
-            [&self.environment.0[..], &self.items.0[..], request],
-        )
     }
     /// A body's own item source digest (`body_identity`): the one input of
     /// its key that a recorded key under the same shape is checked against.

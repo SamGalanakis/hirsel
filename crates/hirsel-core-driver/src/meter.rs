@@ -35,6 +35,17 @@ pub struct Measurements {
     pub observer_residual_instructions: u64,
     /// The request's work counts, from the meter's creation to its last finish.
     pub counters: Counters,
+    /// The gate's class (OPTION-L L2): None when the request reached no front.
+    pub layer_class: Option<LayerClass>,
+}
+
+/// Whether the store selects the record of a request's shape, decided after
+/// the index and before resolve: Fast installs it in place of declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayerClass {
+    Fast,
+    Fallback,
 }
 
 /// Counts of the work a request does, wherever in the process it happens.

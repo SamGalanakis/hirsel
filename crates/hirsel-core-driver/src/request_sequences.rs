@@ -287,6 +287,9 @@ struct Answer {
     /// Whether the request took the fast path, by the meter's
     /// `declared_installs`; None when it declared nothing.
     installed: Option<bool>,
+    /// The gate's logged class (`Measurements::layer_class`); None when the
+    /// request reached no front.
+    class: Option<crate::meter::LayerClass>,
 }
 fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) -> Answer {
     let check = serde_json::json!({
@@ -321,6 +324,7 @@ fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) ->
         native,
         layer: Default::default(),
         installed: None,
+        class: None,
     }
 }
 /// Answer one request from the store at `store`. A core package product that
@@ -357,6 +361,7 @@ fn request(
                     native: None,
                     layer: std::mem::take(&mut driver.layers),
                     installed: None,
+                    class: meter.result.layer_class,
                 };
             }
         }
@@ -369,6 +374,7 @@ fn request(
             .shape
             .map(|_| meter.result.counters.declared_installs == 1),
         layer,
+        class: meter.result.layer_class,
         ..answer(&product, req, options.as_ref())
     }
 }
@@ -390,17 +396,21 @@ fn fault(store: &Path, fault: Fault) {
         }
     }
 }
-/// The declared-state record's law (OPTION-L v3.2, fast path on). A primed
-/// request whose shape the store selects installs the record in place of
-/// declaration, and the meter counts it; an installed program's tables equal
-/// an empty store's declared ones, table by table. A last request (the third
-/// request of A, A', B) installs exactly when its recorded gate class is fast.
+/// The declared-state record's law (OPTION-L v3.2, fast path on). The gate
+/// logs its class before resolve (L2). A primed request the gate logs Fast
+/// installs the store's record in place of declaration, and the meter counts
+/// it; one logged Fallback installs nothing; an installed program's tables
+/// equal an empty store's declared ones, table by table. A last request (the
+/// third request of A, A', B) logs its recorded gate class.
 #[derive(Default)]
 struct LayerLaw {
     /// Per table: the installed requests compared, and those unequal.
     tables: std::collections::BTreeMap<&'static str, (usize, usize)>,
-    /// Last requests whose install disagrees with the recorded gate class.
+    /// Last requests whose logged class disagrees with the recorded one.
     classes: Vec<String>,
+    /// Requests logged Fast whose install refused, or logged Fallback that
+    /// installed: (sequence, step, store).
+    refused: Vec<String>,
 }
 /// Run one sequence; return each step's failures of the law and, separately, the
 /// steps whose roots differ while everything else agrees.
@@ -466,9 +476,9 @@ fn run_sequence(
                     );
         for (path, primed) in [("resident", &resident_answer), ("disk", &disk_answer)] {
             let installed = primed.installed == Some(true);
-            // An image-backed last request declares, installs, and its record's
-            // rows sit above the library's.
-            if req.product == Product::Libraries && n == seq.steps.len() {
+            // A last request whose program reads the image in every step
+            // installs, and its record's rows sit above the library's.
+            if OVER_LIBRARY.contains(&seq.name) && n == seq.steps.len() {
                 let above = primed.layer.tables.iter().find(|(t, _)| *t == "library").is_some_and(|(_, base)| base.iter().all(|b| b != "0"));
                 if !installed || !above {
                     failures.push(format!(
@@ -499,24 +509,28 @@ fn run_sequence(
             }
             if n == seq.steps.len() && path == "resident" {
                 eprintln!(
-                    "LAYER-SEQ {} recorded {:?} installed {:?} shape {} A's",
+                    "LAYER-SEQ {} recorded {:?} logged {:?} installed {:?} shape {} A's",
                     seq.name,
                     seq.gate,
+                    primed.class,
                     primed.installed,
                     if primed.layer.shape == first_shape { "equal to" } else { "unlike" }
                 );
             }
-            // A request the driver serves whole from its snapshot declares nothing.
-            if n == seq.steps.len()
-                && primed.installed.is_some()
-                && installed != (seq.gate == Gate::Fast)
-            {
-                law.classes.push(format!(
-                    "{} ({path} store): recorded {:?}, installed {installed}, shape {} A's",
-                    seq.name,
-                    seq.gate,
-                    if primed.layer.shape == first_shape { "equal to" } else { "unlike" }
-                ));
+            // A request served whole from a record reaches no front.
+            if let Some(class) = primed.class {
+                let fast = class == crate::meter::LayerClass::Fast;
+                if fast != installed {
+                    law.refused.push(format!("{} step {n} ({path} store)", seq.name));
+                }
+                if n == seq.steps.len() && fast != (seq.gate == Gate::Fast) {
+                    law.classes.push(format!(
+                        "{} ({path} store): recorded {:?}, logged {class:?}, shape {} A's",
+                        seq.name,
+                        seq.gate,
+                        if primed.layer.shape == first_shape { "equal to" } else { "unlike" }
+                    ));
+                }
             }
             if (&primed.check, &primed.native) != (&fresh.check, &fresh.native) {
                 failures.push(format!(
@@ -532,7 +546,14 @@ fn run_sequence(
 }
 /// Every sequence of `seqs` keeps the law; the steps whose roots differ are
 /// exactly `unequal_roots` (name, step, store).
-fn run_sequences(seqs: Vec<Seq>, backend: Option<Backend>, unequal_roots: &[&str]) {
+/// The requests whose install disagrees with their logged class are exactly
+/// `gate_refusals`.
+fn run_sequences(
+    seqs: Vec<Seq>,
+    backend: Option<Backend>,
+    unequal_roots: &[&str],
+    gate_refusals: &[&str],
+) {
     let (mut failures, mut roots) = (vec![], vec![]);
     let mut law = LayerLaw::default();
     for seq in &seqs {
@@ -545,6 +566,9 @@ fn run_sequences(seqs: Vec<Seq>, backend: Option<Backend>, unequal_roots: &[&str
     }
     for class in &law.classes {
         eprintln!("LAYER-CLASS {class}");
+    }
+    for refused in &law.refused {
+        eprintln!("LAYER-REFUSED {refused}");
     }
     assert!(
         failures.is_empty(),
@@ -559,8 +583,13 @@ fn run_sequences(seqs: Vec<Seq>, backend: Option<Backend>, unequal_roots: &[&str
     );
     assert!(
         law.classes.is_empty(),
-        "last requests whose install disagrees with the recorded gate class:\n{}",
+        "last requests whose logged class disagrees with the recorded one:\n{}",
         law.classes.join("\n")
+    );
+    law.refused.sort();
+    assert_eq!(
+        law.refused, gate_refusals,
+        "requests whose install disagrees with their logged class"
     );
 }
 
@@ -1777,6 +1806,15 @@ fn layer_sequences() -> Vec<Seq> {
         seq("image_body_edit", vec![
             libraries(&[("a.hirsel", "a", "pub type T:codec {x:u8, xs:List[u8]}\npub fn total(t:T)->u64{list.len(t.xs)}"), ("b.hirsel", "b", "fn use(t:a.T)->u64{a.total(t)}\nfn low(a:u8,b:u8)->u8{std.order.min(a,b)}")]),
             libraries(&[("a.hirsel", "a", "pub type T:codec {x:u8, xs:List[u8]}\npub fn total(t:T)->u64{list.len(t.xs)+1u64}"), ("b.hirsel", "b", "fn use(t:a.T)->u64{a.total(t)}\nfn low(a:u8,b:u8)->u8{std.order.max(a,b)}")])]),
+        // Whether declaration reads the image follows from resolution,
+        // bodies included, which the shape does not hold: a body edit that
+        // drops or adds the program's only read of the image.
+        seq("image_library_read_dropped", vec![
+            libraries(&[("a.hirsel", "a", "pub fn f(){let _=std.order.min(1u8,2u8)}"), ("b.hirsel", "b", "fn g(){}")]),
+            libraries(&[("a.hirsel", "a", "pub fn f(){}"), ("b.hirsel", "b", "fn g(){}")])]),
+        seq("image_library_read_added", vec![
+            libraries(&[("a.hirsel", "a", "pub fn f(){}"), ("b.hirsel", "b", "fn g(){}")]),
+            libraries(&[("a.hirsel", "a", "pub fn f(){let _=std.order.min(1u8,2u8)}"), ("b.hirsel", "b", "fn g(){}")])]),
         seq("finalizer_body_edit", vec![
             check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")])),
             check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){let _=0u8}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")]))]),
@@ -1795,6 +1833,22 @@ fn sequences() -> Vec<Seq> {
 /// Steps whose check root differs from an empty store's while their answers
 /// agree, with the cause.
 const UNEQUAL_ROOTS: &[&str] = &[];
+
+/// Sequences over the libraries' image whose every request reads it: the last
+/// request installs a record whose rows sit above the image's.
+const OVER_LIBRARY: &[&str] = &["image_body_edit"];
+
+/// Requests the gate logs Fast whose install refuses, so they declare (L2).
+/// Whether declaration reads the image follows from resolution, bodies
+/// included, which the shape does not hold: a body edit that drops or adds the
+/// program's only read of the image keeps the shape, and the record's rows sit
+/// on the other library base, which install refuses.
+const GATE_REFUSALS: &[&str] = &[
+    "image_library_read_added step 2 (disk store)",
+    "image_library_read_added step 2 (resident store)",
+    "image_library_read_dropped step 2 (disk store)",
+    "image_library_read_dropped step 2 (resident store)",
+];
 
 /// Each sequence's predicted gate class (see [`Gate`]), sorted by name. Unmarked
 /// rows are l-body-review-1039's settled column (programs/*-v3.md, NEW-SEQUENCES.md).
@@ -1865,6 +1919,8 @@ const GATES: &[(&str, Gate)] = &[
     ("header_type_before_function_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("holds_transitive", Gate::Fallback),
     ("image_body_edit", Gate::Fast),
+    ("image_library_read_added", Gate::Fast),
+    ("image_library_read_dropped", Gate::Fast),
     ("implicit_capacity", Gate::Fallback),
     ("index_builtin", Gate::Fallback),
     ("index_duplicate", Gate::Fallback),
@@ -1944,7 +2000,7 @@ fn request_sequences_answer_as_an_empty_store() {
         .filter(|n| !names.contains(n))
         .collect();
     assert!(stale.is_empty(), "gate classes of no sequence: {stale:?}");
-    run_sequences(seqs, None, UNEQUAL_ROOTS);
+    run_sequences(seqs, None, UNEQUAL_ROOTS, GATE_REFUSALS);
 }
 #[test]
 #[ignore = "explicit native integration target"]
@@ -1953,7 +2009,7 @@ fn request_sequences_build_as_an_empty_store() {
         .into_iter()
         .filter(|s| s.steps.iter().any(|r| r.build))
         .collect();
-    run_sequences(natives, Some(Backend::Cranelift), &[]);
+    run_sequences(natives, Some(Backend::Cranelift), &[], &[]);
 }
 
 // The process leg (S3; STEP-C 2.1 replay law). A request is the `hirsel`

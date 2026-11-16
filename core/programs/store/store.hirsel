@@ -53,18 +53,21 @@ pub opaque type Db {
     store: StoreId,
     disk: List[DiskConnection],
     clock: Clock,
-    roots: Roots,
+    // Every live branch, main first, the rest ascending by id. A version is
+    // compared only with the head of the branch it belongs to (AA1, Z1).
+    heads: List[Head],
+    pins: List[Pin],
+    next_branch: u32,
     next_node: u64,
     next_table: u32,
-    head: u64,
     file_seq: u64,
     file_end: u64,
     frame_seq: u64,
-    at: u64,
     resident: u64,
+    // Commits and cut-made operations on any branch, so a cut ack can tell
+    // whether anything changed after its state was taken.
+    changes: u64,
     ceiling: u64,
-    retained: bool,
-    following: Option[Latest[Snapshot]],
     acks: Option[Receiver[Ack]],
     journaled: u64,
     inflight: u64,
@@ -81,6 +84,34 @@ pub opaque type Db {
 pub type Branch {
     store: StoreId,
     id: u32
+}
+
+type Head {
+    id: u32,
+    name: String,
+    parent: u32,
+    forked_at: u64,
+    roots: Roots,
+    head: u64,
+    at: u64,
+    following: Option[Latest[Snapshot]]
+}
+
+type Pin: shareable + send {
+    name: String,
+    branch: u32,
+    version: u64,
+    roots: Roots
+}
+
+fn main_head(take roots: Roots, head: u64, at: u64) -> Head {
+    Head(id: 0, name: "main", parent: 0, forked_at: 0, roots: take roots, head: head, at: at, following: None)
+}
+
+// I4: while a pin or another branch exists, an old row may stay reachable, so
+// commits charge conservatively until the next cut settles the account.
+fn retaining(db: Db) -> bool {
+    list.len(db.heads) > 1 || list.len(db.pins) != 0
 }
 
 pub type CallId {
@@ -179,7 +210,9 @@ pub fn memory(c: Clock, r: Random, o: Options) -> Db {
 }
 
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, disk: list.new(), clock: c, roots: empty_roots(), next_node: 0, next_table: 1, head: 0, file_seq: 1, file_end: 72, frame_seq: 0, at: 0, resident: 0, ceiling: o.resident_limit, retained: false, following: None, acks: None, journaled: 0, inflight: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None)
+    let mut heads: List[Head] = list.new()
+    result.unwrap(list.push(mut heads, main_head(empty_roots(), 0, 0)))
+    Db(store: id, disk: list.new(), clock: c, heads: take heads, pins: list.new(), next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, changes: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None)
 }
 
 pub fn identity(db: Db) -> StoreId {
@@ -191,7 +224,7 @@ pub fn main_branch(db: Db) -> Branch {
 }
 
 pub fn snapshot(db: Db) -> Snapshot {
-    Snapshot(store: db.store, open: open_number(db), branch: 0, head: db.head, roots: share_roots(db.roots))
+    Snapshot(store: db.store, open: open_number(db), branch: 0, head: db.heads[0].head, roots: share_roots(db.heads[0].roots))
 }
 
 pub fn version(s: Snapshot) -> u64 {
@@ -206,7 +239,7 @@ pub fn follow(mut db: Db, b: Branch) -> Result[Latest[Snapshot], Error] {
     if b.id != 0 {
         return Error(Missing("branch"))
     }
-    if let Some(h) = db.following {
+    if let Some(h) = db.heads[0].following {
         return Ok(latest.handle(h))
     }
     let root = match arc.new(snapshot(db)) {
@@ -217,12 +250,12 @@ pub fn follow(mut db: Db, b: Branch) -> Result[Latest[Snapshot], Error] {
         Ok(take h) => take h,
         Error((c, _)) => return Error(Full(c))
     }
-    db.following = Some(latest.handle(h))
+    db.heads[0].following = Some(latest.handle(h))
     Ok(take h)
 }
 
 fn publish(db: Db) {
-    if let Some(h) = db.following {
+    if let Some(h) = db.heads[0].following {
         match arc.new(snapshot(db)) {
             Ok(take root) => latest.publish(h, take root),
             Error(_) => {}
@@ -258,8 +291,8 @@ pub fn run_on[R, A](mut db: Db, b: Branch, body: scoped[view] fn(mut Tx) -> Resu
         }
     }
     if list.len(db.disk) != 0 && db.file_end - 72 >= db.disk[0].options.checkpoint_bytes {
-        let roots = share_roots(db.roots)
-        let head = db.head
+        let roots = share_roots(db.heads[0].roots)
+        let head = db.heads[0].head
         let live = db.resident
         match disk_begin_cut(mut db, roots, head, live) {
             Error(Full(_)) => {},
@@ -281,9 +314,9 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
         Ok(take x) => take x,
         Error(c) => return Ok(Refused(c))
     }
-    let ci = call_info(db.store, 0, db.head + 1, wall, db.at)
+    let ci = call_info(db.store, 0, db.heads[0].head + 1, wall, db.heads[0].at)
     let caught = isolate(fn() -> (Result[R, A], Roots, u64, Option[Capacity], bool, Option[Bytes]) {
-        let mut tx = Tx(store: db.store, roots: share_roots(db.roots), ids: db.next_node, resident: db.resident, retain_old: db.retained, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci)
+        let mut tx = Tx(store: db.store, roots: share_roots(db.heads[0].roots), ids: db.next_node, resident: db.resident, retain_old: retaining(db), reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci)
         let outcome = body(mut tx)
         let frame: Option[Bytes] = match outcome {
             Error(_) => None,
@@ -331,13 +364,13 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
                         db.inflight += frame_size
                         db.frame_seq += 1
                     }
-                    db.roots = take roots
+                    db.heads[0].roots = take roots
                     db.resident = live
-                    db.head += 1
-                    db.at = ci.at
+                    db.heads[0].head += 1
+                    db.heads[0].at = ci.at
                     publish(db)
                     let sent_sequence = if list.len(db.disk) == 0 {
-                        db.head
+                        db.heads[0].head
                     } else {
                         db.frame_seq
                     }
@@ -878,7 +911,7 @@ pub fn law_resident(c: Clock) -> bool {
         },
         _ => return false
     }
-    if value_at(snapshot(db), 2) != 0 || db.head != 1 {
+    if value_at(snapshot(db), 2) != 0 || db.heads[0].head != 1 {
         return false
     }
     let removed = execute(mut db, 2, fn(mut tx: Tx) -> Result[bool, Error] {
@@ -903,7 +936,7 @@ pub fn law_foreign(c: Clock) -> bool waits {
             fail("foreign body must not run")
         })
         match take outcome {
-            Error(Foreign) => if db.head != 0 {
+            Error(Foreign) => if db.heads[0].head != 0 {
                 return false
             },
             _ => return false
@@ -1265,7 +1298,7 @@ pub fn law_node_ids(c: Clock) -> bool {
         _ => return false
     }
     let after_fault = db.next_node
-    if after_fault == 0 || db.head != 0 {
+    if after_fault == 0 || db.heads[0].head != 0 {
         return false
     }
     let capacity_result = result.unwrap(bound bytes 512 {
@@ -1281,13 +1314,13 @@ pub fn law_node_ids(c: Clock) -> bool {
         _ => return false
     }
     let after_capacity = db.next_node
-    if after_capacity <= after_fault || db.head != 0 {
+    if after_capacity <= after_fault || db.heads[0].head != 0 {
         return false
     }
     if !put_one(mut db, 2, 20) {
         return false
     }
-    match std.omap.root(db.roots.data) {
+    match std.omap.root(db.heads[0].roots.data) {
         Some(n) => std.omap.node_id(n) > after_capacity,
         None => false
     }
@@ -1755,7 +1788,7 @@ fn catalog_index_key(id: u32, name: String) -> Result[Bytes, Error] {
 
 fn catalog_entry(db: Db, k: Bytes) -> Result[Catalog, Error] {
     healthy(db)?
-    match std.omap.get(db.roots.catalog, k) {
+    match std.omap.get(db.heads[0].roots.catalog, k) {
         Some(raw) => decode_catalog(raw),
         None => Error(Stale(0))
     }
@@ -1775,26 +1808,26 @@ fn schema_publish(mut db: Db, take roots: Roots, live: u64) -> Result[Ticket, Er
     if live > db.ceiling {
         return Error(Full(Capacity(requested: live, available: db.ceiling)))
     }
-    let next_head = db.head + 1
+    let next_head = db.heads[0].head + 1
     let ticket = if list.len(db.disk) != 0 {
         Some(disk_request_cut(mut db, roots, next_head, live)?)
     } else {
         None
     }
-    db.roots = take roots
+    db.heads[0].roots = take roots
     db.resident = live
-    db.head += 1
+    db.heads[0].head += 1
     publish(db)
     match ticket {
         Some(t) => Ok(t),
-        None => Ok(Ticket(store: db.store, open: open_number(db), mark: Cut(db.head)))
+        None => Ok(Ticket(store: db.store, open: open_number(db), mark: Cut(db.heads[0].head)))
     }
 }
 
 pub fn create_table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Ticket, Error] waits {
     healthy(db)?
     let k = table_key(name)?
-    if let Some(_) = std.omap.get(db.roots.catalog, k) {
+    if let Some(_) = std.omap.get(db.heads[0].roots.catalog, k) {
         return Error(Exists(named(name)?))
     }
     let schema = capacity(std.codec.schema(value))?
@@ -1803,8 +1836,8 @@ pub fn create_table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], 
     capacity(result.capacity_only(list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))))?
     let c = Catalog(kind: 1, id: db.next_table, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(key))?, schemas: take schemas, next: 1, by: list.new(), revision: list.new())
     let raw = encode_catalog(c)?
-    let live = catalog_recharge(db.resident, db.roots, k, raw, db.retained)
-    let base = share_roots(db.roots)
+    let live = catalog_recharge(db.resident, db.heads[0].roots, k, raw, retaining(db))
+    let base = share_roots(db.heads[0].roots)
     let roots = catalog_put(mut db, base, k, raw)?
     db.next_table += 1
     schema_publish(mut db, take roots, live)
@@ -1833,7 +1866,7 @@ fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16) -> Result[Arc
 fn index_catalog(db: Db, id: u32) -> Result[List[Catalog], Error] {
     let low = index_prefix(id)?
     let high = index_prefix(id + 1)?
-    let mut cursor = capacity(result.capacity_only(std.omap.range(db.roots.catalog, Included(copied(low)?), Excluded(copied(high)?))))?
+    let mut cursor = capacity(result.capacity_only(std.omap.range(db.heads[0].roots.catalog, Included(copied(low)?), Excluded(copied(high)?))))?
     let mut out: List[Catalog] = list.new()
     while let Some((_, raw)) = capacity(std.omap.next(mut cursor))? {
         capacity(result.capacity_only(list.push(mut out, decode_catalog(raw)?)))?
@@ -1844,7 +1877,7 @@ fn index_catalog(db: Db, id: u32) -> Result[List[Catalog], Error] {
 pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] waits {
     healthy(db)?
     let k = table_key(name)?
-    let mut c = match std.omap.get(db.roots.catalog, k) {
+    let mut c = match std.omap.get(db.heads[0].roots.catalog, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(named(name)?))
     }
@@ -1868,8 +1901,8 @@ pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take va
         capacity(result.capacity_only(list.push(mut c.schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))))?
         c.next += 1
         let raw = encode_catalog(c)?
-        let live = catalog_recharge(db.resident, db.roots, k, raw, db.retained)
-        let base = share_roots(db.roots)
+        let live = catalog_recharge(db.resident, db.heads[0].roots, k, raw, retaining(db))
+        let base = share_roots(db.heads[0].roots)
         let roots = catalog_put(mut db, base, k, raw)?
         let _ = schema_publish(mut db, take roots, live)?
     }
@@ -1883,7 +1916,7 @@ pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
         return Error(Foreign)
     }
     let k = catalog_index_key(t.id, name)?
-    if let Some(_) = std.omap.get(db.roots.catalog, k) {
+    if let Some(_) = std.omap.get(db.heads[0].roots.catalog, k) {
         return Error(Exists(named(name)?))
     }
     let mut meta = catalog_entry(db, t.catalog_key)?
@@ -1893,8 +1926,8 @@ pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
     let id = db.next_table
     let c = Catalog(kind: 2, id: id, owner: t.id, epoch: 1, key: capacity(std.codec.key_schema(key))?, schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: list.new())
     let raw = encode_catalog(c)?
-    let mut roots = share_roots(db.roots)
-    let mut live = catalog_recharge(db.resident, db.roots, k, raw, db.retained)
+    let mut roots = share_roots(db.heads[0].roots)
+    let mut live = catalog_recharge(db.resident, db.heads[0].roots, k, raw, retaining(db))
     let mut rows = scan_bytes(snapshot(db), t.id, Unbounded, Unbounded)?
     while let Some((primary, encoded)) = next_bytes(mut rows)? {
         let value = row_value(t.readers, t.id, encoded)?
@@ -1915,7 +1948,7 @@ pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
     roots = catalog_put(mut db, roots, k, raw)?
     meta.epoch += 1
     let changed = encode_catalog(meta)?
-    live = catalog_recharge(live, db.roots, t.catalog_key, changed, db.retained)
+    live = catalog_recharge(live, db.heads[0].roots, t.catalog_key, changed, retaining(db))
     roots = catalog_put(mut db, roots, t.catalog_key, changed)?
     db.next_table += 1
     schema_publish(mut db, take roots, live)
@@ -1927,7 +1960,7 @@ pub fn index[J, K, V](db: Db, mut t: Table[K, V], name: String, by: StaticFn[fn(
         return Error(Foreign)
     }
     let k = catalog_index_key(t.id, name)?
-    let c = match std.omap.get(db.roots.catalog, k) {
+    let c = match std.omap.get(db.heads[0].roots.catalog, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(named(name)?))
     }
@@ -1986,7 +2019,7 @@ pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error
     for ix in indexes {
         capacity(result.capacity_only(list.push(mut ids, ix.id)))?
     }
-    let mut roots = share_roots(db.roots)
+    let mut roots = share_roots(db.heads[0].roots)
     let mut live = db.resident
     for id in ids {
         let mut rows = byte_cursor(roots.data, prefix(id)?, prefix(id + 1)?)?
@@ -2002,7 +2035,7 @@ pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error
         live = int.saturating_sub(live, entry(k, v))
         roots.catalog = capacity(std.omap.remove(mut db.next_node, roots.catalog, k))?
     }
-    if let Some(raw) = std.omap.get(db.roots.catalog, t.catalog_key) {
+    if let Some(raw) = std.omap.get(db.heads[0].roots.catalog, t.catalog_key) {
         live = int.saturating_sub(live, entry(t.catalog_key, raw))
     }
     roots.catalog = capacity(std.omap.remove(mut db.next_node, roots.catalog, t.catalog_key))?
@@ -2286,9 +2319,9 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     result.unwrap(list.push(mut schemas, ValueSchema(number: 0, fingerprint: result.unwrap(std.codec.fingerprint(new_codec())), schema: take writer)))
     meta.schemas = take schemas
     let raw = result.unwrap(encode_catalog(meta))
-    let base = share_roots(db.roots)
+    let base = share_roots(db.heads[0].roots)
     let patched = result.unwrap(catalog_put(mut db, base, old.catalog_key, raw))
-    db.roots = take patched
+    db.heads[0].roots = take patched
     let before_append = version(snapshot(db))
     let current = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), new_codec()))
     // K1: adding a schema is one commit, opening it again commits nothing.
@@ -2313,7 +2346,7 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     if one.balance != 10 || one.bonus != 7 || two.balance != 20 || two.bonus != 9 {
         return false
     }
-    let epoch = db.head
+    let epoch = db.heads[0].head
     let again = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), new_codec()))
     if version(snapshot(db)) != epoch || again.readers.current != 1 {
         return false
@@ -2323,7 +2356,7 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
         Error(Schema(_)) => {},
         _ => return false
     }
-    db.head == epoch
+    db.heads[0].head == epoch
 }
 
 @test
@@ -2476,7 +2509,7 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
         Error(ok && lookup_foreign)
     })
     match take out {
-        Ok(Aborted(Undone(value: true, ticket: None))) => b.head == 0 && b.resident == 0,
+        Ok(Aborted(Undone(value: true, ticket: None))) => b.heads[0].head == 0 && b.resident == 0,
         _ => false
     }
 }
@@ -2798,7 +2831,7 @@ pub fn law_abort_budget(c: Clock) -> bool {
             _ => return false
         }
     }
-    db.head == 0 && db.resident == 0
+    db.heads[0].head == 0 && db.resident == 0
 }
 
 @test
@@ -3012,7 +3045,7 @@ pub fn law_look(c: Clock) -> bool waits {
     let ix = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
     let sh = shape(t)
     let s = snapshot(db)
-    let head = db.head
+    let head = db.heads[0].head
     let live = db.resident
     let high_water = db.next_node
     let end = db.file_end
@@ -3027,7 +3060,7 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || list.len(got.reads) != 6 || db.head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
+    if got.version != head || list.len(got.reads) != 6 || db.heads[0].head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
         return false
     }
     let p1 = match got.reads[0] {
@@ -3073,7 +3106,7 @@ pub fn law_look(c: Clock) -> bool waits {
     }))
     match take second {
         Seen(value) => match value.value {
-            Ok(108) => value.version == db.head && list.len(value.reads) == 6,
+            Ok(108) => value.version == db.heads[0].head && list.len(value.reads) == 6,
             _ => false
         },
         _ => false
@@ -3131,7 +3164,7 @@ pub fn law_look_faults(c: Clock) -> bool {
         })
     })
     match take refused_query {
-        Ok(Refused(_)) => db.head == 0 && db.resident == 0,
+        Ok(Refused(_)) => db.heads[0].head == 0 && db.resident == 0,
         _ => false
     }
 }
@@ -3222,7 +3255,7 @@ pub fn law_changes(c: Clock) -> bool {
         return false
     }
     let foreign = test_db(c, 1073741824)
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.head, roots: share_roots(foreign.roots))
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.heads[0].head, roots: share_roots(foreign.heads[0].roots))
     if !is_foreign(changes(a, other_store)) {
         return false
     }
@@ -3325,7 +3358,7 @@ fn info_helper(mut tx: Tx) -> u64 {
 pub fn law_info_mut(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     for _ in 0u64 .. 2 {
-        let expected = db.head + 1
+        let expected = db.heads[0].head + 1
         let outcome = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[bool, ()] {
             let direct = info(mut tx).id.version
             let indirect = info_helper(mut tx)
@@ -4194,8 +4227,8 @@ fn frame_boundary(c: Clock, last: u64, accepted: bool) -> bool {
         Ok(expected)
     }))
     match take result {
-        Committed(done) => accepted && done.value == 15729018 + last && db.head == 1 && std.omap.len(db.roots.data) == 16,
-        Aborted(Undone(value: Limit(Transaction), ticket: None)) => !accepted && db.head == 0 && std.omap.len(db.roots.data) == 0,
+        Committed(done) => accepted && done.value == 15729018 + last && db.heads[0].head == 1 && std.omap.len(db.heads[0].roots.data) == 16,
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => !accepted && db.heads[0].head == 0 && std.omap.len(db.heads[0].roots.data) == 0,
         _ => false
     }
 }
@@ -4977,7 +5010,7 @@ pub fn disk_law_nodes(c: Clock) -> bool {
             return false
         }
     }
-    let root = option.unwrap(std.omap.root(db.roots.data))
+    let root = option.unwrap(std.omap.root(db.heads[0].roots.data))
     let mut order: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = list.new()
     result.unwrap(disk_postorder(root, mut order))
     let mut nodes: Map[u64, Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = map.new()
@@ -5341,7 +5374,7 @@ pub fn disk_law_graph(c: Clock) -> bool {
         }
     }
     let mut graph = disk_graph()
-    let first = result.unwrap(disk_track(mut graph, db.roots))
+    let first = result.unwrap(disk_track(mut graph, db.heads[0].roots))
     if list.len(first) == 0 || graph.live != 96 * 86 || disk_index_len(graph.nodes) != list.len(first) {
         return false
     }
@@ -5350,7 +5383,7 @@ pub fn disk_law_graph(c: Clock) -> bool {
             return false
         }
     }
-    let second = result.unwrap(disk_track(mut graph, db.roots))
+    let second = result.unwrap(disk_track(mut graph, db.heads[0].roots))
     if list.len(second) != 0 || graph.live != 96 * 86 {
         return false
     }
@@ -5359,7 +5392,7 @@ pub fn disk_law_graph(c: Clock) -> bool {
             return false
         }
     }
-    let third = result.unwrap(disk_track(mut graph, db.roots))
+    let third = result.unwrap(disk_track(mut graph, db.heads[0].roots))
     if list.len(third) == 0 || list.len(third) > 64 * 5 || graph.live != 96 * 86 {
         return false
     }
@@ -5459,7 +5492,7 @@ pub fn disk_law_packs(d: Dir, c: Clock) -> bool waits {
         }
     }
     let mut graph = disk_graph()
-    let nodes = result.unwrap(disk_track(mut graph, db.roots))
+    let nodes = result.unwrap(disk_track(mut graph, db.heads[0].roots))
     let old = result.unwrap(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: 7), 0))
     result.unwrap(disk_write_synced(d, "p-7", old))
     result.unwrap(disk_write_synced(d, "p-7.tmp", old))
@@ -5777,7 +5810,7 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
         }
     }
     let mut graph = disk_graph()
-    let nodes = result.unwrap(disk_track(mut graph, db.roots))
+    let nodes = result.unwrap(disk_track(mut graph, db.heads[0].roots))
     let output = result.unwrap(disk_write_nodes(d, db.store, 1, 4096, mut graph, nodes))
     let (take packs, next_pack) = take output
     let mut manifest = disk_genesis_fixture()
@@ -5785,7 +5818,7 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
     manifest.next_table = db.next_table
     manifest.packs = take packs
     manifest.next_pack = next_pack
-    let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 40, at: 0, roots: disk_root_ids(db.roots))
+    let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 40, at: 0, roots: disk_root_ids(db.heads[0].roots))
     let _ = list.set(mut manifest.branches, 0, take branch)
     result.unwrap(disk_publish_manifest(d, db.store, manifest))
     disk_insert_skipped_node_frame(d, db.store, manifest.packs[0])
@@ -5879,7 +5912,7 @@ pub fn disk_law_compact(d: Dir, c: Clock) -> bool waits {
         }
     }
     let mut graph = disk_graph()
-    let initial_nodes = result.unwrap(disk_track(mut graph, db.roots))
+    let initial_nodes = result.unwrap(disk_track(mut graph, db.heads[0].roots))
     let first = result.unwrap(disk_write_nodes(d, db.store, 1, 4096, mut graph, initial_nodes))
     let (take original, next_pack) = take first
     if list.len(original) != 1 {
@@ -5890,7 +5923,7 @@ pub fn disk_law_compact(d: Dir, c: Clock) -> bool waits {
             return false
         }
     }
-    let fresh = result.unwrap(disk_track(mut graph, db.roots))
+    let fresh = result.unwrap(disk_track(mut graph, db.heads[0].roots))
     let sizes = {
         let live_old = option.unwrap(disk_index_get(graph.pack_stats, 1))
         (live_old.live, live_old.total)
@@ -5908,7 +5941,7 @@ pub fn disk_law_compact(d: Dir, c: Clock) -> bool waits {
     let DiskPackSet(packs: take packs, retired: take retired, next: _) = take output
     manifest.packs = take packs
     manifest.retired = take retired
-    let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 160, at: 0, roots: disk_root_ids(db.roots))
+    let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 160, at: 0, roots: disk_root_ids(db.heads[0].roots))
     let _ = list.set(mut manifest.branches, 0, take branch)
     result.unwrap(disk_publish_manifest(d, db.store, manifest))
     let loaded = result.unwrap(disk_load(d, 96 * 86))
@@ -5961,7 +5994,7 @@ pub fn disk_law_draft_refusal(c: Clock) -> bool {
         }
     }
     let mut installed = disk_graph()
-    let _ = result.unwrap(disk_track(mut installed, db.roots))
+    let _ = result.unwrap(disk_track(mut installed, db.heads[0].roots))
     let count = disk_index_len(installed.nodes)
     let saved: List[u64] = result.unwrap(clone(installed.roots))
     for k in 0u64 .. 64 {
@@ -5974,7 +6007,7 @@ pub fn disk_law_draft_refusal(c: Clock) -> bool {
     let limits: Inline[u64, 6] =[64, 512, 2048, 8192, 32768, 1048576]
     for limit in limits {
         let trial: Result[DiskGraph, Capacity] = result.unwrap(bound bytes limit {
-            disk_graph_draft(installed, db.roots)
+            disk_graph_draft(installed, db.heads[0].roots)
         })
         match take trial {
             Error(_) => {
@@ -6117,7 +6150,7 @@ fn disk_worker(take input: DiskWorker) -> Result[(), Error] waits {
 }
 
 fn disk_cut(db: Db, generation: u64, first_live: u64) -> DiskCut {
-    DiskCut(generation: generation, roots: share_roots(db.roots), head: db.head, at: db.at, next_node: db.next_node + 1, next_table: db.next_table, first_live: first_live)
+    DiskCut(generation: generation, roots: share_roots(db.heads[0].roots), head: db.heads[0].head, at: db.heads[0].at, next_node: db.next_node + 1, next_table: db.next_table, first_live: first_live)
 }
 
 // L28 worker component: the task refuses a1MiB NODE under128KiB, preserves
@@ -6621,11 +6654,11 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     let DiskSession(lock: take lock, startup: take startup, send: take send, acks: take acks, worker: take worker) = take session
     let DiskStartup(store: id, roots: take roots, live: live, head: head, at: at, next_node: next_node, next_table: next_table, generation: generation, cut_head: cut_head, cut_first: cut_first, seq: seq, segment: take segment, end_file: take end_file) = take startup
     let mut db = memory_at(c, id, options)
-    db.roots = take roots
+    db.heads[0].roots = take roots
     db.next_node = next_node
     db.next_table = next_table
-    db.head = head
-    db.at = at
+    db.heads[0].head = head
+    db.heads[0].at = at
     db.file_seq = seq
     db.resident = live
     db.checkpointed = generation
@@ -6679,9 +6712,9 @@ fn disk_wait_cut(mut db: Db, generation: u64) -> Result[(), Error] waits {
                 let pending = disk_pending(db)
                 db.checkpointed = g
                 if let Some(p) = pending {
-                    if db.head == p.head {
+                    if db.heads[0].head == p.head {
                         db.resident = live
-                    } else if db.retained {
+                    } else if retaining(db) {
                         db.resident = int.saturating_add(live, int.saturating_sub(db.resident, p.resident))
                     }
                 }
@@ -6748,7 +6781,7 @@ fn disk_begin_cut(mut db: Db, roots: Roots, head: u64, live: u64) -> Result[Tick
     }
     db.file_seq = seq
     db.file_end = 72
-    let cut = DiskCut(generation: generation, roots: share_roots(roots), head: head, at: db.at, next_node: db.next_node + 1, next_table: db.next_table, first_live: seq)
+    let cut = DiskCut(generation: generation, roots: share_roots(roots), head: head, at: db.heads[0].at, next_node: db.next_node + 1, next_table: db.next_table, first_live: seq)
     let record_previous = db.disk[0].record_cut
     db.disk[0].previous_record_cut = record_previous
     db.disk[0].record_cut = (head, seq)
@@ -6766,8 +6799,8 @@ fn disk_request_cut(mut db: Db, roots: Roots, head: u64, live: u64) -> Result[Ti
 pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits {
     healthy(db)?
     if list.len(db.disk) != 0 {
-        let roots = share_roots(db.roots)
-        let head = db.head
+        let roots = share_roots(db.heads[0].roots)
+        let head = db.heads[0].head
         let live = db.resident
         disk_request_cut(mut db, roots, head, live)
     } else {
@@ -6971,7 +7004,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
         match take made {
             Error(Full(_)) => {
                 refusals += 1
-                if db.head != 513 || db.resident != 134 + 512 * 94 || db.checkpointed != 2 || std.omap.len(db.roots.catalog) != 1 || std.omap.len(db.roots.data) != 512 {
+                if db.heads[0].head != 513 || db.resident != 134 + 512 * 94 || db.checkpointed != 2 || std.omap.len(db.heads[0].roots.catalog) != 1 || std.omap.len(db.heads[0].roots.data) != 512 {
                     return false
                 }
                 let persisted = result.unwrap(disk_load(child, 1048576))
@@ -6981,7 +7014,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
             },
             Ok(ticket) => {
                 successes += 1
-                if db.head != 514 || db.checkpointed != 3 {
+                if db.heads[0].head != 514 || db.checkpointed != 3 {
                     return false
                 }
                 result.unwrap(durable(mut db, ticket))
@@ -7172,8 +7205,8 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         Error(NotFound) => return Ok(scenario == "genesis" && !required_new),
         Error(take e) => return Error(take e)
     }
-    if scenario == "genesis" && db.head == 0 {
-        let empty = std.omap.len(db.roots.data) == 0 && std.omap.len(db.roots.catalog) == 0
+    if scenario == "genesis" && db.heads[0].head == 0 {
+        let empty = std.omap.len(db.heads[0].roots.data) == 0 && std.omap.len(db.heads[0].roots.catalog) == 0
         close(take db)?
         return Ok(empty && !required_new)
     }
@@ -7184,7 +7217,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     for k in 0u64 .. 96 {
         let found = get(snapshot(db), sh, k)?
         let old_value: Option[u64] = if scenario == "genesis" {
-            if k + 1 < db.head { Some(k + 1) } else { None }
+            if k + 1 < db.heads[0].head { Some(k + 1) } else { None }
         } else { Some(k + 1) }
         if found != old_value {
             old = false
@@ -7204,12 +7237,12 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         good = old
         match table(mut db, "added", std.codec.key_u64(), std.codec.of_u64()) {
             Ok(take added) => {
-                if added.id != 2 || db.head != 98 {
+                if added.id != 2 || db.heads[0].head != 98 {
                     good = false
                 }
             },
             Error(Missing(_)) => {
-                if db.head != 97 || required_new {
+                if db.heads[0].head != 97 || required_new {
                     good = false
                 }
             },
@@ -7220,16 +7253,16 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     } else if scenario == "refusal" {
         good = old
         let big = table(mut db, "big", std.codec.key_u64(), std.codec.of_string())?
-        if !old || db.head < 98 || db.head > 100 || (required_new && db.head != 100) { good = false }
+        if !old || db.heads[0].head < 98 || db.heads[0].head > 100 || (required_new && db.heads[0].head != 100) { good = false }
         match get(snapshot(db), shape(big), 1)? {
             Some(value) => {
-                if db.head != 99 || string.byte_len(value) != 1048566 { good = false }
+                if db.heads[0].head != 99 || string.byte_len(value) != 1048566 { good = false }
                 for byte in string.as_bytes(value) { if byte != 97u8 { good = false } }
             },
-            None => if db.head == 99 { good = false }
+            None => if db.heads[0].head == 99 { good = false }
         }
     } else if scenario == "genesis" {
-        good = old && db.head >= 1 && db.head <= 97 && (!required_new || db.head == 97)
+        good = old && db.heads[0].head >= 1 && db.heads[0].head <= 97 && (!required_new || db.heads[0].head == 97)
     }
     close(take db)?
     Ok(good)
@@ -7782,7 +7815,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let id = db.store
     let seq = db.file_seq
     let baseline = db.resident
-    let wall = db.at + 17
+    let wall = db.heads[0].at + 17
     let next_node = db.next_node
     result.unwrap(close(take db))
     let mut stored: Bytes = list.new()
@@ -7803,7 +7836,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let end_path = result.unwrap(disk_path("j-", seq, ".end"))
     result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 145)))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.head != 2 || reopened.at != wall || reopened.resident != baseline + 94 || reopened.next_node <= next_node { return false }
+    if reopened.heads[0].head != 2 || reopened.heads[0].at != wall || reopened.resident != baseline + 94 || reopened.next_node <= next_node { return false }
     if result.unwrap(get(snapshot(reopened), sh, 7)) != Some(70u64) { return false }
     result.unwrap(close(take reopened))
     options.resident_limit = baseline + 93
@@ -8135,7 +8168,7 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     if db.file_seq != before { return false }
     result.unwrap(close(take db))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.head != ci.id.version + 1 || reopened.at < ci.at { return false }
+    if reopened.heads[0].head != ci.id.version + 1 || reopened.heads[0].at < ci.at { return false }
     if result.unwrap(get(snapshot(reopened), sh, 7)) != Some(70u64) || result.unwrap(get(snapshot(reopened), sh, 8)) != Some(80u64) { return false }
     let path = result.unwrap(disk_path("j-", before, ""))
     if !result.unwrap(disk_exists(d, path)) { return false }
@@ -8208,7 +8241,7 @@ pub fn recorded(db: Db, b: Branch, wanted: u64) -> Result[Option[CallRecord], Er
     if !same(db.store, b.store) { return Error(Foreign) }
     if b.id != 0 { return Error(Missing("branch")) }
     if list.len(db.disk) == 0 { return Ok(None) }
-    if wanted > db.head || wanted <= db.disk[0].record_cut.0 { return Ok(None) }
+    if wanted > db.heads[0].head || wanted <= db.disk[0].record_cut.0 { return Ok(None) }
     // Z1: skip the barrier exactly when every frame this Db has sent is acked,
     // so it is written (X1 step 0's condition); never compare a version with
     // `journaled`, which counts frames.
@@ -8301,7 +8334,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     let cut = result.unwrap(checkpoint(mut reopened))
     result.unwrap(durable(mut reopened, cut))
     if let Some(_) = result.unwrap(recorded(reopened, b, 1)) { return false }
-    if std.omap.len(reopened.roots.streams) != 1 { return false }
+    if std.omap.len(reopened.heads[0].roots.streams) != 1 { return false }
     result.unwrap(close(take reopened))
     let in_memory = memory(c, r, options)
     let memory_branch = main_branch(in_memory)
@@ -8343,16 +8376,16 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
     }
     if scenario == "poison-write" {
         let b = main_branch(db)
-        if !journal_is_poisoned(recorded(db, b, db.head)) { return false }
+        if !journal_is_poisoned(recorded(db, b, db.heads[0].head)) { return false }
         // The failure notice is retained, independently of ack consumption.
         let retained = journal_failure_notice(db)
         match retained { Some(Other(125)) => {}, _ => return false }
-        if !journal_is_poisoned(recorded(db, b, db.head)) { return false }
+        if !journal_is_poisoned(recorded(db, b, db.heads[0].head)) { return false }
     }
     let first = durable(mut db, saved)
     if pack {
         if let Error(_) = first { return false }
-        journal_note(out, db.head)
+        journal_note(out, db.heads[0].head)
         result.unwrap(stdout.write(out, "ARM"))
         if !journal_is_poisoned(checkpoint(mut db)) { return false }
     } else if scenario == "poison-segment" || scenario == "poison-write" {
@@ -8401,12 +8434,12 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
         let ticket = match take committed { Committed(done) => done.ticket, _ => fail("journal crash commit") }
         if scenario != "journal-group" || k % 3 == 2 {
             durable(mut db, ticket)?
-            journal_note(out, db.head)
+            journal_note(out, db.heads[0].head)
         }
         if (scenario == "journal-rotate" || scenario == "journal-cancel") && k == 2 {
             let cut = checkpoint(mut db)?
             durable(mut db, cut)?
-            journal_note(out, db.head)
+            journal_note(out, db.heads[0].head)
         }
     }
     close(take db)
@@ -8418,12 +8451,12 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     let mut db = open(tasks, d, c, r, options)?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = shape(t)
-    let head = db.head
+    let head = db.heads[0].head
     let last = if scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else { 7u64 }
     if head < 1 || head > last || head < minimum { return Ok(false) }
     // The independent W2 provider returns wall_ms=phase: genesis0, writes1.
     // Every replayed write must retain1; recovery itself runs under clock2.
-    if db.at != (if head == 1 { 0u64 } else { 1u64 }) { return Ok(false) }
+    if db.heads[0].at != (if head == 1 { 0u64 } else { 1u64 }) { return Ok(false) }
     for k in 0u64 .. 6 {
         let expected = if k + 1 < head { Some(k + 10) } else { None }
         if get(snapshot(db), sh, k)? != expected { return Ok(false) }
@@ -8563,7 +8596,7 @@ fn journal_fixture_call(mut db: Db, large: bool, take revision: Option[Bytes]) -
     let checked = CallRecord(key: take entry_key, args: take args, stream: take stream, revision: take revision)
     call_checked(checked)?
     let call = Some(take checked)
-    let ci = call_info(db.store, 0, db.head + 1, db.at + 1, db.at)
+    let ci = call_info(db.store, 0, db.heads[0].head + 1, db.heads[0].at + 1, db.heads[0].at)
     let data: std.omap.OMap[Bytes, Option[Bytes]] = std.omap.new()
     let raw = result.unwrap(encode_sections(ci, data, streams, call, db.file_seq, db.file_end))
     let size = list.len(raw)
@@ -8571,14 +8604,14 @@ fn journal_fixture_call(mut db: Db, large: bool, take revision: Option[Bytes]) -
         let payload = list.slice(raw, 16, size)
         result.unwrap(journal_decode("fixture", payload))
     }
-    let mut replay = JournalReplay(roots: share_roots(db.roots), head: db.head, at: db.at, next_node: db.next_node)
+    let mut replay = JournalReplay(roots: share_roots(db.heads[0].roots), head: db.heads[0].head, at: db.heads[0].at, next_node: db.next_node)
     result.unwrap(journal_apply("fixture", mut replay, commit))
     let JournalReplay(roots: take roots, head: head, at: wall, next_node: next_node) = take replay
-    db.roots = take roots
-    db.head = head
-    db.at = wall
+    db.heads[0].roots = take roots
+    db.heads[0].head = head
+    db.heads[0].at = wall
     db.next_node = next_node
-    db.resident = journal_account(db.roots)
+    db.resident = journal_account(db.heads[0].roots)
     db.inflight += size
     db.file_end += size
     db.frame_seq += 1
@@ -8598,12 +8631,12 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
     for size in [31u64, 33u64] {
         let mut wrong: Bytes = list.new()
         result.unwrap(list.fill(mut wrong, size, 7u8))
-        let before = db.head
+        let before = db.heads[0].head
         match journal_fixture_call(mut db, refuse, Some(take wrong)) { Error(Missing(name)) => if name != "revision" { return false }, _ => return false }
-        if db.head != before { return false }
+        if db.heads[0].head != before { return false }
     }
     let _ = result.unwrap(journal_fixture_call(mut db, refuse, Some(revision_vector())))
-    let head = db.head
+    let head = db.heads[0].head
     let branch = main_branch(db)
     // The journal has not had a blocking turn since handoff. Only the
     // write barrier makes this answer independent of when it drains.
@@ -8611,7 +8644,7 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
         Some(captured) => if list.len(captured.key) != 32 || list.len(captured.args) != 16 || captured.stream != string.as_bytes("stream00") || !revision_is_vector(captured.revision) { return false },
         None => return false
     }
-    let roots = share_roots(db.roots)
+    let roots = share_roots(db.heads[0].roots)
     let live = db.resident
     let cut = result.unwrap(disk_begin_cut(mut db, roots, head, live))
     if let Some(_) = result.unwrap(recorded(db, branch, head)) { return false }
@@ -8662,7 +8695,7 @@ pub fn journal_law_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
             Committed(_) => {},
             _ => return false
         }
-        let head = db.head
+        let head = db.heads[0].head
         match recorded(db, branch, head) { Ok(None) => {}, _ => return false }
     }
     result.unwrap(close(take db))
@@ -8681,7 +8714,7 @@ fn journal_ack_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
         match take committed { Committed(_) => {}, _ => fail("journal-ack commit") }
     }
     let branch = main_branch(db)
-    let head = db.head
+    let head = db.heads[0].head
     match recorded(db, branch, head)? { None => {}, Some(_) => fail("journal-ack record") }
     let cut = checkpoint(mut db)?
     durable(mut db, cut)?
@@ -8819,10 +8852,10 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     }))
     match take done {
         Committed(x) => {
-            if !accepted || x.value != 15729018 + last || db.head != 1 { return false }
+            if !accepted || x.value != 15729018 + last || db.heads[0].head != 1 { return false }
             result.unwrap(durable(mut db, x.ticket))
         },
-        Aborted(Undone(value: Limit(Transaction), ticket: None)) => if accepted || db.head != 0 || std.omap.len(db.roots.data) != 0 { return false },
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => if accepted || db.heads[0].head != 0 || std.omap.len(db.heads[0].roots.data) != 0 { return false },
         _ => return false
     }
     let seq = db.file_seq
@@ -8833,8 +8866,8 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
         if list.len(raw) != 72 + 15729018 + last || read_le(raw, 76, 4) != 15729002 + last { return false }
     } else if list.len(raw) != 72 { return false }
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.head != (if accepted { 1u64 } else { 0u64 }) { return false }
-    if std.omap.len(reopened.roots.data) != (if accepted { 16u64 } else { 0u64 }) { return false }
+    if reopened.heads[0].head != (if accepted { 1u64 } else { 0u64 }) { return false }
+    if std.omap.len(reopened.heads[0].roots.data) != (if accepted { 16u64 } else { 0u64 }) { return false }
     if accepted {
         for k in 0u64 .. 16 {
             let found = option.unwrap(result.unwrap(get_bytes(snapshot(reopened), 1, key_word(k))))
@@ -8871,8 +8904,8 @@ pub fn journal_law_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     let sh = shape(t)
     let _ = take db
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    if reopened.head != 1 && reopened.head != 2 { return false }
-    let expected: Option[u64] = if reopened.head == 2 { Some(70u64) } else { None }
+    if reopened.heads[0].head != 1 && reopened.heads[0].head != 2 { return false }
+    let expected: Option[u64] = if reopened.heads[0].head == 2 { Some(70u64) } else { None }
     if result.unwrap(get(snapshot(reopened), sh, 7)) != expected { return false }
     result.unwrap(close(take reopened))
     true

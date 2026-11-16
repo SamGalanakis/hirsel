@@ -455,16 +455,14 @@ mod tests {
             }
         };
         let product = |rival, cache: &str| {
+            let mut request = CheckRequest::libraries(
+                root.parent().unwrap(),
+                &dir.path().join(cache).join("checks"),
+            )
+            .unwrap();
+            request.inputs = manifest(rival);
             let checked = Driver::default()
-                .check(
-                    CheckRequest {
-                        inputs: manifest(rival),
-                        store: dir.path().join(cache).join("checks"),
-                        library: LibraryInput::Sources,
-                        entry: None,
-                    },
-                    &mut Meter::new(false),
-                )
+                .check(request, &mut Meter::new(false))
                 .unwrap();
             assert_eq!(checked.accepted(), !rival, "{:?}", checked.diagnostics);
             let diagnostics = encode(&checked.diagnostics).unwrap();

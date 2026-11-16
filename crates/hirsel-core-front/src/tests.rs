@@ -4009,9 +4009,9 @@ fn twin_claims_are_unique_and_name_the_first_declaration() {
         assert_eq!(
             r.causal,
             [Site {
-                module: r.primary.module,
                 item: 1,
-                span: Span { start: 0, end: 8 }
+                span: Span { start: 0, end: 8 },
+                ..r.primary
             }]
         );
     }

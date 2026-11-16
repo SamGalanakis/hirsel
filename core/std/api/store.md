@@ -63,12 +63,31 @@ The transaction limit is 16,777,280 COMMIT payload bytes, excluding the 16-byte
 head. Body-time arithmetic enforces it before publishing. The account uses the
 stored value's length, including its schema number, when subtracting an old row.
 
-The contract follows STORE-SPEC v2.11. The format has a 16-byte frame head and seed-zero XXH3-64, bound to
-store identity, file role, sequence and byte offset, then head bytes 0–8 and the
-payload. S1 tests the encoder directly but has no files or background tasks. Its waiting
-APIs have immediate memory paths. Disk recovery and checkpoints belong to S2;
-journal durability to S3; pins, forks and migration to S4; streams and scopes to
-S5. There is no durability promise for a memory store.
+The contract follows STORE-SPEC v2.13. `open(tasks, dir, clock, random, options)`
+locks the directory, decodes its manifest and packs, replays journal frames and
+rotates to a new segment. Zero `group_commits` or `group_bytes` returns
+`Missing` naming that field before taking LOCK; memory ignores these bounds.
+The journal queue holds twice `group_commits` messages. Frames use a 16-byte
+head and seed-zero XXH3-64 bound to store identity, role, sequence, offset,
+head bytes 0–8 and payload. Unknown optional frames are checked and skipped.
+
+A disk `run` publishes and hands its frame to the journal task. `durable` waits
+for a synced prefix; grouping changes I/O only. END records identify synced
+boundaries, while recovery stops at a torn last tail. `checkpoint` rotates
+before taking its cut, writes only new nodes, and publishes the manifest after
+packs are synced and named. Capacity refuses a cut without poisoning or ending
+the worker; a later cut can retry. Schema changes publish on the cut's ack.
+`close` waits for frames and cuts, joins both tasks, releases LOCK, and returns
+the first stored I/O error. It never requests a cut. Snapshots remain readable.
+
+`recorded(db, branch, version)` waits on a write barrier without consuming
+journal acks. It returns a CALL section from live segments. Compaction is
+measured by the latest cut this Db has taken, with the previous cut restored
+when a refusal is learned. A covering cut or memory mode gives None. A journal
+failure is retained on the write-notice channel, so repeated calls return the
+same `Poisoned` error. CALL carries key, args and stream; the frame supplies
+CallInfo and the stream operation supplies position. Public stream producers
+belong to S5. Pins, forks and migration belong to S4.
 
 `//:core-store-s1` selects the package's evaluator and native laws, including
 Cranelift, LLVM development and LLVM release, with look write/info checker
@@ -76,3 +95,8 @@ refusals, scoped IndexRows escape/write refusals and 32 seeded follower schedule
 in each configuration. `core/HOOK-ALLOWLIST` gates
 the library's core dependencies. The checksum's independent vectors are in
 `core/std/tests/check.hirsel`.
+
+`//:core-store-s2` selects pack, manifest, incremental checkpoint, refusal and
+recovery laws. `//:core-store-s3` selects journal/END/CALL laws, each W2 crash
+cut, cancellation at observed wait entries, named write/sync failures and
+32 seeded grouping/rotation schedules per native configuration.

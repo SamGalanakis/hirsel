@@ -40,7 +40,7 @@ def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
 
 
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
-                entry="store@1/store/disk_crash_main", scenarios=SCENARIOS):
+                entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None):
     build = work / (engine + '-crash')
     build.mkdir()
     if cc is None:
@@ -69,10 +69,10 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
     if engine == 'llvm-release':
         command.append('--release')
     wait_load()
-    result = checked(command)
+    result = checked(command, environment)
     report = json.loads(result.stdout)
     if not report.get('accepted') or not report.get('native', {}).get('linked'):
         raise RuntimeError(result.stdout)
-    env = dict(os.environ)
+    env = dict(os.environ if environment is None else environment)
     env['LD_LIBRARY_PATH'] = str(bridge.resolve().parent) + ':' + env.get('LD_LIBRARY_PATH', '')
     return run_cuts(executable, engine, env, scenarios)

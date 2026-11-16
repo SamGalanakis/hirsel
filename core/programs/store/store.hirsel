@@ -9831,7 +9831,7 @@ pub fn journal_law_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let br = main_branch(db)
     for k in 0u64 .. 8 {
-        match result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, k, k + 10) })) {
+        match result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, k, k + 10) })) {
             Committed(_) => {},
             _ => return false
         }
@@ -9850,7 +9850,7 @@ fn journal_ack_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
     let mut db = open(tasks, d, c, r, journal_ack_options())?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 4 {
-        let committed = run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, k, k + 10) })?
+        let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, k, k + 10) })?
         match take committed { Committed(_) => {}, _ => fail("journal-ack commit") }
     }
     let br = main_branch(db)

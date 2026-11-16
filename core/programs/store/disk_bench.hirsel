@@ -8,7 +8,7 @@ type DiskAccount: send + codec {
 fn disk_bench_bucket(a: DiskAccount) -> Result[u64, Capacity] { Ok(a.id % 4) }
 
 fn disk_bench_put(mut db: Db, t: Table[u64, DiskAccount], key: u64, balance: u64) waits {
-    let done = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+    let done = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         let a = DiskAccount(id: key, balance: int.narrow(balance), owner: result.unwrap(string.from("owner000")))
         put(mut tx, t, key, a)
     }))

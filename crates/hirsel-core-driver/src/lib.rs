@@ -8,6 +8,7 @@ mod image_index;
 mod image_unit;
 pub mod installation;
 mod product;
+pub mod sdk;
 pub use product::PackageProduct;
 mod callable_variants;
 #[cfg(test)]

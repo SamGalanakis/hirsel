@@ -1,0 +1,34 @@
+# Generated TypeScript bindings
+
+`hirsel sdk ts <program> --out <dir>` builds the program and runs its describe
+launch mode. The generated ES modules and `.d.ts` declarations use the same
+code in Node and browsers, without a build step.
+
+## 4. Generated code
+
+`codec.js` follows `std.codec` value schemas and ordered key schemas. Integers
+through 32 bits are `number`; u64 and i64 inputs and outputs are `bigint` only.
+Bytes are `Uint8Array`, strings are strict UTF-8, records are objects in declared
+field order, and tuples are TypeScript tuples. Maps retain insertion order.
+Unit is `undefined`. Floats encode canonical NaNs and reject other NaN patterns
+when decoding. Decoding rejects malformed tags and trailing bytes.
+
+Unit variants are `{tag}`. One-field variants are `{tag, value: T}`.
+Multi-field variants are `{tag, values: [T0, T1, ...]}`, with a TypeScript tuple
+for `values`. Thus Option is `{tag: "None"} | {tag: "Some", value: T}` and
+Result is `{tag: "Ok", value: T} | {tag: "Error", value: E}`. Nested Options
+retain every tag, including Some(None) and Some(unit). Nominal `via` types
+expose their representation type.
+
+`entries.js` exports the Want list, launch identity and `bind(client)`, whose
+result supplies `call.<name>` and `subscribe.<name>` entry stubs. Names are the
+percent-decoded final component of an entry's definition identity. Duplicate
+names cause `DuplicateStubName(a, b)` before any output is written.
+
+The transport implements `call(want, argsBytes, resultDecoder)`, returning
+`Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onRows)`, returning a
+handle with `unsubscribe()`. The client runtime owns subscription recovery
+after Reset and reconnect.
+
+The launch identity contains digest bytes, target and `n_place`. Fingerprints
+come from the described program; the generator does not implement fingerprinting.

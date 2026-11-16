@@ -342,7 +342,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -384,7 +384,25 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
-                adapted.write_text(original + case.file.read_text() + wrapper(case))
+                source = original + case.file.read_text()
+                if typescript and case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(')):
+                    law = 'vectors' if case.call.startswith('ts_codec_vectors(') else 'differential'
+                    program = (f'import * as c from {json.dumps(typescript.resolve().as_uri())};'
+                               f'import {{{law}}} from {json.dumps((root / "core/std/tests/codec.mjs").as_uri())};'
+                               f'console.log(JSON.stringify({law}(c)));')
+                    partner = subprocess.run(['node', '--input-type=module', '--eval', program], capture_output=True, text=True)
+                    if partner.returncode:
+                        row.update(ran=True, passed=False, cause='TypeScript codec: ' + partner.stderr)
+                        save_row(rows, row, output)
+                        continue
+                    values = json.loads(partner.stdout)
+                    row['typescript_cases'] = values['cases']
+                    if law == 'differential':
+                        source, count = re.subn(r'(fn ts_differential_bytes\(\) -> String\s*\{\s*)""(\s*\})',
+                                                lambda m: m[1] + json.dumps(values['hex']) + m[2], source)
+                        if count != 1:
+                            raise ValueError('TypeScript differential must supply exactly one corpus')
+                adapted.write_text(source + wrapper(case))
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
@@ -502,6 +520,7 @@ def main():
     parser.add_argument('--backend', choices=['all', 'evaluator', 'both', 'cranelift', 'llvm'], default='both')
     parser.add_argument('--filter', action='append', default=[])
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--typescript', type=Path, help='generated codec.js ES module; run its codec corpus partner')
     parser.add_argument('--cc', type=Path)
     parser.add_argument('--target')
     parser.add_argument('--emulator', type=Path)
@@ -518,7 +537,8 @@ def main():
         parser.error('native backends require --compiler and --runtime')
     rows = run(root, args.compiler.resolve() if args.compiler else None, args.runtime.resolve() if args.runtime else None, contracts, engines,
                args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None, args.target,
-               args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None)
+               args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
+               typescript=args.typescript)
     return int(any(r['applicable'] and not r['passed'] for r in rows))
 
 

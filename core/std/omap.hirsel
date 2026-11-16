@@ -286,6 +286,16 @@ pub fn insert[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
     }
 }
 
+/// Consuming input with recovery: Capacity returns the original map and k/v.
+/// The input root stays alive until publication, so this uses path copying
+/// even when its caller owns the only version. No rollback allocation occurs.
+pub fn insert_recover[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], take k: K, take v: V) -> Result[OMap[K, V], (Capacity, (OMap[K, V], (K, V)))] {
+    match inserted(mut ids, m, k, v) {
+        Ok(take next_map) => Ok(take next_map),
+        Error(c) => Error((c, (take m, (take k, take v))))
+    }
+}
+
 fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m: OMap[K, V], k: K, v: V) -> Result[OMap[K, V], Capacity] {
     let pieces = match m.head {
         Some(n) => insert_node(mut ids, n, k, v)?,

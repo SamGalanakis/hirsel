@@ -31,6 +31,14 @@ Unwrap/new still frees and allocates one wrapper per visited unique node.
 Capacity consumes the draft m and returns k/v; keep an independent snapshot
 for rollback. Every held version and its node ids stay unchanged.
 
+`insert_recover(mut ids,take m,take k,take v)` returns
+`Result[OMap[K,V],(Capacity,(OMap[K,V],(K,V)))]`. On refusal it returns the
+original map with unchanged contents and node ids, plus its key and value.
+The original root stays alive until publication, so the implementation uses
+path copying even when the caller owns the only version. No fallible rollback
+allocation is needed. This is the transaction-friendly recovery contract;
+`insert_owned` remains the explicit discard-on-Capacity alternative.
+
 `range(m,take lower,take upper)` accepts `Unbounded`, `Included(k)` or
 `Excluded(k)` endpoints and returns an owned, sendable `Cursor`. It reserves one
 Arc frame per level, seeks recursively in O(log n), and pins the version from

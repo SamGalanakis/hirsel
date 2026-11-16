@@ -6,7 +6,9 @@ Each workload runs in a separate process. `insert` measures 100,000 ascending
 u64 inserts from empty. `lookup`, `range` and `snapshots` populate 100,000 rows
 before the measured region. The operations are 100,000 permuted lookups, a
 50,000-row scan, and 1,000 held snapshots with overwrites respectively.
-`unique` uses the consuming std.omap update and im's unique-owner fast path.
+`recover` measures the consuming update that returns the original map on
+Capacity, currently a shared-path copy even with unique ownership.
+`unique` uses the discard-on-Capacity consuming std.omap update and im's unique-owner fast path.
 `bulk` builds from sorted input prepared before the measured region. im's
 FromIterator uses repeated unique inserts; BTreeMap uses its sorted collector.
 `unwrap` is a separate wrapper-cost control with 32 child Arcs.

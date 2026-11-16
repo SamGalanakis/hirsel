@@ -720,3 +720,84 @@ fn shared_byte_versions() -> bool {
     let restored = omap.from_root(Some(reload_bytes(h)))
     byte_equal(restored, xs) && omap.node_id(option.unwrap(omap.root(restored))) == omap.node_id(h)
 }
+
+// Refusal returns the same complete map, even without a rollback snapshot.
+// Exercise both unique and shared roots across successive allocation budgets.
+// expect: run recover_capacity() = true
+fn recover_capacity() -> bool {
+    let mut refused: u64 = 0
+    let mut succeeded: u64 = 0
+    for shared in 0u64 .. 2 {
+        for budget_step in 0u64 .. 48 {
+            let mut ids: u64 = 0
+            let mut m: omap.OMap[u64, String] = omap.new()
+            for i in 0u64 .. 80 {
+                let previous = take m
+                m = result.unwrap(omap.insert_owned(mut ids, take previous, i, "old"))
+            }
+            let old_id = omap.node_id(option.unwrap(omap.root(m)))
+            let held = if shared == 1 {
+                omap.snapshot(m)
+            } else {
+                omap.new()
+            }
+            let answer = result.unwrap(bound bytes budget_step * 64 {
+                omap.insert_recover(mut ids, take m, 81, "new")
+            })
+            match take answer {
+                Error((_, (take recovered, (k, take v)))) => {
+                    if k != 81 || v != "new" || omap.len(recovered) != 80 || omap.node_id(option.unwrap(omap.root(recovered))) != old_id {
+                        return false
+                    }
+                    for i in 0u64 .. 80 {
+                        if option.unwrap(omap.get(recovered, i)) != "old" {
+                            return false
+                        }
+                    }
+                    if let Some(_) = omap.get(recovered, 81) {
+                        return false
+                    }
+                    refused += 1
+                },
+                Ok(take changed) => {
+                    if omap.len(changed) != 81 || option.unwrap(omap.get(changed, 81)) != "new" {
+                        return false
+                    }
+                    succeeded += 1
+                }
+            }
+            if shared == 1 && (omap.len(held) != 80 || omap.node_id(option.unwrap(omap.root(held))) != old_id) {
+                return false
+            }
+        }
+    }
+    refused > 0 && succeeded > 0
+}
+
+// Success through the recovering API keeps all earlier versions and cursors.
+// expect: run recover_versions() = true
+fn recover_versions() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    let mut xs: List[(u64, u64)] = list.new()
+    let mut held: List[omap.OMap[u64, u64]] = result.unwrap(list.with_capacity(97))
+    let mut models: List[List[(u64, u64)]] = result.unwrap(list.with_capacity(97))
+    for step in 0u64 .. 96 {
+        result.unwrap(list.push(mut held, omap.snapshot(m)))
+        let copied_model: Result[List[(u64, u64)], Capacity] = clone(xs)
+        result.unwrap(list.push(mut models, result.unwrap(take copied_model)))
+        let k = (step * 47) % 71
+        let previous = take m
+        m = result.unwrap(omap.insert_recover(mut ids, take previous, k, step + 1))
+        xs = model(xs, k, step + 1, false)
+        if !equal(m, xs) {
+            return false
+        }
+        for i in 0u64 .. list.len(held) {
+            if !equal(held[i], models[i]) {
+                return false
+            }
+        }
+    }
+    true
+}

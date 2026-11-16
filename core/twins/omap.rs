@@ -16,11 +16,11 @@ fn phase(mut operation: impl FnMut() -> u64, gate: &mut std::fs::File) {
 fn btree(mode: &str, gate: &mut std::fs::File) {
     let mut m = BTreeMap::new();
     let mut held = Vec::with_capacity(1_000);
-    if mode != "insert" && mode != "unique" && mode != "bulk" { for i in 0..100_000u64 { m.insert(i, i + 1); } }
+    if mode != "insert" && mode != "unique" && mode != "recover" && mode != "bulk" { for i in 0..100_000u64 { m.insert(i, i + 1); } }
     let input: Vec<_> = if mode == "bulk" { (0..100_000u64).map(|i| (i, i + 1)).collect() } else { Vec::new() };
     phase(|| match mode {
         "bulk" => { m = input.iter().copied().collect(); m.len() as u64 },
-        "insert" | "unique" => { for i in 0..100_000u64 { m.insert(i, i + 1); } m.len() as u64 },
+        "insert" | "unique" | "recover" => { for i in 0..100_000u64 { m.insert(i, i + 1); } m.len() as u64 },
         "lookup" => (0..100_000).map(|i| black_box(&m)[&((i * 65537) % 100_000)]).sum(),
         "range" => m.range(25_000..75_000).map(|(k, v)| k + v).sum(),
         "snapshots" => {
@@ -35,13 +35,13 @@ fn btree(mode: &str, gate: &mut std::fs::File) {
 fn persistent(mode: &str, unique: bool, gate: &mut std::fs::File) {
     let mut m = im::OrdMap::new();
     let mut held = Vec::with_capacity(1_000);
-    if mode != "insert" && mode != "unique" && mode != "bulk" { for i in 0..100_000u64 { m.insert(i, i + 1); } }
+    if mode != "insert" && mode != "unique" && mode != "recover" && mode != "bulk" { for i in 0..100_000u64 { m.insert(i, i + 1); } }
     let input: Vec<_> = if mode == "bulk" { (0..100_000u64).map(|i| (i, i + 1)).collect() } else { Vec::new() };
     phase(|| match mode {
         "bulk" => { m = input.iter().copied().collect(); m.len() as u64 },
-        "insert" | "unique" => {
+        "insert" | "unique" | "recover" => {
             for i in 0..100_000u64 {
-                if unique || mode == "unique" { m.insert(i, i + 1); }
+                if unique || mode == "unique" || mode == "recover" { m.insert(i, i + 1); }
                 else { let pinned = m.clone(); m.insert(i, i + 1); black_box(&pinned); }
             }
             m.len() as u64

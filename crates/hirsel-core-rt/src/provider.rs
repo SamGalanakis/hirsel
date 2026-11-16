@@ -145,6 +145,11 @@ pub unsafe extern "C" fn hirsel_core_host(
     unsafe { drive(context, provider, request, None) }
 }
 
+/// `Outcome.status` of an operation its provider refused before issue: a tape
+/// that has ended or faulted (CAP-9). `drive` records the cause `Tape` at the
+/// operation's site and fails it with status 1.
+pub const STATUS_REFUSED: u8 = 2;
+
 /// The failure of an operation that ended before issue.
 pub(crate) const CANCELLED: Outcome = Outcome {
     value: 0,
@@ -186,7 +191,12 @@ pub(crate) unsafe fn drive(
                 return CANCELLED;
             }
         }
-        crate::tasks::provider_operation(context, &*provider, request, issued)
+        let outcome = crate::tasks::provider_operation(context, &*provider, request, issued);
+        if outcome.status == STATUS_REFUSED {
+            causes::record(&mut *context, causes::Cause::new(causes::TAPE, site));
+            return CANCELLED;
+        }
+        outcome
     }
 }
 

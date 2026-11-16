@@ -122,7 +122,7 @@ pub type Cause {
     site: Site
 }
 
-pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity
+pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity | Tape
 
 pub type BuildError = Capacity(Capacity) | Overflow
 

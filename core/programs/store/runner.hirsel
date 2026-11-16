@@ -61,6 +61,7 @@ fn raised(cs: Causes) -> u32 {
             Fail(_) => 5u32,
             Cancelled => 6u32,
             Capacity => 7u32,
+            Tape => 8u32,
         }
     }
     0u32

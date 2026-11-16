@@ -35,19 +35,31 @@ pub enum Mode {
 
 /// Section 4.2's divergence kinds that S1 can produce.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Divergence {
+pub enum Mismatch {
     Op,
     Object,
     Arg,
     Missing,
     Extra,
+    /// The replaying domain's outcome differs from END's (v2.3 R9).
+    Outcome,
+}
+
+/// Where a replay diverged: `at` is the 1-based position of the frame it was
+/// checked against, counting the frames after block 0 (one past the last frame
+/// when the tape has none left).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Divergence {
+    pub at: u64,
+    pub kind: Mismatch,
 }
 
 /// Why a tape stopped. Every later operation on it fails the same way.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fault {
     Diverged(Divergence),
-    Truncated,
+    /// The tape is cut at the frame in this position.
+    Truncated(u64),
     Damaged(u64),
     Corrupt,
     /// The sink's write failed (S1 has no barriers; S3 poisons instead).
@@ -55,11 +67,15 @@ pub enum Fault {
     /// The tape was ended or dropped (section 8).
     Ended,
 }
-impl From<Stop> for Fault {
-    fn from(s: Stop) -> Self {
+impl Fault {
+    /// The fault a block or frame stop gives at frame position `at`.
+    fn stopped(s: Stop, at: u64) -> Self {
         match s {
-            Stop::Missing => Fault::Diverged(Divergence::Missing),
-            Stop::Truncated => Fault::Truncated,
+            Stop::Missing => Fault::Diverged(Divergence {
+                at,
+                kind: Mismatch::Missing,
+            }),
+            Stop::Truncated => Fault::Truncated(at),
             Stop::Damaged(k) => Fault::Damaged(k),
             Stop::Corrupt => Fault::Corrupt,
         }
@@ -76,7 +92,7 @@ impl From<Corrupt> for Fault {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Refusal {
     Code,
-    Build,
+    Revision,
     Arg,
     Limit,
     Damaged(u64),
@@ -93,17 +109,19 @@ pub enum OpenError {
 /// What a Replay opener compares with the stored header.
 pub struct Expect<'a> {
     pub identity: &'a [u8],
+    pub charge_policy: u32,
     pub limit: u64,
     /// None: the opener receives the stored argument.
     pub arg: Option<&'a [u8]>,
 }
 
-/// An operation that the tape refused: the task fails before issue.
+/// An operation that the tape refused: the task fails before issue with cause
+/// `Tape` (the runtime records it, `STATUS_REFUSED`).
 pub const REFUSED: Outcome = Outcome {
     value: 0,
     error: IoError::OK,
     written: 0,
-    status: 1,
+    status: STATUS_REFUSED,
 };
 
 /// The inner (provider, provider-local handle) an object designates.
@@ -135,6 +153,8 @@ struct Replayer {
     blocks: Blocks,
     decoder: Decoder,
     frames: VecDeque<Frame>,
+    /// Frames taken so far: the position the next divergence names.
+    taken: u64,
 }
 
 struct Live {
@@ -322,16 +342,33 @@ impl Replayer {
     fn next(&mut self) -> Result<Frame, Fault> {
         loop {
             if let Some(f) = self.frames.pop_front() {
+                self.taken += 1;
                 return Ok(f);
             }
-            match self.blocks.next(&self.bytes)? {
-                None => return Err(Fault::Diverged(Divergence::Extra)),
-                Some((flags, payload)) => {
+            let at = self.taken + 1;
+            match self.blocks.next(&self.bytes) {
+                Err(s) => return Err(Fault::stopped(s, at)),
+                Ok(None) => return Err(self.diverged_next(Mismatch::Extra)),
+                Ok(Some((flags, payload))) => {
                     let frames = self.decoder.block(payload, flags & END != 0)?;
                     self.frames.extend(frames);
                 }
             }
         }
+    }
+    /// A divergence at the frame `next` returned last.
+    fn diverged(&self, kind: Mismatch) -> Fault {
+        Fault::Diverged(Divergence {
+            at: self.taken,
+            kind,
+        })
+    }
+    /// A divergence at the frame after the last one taken.
+    fn diverged_next(&self, kind: Mismatch) -> Fault {
+        Fault::Diverged(Divergence {
+            at: self.taken + 1,
+            kind,
+        })
     }
 }
 
@@ -381,9 +418,10 @@ unsafe extern "C" {
 impl Tape {
     /// Open a tape at `name` in the Dir `dir` (its provider and handle).
     /// Record creates the file (CreateNew) and writes block 0 from `header`;
-    /// Replay reads it and refuses, in this order, a changed identity, build,
-    /// argument (when `expect` passes one) or limit. `header.build` is not
-    /// the caller's: open fills it from the running executable.
+    /// Replay reads it and refuses, in this order, a changed identity,
+    /// revision, argument (when `expect` passes one), or limit or charge
+    /// policy. `header.revision` is not the caller's: open fills it from the
+    /// running executable (v2.3 R10's interim producer).
     /// Returns the tape and the stored argument.
     /// # Safety
     /// Called in a task of the run that owns `dir`'s provider.
@@ -397,11 +435,11 @@ impl Tape {
         // SAFETY: forwarded.
         unsafe { Self::open_built(hirsel_build_identity, dir, name, mode, header, expect) }
     }
-    /// `open` as an executable whose key is `build`.
+    /// `open` as an executable whose revision is `revision`.
     /// # Safety
     /// As `open`.
     pub(crate) unsafe fn open_built(
-        build: [u8; 32],
+        revision: [u8; 32],
         dir: (Provider, u64),
         name: &[u8],
         mode: Mode,
@@ -409,7 +447,7 @@ impl Tape {
         expect: &Expect,
     ) -> Result<(Tape, Vec<u8>), OpenError> {
         let header = &Header {
-            build,
+            revision,
             ..header.clone()
         };
         let dir = Inner {
@@ -453,18 +491,18 @@ impl Tape {
                     Err(Stop::Damaged(k)) => {
                         return Err(OpenError::Refused(Refusal::Damaged(k)));
                     }
-                    Err(s) => return Err(OpenError::Unreadable(s.into())),
+                    Err(s) => return Err(OpenError::Unreadable(Fault::stopped(s, 0))),
                 };
                 if stored.identity != expect.identity {
                     return Err(OpenError::Refused(Refusal::Code));
                 }
-                if stored.build != header.build {
-                    return Err(OpenError::Refused(Refusal::Build));
+                if stored.revision != header.revision {
+                    return Err(OpenError::Refused(Refusal::Revision));
                 }
                 if expect.arg.is_some_and(|a| a != stored.arg) {
                     return Err(OpenError::Refused(Refusal::Arg));
                 }
-                if stored.limit != expect.limit {
+                if stored.limit != expect.limit || stored.charge_policy != expect.charge_policy {
                     return Err(OpenError::Refused(Refusal::Limit));
                 }
                 let live = Live {
@@ -478,6 +516,7 @@ impl Tape {
                         blocks,
                         decoder: Decoder::default(),
                         frames: VecDeque::new(),
+                        taken: 0,
                     }),
                 };
                 (live, stored.arg)
@@ -550,8 +589,8 @@ impl Tape {
                 let rep = live.replayer.as_mut().unwrap();
                 let stored = match rep.next() {
                     Ok(Frame::Grant { kind: k, args }) if k == kind => Ok(args.unwrap_or_default()),
-                    Ok(Frame::End(_)) => Err(Fault::Diverged(Divergence::Missing)),
-                    Ok(_) => Err(Fault::Diverged(Divergence::Op)),
+                    Ok(Frame::End(_)) => Err(rep.diverged(Mismatch::Missing)),
+                    Ok(_) => Err(rep.diverged(Mismatch::Op)),
                     Err(f) => Err(f),
                 };
                 stored.inspect_err(|&f| live.fault = Some(f))?
@@ -569,15 +608,16 @@ impl Tape {
         Ok((self.cell.provider, h, stored))
     }
 
-    /// `tape.end`: Record writes the END block and closes the file; Replay
-    /// requires END next and nothing after it. Either way the tape's handles
-    /// end here.
-    pub fn end(self) -> Result<(), Fault> {
-        let result = self.finish(true);
+    /// `tape.end`: Record writes the END block with the domain's outcome
+    /// `ending`; Replay requires END next, with that outcome (else
+    /// `Diverged(Outcome)` at the END frame), and nothing after it. Either
+    /// way the tape's handles end here.
+    pub fn end(self, ending: &Ending) -> Result<(), Fault> {
+        let result = self.finish(Some(ending));
         std::mem::forget(self);
         result
     }
-    fn finish(&self, end: bool) -> Result<(), Fault> {
+    fn finish(&self, end: Option<&Ending>) -> Result<(), Fault> {
         let mut s = self.cell.state.lock().unwrap();
         if s.generation != self.generation {
             return Err(Fault::Ended);
@@ -597,8 +637,8 @@ impl Tape {
         if let Some(rec) = live.recorder.as_mut() {
             // SAFETY: end and drop run in a task of the tape's run.
             let written = unsafe {
-                if end {
-                    rec.frame(&Frame::End(END_COMPLETE))
+                if let Some(e) = end {
+                    rec.frame(&Frame::End(e.clone()))
                         .and_then(|()| rec.close(format::END))
                 } else if rec.buffer.is_empty() {
                     Ok(())
@@ -612,19 +652,20 @@ impl Tape {
                 result = written.and(closed).map_err(Fault::Io);
             }
         }
-        if let (true, Ok(()), Some(rep)) = (end, result, live.replayer.as_mut()) {
+        if let (Some(ending), Ok(()), Some(rep)) = (end, result, live.replayer.as_mut()) {
             result = match rep.next() {
+                Ok(Frame::End(e)) if e != *ending => Err(rep.diverged(Mismatch::Outcome)),
                 Ok(Frame::End(_)) => rep.next().map_or_else(
-                    |f| {
-                        if f == Fault::Diverged(Divergence::Extra) {
-                            Ok(())
-                        } else {
-                            Err(f)
-                        }
+                    |f| match f {
+                        Fault::Diverged(Divergence {
+                            kind: Mismatch::Extra,
+                            ..
+                        }) => Ok(()),
+                        f => Err(f),
                     },
                     |_| Err(Fault::Corrupt),
                 ),
-                Ok(_) => Err(Fault::Diverged(Divergence::Extra)),
+                Ok(_) => Err(rep.diverged(Mismatch::Extra)),
                 Err(f) => Err(f),
             };
         }
@@ -634,7 +675,7 @@ impl Tape {
 }
 impl Drop for Tape {
     fn drop(&mut self) {
-        let _ = self.finish(false);
+        let _ = self.finish(None);
     }
 }
 
@@ -873,19 +914,19 @@ unsafe fn replay(
             args,
         } => match rep.next()? {
             Frame::Done { task: t, out, .. } if t == task => (op, object, args, out),
-            _ => return Err(Fault::Diverged(Divergence::Op)),
+            _ => return Err(rep.diverged(Mismatch::Op)),
         },
-        Frame::End(_) => return Err(Fault::Diverged(Divergence::Missing)),
-        _ => return Err(Fault::Diverged(Divergence::Op)),
+        Frame::End(_) => return Err(rep.diverged(Mismatch::Missing)),
+        _ => return Err(rep.diverged(Mismatch::Op)),
     };
     if op != r.operation {
-        return Err(Fault::Diverged(Divergence::Op));
+        return Err(rep.diverged(Mismatch::Op));
     }
     if object != ordinal as u64 {
-        return Err(Fault::Diverged(Divergence::Object));
+        return Err(rep.diverged(Mismatch::Object));
     }
     if stored != Args::of(args) {
-        return Err(Fault::Diverged(Divergence::Arg));
+        return Err(rep.diverged(Mismatch::Arg));
     }
     let mut o = Outcome {
         value: out.value,

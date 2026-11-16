@@ -369,11 +369,12 @@
 //! pointer to its carrier `{data, length, capacity}` (for a view, the address
 //! of the place holding its carrier, Views). Every `host`, `stdout` and `stderr`
 //! row returns the outcome `value: u64, error: u8, code: u32, written: u64`,
-//! from which the producer builds the `Result`; the rows that `wait` add the
-//! failure status (Native ABI) and fail with `Cancelled` when cancellation is pending, `host_mkdtemp` also with
-//! `Bounds` when the name has fewer than 32 spare bytes. `host_wall_ms` and
-//! `host_mono_ns` return the `u64` alone and cannot fail; neither can the `args`
-//! rows. The run time reads and writes the carrier: `host_read` fills spare
+//! from which the producer builds the `Result`. Every provider row adds the
+//! failure status (Native ABI): it fails with `Tape` when its tape refuses it
+//! before issue (CAP-9); the rows that `wait` also fail with `Cancelled` when
+//! cancellation is pending, `host_mkdtemp` also with `Bounds` when the name has
+//! fewer than 32 spare bytes. `host_wall_ms` and `host_mono_ns` return the `u64`
+//! and `host_random` nothing besides the status. The `args` rows cannot fail. The run time reads and writes the carrier: `host_read` fills spare
 //! capacity and `host_mkdtemp` appends the directory's name, each storing the new
 //! length; neither changes the data pointer or the capacity (no provider
 //! operation admits). `rt.args_get` returns a run-owned `String` carrier of
@@ -390,8 +391,8 @@
 //!   mode, uint64_t site)`, with [`HostOp::code`], the row's handle, its carrier
 //!   pointer (null when it has none) and `mode` (0 when it has none).
 //!   `HirselCoreHostOutcome` is the row's results then the status, laid out as
-//!   the Native ABI's result struct; a row that cannot fail ignores the status
-//!   and keeps `value`. The entry resolves the provider: `open` and the
+//!   the Native ABI's result struct; a clock row keeps `value` and the status,
+//!   `host_random` the status alone. The entry resolves the provider: `open` and the
 //!   directory and stream operations by the capability handle, the file
 //!   operations by the `HostFile`'s retained provider.
 //!

@@ -1,4 +1,4 @@
-"""Independent oracle for the tape laws (REPLAY-SPEC v2.2 sections 4 and 5).
+"""Independent oracle for the tape laws (REPLAY-SPEC v2.3 sections 4 and 5).
 
 Imports no compiler or runtime code: it encodes the spec's byte format by hand
 and checks blocks with the system libxxhash. Run from anywhere:
@@ -87,8 +87,9 @@ class Tape:
             f += lb(payload[:65536])
             data = [bytes([9]) + lb(payload[i:i + 65536]) for i in range(65536, len(payload), 65536)]
         s.put(f, data)
-    def end(s):
-        s.put(bytes([10, 0])); s.close(2)
+    def end(s, kind, outcome):
+        # v2.3 R9: END status 0, the outcome kind, its bytes in args encoding.
+        s.put(bytes([10, 0, kind]) + args(outcome)); s.close(2)
         return b''.join(s.blocks)
 
 t = Tape()
@@ -112,5 +113,8 @@ t.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9_000))
 t.op(RENAME, 3, b'a\0b')
 t.op(MKDTEMP, 3, b't.', 6, payload=b'abc123')         # ordinal 6
 t.op(SYNC_DIR, 6, b'')
-(HERE / 'hand-tape.bin').write_bytes(t.end())
+# The scripted run fails with Fail("no data") then Overflow (core.hirsel:125
+# order: Overflow 0 .. Fail 4 .. Capacity 6, Tape 7); sites are not recorded.
+FAILED = 1
+(HERE / 'hand-tape.bin').write_bytes(t.end(FAILED, vi(2) + bytes([4]) + lb(b'no data') + bytes([0])))
 print('xxh3.bin rows', len(rows) // 16, 'hand-tape.bin bytes', sum(map(len, t.blocks)), 'blocks', len(t.blocks))

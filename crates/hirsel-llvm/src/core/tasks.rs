@@ -96,9 +96,15 @@ impl FunctionEmitter<'_> {
                 ],
             ),
         };
-        if !op.waits() {
-            values.truncate(1);
+        // Every provider row returns its status last (`runtime_call` branches on it):
+        // a tape refuses any of them before issue (CAP-9).
+        let status = values.pop().unwrap();
+        match op {
+            HostOp::WallMs | HostOp::MonoNs => values.truncate(1),
+            HostOp::Random => values.clear(),
+            _ => {}
         }
+        values.push(status);
         values
     }
     pub(super) fn runtime_call(&mut self, op: RtOp, site: &CallSite) -> Result<()> {

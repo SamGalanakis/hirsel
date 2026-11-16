@@ -73,6 +73,7 @@ pub(crate) unsafe fn format_cause_at(
         "Fail",
         "Cancelled",
         "Capacity",
+        "Tape",
     ][cause.kind() as usize];
     // SAFETY: cause chain pins its canonical immutable String carrier and bytes.
     unsafe {

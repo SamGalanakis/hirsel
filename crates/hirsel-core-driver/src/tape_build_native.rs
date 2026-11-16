@@ -1,6 +1,7 @@
 // REPLAY-SPEC v2.1 R1: every executable carries its key as the 32-byte
 // symbol `hirsel_build_identity`, which a tape's header records and a Replay
-// open compares (the runtime's open_refuses_a_changed_code_build_arg_or_limit).
+// open compares as the revision (v2.3 R10; the runtime's
+// open_refuses_a_changed_code_revision_arg_limit_or_policy).
 
 /// The symbol's bytes, read from the executable's own symbol table.
 fn build_identity_of(executable: &Path) -> [u8; 32] {

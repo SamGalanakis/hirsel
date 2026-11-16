@@ -53,6 +53,46 @@ pub const TIMED_OUT: u8 = 3;
 /// END's status: the recording reached `tape.end`.
 pub const END_COMPLETE: u8 = 0;
 
+/// END's outcome kinds (v2.3 R9).
+pub const END_RETURNED: u8 = 0;
+pub const END_FAILED: u8 = 1;
+pub const END_CANCELLED: u8 = 2;
+
+/// What a complete END frame records: the domain's outcome kind and its
+/// bytes in the argument encoding (v2.3 R9). Replay compares it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ending {
+    pub kind: u8,
+    pub outcome: Args,
+}
+impl Ending {
+    /// A Run tape's `Returned`: the exit status as u32 LE.
+    pub fn exit(status: u32) -> Self {
+        Self {
+            kind: END_RETURNED,
+            outcome: Args::of(&status.to_le_bytes()),
+        }
+    }
+    /// `Failed` or `Cancelled`: `varint count`, then per cause, primary
+    /// first, its kind (core.hirsel order) and, for `Fail`, its text. Sites
+    /// are not included.
+    pub fn causes<'a>(kind: u8, causes: impl IntoIterator<Item = (u8, Option<&'a [u8]>)>) -> Self {
+        let causes: Vec<_> = causes.into_iter().collect();
+        let mut out = Vec::new();
+        put_varint(&mut out, causes.len() as u64);
+        for (k, text) in causes {
+            out.push(k);
+            if let Some(t) = text {
+                put_bytes(&mut out, t);
+            }
+        }
+        Self {
+            kind,
+            outcome: Args::of(&out),
+        }
+    }
+}
+
 pub fn xxh3(parts: &[&[u8]]) -> u64 {
     let mut h = XxHash3_64::with_seed(0);
     for p in parts {
@@ -146,8 +186,9 @@ pub struct Header {
     pub mode: u8,
     pub tape_id: [u8; 16],
     pub identity: Vec<u8>,
-    /// The executable's key, from `hirsel_build_identity` (v2.1 R1).
-    pub build: [u8; 32],
+    /// The code's revision (v2.3 R10). Until `code.revision` lands it is the
+    /// executable's key, from `hirsel_build_identity` (v2.1 R1).
+    pub revision: [u8; 32],
     pub charge_policy: u32,
     pub limit: u64,
     pub bound: u64,
@@ -163,7 +204,7 @@ impl Header {
         out.push(self.mode);
         out.extend_from_slice(&self.tape_id);
         put_bytes(&mut out, &self.identity);
-        out.extend_from_slice(&self.build);
+        out.extend_from_slice(&self.revision);
         out.extend_from_slice(&self.charge_policy.to_le_bytes());
         out.extend_from_slice(&self.limit.to_le_bytes());
         out.extend_from_slice(&self.bound.to_le_bytes());
@@ -185,7 +226,7 @@ impl Header {
         }
         let tape_id = c.fixed()?;
         let identity = c.bytes()?.to_vec();
-        let build = c.fixed()?;
+        let revision = c.fixed()?;
         let charge_policy = u32::from_le_bytes(c.fixed()?);
         let limit = u64::from_le_bytes(c.fixed()?);
         let bound = u64::from_le_bytes(c.fixed()?);
@@ -206,7 +247,7 @@ impl Header {
             mode,
             tape_id,
             identity,
-            build,
+            revision,
             charge_policy,
             limit,
             bound,
@@ -499,7 +540,7 @@ pub enum Frame {
         args: Option<Vec<u8>>,
     },
     Incarnation(u64),
-    End(u8),
+    End(Ending),
 }
 
 /// Encodes frames with the T bit's previous-task compression. DATA
@@ -594,9 +635,11 @@ impl Encoder {
                 out.push(F_INCARNATION);
                 put_varint(&mut out, *n);
             }
-            Frame::End(status) => {
+            Frame::End(e) => {
                 out.push(F_END);
-                out.push(*status);
+                out.push(END_COMPLETE);
+                out.push(e.kind);
+                e.outcome.encode(&mut out);
             }
         }
         (out, rest)
@@ -738,10 +781,15 @@ impl Decoder {
                 }
                 F_END => {
                     let status = c.u8()?;
-                    if !end || !c.done() || status != END_COMPLETE {
+                    let kind = c.u8()?;
+                    if !end || status != END_COMPLETE || kind > END_CANCELLED {
                         return Err(Corrupt);
                     }
-                    Frame::End(status)
+                    let outcome = Args::decode(&mut c)?;
+                    if !c.done() {
+                        return Err(Corrupt);
+                    }
+                    Frame::End(Ending { kind, outcome })
                 }
                 _ => return Err(Corrupt),
             };

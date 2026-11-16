@@ -1,6 +1,6 @@
 /* Scripted callbacks beneath the real FORM #50 adapters and process runtime.
    Sample expectations come from providers.core; matrix words deliberately differ
-   in every field so C padding, widths and waits-only status handling are visible. */
+   in every field so C padding, widths and every row's status are visible. */
 #include "hirsel_core_rt.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,8 +54,8 @@ static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) 
         if(op==1 || op==7) {
             r->buffer.data[r->buffer.len++]='X';
         }
-        uint8_t status=(op==10 || op==11 || w->failing) ? 1 : 0;
-        if(w->failing && op!=10 && op!=11)
+        uint8_t status=w->failing ? 1 : 0;
+        if(w->failing)
             hirsel_core_raise(w->ctx,hirsel_core_cause_new(5,0));
         return (HirselCoreHostOutcome){
             .value=UINT64_C(0x1011121314151617),.error={5,UINT32_C(0x89abcdef)},

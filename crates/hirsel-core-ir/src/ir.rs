@@ -893,8 +893,9 @@ impl RtOp {
     /// `f` is a plain function `(&X) -> () dest R`. `channel_new` with `cap` 0 fails
     /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
     /// `Cancelled` when they observe it (CONC-7). `isolate_catch` fails, adding no
-    /// cause, when the chain it would catch has the primary cause `Cancelled`. These
-    /// six are the rows that can fail ([`RtOp::fails`]); the others never do.
+    /// cause, when the chain it would catch has the primary cause `Cancelled`. Every
+    /// provider row can fail with `Tape` (CAP-9). These are the rows that can fail
+    /// ([`RtOp::fails`]); the others never do.
     ///
     /// `compare_bytes` orders unsigned bytes from the first, a proper prefix first
     /// (SEM-7); it reads both ranges, writes nothing, admits nothing and takes no
@@ -984,7 +985,7 @@ impl RtOp {
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
                 | RtOp::IsolateCatch
-        ) || matches!(self, RtOp::Host(op) if op.waits())
+        ) || matches!(self, RtOp::Host(_))
     }
 
     pub fn types(self) -> Vec<TypeId> {

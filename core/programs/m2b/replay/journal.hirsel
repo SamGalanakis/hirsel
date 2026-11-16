@@ -158,7 +158,9 @@ fn expect(mut j: Journal, code: Code, arg: Bytes) -> Result[u64, Diverged] {
 // outcome, recorded and compared like a result; only a mismatch is Diverged.
 pub fn call(mut j: Journal, s: StaticFn[Recorded], arg: Bytes) -> Result[Result[Bytes, Capacity], Diverged] {
     let f = code.callable(s)
-    let r: Result[Bytes, Capacity] = match (bound bytes j.limit { f(arg) }) {
+    let r: Result[Bytes, Capacity] = match (bound bytes j.limit {
+        f(arg)
+    }) {
         Ok(Ok(take o)) => Ok(take o),
         Ok(Error(c)) => Error(c),
         Error(c) => Error(c),
@@ -229,6 +231,7 @@ fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
             },
             Cancelled => put_u8(mut b, 6)?,
             Capacity => put_u8(mut b, 7)?,
+            Tape => put_u8(mut b, 8)?,
         }
         break
     }
@@ -241,7 +244,11 @@ fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
 pub fn call_isolated(mut j: Journal, s: StaticFn[Recorded], arg: Bytes) -> Result[Result[Result[Bytes, Capacity], Causes], Diverged] {
     let f = code.callable(s)
     let limit = j.limit
-    let caught = match isolate(fn() -> Result[Result[Bytes, Capacity], Capacity] { bound bytes limit { f(arg) } }) {
+    let caught = match isolate(fn() -> Result[Result[Bytes, Capacity], Capacity] {
+        bound bytes limit {
+            f(arg)
+        }
+    }) {
         Ok(take x) => x,
         Error(c) => return Error(Full(c)),
     }

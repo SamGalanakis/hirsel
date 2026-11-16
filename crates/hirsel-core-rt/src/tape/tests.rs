@@ -1,6 +1,6 @@
-//! Tape laws (REPLAY-SPEC v2.2 S1). Expected bytes come from
+//! Tape laws (REPLAY-SPEC v2.3 S1). Expected bytes come from
 //! testdata/vectors.py (hand encoding plus system libxxhash, no project code)
-//! and from 1004's model-v21-tape.bin; expected results from sections 5 and 8.
+//! and from 1004's model-v23-tape.bin; expected results from sections 5 and 8.
 use super::*;
 use crate::os::OsProvider;
 use std::cell::Cell as Shared;
@@ -18,7 +18,7 @@ const BUILD: [u8; 32] = {
     b
 };
 const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
-const MODEL: &[u8] = include_bytes!("testdata/model-v21-tape.bin");
+const MODEL: &[u8] = include_bytes!("testdata/model-v23-tape.bin");
 const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
 
 // ---------- providers ----------
@@ -389,7 +389,7 @@ fn header(build: [u8; 32]) -> Header {
         mode: MODE_RECORD,
         tape_id: std::array::from_fn(|i| 0x10 + i as u8),
         identity: b"app@1/main/run".to_vec(),
-        build,
+        revision: build,
         charge_policy: 0,
         limit: 1000,
         bound: 0,
@@ -401,9 +401,16 @@ fn header(build: [u8; 32]) -> Header {
 fn expect() -> Expect<'static> {
     Expect {
         identity: b"app@1/main/run",
+        charge_policy: 0,
         limit: 1000,
         arg: None,
     }
+}
+
+/// The scripted run's outcome, as vectors.py writes it: Failed with
+/// Fail("no data") then Overflow.
+fn ending() -> Ending {
+    Ending::causes(END_FAILED, [(4, Some(&b"no data"[..])), (0, None)])
 }
 
 /// Record the scripted run into a fresh store; the store, observations and
@@ -416,7 +423,7 @@ fn record(read: usize) -> (Box<Store>, Vec<Ob>) {
     assert_eq!(arg, b"arg");
     let (obs, fault) = scripted_run(&tape, world.provider(), read, Variant::Same);
     assert_eq!(fault, None);
-    tape.end().unwrap();
+    tape.end(&ending()).unwrap();
     (store, obs)
 }
 
@@ -427,13 +434,14 @@ fn replay(
     bytes: &[u8],
     read: usize,
     variant: Variant,
+    ending: &Ending,
 ) -> Result<(Vec<Ob>, Option<Fault>, Result<(), Fault>), OpenError> {
     let mut store = Store::with(bytes);
     let host = Counted::new(None);
     let (tape, _) =
         unsafe { Tape::open(store.dir(), b"t", Mode::Replay, &header(BUILD), &expect()) }?;
     let (obs, fault) = scripted_run(&tape, host.provider(), read, variant);
-    let verdict = tape.end();
+    let verdict = tape.end(ending);
     assert_eq!(
         host.calls.get(),
         0,
@@ -490,13 +498,13 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 /// order, varint, zig-zag delta, T at a block's first frame, check input).
 /// The oracle is 1004's model (libxxhash), not this code.
 #[test]
-fn the_encoder_writes_model_v21_tape_byte_for_byte() {
+fn the_encoder_writes_model_v23_tape_byte_for_byte() {
     let h = Header {
         kind: KIND_CALL,
         mode: MODE_DURABLE,
         tape_id: std::array::from_fn(|i| i as u8),
         identity: b"pkg/charge#0001".to_vec(),
-        build: std::array::from_fn(|i| i as u8),
+        revision: std::array::from_fn(|i| i as u8),
         charge_policy: 1,
         limit: 1024,
         bound: 0,
@@ -533,7 +541,12 @@ fn the_encoder_writes_model_v21_tape_byte_for_byte() {
         &mut e,
     );
     let b2 = payload(&[mono(5_000)], &mut e);
-    let b3 = payload(&[Frame::End(END_COMPLETE)], &mut e);
+    // The model's outcome: Returned, the two reads' difference as u64 LE.
+    let outcome = Ending {
+        kind: END_RETURNED,
+        outcome: Args::of(&5_000u64.to_le_bytes()),
+    };
+    let b3 = payload(&[Frame::End(outcome.clone())], &mut e);
     let tape = [
         block(&h.tape_id, 0, 0, &h.encode()),
         block(&h.tape_id, 0, 1, &b1),
@@ -551,6 +564,7 @@ fn the_encoder_writes_model_v21_tape_byte_for_byte() {
     }
     assert_eq!(frames[1], mono(1_000_000_123));
     assert_eq!(frames[2], mono(5_000));
+    assert_eq!(frames[3], Frame::End(outcome));
 }
 
 /// Wrong implementation caught: Record writing anything other than the
@@ -570,7 +584,7 @@ fn record_writes_the_hand_encoded_tape() {
 #[test]
 fn replay_answers_every_operation_from_the_tape_and_none_reaches_the_host() {
     let (_, recorded) = record(70_000);
-    let (obs, fault, verdict) = replay(HAND, 70_000, Variant::Same).unwrap();
+    let (obs, fault, verdict) = replay(HAND, 70_000, Variant::Same, &ending()).unwrap();
     assert_eq!(fault, None);
     assert_eq!(verdict, Ok(()));
     assert_eq!(obs, recorded);
@@ -585,19 +599,25 @@ fn a_cut_at_every_byte_is_truncated_or_missing() {
     let at = boundaries(&t);
     assert_eq!(*at.last().unwrap(), t.len());
     for cut in 0..t.len() {
-        let want = if at.contains(&cut) {
-            Fault::Diverged(Divergence::Missing)
-        } else {
-            Fault::Truncated
+        let want = |f: Fault| match f {
+            Fault::Diverged(Divergence {
+                kind: Mismatch::Missing,
+                ..
+            }) => at.contains(&cut),
+            Fault::Truncated(_) => !at.contains(&cut),
+            _ => false,
         };
-        match replay(&t[..cut], 100, Variant::Same) {
-            Err(OpenError::Unreadable(f)) => assert_eq!(f, want, "cut {cut}"),
+        match replay(&t[..cut], 100, Variant::Same, &ending()) {
+            Err(OpenError::Unreadable(f)) => assert!(want(f), "cut {cut}: {f:?}"),
             Err(e) => panic!("cut {cut}: {e:?}"),
             Ok((obs, _, verdict)) => {
-                assert_eq!(verdict, Err(want), "cut {cut}");
+                assert!(want(verdict.unwrap_err()), "cut {cut}: {verdict:?}");
                 let answered = obs.iter().take_while(|o| o.status == 0).count();
                 assert_eq!(obs[..answered], full[..answered], "cut {cut}");
-                assert!(obs[answered..].iter().all(|o| o.status == 1), "cut {cut}");
+                assert!(
+                    obs[answered..].iter().all(|o| o.status == STATUS_REFUSED),
+                    "cut {cut}"
+                );
             }
         }
     }
@@ -616,13 +636,13 @@ fn every_one_byte_change_is_damaged_or_truncated() {
         for x in [0x01u8, 0x80, 0xff] {
             let mut m = t.clone();
             m[i] ^= x;
-            let r = match replay(&m, 100, Variant::Same) {
+            let r = match replay(&m, 100, Variant::Same, &ending()) {
                 Err(OpenError::Refused(Refusal::Damaged(0))) => Fault::Damaged(0),
                 Err(OpenError::Unreadable(f)) => f,
                 Err(e) => panic!("byte {i}: {e:?}"),
                 Ok((_, _, verdict)) => verdict.unwrap_err(),
             };
-            let ok = r == Fault::Damaged(k as u64) || (in_len && r == Fault::Truncated);
+            let ok = r == Fault::Damaged(k as u64) || (in_len && matches!(r, Fault::Truncated(_)));
             assert!(ok, "byte {i} ^ {x:#x}: {r:?}");
         }
     }
@@ -635,13 +655,16 @@ fn a_cut_in_a_later_block_keeps_earlier_answers() {
     let (_, full) = record(70_000);
     let at = boundaries(HAND);
     for cut in [at[2], at[2] + 1, at[2] + BLOCK_HEAD + 3, at[3] - 1] {
-        let want = if cut == at[2] {
-            Fault::Diverged(Divergence::Missing)
-        } else {
-            Fault::Truncated
+        let (obs, _, verdict) = replay(&HAND[..cut], 70_000, Variant::Same, &ending()).unwrap();
+        let ok = match verdict {
+            Err(Fault::Diverged(Divergence {
+                kind: Mismatch::Missing,
+                ..
+            })) => cut == at[2],
+            Err(Fault::Truncated(_)) => cut != at[2],
+            _ => false,
         };
-        let (obs, _, verdict) = replay(&HAND[..cut], 70_000, Variant::Same).unwrap();
-        assert_eq!(verdict, Err(want), "cut {cut}");
+        assert!(ok, "cut {cut}: {verdict:?}");
         let answered = obs.iter().take_while(|o| o.status == 0).count();
         assert!(answered >= 8, "block 1 holds the first eight operations");
         assert_eq!(obs[..answered], full[..answered]);
@@ -655,7 +678,7 @@ fn swapped_blocks_are_damaged() {
     let at = boundaries(HAND);
     assert_eq!(at.len(), 4, "three blocks");
     let swapped = [&HAND[..at[1]], &HAND[at[2]..at[3]], &HAND[at[1]..at[2]]].concat();
-    let (obs, fault, verdict) = replay(&swapped, 70_000, Variant::Same).unwrap();
+    let (obs, fault, verdict) = replay(&swapped, 70_000, Variant::Same, &ending()).unwrap();
     assert!(obs.is_empty());
     assert_eq!(fault, Some(Fault::Damaged(1)));
     assert_eq!(verdict, Err(Fault::Damaged(1)));
@@ -683,26 +706,79 @@ fn swapped_frames_diverge() {
         &t[at[2]..],
     ]
     .concat();
-    let (obs, _, verdict) = replay(&m, 100, Variant::Same).unwrap();
-    assert_eq!(verdict, Err(Fault::Diverged(Divergence::Op)));
-    assert_eq!(obs[0].status, 1, "the first read fails before any answer");
-    assert!(obs.iter().all(|o| o.status == 1), "a fault is sticky");
+    let (obs, _, verdict) = replay(&m, 100, Variant::Same, &ending()).unwrap();
+    // Frames 1 to 4 are the grants; the wall read meets frame 5, now a mono read.
+    let at = Divergence {
+        at: 5,
+        kind: Mismatch::Op,
+    };
+    assert_eq!(verdict, Err(Fault::Diverged(at)));
+    assert_eq!(
+        obs[0].status, STATUS_REFUSED,
+        "the first read fails before any answer"
+    );
+    assert!(
+        obs.iter().all(|o| o.status == STATUS_REFUSED),
+        "a fault is sticky"
+    );
 }
 
 /// Wrong implementation caught: a Replay that compares op and object but
 /// not arguments.
 #[test]
 fn a_changed_argument_diverges() {
-    let (obs, _, verdict) = replay(HAND, 70_000, Variant::OtherWrite).unwrap();
-    assert_eq!(verdict, Err(Fault::Diverged(Divergence::Arg)));
+    let (obs, _, verdict) = replay(HAND, 70_000, Variant::OtherWrite, &ending()).unwrap();
+    // Four grants, four clock reads, then the first write: frame 9.
+    let at = Divergence {
+        at: 9,
+        kind: Mismatch::Arg,
+    };
+    assert_eq!(verdict, Err(Fault::Diverged(at)));
     assert!(obs[..4].iter().all(|o| o.status == 0));
-    assert!(obs[4..].iter().all(|o| o.status == 1));
+    assert!(obs[4..].iter().all(|o| o.status == STATUS_REFUSED));
+}
+
+/// v2.3 R9: identical operations, changed result. Wrong implementation
+/// caught: a replay that does not compare END's outcome (the silent case:
+/// it would report the run complete). The hand tape records Failed with
+/// Fail("no data") then Overflow; END is frame 20 (4 grants, 15 ops).
+#[test]
+fn identical_operations_with_a_changed_result_diverge_at_end() {
+    let at_end = Err(Fault::Diverged(Divergence {
+        at: 20,
+        kind: Mismatch::Outcome,
+    }));
+    let returned = Ending::exit(0);
+    let reordered = Ending::causes(END_FAILED, [(0, None), (4, Some(&b"no data"[..]))]);
+    let cancelled = Ending::causes(END_CANCELLED, [(4, Some(&b"no data"[..])), (0, None)]);
+    for changed in [returned, reordered, cancelled] {
+        let (obs, fault, verdict) = replay(HAND, 70_000, Variant::Same, &changed).unwrap();
+        assert_eq!((obs.len(), fault), (15, None), "the operations replay");
+        assert_eq!(verdict, at_end, "{changed:?}");
+    }
+}
+
+/// v2.3 R9: the same, with only the failure text changed. Wrong
+/// implementation caught: an outcome that keeps the cause kinds and drops
+/// the Fail texts (or compares only the outcome's kind).
+#[test]
+fn a_changed_failure_text_diverges_at_end() {
+    let changed = Ending::causes(END_FAILED, [(4, Some(&b"no date"[..])), (0, None)]);
+    let (_, fault, verdict) = replay(HAND, 70_000, Variant::Same, &changed).unwrap();
+    assert_eq!(fault, None);
+    assert_eq!(
+        verdict,
+        Err(Fault::Diverged(Divergence {
+            at: 20,
+            kind: Mismatch::Outcome
+        }))
+    );
 }
 
 /// Section 5.3's refusals, in order. Wrong implementation caught: an open
 /// that skips one comparison or checks them in another order.
 #[test]
-fn open_refuses_a_changed_code_build_arg_or_limit() {
+fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     let open = |build: [u8; 32], e: &Expect| {
         let mut store = Store::with(HAND);
         unsafe { Tape::open_built(build, store.dir(), b"t", Mode::Replay, &header(BUILD), e) }.map(
@@ -737,7 +813,7 @@ fn open_refuses_a_changed_code_build_arg_or_limit() {
         ),
         refused(Refusal::Code)
     );
-    assert_eq!(open(other, &e), refused(Refusal::Build));
+    assert_eq!(open(other, &e), refused(Refusal::Revision));
     assert_eq!(
         open(
             other,
@@ -770,6 +846,16 @@ fn open_refuses_a_changed_code_build_arg_or_limit() {
     );
     assert_eq!(
         open(
+            BUILD,
+            &Expect {
+                charge_policy: 1,
+                ..expect()
+            }
+        ),
+        refused(Refusal::Limit)
+    );
+    assert_eq!(
+        open(
             other,
             &Expect {
                 arg: Some(b"arh"),
@@ -777,7 +863,7 @@ fn open_refuses_a_changed_code_build_arg_or_limit() {
                 ..expect()
             }
         ),
-        refused(Refusal::Build)
+        refused(Refusal::Revision)
     );
 }
 
@@ -800,20 +886,20 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
     let opened = plain(dir, OPEN, 0, b"data");
     let file = (dir.0, handle_like(dir.1, opened.value));
     let tape_cell = tape.cell;
-    tape.end().unwrap();
+    tape.end(&ending()).unwrap();
     let sealed = store.file().to_vec();
     let before = host.calls.get();
-    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, 1);
-    assert_eq!(plain(dir, OPEN, 0, b"data").status, 1);
-    assert_eq!(spare(file, READ, &[], 10).status, 1);
+    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, STATUS_REFUSED);
+    assert_eq!(plain(dir, OPEN, 0, b"data").status, STATUS_REFUSED);
+    assert_eq!(spare(file, READ, &[], 10).status, STATUS_REFUSED);
     assert_eq!(host.calls.get(), before, "an ended tape reached its source");
-    assert_eq!(plain(file, CLOSE, 0, &[]).status, 1);
+    assert_eq!(plain(file, CLOSE, 0, &[]).status, STATUS_REFUSED);
     assert_eq!(
         host.calls.get(),
         before + 3,
         "cleanup closes the inner file once"
     );
-    assert_eq!(plain(file, CLOSE, 0, &[]).status, 1);
+    assert_eq!(plain(file, CLOSE, 0, &[]).status, STATUS_REFUSED);
     assert_eq!(host.calls.get(), before + 3);
     assert_eq!(store.file(), sealed, "nothing is written after end");
 
@@ -836,7 +922,7 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
         .on_tape(crate::entry::CLOCK, (next_host.provider(), 0))
         .unwrap();
     let written = next_store.file().to_vec();
-    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, 1);
+    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, STATUS_REFUSED);
     assert_eq!(next_host.calls.get(), 0);
     assert_eq!(next_store.file(), written);
     drop(next);
@@ -855,10 +941,10 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
     let opened = plain(dir, OPEN, 0, b"data");
     assert_eq!(opened.value, 3);
     let file = (dir.0, handle_like(dir.1, opened.value));
-    tape.end().unwrap();
-    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, 1);
-    assert_eq!(spare(file, READ, &[], 10).status, 1);
-    assert_eq!(plain(file, CLOSE, 0, &[]).status, 1);
+    tape.end(&ending()).unwrap();
+    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, STATUS_REFUSED);
+    assert_eq!(spare(file, READ, &[], 10).status, STATUS_REFUSED);
+    assert_eq!(plain(file, CLOSE, 0, &[]).status, STATUS_REFUSED);
     assert_eq!(refuse.calls.get(), 0);
 }
 
@@ -872,9 +958,14 @@ fn a_dropped_tape_keeps_its_frames_and_has_no_end() {
         unsafe { Tape::open(store.dir(), b"t", Mode::Record, &header(BUILD), &expect()) }.unwrap();
     let (recorded, _) = scripted_run(&tape, world.provider(), 100, Variant::Same);
     drop(tape);
-    let (obs, fault, verdict) = replay(store.file(), 100, Variant::Same).unwrap();
+    let (obs, fault, verdict) = replay(store.file(), 100, Variant::Same, &ending()).unwrap();
     assert_eq!((obs, fault), (recorded, None));
-    assert_eq!(verdict, Err(Fault::Diverged(Divergence::Missing)));
+    // Four grants and fifteen operations were answered; END would be frame 20.
+    let at = Divergence {
+        at: 20,
+        kind: Mismatch::Missing,
+    };
+    assert_eq!(verdict, Err(Fault::Diverged(at)));
 }
 
 /// The bypass law on the real host, every S1 operation kind. Wrong
@@ -944,7 +1035,7 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     }
     .unwrap();
     let recorded = run(&tape, host.provider(), wd);
-    tape.end().unwrap();
+    tape.end(&ending()).unwrap();
     let kinds: std::collections::BTreeSet<u8> = recorded.iter().map(|o| o.op).collect();
     assert_eq!(kinds, (OPEN..=SYNC_DIR).collect(), "every S1 op kind");
     assert_eq!(
@@ -969,7 +1060,7 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     }
     .unwrap();
     let replayed = run(&tape, refuse.provider(), 0);
-    tape.end().unwrap();
+    tape.end(&ending()).unwrap();
     assert_eq!(
         refuse.calls.get(),
         0,

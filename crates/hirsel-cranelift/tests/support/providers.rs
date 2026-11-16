@@ -129,7 +129,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
         if sig.results.is_empty() {
             writeln!(
                 source,
-                "uint8_t status={} (ctx,{},0); uint64_t values[0]={{0}}; require(status==0);",
+                "uint8_t status={} (ctx,{},0); uint64_t values[0]={{0}};",
                 module.identity(f.instance).symbol(),
                 args.join(",")
             )
@@ -276,7 +276,7 @@ fn whole_sample_in_dev_and_speed_matches_evaluator() {
 }
 
 #[test]
-fn every_host_row_preserves_c_fields_and_wait_status() {
+fn every_host_row_preserves_c_fields_and_status() {
     let mut source = String::from("core v1\n");
     for (i, op) in HostOp::ALL.into_iter().enumerate() {
         let s = RtOp::Host(op).signature();
@@ -318,7 +318,7 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
                 "call rt.{} g{i} ({}){}",
                 op.name(),
                 arguments.join(","),
-                if op.waits() { " fail b1" } else { "" }
+                " fail b1"
             )
         } else {
             format!(
@@ -326,7 +326,7 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
                 output.join(","),
                 op.name(),
                 arguments.join(","),
-                if op.waits() { " fail b1" } else { "" }
+                " fail b1"
             )
         };
         let return_line = if returned.is_empty() {
@@ -342,9 +342,7 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
             return_line
         )
         .unwrap();
-        if op.waits() {
-            source.push_str("b1:\n  propagate\n");
-        }
+        source.push_str("b1:\n  propagate\n");
         source.push_str("}\n");
     }
     let module = text::parse(&source).unwrap();
@@ -352,9 +350,6 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
     let mut runs = Vec::new();
     for (i, op) in HostOp::ALL.into_iter().enumerate() {
         for failing in [false, true] {
-            if !op.waits() && failing {
-                continue;
-            }
             // The dedicated sleep export is a replay-delivered cancellation
             // point; this generic provider matrix injects only host_op rows.
             if op == HostOp::SleepUntil && failing {

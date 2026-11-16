@@ -192,6 +192,19 @@ Release build (`--target-platforms //tools/buck2:release`, runtime `hirsel-core-
 
 The two C rows are `measure/provider-wrap-writes.c`; they run no generated code, so they are the same for both engines. A provider whose `wait` and `deliver` are the OS provider's own runs the operation body with direct calls; every other provider, the wrapper here, calls through pointers and pays the identity check: +6 instructions per write against the pointer-only body (3,698,246), while the OS provider saves 12 (3,638,111 before). That trade was accepted on 2026-11-16 (review 1025 F2). **Line: the wrapper row stays at or under 3,776,900 (+0.5%).** `python3 crates/hirsel-core-rt/measure-provider.py --runtime <archive>` measures both C rows and exits 1 over the line.
 
+### Every provider row can fail (CAP-9, tape-build-1037)
+
+A tape refuses an operation before issue with cause `Tape`, so `wall_ms`, `mono_ns` and `random` gained the fail edge that the waiting rows already had. Same method, against ba2444e9; the program is untaped.
+
+| program | engine | ba2444e9 | with the edge | change |
+|---|---|---:|---:|---:|
+| hello | Cranelift | 263,753 | 263,755 | 0.00% |
+| hello | LLVM | 263,686 | 263,657 | 0.00% |
+| 100,000 `mono_ns` | Cranelift | 43,363,408 | 43,763,456 | +0.92% (+4 per read) |
+| 100,000 `mono_ns` | LLVM | 42,263,354 | 42,563,324 | +0.71% (+3 per read) |
+
+The edge is a branch on the returned status that is never taken: `movzbq`/`test`/`jne` after the call on Cranelift and `cmpb`/`jne` on LLVM. The runtime adds one compare in `drive`, the refused check that records the `Tape` cause. There is no second call and no reload. The frame position that a refusal reports is counted only by a replaying tape, so an untaped run pays nothing for it.
+
 ## Isolate and bound calls
 
 One local entry call: decode the argument, call the entry and encode the result inside a `bytes n` bound and `isolate` (RUNNER-SPEC section 8, p03 mode 2, copied unchanged to `measure/isolate-call`). Instructions per call on the release build, (median at 40,000 calls − median at 20,000) / 20,000, medians of five on CPU 4.

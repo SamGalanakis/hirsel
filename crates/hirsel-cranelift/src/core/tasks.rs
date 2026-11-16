@@ -162,9 +162,8 @@ impl Function<'_, '_, '_> {
                         &[self.context, code, args[0], operand, mode, site],
                     )?,
                 };
-                if op.waits() {
-                    self.call_failure(values[4], call.fail)?;
-                }
+                // Every provider row can fail: a tape refuses it before issue (CAP-9).
+                self.call_failure(values[4], call.fail)?;
                 let n = if op == HostOp::Random {
                     0
                 } else if matches!(op, HostOp::WallMs | HostOp::MonoNs) {

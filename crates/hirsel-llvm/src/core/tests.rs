@@ -2922,12 +2922,8 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             .verify()
             .unwrap();
         assert!(ir.contains("sret([32 x i8])"));
-        assert_eq!(
-            ir.contains("icmp ne i8"),
-            op.waits(),
-            "{} status",
-            op.name()
-        );
+        // Every provider row branches on its status: a tape can refuse any of them.
+        assert!(ir.contains("icmp ne i8"), "{} status", op.name());
     }
 }
 

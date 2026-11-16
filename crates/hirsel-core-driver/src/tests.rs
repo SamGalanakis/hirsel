@@ -42,7 +42,7 @@ fn joined_units_preserve_calls_and_refuse_conflicting_variants() {
         product.incomplete
     );
     let identity = Identity::plain(DefPath::from_full("app@1/main/answer").unwrap());
-    let units = product.units(identity.clone(), 65_536).unwrap();
+    let units = product.units([identity.clone()], 65_536).unwrap();
     let modules = units.modules().unwrap();
     let (joined, entry) = join(&modules, &identity).unwrap();
     hirsel_core_ir::wf::module(&joined).unwrap();

@@ -44,6 +44,7 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-llvm-lazy", Class::Implementation),
     ("hirsel-core-driver", Class::Wiring),
     ("hirsel-core-contract-eval", Class::Tool),
+    ("hirsel-core-program-tests", Class::Tool),
 ];
 
 /// Shared utilities and data crates that take no external production dependency.

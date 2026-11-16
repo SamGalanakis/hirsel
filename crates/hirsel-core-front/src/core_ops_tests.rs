@@ -17,25 +17,6 @@ fn core_operation_declarations_do_not_drift() {
 }
 
 #[test]
-fn word_store_preserves_bytes_and_refusal_custody() {
-    let failures = run_case(&root().join("cases/body/list-put-word.hirsel"));
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-#[test]
-fn nested_list_mutation_uses_existing_writable_index_places() {
-    for name in [
-        "list-nested-mutate",
-        "list-nested-view-refused",
-        "list-nested-take-refused",
-        "index-types-refused",
-    ] {
-        let failures = run_case(&root().join(format!("cases/body/{name}.hirsel")));
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
-    }
-}
-
-#[test]
 fn cap6_ambient_kernels_take_authority() {
     let (index, modules) = canonical("");
     let p = Program::declare(&index, &modules);

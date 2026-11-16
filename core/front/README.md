@@ -1,7 +1,7 @@
 # Front-end cases
 
-`cases/**/*.hirsel` are the hirsel-core-front corpus: one program per file, module
-`app@1/main`, with `// expect:` header lines read by the crate's case harness:
+`cases/**/*.hirsel` are the front-end corpus: one program per file, module
+`app@1/main`, with `// expect:` header lines read by the driver-level case harness:
 
 - `// expect: accept`: no refusal and no unbuilt construct.
 - `// expect: refuse RULE at LINE:COL`: one line per refusal; the set must match exactly.
@@ -28,9 +28,9 @@ its NOT-BUILT row in the same commit; the walker fails until it does.
 
 Every case is checked against the one core package, `core/core/`, as every program is.
 
-The standing `hirsel-core-front-unittest` / `tests::corpus` well-formedness sweep
-seals after each source body, then materializes and checks the assembled module.
-`call-after-sealed-generic-result.hirsel` exercises calls after an earlier seal,
-including scalar-carried declared arguments and results, both source caches,
-scoped adapters and rows first created during materialization. This state is
-required in a wf sweep alongside the driver's fresh-per-definition products.
+The standing `hirsel-core-program-tests-unittest` / `cases::corpus` sweep checks
+through the driver, with one sealed definition product per body. It walks the
+reached instances, joins those units and checks the joined module before evaluation.
+Layout assertions inspect the defining materialized unit. The
+`call-after-sealed-generic-result.hirsel` vectors retain their scalar arguments,
+results and scoped adapters on this same product route.

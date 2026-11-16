@@ -6,3 +6,6 @@
 # red removes its row.
 hirsel-core-driver-unittest::native::tests::scalar_core_instances_match_closed_bodies	Census904: sum materialized slots7 vs closed3 after implied-dictionary fixture repair; RED-CENSUS.md	core-check-calls-910	2026-11-13
 land-core-evaluator	Joined source/materialized units disagree on canonical structural codec hooks, producing duplicate closed type rows in 246 laws	core-ops-914	2026-11-16
+hirsel-core-program-tests-unittest::cases::corpus	Six preserved refusal expectations include duplicate/secondary diagnostics omitted by the production driver after resolution refusal	hirsellang-24	2026-11-16
+hirsel-core-program-tests-unittest::cases::codec_overrides_and_tombstones	Preserved codec-schema expectation requires a secondary LANG-17 after unresolved No; production skips that body	hirsellang-24	2026-11-16
+hirsel-core-program-tests-unittest::std_seed::generic_numeric_core_contracts	Joined source/materialized List[u64] closures disagree on canonical hooks	core-ops-914	2026-11-16

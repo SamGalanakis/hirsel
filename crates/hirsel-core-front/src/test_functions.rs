@@ -97,24 +97,3 @@ pub(crate) fn check(p: &mut Program<'_>) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn prog4_signature_and_reference_cases() {
-        let root =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/front/cases/body");
-        for name in [
-            "test-functions",
-            "test-signatures-refused",
-            "test-references-refused",
-        ] {
-            let path = root.join(format!("{name}.hirsel"));
-            assert_eq!(
-                crate::tests::run_case(&path),
-                Vec::<String>::new(),
-                "{name}"
-            );
-        }
-    }
-}

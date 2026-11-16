@@ -42,9 +42,9 @@ fn evaluate(
         .map_err(|e| e.to_string())?;
     let root = Identity::plain(entry);
     let units = product
-        .units(root.clone(), 65_536)
+        .units([root.clone()], 65_536)
         .map_err(|e| format!("{e:?}"))?;
-    let revision = units.revision();
+    let revision = units.revision(&root).unwrap();
     let joined = hirsel_core_materialize::join(&units.modules().map_err(|e| e.to_string())?, &root);
     let (module, function) = match joined {
         Ok(joined) => joined,

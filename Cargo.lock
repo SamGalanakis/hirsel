@@ -470,6 +470,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-core-program-tests"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-driver",
+ "hirsel-core-front",
+ "hirsel-core-ids",
+ "hirsel-core-ir",
+ "hirsel-core-layout",
+ "hirsel-core-materialize",
+ "hirsel-core-resolve",
+ "hirsel-core-syntax",
+ "hirsel-guard",
+ "tempfile",
+]
+
+[[package]]
 name = "hirsel-core-resolve"
 version = "0.1.0"
 dependencies = [

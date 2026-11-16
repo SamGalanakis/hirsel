@@ -6,10 +6,12 @@
 //! the front-end slices over every library body and contract test and fails on a body
 //! whose emission stopped without a refusal or a gap.
 
-use super::{line_col, package, run_expect};
-use crate::*;
+use crate::cases::{line_col, run_expect};
+use crate::{Checked, package};
+use hirsel_core_front::*;
 use hirsel_core_ids::PackageId;
-use hirsel_core_resolve::{CorpusManifest, ModuleSource, PackageManifest};
+use hirsel_core_ir::Identity;
+use hirsel_core_resolve::{CorpusManifest, ModuleSource, PackageManifest, Refusal};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -194,7 +196,7 @@ fn std_seed_parses_and_resolves() {
 fn std_bodies_never_halt_silently() {
     let halted: Vec<String> = std_seed_check()
         .lines()
-        .filter(|l| l.contains(crate::body::SILENT_HALT))
+        .filter(|l| l.contains("emission halted without a reported reason"))
         .map(str::to_string)
         .collect();
     assert!(halted.is_empty(), "{}", halted.join("\n"));
@@ -220,6 +222,7 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
         })
         .collect();
     let p = Program::declare(&index, &modules);
+    let checked = Checked::corpus(&corpus);
     let describe = |r: &Refusal| {
         format!(
             "{} at {}: {}",
@@ -241,16 +244,15 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
             .or_default()
             .push(describe(r));
     }
-    let mut emitter = Emitter::new();
     let mut rows: Vec<(String, String, String)> = vec![];
-    let mut emitted: HashMap<String, HashMap<String, hirsel_core_ir::FuncId>> = HashMap::new();
-    for (f, fd) in p.fns.iter().enumerate() {
+    let mut emitted: HashMap<String, HashMap<String, hirsel_core_ids::DefPath>> = HashMap::new();
+    for fd in p.fns.iter() {
         let m = &fd.path.0;
         if !is_reported(&m.package) || fd.body.is_none() {
             continue;
         }
         let module = label(&m.package, &m.modules);
-        let c = p.check_lower(f, &mut emitter);
+        let c = &checked.product.definitions[&fd.path].check;
         let mut why: Vec<String> = by_item
             .remove(&(module.clone(), fd.at.item))
             .unwrap_or_default();
@@ -265,11 +267,11 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
                 .collect();
             g.dedup();
             format!("gap: {}", g.join("; "))
-        } else if let Some(id) = c.function {
+        } else if c.function.is_some() {
             emitted
                 .entry(module.clone())
                 .or_default()
-                .insert(m.name.clone(), id);
+                .insert(m.name.clone(), fd.path.clone());
             "accepted".into()
         } else {
             "not emitted".into()
@@ -283,9 +285,6 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
             format!("refused: {}", why.join("; ")),
         ));
     }
-    emitter
-        .materialize_instances()
-        .expect("materialize seed instances");
     // Contract tests: `// expect: run f() = R` before a test function, run when emitted.
     let mut runs = vec![];
     for s in corpus.sources.iter().filter(|s| is_test(s)) {
@@ -311,13 +310,33 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
                 // The evaluator stops (panics) at a function it has no body for, such as a
                 // core operation that is only a signature.
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_expect(&emitter.module, functions, call, &words, &|a| {
-                        format!("{a:?}")
-                    })
+                    let root = Identity::plain(functions[name].clone());
+                    let units = checked
+                        .product
+                        .units([root.clone()], 65_536)
+                        .map_err(|e| format!("units: {e:?}"));
+                    let (module, function) = units
+                        .and_then(|u| {
+                            hirsel_core_materialize::join(
+                                &u.modules().map_err(|e| e.to_string())?,
+                                &root,
+                            )
+                        })
+                        .map_err(|e| format!("assembly: {e}"))?;
+                    hirsel_core_ir::wf::module(&module)
+                        .map_err(|e| format!("not well formed: {e}"))?;
+                    Ok::<_, String>(run_expect(
+                        &module,
+                        &[(name.to_string(), function)].into(),
+                        call,
+                        &words,
+                        &|a| format!("{a:?}"),
+                    ))
                 }));
                 match run {
-                    Ok(None) => "pass".to_string(),
-                    Ok(Some(f)) => format!("FAIL: {f}"),
+                    Ok(Ok(None)) => "pass".to_string(),
+                    Ok(Ok(Some(f))) => format!("FAIL: {f}"),
+                    Ok(Err(f)) => format!("FAIL: {f}"),
                     Err(_) => "not run: reaches a function with no body".to_string(),
                 }
             };
@@ -372,6 +391,7 @@ fn float_constant_tables_are_read_only_data() {
         })
         .collect();
     let p = Program::declare(&index, &modules);
+    let checked = Checked::corpus(&corpus);
     for name in ["SHIFTS", "POW10_64", "POW10_32", "POW5"] {
         let constant = p
             .constants
@@ -385,24 +405,11 @@ fn float_constant_tables_are_read_only_data() {
             p.gaps
         );
     }
-    let f = p
-        .fns
-        .iter()
-        .position(|f| {
-            f.path.0.package.name == "std"
-                && f.path.0.modules == ["float"]
-                && f.path.0.name == "shift_for"
-        })
-        .unwrap();
-    let mut emitter = Emitter::new();
-    let check = p.check_lower(f, &mut emitter);
-    assert!(
-        check.refusals.is_empty() && check.gaps.is_empty(),
-        "{:?} {:?}",
-        check.refusals,
-        check.gaps
-    );
-    let body = emitter.module.functions[check.function.unwrap().index()]
+    let definition = hirsel_core_ids::DefPath::from_full("std@1/float/shift_for").unwrap();
+    let published = &checked.product.definitions[&definition];
+    assert!(published.check.refusals.is_empty() && published.incomplete.is_empty());
+    let module = published.ir().unwrap();
+    let body = module.functions[published.check.function.unwrap().index()]
         .body
         .as_ref()
         .unwrap();
@@ -435,13 +442,13 @@ fn float_constant_tables_are_read_only_data() {
             .iter()
             .any(|i| matches!(i, Inst::Store { .. } | Inst::Copy { .. }))
     );
-    assert_eq!(emitter.module.statics.len(), 1);
-    assert_eq!(emitter.module.statics[0].bytes.len(), 19 * 8);
+    assert_eq!(module.statics.len(), 1);
+    assert_eq!(module.statics[0].bytes.len(), 19 * 8);
     println!(
         "std.float.shift_for SHIFTS: {} CoreIR instructions per lookup, no table stores/copies",
         end + 1 - start
     );
-    println!("{}", hirsel_core_ir::text::print(&emitter.module));
+    println!("{}", hirsel_core_ir::text::print(&module));
 }
 
 /// Rigid numeric operands used to disappear, making every nonempty sum return zero.
@@ -463,9 +470,9 @@ fn generic_numeric_core_contracts() {
         })
         .collect();
     let p = Program::declare(&index, &modules);
-    let mut emitter = Emitter::new();
+    let checked = Checked::corpus(&corpus);
     let mut functions = HashMap::new();
-    for (f, fd) in p.fns.iter().enumerate() {
+    for fd in p.fns.iter() {
         if fd.body.is_none()
             || !(fd.path.package_is("core", "1")
                 || fd.path.0.modules == ["tests", "int"]
@@ -473,16 +480,14 @@ fn generic_numeric_core_contracts() {
         {
             continue;
         }
-        let check = p.check_lower(f, &mut emitter);
+        let check = &checked.product.definitions[&fd.path].check;
         assert!(
             check.refusals.is_empty() && check.gaps.is_empty(),
             "{}: {check:?}",
             fd.path
         );
-        functions.insert(fd.path.0.name.clone(), check.function.unwrap());
+        functions.insert(fd.path.0.name.clone(), fd.path.clone());
     }
-    emitter.materialize_instances().unwrap();
-    hirsel_core_ir::wf::module(&emitter.module).unwrap();
     for (call, want) in [
         ("parse_u8_cases()", &["true"][..]),
         ("parse_i8_cases()", &["true"][..]),
@@ -493,9 +498,19 @@ fn generic_numeric_core_contracts() {
         ("sum_overflow()", &["fail", "Overflow"][..]),
         ("sum_signed()", &["-2"][..]),
     ] {
-        let error = run_expect(&emitter.module, &functions, call, want, &|a| {
-            format!("{a:?}")
-        });
+        let name = call.split('(').next().unwrap();
+        let root = Identity::plain(functions[name].clone());
+        let units = checked.product.units([root.clone()], 65_536).unwrap();
+        let (module, function) =
+            hirsel_core_materialize::join(&units.modules().unwrap(), &root).unwrap();
+        hirsel_core_ir::wf::module(&module).unwrap();
+        let error = run_expect(
+            &module,
+            &[(name.to_string(), function)].into(),
+            call,
+            want,
+            &|a| format!("{a:?}"),
+        );
         assert!(error.is_none(), "{call}: {error:?}");
     }
 }

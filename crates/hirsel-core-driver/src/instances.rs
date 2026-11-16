@@ -9,7 +9,6 @@ use std::collections::BTreeSet;
 /// The records-free walk's units, retained until their consumer finishes. Native
 /// compilation and evaluation materialize the same per-definition products.
 pub struct Units {
-    root: Identity,
     reached: Vec<Identity>,
     instances: InstanceSet,
 }
@@ -28,10 +27,8 @@ impl Units {
             .collect()
     }
     /// The entry's revision, computed before any link remaps its units.
-    pub fn revision(&self) -> ContentHash {
-        self.instances
-            .revision(&self.root, None)
-            .expect("a records-free walk retains every reached unit")
+    pub fn revision(&self, root: &Identity) -> Option<ContentHash> {
+        self.instances.revision(root, None)
     }
 }
 
@@ -327,15 +324,16 @@ impl InstanceSet {
     }
 }
 impl CheckProduct {
-    /// Materialize every unit reached from `root`, without native object records.
-    pub fn units(&self, root: Identity, limit: usize) -> Result<Units, InstanceStop> {
+    /// Materialize every unit reached from `roots`, without native object records.
+    /// A program entry is one root; source corpora can select several definitions.
+    pub fn units(
+        &self,
+        roots: impl IntoIterator<Item = Identity>,
+        limit: usize,
+    ) -> Result<Units, InstanceStop> {
         let mut instances = InstanceSet::default();
-        let reached = self.instances_into([root.clone()], limit, &mut instances)?;
-        Ok(Units {
-            root,
-            reached,
-            instances,
-        })
+        let reached = self.instances_into(roots, limit, &mut instances)?;
+        Ok(Units { reached, instances })
     }
     pub fn instances(
         &self,

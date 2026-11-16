@@ -1,0 +1,20 @@
+fn vector(raw: Bytes, coded: Bytes) -> bool {
+    let mut out: Bytes = list.new()
+    result.unwrap(base64.encode(raw, mut out))
+    out == coded && match result.unwrap(base64.decode(coded)) {
+        Some(b) => b == raw,
+        None => false
+    }
+}
+
+// RFC 4648 section 10. Mutant: pad_wrong writes A instead of '='.
+// expect: run rfc4648() = true
+fn rfc4648() -> bool {
+    vector(result.unwrap(b""), result.unwrap(b"")) && vector(result.unwrap(b"f"), result.unwrap(b"Zg==")) && vector(result.unwrap(b"fo"), result.unwrap(b"Zm8=")) && vector(result.unwrap(b"foo"), result.unwrap(b"Zm9v")) && vector(result.unwrap(b"foob"), result.unwrap(b"Zm9vYg==")) && vector(result.unwrap(b"fooba"), result.unwrap(b"Zm9vYmE=")) && vector(result.unwrap(b"foobar"), result.unwrap(b"Zm9vYmFy"))
+}
+
+// RFC 4648 sections 3.2, 3.3 and 3.5. Mutant: skip pad-bit validation.
+// expect: run canonical() = true
+fn canonical() -> bool {
+    result.unwrap(base64.decode(result.unwrap(b"Zh=="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zm9="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zg"))) == None && result.unwrap(base64.decode(result.unwrap(b"Z g="))) == None && result.unwrap(base64.decode(result.unwrap(b"===="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zg==AAAA"))) == None
+}

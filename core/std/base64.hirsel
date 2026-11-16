@@ -1,0 +1,124 @@
+// ADAPTED from Goose stdlib/base64.goose: arithmetic alphabet and four-byte
+// groups. Checked arithmetic replaces wrapping offsets. RFC 4648 section 3.5
+// additionally requires zero pad bits, so keys have a canonical spelling.
+fn symbol(x: u8) -> u8 {
+    if x < 26 {
+        b'A' + x
+    } else if x < 52 {
+        b'a' + (x - 26)
+    } else if x < 62 {
+        b'0' + (x - 52)
+    } else if x == 62 {
+        b'+'
+    } else {
+        b'/'
+    }
+}
+
+fn value(x: u8) -> u8 {
+    if x >= b'A' && x <= b'Z' {
+        x - b'A'
+    } else if x >= b'a' && x <= b'z' {
+        x - b'a' + 26
+    } else if x >= b'0' && x <= b'9' {
+        x - b'0' + 52
+    } else if x == b'+' {
+        62
+    } else if x == b'/' {
+        63
+    } else {
+        255
+    }
+}
+
+/// Appends RFC 4648's standard alphabet with '=' padding. O(n).
+/// Fails with Capacity; an earlier prefix may remain. Ex: `base64.encode(b, mut out)?`.
+pub fn encode(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
+    let mut i: u64 = 0
+    let n = list.len(b)
+    while i < n {
+        let a = b[i]
+        let c: u8 = if n - i > 1 {
+            b[i + 1]
+        } else {
+            0
+        }
+        let d: u8 = if n - i > 2 {
+            b[i + 2]
+        } else {
+            0
+        }
+        list.reserve(mut out, 4)?
+        let _ = list.push(mut out, symbol(a >> 2))
+        let _ = list.push(mut out, symbol(((a & 3) << 4) | (c >> 4)))
+        let _ = list.push(mut out, if n - i > 1 {
+            symbol(((c & 15) << 2) | (d >> 6))
+        } else {
+            b'='
+        })
+        let _ = list.push(mut out, if n - i > 2 {
+            symbol(d & 63)
+        } else {
+            b'='
+        })
+        if n - i <= 3 {
+            break
+        }
+        i += 3
+    }
+    Ok(())
+}
+
+/// Decodes canonical padded RFC 4648 bytes. Ok(None) means malformed input,
+/// Error means Capacity. Whitespace, missing padding and nonzero pad bits fail.
+/// O(n); validates before allocating. Ex: `base64.decode(key)?`.
+pub fn decode(b: Bytes) -> Result[Option[Bytes], Capacity] {
+    let n = list.len(b)
+    if n % 4 != 0 {
+        return Ok(None)
+    }
+    let mut pad: u64 = 0
+    if n > 0 && b[n - 1] == b'=' {
+        pad = if b[n - 2] == b'=' {
+            2
+        } else {
+            1
+        }
+    }
+    for i in 0u64 .. n - pad {
+        if value(b[i]) == 255 {
+            return Ok(None)
+        }
+    }
+    if pad == 2 && value(b[n - 3]) & 15 != 0 {
+        return Ok(None)
+    }
+    if pad == 1 && value(b[n - 2]) & 3 != 0 {
+        return Ok(None)
+    }
+    let mut out: Bytes = list.with_capacity(n / 4 * 3 - pad)?
+    let mut i: u64 = 0
+    while i < n {
+        let a = value(b[i])
+        let c = value(b[i + 1])
+        let d: u8 = if b[i + 2] == b'=' {
+            0
+        } else {
+            value(b[i + 2])
+        }
+        let e: u8 = if b[i + 3] == b'=' {
+            0
+        } else {
+            value(b[i + 3])
+        }
+        let _ = list.push(mut out, (a << 2) | (c >> 4))
+        if b[i + 2] != b'=' {
+            let _ = list.push(mut out, (c << 4) | (d >> 2))
+        }
+        if b[i + 3] != b'=' {
+            let _ = list.push(mut out, (d << 6) | e)
+        }
+        i += 4
+    }
+    Ok(Some(take out))
+}

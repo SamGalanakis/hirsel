@@ -4,7 +4,7 @@ use crate::store::Bare;
 use hirsel_core_ir::Identity;
 use hirsel_core_layout::{Layout, Recipe};
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::process::Command;
 
@@ -380,21 +380,21 @@ impl Table {
         object: Bare,
         debug: Option<ContentHash>,
         children: impl IntoIterator<Item = (Option<u32>, &'c Identity)>,
+        described: impl IntoIterator<Item = (Option<u32>, &'c Identity)>,
         items: Vec<DefPath>,
         closures: impl IntoIterator<Item = &'c Arc<hirsel_core_ir::Closure>>,
     ) {
         // A child's position in the prior record is its position here when
         // the instance there is the same.
-        let children = children
-            .into_iter()
-            .map(|(hint, c)| match hint {
-                Some(k) if instances.get(k as usize) == Some(c) => k,
-                _ => instances
-                    .binary_search(c)
-                    .expect("a reached instance's children are reached")
-                    as u32,
-            })
-            .collect();
+        let index = |(hint, c): (Option<u32>, &Identity)| match hint {
+            Some(k) if instances.get(k as usize) == Some(c) => k,
+            _ => instances
+                .binary_search(c)
+                .expect("the instances an instance calls or describes are reached")
+                as u32,
+        };
+        let children = children.into_iter().map(index).collect();
+        let described = described.into_iter().map(index).collect();
         let closures = closures
             .into_iter()
             .map(|c| {
@@ -412,6 +412,7 @@ impl Table {
             object,
             debug,
             children,
+            described,
             items,
             closures,
         });
@@ -535,6 +536,9 @@ impl CheckProduct {
                             e.children
                                 .iter()
                                 .map(|&c| (Some(c), &prior.entry(c as usize).identity)),
+                            e.described
+                                .iter()
+                                .map(|&c| (Some(c), &prior.entry(c as usize).identity)),
                             prior.items(e).cloned().collect(),
                             prior.closures_of(e),
                         );
@@ -560,6 +564,7 @@ impl CheckProduct {
                             record.object,
                             record.debug,
                             record.children.iter().map(|c| (None, c)),
+                            record.described.iter().map(|c| (None, c)),
                             record.items.clone(),
                             &record.closures,
                         );
@@ -585,6 +590,7 @@ impl CheckProduct {
                     object: Default::default(),
                     debug: None,
                     children: fields.children.clone(),
+                    described: fields.described.clone(),
                     items: module.items.clone(),
                     closures: fields.closures.clone(),
                 };
@@ -600,6 +606,7 @@ impl CheckProduct {
                         bare,
                         debug,
                         fields.children.iter().map(|c| (None, c)),
+                        fields.described.iter().map(|c| (None, c)),
                         module.items.clone(),
                         &fields.closures,
                     );
@@ -879,6 +886,7 @@ impl CheckProduct {
             counters,
             record,
             revision,
+            || reached.revisions(),
         )
     }
     /// The entry's declaration part, bound by check.
@@ -1047,6 +1055,7 @@ impl CheckProduct {
             object: Default::default(),
             debug: None,
             children: vec![],
+            described: crate::revision::described(&module),
             items: module.items.clone(),
             closures: vec![],
         };
@@ -1388,6 +1397,7 @@ fn link_objects(
     mut counters: crate::reach::ReachCounters,
     record: impl FnOnce(ContentHash) -> io::Result<u64>,
     revision: ContentHash,
+    revisions: impl FnOnce() -> Result<BTreeMap<Identity, ContentHash>, NativeStop>,
 ) -> Result<Linked, NativeStop> {
     // Development links use lld's cheap string-merging mode. Release keeps
     // the linker default; this spelling is part of the executable key below.
@@ -1424,8 +1434,19 @@ fn link_objects(
         let sources = sources()?;
         let temp = store.scratch()?;
         let entry = temp.path().join("entry.o");
+        // The described instances' revisions are a function of the objects,
+        // so of the key: they are made only for a miss.
+        let revisions: Vec<_> = revisions()?
+            .into_iter()
+            .map(|(identity, revision)| {
+                (
+                    hirsel_core_ir::revision_symbol(identity.digest()),
+                    revision.0,
+                )
+            })
+            .collect();
         let bytes = entry_plan
-            .emit(&options.target, &sources, &link_key.0)
+            .emit(&options.target, &sources, &link_key.0, &revisions)
             .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");

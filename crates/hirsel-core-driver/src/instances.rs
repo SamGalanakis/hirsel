@@ -106,6 +106,8 @@ pub(crate) struct Fields {
     /// The module's `revision::body`.
     pub body: ContentHash,
     pub children: Vec<Identity>,
+    /// The instances the module describes (`revision::described`).
+    pub described: Vec<Identity>,
     pub closures: Vec<Arc<hirsel_core_ir::Closure>>,
 }
 /// A walk over Cranelift development instance records: the encoded
@@ -166,6 +168,8 @@ pub(crate) struct InstanceBody {
     pub function: hirsel_core_ir::FuncId,
     /// The module's `revision::body`.
     pub body: ContentHash,
+    /// The instances the module describes (`revision::described`).
+    pub described: Vec<Identity>,
     /// The module's signature-only rows the walk reached, by ascending row, with
     /// the instance each names.
     externals: Vec<(hirsel_core_ir::FuncId, Identity)>,
@@ -254,7 +258,7 @@ impl InstanceSet {
         root: &Identity,
         prior: Option<&crate::reach::Reach>,
     ) -> Option<ContentHash> {
-        crate::revision::revision(root, |identity| {
+        hirsel_core_ir::code_revision(root, |identity| {
             if let Some(&row) = self.rows.get(identity) {
                 let body = &self.bodies[row];
                 return Some((
@@ -276,6 +280,38 @@ impl InstanceSet {
                     .collect(),
             ))
         })
+    }
+    /// Each instance that one of `instances` describes, with its code
+    /// revision over this walk (`revision`), by identity.
+    pub(crate) fn revisions(
+        &self,
+        instances: &[Identity],
+        prior: Option<&crate::reach::Reach>,
+    ) -> Option<std::collections::BTreeMap<Identity, ContentHash>> {
+        let mut described = BTreeSet::new();
+        for identity in instances {
+            if let Some(&row) = self.rows.get(identity) {
+                described.extend(self.bodies[row].described.iter().cloned());
+            } else if let Some(record) = self.hits.get(identity) {
+                described.extend(record.described.iter().cloned());
+            } else {
+                let prior = prior?;
+                let entry = prior.entry(prior.instance(identity)?);
+                described.extend(
+                    entry
+                        .described
+                        .iter()
+                        .map(|&c| prior.entry(c as usize).identity.clone()),
+                );
+            }
+        }
+        described
+            .into_iter()
+            .map(|identity| {
+                let revision = self.revision(&identity, prior)?;
+                Some((identity, revision))
+            })
+            .collect()
     }
     /// The materialised instance of `definition` whose type arguments' row names are
     /// `arguments`, for tests that name an instance by its source text.
@@ -460,13 +496,15 @@ impl CheckProduct {
                 }
             };
             observe(key, "materialize");
-            let body = {
+            let (body, described) = {
                 let module = match (&built.module, &product) {
                     (Some(module), _) => module,
                     (None, Some(product)) => product.ir().map_err(|e| input(e.to_string()))?,
                     (None, None) => unreachable!("a glue instance is materialised"),
                 };
-                crate::revision::body(module, &mut Vec::new()).map_err(|e| input(e.to_string()))?
+                let body = crate::revision::body(module, &mut Vec::new())
+                    .map_err(|e| input(e.to_string()))?;
+                (body, crate::revision::described(module))
             };
             resolver.add(&built.children);
             if records.is_some() {
@@ -488,6 +526,7 @@ impl CheckProduct {
                             .collect::<BTreeSet<_>>()
                             .into_iter()
                             .collect(),
+                        described: described.clone(),
                         closures: closures.into_values().collect(),
                     },
                 );
@@ -512,6 +551,7 @@ impl CheckProduct {
                 module: built.module,
                 function: built.function,
                 body,
+                described,
                 externals,
             });
             observe(key, "dependencies");

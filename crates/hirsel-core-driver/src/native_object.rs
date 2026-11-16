@@ -122,11 +122,13 @@ pub(crate) struct Instance {
     pub debug: Option<ContentHash>,
     /// The instances the module calls outside itself, sorted and deduplicated.
     pub children: Vec<hirsel_core_ir::Identity>,
+    /// The instances the module describes (`revision::described`).
+    pub described: Vec<hirsel_core_ir::Identity>,
     pub items: Vec<hirsel_core_ids::DefPath>,
     /// Every closure a child's arguments name, deduplicated, by hash.
     pub closures: Vec<std::sync::Arc<hirsel_core_ir::Closure>>,
 }
-pub(crate) const INSTANCE_SCHEMA: u32 = 3;
+pub(crate) const INSTANCE_SCHEMA: u32 = 4;
 
 /// Publish an emitted instance's object, debug rows and record under its
 /// key; the object, the debug rows' name and the descriptor the object's
@@ -209,6 +211,7 @@ mod tests {
             object: Default::default(),
             debug: None,
             children: vec![],
+            described: vec![],
             items: vec![],
             closures: vec![],
         };

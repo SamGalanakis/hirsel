@@ -349,8 +349,9 @@ pub enum Inst {
         function: FuncId,
     },
     /// The address of `function`'s static descriptor (PROG-9): read-only words
-    /// `{code, length}` then the `length` bytes of `identity`, where `code` is
-    /// `function`'s code pointer and `identity` is its identity bytes. A program
+    /// `{code, length, revision}` then the `length` bytes of `identity`, where
+    /// `code` is `function`'s code pointer, `identity` is its identity bytes and
+    /// `revision` addresses its revision carrier ([`revision_symbol`]). A program
     /// has one descriptor per function: every unit that refers to it defines it
     /// weak beside the function's code identity, and the linker keeps one, so
     /// two descriptors' addresses are equal exactly when their functions are.
@@ -1269,6 +1270,100 @@ impl Identity {
     pub fn symbol(&self) -> String {
         symbol(self.digest())
     }
+}
+/// The link name of the revision carrier of the root whose identity digest is
+/// `digest` ([`Module::revision_root`]): a `Bytes` carrier `{bytes, 32, 0}` of
+/// its code revision. Each unit that describes an item's function defines it
+/// weak as `{0, 0, 0}` (no revision), and a link that knows the program's
+/// reach defines it; an intrinsic's carrier holds [`intrinsic_revision`].
+pub fn revision_symbol(digest: ContentHash) -> String {
+    symbol(digest) + "$revision"
+}
+/// Whose code revision a described function has (PROG-9 `code.revision`):
+/// the code a call through the `StaticFn` runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RevisionRoot {
+    /// A reached instance: the described item, which a `$callable` adapter
+    /// calls.
+    Item(Identity),
+    /// A core item without a body, which the adapter computes itself: no
+    /// checked IR reaches out of it ([`intrinsic_revision`]).
+    Intrinsic(Identity),
+}
+impl RevisionRoot {
+    pub fn identity(&self) -> &Identity {
+        match self {
+            Self::Item(identity) | Self::Intrinsic(identity) => identity,
+        }
+    }
+}
+impl Module {
+    /// The revision root of described function `function`: itself, or for a
+    /// `$callable` adapter the item it calls. `code.describe` names a
+    /// non-generic item, so an item without a callee is a plain intrinsic.
+    pub fn revision_root(&self, function: FuncId) -> RevisionRoot {
+        let f = &self.functions[function.index()];
+        let identity = self.identity(f.instance);
+        let Some((source, _)) = identity.definition.0.name.split_once("$callable[") else {
+            return RevisionRoot::Item(identity);
+        };
+        let mut item = identity.definition.clone();
+        item.0.name = source.to_owned();
+        let callee = f
+            .body
+            .iter()
+            .flat_map(|b| &b.calls)
+            .find_map(|c| match c.callee {
+                Callee::Direct(g) => {
+                    let callee = self.identity(self.functions[g.index()].instance);
+                    (callee.definition == item).then_some(callee)
+                }
+                _ => None,
+            });
+        match callee {
+            Some(callee) => RevisionRoot::Item(callee),
+            None => RevisionRoot::Intrinsic(Identity::plain(item)),
+        }
+    }
+}
+/// `revision(root)` (`hirsel.code-revision.v1`) over the instances `row`
+/// describes: each one's body hash and the instances it names. None when an
+/// instance the walk reaches has no row.
+pub fn code_revision(
+    root: &Identity,
+    mut row: impl FnMut(&Identity) -> Option<(ContentHash, Vec<Identity>)>,
+) -> Option<ContentHash> {
+    let mut reached = std::collections::BTreeMap::new();
+    let mut pending = vec![root.clone()];
+    while let Some(identity) = pending.pop() {
+        if reached.contains_key(&identity) {
+            continue;
+        }
+        let (body, children) = row(&identity)?;
+        pending.extend(children.into_iter().filter(|c| !reached.contains_key(c)));
+        reached.insert(identity, body);
+    }
+    let mut rows: Vec<[u8; 64]> = reached
+        .iter()
+        .map(|(identity, body)| {
+            let mut row = [0; 64];
+            row[..32].copy_from_slice(&identity.digest().0);
+            row[32..].copy_from_slice(&body.0);
+            row
+        })
+        .collect();
+    rows.sort_unstable();
+    let count = (rows.len() as u64).to_le_bytes();
+    Some(ContentHash::of_parts(
+        "hirsel.code-revision.v1",
+        [&root.digest().0[..], &count[..]]
+            .into_iter()
+            .chain(rows.iter().map(|r| &r[..])),
+    ))
+}
+/// The code revision of an intrinsic: its one row, with the zero body.
+pub fn intrinsic_revision(root: &Identity) -> ContentHash {
+    code_revision(root, |_| Some((ContentHash::default(), vec![]))).expect("one row")
 }
 /// `h` and the 64 hex digits of `digest`.
 pub fn symbol(digest: ContentHash) -> String {

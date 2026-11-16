@@ -247,9 +247,12 @@ pub fn emit_object_with_charge_observation(
     )
 }
 /// Each function a body of this unit describes (`Inst::DescriptorRef`), its
-/// descriptor `{code, length}` then the identity bytes, defined weak beside
-/// the function's code identity: every unit that describes it defines it, and
-/// the linker keeps one per program, as it keeps one body.
+/// descriptor `{code, length, revision}` then the identity bytes, defined weak
+/// beside the function's code identity: every unit that describes it defines
+/// it, and the linker keeps one per program, as it keeps one body. `revision`
+/// addresses its revision root's carrier (`c::Module::revision_root`): an
+/// item's this unit defines weak as `{0, 0, 0}` and a link that knows the
+/// reach defines over it; an intrinsic's holds its revision.
 fn descriptors(
     object: &mut ObjectModule,
     input: &c::Module,
@@ -258,6 +261,7 @@ fn descriptors(
 ) -> Result<Vec<Option<cranelift_module::DataId>>> {
     let mut descriptors = vec![None; input.functions.len()];
     let mut defined = std::collections::HashSet::new();
+    let mut revisions = std::collections::HashSet::new();
     for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
             let c::Inst::DescriptorRef {
@@ -282,16 +286,52 @@ fn descriptors(
             if !defined.insert(id) {
                 continue;
             }
+            let root = input.revision_root(function);
+            let revision = object
+                .declare_data(
+                    &c::revision_symbol(root.identity().digest()),
+                    Linkage::Preemptible,
+                    false,
+                    false,
+                )
+                .map_err(error)?;
+            if revisions.insert(revision) {
+                let mut carrier = DataDescription::new();
+                carrier.set_align(8);
+                match &root {
+                    c::RevisionRoot::Item(_) => carrier.define_zeroinit(24),
+                    c::RevisionRoot::Intrinsic(identity) => {
+                        let bytes = object.declare_anonymous_data(false, false).map_err(error)?;
+                        let mut data = DataDescription::new();
+                        data.define(
+                            c::intrinsic_revision(identity)
+                                .0
+                                .to_vec()
+                                .into_boxed_slice(),
+                        );
+                        object.define_data(bytes, &data).map_err(error)?;
+                        let mut row = vec![0; 24];
+                        row[8..16].copy_from_slice(&32u64.to_le_bytes());
+                        carrier.define(row.into_boxed_slice());
+                        let bytes = object.declare_data_in_data(bytes, &mut carrier);
+                        carrier.write_data_addr(0, bytes, 0);
+                    }
+                }
+                object.define_data(revision, &carrier).map_err(error)?;
+            }
             let bytes = &input.statics[identity.index()].bytes;
-            let mut image = Vec::with_capacity(16 + bytes.len());
+            let mut image = Vec::with_capacity(24 + bytes.len());
             image.extend_from_slice(&[0; 8]);
             image.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            image.extend_from_slice(&[0; 8]);
             image.extend_from_slice(bytes);
             let mut data = DataDescription::new();
             data.define(image.into_boxed_slice());
             data.set_align(8);
             let code = object.declare_func_in_data(functions[function.index()], &mut data);
             data.write_function_addr(0, code);
+            let carrier = object.declare_data_in_data(revision, &mut data);
+            data.write_data_addr(16, carrier, 0);
             object.define_data(id, &data).map_err(error)?;
         }
     }

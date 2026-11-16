@@ -552,6 +552,9 @@ pub(super) enum Linkage {
     /// A body every unit that carries it defines by its code identity; the linker
     /// keeps one.
     WeakOdr,
+    /// A placeholder another object may define over: its contents are never
+    /// folded into a use.
+    Weak,
 }
 impl Linkage {
     fn text(self) -> &'static str {
@@ -560,6 +563,7 @@ impl Linkage {
             Self::Internal => "internal ",
             Self::Private => "private ",
             Self::WeakOdr => "weak_odr ",
+            Self::Weak => "weak ",
         }
     }
 }

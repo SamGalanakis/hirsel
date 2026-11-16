@@ -11,6 +11,7 @@
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
 use crate::*;
+use hirsel_core_ids::ContentHash;
 use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, cleanup_class,
     compute, field_size, map_entry,
@@ -648,11 +649,35 @@ pub enum Nans {
 }
 /// A run whose NaNs follow `nans`, with what its oracle checks covered.
 pub fn run_nans(m: &Module, f: FuncId, args: &[u64], limit: u64, nans: Nans) -> (Report, Checked) {
-    run_world(m, f, args, limit, None, &[], nans)
+    run_world(m, f, args, limit, None, &[], nans, &Revisions::new())
+}
+/// Each described instance's code revision (PROG-9), by its identity digest:
+/// what a link that knows the program's reach gives its revision carriers.
+pub type Revisions = std::collections::BTreeMap<ContentHash, ContentHash>;
+/// A run whose descriptors' revision carriers hold `revisions`; an instance
+/// it does not name has none.
+pub fn run_revisions(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    revisions: &Revisions,
+) -> Report {
+    run_world(m, f, args, limit, None, &[], Nans::Canonical, revisions).0
 }
 /// A run whose `Args` table holds `argv`.
 pub fn run_args(m: &Module, f: FuncId, args: &[u64], limit: u64, argv: &[&str]) -> Report {
-    run_world(m, f, args, limit, None, argv, Nans::Canonical).0
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        None,
+        argv,
+        Nans::Canonical,
+        &Revisions::new(),
+    )
+    .0
 }
 /// Deterministic admission refusal for native/evaluator agreement fixtures.
 pub fn run_injected(
@@ -662,7 +687,17 @@ pub fn run_injected(
     limit: u64,
     injection: Option<(usize, bool)>,
 ) -> Report {
-    run_world(m, f, args, limit, injection, &[], Nans::Canonical).0
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        injection,
+        &[],
+        Nans::Canonical,
+        &Revisions::new(),
+    )
+    .0
 }
 fn run_world(
     m: &Module,
@@ -672,6 +707,7 @@ fn run_world(
     injection: Option<(usize, bool)>,
     argv: &[&str],
     nans: Nans,
+    revisions: &Revisions,
 ) -> (Report, Checked) {
     let mut mach = Machine {
         m,
@@ -732,8 +768,12 @@ fn run_world(
         mach.world.args.push(carrier);
     }
     // One descriptor per code identity, as the linker keeps one per program:
-    // `{code, length}` then the identity bytes, where `code` is a function token.
+    // `{code, length, revision}` then the identity bytes, where `code` is a
+    // function token and `revision` addresses its revision root's carrier
+    // (`Module::revision_root`), `{bytes, 32, 0}` from `revisions` or an
+    // intrinsic's revision, else `{0, 0, 0}`.
     let mut by_code = HashMap::new();
+    let mut carriers = HashMap::new();
     for body in m.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
             let Inst::DescriptorRef {
@@ -749,13 +789,32 @@ fn run_world(
             let at = if let Some(&at) = by_code.get(&code) {
                 at
             } else {
+                let root = m.revision_root(function);
+                let carrier = *carriers.entry(root.identity().digest()).or_insert_with(|| {
+                    let at = mach.block(24, None, 0, None);
+                    let revision = match &root {
+                        RevisionRoot::Item(identity) => revisions.get(&identity.digest()).copied(),
+                        RevisionRoot::Intrinsic(identity) => Some(intrinsic_revision(identity)),
+                    };
+                    if let Some(revision) = revision {
+                        let bytes = mach.block(32, None, 0, None);
+                        mach.mem[split(bytes).0].bytes = revision.0.to_vec();
+                        mach.mem[split(bytes).0].fixed = true;
+                        mach.store(at, 8, bytes);
+                        mach.store(at + 8, 8, 32);
+                    }
+                    mach.mem[split(at).0].fixed = true;
+                    at
+                });
                 let bytes = &m.statics[identity.index()].bytes;
-                let mut block = Vec::with_capacity(16 + bytes.len());
+                let mut block = Vec::with_capacity(24 + bytes.len());
                 block.extend_from_slice(&(FN_BASE + u64::from(function.0)).to_le_bytes());
                 block.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                block.extend_from_slice(&[0; 8]);
                 block.extend_from_slice(bytes);
                 let at = mach.block(block.len() as u64, None, 0, None);
                 mach.mem[split(at).0].bytes = block;
+                mach.store(at + 16, 8, carrier);
                 mach.mem[split(at).0].fixed = true;
                 by_code.insert(code, at);
                 at

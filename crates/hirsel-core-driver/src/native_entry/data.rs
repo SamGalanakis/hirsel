@@ -16,6 +16,17 @@ pub(super) fn bytes(
 ) -> Result<DataId> {
     define(object, name, bytes, align, &[])
 }
+/// A Bytes `{bytes, 32, 0}` over `revision`, exported as `symbol`.
+pub(super) fn carrier(
+    object: &mut ObjectModule,
+    symbol: &str,
+    revision: &[u8; 32],
+) -> Result<DataId> {
+    let bytes = bytes(object, None, revision.to_vec(), 1)?;
+    let mut row = vec![0; 24];
+    row[8..16].copy_from_slice(&32u64.to_le_bytes());
+    define(object, Some(symbol), row, 8, &[(0, bytes)])
+}
 fn define(
     object: &mut ObjectModule,
     name: Option<&str>,

@@ -3,4 +3,6 @@ pub fn describe[F](f: F) -> StaticFn[F]
 
 pub fn identity[F](s: StaticFn[F]) -> View[Bytes] in s
 
+pub fn revision[F](s: StaticFn[F]) -> Option[View[Bytes]] in s
+
 pub fn callable[F](s: StaticFn[F]) -> F

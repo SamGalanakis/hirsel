@@ -36,6 +36,7 @@ pub(crate) enum Kernel {
     LogAppend,
     LogFinish,
     CodeIdentity,
+    CodeRevision,
     CodeCallable,
     CodeDescribe,
 }
@@ -77,6 +78,7 @@ operations! {
     ("log", "finish", Lane::Runtime(Kernel::LogFinish), "B", "core-ops-914", false),
     ("code", "describe", Lane::Runtime(Kernel::CodeDescribe), "A", "core-check-callables-913", false),
     ("code", "identity", Lane::Runtime(Kernel::CodeIdentity), "A", "core-ops-914", false),
+    ("code", "revision", Lane::Runtime(Kernel::CodeRevision), "A", "core-ops-914", false),
     ("code", "callable", Lane::Runtime(Kernel::CodeCallable), "A", "core-ops-914", false),
     ("host", "rename", Lane::Runtime(Kernel::Host(HostOp::Rename)), "B", "core-ops-914", false),
     ("host", "sleep_until", Lane::Runtime(Kernel::Host(HostOp::SleepUntil)), "B", "core-ops-914", false),
@@ -686,6 +688,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], result, n),
             Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
             Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
+            Kernel::CodeRevision => self.runtime_code_revision(vals[0]?, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
             Kernel::CodeDescribe => self.runtime_code_describe(result, n),
         }
@@ -1400,6 +1403,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::LogAppend
             | Kernel::LogFinish
             | Kernel::CodeIdentity
+            | Kernel::CodeRevision
             | Kernel::CodeCallable
             | Kernel::CodeDescribe => false,
         }
@@ -1889,7 +1893,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     /// PROG-9: a StaticFn is the address of its function's static descriptor,
-    /// `{code, length}` then the identity bytes (`Inst::DescriptorRef`). The
+    /// `{code, length, revision}` then the identity bytes (`Inst::DescriptorRef`). The
     /// described function is the item's closed adapter, whatever body describes
     /// it, so a program has one descriptor per function and StaticFn equality is
     /// word equality.
@@ -1926,45 +1930,61 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         word
     }
 
-    /// `code.identity(s)`: the bytes after `s`'s descriptor's two words, as a
-    /// view. A StaticFn this body described has its descriptor and length here;
-    /// any other has them in its word.
+    /// The descriptor of `value`, a StaticFn, and its identity length: a
+    /// StaticFn this body described has both here; any other has them in its
+    /// word.
+    fn code_descriptor(&mut self, value: ValueId, n: NodeId) -> Option<(ValueId, ValueId)> {
+        if let Some(&(function, identity, length)) = self.static_fns.get(&value) {
+            let descriptor = self.value(Ty::Ptr);
+            self.inst(
+                Inst::DescriptorRef {
+                    result: descriptor,
+                    function,
+                    identity,
+                },
+                n,
+            );
+            return Some((descriptor, self.konst(Ty::Scalar(Scalar::U64), length, n)?));
+        }
+        let Some(descriptor) = self.static_fn_pointer(value, n) else {
+            self.gap(n, "StaticFn identity carriage is not built");
+            return None;
+        };
+        let length = self.descriptor_word(descriptor, 8, Ty::Scalar(Scalar::U64), n)?;
+        Some((descriptor, length))
+    }
+
+    /// The word at `offset` in `descriptor`.
+    fn descriptor_word(
+        &mut self,
+        descriptor: ValueId,
+        offset: u64,
+        ty: Ty,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let offset = self.konst(Ty::Scalar(Scalar::U64), offset, n)?;
+        let at = self.address(
+            AddressBase::Value(descriptor),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(ty),
+            n,
+        );
+        Some(self.read_bits(at, ty, n))
+    }
+
+    /// `code.identity(s)`: the bytes after `s`'s descriptor's three words, as
+    /// a view.
     fn runtime_code_identity(
         &mut self,
         value: ValueId,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let (descriptor, length) =
-            if let Some(&(function, identity, length)) = self.static_fns.get(&value) {
-                let descriptor = self.value(Ty::Ptr);
-                self.inst(
-                    Inst::DescriptorRef {
-                        result: descriptor,
-                        function,
-                        identity,
-                    },
-                    n,
-                );
-                (descriptor, self.konst(Ty::Scalar(Scalar::U64), length, n)?)
-            } else {
-                let Some(descriptor) = self.static_fn_pointer(value, n) else {
-                    self.gap(n, "StaticFn identity carriage is not built");
-                    return None;
-                };
-                let eight = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
-                let at = self.address(
-                    AddressBase::Value(descriptor),
-                    &[Step::Byte(eight)],
-                    PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                    n,
-                );
-                (descriptor, self.read_bits(at, Ty::Scalar(Scalar::U64), n))
-            };
-        let sixteen = self.konst(Ty::Scalar(Scalar::U64), 16, n)?;
+        let (descriptor, length) = self.code_descriptor(value, n)?;
+        let offset = self.konst(Ty::Scalar(Scalar::U64), 24, n)?;
         let at = self.address(
             AddressBase::Value(descriptor),
-            &[Step::Byte(sixteen)],
+            &[Step::Byte(offset)],
             PlaceTy::Value(Ty::Scalar(Scalar::U8)),
             n,
         );
@@ -1975,6 +1995,60 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         self.temp(result, Some(value));
         Some(value)
+    }
+
+    /// `code.revision(s)`: the descriptor's third word addresses the
+    /// function's revision carrier `{bytes, 32, 0}`, which the link defines
+    /// from the program's reach; a unit linked without it keeps its own
+    /// `{0, 0, 0}`, and the result is None.
+    fn runtime_code_revision(
+        &mut self,
+        value: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let (descriptor, _) = self.code_descriptor(value, n)?;
+        let carrier = self.descriptor_word(descriptor, 16, Ty::Ptr, n)?;
+        let bytes = self.descriptor_word(carrier, 0, Ty::Ptr, n)?;
+        let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
+            self.gap(
+                n,
+                "a code revision that is not a declared type is not built",
+            );
+            return None;
+        };
+        let payload = arguments[0];
+        let id = self.runtime_type(result, n)?;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let none = self.runtime_compare(Ty::Ptr, bytes, 0, n)?;
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.runtime_branch(none, no, yes, n);
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        let at = self.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], payload, n)?;
+        // The carrier is static and has capacity 0: the payload is its 24-byte
+        // non-owning value.
+        self.install_view(at, self.bare(payload), carrier, n)?;
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+        Some(self.pointer(to, n))
     }
 
     fn code_identity_bytes(&self, function: FuncId) -> Option<Vec<u8>> {

@@ -52,6 +52,14 @@ impl Reachable<'_> {
                 NativeStop::Entry(format!("{entry}: a reached instance has no revision row"))
             })
     }
+    /// The code revision of each instance this walk's instances describe:
+    /// the rows a link's entry object defines (`ir::revision_symbol`).
+    pub(crate) fn revisions(&self) -> Result<BTreeMap<Identity, ContentHash>, NativeStop> {
+        let prior = self.reach.as_ref().and_then(|r| r.prior.as_ref());
+        self.materialized
+            .revisions(self.require()?, prior)
+            .ok_or_else(|| NativeStop::Entry("a described instance has no revision row".into()))
+    }
     pub fn accepted(&self) -> bool {
         self.diagnostics.is_empty()
             && self.incomplete.is_empty()

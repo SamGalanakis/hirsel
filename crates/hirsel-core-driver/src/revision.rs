@@ -8,7 +8,7 @@
 //! - `I`'s edges are the instances its module names outside itself (an
 //!   instance record's `children`): calls, function values and dispatch
 //!   candidates, including the selections the front end makes from types.
-//! - `revision(f)` hashes `f`'s identity and the sorted rows
+//! - `revision(f)` (`hirsel_core_ir::code_revision`) hashes `f`'s identity and the sorted rows
 //!   `(identity(I), body(I))` of every `I` reachable from `f`. A call site
 //!   names its callee's identity inside the caller's module, so a retargeted
 //!   edge changes the caller's `body`.
@@ -19,7 +19,6 @@
 //! build --json` reports it.
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::{Identity, Module};
-use std::collections::BTreeMap;
 use std::io;
 
 /// `body(I)` of the module an instance materialises to. `scratch` is reused
@@ -40,44 +39,21 @@ pub(crate) fn body(module: &Module, scratch: &mut Vec<u8>) -> io::Result<Content
     ))
 }
 
-/// `revision(root)` over the instances `row` describes: each one's `body`
-/// and the instances it names. None when an instance the walk reaches has no
-/// row, which a complete build's set never leaves.
-pub(crate) fn revision(
-    root: &Identity,
-    mut row: impl FnMut(&Identity) -> Option<(ContentHash, Vec<Identity>)>,
-) -> Option<ContentHash> {
-    let mut reached = BTreeMap::new();
-    let mut pending = vec![root.clone()];
-    while let Some(identity) = pending.pop() {
-        if reached.contains_key(&identity) {
-            continue;
+/// The item roots of the functions `module`'s bodies describe
+/// (`Inst::DescriptorRef`, `Module::revision_root`), sorted and deduplicated:
+/// the ones whose revision carriers a link defines.
+pub(crate) fn described(module: &Module) -> Vec<Identity> {
+    let mut described = std::collections::BTreeSet::new();
+    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for inst in &body.insts {
+            if let hirsel_core_ir::Inst::DescriptorRef { function, .. } = *inst
+                && let hirsel_core_ir::RevisionRoot::Item(root) = module.revision_root(function)
+            {
+                described.insert(root);
+            }
         }
-        let (body, children) = row(&identity)?;
-        pending.extend(children.into_iter().filter(|c| !reached.contains_key(c)));
-        reached.insert(identity, body);
     }
-    let root = root.digest();
-    let rows: Vec<[u8; 64]> = {
-        let mut rows: Vec<[u8; 64]> = reached
-            .iter()
-            .map(|(identity, body)| {
-                let mut row = [0; 64];
-                row[..32].copy_from_slice(&identity.digest().0);
-                row[32..].copy_from_slice(&body.0);
-                row
-            })
-            .collect();
-        rows.sort_unstable();
-        rows
-    };
-    let count = (rows.len() as u64).to_le_bytes();
-    Some(ContentHash::of_parts(
-        "hirsel.code-revision.v1",
-        [&root.0[..], &count[..]]
-            .into_iter()
-            .chain(rows.iter().map(|r| &r[..])),
-    ))
+    described.into_iter().collect()
 }
 
 #[cfg(test)]

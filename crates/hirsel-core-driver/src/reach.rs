@@ -34,7 +34,7 @@ use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-pub(crate) const REACH_SCHEMA: u32 = 7;
+pub(crate) const REACH_SCHEMA: u32 = 8;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -72,6 +72,8 @@ pub(crate) struct Entry {
     pub object: Bare,
     pub debug: Option<ContentHash>,
     pub children: Vec<u32>,
+    /// The instances it describes, as table indices.
+    pub described: Vec<u32>,
     pub items: Vec<u32>,
     pub closures: Vec<u32>,
 }
@@ -87,6 +89,8 @@ pub(crate) struct Fresh {
     pub object: Bare,
     pub debug: Option<ContentHash>,
     pub children: Vec<u32>,
+    /// The instances it describes, as table indices.
+    pub described: Vec<u32>,
     pub items: Vec<DefPath>,
     pub closures: Vec<u32>,
 }
@@ -120,6 +124,7 @@ struct StoredEntry<S, H, U> {
     object: Bare,
     debug: Option<ContentHash>,
     children: U,
+    described: U,
     items: U,
     closures: U,
 }
@@ -449,6 +454,7 @@ impl Reach {
             let in_range = (e.definition as usize) < self.paths.len()
                 && e.children
                     .iter()
+                    .chain(&e.described)
                     .all(|&c| (c as usize) < self.instances.len())
                 && e.items.iter().all(|&p| (p as usize) < self.paths.len())
                 && e.closures
@@ -467,6 +473,7 @@ impl Reach {
                 object: e.object,
                 debug: e.debug,
                 children: e.children,
+                described: e.described,
                 items: e.items,
                 closures: e.closures,
             }
@@ -709,7 +716,7 @@ pub(crate) fn patched(product: &CheckProduct, prior: &Reach, changed: &[bool]) -
     }
 }
 
-/// The selection: `hirsel.core-reach.v5` over the environment digest, the
+/// The selection: `hirsel.core-reach.v6` over the environment digest, the
 /// image, the entry and its declaration part, whether it is a test, the
 /// entry policy and the instance limit.
 pub(crate) fn selection(
@@ -728,7 +735,7 @@ pub(crate) fn selection(
         return Ok(None);
     };
     crate::native::key(
-        "hirsel.core-reach.v5",
+        "hirsel.core-reach.v6",
         &(
             records.digest,
             product.image.as_ref().map(|i| i.identity),
@@ -880,6 +887,7 @@ fn encode_record<'a>(
             object: e.object,
             debug: e.debug,
             children: &e.children,
+            described: &e.described,
             items: &items,
             closures: &e.closures,
         })?;

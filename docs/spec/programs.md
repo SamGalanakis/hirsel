@@ -180,8 +180,10 @@ instance (PROG-5) that the function reaches, std's and core's included, taken by
 edges: calls and function values, among them the functions the checker selects from types,
 such as a codec maker. Each instance enters as its identity and its
 checked IR with the source positions and the optimisation-only facts removed; the reach is a
-set, so recursion and order do not matter. Nothing else enters: not the backend, the
-runtime, the target, the optimisation level or the root limit. So:
+set, so recursion and order do not matter. A core function the compiler implements itself,
+such as `float.widen`, has no checked IR: it reaches nothing and enters as its identity
+alone. Nothing else enters: not the backend, the runtime, the target, the optimisation
+level or the root limit. So:
 
 - an edit to comments, layout, local or parameter names, item order, or an item the
   function does not reach leaves the revision equal;
@@ -192,9 +194,10 @@ runtime, the target, the optimisation level or the root limit. So:
 
 The revision is never part of equality: two `StaticFn` values with equal identity bytes are
 equal whatever their revisions. It is `None` only when the program was assembled without its
-revisions, which a program `hirsel build` links never is. A store, registry or tape that
-keeps only identity bytes matches by identity alone, so a changed body under an unchanged
-identity is not detected; one that keeps the revision as well detects it.
+revisions, which a program `hirsel build` links never is; a core function the compiler
+implements has its revision in any program. A store, registry or tape that keeps only
+identity bytes matches by identity alone, so a changed body under an unchanged identity is
+not detected; one that keeps the revision as well detects it.
 
 ```hirsel
 type Handler = fn(Bytes) -> Result[Bytes, Capacity]

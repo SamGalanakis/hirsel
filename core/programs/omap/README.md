@@ -13,7 +13,8 @@ FromIterator uses repeated unique inserts; BTreeMap uses its sorted collector.
 
 Pass `--compiler`, `--runtime` and `--out` to `core/tools/omap_bench.py`.
 `--prepare` builds the programs; `--check-refusal` checks the resource fixture;
-`--measure` takes one sample; `--profile` records sampled instruction IPs.
+`--measure` takes one sample, or `--samples 5` takes the requested five
+independent samples for a median; `--profile` records sampled instruction IPs.
 `--only-workload`, `--only-profile` and `--only-implementation` select cases.
 `--reuse-rust DIR` reuses exact dependency rlibs, rebuilding only the twin.
 Evidence belongs outside the repository. Each measurement tag directory must

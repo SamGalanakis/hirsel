@@ -605,3 +605,26 @@ fn owned_splits() -> bool {
     }
     equal(m, expected) && equal(held, old) && omap.node_id(option.unwrap(omap.root(held))) == held_id && nodes(option.unwrap(omap.root(m)), true) && nodes(option.unwrap(omap.root(held)), true)
 }
+
+// Every possible insertion position in a full leaf, including both sides of
+// the 16/17 split. A shifted-source-index mutant duplicates one entry and
+// loses its neighbour. Check complete contents and the held original.
+// expect: run split_boundary_entries() = true
+fn split_boundary_entries() -> bool {
+    for at in 0u64 .. 33 {
+        let mut ids: u64 = 0
+        let mut m: omap.OMap[u64, u64] = omap.new()
+        let mut xs: List[(u64, u64)] = result.unwrap(list.with_capacity(32))
+        for i in 0u64 .. 32 {
+            m = put(mut ids, m, i * 2 + 1, i + 100)
+            result.unwrap(list.push(mut xs, (i * 2 + 1, i + 100)))
+        }
+        let held = omap.snapshot(m)
+        m = put(mut ids, m, at * 2, 777)
+        let expected = model(xs, at * 2, 777, false)
+        if !equal(m, expected) || !equal(held, xs) || !nodes(option.unwrap(omap.root(m)), true) {
+            return false
+        }
+    }
+    true
+}

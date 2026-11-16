@@ -8,7 +8,9 @@ persistent B+ tree with maximum fan-out 32 and minimum non-root occupancy 16.
 and `len` reads its entry count. `get`, `first` and `last` borrow one version.
 An update returns a new version while every held version retains its contents.
 Keys and values occupy contiguous node lists. Path copies clone their payloads
-and share untouched child subtrees. Resources fail the ordinary `shareable` bound.
+and share untouched child subtrees. Shared leaf insertion copies each entry
+once directly into its final leaf, including both halves of a split. Splitting
+a temporary owned leaf moves its entries without cloning their payloads. Resources fail the ordinary `shareable` bound.
 Versions are sendable; last-holder release frees unreachable nodes and payloads
 through the existing constant-stack Arc worklist.
 

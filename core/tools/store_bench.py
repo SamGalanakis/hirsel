@@ -19,6 +19,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--artifacts', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--samples', type=int, choices=range(1, 6), default=1)
     p.add_argument('--prepare', action='store_true')
     p.add_argument('--measure', action='store_true')
     p.add_argument('--profile', action='store_true')
@@ -76,12 +77,13 @@ def main():
                     if language == 'rust':
                         argv.append(host / 'gate')
                     tag = '-'.join([language, profile, mode]) + ('-insert-profile' if args.profile and mode == 'R1' else '-profile' if args.profile else '')
-                    row = measure(argv, out, env, tag, EXPECTED[mode],
-                                  recording=args.profile, host_directory=host)
-                    row.update(language=language, profile=profile, workload=mode, artifacts=identity)
-                    rows.append(row)
-                    print(tag, row, flush=True)
-                    (out / ('profiles.json' if args.profile else 'samples.json')).write_text(json.dumps(rows, indent=2) + '\n')
+                    for sample in range(args.samples):
+                        row = measure(argv, out, env, tag + ('-' + str(sample) if args.samples > 1 else ''), EXPECTED[mode],
+                                      recording=args.profile, host_directory=host)
+                        row.update(language=language, profile=profile, workload=mode, artifacts=identity)
+                        rows.append(row)
+                        print(tag, row, flush=True)
+                        (out / ('profiles.json' if args.profile else 'samples.json')).write_text(json.dumps(rows, indent=2) + '\n')
         for lock in locks:
             lock.close()
     return 0

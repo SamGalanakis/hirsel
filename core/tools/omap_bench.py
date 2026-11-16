@@ -180,6 +180,7 @@ def main():
     parser.add_argument('--reuse-rust', type=Path)
     parser.add_argument('--binary-dir', type=Path, help='measure existing frozen executables without rebuilding')
     parser.add_argument('--only-implementation', action='append', choices=['hirsel', 'btree', 'im', 'im-unique', 'arc-rewrap', 'arc-unique'])
+    parser.add_argument('--samples', type=int, choices=range(1, 6), default=1)
     parser.add_argument('--prepare', action='store_true')
     parser.add_argument('--measure', action='store_true')
     parser.add_argument('--check-refusal', action='store_true')
@@ -233,10 +234,11 @@ def main():
                     for implementation, argv in programs:
                         if args.only_implementation and implementation not in args.only_implementation:
                             continue
-                        row = measure(argv, directory, env, ('profile-' if args.profile else '') + profile + '-' + workload + '-' + implementation, expected, args.profile, binaries / 'host')
-                        rows.append(row)
-                        (directory / ('profile-rows.json' if args.profile else 'rows.json')).write_text(json.dumps(rows, indent=2) + '\n')
-                        print(json.dumps(row), flush=True)
+                        for sample in range(args.samples):
+                            row = measure(argv, directory, env, ('profile-' if args.profile else '') + profile + '-' + workload + '-' + implementation + ('-' + str(sample) if args.samples > 1 else ''), expected, args.profile, binaries / 'host')
+                            rows.append(row)
+                            (directory / ('profile-rows.json' if args.profile else 'rows.json')).write_text(json.dumps(rows, indent=2) + '\n')
+                            print(json.dumps(row), flush=True)
     return 0
 
 

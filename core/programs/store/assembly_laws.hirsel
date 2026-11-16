@@ -59,7 +59,7 @@ pub fn law_shared_payload_copy(c: Clock) -> bool {
     for i in 0u64 .. 32 {
         let key = shared_store_bytes(i)
         let value = shared_store_bytes(i)
-        let _ = result.unwrap(execute(mut db, i, fn(mut tx: Tx) -> Result[(), Error] {
+        let _ = result.unwrap(execute(mut db, 0, i, fn(mut tx: Tx) -> Result[(), Error] {
             put_bytes(mut tx, 1, key, value)
         }))
     }
@@ -67,7 +67,7 @@ pub fn law_shared_payload_copy(c: Clock) -> bool {
     let key = shared_store_bytes(16)
     let value = shared_store_bytes(99)
     let attempted = result.unwrap(bound bytes 32768 {
-        execute(mut db, 32, fn(mut tx: Tx) -> Result[(), Error] {
+        execute(mut db, 0, 32, fn(mut tx: Tx) -> Result[(), Error] {
             put_bytes(mut tx, 1, key, value)
         })
     })

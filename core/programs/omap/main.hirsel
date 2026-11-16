@@ -76,12 +76,16 @@ fn work(mut ids: u64, mut m: std.omap.OMap[u64, u64], mut held: List[std.omap.OM
         return std.omap.len(m)
     }
     if mode == "overwrite" {
+        let mut replaced_sum: u64 = 0
         for i in 0u64 .. 100000 {
             let previous = replace(mut m, std.omap.new())
-            let (take changed, _) = result.unwrap(std.omap.insert_owned(mut ids, take previous, i, i + 2))
+            let (take changed, take replaced) = result.unwrap(std.omap.insert_owned(mut ids, take previous, i, i + 2))
+            let old = option.unwrap(take replaced)
+            replaced_sum += std.omap.replaced_value(old)
             m = take changed
         }
-        return std.omap.len(m)
+        // Old values 1..100000 sum to 100000*100001/2 = 5000050000.
+        return replaced_sum
     }
     if mode == "unwrap" {
         return unwrap_edits(mut edits)
@@ -164,7 +168,9 @@ pub fn main(argv: Args, out: Stdout, dir: Dir, clock: Clock) -> Result[(), Exit]
     let start = host.mono_ns(clock)
     let sum = work(mut ids, mut m, mut held, mut edits, keys, values, mode)
     let elapsed = host.mono_ns(clock) - start
-    let expected = if mode == "overwrite" || mode == "insert" || mode == "unique" || mode == "recover" || mode == "bulk" || mode == "unwrap" {
+    let expected = if mode == "overwrite" {
+        5000050000u64
+    } else if mode == "insert" || mode == "unique" || mode == "recover" || mode == "bulk" || mode == "unwrap" {
         100000u64
     } else if mode == "lookup" {
         5000050000u64
@@ -190,6 +196,20 @@ pub fn main(argv: Args, out: Stdout, dir: Dir, clock: Clock) -> Result[(), Exit]
     // Keep both roots and snapshots alive until perf and RSS have been read.
     if (mode == "unwrap" && list.len(edits) != 1) || (mode != "unwrap" && std.omap.len(m) != 100000) || (mode == "snapshots" && list.len(held) != 1000) {
         return Error(Exit(status: 6))
+    }
+    // Validate every final row after counters and peak RSS have been read.
+    // Unique insert stores i+1; overwrite stores i+2. Length alone misses no-ops.
+    if mode == "unique" || mode == "overwrite" {
+        let offset = if mode == "overwrite" {
+            2u64
+        } else {
+            1u64
+        }
+        for i in 0u64 .. 100000 {
+            if value(m, i) != i + offset {
+                return Error(Exit(status: 10))
+            }
+        }
     }
     Ok(())
 }

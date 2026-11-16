@@ -20,7 +20,8 @@ fn btree(mode: &str, gate: &mut std::fs::File) {
     let input: Vec<_> = if mode == "bulk" { (0..100_000u64).map(|i| (i, i + 1)).collect() } else { Vec::new() };
     phase(|| match mode {
         "bulk" => { m = input.iter().copied().collect(); m.len() as u64 },
-        "overwrite" => { for i in 0..100_000u64 { black_box(m.insert(i, i + 2)); } m.len() as u64 },
+        // Old values 1..100000 sum to 100000*100001/2 = 5000050000.
+        "overwrite" => (0..100_000u64).map(|i| m.insert(i, i + 2).unwrap()).sum(),
         "insert" | "unique" | "recover" => { for i in 0..100_000u64 { m.insert(i, i + 1); } m.len() as u64 },
         "lookup" => (0..100_000).map(|i| black_box(&m)[&((i * 65537) % 100_000)]).sum(),
         "range" => m.range(25_000..75_000).map(|(k, v)| k + v).sum(),
@@ -30,6 +31,12 @@ fn btree(mode: &str, gate: &mut std::fs::File) {
         },
         _ => panic!("unknown workload"),
     }, gate);
+    // After the counter/RSS gate, verify every row, not only the length.
+    if mode == "unique" || mode == "overwrite" {
+        assert_eq!(m.len(), 100_000);
+        let offset = if mode == "overwrite" { 2 } else { 1 };
+        for i in 0..100_000u64 { assert_eq!(m.get(&i), Some(&(i + offset))); }
+    }
     black_box((&m, &held, &input));
 }
 
@@ -40,7 +47,8 @@ fn persistent(mode: &str, unique: bool, gate: &mut std::fs::File) {
     let input: Vec<_> = if mode == "bulk" { (0..100_000u64).map(|i| (i, i + 1)).collect() } else { Vec::new() };
     phase(|| match mode {
         "bulk" => { m = input.iter().copied().collect(); m.len() as u64 },
-        "overwrite" => { for i in 0..100_000u64 { black_box(m.insert(i, i + 2)); } m.len() as u64 },
+        // Old values 1..100000 sum to 100000*100001/2 = 5000050000.
+        "overwrite" => (0..100_000u64).map(|i| m.insert(i, i + 2).unwrap()).sum(),
         "insert" | "unique" | "recover" => {
             for i in 0..100_000u64 {
                 if unique || mode == "unique" || mode == "recover" { m.insert(i, i + 1); }
@@ -56,6 +64,12 @@ fn persistent(mode: &str, unique: bool, gate: &mut std::fs::File) {
         },
         _ => panic!("unknown workload"),
     }, gate);
+    // After the counter/RSS gate, verify every row, not only the length.
+    if mode == "unique" || mode == "overwrite" {
+        assert_eq!(m.len(), 100_000);
+        let offset = if mode == "overwrite" { 2 } else { 1 };
+        for i in 0..100_000u64 { assert_eq!(m.get(&i), Some(&(i + offset))); }
+    }
     black_box((&m, &held, &input));
 }
 

@@ -992,3 +992,55 @@ fn owned_unique_reuses_nodes() -> bool {
         Error(_) => false
     }
 }
+
+// 1100 keys force leaf and branch splits. For values i+1, i+2 and i+3,
+// arithmetic-series sums are 605550, 606650 and 607750 respectively.
+// The first overwrite is unique; the second keeps an independent version.
+// expect: run owned_replaced_checksums() = true
+fn owned_replaced_checksums() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    for i in 0u64 .. 1100 {
+        let previous = take m
+        let (take changed, take old) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 1))
+        if let Some(_) = old {
+            return false
+        }
+        m = take changed
+    }
+    let mut first_sum: u64 = 0
+    for i in 0u64 .. 1100 {
+        let previous = take m
+        let (take changed, take old) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 2))
+        let replaced = option.unwrap(take old)
+        first_sum += omap.replaced_value(replaced)
+        m = take changed
+    }
+    let held = omap.snapshot(m)
+    let mut second_sum: u64 = 0
+    for i in 0u64 .. 1100 {
+        let previous = take m
+        let (take changed, take old) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 3))
+        let replaced = option.unwrap(take old)
+        second_sum += omap.replaced_value(replaced)
+        m = take changed
+    }
+    let mut held_sum: u64 = 0
+    let mut final_sum: u64 = 0
+    for i in 0u64 .. 1100 {
+        let old_value: u64 = match omap.get(held, i) {
+            Some(v) => v,
+            None => return false
+        }
+        let new_value: u64 = match omap.get(m, i) {
+            Some(v) => v,
+            None => return false
+        }
+        if old_value != i + 2 || new_value != i + 3 {
+            return false
+        }
+        held_sum += old_value
+        final_sum += new_value
+    }
+    first_sum == 605550 && second_sum == 606650 && held_sum == 606650 && final_sum == 607750 && omap.len(m) == 1100 && omap.len(held) == 1100
+}

@@ -28,7 +28,7 @@ DEPENDENCIES = [
     ('rand_xoshiro', '0.6.0', ['rand_core'], []),
     ('im', '15.1.0', ['typenum', 'bitmaps', 'sized_chunks', 'rand_core', 'rand_xoshiro'], []),
 ]
-EXPECTED = {'overwrite': 100000, 'insert': 100000, 'lookup': 5000050000, 'range': 5000000000, 'snapshots': 500500, 'bulk': 100000, 'unwrap': 100000, 'unique': 100000, 'recover': 100000}
+EXPECTED = {'overwrite': 5000050000, 'insert': 100000, 'lookup': 5000050000, 'range': 5000000000, 'snapshots': 500500, 'bulk': 100000, 'unwrap': 100000, 'unique': 100000, 'recover': 100000}
 
 
 def inputs(source):
@@ -104,7 +104,7 @@ def resident(pid):
             for name in ['VmRSS', 'VmHWM']}
 
 
-def measure(argv, directory, env, tag, expected, recording=False, host_directory=None):
+def measure(argv, directory, env, tag, expected, recording=False, host_directory=None, events="instructions:u"):
     """Counters start after population; HWM resets to resident size at READY.
 
     The target reports its own monotonic operation duration. The post-DONE gate
@@ -121,7 +121,7 @@ def measure(argv, directory, env, tag, expected, recording=False, host_directory
     controls = [os.open(work / name, os.O_RDWR | os.O_NONBLOCK) for name in ['control', 'ack']]
     perf = work / ('perf.data' if recording else 'perf.tsv')
     mode = (['record', '-e', 'instructions:u', '-c', '100000' if 'insert' in tag else '10000',
-             '--call-graph', 'fp'] if recording else ['stat', '-x', '\t', '-e', 'instructions:u'])
+             '--call-graph', 'fp'] if recording else ['stat', '-x', '\t', '-e', events])
     wait_load()
     with (work / 'stderr').open('w') as err:
         command_line = [ROOT / 'tools/capped', 'taskset', '-c', '16', 'perf', *mode,
@@ -156,10 +156,15 @@ def measure(argv, directory, env, tag, expected, recording=False, host_directory
         os.close(fd)
     (work / 'stdout').write_text(ready + done + remainder)
     raw = perf.read_text() if not recording and perf.exists() else ''
+    counts = {}
+    for line in raw.splitlines():
+        cols = line.split('\t')
+        if len(cols) > 2 and cols[0].replace(',', '').isdigit():
+            counts[cols[2]] = int(cols[0].replace(',', ''))
     instructions = next((int(line.split('\t')[0].replace(',', '')) for line in raw.splitlines()
                          if '\tinstructions:u\t' in line and line.split('\t')[0].replace(',', '').isdigit()), None)
     ok = code == 0 and match is not None and int(match[1]) == expected and (recording or instructions is not None)
-    row = dict(tag=tag, exit=code, complete=ok, instructions=instructions,
+    row = dict(tag=tag, exit=code, complete=ok, instructions=instructions, counts=counts,
                wall_ns=int(match[2]) if match else None,
                resident_before_kib=start_resident['VmRSS'], peak_rss_kib=peak['VmHWM'] if peak else None,
                censored=None if ok else (work / 'stderr').read_text()[-1000:])
@@ -185,6 +190,7 @@ def main():
     parser.add_argument('--measure', action='store_true')
     parser.add_argument('--check-refusal', action='store_true')
     parser.add_argument('--profile', action='store_true')
+    parser.add_argument('--events', default='instructions:u', help='perf stat event list')
     parser.add_argument('--only-profile', choices=['dev', 'release'])
     parser.add_argument('--only-workload', action='append', choices=list(EXPECTED))
     args = parser.parse_args()
@@ -235,7 +241,7 @@ def main():
                         if args.only_implementation and implementation not in args.only_implementation:
                             continue
                         for sample in range(args.samples):
-                            row = measure(argv, directory, env, ('profile-' if args.profile else '') + profile + '-' + workload + '-' + implementation + ('-' + str(sample) if args.samples > 1 else ''), expected, args.profile, binaries / 'host')
+                            row = measure(argv, directory, env, ('profile-' if args.profile else '') + profile + '-' + workload + '-' + implementation + ('-' + str(sample) if args.samples > 1 else ''), expected, args.profile, binaries / 'host', args.events)
                             rows.append(row)
                             (directory / ('profile-rows.json' if args.profile else 'rows.json')).write_text(json.dumps(rows, indent=2) + '\n')
                             print(json.dumps(row), flush=True)

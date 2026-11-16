@@ -28,7 +28,7 @@ SIZES = (1, 100)
 N_PLACE = 8 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_deadline_held', 'calls_held_head', 'l14_handles')
+         'calls_store_refusal', 'calls_deadline_held', 'calls_held_head', 'l14_handles')
 
 # (name, [(old text, new text)], module, the law that must turn red). Each is a wrong
 # implementation the law names:
@@ -40,6 +40,7 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 # - release_at_commit_version: a Release at its own commit version, not the group's
 #   durable version;
 # - queue_outside_account: a session that frees a slot when it answers Abandoned.
+# - store_v22_admit: an admit of latest+1 while latest is unreplied.
 MUTANTS = (
     ('duplicate_unchecked',
      [('    if map.contains(r.slots, key) {\n        return Error(AlreadyRegistered(take key))\n    }\n', '')],
@@ -81,6 +82,9 @@ MUTANTS = (
      [('                if fired {\n                    let named',
        '                if fired {\n                    let _ = map.remove(mut held, slot_key(t.stream, t.p))\n                    let named')],
      'runner_calls', 'calls_held_head'),
+    ('store_v22_admit',
+     [('Some(r) => p == r.p + 1u64 && r.replied,', 'Some(r) => p == r.p + 1u64,')],
+     'runner_calls', 'calls_store_refusal'),
 )
 
 

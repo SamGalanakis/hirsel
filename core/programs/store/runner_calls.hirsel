@@ -47,12 +47,23 @@ fn crash(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
     Ok(xs[k])
 }
 
+// k rows in one commit: past a small resident_limit, the store refuses the commit.
+fn flood(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    for i in 0u64 .. k {
+        if let Error(_) = store.put(mut tx, h.t, i, i) {
+            return Error(1u32)
+        }
+    }
+    Ok(k)
+}
+
 // The place's one `place` function (rule 10): the head, the publisher and every session
 // run it.
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(write), 65536u64)?
     runner.transact(mut r, code.describe(refuse), 65536u64)?
-    runner.transact(mut r, code.describe(crash), 65536u64)
+    runner.transact(mut r, code.describe(crash), 65536u64)?
+    runner.transact(mut r, code.describe(flood), 1048576u64)
 }
 
 const N_PLACE: u64 = 1048576u64
@@ -72,6 +83,10 @@ fn k_write() -> Bytes {
 
 fn k_refuse() -> Bytes {
     key_of(code.identity(code.describe(refuse)), std.codec.of_u64(), std.codec.of_u64())
+}
+
+fn k_flood() -> Bytes {
+    key_of(code.identity(code.describe(flood)), std.codec.of_u64(), std.codec.of_u64())
 }
 
 fn k_crash() -> Bytes {
@@ -205,7 +220,11 @@ const LATER: u64 = 10000000000u64
 // One place: a fresh memory store with "data", place_head on this task, and the case's
 // client driver as a task that ends by dropping its head sender.
 fn served(c: Clock, r: Random, tasks: Tasks, f: fn(take Drive) -> () waits) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    served_in(c, r, tasks, store.defaults(), f)
+}
+
+fn served_in(c: Clock, r: Random, tasks: Tasks, o: store.Options, f: fn(take Drive) -> () waits) -> bool waits {
+    let mut db = store.memory(c, r, o)
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
@@ -358,6 +377,33 @@ pub fn law_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     served(c, r, tasks, drive_refusals)
 }
 
+// refusals' store refusal (store_v22_admit, C3): the store refuses p0's effect commit
+// (resident_limit), so the session gets Refused(Overloaded) in a frame at the publisher's
+// base (V3), the open's version 2, and p0 stays admitted with no reply. p1 is not admitted while p0 is unreplied (STORE-SPEC §1.8, S7):
+// it waits in the FIFO and is Abandoned at its deadline. A re-send of p0 runs it again
+// and is refused again; it is not Superseded, which C3 allows only for a replied position.
+fn drive_store_refusal(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_flood(), u64_arg(FLOOD), LATER)
+    let a = frame(s0)
+    want(is(a.outcome, Refused(Overloaded)) && a.version == 2u64, "store_refusal: p0 refused by the store")
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(1u64), 2000000u64)
+    let b = frame(s0)
+    want(b.p == 1u64 && is(b.outcome, Abandoned), "store_refusal: p1 not admitted while p0 is unreplied")
+    ask(s0, d.clock, 0u64, 0u64, k_flood(), u64_arg(FLOOD), LATER)
+    let c = frame(s0)
+    want(c.p == 0u64 && is(c.outcome, Refused(Overloaded)), "store_refusal: re-sent p0 runs again, not Superseded")
+    hang(take s0)
+}
+
+const FLOOD: u64 = 4000u64
+
+pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut o = store.defaults()
+    o.resident_limit = 32768u64
+    served_in(c, r, tasks, o, drive_store_refusal)
+}
+
 // L7/deadline_held (v2.4), on the real head. p1 of a fresh stream, sent before p0, waits
 // in the head's FIFO (S7: Rejected(0)); the session answers Abandoned at its deadline
 // (V1), at its last version 0, and keeps the slot (V2). Then p0 is sent and p1 re-sent:
@@ -466,6 +512,11 @@ fn test_calls_duplicate(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] wai
 @test
 fn test_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_calls_refusals(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_store_refusal(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_store_refusal(c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 @test

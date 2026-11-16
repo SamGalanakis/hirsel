@@ -151,10 +151,12 @@ enum Section {
     /// The entry link, encoded.
     Link,
     /// Each path's source place in the link that wrote the record: fixed
-    /// `(placed, module, file offset)` u32 triples by path index.
+    /// `(placed, module, file, file offset)` u32 quadruples by path index.
     Places,
 }
 const SECTIONS: usize = 8;
+/// The bytes of one [`Section::Places`] row.
+const PLACE: usize = 16;
 /// The head: schema, [`Head`], and each section's offset and length in the
 /// payload, u32 little-endian.
 const HEAD: usize = HEAD_SECTIONS + SECTIONS * 8;
@@ -315,7 +317,7 @@ impl Reach {
         let graph = section(Section::Graph);
         let fixed = constants.len() % 4 == 0
             && (0..constants.len() / 4).all(|i| (u32_at(constants, i * 4) as usize) < paths)
-            && places.len() == paths * 12
+            && places.len() == paths * PLACE
             && rows <= paths;
         if !fixed || graph.len() < 8 {
             return None;
@@ -437,10 +439,16 @@ impl Reach {
             .collect()
     }
     /// The source place of path `i` in the link that wrote the record.
-    pub(crate) fn place(&self, i: usize) -> Option<(ModuleId, u32)> {
-        let at = i * 12;
+    pub(crate) fn place(&self, i: usize) -> Option<(ModuleId, SourceId, u32)> {
+        let at = i * PLACE;
         let bytes = self.section(Section::Places);
-        (u32_at(bytes, at) == 1).then(|| (ModuleId(u32_at(bytes, at + 4)), u32_at(bytes, at + 8)))
+        (u32_at(bytes, at) == 1).then(|| {
+            (
+                ModuleId(u32_at(bytes, at + 4)),
+                SourceId(u32_at(bytes, at + 8)),
+                u32_at(bytes, at + 12),
+            )
+        })
     }
     /// The table's length.
     pub(crate) fn len(&self) -> usize {
@@ -894,17 +902,14 @@ fn encode_record<'a>(
     }
     let mut placed = vec![];
     for row in places {
-        placed.push((index(row.path)?, row.module, row.file_offset));
+        placed.push((index(row.path)?, row));
     }
     for path in &paths[path_bytes.ends.len()..] {
         path_bytes.encode(*path)?;
     }
-    let mut place_bytes = vec![0u8; paths.len() * 12];
-    for (i, module, offset) in placed {
-        let at = i as usize * 12;
-        for (k, word) in [1, module.0, offset].into_iter().enumerate() {
-            place_bytes[at + k * 4..at + k * 4 + 4].copy_from_slice(&word.to_le_bytes());
-        }
+    let mut place_bytes = vec![0u8; paths.len() * PLACE];
+    for (i, row) in placed {
+        write_place(&mut place_bytes, i as usize, row);
     }
     let mut closure_bytes = Vector::default();
     for closure in closures {
@@ -1020,26 +1025,33 @@ fn place_section(
     let n = prior.paths.len();
     let numbers: rustc_hash::FxHashMap<&DefPath, usize> =
         (0..n).map(|i| (prior.path(i), i)).collect();
-    let mut out = vec![0u8; n * 12];
+    let mut out = vec![0u8; n * PLACE];
     for row in places {
-        let at = *numbers.get(row.path)? * 12;
-        for (k, word) in [1, row.module.0, row.file_offset].into_iter().enumerate() {
-            out[at + k * 4..at + k * 4 + 4].copy_from_slice(&word.to_le_bytes());
-        }
+        write_place(&mut out, *numbers.get(row.path)?, row);
     }
     Some(out)
 }
+/// Row `i` of a Places section: placed, module, file, file offset.
+fn write_place(out: &mut [u8], i: usize, row: &crate::native_sources::SourceRow<'_>) {
+    let at = i * PLACE;
+    for (k, word) in [1, row.module.0, row.source.0, row.file_offset]
+        .into_iter()
+        .enumerate()
+    {
+        out[at + k * 4..at + k * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+}
 
 /// What a source map rests on besides the image (which the record's key
-/// names) and its items: each request file's module, name and text. Equal
-/// files give each item the same module and offset.
+/// names) and its items: each request file's occurrence, module, name and
+/// text. Equal files give each item the same file and offset.
 pub(crate) fn files_digest(product: &CheckProduct) -> io::Result<ContentHash> {
     let files: Vec<_> = product
         .files
         .iter()
-        .map(|f| (f.module, product.source_name(f.module), f.source))
+        .map(|f| (f.file, f.module, product.file_name(f), f.source))
         .collect();
-    crate::native::key("hirsel.core-reach-files.v1", &files)
+    crate::native::key("hirsel.core-reach-files.v2", &files)
 }
 
 /// The digest of the source map `source_map(rows)` builds: each item's path,
@@ -1049,23 +1061,28 @@ pub(crate) fn sources_digest(
     product: &CheckProduct,
     rows: &[crate::native_sources::SourceRow<'_>],
 ) -> io::Result<ContentHash> {
-    let mut modules = BTreeMap::new();
+    let mut files = BTreeMap::new();
     for row in rows {
-        modules.entry(row.module).or_insert_with(|| {
-            let own = product.files.iter().find(|file| file.module == row.module);
-            let text = match own {
-                Some(file) => file.source,
-                None => product.image.as_ref().unwrap().identity,
-            };
-            (product.source_name(row.module), own.is_some(), text)
-        });
+        if files.contains_key(&row.source) {
+            continue;
+        }
+        let file = match product.files.iter().find(|file| file.file == row.source) {
+            Some(file) => (product.file_name(file), true, file.source),
+            None => {
+                let image = product.image.as_ref().unwrap();
+                let name = image.source_name(row.source)?;
+                let name = name.unwrap_or_else(|| product.module_name(row.module));
+                (name, false, image.identity)
+            }
+        };
+        files.insert(row.source, file);
     }
     let rows: Vec<_> = rows
         .iter()
-        .map(|r| (r.path, r.module, r.file_offset))
+        .map(|r| (r.path, r.source, r.file_offset))
         .collect();
     crate::native::key(
-        "hirsel.core-source-map.v1",
-        &(rows, modules.into_iter().collect::<Vec<_>>()),
+        "hirsel.core-source-map.v2",
+        &(rows, files.into_iter().collect::<Vec<_>>()),
     )
 }

@@ -31,6 +31,10 @@ pub struct SourceId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Site {
     pub module: ModuleId,
+    /// The file the site is in: `item` is that file's item ordinal and `span`
+    /// is relative to the item, or to the file when `item` is `u32::MAX`. None
+    /// only for a site of a module itself (its name), which is in no file.
+    pub source: Option<SourceId>,
     pub item: u32,
     pub span: Span,
 }
@@ -64,11 +68,12 @@ impl Refusal {
             message: message.into(),
         }
     }
-    pub fn syntax(module: ModuleId, diagnostic: &Diagnostic) -> Self {
+    pub fn syntax(module: ModuleId, source: SourceId, diagnostic: &Diagnostic) -> Self {
         Self {
             rule: diagnostic.rule.clone(),
             primary: Site {
                 module,
+                source: Some(source),
                 item: u32::MAX,
                 span: diagnostic.primary,
             },
@@ -246,6 +251,7 @@ impl NameIndex {
                         "LANG-2",
                         Site {
                             module: id,
+                            source: None,
                             item: u32::MAX,
                             span: Span::default(),
                         },
@@ -546,6 +552,7 @@ impl NameIndex {
         };
         let site = Site {
             module,
+            source: Some(source),
             item: ordinal,
             span: item.token_span(t),
         };

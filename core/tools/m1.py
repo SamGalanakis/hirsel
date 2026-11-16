@@ -105,8 +105,11 @@ def checker_slice(message, expression=""):
     return 'unassigned'
 
 
-def gap_sites(incomplete, sources=None, first_stops=()):
-    """Count source spans, not duplicate messages or the first message per body."""
+def gap_sites(incomplete, sources=None, first_stops=(), modules=None):
+    """Count source spans, not duplicate messages or the first message per body.
+
+    A site names its file as the request does (relative to the manifest under
+    --inputs); `modules` maps such a name to its module path."""
     sites = {}
     instance_gaps = [dict(message=stop['construct'], primary=stop['primary'], rule=stop['rule'])
                      for stop in first_stops if stop['rule'] == 'instances']
@@ -117,7 +120,7 @@ def gap_sites(incomplete, sources=None, first_stops=()):
         expression = source[span['start']:span['end']].decode(errors='replace') if source is not None else ''
         owner = checker_slice(gap['message'], expression)
         if gap.get('rule') == 'instances':
-            module = primary['module']
+            module = (modules or {}).get(primary['module'], primary['module'])
             if gap['message'] == 'native body is unavailable':
                 if module.startswith(('core@1/string', 'core@1/list', 'core@1/map', 'core@1/box', 'core@1/rc', 'core@1/arc', 'core@1/option', 'core@1/result')):
                     owner = 'A1'
@@ -199,20 +202,24 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
             if not cases:
                 raise ValueError(f'entry has no applicable cases: {entry}')
             selected_inputs = inputs_for(manifest, entry, root)
-            sources = {}
+            files = {}
             for package in selected_inputs['packages']:
                 for source in package['sources']:
                     file = Path(source['file'])
                     if file.is_file():
                         name = package['package']
                         module = f"{name['name']}@{name['version']}/" + '/'.join(source['modules'])
-                        sources[module] = file.read_bytes()
+                        files[file] = (module, file.read_bytes())
             for engine in engines:
                 name = f"{entry['workload']}-{entry['variant']}-{engine}"
                 scratch = temp / name
                 scratch.mkdir()
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(selected_inputs))
+                # Diagnostics name a file by its path relative to the manifest.
+                names = {os.path.relpath(file, scratch): module_bytes for file, module_bytes in files.items()}
+                sources = {name: data for name, (_, data) in names.items()}
+                modules = {name: module for name, (module, _) in names.items()}
                 binary = scratch / 'program'
                 path = entry['package']
                 entry_path = f"{path['name']}@{path['version']}/{entry['module']}/{entry['function']}"
@@ -240,7 +247,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                     continue
                 row['diagnostics'] = product.get('diagnostics', [])
                 row['incomplete'] = product.get('incomplete', [])
-                row['gap_sites'] = gap_sites(row['incomplete'], sources, product.get('reachable', {}).get('first_stops', []))
+                row['gap_sites'] = gap_sites(row['incomplete'], sources, product.get('reachable', {}).get('first_stops', []), modules)
                 row['checked'] = bool(product['accepted'])
                 row['native'] = product.get('native')
                 row['artifact_linked'] = build.returncode == 0 and bool(row['native'])

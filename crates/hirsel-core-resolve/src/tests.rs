@@ -8,7 +8,7 @@ fn package(name: &str) -> PackageId {
         version: "1".into(),
     }
 }
-type Files = Vec<(ModuleId, SyntaxFile)>;
+type Files = Vec<(ModuleId, SyntaxFile, SourceId)>;
 fn fixture(sources: &[(&str, &str)]) -> (NameIndex, Files) {
     packages(
         &sources
@@ -80,7 +80,7 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
         for (i, item) in syntax.items().enumerate() {
             index.index_item(module, source, i as u32, item);
         }
-        files.push((module, syntax));
+        files.push((module, syntax, source));
     }
     let core = index
         .package(
@@ -93,7 +93,7 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
     (index, files)
 }
 fn run(index: &NameIndex, files: &Files, f: usize, i: usize) -> Resolution {
-    resolve(index, files[f].0, i as u32, files[f].1.item(i))
+    resolve(index, files[f].0, files[f].2, i as u32, files[f].1.item(i))
 }
 fn sym(index: &NameIndex, s: &str) -> hirsel_core_syntax::Symbol {
     index.symbols.find(s).unwrap()
@@ -651,6 +651,7 @@ fn only_core_functions_may_end_at_their_header() {
                     d.primary,
                     Site {
                         module: f[0].0,
+                        source: Some(f[0].2),
                         item: 0,
                         span: hirsel_core_syntax::Span { start: end, end },
                     }
@@ -801,9 +802,9 @@ fn syntax_refusals_do_not_cascade_and_recovery_keeps_the_next_definition() {
     let file = &p.syntax;
     assert!(file.items[0].has_errors);
     assert!(!file.items[1].has_errors);
-    let bad = resolve(&index, module, 0, file.item(0));
+    let bad = resolve(&index, module, files[0].2, 0, file.item(0));
     assert!(bad.names.is_empty() && bad.diagnostics.is_empty());
-    let good = resolve(&index, module, 1, file.item(1));
+    let good = resolve(&index, module, files[0].2, 1, file.item(1));
     assert!(good.diagnostics.is_empty());
     assert_eq!(good.names.len(), 3);
     let recovery = parse(
@@ -1167,6 +1168,7 @@ fn lang_15_prog_7_continue_refusal_has_the_target_site_and_facts() {
         d.primary,
         Site {
             module: f[0].0,
+            source: Some(f[0].2),
             item: 0,
             span: hirsel_core_syntax::Span { start: 15, end: 26 }
         }
@@ -1216,15 +1218,15 @@ fn scratch_reuse_keeps_each_items_reads_sites_and_private_refusals() {
     let mut scratch = ResolutionScratch::default();
     for &f in &[0, 1, 0, 1] {
         for (i, item) in files[f].1.items().enumerate() {
-            let expected = resolve(&index, files[f].0, i as u32, item);
-            let actual = scratch.resolve(&index, files[f].0, i as u32, item);
+            let expected = resolve(&index, files[f].0, files[f].2, i as u32, item);
+            let actual = scratch.resolve(&index, files[f].0, files[f].2, i as u32, item);
             assert_eq!(
                 serde_json::to_value(actual).unwrap(),
                 serde_json::to_value(expected).unwrap()
             );
         }
     }
-    let third = scratch.resolve(&index, files[1].0, 2, files[1].1.item(2));
+    let third = scratch.resolve(&index, files[1].0, files[1].2, 2, files[1].1.item(2));
     assert_eq!(
         third
             .diagnostics

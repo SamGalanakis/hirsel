@@ -24,10 +24,11 @@ pub(crate) struct ImageDirectory {
     pub inputs: CorpusManifest,
     pub index: Arc<NameIndex>,
     pub files: Table<ImageFile>,
-    pub sources: Map<ModuleId, ContentHash>,
+    /// Each file's manifest-relative name, if it had one, and its text's row.
+    pub sources: Map<SourceId, (Option<String>, ContentHash)>,
     pub headers: Arc<reuse::Headers>,
-    pub anchors: Map<(ModuleId, u32), DefPath>,
-    pub offsets: Map<(ModuleId, u32), u32>,
+    pub anchors: Map<ItemAt, DefPath>,
+    pub offsets: Map<ItemAt, u32>,
     pub declarations: ContentHash,
     pub definitions: Map<DefPath, ContentHash>,
     pub diagnostics: Table<Refusal>,
@@ -151,16 +152,29 @@ impl CoreImage {
     pub fn file(&self, index: usize) -> io::Result<Arc<FileProduct>> {
         hirsel_core_ids::published::catch_io(|| self.file_inner(index))
     }
-    /// One library file's text for an executable's source table; the
-    /// executable names the file by its module, never by its installed path.
-    pub(crate) fn source_text(&self, module: ModuleId) -> io::Result<String> {
+    /// One library file's manifest-relative name, if it had one.
+    pub(crate) fn source_name(&self, source: SourceId) -> io::Result<Option<String>> {
+        hirsel_core_ids::published::catch_io(|| {
+            Ok(self
+                .directory()?
+                .sources
+                .get(&source)
+                .and_then(|(name, _)| name.clone()))
+        })
+    }
+    /// One library file's manifest-relative name, if it had one, and its text
+    /// for an executable's source table; never its installed path.
+    pub(crate) fn source_file(&self, source: SourceId) -> io::Result<(Option<String>, String)> {
         let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         hirsel_core_ids::published::catch_io(|| {
             let directory = self.directory()?;
-            let row = directory.sources.get(&module).ok_or_else(|| {
-                io::Error::other("native source module is not in its package image")
+            let (name, row) = directory.sources.get(&source).ok_or_else(|| {
+                io::Error::other("native source file is not in its package image")
             })?;
-            self.read(*row, crate::meter::Count::ImageSourceBytes)
+            Ok((
+                name.clone(),
+                self.read(*row, crate::meter::Count::ImageSourceBytes)?,
+            ))
         })
     }
     fn file_inner(&self, index: usize) -> io::Result<Arc<FileProduct>> {
@@ -191,15 +205,10 @@ impl CoreImage {
     pub fn checked_index_pages(&self) -> usize {
         self.indexed.checked_pages()
     }
-    pub(crate) fn file_offset(&self, module: ModuleId, item: u32) -> io::Result<u32> {
+    pub(crate) fn file_offset(&self, at: ItemAt) -> io::Result<u32> {
         let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         hirsel_core_ids::published::catch_io(|| {
-            Ok(self
-                .directory()?
-                .offsets
-                .get(&(module, item))
-                .copied()
-                .unwrap_or(0))
+            Ok(self.directory()?.offsets.get(&at).copied().unwrap_or(0))
         })
     }
     pub fn demand(&self, path: &DefPath) -> io::Result<Arc<DefinitionProduct>> {
@@ -315,7 +324,10 @@ impl Driver {
         let mut files = Vec::new();
         let mut sources = Map::default();
         for file in &product.files {
-            sources.insert(file.module, store.put(&encode(&file.syntax.source)?)?);
+            sources.insert(
+                file.file,
+                (file.name.clone(), store.put(&encode(&file.syntax.source)?)?),
+            );
             files.push(ImageFile {
                 module: file.module,
                 names: file.names.clone(),
@@ -331,7 +343,7 @@ impl Driver {
         for (id, header) in product.headers.rows.iter().enumerate() {
             if let Some(header) = header {
                 anchors.insert(
-                    header.anchor,
+                    (header.anchor.1, header.anchor.2),
                     product
                         .index
                         .definition_path(hirsel_core_resolve::DefinitionId(id as u32)),
@@ -341,7 +353,7 @@ impl Driver {
         let mut offsets = Map::default();
         for file in &product.files {
             for (i, item) in file.syntax.items.iter().enumerate() {
-                offsets.insert((file.module, i as u32), item.file_offset);
+                offsets.insert((file.file, i as u32), item.file_offset);
             }
         }
         for package in &mut inputs.packages {

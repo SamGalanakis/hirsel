@@ -171,6 +171,7 @@ impl PackageProduct {
     ) -> io::Result<Self> {
         let (checked, image) = Driver::default().produce_package(
             CheckRequest {
+                manifest: None,
                 inputs,
                 store: directory,
                 library: LibraryInput::Sources,
@@ -845,6 +846,7 @@ mod agreement {
     fn run(inputs: CorpusManifest, entry: Option<DefPath>, dir: &Path, cache: &Path) {
         let expect_std = inputs.packages.iter().any(|p| p.package == package("std"));
         let mut request = CheckRequest {
+            manifest: None,
             inputs,
             store: dir.join("source"),
             library: LibraryInput::Sources,

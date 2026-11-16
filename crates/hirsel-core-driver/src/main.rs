@@ -364,7 +364,11 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     }
     let mut request = if let Some(manifest) = manifest {
         CheckRequest {
-            inputs: serde_json::from_slice::<CorpusManifest>(&std::fs::read(manifest)?)?,
+            inputs: serde_json::from_slice::<CorpusManifest>(&std::fs::read(&manifest)?)?,
+            manifest: Some(match manifest.parent() {
+                Some(dir) if !dir.as_os_str().is_empty() => dir.to_owned(),
+                _ => PathBuf::from("."),
+            }),
             store,
             library: image.map_or(LibraryInput::Sources, LibraryInput::Image),
             entry: None,

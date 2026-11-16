@@ -19,6 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .retain(|p| ["core", "std"].contains(&p.package.name.as_str()));
         Driver::default().check_reachable_with_product(
             CheckRequest {
+                manifest: None,
                 inputs,
                 entry: None,
                 store: cache.join("prepare"),
@@ -37,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cost::start(move || counter.read())?;
     }
     let request = CheckRequest {
+        manifest: None,
         inputs: serde_json::from_slice(&std::fs::read(&args[0])?)?,
         store: PathBuf::from(&args[1]),
         library: LibraryInput::Sources,

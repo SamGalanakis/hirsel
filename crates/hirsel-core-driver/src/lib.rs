@@ -56,7 +56,7 @@ use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 use hirsel_core_ir::Module;
 use hirsel_core_resolve::{
     CorpusManifest, Definition, DefinitionId, ModuleId, ModulePath, NameIndex, PackageManifest,
-    Refusal, Resolution, ResolutionScratch, Site,
+    Refusal, Resolution, ResolutionScratch, Site, SourceId,
 };
 use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile};
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,12 @@ pub struct CheckRequest {
     pub store: PathBuf,
     pub library: LibraryInput,
     pub entry: Option<DefPath>,
+    /// The directory of the explicit manifest `inputs` was read from. A
+    /// diagnostic and a native site name a file of the request by its path
+    /// relative to it, so two files of one module have two names. Without a
+    /// manifest a file is named by its module, as the directory convention
+    /// gives each file a module of its own.
+    pub manifest: Option<PathBuf>,
 }
 impl CheckRequest {
     fn source_std(root: &Path) -> io::Result<PackageManifest> {
@@ -103,6 +109,7 @@ impl CheckRequest {
         };
         let std = Self::source_std(&libraries.join("std"))?;
         Ok(Self {
+            manifest: None,
             inputs: CorpusManifest {
                 core: package("core"),
                 packages: vec![core, std],
@@ -123,6 +130,7 @@ impl CheckRequest {
                 .map(|p| p.package.clone()),
         );
         Ok(Self {
+            manifest: None,
             inputs: CorpusManifest {
                 core: image.directory()?.inputs.core.clone(),
                 packages: vec![app],
@@ -143,6 +151,7 @@ impl CheckRequest {
         let mut app = PackageManifest::directory(dir, package("app"), false)?;
         app.dependencies.extend([package("core"), package("std")]);
         Ok(Self {
+            manifest: None,
             inputs: CorpusManifest {
                 core: package("core"),
                 packages: vec![
@@ -166,6 +175,7 @@ impl CheckRequest {
         let mut app = PackageManifest::directory(dir, package("app"), false)?;
         app.dependencies.extend([package("core"), package("std")]);
         Ok(Self {
+            manifest: None,
             inputs: CorpusManifest {
                 core: package("core"),
                 packages: vec![core, std, app],
@@ -180,6 +190,10 @@ impl CheckRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileProduct {
     pub module: ModuleId,
+    /// This file's occurrence in the index: sites in it name it.
+    pub file: SourceId,
+    /// Its path relative to the request's manifest, when it has one.
+    pub name: Option<String>,
     pub source: ContentHash,
     pub syntax: SyntaxFile,
     pub names: Vec<Definition>,
@@ -217,7 +231,7 @@ mod body {
         ir_hash: ContentHash,
         pub resolved: bool,
         pub key: DefinitionKey,
-        pub anchors: BTreeMap<(ModuleId, u32), DefPath>,
+        pub anchors: BTreeMap<ItemAt, DefPath>,
         pub incomplete: Vec<Incomplete>,
         /// The body record's address: the content hash of this product as published.
         pub record: ContentHash,
@@ -247,7 +261,7 @@ mod body {
             ir: Module,
             resolved: bool,
             key: DefinitionKey,
-            anchors: BTreeMap<(ModuleId, u32), DefPath>,
+            anchors: BTreeMap<ItemAt, DefPath>,
             incomplete: Vec<Incomplete>,
         ) -> Self {
             Self {
@@ -429,10 +443,23 @@ pub struct Driver {
     pub(crate) layers: layers::Probe,
 }
 
-/// The module of a canonical record site: its item is an index into the
-/// record's anchor list, so a record does not depend on module numbering or
-/// item order at the time it was checked.
-const ANCHORED: ModuleId = ModuleId(u32::MAX);
+/// An item in one source file: the file's occurrence and the item's ordinal
+/// in it. A site's anchor key; two files of one module never share one.
+pub(crate) type ItemAt = (SourceId, u32);
+pub(crate) fn item_at(site: &Site) -> Option<ItemAt> {
+    site.source.map(|source| (source, site.item))
+}
+/// Point `site` at the item `anchor` (module, file, ordinal) names.
+pub(crate) fn bind(site: &mut Site, anchor: (ModuleId, SourceId, u32)) {
+    site.module = anchor.0;
+    site.source = Some(anchor.1);
+    site.item = anchor.2;
+}
+/// The module and file of a canonical record site: its item is an index into
+/// the record's anchor list, so a record does not depend on module or file
+/// numbering or item order at the time it was checked.
+const ANCHORED_MODULE: ModuleId = ModuleId(u32::MAX);
+const ANCHORED: SourceId = SourceId(u32::MAX);
 
 // Borrow the native result tables for output. No cloned IR, resolver scratch or text.
 // Sites are canonical: each site with an anchor names it by its position in `anchors`.
@@ -467,8 +494,9 @@ impl<'a> DiskCheckRef<'a> {
             )));
         }
         let canonical = |site: &mut Site| {
-            if let Some(path) = d.anchors.get(&(site.module, site.item)) {
-                site.module = ANCHORED;
+            if let Some(path) = item_at(site).and_then(|at| d.anchors.get(&at)) {
+                site.module = ANCHORED_MODULE;
+                site.source = Some(ANCHORED);
                 site.item = anchors.binary_search(&path).unwrap() as u32;
             }
         };
@@ -546,6 +574,11 @@ impl Driver {
                     ContentHash::of_bytes(&bytes)
                 };
                 bytes_total += bytes.len();
+                let name = request
+                    .manifest
+                    .as_deref()
+                    .map(|root| manifest_name(root, &s.file))
+                    .transpose()?;
                 sources.push((
                     ModulePath {
                         package: p.package.clone(),
@@ -554,6 +587,7 @@ impl Driver {
                     s.signatures,
                     bytes,
                     hash,
+                    name,
                 ));
             }
         }
@@ -567,8 +601,9 @@ impl Driver {
         let produce = matches!(request.library, LibraryInput::Produce);
         let reachable_only = matches!(request.library, LibraryInput::ReachableImage(_));
         // A file is read for its bytes alone: the snapshot names each source
-        // by its module and digest, never by where the checkout lives.
-        let source_stamps: Vec<_> = sources.iter().map(|s| (&s.0, s.1, s.3)).collect();
+        // by its module, digest and manifest-relative name, never by where
+        // the checkout lives.
+        let source_stamps: Vec<_> = sources.iter().map(|s| (&s.0, s.1, s.3, &s.4)).collect();
         let dependencies: Vec<_> = request
             .inputs
             .packages
@@ -629,7 +664,7 @@ impl Driver {
         let mut modules = vec![];
         let mut syntax_diagnostics = vec![];
         let mut syntax_resources = vec![];
-        for (path, signatures, bytes, _) in &sources {
+        for (file, (path, signatures, bytes, _, _)) in sources.iter().enumerate() {
             let derive = request
                 .inputs
                 .packages
@@ -648,9 +683,9 @@ impl Driver {
                 &mut symbols,
                 derive.as_ref(),
             );
-            syntax_diagnostics.extend(output.diagnostics.into_iter().map(|d| (path, d)));
+            syntax_diagnostics.extend(output.diagnostics.into_iter().map(|d| (file, d)));
             if let Some(r) = output.resource_refusal {
-                syntax_resources.push((path, r.site(), format!("parser resource refusal: {r}")));
+                syntax_resources.push((file, r.site(), format!("parser resource refusal: {r}")));
             }
             modules.push((path, output.syntax));
         }
@@ -717,15 +752,16 @@ impl Driver {
             result.resources.extend(directory.resources.iter().cloned());
         }
         result.snapshot = snapshot;
-        for (path, d) in syntax_diagnostics {
-            result
-                .diagnostics
-                .push(Refusal::syntax(index.module(path).unwrap(), &d));
+        // Modules are the sources in order, one file each.
+        for (file, d) in syntax_diagnostics {
+            let m = &modules[file];
+            result.diagnostics.push(Refusal::syntax(m.id, m.source, &d));
         }
-        for (path, span, message) in syntax_resources {
+        for (file, span, message) in syntax_resources {
             result.resources.push(ResourceRefusal {
                 primary: Site {
-                    module: index.module(path).unwrap(),
+                    module: modules[file].id,
+                    source: Some(modules[file].source),
                     item: u32::MAX,
                     span,
                 },
@@ -741,7 +777,7 @@ impl Driver {
                     .items()
                     .enumerate()
                     .map(|(i, item)| {
-                        Arc::new(resolution_scratch.resolve(&index, m.id, i as u32, item))
+                        Arc::new(resolution_scratch.resolve(&index, m.id, m.source, i as u32, item))
                     })
                     .collect()
             })
@@ -1086,30 +1122,28 @@ impl Driver {
         }
         meter.finish("check/lower");
         derived_sites(&mut result, &modules);
-        let mut names: BTreeMap<ModuleId, Vec<(DefinitionId, Definition)>> = BTreeMap::new();
+        let mut names: BTreeMap<Option<SourceId>, Vec<(DefinitionId, Definition)>> =
+            BTreeMap::new();
         let base = index.definitions.base_len();
         for (i, d) in index.definitions.own_iter().enumerate() {
             names
-                .entry(d.site.module)
+                .entry(d.site.source)
                 .or_default()
                 .push((DefinitionId((base + i) as u32), *d));
         }
-        for (m, (path, _, bytes, source)) in modules.into_iter().zip(sources) {
-            let rows = names.remove(&m.id).unwrap_or_default();
-            publication.files.insert(
-                (
-                    path.package.name.clone(),
-                    path.package.version.clone(),
-                    path.modules.clone(),
-                ),
-                file_record(&index, &m, &bytes, source, &rows),
-            );
-            let module_names = rows.into_iter().map(|(_, d)| d).collect();
+        for (m, (_, _, bytes, source, name)) in modules.into_iter().zip(sources) {
+            let rows = names.remove(&Some(m.source)).unwrap_or_default();
+            publication
+                .files
+                .push(file_record(&index, &m, &bytes, source, &rows));
+            let file_names = rows.into_iter().map(|(_, d)| d).collect();
             result.files.push(Arc::new(FileProduct {
                 module: m.id,
+                file: m.source,
+                name,
                 source,
                 syntax: m.syntax,
-                names: module_names,
+                names: file_names,
             }));
         }
         meter.finish("publish/assemble products");
@@ -1187,6 +1221,30 @@ fn recorded_definition(
     Ok(DefinitionProduct::from_head(&head, record, decode, source)
         .filter(|product| product.definition == *path))
 }
+/// What a diagnostic and a native site call `file`, listed by the manifest in
+/// `root`: its path relative to `root`, by components, `/`-separated. Both
+/// are made absolute first, so a relative manifest entry and a relative
+/// manifest directory agree; a file outside `root` climbs with `..`.
+fn manifest_name(root: &Path, file: &Path) -> io::Result<String> {
+    use std::path::Component;
+    let (root, file) = (std::path::absolute(root)?, std::path::absolute(file)?);
+    let normal = |p: &Path| -> Vec<String> {
+        let mut out: Vec<String> = vec![];
+        for c in p.components() {
+            match c {
+                Component::ParentDir => drop(out.pop()),
+                Component::Normal(s) => out.push(s.to_string_lossy().into_owned()),
+                _ => {}
+            }
+        }
+        out
+    };
+    let (root, file) = (normal(&root), normal(&file));
+    let shared = root.iter().zip(&file).take_while(|(a, b)| a == b).count();
+    let mut parts = vec![".."; root.len() - shared];
+    parts.extend(file[shared..].iter().map(String::as_str));
+    Ok(parts.join("/"))
+}
 /// The file record: namespace map and anchor map (item ordinal, line base).
 fn file_record(
     index: &NameIndex,
@@ -1226,10 +1284,11 @@ fn file_record(
 /// default of another type, which the generated items would repeat at text no one wrote.
 fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
     let at = |site: &Site| {
-        let m = modules.iter().find(|m| m.id == site.module)?;
+        let m = modules.iter().find(|m| Some(m.source) == site.source)?;
         let (item, span) = hirsel_core_syntax::declaration_of(&m.syntax, site.item as usize)?;
         Some(Site {
             module: site.module,
+            source: site.source,
             item: item as u32,
             span,
         })
@@ -1238,7 +1297,7 @@ fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
         .diagnostics
         .iter()
         .filter(|r| at(&r.primary).is_none())
-        .map(|r| (r.primary.module, r.primary.item))
+        .map(|r| (r.primary.source, r.primary.item))
         .collect();
     let mut seen = std::collections::HashSet::new();
     result.diagnostics.retain_mut(|r| {
@@ -1251,10 +1310,10 @@ fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
                 *causal = site;
             }
         }
-        !own.contains(&(site.module, site.item))
+        !own.contains(&(site.source, site.item))
             && seen.insert((
                 r.rule.clone(),
-                site.module,
+                site.source,
                 site.item,
                 site.span.start,
                 r.message.clone(),
@@ -1266,8 +1325,8 @@ fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
             return true;
         };
         g.primary = site;
-        !own.contains(&(site.module, site.item))
-            && seen.insert((site.module, site.item, site.span.start, g.message.clone()))
+        !own.contains(&(site.source, site.item))
+            && seen.insert((site.source, site.item, site.span.start, g.message.clone()))
     });
 }
 
@@ -1277,12 +1336,11 @@ fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
 fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) {
     let anchors = std::mem::take(&mut product.anchors);
     let bind = |site: &mut Site| {
-        if let Some(h) = anchors
-            .get(&(site.module, site.item))
+        if let Some(h) = item_at(site)
+            .and_then(|at| anchors.get(&at))
             .and_then(|p| headers.get(p))
         {
-            site.module = h.anchor.0;
-            site.item = h.anchor.1;
+            crate::bind(site, h.anchor);
         }
     };
     for r in &mut product.check.refusals {
@@ -1296,7 +1354,10 @@ fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) 
     }
     product.anchors = anchors
         .into_values()
-        .filter_map(|path| Some((headers.get(&path)?.anchor, path)))
+        .filter_map(|path| {
+            let (_, source, item) = headers.get(&path)?.anchor;
+            Some(((source, item), path))
+        })
         .collect();
 }
 

@@ -5,6 +5,7 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
     std::fs::write(&source_file, source).unwrap();
     CheckRequest {
+        manifest: None,
         inputs: CorpusManifest {
             core: package("core"),
             packages: vec![PackageManifest {
@@ -1113,6 +1114,7 @@ fn directory_source_file_symlinks_are_checked_instead_of_skipped() {
     let product = Driver::default()
         .check(
             CheckRequest {
+                manifest: None,
                 inputs,
                 store: dir.path().join("store"),
                 library: LibraryInput::Sources,
@@ -1751,6 +1753,7 @@ fn indexed_combined_libraries_keep_existing_module_extensions() {
     let (_, image) = Driver::default()
         .produce_image(
             CheckRequest {
+                manifest: None,
                 inputs: CorpusManifest {
                     core: package("core"),
                     packages: vec![core, std],
@@ -1783,6 +1786,7 @@ fn indexed_combined_libraries_keep_existing_module_extensions() {
     let product = Driver::default()
         .check(
             CheckRequest {
+                manifest: None,
                 inputs: CorpusManifest {
                     core: package("core"),
                     packages: vec![app],
@@ -2431,6 +2435,7 @@ fn every_reached_instance_imports_its_closures() {
             (
                 name.to_string(),
                 CheckRequest {
+                    manifest: None,
                     inputs,
                     store,
                     library: LibraryInput::Sources,
@@ -2562,6 +2567,7 @@ fn m2b_requests(root: &Path, dir: &Path) -> Vec<(String, CheckRequest)> {
         requests.push((
             format!("m2b {workload}"),
             CheckRequest {
+                manifest: None,
                 inputs,
                 store: dir.join(format!("m2b-{workload}")),
                 library: LibraryInput::Sources,
@@ -3234,6 +3240,7 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
         Driver::default()
             .check(
                 CheckRequest {
+                    manifest: None,
                     inputs: langarena_inputs(&root, &core, &arena),
                     store: store.to_owned(),
                     library: LibraryInput::Sources,

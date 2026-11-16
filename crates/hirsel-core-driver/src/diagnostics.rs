@@ -4,6 +4,8 @@ use hirsel_core_syntax::Span;
 
 #[derive(Serialize)]
 pub struct SourceSite {
+    /// The file: its path relative to the request's manifest, or without a
+    /// manifest its module (`app@1/main`).
     pub module: String,
     pub span: Span,
 }
@@ -32,24 +34,31 @@ impl CheckProduct {
         hirsel_core_ids::published::catch_io(|| self.source_site_inner(site))
     }
     fn source_site_inner(&self, site: &Site) -> io::Result<SourceSite> {
-        let base = if let Some(file) = self.files.iter().find(|f| f.module == site.module) {
-            file.syntax
+        let own = site
+            .source
+            .and_then(|source| self.files.iter().find(|f| f.file == source));
+        let (base, name) = if let Some(file) = own {
+            let base = file
+                .syntax
                 .items
                 .get(site.item as usize)
-                .map_or(0, |i| i.file_offset)
-        } else if let Some(image) = &self.image {
-            image.file_offset(site.module, site.item)?
+                .map_or(0, |i| i.file_offset);
+            (base, file.name.clone())
+        } else if let (Some(image), Some(at)) = (&self.image, item_at(site)) {
+            (image.file_offset(at)?, image.source_name(at.0)?)
         } else {
-            0
+            (0, None)
         };
         let id = self.index.module_path(site.module);
         Ok(SourceSite {
-            module: format!(
-                "{}@{}/{}",
-                id.package.name,
-                id.package.version,
-                id.modules.join("/")
-            ),
+            module: name.unwrap_or_else(|| {
+                format!(
+                    "{}@{}/{}",
+                    id.package.name,
+                    id.package.version,
+                    id.modules.join("/")
+                )
+            }),
             span: Span {
                 start: base + site.span.start,
                 end: base + site.span.end,

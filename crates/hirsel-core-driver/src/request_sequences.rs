@@ -330,6 +330,7 @@ fn request(
     driver.layers.law = true;
     let products = store.with_extension("products");
     let request = CheckRequest {
+        manifest: None,
         inputs,
         store,
         library: LibraryInput::Sources,

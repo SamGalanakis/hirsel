@@ -42,7 +42,7 @@ pub fn core_inventory(
         }
         for (ordinal, item) in file.syntax.items().enumerate() {
             items += 1;
-            let resolution = scratch.resolve(index, file.module, ordinal as u32, item);
+            let resolution = scratch.resolve(index, file.module, file.file, ordinal as u32, item);
             for used in &resolution.names {
                 if let Target::Definition(d) = used.target {
                     let path = index.definition_path(d);
@@ -173,6 +173,7 @@ mod tests {
         let mut all = vec![installed(root, "core"), installed(root, "std")];
         all.extend(packages);
         let request = CheckRequest {
+            manifest: None,
             inputs: CorpusManifest {
                 core: package("core"),
                 packages: all,

@@ -114,7 +114,8 @@ pub(crate) struct Header {
     pub(crate) has_body: bool,
     pub(crate) header_end: u32,
     pub(crate) site: Site,
-    pub(crate) anchor: (ModuleId, u32),
+    /// The item's module, its file and its ordinal in that file.
+    pub(crate) anchor: (ModuleId, SourceId, u32),
 }
 /// Numeric signature rows are separate from the path index. Already resolved
 /// dependencies demand a row directly, without re-encoding its canonical path.
@@ -243,7 +244,7 @@ pub(crate) struct Keys {
     definitions: Demand<ContentHash>,
     modules: Demand<ContentHash>,
     packages: Demand<ContentHash>,
-    anchors: hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>,
+    anchors: hirsel_core_ids::published::Map<crate::ItemAt, DefPath>,
     // One closure hash per definition, memoised across the bodies of a request.
     closures: std::cell::RefCell<rustc_hash::FxHashMap<u32, ContentHash>>,
     // Contextual constructor candidates in index order, per (module, name).
@@ -343,7 +344,7 @@ impl Keys {
         compiler: ContentHash,
         image: Option<ContentHash>,
         image_headers: Option<&Headers>,
-        image_anchors: Option<&hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>>,
+        image_anchors: Option<&hirsel_core_ids::published::Map<crate::ItemAt, DefPath>>,
     ) -> io::Result<Self> {
         let mut headers = image_headers.cloned().unwrap_or_default();
         headers.rows.resize(index.definitions.len(), None);
@@ -386,7 +387,7 @@ impl Keys {
                         || index
                             .diagnostics
                             .iter()
-                            .any(|r| r.primary.module == m.id && r.primary.item == ordinal as u32)
+                            .any(|r| crate::item_at(&r.primary) == Some((m.source, ordinal as u32)))
                     {
                         continue;
                     }
@@ -427,7 +428,7 @@ impl Keys {
                         }
                     }
                 }
-                anchors.insert((m.id, ordinal as u32), path.clone());
+                anchors.insert((m.source, ordinal as u32), path.clone());
                 headers.names.insert(path, definition);
                 headers.rows[definition.0 as usize] = Some(Header {
                     digest,
@@ -437,7 +438,7 @@ impl Keys {
                     site: index.get(definition).site,
                     body_reads: body_reads.into_iter().collect(),
                     reads: reads.into_iter().collect(),
-                    anchor: (m.id, ordinal as u32),
+                    anchor: (m.id, m.source, ordinal as u32),
                 });
             }
         }
@@ -572,11 +573,13 @@ impl Keys {
         &self,
         check: &CoreCheck,
         incomplete: &[Incomplete],
-    ) -> BTreeMap<(ModuleId, u32), DefPath> {
+    ) -> BTreeMap<crate::ItemAt, DefPath> {
         hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
         let mut anchors = BTreeMap::new();
         let mut capture = |site: &Site| {
-            let at = (site.module, site.item);
+            let Some(at) = crate::item_at(site) else {
+                return;
+            };
             if let Some(path) = self.anchors.get(&at) {
                 anchors.insert(at, path.clone());
             }
@@ -592,12 +595,11 @@ impl Keys {
         }
         anchors
     }
-    pub fn bind_site(&self, anchors: &BTreeMap<(ModuleId, u32), DefPath>, site: &mut Site) {
-        if let Some(path) = anchors.get(&(site.module, site.item))
+    pub fn bind_site(&self, anchors: &BTreeMap<crate::ItemAt, DefPath>, site: &mut Site) {
+        if let Some(path) = crate::item_at(site).and_then(|at| anchors.get(&at))
             && let Some(h) = self.headers.get(path)
         {
-            site.module = h.anchor.0;
-            site.item = h.anchor.1;
+            crate::bind(site, h.anchor);
         }
     }
     /// A closure already known: hashed earlier in this request, or sealed in

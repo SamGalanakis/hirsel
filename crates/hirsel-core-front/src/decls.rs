@@ -500,6 +500,7 @@ impl Program<'_> {
                     }
                     let site = Site {
                         module: module.id,
+                        source: Some(module.source),
                         item: i as u32,
                         span: name_span,
                     };
@@ -517,6 +518,7 @@ impl Program<'_> {
                 let path = self.index.definition_path(definition);
                 let site = Site {
                     module: module.id,
+                    source: Some(module.source),
                     item: i as u32,
                     span: name_span,
                 };

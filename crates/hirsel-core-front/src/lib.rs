@@ -281,7 +281,9 @@ impl<'a> Program<'a> {
                     .items()
                     .enumerate()
                     .map(|(i, item)| {
-                        std::sync::Arc::new(resolution_scratch.resolve(index, m.id, i as u32, item))
+                        std::sync::Arc::new(
+                            resolution_scratch.resolve(index, m.id, m.source, i as u32, item),
+                        )
                     })
                     .collect()
             })
@@ -414,6 +416,7 @@ impl<'a> Program<'a> {
     pub(crate) fn site_span(&self, at: ItemRef, span: Span) -> Site {
         Site {
             module: self.modules[at.module as usize].id,
+            source: Some(self.modules[at.module as usize].source),
             item: at.item,
             span,
         }

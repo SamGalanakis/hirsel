@@ -7,8 +7,10 @@
 //!   definition of the request. No row holds IR, and a path that left the
 //!   request has no row, so the root is a function of the live rows and files:
 //!   an incremental publication is a fresh one's.
-//! - A **file record** holds a module's source hash, its namespace map
-//!   (name → DefPath) and its anchor map (item ordinal → DefPath, line base).
+//! - A **file record** holds one source file's module, source hash, namespace
+//!   map (name → DefPath) and anchor map (item ordinal → DefPath, line base).
+//!   The root lists them in the request's normalised source order, so two
+//!   files of one module are two records.
 //! - The **root node** is the trie's top node plus the file records and the
 //!   key shape its rows' keys were derived under. One selection rename
 //!   publishes root, rows and maps together.
@@ -91,7 +93,7 @@ pub(crate) struct ProgramIndex {
     /// The key shape of the selected root.
     pub shape: Option<ContentHash>,
     rows: FxHashMap<DefPath, Row>,
-    files: BTreeMap<ModuleKey, ContentHash>,
+    files: Vec<(ModuleKey, ContentHash)>,
     /// Nodes and file records this publication already holds, verified or referenced.
     published: FxHashSet<ContentHash>,
 }
@@ -111,7 +113,7 @@ impl ProgramIndex {
         index.published.insert(root);
         for (module, file) in node.files {
             index.published.insert(file);
-            index.files.insert(module, file);
+            index.files.push((module, file));
         }
         let mut pending: Vec<ContentHash> = node.children.into_iter().map(|c| c.1).collect();
         while let Some(hash) = pending.pop() {
@@ -128,10 +130,10 @@ impl ProgramIndex {
     pub fn live(&self, path: &DefPath) -> Option<(ContentHash, ContentHash)> {
         self.rows.get(path).map(|row| (row.key, row.body))
     }
-    /// The published file record of each module.
+    /// The published file record of each source file, in source order.
     #[cfg(test)]
     pub fn files(&self) -> Vec<(ModuleKey, ContentHash)> {
-        self.files.iter().map(|(m, h)| (m.clone(), *h)).collect()
+        self.files.clone()
     }
     pub fn rows(&self) -> impl Iterator<Item = (&DefPath, &Row)> {
         self.rows.iter()
@@ -145,7 +147,8 @@ pub(crate) struct Publication {
     /// Body records framed when their body was checked.
     pub bodies: Vec<(ContentHash, Vec<u8>)>,
     pub rows: BTreeMap<DefPath, Row>,
-    pub files: BTreeMap<ModuleKey, FileRecord>,
+    /// One record per source file, in normalised source order.
+    pub files: Vec<FileRecord>,
 }
 impl Publication {
     pub fn new() -> Self {
@@ -153,7 +156,7 @@ impl Publication {
             shape: ContentHash::default(),
             bodies: vec![],
             rows: BTreeMap::new(),
-            files: BTreeMap::new(),
+            files: vec![],
         }
     }
     /// Write what the prior publication does not hold, then rename the selection.
@@ -163,12 +166,12 @@ impl Publication {
         hirsel_core_front::cost_scope!("non-check", "program index publication");
         let mut writes: Vec<(ContentHash, Vec<u8>)> = std::mem::take(&mut self.bodies);
         let mut files = Vec::with_capacity(self.files.len());
-        for (module, record) in &self.files {
+        for record in &self.files {
             let (hash, bytes) = Store::frame(&encode(record)?);
             if !prior.published.contains(&hash) {
                 writes.push((hash, bytes));
             }
-            files.push((module.clone(), hash));
+            files.push((record.module.clone(), hash));
         }
         let mut hashed = Vec::with_capacity(self.rows.len());
         for (path, row) in self.rows {

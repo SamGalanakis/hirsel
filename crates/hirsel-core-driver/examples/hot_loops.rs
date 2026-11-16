@@ -13,6 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = Path::new(&args[1]);
     fs::create_dir_all(out)?;
     let request = CheckRequest {
+        manifest: None,
         inputs: manifest,
         store: out.join("checks"),
         library: LibraryInput::Sources,

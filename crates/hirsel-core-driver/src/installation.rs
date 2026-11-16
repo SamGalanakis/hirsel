@@ -332,6 +332,7 @@ fn prebuild(
     };
     let scratch = tempfile::tempdir()?;
     let request = crate::CheckRequest {
+        manifest: None,
         inputs: crate::CorpusManifest {
             core: image.directory()?.inputs.core.clone(),
             packages: vec![],

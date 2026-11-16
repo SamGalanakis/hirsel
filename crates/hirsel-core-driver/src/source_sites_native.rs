@@ -222,18 +222,20 @@ fn failure_sites_adapter_llvm_dev() { failure_sites_adapter(Backend::Llvm, false
 #[ignore = "explicit native integration target"]
 fn failure_sites_adapter_llvm_release_lines() { failure_sites_adapter(Backend::Llvm, true, true); }
 
-/// One module in two files (review 1043 F3). A native site names the file its
-/// item is in: a failure in the second file reports that file's line, an item
-/// moved across the files is found in its new file, and a build against the
-/// primed store links what an empty store links.
+/// One module in two files (review 1043 F3). A native site and a diagnostic
+/// name the file their item is in: a failure in the second file reports that
+/// file's line, under the manifest's name for it when the request has a
+/// manifest; an item moved across the files is found in its new file; and a
+/// build against the primed store links what an empty store links.
 fn failure_sites_two_files(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let (a, b) = (dir.path().join("a.hirsel"), dir.path().join("b.hirsel"));
-    let check = |first: &str, second: &str| {
+    let named = |first: &str, second: &str, manifest: bool| {
         std::fs::write(&a, first).unwrap();
         std::fs::write(&b, second).unwrap();
         let mut request = source_request("", dir.path());
+        request.manifest = manifest.then(|| dir.path().to_owned());
         request.inputs.packages[0].sources = [&a, &b]
             .map(|file| hirsel_core_resolve::ModuleSource {
                 file: file.clone(),
@@ -243,6 +245,7 @@ fn failure_sites_two_files(backend: Backend) {
             .to_vec();
         Driver::default().check(request, &mut Meter::new(false)).unwrap()
     };
+    let check = |first: &str, second: &str| named(first, second, false);
     let options = native_options(backend, dir.path());
     let mut fresh = 0;
     let mut built = |product: &CheckProduct| {
@@ -265,6 +268,14 @@ fn failure_sites_two_files(backend: Backend) {
     let output = built(&check("\n\nfn g() -> u64 {\n    0\n}\nfn h() -> u64 {\n    1\n}\n", OVERFLOW));
     assert_eq!(output.status.code(), Some(101), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "Overflow at app@1/main.hirsel:2:5\n");
+    let output = built(&named("\n\nfn g() -> u64 {\n    0\n}\nfn h() -> u64 {\n    1\n}\n", OVERFLOW, true));
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "Overflow at b.hirsel:2:5\n");
+
+    // A refusal in item 0 of the second file: its file's name and offset.
+    let refused = named("\n\nfn g() -> u64 {\n    0\n}\n", "fn y() -> u64\n", true);
+    let diagnostics = refused.machine_diagnostics().unwrap();
+    let sites: Vec<_> = diagnostics.iter().map(|d| (d.rule, d.primary.module.as_str(), d.primary.span.start)).collect();
+    assert_eq!(sites, [("LANG-5", "b.hirsel", 13)]);
 
     // The reviewer's move: f leaves the first file for the second, before main.
     const MAIN: &str = "pub fn main() -> Result[(), Exit] { Error(Exit(status: f())) }\n";

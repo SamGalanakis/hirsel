@@ -14,7 +14,7 @@ impl CheckProduct {
     /// (path indices) borrowed from the record where the record's place still
     /// holds, the rest and `items` found. A recorded place holds when its file
     /// is the image's, which the record's key names, or when the request's
-    /// files are the record's (`same_files`), which fixes every module and
+    /// files are the record's (`same_files`), which fixes every file and
     /// offset. Each distinct item, in path order.
     pub(crate) fn link_rows<'p>(
         &self,
@@ -26,16 +26,20 @@ impl CheckProduct {
         let mut rest = items.to_vec();
         let mut rows = Vec::with_capacity(recorded.len());
         if let Some(prior) = prior {
-            let request: BTreeSet<ModuleId> = self.files.iter().map(|f| f.module).collect();
+            let request: BTreeSet<SourceId> = self.files.iter().map(|f| f.file).collect();
             for &i in recorded {
                 let path = prior.path(i as usize);
                 match prior.place(i as usize) {
-                    Some((module, file_offset)) if same_files || !request.contains(&module) => rows
-                        .push(SourceRow {
+                    Some((module, source, file_offset))
+                        if same_files || !request.contains(&source) =>
+                    {
+                        rows.push(SourceRow {
                             path,
                             module,
+                            source,
                             file_offset,
-                        }),
+                        })
+                    }
                     _ => rest.push(path),
                 }
             }
@@ -58,18 +62,19 @@ impl CheckProduct {
                     let header = self.headers.get(path).ok_or_else(|| {
                         io::Error::other(format!("native source item is not indexed: {path}"))
                     })?;
-                    let (module, item) = header.anchor;
-                    let file_offset = match self.files.iter().find(|file| file.module == module) {
+                    let (module, source, item) = header.anchor;
+                    let file_offset = match self.files.iter().find(|file| file.file == source) {
                         Some(file) => file.syntax.items[item as usize].file_offset,
                         None => self
                             .image
                             .as_ref()
                             .ok_or_else(|| io::Error::other("native source has no package image"))?
-                            .file_offset(module, item)?,
+                            .file_offset((source, item))?,
                     };
                     Ok(SourceRow {
                         path,
                         module,
+                        source,
                         file_offset,
                     })
                 })
@@ -87,20 +92,21 @@ impl CheckProduct {
             let mut files = BTreeMap::new();
             let mut items = Vec::with_capacity(rows.len());
             for row in rows {
-                let file = if let Some(&file) = files.get(&row.module) {
+                let file = if let Some(&file) = files.get(&row.source) {
                     file
                 } else {
-                    let text = match self.files.iter().find(|file| file.module == row.module) {
-                        Some(file) => file.syntax.source.clone(),
-                        None => self.image.as_ref().unwrap().source_text(row.module)?,
+                    let (name, text) = match self.files.iter().find(|file| file.file == row.source)
+                    {
+                        Some(file) => (file.name.clone(), file.syntax.source.clone()),
+                        None => self.image.as_ref().unwrap().source_file(row.source)?,
                     };
                     let file = u32::try_from(result.files.len())
                         .map_err(|_| io::Error::other("native source file table exceeds u32"))?;
                     result.files.push(SourceFile {
-                        path: self.source_name(row.module),
+                        path: name.unwrap_or_else(|| self.module_name(row.module)),
                         text,
                     });
-                    files.insert(row.module, file);
+                    files.insert(row.source, file);
                     file
                 };
                 items.push((
@@ -117,11 +123,16 @@ impl CheckProduct {
         })
     }
 
-    /// What an executable calls one source file: its package and its place in
-    /// the package (`std@1/list.hirsel`), which the module path is. Never a host
-    /// path, so an executable does not depend on where the core product is
-    /// installed or where the project lives.
-    pub(crate) fn source_name(&self, module: ModuleId) -> String {
+    /// What an executable calls a source file a manifest did not name: its
+    /// package and its place in the package (`std@1/list.hirsel`), which the
+    /// module path is. Never a host path, so an executable does not depend on
+    /// where the core product is installed or where the project lives.
+    pub(crate) fn file_name(&self, file: &FileProduct) -> String {
+        file.name
+            .clone()
+            .unwrap_or_else(|| self.module_name(file.module))
+    }
+    pub(crate) fn module_name(&self, module: ModuleId) -> String {
         let path = self.index.module_path(module);
         format!(
             "{}@{}/{}.hirsel",
@@ -136,5 +147,6 @@ impl CheckProduct {
 pub(crate) struct SourceRow<'p> {
     pub(crate) path: &'p DefPath,
     pub(crate) module: ModuleId,
+    pub(crate) source: SourceId,
     pub(crate) file_offset: u32,
 }

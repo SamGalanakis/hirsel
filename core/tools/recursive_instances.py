@@ -66,7 +66,7 @@ def main():
             refusal = diagnoses[0]
             if refusal['primary']['span']['start'] != len('pub type Nest[T] = Leaf(T) | Deeper('):
                 raise AssertionError(refusal)
-            if refusal['primary']['module'] != 'growth@1/types' or 'Nest' not in refusal['message'] or ' -> ' not in refusal['message']:
+            if refusal['primary']['module'] != 'forest.hirsel' or 'Nest' not in refusal['message'] or ' -> ' not in refusal['message']:
                 raise AssertionError(refusal)
             print('pass Forest: one declaration refusal naming its growing cycle', flush=True)
         if args.only != 'forest':

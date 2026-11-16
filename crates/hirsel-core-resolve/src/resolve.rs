@@ -103,8 +103,14 @@ struct Binding {
 }
 /// Resolve one borrowed item. The visitor allocates no child/path/scope objects.
 /// Result tables and scratch storage are reserved once, before traversal.
-pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>) -> Resolution {
-    ResolutionScratch::default().resolve(index, module, ordinal, item)
+pub fn resolve(
+    index: &NameIndex,
+    module: ModuleId,
+    source: SourceId,
+    ordinal: u32,
+    item: Item<'_>,
+) -> Resolution {
+    ResolutionScratch::default().resolve(index, module, source, ordinal, item)
 }
 
 /// Request-owned work tables reused across items. Results own only their output rows.
@@ -125,6 +131,7 @@ impl ResolutionScratch {
         &mut self,
         index: &NameIndex,
         module: ModuleId,
+        source: SourceId,
         ordinal: u32,
         item: Item<'_>,
     ) -> Resolution {
@@ -173,6 +180,7 @@ impl ResolutionScratch {
             module,
             package,
             item,
+            source,
             ordinal,
             scratch: self,
             label_base: 0,
@@ -214,6 +222,7 @@ impl ResolutionScratch {
                     "LANG-5",
                     Site {
                         module,
+                        source: Some(source),
                         item: ordinal,
                         span: Span { start: end, end },
                     },
@@ -239,6 +248,7 @@ struct Resolver<'a, 's> {
     module: ModuleId,
     package: PackageKey,
     item: Item<'a>,
+    source: SourceId,
     ordinal: u32,
     scratch: &'s mut ResolutionScratch,
     label_base: usize,
@@ -256,6 +266,7 @@ impl<'a> Resolver<'a, '_> {
     fn site(&self, n: NodeId) -> Site {
         Site {
             module: self.module,
+            source: Some(self.source),
             item: self.ordinal,
             span: self.item.tree.node(n).origin.span,
         }

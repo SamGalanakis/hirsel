@@ -76,9 +76,11 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
         })
         .collect::<Vec<_>>();
     for d in &diagnostics {
-        index
-            .diagnostics
-            .push(Refusal::syntax(modules.last().unwrap().id, d));
+        index.diagnostics.push(Refusal::syntax(
+            modules.last().unwrap().id,
+            modules.last().unwrap().source,
+            d,
+        ));
     }
     for m in &modules {
         for (i, item) in m.syntax.items().enumerate() {

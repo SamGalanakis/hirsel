@@ -140,8 +140,10 @@ impl Corpus {
     pub fn analyze(&self, parsed: &ParsedCorpus, index: &NameIndex) -> CorpusReport {
         let mut files = vec![];
         let mut scratch = ResolutionScratch::default();
-        for (source, p) in self.sources.iter().zip(&parsed.files) {
+        // `index` allocated one occurrence per source, in this order.
+        for (file, (source, p)) in self.sources.iter().zip(&parsed.files).enumerate() {
             let module = index.module(&source.module).unwrap();
+            let occurrence = SourceId(file as u32);
             let mut result = FileResult {
                 file: source.file.clone(),
                 module: source.module.clone(),
@@ -181,15 +183,15 @@ impl Corpus {
                 });
             };
             for d in &p.diagnostics {
-                record(Refusal::syntax(module, d));
+                record(Refusal::syntax(module, occurrence, d));
             }
             for d in &index.diagnostics {
-                if d.primary.module == module {
+                if d.primary.source == Some(occurrence) {
                     record(d.clone());
                 }
             }
             for (i, item) in p.syntax.items().enumerate() {
-                let r = scratch.resolve(index, module, i as u32, item);
+                let r = scratch.resolve(index, module, occurrence, i as u32, item);
                 result.names += r.names.len();
                 result.reads += r.reads.len();
                 result.resource_refusal |= r.resource_refusal.is_some();

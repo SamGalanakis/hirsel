@@ -28,11 +28,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("resolve") => {
             let mut scratch = ResolutionScratch::default();
             for _ in 0..iterations {
-                for (source, p) in corpus.sources.iter().zip(&parsed.files) {
+                for (file, (source, p)) in corpus.sources.iter().zip(&parsed.files).enumerate() {
                     for (i, item) in p.syntax.items().enumerate() {
                         black_box(scratch.resolve(
                             &index,
                             index.module(&source.module).unwrap(),
+                            hirsel_core_resolve::SourceId(file as u32),
                             i as u32,
                             item,
                         ));

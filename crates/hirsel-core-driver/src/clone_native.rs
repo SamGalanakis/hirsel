@@ -37,7 +37,7 @@ fn clone_body_keys_preserve_type_identity_across_edits_and_reordering() {
     assert!(reordered.accepted(), "{:?} {:?}", reordered.diagnostics, reordered.incomplete);
     assert!(reordered.rechecked.is_empty(), "{:?}", reordered.rechecked);
     assert_eq!(edited.definitions[&path].key, reordered.definitions[&path].key);
-    assert_eq!(reordered.headers.get(&path).unwrap().anchor.1, 2);
+    assert_eq!(reordered.headers.get(&path).unwrap().anchor.2, 2);
 }
 
 fn clone_product(backend: Backend) {

@@ -511,19 +511,24 @@ impl CheckProduct {
                     let path = self
                         .index
                         .definition_path(hirsel_core_resolve::DefinitionId(id as u32));
-                    Some((h.anchor, (path, h)))
+                    Some(((h.anchor.1, h.anchor.2), (path, h)))
                 })
                 .collect();
             let needed = |site: &Site| -> bool {
-                if let Some((path, header)) = owners.get(&(site.module, site.item)) {
+                if let Some((path, header)) = crate::item_at(site).and_then(|at| owners.get(&at)) {
                     reached.body(path)
                         || reached.declaration(path) && site.span.start < header.header_end
                 } else {
-                    // Module-wide decoding/resource failures affect each demand from it.
+                    // A file-wide decoding/resource failure affects each demand
+                    // from its file; a module's own failure each from its module.
+                    let within = |h: &reuse::Header| match site.source {
+                        Some(source) => h.anchor.1 == source,
+                        None => h.anchor.0 == site.module,
+                    };
                     site.item == u32::MAX
-                        && owners.values().any(|(p, h)| {
-                            h.anchor.0 == site.module && (reached.body(p) || reached.declaration(p))
-                        })
+                        && owners
+                            .values()
+                            .any(|(p, h)| within(h) && (reached.body(p) || reached.declaration(p)))
                 }
             };
             let mut library_diagnostics = vec![];
@@ -568,8 +573,8 @@ impl CheckProduct {
                 )
             {
                 let primary = self.source_site(site)?;
-                let name = owners
-                    .get(&(site.module, site.item))
+                let name = crate::item_at(site)
+                    .and_then(|at| owners.get(&at))
                     .map(|(p, _)| p.to_string())
                     .unwrap_or_else(|| primary.module.clone());
                 if let std::collections::btree_map::Entry::Vacant(slot) =

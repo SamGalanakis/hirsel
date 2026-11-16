@@ -58,6 +58,7 @@ fn prebuild_check(
 ) -> (Arc<CheckProduct>, Option<DefPath>) {
     let entry = entry.map(|entry| DefPath::from_full(entry).unwrap());
     let request = CheckRequest {
+        manifest: None,
         inputs: hirsel_core_resolve::CorpusManifest {
             core: image.directory().unwrap().inputs.core.clone(),
             packages,

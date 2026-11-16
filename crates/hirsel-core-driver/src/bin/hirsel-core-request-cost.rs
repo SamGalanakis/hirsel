@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .retain(|p| ["core", "std"].contains(&p.package.name.as_str()));
             Driver::default().check_reachable_with_product(
                 CheckRequest {
+                    manifest: None,
                     inputs,
                     entry: None,
                     store: Path::new(&args[1]).join("prepare"),
@@ -38,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut meter = Meter::new(true);
     let request = CheckRequest {
+        manifest: None,
         inputs: serde_json::from_slice(&std::fs::read(&args[0])?)?,
         entry: Some(DefPath::from_full(&args[1]).ok_or("invalid entry")?),
         store: PathBuf::from(&args[2]),

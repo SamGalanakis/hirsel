@@ -415,6 +415,62 @@ fn signature_edits_recheck_readers_and_leave_independent_bodies() {
         encode(&reused.diagnostics).unwrap()
     );
 }
+/// A duplicate definition (LANG-7) checked against a store that holds its
+/// copies reports what a fresh store reports. The copies share one name,
+/// whose key hashes one copy's text, so none is a hit; the path's product is
+/// the last copy's. Found as a panic framing a stored hit that replaced the
+/// fresh copy before it (the second pair); the third pair's type refusal was
+/// lost to a hit under the other copy's text.
+#[test]
+fn a_duplicate_definition_over_a_stored_copy_reports_as_fresh() {
+    for (stored, duplicate) in [
+        (
+            "fn f() -> u64 { 1 }\nfn f() -> u64 { 2 }\nfn g() -> u64 { f() }\n",
+            "fn f() -> u64 { 3 }\nfn f() -> u64 { 2 }\nfn g() -> u64 { f() }\n",
+        ),
+        (
+            "fn f() -> u64 { 1 }\nfn f() -> u64 { 2 }\nfn g() -> u64 { f() }\n",
+            "fn f() -> u64 { g() }\nfn f() -> u64 { 2 }\nfn g() -> u64 { f() }\n",
+        ),
+        (
+            "fn f() -> u64 { 1 }\nfn f() -> u64 { 2 }\nfn g() -> u64 { f() }\n",
+            "fn f() -> u64 { true }\nfn f() -> u64 { 2 }\nfn g() -> u64 { f() }\n",
+        ),
+        (
+            "fn f() -> u64 { 1 }\nfn g() -> u64 { f() }\n",
+            "fn f() -> u64 { 1 }\nfn f() -> u64 { 2 }\nfn g() -> u64 { f() }\n",
+        ),
+    ] {
+        let primed = tempfile::tempdir().unwrap();
+        Driver::default()
+            .check(request(stored, primed.path()), &mut Meter::new(false))
+            .unwrap();
+        let over = Driver::default()
+            .check(request(duplicate, primed.path()), &mut Meter::new(false))
+            .unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let fresh = Driver::default()
+            .check(request(duplicate, empty.path()), &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            fresh.diagnostics.iter().any(|r| r.rule == "LANG-7"),
+            "{duplicate}"
+        );
+        assert_eq!(
+            encode(&over.diagnostics).unwrap(),
+            encode(&fresh.diagnostics).unwrap(),
+            "{duplicate}"
+        );
+        let again = Driver::default()
+            .check(request(duplicate, primed.path()), &mut Meter::new(false))
+            .unwrap();
+        assert_eq!(
+            encode(&again.diagnostics).unwrap(),
+            encode(&fresh.diagnostics).unwrap(),
+            "{duplicate}: read back"
+        );
+    }
+}
 #[test]
 fn negative_and_shadowed_name_reads_invalidate_on_new_names() {
     let dir = tempfile::tempdir().unwrap();

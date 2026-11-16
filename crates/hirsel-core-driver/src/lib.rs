@@ -57,7 +57,7 @@ use hirsel_core_resolve::{
 };
 use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile, parse_bytes};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -827,6 +827,13 @@ impl Driver {
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
             let mut fresh: Vec<(DefPath, ContentHash)> = Vec::new();
+            let duplicated: BTreeSet<&DefPath> = {
+                let mut seen = BTreeSet::new();
+                (p.fns.base_len()..p.fns.len())
+                    .map(|f| &p.fns[f].path)
+                    .filter(|path| !seen.insert(*path))
+                    .collect()
+            };
             for f in p.fns.base_len()..p.fns.len() {
                 let fd = &p.fns[f];
                 if fd.body.is_none() {
@@ -877,11 +884,17 @@ impl Driver {
                     .and_then(|p| p.definitions.get(&fd.path))
                     .filter(|d| d.key == key)
                     .cloned();
-                let cached = if resident.is_some() {
+                // The copies of a duplicate definition (LANG-7) share one
+                // name, whose key hashes one copy's text: each is checked on
+                // every request.
+                let cached = if duplicated.contains(&fd.path) {
+                    None
+                } else if resident.is_some() {
                     resident
                 } else {
                     prior_definition(&store, &prior, &fd.path, &key, key_hash)?.map(Arc::new)
                 };
+                let mut checked = None;
                 let product = if let Some(product) = cached {
                     publication.rows.insert(
                         fd.path.clone(),
@@ -924,8 +937,7 @@ impl Driver {
                         anchors,
                         incomplete,
                     );
-                    // Framed below, as publication work, once checking is done.
-                    fresh.push((fd.path.clone(), key_hash));
+                    checked = Some(key_hash);
                     Arc::new(product)
                 };
                 if product.resolved {
@@ -943,7 +955,19 @@ impl Driver {
                     keys.bind_site(&product.anchors, &mut g.primary);
                     result.incomplete.push(g);
                 }
-                result.definitions.insert(fd.path.clone(), product);
+                // A duplicate definition's copies (LANG-7) share the path,
+                // whose product is the last copy's.
+                if result
+                    .definitions
+                    .insert(fd.path.clone(), product)
+                    .is_some()
+                {
+                    fresh.retain(|(path, _)| *path != fd.path);
+                }
+                // Framed below, as publication work, once checking is done.
+                if let Some(key_hash) = checked {
+                    fresh.push((fd.path.clone(), key_hash));
+                }
             }
             meter.finish("check/lower");
             if MEASURE {

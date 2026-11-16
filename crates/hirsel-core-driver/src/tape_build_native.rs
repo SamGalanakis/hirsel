@@ -1,17 +1,17 @@
-// REPLAY-SPEC v2.1 R1: every executable carries its key as the 32-byte
-// symbol `hirsel_build_identity`, which a tape's header records and a Replay
-// open compares as the revision (v2.3 R10; the runtime's
+// REPLAY-SPEC v2.3 R10: every executable carries its entry's code revision as
+// the 32-byte symbol `hirsel_code_revision`, which a Run tape's header records
+// and a Replay open compares (the runtime's
 // open_refuses_a_changed_code_revision_arg_limit_or_policy).
 
 /// The symbol's bytes, read from the executable's own symbol table.
-fn build_identity_of(executable: &Path) -> [u8; 32] {
+fn code_revision_of(executable: &Path) -> [u8; 32] {
     use object::{Object, ObjectSection, ObjectSymbol};
     let bytes = std::fs::read(executable).unwrap();
     let file = object::File::parse(&*bytes).unwrap();
     let symbol = file
         .symbols()
-        .find(|s| s.name() == Ok("hirsel_build_identity"))
-        .expect("the executable defines hirsel_build_identity");
+        .find(|s| s.name() == Ok("hirsel_code_revision"))
+        .expect("the executable defines hirsel_code_revision");
     let section = file
         .section_by_index(symbol.section_index().unwrap())
         .unwrap();
@@ -19,19 +19,19 @@ fn build_identity_of(executable: &Path) -> [u8; 32] {
     section.data().unwrap()[at..at + 32].try_into().unwrap()
 }
 
-/// Wrong implementation caught: a symbol that is not the executable's key
-/// (a constant, the sources digest alone, the entry plan's), so a rebuild
-/// with a changed reachable body would replay an old tape silently, or an
-/// unchanged rebuild would refuse its own tape.
-fn build_identity_is_the_key(backend: Backend) {
+/// The oracle is the revision the build reports (revision.rs, from the checked
+/// IR, not from the link), which a Call header must also agree with. Wrong
+/// implementations caught: a symbol that is the executable's key, the sources
+/// digest (a comment edit would refuse) or any other hash than the revision.
+#[test]
+#[ignore = "explicit native integration target"]
+fn tape_code_revision_is_the_entry_revision() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
-    let build = |text: &str, store: &str| {
-        let source = format!(
-            "pub fn main(output: Stdout) -> Result[(), Exit] waits {{\n    result.unwrap(stdout.write(output, \"{text}\"))\n    Ok(())\n}}"
-        );
-        let mut request = source_request(&source, dir.path());
+    let source = "pub fn main(output: Stdout) -> Result[(), Exit] waits {\n    result.unwrap(stdout.write(output, \"entered\"))\n    Ok(())\n}";
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut request = source_request(source, dir.path());
         request.inputs.packages[1] =
             PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
         let product = Driver::default()
@@ -39,30 +39,10 @@ fn build_identity_is_the_key(backend: Backend) {
             .unwrap();
         assert!(product.accepted());
         let mut options = native_options(backend, dir.path());
-        options.store = dir.path().join(store);
-        options.output = dir.path().join(format!("{store}-{text}"));
+        options.output = dir.path().join(format!("{backend:?}"));
         let built = product.build(&entry, &options).unwrap();
-        (built.identity, build_identity_of(&built.executable))
-    };
-    let (key, first) = build("entered", "a");
-    assert_eq!(first, key.0, "the symbol is the executable's key");
-    let (_, rebuilt) = build("entered", "b");
-    assert_eq!(rebuilt, first, "an unchanged rebuild in a fresh store keeps it");
-    // One byte of main's body; main's identity (its signature) is unchanged.
-    let (_, changed) = build("enterEd", "a");
-    assert_ne!(changed, first, "a changed reachable body changes it");
-}
-
-#[test]
-#[ignore = "explicit native integration target"]
-fn tape_build_identity_is_the_key_cranelift() {
-    build_identity_is_the_key(Backend::Cranelift);
-}
-
-#[test]
-#[ignore = "explicit native integration target"]
-fn tape_build_identity_is_the_key_llvm() {
-    build_identity_is_the_key(Backend::Llvm);
+        assert_eq!(code_revision_of(&built.executable), built.revision.0, "{backend:?}");
+    }
 }
 
 /// Builds core/front/tape/run.hirsel, with `edit` applied to its text,
@@ -110,10 +90,12 @@ fn tape_run(program: &Path, argv: &[&str]) -> (Option<i32>, String, String) {
 /// nothing through the substitute Stdout. Wrong implementations caught: a
 /// replayed substitute that reaches the host (a second "taped", a fresh clock
 /// reading), Args answered from the live vector or not readable after end
-/// ("|two"), a Replay that writes the tape, a header compare that ignores the
-/// revision (a changed body replays), or one that refuses an unchanged rebuild;
-/// END's outcome not compared through `tape.end` (exit 5).
-fn tape_run_replays(backend: Backend) {
+/// ("|two"), a Replay that writes the tape, END's outcome not compared (exit 5);
+/// a revision that changes with the build (a rebuild with the other engine
+/// refuses, exit 3); a changed body that replays without Across, an
+/// Across that refuses it or does not say so ("across:"), or says so of its own
+/// revision; an Across replay whose changed outcome is not Diverged(Outcome).
+fn tape_run_replays(backend: Backend, other: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let grant = dir.path().join("grant");
     std::fs::create_dir(&grant).unwrap();
@@ -132,24 +114,35 @@ fn tape_run_replays(backend: Backend) {
     assert_eq!(std::fs::read(grant.join("run.tape")).unwrap(), tape);
     let (code, _, err) = tape_run(&program, &["x"]);
     assert_eq!(code, Some(5), "a changed outcome is Diverged(Outcome): {err}");
-    let rebuilt = tape_run_build(backend, dir.path(), "b", ("", ""));
-    let (code, again, err) = tape_run(&rebuilt, &["three"]);
-    assert_eq!((code, again), (Some(0), replayed), "an unchanged rebuild: {err}");
+    let (code, forced, err) = tape_run(&program, &["force"]);
+    assert_eq!((code, forced), (Some(0), replayed.clone()), "Across of its own revision: {err}");
+    let switched = tape_run_build(other, dir.path(), "e", ("", ""));
+    let (code, again, err) = tape_run(&switched, &["three"]);
+    assert_eq!((code, again), (Some(0), replayed), "the other engine: {err}");
     let changed = tape_run_build(backend, dir.path(), "c", ("\"|\"", "\"/\""));
     let (code, printed, err) = tape_run(&changed, &["one"]);
     assert_eq!((code, printed), (Some(3), String::new()), "Refused(Revision): {err}");
+    let (code, printed, err) = tape_run(&changed, &["force"]);
+    assert_eq!(
+        (code, printed),
+        (Some(0), format!("across:{reading}/one")),
+        "Across opens it, labelled: {err}"
+    );
+    let behaves = tape_run_build(backend, dir.path(), "d", ("{ 1u8 } else { 0u8 }", "{ 1u8 } else { 6u8 }"));
+    let (code, _, err) = tape_run(&behaves, &["force"]);
+    assert_eq!(code, Some(5), "a changed outcome under Across is Diverged(Outcome): {err}");
 }
 
 #[test]
 #[ignore = "explicit native integration target"]
 fn tape_run_replays_cranelift() {
-    tape_run_replays(Backend::Cranelift);
+    tape_run_replays(Backend::Cranelift, Backend::Llvm);
 }
 
 #[test]
 #[ignore = "explicit native integration target"]
 fn tape_run_replays_llvm() {
-    tape_run_replays(Backend::Llvm);
+    tape_run_replays(Backend::Llvm, Backend::Cranelift);
 }
 
 /// A substitute used after `tape.end` fails with cause `Tape`, printed from

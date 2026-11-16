@@ -754,6 +754,8 @@ pub enum RtOp {
     /// `tape.clock`, `tape.dir`, `tape.stdout`, `tape.stderr`, `tape.args`:
     /// a capability's substitute on a tape.
     TapeGrant,
+    /// `tape.across`: whether an Across open's revision differs.
+    TapeAcross,
     /// `isolate`'s entry: reserve a cause cell (crate docs, "Isolation").
     IsolateEnter,
     /// `isolate`'s body returned: refund the innermost reservation.
@@ -896,6 +898,7 @@ impl RtOp {
     /// | `tape_open` | `Dir: u64`, name `ptr`, `mode: u8`, identity `ptr`, arg `ptr`, `limit: u64`, `id0: u64`, `id1: u64` | `Tape: u64` (0 unless opened), `code: u64` |
     /// | `tape_end` | `Tape: u64`, `kind: u8`, operand `ptr` | `code: u64` |
     /// | `tape_grant` | `Tape: u64`, `kind: u8`, capability `u64` | substitute `u64` |
+    /// | `tape_across` | `Tape: u64` | `bool` |
     /// | `isolate_enter` | | `bool`: reserved; `available: u64` (0 when reserved) |
     /// | `isolate_leave` | | |
     /// | `isolate_catch` | | `Causes` `ptr`: the caught chain's head |
@@ -963,6 +966,7 @@ impl RtOp {
             ),
             RtOp::TapeEnd => (vec![V(u64_), V(u8_), V(p)], vec![u64_]),
             RtOp::TapeGrant => (vec![V(u64_), V(u8_), V(u64_)], vec![u64_]),
+            RtOp::TapeAcross => (vec![V(u64_)], vec![bool_]),
             RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
             RtOp::IsolateLeave => (vec![], vec![]),
             RtOp::IsolateCatch => (vec![], vec![p]),
@@ -1033,6 +1037,7 @@ impl RtOp {
             | RtOp::TapeOpen
             | RtOp::TapeEnd
             | RtOp::TapeGrant
+            | RtOp::TapeAcross
             | RtOp::IsolateEnter
             | RtOp::IsolateLeave
             | RtOp::IsolateCatch => vec![],

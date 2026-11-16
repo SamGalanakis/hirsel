@@ -1,12 +1,14 @@
-//! Tape laws (REPLAY-SPEC v2.3 S1). Expected bytes come from
+//! Tape laws (REPLAY-SPEC v2.3 S1, tape format 2). Expected bytes come from
 //! testdata/vectors.py (hand encoding plus system libxxhash, no project code)
-//! and from 1004's model-v23-tape.bin; expected results from sections 5 and 8.
+//! and from 1004's model: model-f2-tape.bin is its models_v23.py `T` with the
+//! header's format 2, model-v23-tape.bin its format 1 original; expected
+//! results from sections 5 and 8.
 use super::*;
 use crate::os::OsProvider;
 use std::cell::Cell as Shared;
 
-/// The revision of the "executable" the tests open tapes as.
-const BUILD: [u8; 32] = {
+/// The code revision the tests open tapes as.
+const REVISION: [u8; 32] = {
     let mut b = [0; 32];
     let mut i = 0;
     while i < 32 {
@@ -16,7 +18,8 @@ const BUILD: [u8; 32] = {
     b
 };
 const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
-const MODEL: &[u8] = include_bytes!("testdata/model-v23-tape.bin");
+const MODEL: &[u8] = include_bytes!("testdata/model-f2-tape.bin");
+const MODEL_F1: &[u8] = include_bytes!("testdata/model-v23-tape.bin");
 const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
 
 // ---------- providers ----------
@@ -402,6 +405,7 @@ fn expect() -> Expect<'static> {
         charge_policy: 0,
         limit: 1000,
         arg: None,
+        across: false,
     }
 }
 
@@ -418,11 +422,11 @@ fn record(read: usize) -> (Box<Store>, Vec<Ob>) {
     let mut world = World::new(read);
     let (tape, arg) = unsafe {
         Tape::open(
-            BUILD,
+            REVISION,
             store.dir(),
             b"t",
             Mode::Record,
-            &header(BUILD),
+            &header(REVISION),
             &expect(),
         )
     }
@@ -447,11 +451,11 @@ fn replay(
     let host = Counted::new(None);
     let (tape, _) = unsafe {
         Tape::open(
-            BUILD,
+            REVISION,
             store.dir(),
             b"t",
             Mode::Replay,
-            &header(BUILD),
+            &header(REVISION),
             &expect(),
         )
     }?;
@@ -511,9 +515,10 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 
 /// Wrong implementation caught: any byte of the encoder off the spec (field
 /// order, varint, zig-zag delta, T at a block's first frame, check input).
-/// The oracle is 1004's model (libxxhash), not this code.
+/// The oracle is 1004's model (libxxhash), not this code. Its header is a
+/// Call tape's, with `revision[32]`.
 #[test]
-fn the_encoder_writes_model_v23_tape_byte_for_byte() {
+fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
     let h = Header {
         kind: KIND_CALL,
         mode: MODE_DURABLE,
@@ -580,6 +585,15 @@ fn the_encoder_writes_model_v23_tape_byte_for_byte() {
     assert_eq!(frames[1], mono(1_000_000_123));
     assert_eq!(frames[2], mono(5_000));
     assert_eq!(frames[3], Frame::End(outcome));
+}
+
+/// Format 2 has no reader for format 1 (gavel 7): 1004's format 1 tape, a
+/// valid tape of its format, is Corrupt. Wrong implementation caught: a
+/// reader that still accepts format 1 beside format 2.
+#[test]
+fn a_format_1_tape_is_corrupt() {
+    assert_eq!(Blocks::open(MODEL_F1).err(), Some(Stop::Corrupt));
+    assert!(Blocks::open(MODEL).is_ok());
 }
 
 /// Wrong implementation caught: Record writing anything other than the
@@ -706,7 +720,7 @@ fn swapped_frames_diverge() {
     let (store, _) = record(100);
     let t = store.file().to_vec();
     let at = boundaries(&t);
-    let h = header(BUILD);
+    let h = header(REVISION);
     let mut d = Decoder::default();
     let p = &t[at[1] + BLOCK_HEAD..at[2] - BLOCK_CHECK];
     let flags = t[at[1]];
@@ -796,20 +810,20 @@ fn a_changed_failure_text_diverges_at_end() {
 fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     let open = |build: [u8; 32], e: &Expect| {
         let mut store = Store::with(HAND);
-        unsafe { Tape::open(build, store.dir(), b"t", Mode::Replay, &header(BUILD), e) }.map(
+        unsafe { Tape::open(build, store.dir(), b"t", Mode::Replay, &header(REVISION), e) }.map(
             |(t, arg)| {
                 drop(t);
                 arg
             },
         )
     };
-    let mut other = BUILD;
+    let mut other = REVISION;
     other[31] ^= 1;
     let e = expect();
-    assert_eq!(open(BUILD, &e), Ok(b"arg".to_vec()));
+    assert_eq!(open(REVISION, &e), Ok(b"arg".to_vec()));
     assert_eq!(
         open(
-            BUILD,
+            REVISION,
             &Expect {
                 arg: Some(b"arg"),
                 ..expect()
@@ -820,7 +834,7 @@ fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     let refused = |r| Err(OpenError::Refused(r));
     assert_eq!(
         open(
-            BUILD,
+            REVISION,
             &Expect {
                 identity: b"app@1/main/ran",
                 ..expect()
@@ -841,7 +855,7 @@ fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     );
     assert_eq!(
         open(
-            BUILD,
+            REVISION,
             &Expect {
                 arg: Some(b"arh"),
                 ..expect()
@@ -851,7 +865,7 @@ fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     );
     assert_eq!(
         open(
-            BUILD,
+            REVISION,
             &Expect {
                 limit: 999,
                 ..expect()
@@ -861,7 +875,7 @@ fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     );
     assert_eq!(
         open(
-            BUILD,
+            REVISION,
             &Expect {
                 charge_policy: 1,
                 ..expect()
@@ -882,6 +896,52 @@ fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     );
 }
 
+/// The across open (v2.3, gavel 7): Replay of a tape whose revision is not
+/// the opener's opens, and only then is the tape labelled. Wrong
+/// implementations caught: an across open that still refuses, a label taken
+/// from the mode rather than the comparison, and a plain Replay that skips the
+/// revision when another refusal would also apply.
+#[test]
+fn an_across_open_runs_another_revision_and_says_so() {
+    let open = |revision: [u8; 32], e: &Expect| {
+        let mut store = Store::with(HAND);
+        unsafe {
+            Tape::open(
+                revision,
+                store.dir(),
+                b"t",
+                Mode::Replay,
+                &header(REVISION),
+                e,
+            )
+        }
+        .map(|(t, _)| t.revision_differs())
+    };
+    let mut other = REVISION;
+    other[0] ^= 0x80;
+    let across = Expect {
+        across: true,
+        ..expect()
+    };
+    assert_eq!(open(other, &across), Ok(true));
+    assert_eq!(open(REVISION, &across), Ok(false));
+    assert_eq!(open(REVISION, &expect()), Ok(false));
+    assert_eq!(
+        open(other, &expect()),
+        Err(OpenError::Refused(Refusal::Revision))
+    );
+    assert_eq!(
+        open(
+            other,
+            &Expect {
+                limit: 999,
+                ..across
+            }
+        ),
+        Err(OpenError::Refused(Refusal::Limit))
+    );
+}
+
 /// Section 8. Wrong implementation caught: an end that leaves its handles
 /// live (a Record substitute still writing through, a Replay one turning into
 /// live I/O), or a cleanup that leaks the inner file.
@@ -892,11 +952,11 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
     let host = Counted::new(Some(world.provider()));
     let (tape, _) = unsafe {
         Tape::open(
-            BUILD,
+            REVISION,
             store.dir(),
             b"t",
             Mode::Record,
-            &header(BUILD),
+            &header(REVISION),
             &expect(),
         )
     }
@@ -933,11 +993,11 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
     let next_host = Counted::new(Some(world.provider()));
     let (next, _) = unsafe {
         Tape::open(
-            BUILD,
+            REVISION,
             next_store.dir(),
             b"t",
             Mode::Record,
-            &header(BUILD),
+            &header(REVISION),
             &expect(),
         )
     }
@@ -957,11 +1017,11 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
     let refuse = Counted::new(None);
     let (tape, _) = unsafe {
         Tape::open(
-            BUILD,
+            REVISION,
             store.dir(),
             b"t",
             Mode::Replay,
-            &header(BUILD),
+            &header(REVISION),
             &expect(),
         )
     }
@@ -990,11 +1050,11 @@ fn a_dropped_tape_keeps_its_frames_and_has_no_end() {
     let mut world = World::new(100);
     let (tape, _) = unsafe {
         Tape::open(
-            BUILD,
+            REVISION,
             store.dir(),
             b"t",
             Mode::Record,
-            &header(BUILD),
+            &header(REVISION),
             &expect(),
         )
     }
@@ -1069,11 +1129,11 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     };
     let (tape, _) = unsafe {
         Tape::open(
-            BUILD,
+            REVISION,
             (os.provider(), sd),
             b"t",
             Mode::Record,
-            &header(BUILD),
+            &header(REVISION),
             &expect(),
         )
     }
@@ -1095,11 +1155,11 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     let refuse = Counted::new(None);
     let (tape, _) = unsafe {
         Tape::open(
-            BUILD,
+            REVISION,
             (os.provider(), sd),
             b"t",
             Mode::Replay,
-            &header(BUILD),
+            &header(REVISION),
             &expect(),
         )
     }

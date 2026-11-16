@@ -329,6 +329,7 @@ core@1/task/check_cancel
 core@1/task/join
 core@1/task/spawn
 # DECISIONS.md 2026-11-16 ruling: replay core (REPLAY-SPEC v2 §9)
+core@1/tape/across
 core@1/tape/args
 core@1/tape/clock
 core@1/tape/dir

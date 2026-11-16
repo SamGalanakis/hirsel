@@ -2,12 +2,14 @@
 // them with no host. REPLAY-SPEC v2.3 slice S1: Run tapes, Record and Replay, and
 // substitutes for Clock, Dir, Stdout, Stderr and Args.
 // Record writes a new tape (the name must not exist); Replay answers every
-// operation from one and never reaches the host.
-pub type Mode = Record | Replay
+// operation from one and never reaches the host. Across is a Replay that also
+// opens a tape recorded by another code revision; `across` says it did.
+pub type Mode = Record | Replay | Across
 
 // A Run tape's header. `id` is the tape's id, unique per tape file; `identity` the
 // code's identity; `arg` the run's argument bytes; `limit` its root limit. The
-// revision is not the caller's: open fills it from the running executable.
+// revision is not the caller's: open fills it with the entry's code revision,
+// which a rebuild or another engine keeps and a changed reachable body changes.
 pub type Header {
     id: (u64, u64),
     identity: String,
@@ -15,8 +17,9 @@ pub type Header {
     limit: u64
 }
 
-// Open refuses, before anything runs, a tape whose identity (Code), revision,
-// argument or limit differs from the opener's, or whose header block is damaged.
+// Open refuses, before anything runs, a tape whose identity (Code), revision
+// (except Across), argument or limit differs from the opener's, or whose header
+// block is damaged.
 pub type OpenError = Refused(Refusal) | Io(IoError)
 
 pub type Refusal = Code | Revision | Arg | Limit | Damaged(u64)
@@ -71,6 +74,10 @@ pub fn stderr(mut t: Tape, s: Stderr) -> Stderr
 // Args's substitute reads the recorded vector, also after the tape ends: reading
 // it is not an operation.
 pub fn args(mut t: Tape, a: Args) -> Args
+
+// Whether `t` was opened Across a tape another code revision recorded. A run that
+// replays such a tape reports it as such; a changed outcome still ends Diverged.
+pub fn across(t: Tape) -> bool
 
 // The runtime's words (tape/abi.rs): bits 0-7 a tag, 8-15 a sub-kind, 16-63 a value.
 fn open_raw(d: Dir, name: String, mode: Mode, identity: String, arg: Bytes, limit: u64, id0: u64, id1: u64) -> Result[Tape, u64] waits

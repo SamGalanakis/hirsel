@@ -114,6 +114,9 @@ pub struct Expect<'a> {
     pub limit: u64,
     /// None: the opener receives the stored argument.
     pub arg: Option<&'a [u8]>,
+    /// Open a tape of another revision (REPLAY-SPEC v2.3's "across" open,
+    /// Replay only): it runs, and the tape says its revision differs.
+    pub across: bool,
 }
 
 /// An operation that the tape refused: the task fails before issue with cause
@@ -261,6 +264,8 @@ fn cell() -> &'static Cell {
 pub struct Tape {
     cell: &'static Cell,
     generation: u32,
+    /// An across open of a tape whose revision is not the opener's.
+    differs: bool,
 }
 
 fn handle(generation: u32, ordinal: usize) -> u64 {
@@ -438,14 +443,14 @@ fn clock(op: u8) -> bool {
 
 impl Tape {
     /// Open a tape at `name` in the Dir `dir` (its provider and handle), as
-    /// the executable whose key is `revision`: the generated `tape.open` passes
-    /// the entry object's `hirsel_build_identity` (REPLAY-SPEC v2.1 R1), so a
-    /// program that never opens a tape never references it.
+    /// the code whose revision is `revision`: the generated `tape.open` passes
+    /// the entry object's `hirsel_code_revision`, the entry's code revision,
+    /// so a program that never opens a tape never references it.
     /// Record creates the file (CreateNew) and writes block 0 from `header`;
     /// Replay reads it and refuses, in this order, a changed identity,
-    /// revision, argument (when `expect` passes one), or limit or charge
-    /// policy. `header.revision` is not the caller's: open fills it from
-    /// `revision` (v2.3 R10's interim producer).
+    /// revision (unless `expect.across`), argument (when `expect` passes
+    /// one), or limit or charge policy. `header.revision` is not the
+    /// caller's: open fills it from `revision`.
     /// Returns the tape and the stored argument.
     /// # Safety
     /// Called in a task of the run that owns `dir`'s provider.
@@ -465,6 +470,7 @@ impl Tape {
             provider: dir.0,
             handle: dir.1,
         };
+        let mut differs = false;
         let (live, arg) = match mode {
             Mode::Record => {
                 // SAFETY: forwarded.
@@ -507,7 +513,7 @@ impl Tape {
                 if stored.identity != expect.identity {
                     return Err(OpenError::Refused(Refusal::Code));
                 }
-                if stored.revision != header.revision {
+                if stored.revision != header.revision && !expect.across {
                     return Err(OpenError::Refused(Refusal::Revision));
                 }
                 if expect.arg.is_some_and(|a| a != stored.arg) {
@@ -516,6 +522,7 @@ impl Tape {
                 if stored.limit != expect.limit || stored.charge_policy != expect.charge_policy {
                     return Err(OpenError::Refused(Refusal::Limit));
                 }
+                differs = stored.revision != header.revision;
                 let live = Live {
                     mode,
                     fault: None,
@@ -542,7 +549,14 @@ impl Tape {
         s.live = Some(live);
         let generation = s.generation;
         drop(s);
-        Ok((Tape { cell, generation }, arg))
+        Ok((
+            Tape {
+                cell,
+                generation,
+                differs,
+            },
+            arg,
+        ))
     }
 
     /// `std.<kind>.on_tape`: the substitute for the capability `source`, as
@@ -550,6 +564,11 @@ impl Tape {
     /// Replay checks it is the next frame.
     pub fn on_tape(&self, kind: u8, source: (Provider, u64)) -> Result<(Provider, u64), Fault> {
         self.grant(kind, None, Some(source)).map(|(p, h, _)| (p, h))
+    }
+    /// The label of an across open: the tape's revision is not the
+    /// opener's. False for every other open.
+    pub fn revision_differs(&self) -> bool {
+        self.differs
     }
     /// `std.args.on_tape`: Record writes the whole vector into the GRANT
     /// frame and returns it; Replay returns the recorded vector.

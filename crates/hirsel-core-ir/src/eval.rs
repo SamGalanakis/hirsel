@@ -2377,7 +2377,9 @@ impl Machine<'_> {
                 vec![self.dests]
             }
             RtOp::ArgsLen => vec![self.world.args.len() as u64],
-            RtOp::TapeOpen | RtOp::TapeEnd | RtOp::TapeGrant => panic!("{NO_TAPE}"),
+            RtOp::TapeOpen | RtOp::TapeEnd | RtOp::TapeGrant | RtOp::TapeAcross => {
+                panic!("{NO_TAPE}")
+            }
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
             RtOp::Host(op) => self.host(t, op, a)?,
             RtOp::CompareBytes => {

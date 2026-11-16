@@ -1,5 +1,5 @@
 //! The core surface's runtime rows (`rt.tape_open`, `rt.tape_end`,
-//! `rt.tape_grant`) and the Tape resource's drop.
+//! `rt.tape_grant`, `rt.tape_across`) and the Tape resource's drop.
 //!
 //! A `Tape` value is a run-local u64 key into the run's `Files` registry, like
 //! a HostFile's. A substitute is a dynamic grant (`Files::grant`) whose
@@ -72,10 +72,11 @@ pub struct Opened {
 }
 
 /// `rt.tape_open`: open `name` in the Dir `dir` as a Run tape. `mode` is
-/// core's `tape.Mode` case (0 Record, 1 Replay); `id` is the tape id's two
-/// words, little-endian, first word first. Replay compares the argument
-/// always, and the charge policy is 0 (S1 has one policy). `revision` is the
-/// executable's `hirsel_build_identity`.
+/// core's `tape.Mode` case (0 Record, 1 Replay, 2 Across: a Replay that
+/// opens a tape of another revision); `id` is the tape id's two words,
+/// little-endian, first word first. Replay compares the argument always,
+/// and the charge policy is 0 (S1 has one policy). `revision` is the entry
+/// object's `hirsel_code_revision`.
 /// # Safety
 /// A live run context; the carriers and `revision` are live for the call.
 #[allow(clippy::too_many_arguments)]
@@ -119,6 +120,7 @@ pub unsafe extern "C" fn hirsel_core_tape_open(
             charge_policy: 0,
             limit,
             arg: Some(arg),
+            across: mode == 2,
         };
         let mode = if mode == 0 {
             Mode::Record
@@ -192,6 +194,16 @@ pub unsafe extern "C" fn hirsel_core_tape_end(
 pub struct Granted {
     pub value: u64,
     pub status: u8,
+}
+
+/// `rt.tape_across`: whether `tape` was opened Across and its revision is
+/// not the opener's.
+/// # Safety
+/// A live run context; `tape` is a live key of the run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_tape_across(context: *mut Context, tape: u64) -> bool {
+    // SAFETY: the registry is the run's.
+    unsafe { (*(*context).host_files).tape_ref(tape).revision_differs() }
 }
 
 /// `rt.tape_grant`: the substitute of the capability `source` of `kind`

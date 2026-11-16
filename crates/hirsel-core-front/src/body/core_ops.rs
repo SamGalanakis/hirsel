@@ -45,6 +45,7 @@ pub(crate) enum Kernel {
     TapeEnd(bool),
     /// The substitute of a capability of this `entry` kind.
     TapeGrant(u8),
+    TapeAcross,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,6 +162,7 @@ operations! {
     ("tape", "stdout", Lane::Runtime(Kernel::TapeGrant(4)), "B", "tape-build-1037", false),
     ("tape", "stderr", Lane::Runtime(Kernel::TapeGrant(5)), "B", "tape-build-1037", false),
     ("tape", "args", Lane::Runtime(Kernel::TapeGrant(10)), "B", "tape-build-1037", false),
+    ("tape", "across", Lane::Runtime(Kernel::TapeAcross), "B", "tape-build-1037", false),
     ("tape", "io_error", Lane::PendingCode, "C", "tape-build-1037", true),
     ("tape", "open_error", Lane::PendingCode, "C", "tape-build-1037", true),
     ("tape", "ending", Lane::PendingCode, "C", "tape-build-1037", true),
@@ -739,6 +741,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     n,
                 )?;
                 Some(value)
+            }
+            Kernel::TapeAcross => {
+                let tape = self.runtime_key(vals[0]?, n);
+                let [differs, ..] = self.runtime_row(RtOp::TapeAcross, &[Arg::Value(tape)], n)?;
+                Some(differs)
             }
         }
     }
@@ -1431,7 +1438,8 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::ArgsGet
             | Kernel::TapeOpen
             | Kernel::TapeEnd(_)
-            | Kernel::TapeGrant(_) => true,
+            | Kernel::TapeGrant(_)
+            | Kernel::TapeAcross => true,
             Kernel::CarrierMove
             | Kernel::CarrierView
             | Kernel::StringShorten

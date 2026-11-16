@@ -9,7 +9,7 @@
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 1;
+pub const FORMAT: u16 = 2;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// Block flags: closed for a durable barrier; the tape's last block.
 pub const BARRIER: u8 = 1;
@@ -186,8 +186,9 @@ pub struct Header {
     pub mode: u8,
     pub tape_id: [u8; 16],
     pub identity: Vec<u8>,
-    /// The code's revision (v2.3 R10). Until `code.revision` lands it is the
-    /// executable's key, from `hirsel_build_identity` (v2.1 R1).
+    /// The code's revision: the entry's code revision for a Run tape, the
+    /// called function's for a Call tape (format 2, gavel 7). No compiler,
+    /// backend or runtime identity is in it.
     pub revision: [u8; 32],
     pub charge_policy: u32,
     pub limit: u64,

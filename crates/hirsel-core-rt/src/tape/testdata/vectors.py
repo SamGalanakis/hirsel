@@ -1,4 +1,4 @@
-"""Independent oracle for the tape laws (REPLAY-SPEC v2.3 sections 4 and 5).
+"""Independent oracle for the tape laws (REPLAY-SPEC v2.3 sections 4 and 5, tape format 2).
 
 Imports no compiler or runtime code: it encodes the spec's byte format by hand
 and checks blocks with the system libxxhash. Run from anywhere:
@@ -47,7 +47,7 @@ def block(seq, flags, payload):
     return head + payload + struct.pack('<Q', xxh3(TAPE_ID + head + payload))
 
 # Header: Call tape (no header grants), Record mode.
-header = (struct.pack('<HBB', 1, 2, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
+header = (struct.pack('<HBB', 2, 2, 1) + TAPE_ID + lb(b'app@1/main/run') + BUILD
           + struct.pack('<IQQ', 0, 1000, 0) + bytes([0]) + lb(b'arg') + vi(0))
 
 # Op tags (provider.rs) and grant kinds (entry.rs).

@@ -110,17 +110,17 @@ impl<'a> Plan<'a> {
         })
     }
 
-    /// The entry object of the executable whose key is `build`. It also
-    /// defines `hirsel_build_identity`, the 32 key bytes a tape's header
-    /// carries (REPLAY-SPEC v2.1 R1), and each `revisions` row's carrier, a
-    /// Bytes `{bytes, 32, 0}` over the revision, under its symbol: these
-    /// override the empty carriers the units define (PROG-9). The object is
-    /// made after the key and is not an input to it.
+    /// The entry object of the executable. It also defines
+    /// `hirsel_code_revision`, the entry's code revision, which a Run tape's
+    /// header carries (REPLAY-SPEC v2.3 R10): a rebuild or another engine keeps
+    /// it, a changed reachable body changes it. And it defines each `revisions`
+    /// row's carrier, a Bytes `{bytes, 32, 0}` over the revision, under its
+    /// symbol: these override the empty carriers the units define (PROG-9).
     pub(crate) fn emit(
         &self,
         target: &str,
         sources: &SourceMap,
-        build: &[u8; 32],
+        revision: &[u8; 32],
         revisions: &[(String, [u8; 32])],
     ) -> Result<Vec<u8>> {
         let mut flags = settings::builder();
@@ -150,8 +150,8 @@ impl<'a> Plan<'a> {
         let data = data::write(&mut object, self, sources)?;
         data::bytes(
             &mut object,
-            Some("hirsel_build_identity"),
-            build.to_vec(),
+            Some("hirsel_code_revision"),
+            revision.to_vec(),
             8,
         )?;
         for (symbol, revision) in revisions {

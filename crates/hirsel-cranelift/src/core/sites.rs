@@ -54,13 +54,13 @@ impl Constants {
 }
 
 impl Function<'_, '_, '_> {
-    /// The address of the executable's key, `hirsel_build_identity`, which the
-    /// driver's entry object defines (REPLAY-SPEC v2.1 R1). Only `tape.open`
-    /// reads it, so a program that opens no tape never references it.
-    pub(super) fn build_identity(&mut self) -> Result<Value> {
+    /// The address of the entry's code revision, `hirsel_code_revision`, which
+    /// the driver's entry object defines (REPLAY-SPEC v2.3 R10). Only
+    /// `tape.open` reads it, so a program that opens no tape never references it.
+    pub(super) fn code_revision(&mut self) -> Result<Value> {
         let data = self
             .object
-            .declare_data("hirsel_build_identity", Linkage::Import, false, false)
+            .declare_data("hirsel_code_revision", Linkage::Import, false, false)
             .map_err(error)?;
         let global = self.object.declare_data_in_func(data, self.b.func);
         Ok(self.b.ins().symbol_value(types::I64, global))

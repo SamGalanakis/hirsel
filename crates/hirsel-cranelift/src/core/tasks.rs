@@ -99,7 +99,7 @@ impl Function<'_, '_, '_> {
                 1
             }
             RtOp::TapeOpen => {
-                let revision = self.build_identity()?;
+                let revision = self.code_revision()?;
                 let values = self.c_call(
                     "hirsel_core_tape_open",
                     &[P, U, P, K, P, P, U, U, U, P],
@@ -127,6 +127,15 @@ impl Function<'_, '_, '_> {
                     &[P, U, K, P],
                     &[U],
                     &[self.context, args[0], args[1], args[2]],
+                )?[0];
+                1
+            }
+            RtOp::TapeAcross => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_tape_across",
+                    &[P, U],
+                    &[B],
+                    &[self.context, args[0]],
                 )?[0];
                 1
             }

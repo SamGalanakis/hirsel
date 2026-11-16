@@ -1434,8 +1434,8 @@ fn link_objects(
         let sources = sources()?;
         let temp = store.scratch()?;
         let entry = temp.path().join("entry.o");
-        // The described instances' revisions are a function of the objects,
-        // so of the key: they are made only for a miss.
+        // The entry's and the described instances' revisions are a function
+        // of the objects, so of the key: they are made only for a miss.
         let revisions: Vec<_> = revisions()?
             .into_iter()
             .map(|(identity, revision)| {
@@ -1446,7 +1446,7 @@ fn link_objects(
             })
             .collect();
         let bytes = entry_plan
-            .emit(&options.target, &sources, &link_key.0, &revisions)
+            .emit(&options.target, &sources, &revision.0, &revisions)
             .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");

@@ -145,7 +145,7 @@ impl FunctionEmitter<'_> {
             }
             RtOp::DestId => self.native_call("hirsel_core_dest_id", &[U], &[]),
             RtOp::TapeOpen => {
-                let revision = self.build_identity();
+                let revision = self.code_revision();
                 self.native_call(
                     "hirsel_core_tape_open",
                     &[U, U],
@@ -172,6 +172,11 @@ impl FunctionEmitter<'_> {
                     zeroext(Type::I8, args[1].clone()),
                     p(&args[2]),
                 ],
+            ),
+            RtOp::TapeAcross => self.native_call(
+                "hirsel_core_tape_across",
+                &[B],
+                &[ptr(CONTEXT), u(&args[0])],
             ),
             RtOp::TapeGrant => self.native_call(
                 "hirsel_core_tape_grant",

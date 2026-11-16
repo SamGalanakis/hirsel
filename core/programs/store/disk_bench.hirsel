@@ -1,0 +1,130 @@
+// Appended to the store module only by store_disk_bench.py. S2 open is private.
+type DiskAccount: send + codec {
+    id: u64,
+    balance: i64,
+    owner: String
+}
+
+fn disk_bench_bucket(a: DiskAccount) -> Result[u64, Capacity] { Ok(a.id % 4) }
+
+fn disk_bench_put(mut db: Db, t: Table[u64, DiskAccount], key: u64, balance: u64) waits {
+    let done = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        let a = DiskAccount(id: key, balance: int.narrow(balance), owner: result.unwrap(string.from("owner000")))
+        put(mut tx, t, key, a)
+    }))
+    if let Committed(_) = done {} else { fail("disk bench put") }
+}
+
+fn disk_bench_manifest(d: Dir) -> DiskManifest waits {
+    let raw = result.unwrap(disk_read_file(d, "MANIFEST", 67108952))
+    let result = result.unwrap(disk_read_manifest("MANIFEST", raw))
+    let (_, take m) = take result
+    take m
+}
+
+fn disk_bench_next_pack(d: Dir) -> u64 waits { disk_bench_manifest(d).next_pack }
+
+pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let mode = option.unwrap(args.get(argv, 0))
+    let with_index = option.unwrap(args.get(argv, 1)) == "1"
+    let million = mode == "R8-load" || mode == "R8-open"
+    let n: u64 = if million { 1000000 } else { 100000 }
+    let child = disk_test_directory(d)
+    let mut options = defaults()
+    // The task allowance and resident limit keep their specified defaults.
+    let mut db = result.unwrap(open(tasks, child, c, r, options))
+    let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
+    result.unwrap(create_table(mut db, "accounts", std.codec.key_u64(), dictionary))
+    let mut t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
+    if with_index {
+        result.unwrap(create_index(mut db, t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
+        let _ = result.unwrap(index(db, mut t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
+    }
+    let catalog_cost = db.resident
+    for k in 0u64 .. n { disk_bench_put(mut db, t, k, k) }
+    let first = result.unwrap(checkpoint(mut db))
+    result.unwrap(durable(mut db, first))
+    let per_row: u64 = if with_index { 204 } else { 118 }
+    if db.resident != catalog_cost + n * per_row { fail("disk bench account") }
+    let first_pack = disk_bench_next_pack(child)
+    if mode == "R6" {
+        for i in 0u64 .. 64 {
+            let k = sm(i) % n
+            disk_bench_put(mut db, t, k, 100000 + i)
+        }
+    }
+    // Reopen modes release the populated database before READY.
+    let mut holder: List[Db] = list.new()
+    if mode == "R7" || mode == "R8-open" {
+        result.unwrap(close(take db))
+    } else {
+        result.unwrap(list.push(mut holder, take db))
+    }
+    let mut gate = result.unwrap(host.open(d, "gate", Read))
+    let mut byte: Bytes = result.unwrap(list.with_capacity(1))
+    result.unwrap(stdout.write(out, "READY\n"))
+    if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+    let started = host.mono_ns(c)
+    if mode == "R7" || mode == "R8-open" {
+        options.create = false
+        let opened = result.unwrap(open(tasks, child, c, r, options))
+        result.unwrap(list.push(mut holder, take opened))
+    } else if mode == "R6" {
+        let cut = result.unwrap(checkpoint(mut holder[0]))
+        result.unwrap(durable(mut holder[0], cut))
+    }
+    let elapsed = host.mono_ns(c) - started
+    let count = std.omap.len(holder[0].roots.data)
+    let expected_count = if with_index { 2 * n } else { n }
+    if count != expected_count { fail("disk bench row count") }
+    let mut rendered = string.new()
+    result.unwrap(string.push(mut rendered, "DONE "))
+    result.unwrap(string.push_u64(mut rendered, n))
+    result.unwrap(string.push(mut rendered, " "))
+    result.unwrap(string.push_u64(mut rendered, elapsed))
+    result.unwrap(string.push(mut rendered, "\n"))
+    result.unwrap(stdout.write(out, rendered))
+    list.clear(mut byte)
+    if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+    // Full values are verified after the phase counters and RSS have stopped.
+    let sh = shape(t)
+    let s = snapshot(holder[0])
+    let mut rows = result.unwrap(scan(s, sh, Unbounded, Unbounded))
+    for k in 0u64 .. n {
+        let row = option.unwrap(result.unwrap(next(mut rows)))
+        let mut balance = k
+        if mode == "R6" {
+            for i in 0u64 .. 64 {
+                if sm(i) % n == k { balance = 100000 + i }
+            }
+        }
+        if row.0 != k || row.1.id != k || row.1.balance != int.narrow(balance) || row.1.owner != "owner000" {
+            fail("disk bench wrong row")
+        }
+    }
+    if let Some(_) = result.unwrap(next(mut rows)) { fail("disk bench extra row") }
+    let manifest = disk_bench_manifest(child)
+    let mut written: u64 = 0
+    let mut nodes: u64 = 0
+    for pack in manifest.packs {
+        if pack.seq >= first_pack {
+            let path = result.unwrap(disk_path("p-", pack.seq, ""))
+            let raw = result.unwrap(disk_read_file(child, path, 67108952))
+            written += list.len(raw)
+            nodes += int.widen(pack.nodes)
+        }
+    }
+    let mut extra = string.new()
+    result.unwrap(string.push(mut extra, "PACK_BYTES "))
+    result.unwrap(string.push_u64(mut extra, written))
+    result.unwrap(string.push(mut extra, " NEW_NODES "))
+    result.unwrap(string.push_u64(mut extra, nodes))
+    result.unwrap(string.push(mut extra, " ACCOUNT "))
+    result.unwrap(string.push_u64(mut extra, holder[0].resident))
+    result.unwrap(string.push(mut extra, "\n"))
+    result.unwrap(stdout.write(out, extra))
+    let mut finished = take holder
+    let owned = option.unwrap(list.pop(mut finished))
+    result.unwrap(close(take owned))
+    Ok(())
+}

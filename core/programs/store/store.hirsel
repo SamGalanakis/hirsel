@@ -4222,7 +4222,7 @@ fn test_stored_size(c: Clock) -> Result[(), ()] waits {
     if law_stored_size(c) { Ok(()) } else { Error(()) }
 }
 
-// S2 disk format and recovery. STORE-SPEC v2.8, with v2.5 pack naming.
+// S2 disk format and recovery. STORE-SPEC v2.11, with v2.5 pack naming.
 type DiskContext {
     store: StoreId,
     role: u8,
@@ -4572,7 +4572,7 @@ fn disk_manifest_bytes(id: StoreId, m: DiskManifest) -> Result[Bytes, Capacity] 
     le(mut payload, m.generation, 8)?
     le(mut payload, 4096, 4)?
     le(mut payload, 1048576, 4)?
-    le(mut payload, 16777216, 4)?
+    le(mut payload, 16777280, 4)?
     le(mut payload, 32, 2)?
     le(mut payload, m.next_node, 8)?
     le(mut payload, int.widen(m.next_branch), 4)?
@@ -4627,7 +4627,7 @@ fn disk_read_manifest(file: String, raw: Bytes) -> Result[(StoreId, DiskManifest
     let values = disk_number(file, payload, mut at, 4)?
     let transaction = disk_number(file, payload, mut at, 4)?
     let fanout = disk_number(file, payload, mut at, 2)?
-    if keys != 4096 || values != 1048576 || transaction != 16777216 || fanout != 32 {
+    if keys != 4096 || values != 1048576 || transaction != 16777280 || fanout != 32 {
         return Error(disk_fault(file, 72, Malformed))
     }
     let next_node = disk_number(file, payload, mut at, 8)?
@@ -4708,7 +4708,7 @@ pub fn disk_law_manifest() -> bool {
     let id = StoreId(hi: 1, lo: 2)
     let m = disk_genesis_fixture()
     let raw = result.unwrap(disk_manifest_bytes(id, m))
-    if list.len(raw) != 228 || std.check.xxh3(raw, 0, list.len(raw)) != 0x9f20a7c448135b34u64 {
+    if list.len(raw) != 228 || std.check.xxh3(raw, 0, list.len(raw)) != 0xef84b5cbe926a0a1u64 {
         return false
     }
     let decoded_manifest = result.unwrap(disk_read_manifest("MANIFEST", raw))
@@ -4787,7 +4787,7 @@ fn disk_blob(file: String, raw: Bytes, mut at: u64, limit: u64) -> Result[Bytes,
     Ok(take out)
 }
 
-fn disk_node_bytes(node: Arc[std.omap.Node[Bytes, Bytes]]) -> Result[Bytes, Capacity] {
+fn disk_node_bytes(node: Arc[std.omap.Node[Bytes, Arc[Bytes]]]) -> Result[Bytes, Capacity] {
     let mut payload: Bytes = list.new()
     le(mut payload, std.omap.node_id(node), 8)?
     le(mut payload, std.omap.node_level(node), 1)?
@@ -4815,7 +4815,7 @@ fn disk_node_bytes(node: Arc[std.omap.Node[Bytes, Bytes]]) -> Result[Bytes, Capa
     Ok(take payload)
 }
 
-fn disk_parse_node(file: String, raw: Bytes, nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]], next_node: u64) -> Result[Arc[std.omap.Node[Bytes, Bytes]], Error] {
+fn disk_parse_node(file: String, raw: Bytes, nodes: Map[u64, Arc[std.omap.Node[Bytes, Arc[Bytes]]]], next_node: u64) -> Result[Arc[std.omap.Node[Bytes, Arc[Bytes]]], Error] {
     let mut at: u64 = 0
     let id = disk_number(file, raw, mut at, 8)?
     if id == 0 || id >= next_node {
@@ -4829,12 +4829,13 @@ fn disk_parse_node(file: String, raw: Bytes, nodes: Map[u64, Arc[std.omap.Node[B
     }
     let mut keys: List[Bytes] = list.new()
     if level == 0 {
-        let mut values: List[Bytes] = list.new()
+        let mut values: List[Arc[Bytes]] = list.new()
         for _ in 0u64 .. count {
             let k = disk_blob(file, raw, mut at, 4096)?
             let v = disk_blob(file, raw, mut at, 1048576)?
             capacity(result.capacity_only(list.push(mut keys, take k)))?
-            capacity(result.capacity_only(list.push(mut values, take v)))?
+            let shared_value = capacity(result.capacity_only(arc.new(take v)))?
+            capacity(result.capacity_only(list.push(mut values, take shared_value)))?
         }
         if at != list.len(raw) {
             return Error(disk_fault(file, at, Malformed))
@@ -4844,7 +4845,7 @@ fn disk_parse_node(file: String, raw: Bytes, nodes: Map[u64, Arc[std.omap.Node[B
             Error((c, _)) => Error(Full(c))
         }
     } else {
-        let mut children: List[Arc[std.omap.Node[Bytes, Bytes]]] = list.new()
+        let mut children: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = list.new()
         for i in 0u64 .. count {
             let child_id = disk_number(file, raw, mut at, 8)?
             if child_id == 0 || child_id >= id {
@@ -4877,7 +4878,7 @@ fn disk_parse_node(file: String, raw: Bytes, nodes: Map[u64, Arc[std.omap.Node[B
     }
 }
 
-fn disk_postorder(node: Arc[std.omap.Node[Bytes, Bytes]], mut out: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[(), Capacity] {
+fn disk_postorder(node: Arc[std.omap.Node[Bytes, Arc[Bytes]]], mut out: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]]) -> Result[(), Capacity] {
     for i in 0u64 .. std.omap.node_count(node) {
         if let Some(child) = std.omap.node_child(node, i) {
             disk_postorder(child, mut out)?
@@ -4885,6 +4886,8 @@ fn disk_postorder(node: Arc[std.omap.Node[Bytes, Bytes]], mut out: List[Arc[std.
     }
     result.capacity_only(list.push(mut out, arc.share(node)))
 }
+
+fn disk_word(value: Bytes, n: u64) -> bool { value == key_word(n) }
 
 // NODE bytes, including branch entry0's empty low key, reconstruct the map.
 // Reader validates ids/lengths/shape fields; it does not recheck B-tree order.
@@ -4896,9 +4899,9 @@ pub fn disk_law_nodes(c: Clock) -> bool {
         }
     }
     let root = option.unwrap(std.omap.root(db.roots.data))
-    let mut order: List[Arc[std.omap.Node[Bytes, Bytes]]] = list.new()
+    let mut order: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = list.new()
     result.unwrap(disk_postorder(root, mut order))
-    let mut nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]] = map.new()
+    let mut nodes: Map[u64, Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = map.new()
     for n in order {
         let raw = result.unwrap(disk_node_bytes(n))
         let rebuilt = result.unwrap(disk_parse_node("p-1", raw, nodes, db.next_node + 1))
@@ -4917,7 +4920,7 @@ pub fn disk_law_nodes(c: Clock) -> bool {
     for k in 0u64 .. 96 {
         let p = result.unwrap(physical(1, key_word(k)))
         match std.omap.get(rebuilt_map, p) {
-            Some(v) => if v != key_word(k + 1) {
+            Some(v) => if !disk_word(v, k + 1) {
                 return false
             },
             None => return false
@@ -5064,7 +5067,7 @@ fn disk_new_segment(d: Dir, id: StoreId, seq: u64, prev_end: u64) -> Result[(Hos
 // Checkpoint graph: new nodes contribute their child edges once; root edges
 // change at the cut. Removing a last edge cascades without walking live subtrees.
 type DiskNodeRecord: shareable + send {
-    node: Arc[std.omap.Node[Bytes, Bytes]],
+    node: Arc[std.omap.Node[Bytes, Arc[Bytes]]],
     pack: u64,
     size: u64,
     refs: u64,
@@ -5141,11 +5144,13 @@ fn disk_graph() -> DiskGraph {
     DiskGraph(nodes: disk_index(), roots: list.new(), live: 0, pack_stats: disk_index())
 }
 
-fn disk_node_size(node: Arc[std.omap.Node[Bytes, Bytes]]) -> u64 {
+fn disk_node_size(node: Arc[std.omap.Node[Bytes, Arc[Bytes]]]) -> u64 {
     let mut size: u64 = 28
     for i in 0u64 .. std.omap.node_count(node) {
         if std.omap.node_level(node) == 0 {
-            size += 8 + list.len(option.unwrap(std.omap.node_key(node, i))) + list.len(option.unwrap(std.omap.node_value(node, i)))
+            let key = option.unwrap(std.omap.node_key(node, i))
+            let value = option.unwrap(std.omap.node_value(node, i))
+            size += 8 + list.len(key) + list.len(value)
         } else {
             size += 12
             if i != 0 {
@@ -5156,7 +5161,7 @@ fn disk_node_size(node: Arc[std.omap.Node[Bytes, Bytes]]) -> u64 {
     size
 }
 
-fn disk_node_charge(node: Arc[std.omap.Node[Bytes, Bytes]]) -> u64 {
+fn disk_node_charge(node: Arc[std.omap.Node[Bytes, Arc[Bytes]]]) -> u64 {
     let mut charge: u64 = 0
     if std.omap.node_level(node) == 0 {
         for i in 0u64 .. std.omap.node_count(node) {
@@ -5177,7 +5182,7 @@ fn disk_ref(mut graph: DiskGraph, id: u64) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn disk_reach(mut graph: DiskGraph, node: Arc[std.omap.Node[Bytes, Bytes]], mut fresh: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[(), Capacity] {
+fn disk_reach(mut graph: DiskGraph, node: Arc[std.omap.Node[Bytes, Arc[Bytes]]], mut fresh: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]]) -> Result[(), Capacity] {
     let id = std.omap.node_id(node)
     if let Some(_) = disk_index_get(graph.nodes, id) {
         return Ok(())
@@ -5221,7 +5226,7 @@ fn disk_unref(mut graph: DiskGraph, id: u64) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn disk_track_tree(mut graph: DiskGraph, tree: std.omap.OMap[Bytes, Bytes], mut roots: List[u64], mut fresh: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[(), Capacity] {
+fn disk_track_tree(mut graph: DiskGraph, tree: std.omap.OMap[Bytes, Arc[Bytes]], mut roots: List[u64], mut fresh: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]]) -> Result[(), Capacity] {
     if let Some(root) = std.omap.root(tree) {
         disk_reach(mut graph, root, mut fresh)?
         let id = std.omap.node_id(root)
@@ -5231,9 +5236,9 @@ fn disk_track_tree(mut graph: DiskGraph, tree: std.omap.OMap[Bytes, Bytes], mut 
     Ok(())
 }
 
-fn disk_track(mut graph: DiskGraph, roots: Roots) -> Result[List[Arc[std.omap.Node[Bytes, Bytes]]], Capacity] {
+fn disk_track(mut graph: DiskGraph, roots: Roots) -> Result[List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]], Capacity] {
     let mut next_roots: List[u64] = list.new()
-    let mut fresh: List[Arc[std.omap.Node[Bytes, Bytes]]] = list.new()
+    let mut fresh: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = list.new()
     disk_track_tree(mut graph, roots.data, mut next_roots, mut fresh)?
     disk_track_tree(mut graph, roots.streams, mut next_roots, mut fresh)?
     disk_track_tree(mut graph, roots.catalog, mut next_roots, mut fresh)?
@@ -5340,7 +5345,7 @@ fn disk_pack_close(d: Dir, id: StoreId, mut writer: DiskPackWriter, mut graph: D
     Ok(())
 }
 
-fn disk_pack_add(d: Dir, id: StoreId, mut writer: DiskPackWriter, mut graph: DiskGraph, node: Arc[std.omap.Node[Bytes, Bytes]]) -> Result[(), Error] waits {
+fn disk_pack_add(d: Dir, id: StoreId, mut writer: DiskPackWriter, mut graph: DiskGraph, node: Arc[std.omap.Node[Bytes, Arc[Bytes]]]) -> Result[(), Error] waits {
     let size = disk_node_size(node)
     if list.len(writer.ids) != 0 && int.saturating_add(list.len(writer.raw), size) > writer.cap {
         disk_pack_close(d, id, mut writer, mut graph)?
@@ -5351,7 +5356,7 @@ fn disk_pack_add(d: Dir, id: StoreId, mut writer: DiskPackWriter, mut graph: Dis
     capacity(result.capacity_only(list.push(mut writer.ids, std.omap.node_id(node))))
 }
 
-fn disk_write_nodes(d: Dir, id: StoreId, seq: u64, cap: u64, mut graph: DiskGraph, nodes: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[(List[DiskPack], u64), Error] waits {
+fn disk_write_nodes(d: Dir, id: StoreId, seq: u64, cap: u64, mut graph: DiskGraph, nodes: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]]) -> Result[(List[DiskPack], u64), Error] waits {
     let mut writer = capacity(disk_pack_writer(id, seq, cap))?
     for node in nodes {
         disk_pack_add(d, id, mut writer, mut graph, node)?
@@ -5468,7 +5473,7 @@ fn disk_load_pack(d: Dir, id: StoreId, pack: DiskPack, cap: u64, next_node: u64,
     Ok(())
 }
 
-fn disk_attach_tree(nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]], id: u64) -> Result[std.omap.OMap[Bytes, Bytes], Error] {
+fn disk_attach_tree(nodes: Map[u64, Arc[std.omap.Node[Bytes, Arc[Bytes]]]], id: u64) -> Result[std.omap.OMap[Bytes, Arc[Bytes]], Error] {
     if id == 0 {
         return Ok(std.omap.new())
     }
@@ -5478,13 +5483,13 @@ fn disk_attach_tree(nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]], id: u64) 
     }
 }
 
-fn disk_attach_roots(nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]], roots: DiskRoots) -> Result[Roots, Error] {
+fn disk_attach_roots(nodes: Map[u64, Arc[std.omap.Node[Bytes, Arc[Bytes]]]], roots: DiskRoots) -> Result[Roots, Error] {
     Ok(Roots(data: disk_attach_tree(nodes, roots.data)?, streams: disk_attach_tree(nodes, roots.streams)?, catalog: disk_attach_tree(nodes, roots.catalog)?))
 }
 
-fn disk_track_roots(mut graph: DiskGraph, all: List[Roots]) -> Result[List[Arc[std.omap.Node[Bytes, Bytes]]], Capacity] {
+fn disk_track_roots(mut graph: DiskGraph, all: List[Roots]) -> Result[List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]], Capacity] {
     let mut next_roots: List[u64] = list.new()
-    let mut fresh: List[Arc[std.omap.Node[Bytes, Bytes]]] = list.new()
+    let mut fresh: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = list.new()
     for roots in all {
         disk_track_tree(mut graph, roots.data, mut next_roots, mut fresh)?
         disk_track_tree(mut graph, roots.streams, mut next_roots, mut fresh)?
@@ -5515,7 +5520,7 @@ fn disk_load_manifest(d: Dir, raw: Bytes, cap: u64, ceiling: u64) -> Result[Disk
     list.sort(mut ids, fn(a: u64, b: u64) -> Order {
         std.order.compare(a, b)
     })
-    let mut nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]] = map.new()
+    let mut nodes: Map[u64, Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = map.new()
     let mut locations: Map[u64, (u64, u64)] = map.new()
     for node_id in ids {
         // Release each encoded payload as its node is built, rather than keep
@@ -5606,7 +5611,7 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
     for k in 0u64 .. 40 {
         let key = result.unwrap(physical(1, key_word(k)))
         match std.omap.get(loaded.roots.data, key) {
-            Some(v) => if v != key_word(k + 1) {
+            Some(v) => if !disk_word(v, k + 1) {
                 return false
             },
             None => return false
@@ -5641,7 +5646,7 @@ type DiskPackSet {
     next: u64
 }
 
-fn disk_compact(d: Dir, id: StoreId, mut graph: DiskGraph, old: List[DiskPack], seq: u64, cap: u64, take fresh: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[DiskPackSet, Error] waits {
+fn disk_compact(d: Dir, id: StoreId, mut graph: DiskGraph, old: List[DiskPack], seq: u64, cap: u64, take fresh: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]]) -> Result[DiskPackSet, Error] waits {
     let mut packs: List[DiskPack] = list.new()
     let mut retired: List[u64] = list.new()
     let mut emitted = take fresh
@@ -5661,7 +5666,7 @@ fn disk_compact(d: Dir, id: StoreId, mut graph: DiskGraph, old: List[DiskPack], 
     }
     // Forwarded old ids and new parents can share one new pack. Sorting the
     // emitted ids preserves children-before-parents within that pack.
-    list.sort(mut emitted, fn(a: Arc[std.omap.Node[Bytes, Bytes]], b: Arc[std.omap.Node[Bytes, Bytes]]) -> Order {
+    list.sort(mut emitted, fn(a: Arc[std.omap.Node[Bytes, Arc[Bytes]]], b: Arc[std.omap.Node[Bytes, Arc[Bytes]]]) -> Order {
         std.order.compare(std.omap.node_id(a), std.omap.node_id(b))
     })
     let result_set = disk_write_nodes(d, id, seq, cap, mut graph, emitted)?
@@ -5727,7 +5732,7 @@ pub fn disk_law_compact(d: Dir, c: Clock) -> bool waits {
             k + 1
         }
         match std.omap.get(loaded.roots.data, key) {
-            Some(v) => if v != key_word(expected) {
+            Some(v) => if !disk_word(v, expected) {
                 return false
             },
             None => return false

@@ -216,10 +216,10 @@
         "image index": 203.79778742473042
       },
       "image_per_token": {
-        "records_opened": 0.0024567987676795966,
-        "bytes_read": 10.042279232600476,
-        "digests": 0.0024567987676795966,
-        "digest_bytes": 9.944007281893294,
+        "records_opened": 0.0024646408066097184,
+        "bytes_read": 10.084441954908277,
+        "digests": 0.0024646408066097184,
+        "digest_bytes": 9.985856322643887,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.03113849600896233,
@@ -854,6 +854,49 @@
       "evidence": [
         "/tmp/std-codec-1008-land.log",
         "std-codec-1008/evidence/front-cost.log"
+      ]
+    },
+    {
+      "reason": "std.codec.of (core-derive-codec-1017 slice 1: `of[T: codec]() -> Codec[T]`, resolved per instance to the type's maker) is one more std.codec function; suite-edit's image opens its record. The four suite-edit image cells it moves receive the observation; every other cell is unchanged.",
+      "changes": {
+        "suite-edit": {
+          "records_opened": {
+            "before": 0.0024567987676795966,
+            "after": 0.0024646408066097184
+          },
+          "bytes_read": {
+            "before": 10.042279232600476,
+            "after": 10.084441954908277
+          },
+          "digests": {
+            "before": 0.0024567987676795966,
+            "after": 0.0024646408066097184
+          },
+          "digest_bytes": {
+            "before": 9.944007281893294,
+            "after": 9.985856322643887
+          }
+        }
+      },
+      "observation": {
+        "local": {
+          "records_opened": 88,
+          "bytes_read": 360065,
+          "digests": 88,
+          "digest_bytes": 356545,
+          "tokens": 35705
+        },
+        "base_local": {
+          "records_opened": 87,
+          "bytes_read": 355909,
+          "digests": 87,
+          "digest_bytes": 352429,
+          "tokens": 35705
+        }
+      },
+      "evidence": [
+        "core-derive-codec-1017/logs/slice1-tests.log",
+        "core-derive-codec-1017/logs/slice1-basecost.log"
       ]
     }
   ],

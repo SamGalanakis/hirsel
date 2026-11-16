@@ -1,0 +1,31 @@
+// Published CRC-32C check value and independent bit-at-a-time recurrence.
+fn bitwise(b: Bytes) -> u32 {
+    let mut crc: u32 = 0xffffffff
+    for byte in b {
+        crc = crc ^ int.widen(byte)
+        for bit in 0u64 .. 8 {
+            crc = if (crc & 1) == 0 { crc >> 1 } else { (crc >> 1) ^ 0x82f63b78u32 }
+        }
+    }
+    crc ^ 0xffffffffu32
+}
+// Wrong implementation caught: IEEE polynomial, no initial/final complement.
+// expect: run published_vector() = true
+fn published_vector() -> bool {
+    let empty: Bytes = list.new()
+    check.crc32c(empty) == 0 && check.crc32c(string.as_bytes("123456789")) == 0xe3069283u32
+}
+// Wrong implementation caught: byte/table indexing errors and reset at each chunk.
+// expect: run every_byte_and_split() = true
+fn every_byte_and_split() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(256))
+    for i in 0u64 .. 256 {
+        result.unwrap(list.push(mut b, int.truncate(i)))
+        if check.crc32c(b) != bitwise(b) { return false }
+    }
+    for cut in 0u64 .. 257 {
+        let a = check.crc32c(list.slice(b, 0, cut))
+        if check.crc32c_append(a, list.slice(b, cut, 256)) != bitwise(b) { return false }
+    }
+    true
+}

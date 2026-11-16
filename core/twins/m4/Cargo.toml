@@ -11,3 +11,7 @@ path = "durable_commit.rs"
 [[bin]]
 name = "m4-isolate"
 path = "isolate.rs"
+
+[[bin]]
+name = "m4-crc"
+path = "crc.rs"

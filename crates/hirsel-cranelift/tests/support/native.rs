@@ -1,3 +1,16 @@
+trait NativeInput {
+    fn module(&self) -> &c::Module;
+    fn object(&self, optimize: bool, debug: bool, observing: bool) -> Vec<u8>;
+}
+impl NativeInput for c::Module {
+    fn module(&self) -> &c::Module { self }
+    fn object(&self, optimize: bool, debug: bool, observing: bool) -> Vec<u8> {
+        hirsel_cranelift::core::emit_object_for_test_observed(self,
+            &hirsel_core_layout::compute(&self.types).unwrap(),
+            &Options { target: NATIVE_TARGET, optimize, debug_lines: debug },
+            hirsel_core_ids::ContentHash([0x90; 32]), observing).unwrap().bytes
+    }
+}
 // Execute objects through a separately compiled C caller. This catches both
 // scalar semantics and the register packing a same-backend caller could mask.
 use hirsel_core_ir::eval::{self, Outcome};
@@ -11,8 +24,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-#[path = "front.rs"]
-mod front;
 #[path = "providers.rs"]
 mod providers;
 
@@ -125,23 +136,23 @@ fn declare_functions(source: &mut String, module: &c::Module) {
     source.push_str("};\nstatic void emit_test_site(uint64_t site) { uint64_t present=site!=0, start=(uint32_t)site, empty[4]={0}; fwrite(&present,8,1,stdout); fwrite(present?test_site_items[(site>>32)-1]:empty,8,4,stdout); fwrite(&start,8,1,stdout); }\n");
 }
 
-fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
-    execute_limit(module, runs, optimize, 1_000_000);
+fn execute(input: &impl NativeInput, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
+    execute_limit(input, runs, optimize, 1_000_000);
 }
-fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool, limit: u64) {
-    execute_injected(module, runs, optimize, limit, None);
+fn execute_limit(input: &impl NativeInput, runs: &[(FuncId, Vec<u64>)], optimize: bool, limit: u64) {
+    execute_injected(input, runs, optimize, limit, None);
 }
 fn execute_injected(
-    module: &c::Module,
+    input: &impl NativeInput,
     runs: &[(FuncId, Vec<u64>)],
     optimize: bool,
     limit: u64,
     injection: Option<(usize, bool)>,
 ) {
-    execute_reports(module, runs, optimize, limit, injection, None);
+    execute_reports(input, runs, optimize, limit, injection, None);
 }
 fn execute_reports(
-    module: &c::Module,
+    input: &impl NativeInput,
     runs: &[(FuncId, Vec<u64>)],
     optimize: bool,
     limit: u64,
@@ -159,7 +170,7 @@ fn execute_reports(
             report: reports.map(|reports| &reports[i]),
         })
         .collect();
-    execute_cases(module, optimize, &cases);
+    execute_cases(input, optimize, &cases);
 }
 
 struct NativeCase<'a> {
@@ -170,27 +181,29 @@ struct NativeCase<'a> {
     report: Option<&'a eval::Report>,
 }
 
-fn execute_cases(module: &c::Module, optimize: bool, cases: &[NativeCase<'_>]) {
-    execute_cases_with_rows(module, optimize, cases, false);
+fn execute_cases(input: &impl NativeInput, optimize: bool, cases: &[NativeCase<'_>]) {
+    execute_cases_with_rows(input, optimize, cases, false);
 }
 
 fn execute_cases_with_rows(
-    module: &c::Module,
+    input: &impl NativeInput,
     optimize: bool,
     cases: &[NativeCase<'_>],
     debug_lines: bool,
 ) {
-    execute_cases_with_bindings(module, optimize, cases, debug_lines, "", false);
+    execute_cases_with_bindings(input, optimize, cases, debug_lines, "", false);
 }
 
 fn execute_cases_with_bindings(
-    module: &c::Module,
+    input: &impl NativeInput,
     optimize: bool,
     cases: &[NativeCase<'_>],
     debug_lines: bool,
     bindings: &str,
     memcheck: bool,
 ) {
+    let module = input.module();
+    let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     assert!(!cases.is_empty(), "native fixture must execute cases");
     println!("native cases: {} (optimize={optimize})", cases.len());
     fn has_hostfile(field: &hirsel_core_layout::FieldTy) -> bool {
@@ -229,21 +242,8 @@ fn execute_cases_with_bindings(
                 })
             });
     let scratch = Scratch::new();
-    let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let observing = std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some();
-    let artifact = hirsel_cranelift::core::emit_object_for_test_observed(
-        module,
-        &layouts,
-        &Options {
-            target: NATIVE_TARGET,
-            optimize,
-            debug_lines,
-        },
-        hirsel_core_ids::ContentHash([0x90; 32]),
-        observing,
-    )
-    .unwrap();
-    fs::write(scratch.0.join("input.o"), artifact.bytes).unwrap();
+    fs::write(scratch.0.join("input.o"), input.object(optimize, debug_lines, observing)).unwrap();
     let mut source = String::from("#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n#include <sys/wait.h>\n");
     source.push_str(bindings);
     source.push_str(include_str!(
@@ -791,9 +791,9 @@ fn link_run_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Vec<u64>
         ]);
         if NATIVE_TARGET == "aarch64-unknown-linux-gnu" {
             command
-                .arg(input_path("HIRSEL_TOOLCHAIN_QEMU").join("qemu-aarch64"))
+                .arg(std::env::var_os("HIRSEL_QEMU_AARCH64").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_QEMU").join("qemu-aarch64")))
                 .arg("-L")
-                .arg(input_path("HIRSEL_TOOLCHAIN_ARM").join("aarch64-none-linux-gnu/libc"))
+                .arg(std::env::var_os("HIRSEL_AARCH64_SYSROOT").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_ARM").join("aarch64-none-linux-gnu/libc")))
                 .arg(&binary);
         } else {
             command.arg(&binary);
@@ -906,101 +906,7 @@ fn check_sample_with_refusals(source: &str, optimize: bool) {
     execute_cases(&module, optimize, &native);
 }
 
-fn check_front_end_run_cases() {
-    fn files(path: &std::path::Path, out: &mut Vec<PathBuf>) {
-        for entry in fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                files(&path, out)
-            } else if path.extension().is_some_and(|e| e == "hirsel") {
-                out.push(path)
-            }
-        }
-    }
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let mut cases = Vec::new();
-    files(&root.join("cases"), &mut cases);
-    cases.sort();
-    let mut count = 0;
-    let mut failures = Vec::new();
-    for file in cases {
-        let source = fs::read_to_string(&file).unwrap();
-        if !source.lines().any(|l| l.starts_with("// expect: run ")) {
-            continue;
-        }
-        println!("front-end fixture: {}", file.display());
-        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let (module, functions) = front::lower(&root, &source);
-            let mut runs = Vec::new();
-            // A run marked `evaluator-only:..cranelift..` (SITES.md, NOT-BUILT) must
-            // still disagree here, so the marker cannot outlive the missing emission.
-            let mut pending = Vec::new();
-            for line in source
-                .lines()
-                .filter_map(|l| l.strip_prefix("// expect: run "))
-            {
-                let marked = line.split_whitespace().last().is_some_and(|m| {
-                    m.strip_prefix("evaluator-only:")
-                        .is_some_and(|e| e.split(',').any(|e| e == "cranelift"))
-                });
-                let call = line.split_once(" = ").unwrap().0;
-                let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
-                let f = functions[name];
-                let sig = &module.signatures[module.functions[f.index()].signature.index()];
-                let args = sig
-                    .params
-                    .iter()
-                    .zip(args.split(',').filter(|a| !a.is_empty()))
-                    .map(|(p, a)| {
-                        let Param::Value(t) = p else {
-                            panic!("scalar run parameter")
-                        };
-                        eval::scalar(*t, a.trim())
-                    })
-                    .collect();
-                if marked {
-                    pending.push((line, (f, args)));
-                    continue;
-                }
-                runs.push((f, args));
-                count += 1;
-            }
-            execute(&module, &runs, false);
-            for (line, run) in pending {
-                let agrees = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    execute(&module, &[run], false)
-                }))
-                .is_ok();
-                assert!(
-                    !agrees,
-                    "`{line}` now agrees on Cranelift: remove `cranelift` from its marker and its NOT-BUILT row"
-                );
-            }
-        }));
-        if let Err(error) = attempt {
-            let message = error
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| error.downcast_ref::<&str>().copied())
-                .unwrap_or("non-string panic");
-            // Assembly/link failures prevent every row of this fixture from
-            // running; name all of them instead of silently dropping the file.
-            let rows = source
-                .lines()
-                .filter_map(|l| l.strip_prefix("// expect: run "))
-                .map(|run| format!("{}: {run}", file.display()))
-                .collect::<Vec<_>>();
-            failures.push(format!("{}\n{message}", rows.join("\n")));
-        }
-    }
-    assert!(count > 0, "the front-end corpus must execute run cases");
-    println!("front-end run cases selected: {count}");
-    assert!(
-        failures.is_empty(),
-        "front-end failures:\n{}",
-        failures.join("\n\n")
-    );
-}
+
 
 fn input_path(variable: &str) -> PathBuf {
     let path = PathBuf::from(
@@ -1017,7 +923,7 @@ fn input_path(variable: &str) -> PathBuf {
 }
 fn c_compiler() -> PathBuf {
     if NATIVE_TARGET == "aarch64-unknown-linux-gnu" {
-        input_path("HIRSEL_TOOLCHAIN_ARM").join("bin/aarch64-none-linux-gnu-gcc")
+        std::env::var_os("HIRSEL_AARCH64_CC").map(PathBuf::from).unwrap_or_else(|| input_path("HIRSEL_TOOLCHAIN_ARM").join("bin/aarch64-none-linux-gnu-gcc"))
     } else {
         PathBuf::from("cc")
     }
@@ -1113,118 +1019,11 @@ b0(v0: f32, v1: f32):
     execute(&m, &runs, true);
 }
 
-fn front_runs(
-    module: &c::Module,
-    functions: &std::collections::HashMap<String, FuncId>,
-    source: &str,
-) -> Vec<(FuncId, Vec<u64>)> {
-    source
-        .lines()
-        .filter_map(|line| line.strip_prefix("// expect: run "))
-        .map(|line| {
-            let call = line.split_once(" = ").unwrap().0;
-            let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
-            let function = functions[name];
-            let signature =
-                &module.signatures[module.functions[function.index()].signature.index()];
-            let args = signature
-                .params
-                .iter()
-                .zip(args.split(',').filter(|a| !a.is_empty()))
-                .map(|(p, a)| {
-                    let Param::Value(t) = p else {
-                        panic!("scalar run")
-                    };
-                    eval::scalar(*t, a.trim())
-                })
-                .collect();
-            (function, args)
-        })
-        .collect()
-}
 
-fn check_failure_sites() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let source = fs::read_to_string(root.join("cases/body/failure-sites.hirsel")).unwrap();
-    let (module, functions) = front::lower(&root, &source);
-    let runs = front_runs(&module, &functions, &source);
-    assert_eq!(runs.len(), 9);
-    for optimize in [false, true] {
-        execute(&module, &runs, optimize);
-    }
-    // FORM #95's core and generated fallbacks are real calls, even when the
-    // source frontend elects to inline a particular library operation.
-    let inheritance = text::parse(
-        r#"core v1
-item i0 = user@0/site/call
-item i1 = core@1/site/helper
-sig g0 = (u64) -> (u64)
-inst n0 = core@1/site/helper [] []
-inst n1 = user@0/site/call [] []
-inst n2 = user@0/site/call.$glue [] []
-inst n3 = user@0/site/own [] []
-inst n4 = user@0/site/relay [] []
-inst n5 = user@0/site/indirect [] []
-inst n6 = user@0/site/glue_caller [] []
-fn f0 = n0 g0 {
-b0(v0: u64):
-  v1: u64 = const 1
-  v2: u64 = add v0, v1 at i1 5..10
-  return v2
-}
-fn f1 = n1 g0 {
-b0(v0: u64):
-  v1: u64 = call f0 g0 (v0) at i0 20..30
-  return v1
-}
-fn f2 = n2 g0 {
-b0(v0: u64):
-  v1: u64 = const 1
-  v2: u64 = add v0, v1
-  return v2
-}
-fn f3 = n6 g0 {
-b0(v0: u64):
-  v1: u64 = call f2 g0 (v0) at i0 90..95
-  return v1
-}
-fn f4 = n3 g0 {
-b0(v0: u64):
-  v1: u64 = const 1
-  v2: u64 = add v0, v1 at i0 50..55
-  return v2
-}
-fn f5 = n4 g0 {
-b0(v0: u64):
-  v1: u64 = call f4 g0 (v0) at i0 60..65
-  return v1
-}
-fn f6 = n5 g0 {
-b0(v0: u64):
-  v1: ptr = fnref f0
-  v2: u64 = call v1 g0 (v0) at i0 22..25
-  return v2
-}
-"#,
-    )
-    .unwrap();
-    wf::module(&inheritance).unwrap();
-    let runs = [0, 1, 3, 5, 6].map(|f| (FuncId(f), vec![u64::MAX]));
-    for optimize in [false, true] {
-        execute(&inheritance, &runs, optimize);
-    }
-}
 
-fn check_float_nan_paths() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let source = fs::read_to_string(root.join("cases/body/float-nan-paths.hirsel")).unwrap();
-    let (module, functions) = front::lower(&root, &source);
-    let runs = front_runs(&module, &functions, &source);
-    assert_eq!(runs.len(), 32);
-    for optimize in [false, true] {
-        execute(&module, &runs, optimize);
-    }
-}
+
+
+
 
 fn check_relative_debug_rows() {
     use cranelift_object::object::{Object as _, ObjectSection as _, ObjectSymbol as _};
@@ -1493,105 +1292,73 @@ b0(v0: u64):
     }
 }
 
-fn check_growth_shadow_words() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let source = include_str!("../../../../core/front/cases/body/grow-carrier-words.hirsel");
-    let (module, names) = front::lower(&root, source);
-    let runs: Vec<_> = [
-        ("grown", 131328),
-        ("refused", 130816512904),
-        ("regrown", 523776),
-    ]
-    .into_iter()
-    .map(|(name, want)| {
-        let f = names[name];
-        let report = eval::run(&module, f, &[], 1_000_000);
-        assert_eq!(report.outcome, eval::Outcome::Returned(vec![want]));
-        assert_eq!(report.used, 0);
-        (f, Vec::new())
-    })
-    .collect();
-    let cases: Vec<_> = runs
-        .iter()
-        .map(|(function, args)| NativeCase {
-            function: *function,
-            args,
-            limit: 1_000_000,
-            injection: None,
-            report: None,
-        })
-        .collect();
-    for speed in [false, true] {
-        execute_cases_with_bindings(
-            &module,
-            speed,
-            &cases,
-            false,
-            include_str!("../../../hirsel-core-rt/testdata/moving_realloc.c"),
-            true,
-        );
-    }
-}
 
-#[test]
-fn cancelled_cold_word_call_isolate_refunds_on_both_cranelift_targets() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let template = r#"
-fn grow_then_check(mut xs: List[u64]) {
-    for n in 0u64 .. 100 { result.unwrap(list.push(mut xs, n)) }
-    task.check_cancel()
-}
-fn isolated_body() {
-    let mut xs: List[u64] = list.new()
-    if list.len(xs) == list.capacity(xs) { grow_then_check(mut xs) }
-}
-fn child(take x: u64) -> u64 { CALL_BODY; x }
-fn cancelled(tasks: Tasks) -> u64 waits {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 65536, 41u64, child))
-    task.cancel(mut h)
-    match task.join(take h) {
-        Ok(n) => n,
-        Error(Cancelled(take c)) => { let _ = take c; 1 }
-        Error(Failed(take c)) => { let _ = take c; 2 }
-    }
-}
-"#;
-    for with_isolate in [false, true] {
-        let source = template.replace(
-            "CALL_BODY",
-            if with_isolate {
-                "let _ = isolate(fn() -> () { isolated_body() })"
-            } else {
-                "isolated_body()"
-            },
-        );
-        let (module, names) = front::lower(&root, &source);
-        let evaluator = eval::run(&module, names["cancelled"], &[0], 1_000_000);
-        assert_eq!(evaluator.used, 0);
-        let expected = eval::Report {
-            outcome: Outcome::Returned(vec![1]),
-            used: 0,
-            peak_reserved: 0,
-            trace: Vec::new(),
-            admissions: if with_isolate { 8 } else { 7 },
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            sites: Vec::new(),
-            events: Vec::new(),
-        };
-        execute_reports(
-            &module,
-            &[(names["cancelled"], vec![0])],
-            true,
-            1_000_000,
-            None,
-            Some(&[expected]),
-        );
-        println!(
-            "cranelift cancelled cold word call isolate={with_isolate}: used=0 evaluator_used={}",
-            evaluator.used
-        );
-    }
-}
+
+
 
 include!("copy.rs");
+
+fn check_failure_inheritance() {
+    // FORM #95's core and generated fallbacks are real calls, even when the
+    // source frontend elects to inline a particular library operation.
+    let inheritance = text::parse(
+        r#"core v1
+item i0 = user@0/site/call
+item i1 = core@1/site/helper
+sig g0 = (u64) -> (u64)
+inst n0 = core@1/site/helper [] []
+inst n1 = user@0/site/call [] []
+inst n2 = user@0/site/call.$glue [] []
+inst n3 = user@0/site/own [] []
+inst n4 = user@0/site/relay [] []
+inst n5 = user@0/site/indirect [] []
+inst n6 = user@0/site/glue_caller [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1 at i1 5..10
+  return v2
+}
+fn f1 = n1 g0 {
+b0(v0: u64):
+  v1: u64 = call f0 g0 (v0) at i0 20..30
+  return v1
+}
+fn f2 = n2 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1
+  return v2
+}
+fn f3 = n6 g0 {
+b0(v0: u64):
+  v1: u64 = call f2 g0 (v0) at i0 90..95
+  return v1
+}
+fn f4 = n3 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1 at i0 50..55
+  return v2
+}
+fn f5 = n4 g0 {
+b0(v0: u64):
+  v1: u64 = call f4 g0 (v0) at i0 60..65
+  return v1
+}
+fn f6 = n5 g0 {
+b0(v0: u64):
+  v1: ptr = fnref f0
+  v2: u64 = call v1 g0 (v0) at i0 22..25
+  return v2
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&inheritance).unwrap();
+    let runs = [0, 1, 3, 5, 6].map(|f| (FuncId(f), vec![u64::MAX]));
+    for optimize in [false, true] {
+        execute(&inheritance, &runs, optimize);
+    }
+
+}

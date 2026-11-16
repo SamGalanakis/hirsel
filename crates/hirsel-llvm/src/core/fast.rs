@@ -89,16 +89,13 @@ impl FunctionEmitter<'_> {
         self.block(done);
     }
     fn admission_probe(&mut self, charge: &Value) -> Value {
-        #[cfg(test)]
-        {
+        if self.test_hooks {
             self.intrinsic(
                 "hirsel_core_test_probe_admission",
                 Type::I1,
                 &[ptr(CONTEXT), word(charge.clone())],
             )
-        }
-        #[cfg(not(test))]
-        {
+        } else {
             let _ = charge;
             true.into()
         }
@@ -107,7 +104,7 @@ impl FunctionEmitter<'_> {
         let allowed = self.admission_probe(charge);
         let available = self.load_native(payer, LIMIT_AVAILABLE, Type::I64);
         let fits = self.cmp(Predicate::Ule, &Type::I64, charge, &available);
-        let fits = if cfg!(test) {
+        let fits = if self.test_hooks {
             self.bin(Binary::And, &Type::I1, &fits, &allowed)
         } else {
             fits
@@ -232,10 +229,14 @@ impl FunctionEmitter<'_> {
         let probe = Label::new("allocation_probe", n);
         let refused = Label::new("refused", n);
         let done = Label::new("allocation_done", n);
-        self.likely(&fits, if cfg!(test) { probe } else { allocate }, slow_label);
+        self.likely(
+            &fits,
+            if self.test_hooks { probe } else { allocate },
+            slow_label,
+        );
         // Refusal injection exists only in the test engine. Production needs
         // neither its always-true branch nor its unreachable refusal join.
-        if cfg!(test) {
+        if self.test_hooks {
             self.block(probe);
             let allowed = self.admission_probe(charge);
             self.likely(&allowed, allocate, refused);
@@ -258,7 +259,7 @@ impl FunctionEmitter<'_> {
         let header = self.offset(&payload, back(OWN_PAYER_BACK));
         self.store(&Type::Ptr, &tagged, &header, 8);
         self.br(done);
-        if cfg!(test) {
+        if self.test_hooks {
             self.block(refused);
             self.br(done);
         }
@@ -279,7 +280,7 @@ impl FunctionEmitter<'_> {
         self.block(done);
         let mut pointers = vec![(payload, allocate), (slow, slow_label)];
         let mut rooms = vec![(int(0), allocate), (room, slow_label)];
-        if cfg!(test) {
+        if self.test_hooks {
             pointers.push((Value::Null, refused));
             rooms.push((available, refused));
         }

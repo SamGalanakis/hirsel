@@ -19,3 +19,13 @@ hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }
 hirsel-guard = { path = "../hirsel-guard" }
 tempfile = "3"
+hirsel-cranelift = { path = "../hirsel-cranelift" }
+hirsel-llvm = { path = "../hirsel-llvm" }
+hirsel-llvm-lazy = { path = "../hirsel-llvm-lazy" }
+cranelift-codegen = { version = "=0.136.3", default-features = false, features = ["timing"] }
+cranelift-module = { version = "=0.136.3", default-features = false, features = ["std"] }
+cranelift-object = { version = "=0.136.3", default-features = false }
+hirsel-intern = { path = "../hirsel-intern" }
+object = { version = "=0.40.0", default-features = false, features = ["elf", "read_core", "std", "write", "build"] }
+gimli = { version = "=0.33.0", default-features = false, features = ["read", "std"] }
+llvm-sys = { version = "=231.0.1", default-features = false, features = ["strict-versioning", "force-dynamic"] }

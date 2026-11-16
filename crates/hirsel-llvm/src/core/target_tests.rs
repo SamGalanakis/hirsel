@@ -306,6 +306,7 @@ int main(void) {{
                     false,
                     facts,
                     SourceEmission {
+                        test_hooks: true,
                         relocatable_sites: false,
                         debug_lines: true,
                     },

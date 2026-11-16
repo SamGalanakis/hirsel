@@ -59,6 +59,7 @@ pub enum Optimization {
 
 #[derive(Clone, Copy)]
 struct SourceEmission {
+    test_hooks: bool,
     relocatable_sites: bool,
     debug_lines: bool,
 }
@@ -195,6 +196,7 @@ pub fn emit_ir_for_target(module: &Module, target: Target, observe_charge: bool)
         observe_charge,
         facts_enabled(),
         SourceEmission {
+            test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
         },
@@ -209,6 +211,7 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
         observe_charge,
         facts,
         SourceEmission {
+            test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
         },
@@ -508,6 +511,7 @@ fn emit_module(
             debug_location: function_debug.map(|d| d.location(None)),
             anchor: None,
             relocatable_sites: source.relocatable_sites,
+            test_hooks: source.test_hooks,
             value_slots: values::slots(body, &flow),
             literals: Vec::new(),
             address_slots: values::address_slots(body, &flow),
@@ -693,7 +697,16 @@ fn emit_module(
             e.infallible_wrapper(&name, sig, facts, function_debug.and_then(|d| d.wrapper));
         }
     }
-    cleanup::drop_glue(module, target, &recipes, &failures, facts, sink, &mut items)?;
+    cleanup::drop_glue(
+        module,
+        target,
+        &recipes,
+        &failures,
+        facts,
+        source.test_hooks,
+        sink,
+        &mut items,
+    )?;
     task_entry::emit(module, target, &recipes, &failures, facts, sink, &mut items)?;
     let lasts = items.take_release_lasts();
     cleanup::release_lasts(
@@ -719,6 +732,7 @@ pub(crate) fn emit_native_module_in_context(
         context,
         observe_charge,
         SourceEmission {
+            test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
         },
@@ -833,6 +847,7 @@ pub fn emit_ir_relocatable_for_target(
         observe_charge,
         facts_enabled(),
         SourceEmission {
+            test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
         },
@@ -854,6 +869,7 @@ pub fn emit_ir_relocatable_with_role_facts_for_target(
         observe_charge,
         facts_enabled(),
         SourceEmission {
+            test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
         },
@@ -890,6 +906,7 @@ pub fn emit_object_for_target(
         opt,
         observe_charge,
         SourceEmission {
+            test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
         },
@@ -912,6 +929,7 @@ pub fn emit_object_relocatable_for_target(
         opt,
         observe_charge,
         SourceEmission {
+            test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
         },
@@ -978,6 +996,7 @@ fn compile<R>(
         opt,
         false,
         SourceEmission {
+            test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
         },
@@ -1068,6 +1087,7 @@ struct FunctionEmitter<'a> {
     debug_location: Option<usize>,
     anchor: Option<Anchor>,
     relocatable_sites: bool,
+    test_hooks: bool,
     value_slots: Vec<bool>,
     /// Each constant's literal, used in place of the value.
     literals: Vec<Option<Value>>,
@@ -1722,4 +1742,49 @@ impl FunctionEmitter<'_> {
         }
         Ok(())
     }
+}
+
+/// Native law fixture: admission injection and cleanup traces are explicit,
+/// independent of which crate owns the source law.
+#[doc(hidden)]
+pub fn emit_ir_for_test(
+    module: &Module,
+    target: Target,
+    observe_charge: bool,
+    debug_lines: bool,
+    roles: Option<&hirsel_core_ir::roles::Facts>,
+) -> Result<String> {
+    emit_ir_target_with_role_facts(
+        module,
+        target,
+        observe_charge,
+        facts_enabled(),
+        SourceEmission {
+            test_hooks: true,
+            relocatable_sites: true,
+            debug_lines,
+        },
+        roles,
+    )
+}
+/// The direct engine's object for the same native law fixture.
+#[doc(hidden)]
+pub fn emit_object_for_test(
+    module: &Module,
+    target: Target,
+    optimization: Optimization,
+    observe_charge: bool,
+    debug_lines: bool,
+) -> Result<Vec<u8>> {
+    emit_object_site_binding(
+        module,
+        target,
+        optimization,
+        observe_charge,
+        SourceEmission {
+            test_hooks: true,
+            relocatable_sites: true,
+            debug_lines,
+        },
+    )
 }

@@ -92,3 +92,6 @@ impl Checked {
 mod cases;
 #[cfg(test)]
 mod std_seed;
+
+mod source;
+pub use source::SourceProgram;

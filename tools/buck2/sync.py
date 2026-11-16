@@ -109,6 +109,9 @@ TEST_DATA = {
     "hirsel-core-resolve-unittest": ["docs/spec/**", "core/core/**"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
     "hirsel-core-program-tests-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**", "crates/hirsel-core-front/src/testdata/**", "crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel"],
+    "hirsel-core-program-tests-test-cranelift_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
+    "hirsel-core-program-tests-test-cranelift_source_aarch64": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
+    "hirsel-core-program-tests-test-llvm_source": ["core/front/**", "core/core/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/programs/store/*.hirsel", "core/programs/store/manifest.json", "core/langarena/**/*.hirsel", "core/HOOK-ALLOWLIST"],
     "hirsel-cranelift-test-core_native": ["core/front/**", "core/core/**"],
     "hirsel-cranelift-test-core_aarch64": ["core/front/**", "core/core/**"],
@@ -518,16 +521,18 @@ def first_party(meta: dict) -> str:
         common = {"manifest_dir": manifest_dir, "package_name": name, "version": package["version"], "edition": package["edition"]}
 
         def test_attrs(binary: str, src: pathlib.Path) -> dict:
-            core_native = binary in ("hirsel-cranelift-test-core_native", "hirsel-cranelift-test-core_aarch64")
+            program_cl = binary.startswith("hirsel-core-program-tests-test-cranelift_source")
+            program_llvm = binary == "hirsel-core-program-tests-test-llvm_source"
+            arm = binary.endswith("cranelift_source_aarch64") or binary == "hirsel-cranelift-test-core_aarch64"
+            core_native = program_cl or binary in ("hirsel-cranelift-test-core_native", "hirsel-cranelift-test-core_aarch64")
             files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-cranelift-runtime-fixtures[aarch64]",
                           "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
-                          "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"} if binary == "hirsel-cranelift-test-core_aarch64" else
+                          "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"} if arm else
                          {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"} if core_native
-                          else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" else None)
+                          else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" or program_llvm else None)
             return dict(data=test_data(binary, name, package_dir, src),
                         files_env=files_env,
-                        # hirsel-llvm's target tests link and run AArch64 objects through the pinned cross tools.
-                        native_tools=True if binary in ("hirsel-cranelift-test-core_native", "hirsel-llvm-unittest") else None)
+                        native_tools=True if core_native or program_llvm or binary == "hirsel-llvm-unittest" else None)
 
         lib = next((t for t in package["targets"] if set(t["kind"]) & {"lib", "rlib", "staticlib"}), None)
         build = next((t for t in package["targets"] if t["kind"] == ["custom-build"]), None)
@@ -653,7 +658,9 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-abi", data=["crates/hirsel-llvm/Cargo.toml"], selection=["core::target_tests::linux_c_results_execute_with_mixed_fields_padding_and_hfas", "core::tests::lazy_component_preserves_exact_core_objects", "--exact"]))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-failure", data=Raw('glob(["crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-llvm/Cargo.toml"]'), selection=["core::target_tests::checked_arithmetic_preserves_status_context_and_cause_copies", "--exact"]))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-llvm-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_llvm_runtime_fixture.a"))
-    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-runtime", data=Raw('glob(["core/core/**", "core/front/cases/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**"]) + ["crates/hirsel-llvm/Cargo.toml"]'), selection=["core::tests::aarch64_memory_custody_and_calls_match_the_evaluator", "core::tests::aarch64_failure_sites_and_relative_debug_rows_match_the_evaluator", "core::tests::aarch64_caller_sites_follow_core_generated_direct_and_indirect_inheritance", "core::tests::aarch64_consuming_growth_keeps_the_carrier_and_original_payer_on_refusal", "core::tests::aarch64_consuming_growth_host_memory_refusal_is_a_reported_run_stop", "core::tests::aarch64_growth_shadow_copies_back_data_and_capacity", "core::tests::aarch64_carrier_twins_match_the_evaluator_in_program_builds", "core::tests::aarch64_cancelled_child_inside_isolate_passes_through_and_refunds_cell", "--exact", "--ignored", "--nocapture"], runtime="//:core-llvm-runtime-fixtures[aarch64]"))
+    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-runtime", data=Raw('glob(["core/core/**", "core/front/cases/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**"]) + ["crates/hirsel-llvm/Cargo.toml"]'), selection=["core::tests::aarch64_memory_custody_and_calls_match_the_evaluator", "core::tests::aarch64_caller_sites_follow_core_generated_direct_and_indirect_inheritance", "core::tests::aarch64_consuming_growth_keeps_the_carrier_and_original_payer_on_refusal", "core::tests::aarch64_consuming_growth_host_memory_refusal_is_a_reported_run_stop", "core::tests::aarch64_carrier_twins_match_the_evaluator_in_program_builds", "core::tests::aarch64_cancelled_child_inside_isolate_passes_through_and_refunds_cell", "--exact", "--ignored", "--nocapture"], runtime="//:core-llvm-runtime-fixtures[aarch64]"))
+
+    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-program-llvm-aarch64-runtime", data=Raw('glob(["core/core/**", "core/front/**", "crates/hirsel-core-rt/include/**"])'), selection=["aarch64_", "--ignored", "--nocapture"], runtime="//:core-llvm-runtime-fixtures[aarch64]", binary="hirsel-core-program-tests-test-llvm_source", cwd="crates/hirsel-core-program-tests"))
 
     for phase in ("front", "std", "m1"):
         name = "core-llvm-aarch64-" + phase

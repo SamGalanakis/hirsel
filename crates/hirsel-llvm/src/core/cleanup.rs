@@ -50,6 +50,7 @@ pub(super) fn glue_emitter<'a>(
         debug_location: None,
         anchor: None,
         relocatable_sites: false,
+        test_hooks: cfg!(test),
         value_slots: Vec::new(),
         literals: Vec::new(),
         address_slots: Vec::new(),
@@ -88,12 +89,14 @@ pub(super) const STEP_PARAMS: [Local; 4] = [
 ];
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn drop_glue(
     module: &Module,
     target: Target,
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
     facts: bool,
+    test_hooks: bool,
     sink: &mut dyn Sink,
     items: &mut Items,
 ) -> Result<()> {
@@ -174,8 +177,9 @@ pub(super) fn drop_glue(
             } else {
                 payload.clone()
             };
-            #[cfg(test)]
-            if resource
+            e.test_hooks = test_hooks;
+            if test_hooks
+                && resource
                 && let hirsel_core_layout::Body::Record(fields) = &module.types[t].body
                 && let Some(i) = fields
                     .iter()

@@ -2,8 +2,6 @@
 //! boundaries; hardware counters and resettable RSS high-water marks are sampled
 //! at every boundary. Observer bookkeeping is outside the instruction intervals.
 hirsel_guard::install!();
-#[path = "../tests/support/front.rs"]
-mod front;
 
 use cranelift_codegen::timing::{self, Pass, Profiler};
 use cranelift_module::{Module as _, ModuleReloc};
@@ -15,7 +13,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::{Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::Rc,
 };
 
@@ -190,51 +188,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let _previous = timing::set_thread_profiler(Box::new(measure.clone()));
     let total = measure.scope("total");
-    let module = {
+    let modules = {
         let _span = measure.scope("intake");
         let text = std::fs::read_to_string(&args[1])?;
         if let Some(i) = args.iter().position(|a| a == "--front") {
-            front::lower(Path::new(&args[i + 1]), &text).0
+            {
+                let _fixture_root = &args[i + 1];
+                hirsel_core_program_tests::SourceProgram::lower(&text, None)
+                    .0
+                    .modules
+            }
         } else {
-            hirsel_core_ir::text::parse(&text).map_err(|e| format!("{e:?}"))?
+            vec![hirsel_core_ir::text::parse(&text).map_err(|e| format!("{e:?}"))?]
         }
     };
-    let instructions = module
-        .functions
+    let instructions = modules
         .iter()
+        .flat_map(|m| &m.functions)
         .filter_map(|f| f.body.as_ref())
         .map(|b| b.insts.len())
         .sum::<usize>();
-    let terms = module
-        .functions
+    let terms = modules
         .iter()
+        .flat_map(|m| &m.functions)
         .filter_map(|f| f.body.as_ref())
         .map(|b| b.terminators.len())
         .sum::<usize>();
-    println!("input\t{instructions}\t{terms}\t{}", module.functions.len());
-    let layouts = {
-        let _span = measure.scope("layout_intake");
-        hirsel_core_layout::compute(&module.types).map_err(|e| format!("{e:?}"))?
-    };
-    let object = core::emit_object_profiled(
-        &module,
-        &layouts,
-        &Options {
-            target: "x86_64-unknown-linux-gnu",
-            optimize: args.iter().any(|a| a == "--speed"),
-            debug_lines: false,
-        },
-        hirsel_core_ids::ContentHash([0x90; 32]),
-        &measure,
-    )?;
-    {
-        let _span = measure.scope("object_file");
-        std::fs::write(&args[2], object.bytes)?;
-    }
-    {
-        let _span = measure.scope("intake_drop");
-        drop(module);
-        drop(layouts);
+    println!(
+        "input\t{instructions}\t{terms}\t{}",
+        modules.iter().map(|m| m.functions.len()).sum::<usize>()
+    );
+    for (unit, module) in modules.iter().enumerate() {
+        let layouts = {
+            let _span = measure.scope("layout_intake");
+            hirsel_core_layout::compute(&module.types).map_err(|e| format!("{e:?}"))?
+        };
+        let object = core::emit_object_profiled(
+            &module,
+            &layouts,
+            &Options {
+                target: "x86_64-unknown-linux-gnu",
+                optimize: args.iter().any(|a| a == "--speed"),
+                debug_lines: false,
+            },
+            hirsel_core_ids::ContentHash([0x90; 32]),
+            &measure,
+        )?;
+        {
+            let _span = measure.scope("object_file");
+            std::fs::write(format!("{}.{}", &args[2], unit), object.bytes)?;
+        }
+        {
+            let _span = measure.scope("intake_drop");
+
+            drop(layouts);
+        }
     }
     drop(total);
     println!("stage\tinstructions_exclusive\tpeak_rss_kib\tsegments");

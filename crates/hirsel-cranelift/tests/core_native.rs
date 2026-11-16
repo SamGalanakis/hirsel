@@ -233,11 +233,6 @@ fn every_whole_v0_sample_matches_evaluator() {
 }
 
 #[test]
-fn every_front_end_run_case_matches_evaluator() {
-    check_front_end_run_cases();
-}
-
-#[test]
 fn declared_places_variants_and_destination_calls_match_evaluator() {
     let source = r#"core v1
 type t0 = own "Row" { small: u8, large: u64 }
@@ -1434,18 +1429,8 @@ fn isolate_sample_in_dev_and_speed_matches_evaluator() {
 }
 
 #[test]
-fn failure_sites_in_dev_and_speed() {
-    check_failure_sites();
-}
-
-#[test]
 fn relative_debug_rows_and_distinct_cold_sites() {
     check_relative_debug_rows();
-}
-
-#[test]
-fn float_nan_paths_in_dev_and_speed() {
-    check_float_nan_paths();
 }
 
 #[test]
@@ -1459,8 +1444,8 @@ fn consuming_growth_keeps_the_carrier_and_original_payer_on_refusal() {
 }
 
 #[test]
-fn growth_shadow_copies_back_data_and_capacity() {
-    check_growth_shadow_words();
+fn inherited_failure_sites_through_core_and_generated_calls() {
+    check_failure_inheritance();
 }
 
 #[test]

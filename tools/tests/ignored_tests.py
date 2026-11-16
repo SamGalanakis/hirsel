@@ -83,6 +83,8 @@ def orphans(sources):
                 continue
             if path == 'crates/hirsel-llvm/src/core/tests.rs' and name in AARCH64_RUNTIME:
                 continue
+            if path == 'crates/hirsel-core-program-tests/tests/llvm_source.rs' and name.startswith('aarch64_'):
+                continue
             if path in DRIVER_NATIVE:
                 continue
             if spawned(sources, path, name):

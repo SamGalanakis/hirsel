@@ -473,6 +473,10 @@ dependencies = [
 name = "hirsel-core-program-tests"
 version = "0.1.0"
 dependencies = [
+ "cranelift-codegen",
+ "cranelift-module",
+ "cranelift-object",
+ "gimli",
  "hirsel-core-driver",
  "hirsel-core-front",
  "hirsel-core-ids",
@@ -481,7 +485,13 @@ dependencies = [
  "hirsel-core-materialize",
  "hirsel-core-resolve",
  "hirsel-core-syntax",
+ "hirsel-cranelift",
  "hirsel-guard",
+ "hirsel-intern",
+ "hirsel-llvm",
+ "hirsel-llvm-lazy",
+ "llvm-sys",
+ "object",
  "tempfile",
 ]
 
@@ -530,12 +540,9 @@ dependencies = [
  "cranelift-frontend",
  "cranelift-module",
  "cranelift-object",
- "hirsel-core-front",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
- "hirsel-core-resolve",
- "hirsel-core-syntax",
  "hirsel-guard",
  "hirsel-intern",
 ]
@@ -559,13 +566,10 @@ name = "hirsel-llvm"
 version = "0.1.0"
 dependencies = [
  "gimli",
- "hirsel-core-front",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
- "hirsel-core-resolve",
  "hirsel-core-rt",
- "hirsel-core-syntax",
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-llvm-lazy",

@@ -570,7 +570,8 @@ fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, t
     let changed = match take old {
         None => {
             let empty: Node[K, V] = Node(stamp: 0, depth: 0, size: 0, keys: list.new(), values: list.new(), kids: list.new(), lows: None)
-            owned_node(mut ids, mut replaced, take empty, k, v)?
+            let h = result.capacity_only(arc.new(take empty))?
+            owned_arc(mut ids, mut replaced, take h, k, v)?
         },
         Some(take h) => owned_arc(mut ids, mut replaced, take h, k, v)?
     }
@@ -589,15 +590,80 @@ fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, t
 
 fn owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], take h: Arc[Node[K, V]], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
     let mut holder = take h
+    let right = edit_owned_arc(mut ids, mut replaced, mut holder, k, v)?
+    Ok(Pieces(first: take holder, second: take right))
+}
+
+fn edit_owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], mut holder: Arc[Node[K, V]], k: K, v: V) -> Result[Option[Arc[Node[K, V]]], Capacity] {
     let edited = arc.with_unique(mut holder, scoped fn(mut node: Node[K, V]) -> Result[Option[Arc[Node[K, V]]], Capacity] {
-        edit_owned_node(mut ids, mut replaced, mut node, k, v)
+        if node.depth == 0 {
+            let at = lower(node.keys, k)
+            let hit = at < list.len(node.keys) && key_order(node.keys, at, k) == Equal
+            let nk = copied(k)?
+            let nv = copied(v)?
+            if hit {
+                let _ = list.set(mut node.keys, at, take nk)
+                let old = list.set(mut node.values, at, take nv)
+                replaced = Some(Replaced(value: Moved(take old)))
+            } else {
+                let capacity = if list.len(node.keys) < 32 {
+                    32u64
+                } else {
+                    33u64
+                }
+                let extra_keys = capacity - list.len(node.keys)
+                let extra_values = capacity - list.len(node.values)
+                list.reserve(mut node.keys, extra_keys)?
+                list.reserve(mut node.values, extra_values)?
+                push_at(mut node.keys, at, take nk)?
+                push_at(mut node.values, at, take nv)?
+            }
+            node.size = list.len(node.keys)
+        } else {
+            let at = child_index_node(node, k)
+            let mut boundaries_changed = {
+                let ks = node_keys(node)
+                at == 0 && k < ks[at]
+            }
+            let total = list.len(node.kids)
+            let old_size = node.kids[at].size
+            list.swap(mut node.kids, at, total - 1)
+            let mut selected = option.unwrap(list.pop(mut node.kids))
+            let right = edit_owned_arc(mut ids, mut replaced, mut selected, k, v)?
+            let mut size = selected.size
+            result.capacity_only(list.push(mut node.kids, take selected))?
+            list.swap(mut node.kids, at, total - 1)
+            if let Some(take r) = take right {
+                boundaries_changed = true
+                size += r.size
+                list.reserve(mut node.kids, 1)?
+                push_at(mut node.kids, at + 1, take r)?
+            }
+            node.size = node.size - old_size + size
+            if boundaries_changed && list.len(node.kids) <= 32 {
+                node.lows = Some(fresh_keys(node.kids)?)
+            }
+        }
+        ids += 1
+        node.stamp = ids
+        let count = if node.depth == 0 {
+            list.len(node.keys)
+        } else {
+            list.len(node.kids)
+        }
+        if count > 32 {
+            Ok(Some(split_owned_node(mut ids, mut node)?))
+        } else {
+            Ok(None)
+        }
     })
     match take edited {
-        Some(take changed) => {
-            let right = changed?
-            Ok(Pieces(first: take holder, second: take right))
+        Some(take changed) => take changed,
+        None => {
+            let Pieces(first: left, second: right) = as_pieces(insert_node(mut ids, mut replaced, holder, k, v)?)
+            holder = take left
+            Ok(take right)
         },
-        None => Ok(as_pieces(insert_node(mut ids, mut replaced, holder, k, v)?))
     }
 }
 
@@ -609,77 +675,6 @@ fn push_at[T](mut xs: List[T], at: u64, take value: T) -> Result[(), Capacity] {
         i -= 1
     }
     Ok(())
-}
-
-fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], take n: Node[K, V], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
-    let mut node = take n
-    let right = edit_owned_node(mut ids, mut replaced, mut node, k, v)?
-    let holder = result.capacity_only(arc.new(take node))?
-    Ok(Pieces(first: take holder, second: take right))
-}
-
-fn edit_owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], mut node: Node[K, V], k: K, v: V) -> Result[Option[Arc[Node[K, V]]], Capacity] {
-    if node.depth == 0 {
-        let at = lower(node.keys, k)
-        let hit = at < list.len(node.keys) && key_order(node.keys, at, k) == Equal
-        let nk = copied(k)?
-        let nv = copied(v)?
-        if hit {
-            let _ = list.set(mut node.keys, at, take nk)
-            let old = list.set(mut node.values, at, take nv)
-            replaced = Some(Replaced(value: Moved(take old)))
-        } else {
-            let capacity = if list.len(node.keys) < 32 {
-                32u64
-            } else {
-                33u64
-            }
-            let extra_keys = capacity - list.len(node.keys)
-            let extra_values = capacity - list.len(node.values)
-            list.reserve(mut node.keys, extra_keys)?
-            list.reserve(mut node.values, extra_values)?
-            push_at(mut node.keys, at, take nk)?
-            push_at(mut node.values, at, take nv)?
-        }
-        node.size = list.len(node.keys)
-    } else {
-        let at = child_index_node(node, k)
-        let mut boundaries_changed = {
-            let ks = node_keys(node)
-            at == 0 && k < ks[at]
-        }
-        let total = list.len(node.kids)
-        let old_size = node.kids[at].size
-        list.swap(mut node.kids, at, total - 1)
-        let selected = option.unwrap(list.pop(mut node.kids))
-        let changed = owned_arc(mut ids, mut replaced, take selected, k, v)?
-        let Pieces(first: left, second: right) = take changed
-        let mut size = left.size
-        result.capacity_only(list.push(mut node.kids, take left))?
-        list.swap(mut node.kids, at, total - 1)
-        if let Some(take r) = take right {
-            boundaries_changed = true
-            size += r.size
-            list.reserve(mut node.kids, 1)?
-            push_at(mut node.kids, at + 1, take r)?
-        }
-        node.size = node.size - old_size + size
-        if boundaries_changed && list.len(node.kids) <= 32 {
-            node.lows = Some(fresh_keys(node.kids)?)
-        }
-    }
-    ids += 1
-    node.stamp = ids
-    let count = if node.depth == 0 {
-        list.len(node.keys)
-    } else {
-        list.len(node.kids)
-    }
-    if count > 32 {
-        Ok(Some(split_owned_node(mut ids, mut node)?))
-    } else {
-        Ok(None)
-    }
 }
 
 fn split_owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut node: Node[K, V]) -> Result[Arc[Node[K, V]], Capacity] {

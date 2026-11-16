@@ -50,6 +50,11 @@ impl Limits {
         }
     }
 }
+
+pub struct Launch {
+    pub target: String,
+    pub n_place: u64,
+}
 struct Bucket {
     tokens: f64,
     at: std::time::Instant,
@@ -520,11 +525,13 @@ pub async fn serve(
     wal: &Path,
     wants: Vec<Want>,
     limits: Limits,
+    launch: Launch,
     stop: impl Future<Output = ()>,
 ) -> Result<Stats> {
     let wal = Wal::open(wal)?;
     let digest = Arc::new(Sha256::digest(std::fs::read(std::env::current_exe()?)?).to_vec());
     let wants = Arc::new(wants);
+    let launch = Arc::new(launch);
     let (tx, mut rx) = mpsc::channel(4096);
     let mut head = Head {
         wal,
@@ -585,11 +592,11 @@ pub async fn serve(
                     }); continue;
                 };
                 next += 1; let id = next; let tx = tx.clone(); let digest = digest.clone(); let wants = wants.clone();
-                let principals = principals.clone();
+                let principals = principals.clone(); let launch = launch.clone();
                 sessions.spawn(async move {
                     let _ip = ip_permit;
                     let ingress = Ingress { ip: addr.ip(), principals, pending: pending_permit, limits };
-                    let r = session(socket, id, tx.clone(), digest, wants, ingress).await;
+                    let r = session(socket, id, tx.clone(), digest, wants, ingress, launch).await;
                     let _ = tx.send(Command::Leave(id)).await; r
                 });
             }
@@ -659,6 +666,7 @@ async fn session(
     digest: Arc<Vec<u8>>,
     wants: Arc<Vec<Want>>,
     ingress: Ingress,
+    launch: Arc<Launch>,
 ) -> Result<()> {
     socket.set_nodelay(true)?;
     let config = WebSocketConfig::default()
@@ -722,7 +730,15 @@ async fn session(
     let mut token = b"anon:".to_vec();
     token.extend(principal);
     ws.send(Message::Binary(
-        codec::encode(&Frame::Welcome(token, 4, 1024 * 1024, digest.to_vec())).into(),
+        codec::encode(&Frame::Welcome(
+            token,
+            4,
+            1024 * 1024,
+            digest.to_vec(),
+            launch.target.clone(),
+            launch.n_place,
+        ))
+        .into(),
     ))
     .await?;
     let mut slots = Vec::new();

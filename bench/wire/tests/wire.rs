@@ -1,6 +1,13 @@
 use hirsel_wire_bench::codec::{self, Done, Entry, Frame, Outcome, Row};
 use hirsel_wire_bench::{BITS, IMAGE_BYTES, Result, client, flip, reference};
 
+fn launch() -> reference::Launch {
+    reference::Launch {
+        target: "x86_64-unknown-linux-gnu".to_owned(),
+        n_place: 1048576,
+    }
+}
+
 #[test]
 fn provisional_v2_byte_costs_match_the_hand_derived_spec_table() {
     fn wire(f: Frame) -> usize {
@@ -43,8 +50,15 @@ fn provisional_v2_byte_costs_match_the_hand_derived_spec_table() {
     );
     assert_eq!(wire(Frame::Batch(0, vec![1], vec![], vec![])), 30);
     assert_eq!(
-        wire(Frame::Welcome(vec![0; 21], 4, 1048576, vec![0; 32])),
-        79
+        wire(Frame::Welcome(
+            vec![0; 21],
+            4,
+            1048576,
+            vec![0; 32],
+            "test".to_owned(),
+            1048576
+        )),
+        95
     );
 }
 
@@ -70,8 +84,8 @@ fn hand_derived_frame_vectors_and_strict_decode() -> Result<()> {
         ),
         (Frame::Unsubscribe(9), "03 00 00 00 09 00 00 00"),
         (
-            Frame::Welcome(vec![1], 2, 3, vec![4]),
-            "04 00 00 00 01 00 00 00 01 02 00 00 00 03 00 00 00 00 00 00 00 01 00 00 00 04",
+            Frame::Welcome(vec![1], 2, 3, vec![4], "ab".to_owned(), 9),
+            "04 00 00 00 01 00 00 00 01 02 00 00 00 03 00 00 00 00 00 00 00 01 00 00 00 04 02 00 00 00 61 62 09 00 00 00 00 00 00 00",
         ),
         (
             Frame::Placed(Entry::Ready(7)),
@@ -165,6 +179,7 @@ async fn default_session_and_new_principal_limits_refuse_at_distinct_boundaries(
                 &wal,
                 codec::checkbox_wants(),
                 reference::Limits::default(),
+                launch(),
                 async {
                     let _ = rx.await;
                 },
@@ -217,6 +232,7 @@ async fn reference_converges_with_reconnect_and_recovered_state() -> Result<()> 
             &wal,
             entries,
             reference::Limits::benchmark(),
+            launch(),
             async {
                 let _ = rx.await;
             },
@@ -244,6 +260,7 @@ async fn reference_converges_with_reconnect_and_recovered_state() -> Result<()> 
             &path,
             wants,
             reference::Limits::benchmark(),
+            launch(),
             async {
                 let _ = rx.await;
             },

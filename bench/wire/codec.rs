@@ -67,7 +67,7 @@ pub enum Frame {
     Call(u32, u64, u32, u32, Vec<u8>),
     Subscribe(u32, u32, Vec<u8>, Option<Vec<u8>>),
     Unsubscribe(u32),
-    Welcome(Vec<u8>, u32, u64, Vec<u8>),
+    Welcome(Vec<u8>, u32, u64, Vec<u8>, String, u64),
     Placed(Entry),
     Batch(u64, Vec<u32>, Vec<Row>, Vec<Done>),
     Ended(u32, Outcome),
@@ -143,6 +143,17 @@ impl<T: Wire> Wire for Option<T> {
         }
     }
 }
+impl Wire for String {
+    fn put(&self, b: &mut Vec<u8>) {
+        u32::try_from(self.len())
+            .expect("wire string fits u32")
+            .put(b);
+        b.extend_from_slice(self.as_bytes());
+    }
+    fn get(r: &mut Reader<'_>) -> Result<Self> {
+        Ok(String::from_utf8(Vec::<u8>::get(r)?)?)
+    }
+}
 macro_rules! record {
     ($t:ident { $($field:ident),* }) => { impl Wire for $t {
         fn put(&self, b: &mut Vec<u8>) { $(self.$field.put(b);)* }
@@ -174,7 +185,7 @@ sum!(Outcome { 0 => Returned(bytes), 1 => Failed(fault), 2 => Refused(refusal), 
 sum!(Frame {
     0 => Hello(token, wants), 1 => Call(stream, p, slot, deadline, arg),
     2 => Subscribe(sub, slot, arg, resume), 3 => Unsubscribe(sub),
-    4 => Welcome(principal, q, budget, executable), 5 => Placed(entry),
+    4 => Welcome(principal, q, budget, executable, target, n_place), 5 => Placed(entry),
     6 => Batch(version, complete, rows, done), 7 => Ended(sub, outcome), 8 => Reset(version, done),
 });
 

@@ -43,7 +43,7 @@ impl Client {
                 codec::encode(&Frame::Hello(token, wants.to_vec())).into(),
             ))
             .await?;
-        let Frame::Welcome(token, _, _, _) = read_frame(&mut socket).await? else {
+        let Frame::Welcome(token, _, _, _, _, _) = read_frame(&mut socket).await? else {
             return Err("expected Welcome first".into());
         };
         let mut slots = Vec::new();
@@ -153,6 +153,9 @@ fn apply_batch(
     complete: &[u32],
     rows: &[codec::Row],
 ) -> Result<()> {
+    if pending.is_some() && !complete.contains(&sub) && rows.iter().any(|r| r.sub == sub) {
+        return Err("live subscription row arrived before its complete marker".into());
+    }
     for row in rows {
         if row.sub == sub {
             codec::apply_row(pending.as_mut().unwrap_or(image), row)?;
@@ -187,6 +190,16 @@ mod tests {
             &[codec::chunk_row(1, 0, &bits)],
         )?;
         assert_eq!(image[0], 1);
+        assert!(
+            apply_batch(
+                &mut image,
+                &mut pending,
+                2,
+                &[],
+                &[codec::chunk_row(2, 0, &bits)]
+            )
+            .is_err()
+        );
         apply_batch(
             &mut image,
             &mut pending,

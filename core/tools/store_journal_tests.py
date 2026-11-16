@@ -13,8 +13,8 @@ from store_tests import inputs
 from store_crash_tests import checked, run_crashes
 
 LAWS = ('end', 'payload', 'segment', 'apply', 'recovery', 'bootstrap', 'worker',
-        'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation')
-TESTS = {'store@1/store/journal_test_' + name for name in LAWS}
+        'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop')
+TESTS = {'store@1/store/journal_test_' + name for name in LAWS if name not in ('frame_size_boundary', 'frame_oversize')}
 SCENARIOS = ('journal', 'journal-group', 'journal-rotate')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut')
 
@@ -113,6 +113,22 @@ def main():
                     and {test['definition'] for test in tests} == TESTS and all(test.get('passed') for test in tests))
             rows.append(dict(engine=engine, passed=good, result=report))
             print(f'{engine}: {sum(bool(t.get("passed")) for t in tests)}/{len(TESTS)} passed', flush=True)
+            large = list(command)
+            large[large.index('--filter') + 1] = 'store@1/store/journal_frame_'
+            # L29 simultaneously retains sixteen MiB of rows and the maximum
+            # frame, plus replay buffers and the two reserved task roots.
+            large[large.index('--limit') + 1] = str(512 * 1024 * 1024)
+            result = subprocess.run(large, capture_output=True, text=True, env=env)
+            try:
+                report = json.loads(result.stdout)
+            except ValueError:
+                report = dict(stdout=result.stdout, stderr=result.stderr)
+            tests = report.get('tests', [])
+            good = (result.returncode == 0 and len(tests) == 2
+                    and {t.get('definition') for t in tests} == {'store@1/store/journal_frame_size_boundary', 'store@1/store/journal_frame_oversize'}
+                    and all(t.get('passed') is True for t in tests))
+            rows.append(dict(engine=engine, law='frame_size_boundary', passed=good, result=report))
+            print(f'{engine} frame_size_boundary: {"PASS" if good else "FAIL"}', flush=True)
             try:
                 # run_crashes builds with the same native toolchain, then executes
                 # the immutable binary once at every W2 mutation cut.

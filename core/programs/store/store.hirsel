@@ -8358,6 +8358,9 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     let head = db.head
     let last = if scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else { 7u64 }
     if head < 1 || head > last || head < minimum { return Ok(false) }
+    // The independent W2 provider returns wall_ms=phase: genesis0, writes1.
+    // Every replayed write must retain1; recovery itself runs under clock2.
+    if db.at != (if head == 1 { 0u64 } else { 1u64 }) { return Ok(false) }
     for k in 0u64 .. 6 {
         let expected = if k + 1 < head { Some(k + 10) } else { None }
         if get(snapshot(db), sh, k)? != expected { return Ok(false) }
@@ -8595,4 +8598,168 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
 @test
 fn journal_test_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if journal_law_rotation(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+// L23 across a checkpoint: expected physical keys and stored values are laid
+// out by hand. Rewriting row2 to the same value emits no Change.
+pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    for k in 0u64 .. 3 { if !typed_put(mut db, t, k, (k + 1) * 10) { return false } }
+    let before = snapshot(db)
+    let cut = result.unwrap(checkpoint(mut db))
+    result.unwrap(durable(mut db, cut))
+    let done = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 0, 11)?
+        if !delete(mut tx, t, 1)? { fail("missing L23 row") }
+        put(mut tx, t, 2, 30)?
+        put(mut tx, t, 3, 40)
+    }))
+    match take done { Committed(_) => {}, _ => return false }
+    let after = snapshot(db)
+    let found = result.unwrap(changes(before, after))
+    if list.len(found) != 3 { return false }
+    let keys: Inline[u64, 3] =[0, 1, 3]
+    for i in 0u64 .. 3 {
+        let mut key: Bytes = result.unwrap(list.with_capacity(12))
+        result.unwrap(list.fill(mut key, 3, 0u8))
+        result.unwrap(list.push(mut key, 1u8))
+        for j in 0u64 .. 8 { result.unwrap(list.push(mut key, int.truncate(keys[i] >> int.truncate((7 - j) * 8)))) }
+        if found[i].tree_key != key { return false }
+        if i == 1 {
+            if found[i].value != None { return false }
+        } else {
+            let v = if i == 0 { 11u64 } else { 40u64 }
+            let mut expected: Bytes = result.unwrap(list.with_capacity(10))
+            result.unwrap(list.fill(mut expected, 2, 0u8))
+            for j in 0u64 .. 8 { result.unwrap(list.push(mut expected, int.truncate(v >> int.truncate(j * 8)))) }
+            match found[i].value { Some(raw) => if raw != expected { return false }, None => return false }
+        }
+    }
+    let sh = shape(t)
+    for k in 0u64 .. 4 {
+        let old = result.unwrap(get(before, sh, k))
+        let new = result.unwrap(get(after, sh, k))
+        let expected_old: Option[u64] = if k < 3 { Some((k + 1) * 10) } else { None }
+        let expected_new: Option[u64] = if k == 0 { Some(11u64) } else if k == 1 { None } else if k == 2 { Some(30u64) } else { Some(40u64) }
+        if old != expected_old || new != expected_new { return false }
+        if (old != new) != (k != 2) { return false }
+    }
+    result.unwrap(close(take db))
+    true
+}
+
+@test
+fn journal_test_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_changes_checkpoint(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, accepted: bool) -> bool waits {
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    options.checkpoint_bytes = 134217728
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let done = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[u64, Error] {
+        for k in 0u64 .. 16 {
+            let size = if k == 15 { last } else { 1048576u64 }
+            let mut value: Bytes = capacity(list.with_capacity(size))?
+            capacity(list.fill(mut value, size, 0u8))?
+            put_bytes(mut tx, 1, key_word(k), value)?
+        }
+        // §2.4:26-byte section prelude +16*(1+4+12+4)+stored values.
+        let expected = 16 + 26 + 16 * 21 + 15 * 1048576 + last
+        if tx.frame_bytes != expected { fail("disk L29 arithmetic") }
+        Ok(expected)
+    }))
+    match take done {
+        Committed(x) => {
+            if !accepted || x.value != 15729018 + last || db.head != 1 { return false }
+            result.unwrap(durable(mut db, x.ticket))
+        },
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => if accepted || db.head != 0 || std.omap.len(db.roots.data) != 0 { return false },
+        _ => return false
+    }
+    let seq = db.file_seq
+    result.unwrap(close(take db))
+    let path = result.unwrap(disk_path("j-", seq, ""))
+    let raw = result.unwrap(disk_read_file(d, path, 16777400))
+    if accepted {
+        if list.len(raw) != 72 + 15729018 + last || read_le(raw, 76, 4) != 15729002 + last { return false }
+    } else if list.len(raw) != 72 { return false }
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    if reopened.head != (if accepted { 1u64 } else { 0u64 }) { return false }
+    if std.omap.len(reopened.roots.data) != (if accepted { 16u64 } else { 0u64 }) { return false }
+    if accepted {
+        for k in 0u64 .. 16 {
+            let found = option.unwrap(result.unwrap(get_bytes(snapshot(reopened), 1, key_word(k))))
+            let expected_size = if k == 15 { last } else { 1048576u64 }
+            if list.len(found) != expected_size { return false }
+            for byte in found { if byte != 0u8 { return false } }
+        }
+    }
+    result.unwrap(close(take reopened))
+    true
+}
+
+// L29 disk: the same hand-derived cap-1/cap/cap+1 as the memory law.
+// The whole 16MiB boundary frame is replayed, rather than only decoded.
+pub fn journal_law_frame_size_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048277, true) &&
+    journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048278, true) &&
+    journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048279, false)
+}
+
+@test
+fn journal_frame_size_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_frame_size_boundary(d, c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+// L21c: dropping the owner cancels/joins both workers and releases LOCK.
+// The next open sees one exact commit prefix, whether handoff had drained.
+pub fn journal_law_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let options = journal_crash_options()
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 7, 70) { return false }
+    let sh = shape(t)
+    let _ = take db
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    if reopened.head != 1 && reopened.head != 2 { return false }
+    let expected: Option[u64] = if reopened.head == 2 { Some(70u64) } else { None }
+    if result.unwrap(get(snapshot(reopened), sh, 7)) != expected { return false }
+    result.unwrap(close(take reopened))
+    true
+}
+
+@test
+fn journal_test_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_drop(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+// L29c: a separately laid out over-limit frame has a valid checksum, so it
+// must be rejected for its length even though none of its bytes are torn.
+pub fn journal_law_frame_oversize() -> bool {
+    let ctx = DiskContext(store: StoreId(hi: 1, lo: 2), role: 2, seq: 7)
+    let mut payload: Bytes = result.unwrap(list.with_capacity(16777281))
+    result.unwrap(list.fill(mut payload, 16777281, 0u8))
+    let mut frame: Bytes = result.unwrap(list.with_capacity(16777297))
+    result.unwrap(le(mut frame, 0x0011, 2))
+    result.unwrap(le(mut frame, 1, 2))
+    result.unwrap(le(mut frame, 16777281, 4))
+    let check = result.unwrap(disk_check(ctx, 72, frame, payload))
+    result.unwrap(le(mut frame, check, 8))
+    result.unwrap(list.append(mut frame, payload))
+    let mut file = result.unwrap(disk_header_bytes(ctx, 0))
+    result.unwrap(list.append(mut file, frame))
+    match disk_read_frame("j-7", ctx, file, 72) {
+        Error(Corrupt(f)) => match f.why { Malformed => f.offset == 72, _ => false },
+        _ => false
+    }
+}
+
+@test
+fn journal_frame_oversize() -> Result[(), ()] {
+    if journal_law_frame_oversize() { Ok(()) } else { Error(()) }
 }

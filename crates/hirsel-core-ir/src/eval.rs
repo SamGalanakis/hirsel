@@ -1916,7 +1916,14 @@ impl Machine<'_> {
                 }
                 Step::Byte(n) => {
                     p += vals[n.index()];
-                    at = At::Other;
+                    // A byte offset is untyped for raw buffers, but the front can
+                    // also use it to address a declared inline value in a closure
+                    // environment. Preserve that declared row so a following field
+                    // step remains typed (LANG-14 by-value captures).
+                    at = match info.ty {
+                        PlaceTy::Declared(t) => self.at_of(TypeRef(t.0)),
+                        PlaceTy::Value(_) => At::Other,
+                    };
                     continue;
                 }
                 Step::Seq(w) => {

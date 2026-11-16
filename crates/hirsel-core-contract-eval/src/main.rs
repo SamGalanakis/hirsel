@@ -26,6 +26,12 @@ fn evaluate(
     let product = driver
         .check(
             CheckRequest {
+                manifest: Some(
+                    manifest
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .to_owned(),
+                ),
                 inputs,
                 store: store.to_owned(),
                 library: LibraryInput::Sources,

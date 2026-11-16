@@ -100,3 +100,8 @@ the library's core dependencies. The checksum's independent vectors are in
 recovery laws. `//:core-store-s3` selects journal/END/CALL laws, each W2 crash
 cut, cancellation at observed wait entries, named write/sync failures and
 32 seeded grouping/rotation schedules per native configuration.
+
+A cut waits for all previously sent frames to be synced before creating the
+successor segment whose HEADER binds their end. An empty journal, consecutive
+cuts and Barrier-only traffic require no additional ack. A failed prior sync or
+a closed rotation sender poisons the Db and takes no Cut.

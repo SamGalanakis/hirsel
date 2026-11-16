@@ -6701,8 +6701,12 @@ fn disk_wait_cut(mut db: Db, generation: u64) -> Result[(), Error] waits {
 fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), Error] waits {
     let d = db.disk[0].d
     let (take segment, take end_file) = disk_new_segment(d, id, seq, previous)?
-    if let Some(sender) = db.journal {
-        let _ = channel.send(sender, Rotate(take segment, take end_file))
+    let closed = if let Some(sender) = db.journal {
+        match channel.send(sender, Rotate(take segment, take end_file)) { Ok(()) => false, Error(_) => true }
+    } else { false }
+    if closed {
+        // The task sends Broken before ending. Preserve that first error.
+        loop { let ack = journal_receive(db); journal_ack(mut db, take ack)? }
     }
     journal_poll(mut db)
 }
@@ -6719,6 +6723,10 @@ fn disk_begin_cut(mut db: Db, roots: Roots, head: u64, live: u64) -> Result[Tick
     if let Some(p) = disk_pending(db) {
         disk_wait_cut(mut db, p.generation)?
     }
+    // X1: the successor HEADER makes prev_end durable. Every frame it
+    // names must already be synced, including frames still in the FIFO.
+    let last_frame = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    durable(mut db, last_frame)?
     let generation = db.checkpointed + 1
     let seq = db.file_seq + 1
     let previous = db.file_end
@@ -7072,9 +7080,10 @@ fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) 
     }
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 96 {
-        if !typed_put(mut db, t, k, k + 1) {
-            fail("crash init put")
-        }
+        let inserted = run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, t, k, k + 1)
+        })?
+        match take inserted { Committed(_) => {}, _ => fail("crash init put") }
     }
     let _ = checkpoint(mut db)?
     if scenario == "gap" {
@@ -8540,4 +8549,40 @@ fn journal_failure_notice(db: Db) -> Option[IoError] {
 type JournalCancelInput: send { d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout }
 fn journal_cancel_owner(take input: JournalCancelInput) -> Result[(), Error] waits {
     journal_crash_write(input.d, input.c, input.r, input.tasks, input.out, "journal-cancel")
+}
+
+// L4/X1: a queued frame is acked before a successor can bind its end.
+// Open, repeated cuts and Barrier-only traffic require no new frame ack.
+// The frozen rotate_before_ack source makes W2 refusal cut20 unopenable.
+pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let options = journal_crash_options()
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let empty = result.unwrap(checkpoint(mut db))
+    result.unwrap(durable(mut db, empty))
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    for k in 0u64 .. 3 { if !typed_put(mut db, t, k, k + 10) { return false } }
+    let wanted = db.frame_seq
+    let pending_end = db.file_end
+    let previous_seq = db.file_seq
+    let cut = result.unwrap(checkpoint(mut db))
+    if db.journaled != wanted { return false }
+    let header = option.unwrap(result.unwrap(journal_header(d, db.store, previous_seq + 1, false)))
+    if header.prev_end != pending_end { return false }
+    result.unwrap(durable(mut db, cut))
+    if let Some(sender) = db.journal { result.unwrap(channel.send(sender, Barrier)) }
+    if let Some(receiver) = db.written { match result.unwrap(channel.receive(receiver)) { Written => {}, _ => return false } }
+    let again = result.unwrap(checkpoint(mut db))
+    result.unwrap(durable(mut db, again))
+    result.unwrap(close(take db))
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    let sh = shape(t)
+    for k in 0u64 .. 3 { if result.unwrap(get(snapshot(reopened), sh, k)) != Some(k + 10) { return false } }
+    result.unwrap(close(take reopened))
+    true
+}
+
+@test
+fn journal_test_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_rotation(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
 }

@@ -334,6 +334,10 @@ impl Store {
         }
         Ok(temporary.file)
     }
+    /// Whether `path` names a file of this store.
+    pub(crate) fn holds(&self, path: &Path) -> bool {
+        path.parent() == Some(&*self.root)
+    }
     pub fn path(&self, key: ContentHash) -> PathBuf {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut name = [0; 64];

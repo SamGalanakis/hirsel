@@ -803,9 +803,15 @@ impl CheckProduct {
             link.cleanup.as_ref().map(|c| c.identity.symbol()),
             options,
         )?;
+        let image = self
+            .image
+            .as_ref()
+            .map(|i| Store::new(&i.store_root().join("native")))
+            .transpose()?;
         link_objects(
             &entry_plan,
             &objects,
+            image.as_ref(),
             options,
             sources,
             || match &source_rows {
@@ -1137,7 +1143,7 @@ pub fn grant_kind(name: &str) -> Option<u8> {
     .map(|kind| kind as u8)
 }
 
-fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
+pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     let result = command
         .output()
         .map_err(|e| NativeStop::Link(format!("launch {command:?}: {e}")))?;
@@ -1219,6 +1225,12 @@ thread_local! {
     /// the objects' paths.
     pub(crate) static BEFORE_OPEN: std::cell::RefCell<Option<Box<dyn FnMut(&[PathBuf])>>> =
         const { std::cell::RefCell::new(None) };
+    /// The image unit the last link on this thread read: its key, its file
+    /// and whether the link prelinked it.
+    pub(crate) static UNIT: std::cell::RefCell<Option<(ContentHash, PathBuf, bool)>> =
+        const { std::cell::RefCell::new(None) };
+    /// Set: a link reads the image objects one by one, not as their unit.
+    pub(crate) static SEPARATE_IMAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Runs between the objects' check and the linker's spawn, with their paths.
     pub(crate) static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn FnMut(&[PathBuf])>>> =
         const { std::cell::RefCell::new(None) };
@@ -1232,7 +1244,7 @@ thread_local! {
 /// Every stored object is checked; each that fails is removed, and the
 /// instances of all of them are returned.
 fn open_objects(
-    objects: &[ObjectProduct],
+    objects: &[&ObjectProduct],
     counters: &mut crate::reach::ReachCounters,
 ) -> Result<Result<Vec<std::fs::File>, Vec<Identity>>, NativeStop> {
     use std::io::Read;
@@ -1298,6 +1310,7 @@ fn open_objects(
 fn link_objects(
     entry_plan: &crate::native_entry::Plan<'_>,
     objects: &[ObjectProduct],
+    image: Option<&Store>,
     options: &NativeOptions,
     sources_digest: ContentHash,
     sources: impl FnOnce() -> io::Result<hirsel_core_ir::source::SourceMap>,
@@ -1313,10 +1326,11 @@ fn link_objects(
         "development-link-O0"
     };
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
-    // v4: the source map enters by its digest, and the runtime headers by the
-    // compiler identity, which embeds them.
+    // v5: the image objects are linked as their image unit. The source map
+    // enters by its digest, and the runtime headers by the compiler identity,
+    // which embeds them.
     let link_key = key(
-        "hirsel.core-executable.v4",
+        "hirsel.core-executable.v5",
         &(
             compiler_identity()?,
             toolchain,
@@ -1373,29 +1387,6 @@ fn link_objects(
         } else {
             None
         };
-        let files = match open_objects(objects, &mut counters)? {
-            Ok(files) => files,
-            Err(refused) => return Ok(Linked::Damaged(refused, compiled, counters)),
-        };
-        // The linker opens each checked object through this process's
-        // descriptor table, so it reads the inode that was checked and inherits
-        // nothing: a spawn that cleared close-on-exec would need fork, whose
-        // child holds every thread's writable descriptors until it execs.
-        let pid = std::process::id();
-        let mut inputs = Vec::with_capacity(objects.len() + 3);
-        inputs.push(entry.clone());
-        inputs.extend(files.iter().map(|file| {
-            PathBuf::from(format!(
-                "/proc/{pid}/fd/{}",
-                std::os::fd::AsRawFd::as_raw_fd(file)
-            ))
-        }));
-        if let Some(debug) = debug {
-            let debug_path = temp.path().join("debug.o");
-            std::fs::write(&debug_path, debug)?;
-            inputs.push(debug_path);
-        }
-        inputs.push(options.runtime.clone());
         let mut recipe = recipe;
         let mut missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
         if !missing.is_empty() {
@@ -1413,6 +1404,62 @@ fn link_objects(
                     .join(", ")
             )));
         }
+        // The image objects are linked as their unit, prelinked here when no
+        // unit is stored under their key; the rest are linked one by one.
+        #[cfg(test)]
+        let image = image.filter(|_| !SEPARATE_IMAGE.get());
+        let (in_image, separate): (Vec<&ObjectProduct>, Vec<&ObjectProduct>) = objects
+            .iter()
+            .partition(|o| image.is_some_and(|image| image.holds(&o.path)));
+        let unit = match image.filter(|_| !in_image.is_empty()) {
+            None => None,
+            Some(image) => {
+                let identities: Vec<_> = in_image.iter().map(|o| o.identity).collect();
+                let unit_key =
+                    crate::image_unit::key(toolchain, &recipe, &options.target, &identities)?;
+                // The unit and whether this link prelinked it, which a test reads.
+                let (_unit, file, _prelinked) = match crate::image_unit::load(image, unit_key)? {
+                    Some((unit, file)) => (unit, file, false),
+                    None => {
+                        let files = match open_objects(&in_image, &mut counters)? {
+                            Ok(files) => files,
+                            Err(refused) => {
+                                return Ok(Linked::Damaged(refused, compiled, counters));
+                            }
+                        };
+                        let (unit, file) =
+                            crate::image_unit::prelink(image, unit_key, &recipe.linker, &files)?;
+                        (unit, file, true)
+                    }
+                };
+                #[cfg(test)]
+                UNIT.set(Some((unit_key, image.path(_unit.address), _prelinked)));
+                Some(file)
+            }
+        };
+        let files = match open_objects(&separate, &mut counters)? {
+            Ok(files) => files,
+            Err(refused) => return Ok(Linked::Damaged(refused, compiled, counters)),
+        };
+        // The linker opens each checked object through this process's
+        // descriptor table, so it reads the inode that was checked and inherits
+        // nothing: a spawn that cleared close-on-exec would need fork, whose
+        // child holds every thread's writable descriptors until it execs.
+        let pid = std::process::id();
+        let mut inputs = Vec::with_capacity(objects.len() + 4);
+        inputs.push(entry.clone());
+        inputs.extend(unit.iter().chain(&files).map(|file| {
+            PathBuf::from(format!(
+                "/proc/{pid}/fd/{}",
+                std::os::fd::AsRawFd::as_raw_fd(file)
+            ))
+        }));
+        if let Some(debug) = debug {
+            let debug_path = temp.path().join("debug.o");
+            std::fs::write(&debug_path, debug)?;
+            inputs.push(debug_path);
+        }
+        inputs.push(options.runtime.clone());
         if let Err(first) = direct_link(
             &recipe,
             &inputs,
@@ -1446,7 +1493,7 @@ fn link_objects(
                 options.optimize,
             )?;
         }
-        drop(files);
+        drop((unit, files));
         let bytes = std::fs::read(output)?;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         publish(&store, link_key, &bytes)?;
@@ -1514,6 +1561,7 @@ mod tests {
     include!("object_key_native.rs");
     include!("instance_record_native.rs");
     include!("prebuild_native.rs");
+    include!("image_unit_native.rs");
     include!("reach_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {

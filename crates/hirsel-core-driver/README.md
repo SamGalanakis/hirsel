@@ -163,6 +163,13 @@ refresh them even when version output is unchanged. Incidental metadata changes
 do not invalidate a link whose tool content is unchanged. PATH selection is repeated
 on each link request; a missing selected editor is a named link refusal. A warm build reads integrity-checked products
 and compiles/links nothing; an implementation edit rebuilds its object and relinks.
+A link reads the package-image objects it reaches as one image unit: `ld -r` of
+them in link order by the link's own linker, stored in the image's store under a
+key of the toolchain, link recipe, target, flags and the ordered object
+identities, and checked on every read. A damaged unit, or a frame under another
+key, is prelinked again. A fresh store links through the same unit, so a primed
+store's executable is a fresh store's; it is not byte-equal to a link of the
+separate objects (`ld -r` renumbers local and section symbols).
 `--debug-lines on|off` controls native line tables for build, run and test.
 Line tables default to off on every profile and both engines. Use
 `--debug-lines on` to opt in.

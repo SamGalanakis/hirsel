@@ -5,6 +5,7 @@ pub mod cli_tools;
 mod diagnostics;
 mod image;
 mod image_index;
+mod image_unit;
 pub mod installation;
 mod product;
 pub use product::PackageProduct;

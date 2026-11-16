@@ -13,7 +13,7 @@
         "parse": 427.8149250817512,
         "index": 7.261213333984089,
         "resolve": 159.08216879569866,
-        "input counts": 8.62370820668693,
+        "input counts": 8.623426348887085,
         "declarations": 158.73517497193617,
         "body keys/new": 85.837522573088,
         "body keys/for_body": 192.52037678754454,
@@ -35,10 +35,10 @@
     },
     "std": {
       "instructions_per_token": {
-        "parse": 451.1690534841969,
+        "parse": 450.82822781937824,
         "index": 9.026762974406079,
         "resolve": 150.87679011314768,
-        "input counts": 8.747613909868038,
+        "input counts": 8.746415826061844,
         "declarations": 204.50085591415808,
         "body keys/new": 100.27973779800426,
         "body keys/for_body": 179.60836708279405,
@@ -60,8 +60,8 @@
     },
     "suite-edit": {
       "instructions_per_token": {
-        "parse": 444.98529617700603,
-        "index": 11.763058395182748,
+        "parse": 444.9628903514914,
+        "index": 11.693040190449517,
         "resolve": 254.41534799047753,
         "input counts": 8.46380058815292,
         "declarations": 109.00154040050413,

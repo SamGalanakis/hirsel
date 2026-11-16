@@ -1,0 +1,38 @@
+[package]
+name = "hirsel-wire-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "wire-reference"
+path = "reference/main.rs"
+
+[[bin]]
+name = "wire-load"
+path = "load/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tokio-tungstenite = { git = "https://github.com/snapview/tokio-tungstenite", rev = "76e10f08c488eb0032f136c7c56a437cd30164c2" }
+futures-util = { version = "0.3", features = ["sink"] }
+sha2 = "0.10"
+rand = "0.9"
+serde_json = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[patch.crates-io]
+tokio = { git = "https://github.com/tokio-rs/tokio", rev = "f3e855fa55d6c1cc3e7a28e115a421b8ee5860bd" }
+tungstenite = { git = "https://github.com/snapview/tungstenite-rs", rev = "89576c6fcf7ac71332a26257ad71eb90e06e2516" }
+
+[profile.release]
+overflow-checks = true
+debug = "line-tables-only"

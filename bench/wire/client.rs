@@ -1,0 +1,326 @@
+use crate::codec::{self, Done, Entry, Frame, Outcome, Want};
+use crate::{BITS, IMAGE_BYTES, Result, flip};
+use futures_util::{SinkExt, StreamExt};
+use std::time::Duration;
+use tokio::net::TcpStream;
+use tokio::task::JoinSet;
+use tokio::time::{Instant, sleep_until};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream,
+    tungstenite::{Message, client::IntoClientRequest},
+};
+
+pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub struct Client {
+    pub socket: Socket,
+    pub token: Vec<u8>,
+    pub image: Vec<u8>,
+    pub version: u64,
+    pub toggle_slot: u32,
+    pub board_slot: u32,
+    subscribed: bool,
+    sub: u32,
+    pending: Option<Vec<u8>>,
+}
+impl Client {
+    pub async fn connect(url: &str, wants: &[Want], token: Option<Vec<u8>>) -> Result<Self> {
+        let mut request = url.into_client_request()?;
+        request
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", "hirsel.1".parse()?);
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .read_buffer_size(4096)
+            .write_buffer_size(0)
+            .max_message_size(Some(crate::MAX_FRAME))
+            .max_frame_size(Some(crate::MAX_FRAME));
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async_with_config(request, Some(config), true).await?;
+        if let MaybeTlsStream::Plain(tcp) = socket.get_ref() {
+            tcp.set_nodelay(true)?;
+        }
+        socket
+            .send(Message::Binary(
+                codec::encode(&Frame::Hello(token, wants.to_vec())).into(),
+            ))
+            .await?;
+        let Frame::Welcome(token, _, _, _) = read_frame(&mut socket).await? else {
+            return Err("expected Welcome first".into());
+        };
+        let mut slots = Vec::new();
+        for _ in wants {
+            match read_frame(&mut socket).await? {
+                // Call.slot indexes the Hello list, regardless of Ready's registry slot.
+                Frame::Placed(Entry::Ready(_)) => slots.push((slots.len()) as u32),
+                _ => return Err("checkbox entry not Ready; pass the generated --wants file".into()),
+            }
+        }
+        if slots.len() != 2 {
+            return Err("expected [toggle, board] entries".into());
+        }
+        Ok(Self {
+            socket,
+            token,
+            image: vec![0; IMAGE_BYTES],
+            version: 0,
+            toggle_slot: slots[0],
+            board_slot: slots[1],
+            subscribed: false,
+            sub: 0,
+            pending: None,
+        })
+    }
+    pub async fn send(&mut self, frame: Frame) -> Result<()> {
+        self.socket
+            .send(Message::Binary(codec::encode(&frame).into()))
+            .await?;
+        Ok(())
+    }
+    pub async fn subscribe(&mut self) -> Result<()> {
+        self.sub = self
+            .sub
+            .checked_add(1)
+            .ok_or("subscription ids exhausted")?;
+        self.pending = Some(vec![0; IMAGE_BYTES]);
+        self.subscribed = true;
+        self.send(Frame::Subscribe(self.sub, self.board_slot, vec![], None))
+            .await
+    }
+    pub async fn snapshot(&mut self) -> Result<()> {
+        self.subscribe().await?;
+        loop {
+            if matches!(self.receive().await?, Frame::Batch(_, complete, _, _) if complete.contains(&self.sub))
+            {
+                return Ok(());
+            }
+        }
+    }
+    pub async fn receive(&mut self) -> Result<Frame> {
+        let frame = read_frame(&mut self.socket).await?;
+        match &frame {
+            Frame::Batch(version, complete, rows, _) => {
+                if *version < self.version {
+                    return Err("session version decreased".into());
+                }
+                self.version = *version;
+                apply_batch(&mut self.image, &mut self.pending, self.sub, complete, rows)?;
+            }
+            Frame::Reset(version, _) => {
+                if *version < self.version {
+                    return Err("Reset version decreased".into());
+                }
+                self.version = *version;
+                self.image.fill(0);
+                if self.subscribed {
+                    self.subscribe().await?;
+                }
+            }
+            Frame::Ended(_, outcome) => return Err(format!("board ended: {outcome:?}").into()),
+            _ => return Err("unexpected server frame after Placed".into()),
+        }
+        Ok(frame)
+    }
+    pub async fn start_call(&mut self, stream: u32, p: u64, bit: u32) -> Result<()> {
+        self.send(Frame::Call(
+            stream,
+            p,
+            self.toggle_slot,
+            30_000,
+            bit.to_le_bytes().to_vec(),
+        ))
+        .await
+    }
+    pub async fn finish_call(&mut self, stream: u32, p: u64) -> Result<bool> {
+        loop {
+            let frame = self.receive().await?;
+            let done = outcomes(frame);
+            if done.len() > 1 {
+                return Err("more than one outcome for a single in-flight call".into());
+            }
+            if let Some(done) = done.first() {
+                if done.stream != stream || done.p != p {
+                    return Err("unexpected or duplicate final outcome".into());
+                }
+                return returned(done);
+            }
+        }
+    }
+}
+
+fn apply_batch(
+    image: &mut Vec<u8>,
+    pending: &mut Option<Vec<u8>>,
+    sub: u32,
+    complete: &[u32],
+    rows: &[codec::Row],
+) -> Result<()> {
+    for row in rows {
+        if row.sub == sub {
+            codec::apply_row(pending.as_mut().unwrap_or(image), row)?;
+        }
+    }
+    if complete.contains(&sub)
+        && let Some(whole) = pending.take()
+    {
+        *image = whole;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_completion_replaces_the_named_cache_and_retired_rows_are_ignored() -> Result<()> {
+        let mut image = vec![0; IMAGE_BYTES];
+        image[0] = 1;
+        let mut pending = Some(vec![0; IMAGE_BYTES]);
+        apply_batch(&mut image, &mut pending, 2, &[], &[])?;
+        assert_eq!(image[0], 1);
+        assert!(pending.is_some());
+        let mut bits = vec![0; IMAGE_BYTES];
+        bits[0] = 2;
+        apply_batch(
+            &mut image,
+            &mut pending,
+            2,
+            &[1],
+            &[codec::chunk_row(1, 0, &bits)],
+        )?;
+        assert_eq!(image[0], 1);
+        apply_batch(
+            &mut image,
+            &mut pending,
+            2,
+            &[2],
+            &[codec::chunk_row(2, 0, &bits)],
+        )?;
+        assert_eq!(image[0], 2);
+        assert!(pending.is_none());
+        Ok(())
+    }
+}
+pub fn outcomes(frame: Frame) -> Vec<Done> {
+    match frame {
+        Frame::Batch(_, _, _, done) | Frame::Reset(_, done) => done,
+        _ => vec![],
+    }
+}
+pub fn returned(done: &Done) -> Result<bool> {
+    match &done.outcome {
+        Outcome::Returned(b) if b == &[0, 0, 0, 0, 0] => Ok(false),
+        Outcome::Returned(b) if b == &[0, 0, 0, 0, 1] => Ok(true),
+        other => Err(format!("toggle did not return a bool: {other:?}").into()),
+    }
+}
+async fn read_frame(socket: &mut Socket) -> Result<Frame> {
+    loop {
+        match socket.next().await.transpose()? {
+            Some(Message::Binary(bytes)) => return codec::decode(&bytes),
+            Some(Message::Ping(_)) => socket.flush().await?,
+            Some(Message::Pong(_)) => (),
+            _ => return Err("connection ended before the expected frame".into()),
+        }
+    }
+}
+
+pub fn seeded(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+#[derive(Debug)]
+pub struct Converged {
+    pub clients: usize,
+    pub returned: usize,
+    pub reconnects: usize,
+    pub version: u64,
+}
+
+/// Identical driver for both servers. The oracle depends only on Returned calls.
+pub async fn converge(
+    url: &str,
+    wants: &[Want],
+    n: usize,
+    toggles: usize,
+    rate: u32,
+) -> Result<Converged> {
+    if n < 2 || toggles < 2 || rate == 0 {
+        return Err("converge requires >=2 clients, >=2 toggles, positive rate".into());
+    }
+    let mut clients = Vec::new();
+    for _ in 0..n {
+        let mut c = Client::connect(url, wants, None).await?;
+        c.snapshot().await?;
+        clients.push(c);
+    }
+    let start = Instant::now() + Duration::from_millis(20);
+    let mut tasks = JoinSet::new();
+    for (id, mut client) in clients.into_iter().enumerate() {
+        let url = url.to_owned();
+        let wants = wants.to_vec();
+        tasks.spawn(async move {
+            let mut state = id as u64 + 0x1062;
+            let reconnect = 1 + seeded(&mut state) as usize % (toggles - 1);
+            let mut returned_bits = Vec::new();
+            for j in 0..toggles {
+                sleep_until(start + Duration::from_secs_f64(j as f64 / f64::from(rate))).await;
+                let bit = if j < 6 {
+                    [0, 7, 8, 511, 512, 999_999][j]
+                } else {
+                    (seeded(&mut state) % u64::from(BITS)) as u32
+                };
+                let p = j as u64;
+                client.start_call(0, p, bit).await?;
+                if j == reconnect {
+                    // Deliberately lose a possible outcome and resend the same p on the same principal.
+                    let token = client.token.clone();
+                    drop(client);
+                    client = Client::connect(&url, &wants, Some(token)).await?;
+                    client.snapshot().await?;
+                    client.start_call(0, p, bit).await?;
+                }
+                client.finish_call(0, p).await?;
+                returned_bits.push(bit);
+            }
+            Ok::<_, crate::Error>((client, returned_bits))
+        });
+    }
+    let mut finished = Vec::new();
+    let mut oracle = vec![0; IMAGE_BYTES];
+    let mut count = 0;
+    while let Some(r) = tasks.join_next().await {
+        let (c, bits) = r??;
+        count += bits.len();
+        for bit in bits {
+            flip(&mut oracle, bit);
+        }
+        finished.push(c);
+    }
+    let mut fresh = Client::connect(url, wants, None).await?;
+    fresh.snapshot().await?;
+    if fresh.image != oracle {
+        return Err("fresh server table differs from XOR of Returned toggles".into());
+    }
+    let version = fresh.version;
+    for mut client in finished {
+        while client.version < version {
+            let frame = client.receive().await?;
+            if !outcomes(frame).is_empty() {
+                return Err("duplicate final outcome after last call".into());
+            }
+        }
+        if client.image != oracle {
+            return Err("subscriber image differs from XOR of Returned toggles".into());
+        }
+        client.socket.close(None).await?;
+    }
+    fresh.socket.close(None).await?;
+    Ok(Converged {
+        clients: n,
+        returned: count,
+        reconnects: n,
+        version,
+    })
+}

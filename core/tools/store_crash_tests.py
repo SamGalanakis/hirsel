@@ -24,9 +24,9 @@ def checked(command, env=None):
     return result
 
 
-def run_cuts(executable, engine, env=None):
+def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
     rows = []
-    for scenario in SCENARIOS:
+    for scenario in scenarios:
         result = checked([str(executable), scenario, 'count'], env)
         match = re.fullmatch(r'cuts ([0-9]+)\n', result.stdout)
         if match is None or int(match[1]) == 0:
@@ -39,7 +39,8 @@ def run_cuts(executable, engine, env=None):
     return rows
 
 
-def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine):
+def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
+                entry="store@1/store/disk_crash_main", scenarios=SCENARIOS):
     build = work / (engine + '-crash')
     build.mkdir()
     if cc is None:
@@ -52,11 +53,14 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine):
                        + shlex.quote(str(root / 'core/tools/store_crash.c')) + ' '
                        + shlex.quote(str(bridge.resolve())) + ' -I'
                        + shlex.quote(str(root / 'crates/hirsel-core-rt/include'))
-                       + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
+                       + ' -Wl,--wrap=hirsel_core_os_run_with_sources'
+                       + ' -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_host_op'
+                       + ' -Wl,--wrap=hirsel_core_host_rename -Wl,--wrap=hirsel_core_send'
+                       + ' -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_join\n')
     wrapper.chmod(0o755)
     executable = build / 'store'
     command = [str(compiler.resolve()), 'build', '--inputs', str(manifest), '--source-core', '--source-std',
-               '--entry', 'store@1/store/disk_crash_main', '--backend',
+               '--entry', entry, '--backend',
                'llvm' if engine == 'llvm-release' else engine, '--runtime', str(runtime.resolve()),
                '--cc', str(wrapper), '--store', str(build / 'objects'), '--limit', str(64 * 1024 * 1024),
                '--dir', str(build), '-o', str(executable), '--json']
@@ -71,4 +75,4 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine):
         raise RuntimeError(result.stdout)
     env = dict(os.environ)
     env['LD_LIBRARY_PATH'] = str(bridge.resolve().parent) + ':' + env.get('LD_LIBRARY_PATH', '')
-    return run_cuts(executable, engine, env)
+    return run_cuts(executable, engine, env, scenarios)

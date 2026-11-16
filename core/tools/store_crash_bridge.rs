@@ -38,6 +38,10 @@ struct Bridge {
     events: u64,
     crashed: bool,
     acked: bool,
+    floor: u64,
+    sync_failure: u8,
+    armed: bool,
+    failed_syncs: u64,
     random: u8,
 }
 impl Bridge {
@@ -83,6 +87,27 @@ impl Bridge {
                 }
             }
             return Outcome::default();
+        }
+        // The out-of-process witness records returned durability even when a
+        // different task has just encountered the simulated filesystem cut.
+        if op == 12 {
+                if self.phase == 1 {
+                    if &data[..len] == b"DONE" {
+                        self.acked = true;
+                    } else if &data[..len] == b"ARM" {
+                        self.armed = true;
+                    } else if let Some(version) = data[..len].strip_prefix(b"ACK ") {
+                        let version: u64 = std::str::from_utf8(version)
+                            .expect("ACK is ASCII").parse().expect("ACK version");
+                        assert!(version >= self.floor, "durability acknowledgments regressed");
+                        self.floor = version;
+                    }
+                }
+                return Outcome { written: len as u64, ..Outcome::default() };
+        }
+        if op == 13 {
+            eprint!("{}", String::from_utf8_lossy(&data[..len]));
+            return Outcome { written: len as u64, ..Outcome::default() };
         }
         if self.crashed {
             return Self::error(5);
@@ -139,6 +164,13 @@ impl Bridge {
                 let file = self.files.get(&handle).expect("live provider descriptor");
                 let name = file.name.clone();
                 let cursor = file.cursor;
+                if self.phase == 1 && self.armed && self.sync_failure == 4
+                    && name.starts_with("j-") && !name.ends_with(".end")
+                {
+                    self.failed_syncs += 1;
+                    assert_eq!(self.failed_syncs, 1, "store retried a failed write");
+                    return Self::error(5);
+                }
                 let append = file.mode == 2;
                 let applied = if append {
                     self.apply(Op::Append(&name, &data[..len]))
@@ -192,22 +224,6 @@ impl Bridge {
                 value: self.events,
                 ..Outcome::default()
             },
-            12 => {
-                if self.phase == 1 && &data[..len] == b"DONE" {
-                    self.acked = true;
-                }
-                Outcome {
-                    written: len as u64,
-                    ..Outcome::default()
-                }
-            }
-            13 => {
-                eprint!("{}", String::from_utf8_lossy(&data[..len]));
-                Outcome {
-                    written: len as u64,
-                    ..Outcome::default()
-                }
-            }
             14 => {
                 let split = path.iter().position(|&b| b == 0).expect("rename delimiter");
                 let from = std::str::from_utf8(&path[..split]).unwrap();
@@ -228,6 +244,19 @@ impl Bridge {
                     .expect("live sync descriptor")
                     .name
                     .clone();
+                let matches = match self.sync_failure {
+                    1 => name.starts_with("j-") && !name.ends_with(".end"),
+                    2 => name.starts_with("j-") && name.ends_with(".end"),
+                    3 => name.starts_with("p-"),
+                    _ => false,
+                };
+                if self.phase == 1 && self.armed && matches {
+                    self.failed_syncs += 1;
+                    // A failed sync publishes no dirty bytes. A retry on this
+                    // live Db is a test failure, rather than a successful retry.
+                    assert_eq!(self.failed_syncs, 1, "store retried a failed sync");
+                    return Self::error(5);
+                }
                 if self.apply(Op::Sync(&name)) {
                     Outcome::default()
                 } else {
@@ -268,6 +297,10 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         events: 0,
         crashed: false,
         acked: false,
+        floor: 0,
+        sync_failure: 0,
+        armed: false,
+        failed_syncs: 0,
         random: 1,
     }))
     .cast()
@@ -361,4 +394,29 @@ pub unsafe extern "C" fn store_crash_free(p: *mut c_void) {
         "final run leaked provider file handles"
     );
     drop(bridge);
+}
+
+/// # Safety
+/// `p` is the live bridge; only the C wrapper accesses it between serialized runs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
+    // SAFETY: the wrapper owns p and no provider callback is active here.
+    unsafe { (*p.cast::<Bridge>()).floor }
+}
+
+/// # Safety
+/// `p` is live and quiescent, and `kind` is 0 (off), 1 (segment), 2 (END), 3 (pack), or 4 (segment write).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
+    assert!(kind <= 4);
+    // SAFETY: the C wrapper configures the bridge before starting a run.
+    unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
+}
+
+/// # Safety
+/// `p` is live and quiescent, as for store_crash_floor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_failed_syncs(p: *mut c_void) -> u64 {
+    // SAFETY: called only between the wrapper's synchronous runs.
+    unsafe { (*p.cast::<Bridge>()).failed_syncs }
 }

@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -13,6 +14,17 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'core/tools'))
 from measure import source_lines
+
+# Frozen, absolute allowances owned by core-check-index-912. They never scale
+# with source growth and never apply to the fixed finished-process budget.
+ANCHOR_RESIDUAL = {'m1': 3371157, 'std': 973518}
+COMPLETE = dict(complete_bodies=1, bodies=1,
+                missing_check_lower_per_line=0, additional_publication_per_line=0)
+
+
+def margin(value):
+    return math.ceil(value * 1.02 / 100) * 100
+
 
 
 def process_instructions(path):
@@ -39,9 +51,9 @@ def check_ceiling(metrics, lines, ceiling, process, anchor_residual=0):
         raise ValueError('negative recorded anchor residual')
     failures = []
     for name, instructions, maximum in [
-        ('check/lower', lower, ceiling['check_lower_per_line']),
-        ('driver request', total, ceiling['whole_request_per_line']),
-        ('whole process', process, ceiling['whole_process_per_line']),
+        ('check/lower', lower, ceiling.get('check_lower_per_line', float('inf'))),
+        ('driver request', total, ceiling.get('whole_request_per_line', float('inf'))),
+        ('whole process', process, ceiling.get('whole_process_per_line', float('inf'))),
     ]:
         adjusted = instructions - anchor_residual
         if adjusted > maximum * lines:
@@ -112,34 +124,38 @@ def sample_sources(compiler, output, profile_front=False):
 
 
 def run(compiler, output, ceilings, request_compiler=None, report_only=False):
-    failures = []
+    failures, observations, proposed = [], {}, {}
     for name, lines, product, metrics, process in sample_sources(compiler, output):
-        ceiling = ceilings['corpora'][name]
-        if lines != ceiling['code_lines']:
-            print(f"{name}: baseline {ceiling['code_lines']} code lines; current {lines}; "
-                  "costs use the deterministic current count")
-        anchor = ceilings.get('known_anchor_residual', {}).get(name)
-        residual = anchor['check_lower_instructions'] if anchor else 0
+        ceiling = ceilings['corpora'].get(name, {})
+        residual = ANCHOR_RESIDUAL.get(name, 0)
         lower, total, errors = check_ceiling(metrics, lines, ceiling, process, residual)
-        if anchor:
-            print(f"{name}: KNOWN EXCESS {anchor['owner']}: {residual} anchor instructions "
-                  f"({residual / lines:.2f}/current line), recorded separately from growth; "
-                  "observation ceilings compare the remaining work; budget uses the full process")
+        if residual:
+            print(f'{name}: KNOWN EXCESS core-check-index-912: {residual} absolute anchor instructions; budget uses the full process')
         print(f'{name}: {lines} code lines; check/lower {lower:.2f}; driver request {total:.2f}; whole process {process / lines:.2f} instructions/line')
-        projection = ceilings['completion_forecast'][name]
-        failures.extend(f'{name}: {error}' for error in completion_errors(product, projection))
+        projection = COMPLETE
+        completion = completion_errors(product, projection)
+        failures.extend(f'{name}: {error}' for error in completion)
         forecast, budget_errors = finished_forecast(
             process, lines, projection, ceilings['finished_budget_per_line'])
         print(f"{name}: finished whole process forecast {forecast:.2f}; "
               f"budget {ceilings['finished_budget_per_line']} instructions/line; "
-              f"recorded completion {projection['complete_bodies']}/{projection['bodies']} bodies "
-              f"at {ceilings['forecast_revision']}")
+              f"current corpus complete: {not (product['diagnostics'] or product['incomplete'])}")
         failures.extend(f'{name}: {e}' for e in errors + budget_errors)
+        raw = {stage['name']: stage['instructions'] for stage in metrics['stages']}
+        values = dict(check_lower_per_line=(raw['check/lower'] - residual) / lines,
+                      whole_request_per_line=(metrics['instructions'] - residual) / lines,
+                      whole_process_per_line=(process - residual) / lines)
+        observations[name] = dict(code_lines=lines, process=process, metrics=metrics,
+                                  diagnostics=product['diagnostics'], incomplete=product['incomplete'])
+        if not completion:
+            proposed[name] = {key: margin(max(0, value)) for key, value in values.items()}
     if request_compiler is not None:
-        failures.extend(run_product(request_compiler, output / 'product', ceilings))
-    print('COST_REPORT ' + json.dumps(dict(target='core-check-cost', findings=failures)), flush=True)
+        errors, observed, limits = run_product(request_compiler, output / 'product', ceilings)
+        failures.extend(errors)
+        observations['product'], proposed['product'] = observed, limits
+    print('COST_REPORT ' + json.dumps(dict(target='core-check-cost', findings=failures, observations=observations, ceilings=proposed)), flush=True)
     if failures:
-        message = '\n'.join(failures) + '\n' + ceilings['regression_policy']
+        message = '\n'.join(failures) + '\n' + ceilings['policy']
         if report_only:
             print(message)
         else:
@@ -208,7 +224,7 @@ def run_product(compiler, directory, ceilings):
     empty['packages'].append({'package': {'name': 'empty', 'version': '1'},
         'dependencies': [p['package'] for p in empty['packages']],
         'sources': [{'file': str(source), 'modules': ['main'], 'signatures': False}]})
-    limits = ceilings['corpora']['product']
+    limits = ceilings['corpora'].get('product', {})
     failures = []
     fixed = {}
     for mode in ['std', 'core']:
@@ -218,7 +234,7 @@ def run_product(compiler, directory, ceilings):
             request['packages'][-1]['dependencies'] = [request['core']]
         fixed[mode] = product_sample(compiler, request, 'empty@1/main/main', mode,
                                      directory / ('fixed-' + mode), cache)
-        maximum = limits['fixed_' + mode + '_instructions']
+        maximum = limits.get('fixed_' + mode + '_instructions', float('inf'))
         print(f'product: fixed {mode} {fixed[mode]} instructions; ceiling {maximum}')
         if fixed[mode] > maximum:
             failures.append(f'product fixed {mode}: {fixed[mode]} exceeds {maximum}')
@@ -232,13 +248,15 @@ def run_product(compiler, directory, ceilings):
         path = entry['package']['name'] + '@1/' + entry['module'] + '/' + entry['function']
         process = product_sample(compiler, request, path, 'std', directory / name, cache)
         marginal, errors = product_ceiling(process, fixed['std'], lines,
-            limits['entries'][name]['marginal_per_line'], ceilings['finished_budget_per_line'])
+            limits.get('entries', {}).get(name, {}).get('marginal_per_line', float('inf')), ceilings['finished_budget_per_line'])
         rows.append(dict(entry=name, own_lines=lines, process=process,
                          fixed=fixed['std'], marginal=marginal))
         print(f'product {name}: {lines} own lines; process {process}; fixed {fixed["std"]}; marginal {marginal:.2f}')
         failures.extend(f'product {name}: {e}' for e in errors)
     (directory / 'results.json').write_text(json.dumps(dict(fixed=fixed, entries=rows), indent=2) + '\n')
-    return failures
+    proposals = {'fixed_' + mode + '_instructions': math.ceil(value * 1.02) for mode, value in fixed.items()}
+    proposals['entries'] = {row['entry']: dict(marginal_per_line=margin(row['marginal'])) for row in rows}
+    return failures, dict(fixed=fixed, entries=rows), proposals
 
 
 def main():
@@ -250,6 +268,7 @@ def main():
     parser.add_argument('--report-only', action='store_true', help='report ceiling findings; tool errors still fail')
     args = parser.parse_args()
     ceilings = json.loads(args.ceilings.read_text())
+    ceilings['policy'] = ceilings.get('policy', 'Cost regressions are report-only; land owns ceiling changes.')
     if args.out:
         args.out.mkdir(parents=True, exist_ok=False)
         run(args.compiler.resolve(), args.out.resolve(), ceilings, args.request_compiler.resolve(), args.report_only)

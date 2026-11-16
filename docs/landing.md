@@ -80,6 +80,14 @@ lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`).
 Measurement tool crashes still refuse the push. The rows, including regressions,
 are retained in each ticket's log and completion event. `//:core-check-cost-unit`
 stays in acceptance because it tests synthetic inputs, not measured ceilings.
+Land then writes only smaller measured ceilings, initializes new cells with their
+measured margin, and commits that change in the pushed tree. It drops historical
+observations from the ceiling documents; each ticket's log and event retain the
+current rows and generated changes. Lane edits to either JSON are refused.
+Explicit increases use reviewed per-lane requests described in
+[the cost tool documentation](../crates/hirsel-core-front/README.md#cost-attribution-and-regression-ceiling).
+The land process consumes them and logs the reason. The fixed budget stays 60,000.
+
 
 The queue controller updates to its rebased tree's `tools/land` before leading.
 For every candidate, including waiting tickets and bisection groups, a fresh Python

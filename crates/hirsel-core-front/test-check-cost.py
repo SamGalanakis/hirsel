@@ -123,10 +123,10 @@ class ReportOnly(unittest.TestCase):
                      whole_request_per_line=60, whole_process_per_line=70)),
                      completion_forecast=dict(m1=dict(complete_bodies=1, bodies=1,
                          missing_check_lower_per_line=0, additional_publication_per_line=0)),
-                     finished_budget_per_line=60000, forecast_revision='fixture', regression_policy='explain the rise')
+                     finished_budget_per_line=60000, policy='explain the rise')
         def samples(*_):
             return [('m1', 1, product, metrics, 120)]
-        with patch.dict(run.__globals__, sample_sources=samples):
+        with patch.dict(run.__globals__, sample_sources=samples, ANCHOR_RESIDUAL={}):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 with self.assertRaisesRegex(ValueError, '90.00 instructions/line'):
@@ -136,6 +136,15 @@ class ReportOnly(unittest.TestCase):
             metrics['counter_refusal'] = 'counter unavailable'
             with self.assertRaisesRegex(ValueError, 'counter unavailable'):
                 run(None, None, limits, report_only=True)
+            metrics['counter_refusal'] = None
+            product['incomplete'] = ['gap']
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                run(None, None, limits, report_only=True)
+            import json
+            row = next(line.removeprefix('COST_REPORT ') for line in output.getvalue().splitlines()
+                       if line.startswith('COST_REPORT '))
+            self.assertEqual(json.loads(row)['ceilings'], {})
 
 
 class ProcessCeiling(unittest.TestCase):

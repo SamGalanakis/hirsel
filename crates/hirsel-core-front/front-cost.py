@@ -55,12 +55,12 @@ def compare(row, ceiling):
     failures = []
     for name in STAGES:
         value = row['costs'][name] / row['tokens']
-        maximum = ceiling['instructions_per_token'][name]
+        maximum = ceiling.get('instructions_per_token', {}).get(name, float('inf'))
         if value > maximum:
             failures.append(f'{name}: {value:.6f} instructions/token exceeds {maximum}')
     for name in COUNTS:
         value = row['image_access'][name] / row['tokens']
-        maximum = ceiling['image_per_token'][name]
+        maximum = ceiling.get('image_per_token', {}).get(name, float('inf'))
         if value > maximum:
             failures.append(f'image {name}: {value:.6f}/token exceeds {maximum}')
     return failures
@@ -72,8 +72,7 @@ def baseline(row):
     # the observation when that is larger than the percentage margin. Keep the
     # resulting count fractional until comparison; rounding it up would admit
     # two events for small observations and hide a two-event regression.
-    return dict(source_bytes=row['source_bytes'], tokens=row['tokens'], observation=row,
-                instructions_per_token={k: math.ceil(v * 1.02 / 100) * 100 / row['tokens']
+    return dict(instructions_per_token={k: math.ceil(v * 1.02 / 100) * 100 / row['tokens']
                                         for k, v in row['costs'].items()},
                 image_per_token={k: max(row['image_access'][k] * 1.02,
                                        row['image_access'][k] + 1) / row['tokens']
@@ -165,12 +164,13 @@ def run(compiler, runtime, out, ceilings=None, tools=None, image_profiler=None, 
         print_row(name, row)
         print('  identities: ' + json.dumps({k: row[k] for k in ('compiler_sha256', 'linker_sha256', 'image_profiler_sha256') if k in row}))
         if ceilings:
-            failures.extend(name + ': ' + e for e in compare(row, ceilings['corpora'][name]))
+            failures.extend(name + ': ' + e for e in compare(row, ceilings['corpora'].get(name, {})))
     (out / 'front-results.json').write_text(json.dumps(rows, indent=2) + '\n')
     if ceilings:
         print('Suite F targets (instructions, separate from current ceilings): '
               + json.dumps(ceilings['suite_targets_instructions']))
-    print('COST_REPORT ' + json.dumps(dict(target='core-front-cost', findings=failures)), flush=True)
+    print('COST_REPORT ' + json.dumps(dict(target='core-front-cost', findings=failures, observations=rows,
+                                          ceilings={name: baseline(row) for name, row in rows.items()})), flush=True)
     if failures:
         if report_only:
             print('\n'.join(failures))
@@ -186,7 +186,6 @@ def main():
     parser.add_argument('--image-profiler', type=Path, required=True)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--ceilings', type=Path, default=Path(__file__).with_name('front-cost-ceilings.json'))
-    parser.add_argument('--record', action='store_true', help='initial same-binary baseline; later updates must only lower saved stage limits')
     parser.add_argument('--test-threads', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--buck-tool-inputs', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--report-only', action='store_true', help='report ceiling findings; tool errors still fail')
@@ -195,20 +194,12 @@ def main():
     if runtime is None:
         runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVES']) / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
     compiler, runtime = args.compiler.resolve(), runtime.resolve()
-    limits = None if args.record else json.loads(args.ceilings.read_text())
+    limits = json.loads(args.ceilings.read_text())
     inputs = dict(llvm=os.environ['LLVM_SYS_231_PREFIX'], kit=os.environ['HIRSEL_LINK_KIT']) if args.buck_tool_inputs else None
     tools = request_cost.toolchain(ROOT, inputs)
     def execute(out):
         out.mkdir(parents=True, exist_ok=True)
-        rows = run(compiler, runtime, out, limits, tools, args.image_profiler.resolve(), args.report_only)
-        if args.record:
-            args.ceilings.write_text(json.dumps(dict(
-                revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
-                policy='Each F land lowers only its measured stage. Initial margin 2%, rounded up to 100 instructions. Budget targets remain separate. M1 legacy check/lower unchanged.',
-                nested='Body keys remain in legacy declarations/check stages; image read includes digest and overlaps the consuming phase. Do not sum nested rows.',
-                suite_targets_instructions=dict(parse=8000000, resolve=7000000, declarations=5000000, index=600000, **{'body keys':8000000}),
-                corpora={name: baseline(row) for name, row in rows.items()},
-                history=[dict(reason='Initial exact front counters, 2% stage margin; no legacy ceilings or fixed 60000 budget changed.')]), indent=2) + '\n')
+        run(compiler, runtime, out, limits, tools, args.image_profiler.resolve(), args.report_only)
     if args.out:
         execute(args.out.resolve())
     else:

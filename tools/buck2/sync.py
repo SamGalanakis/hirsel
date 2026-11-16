@@ -725,7 +725,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
                             production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/check-conflict-markers", "core/tools/std_api_index.py",
-                                  "core/tools/gate_evaluator.py", "core/tools/std_native.py", "core/tools/std_native_owners.json",
+                                  "core/tools/cost_ceilings.py", "core/tools/gate_evaluator.py", "core/tools/std_native.py", "core/tools/std_native_owners.json",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
                                   "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py",

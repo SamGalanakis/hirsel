@@ -38,6 +38,8 @@ BUILD_INPUTS = tuple(sorted(path for outputs in PARTS.values() for path in outpu
 # Tracked documents are regenerated after every successful rebase and included
 # in the candidate commit. Unlike BUILD_INPUTS, these remain tracked on main.
 DOCUMENTS = {'core/std/API-INDEX.md': ('core/tools/std_api_index.py', '--write')}
+COST_CEILINGS = ('crates/hirsel-core-front/cost-ceilings.json',
+                 'crates/hirsel-core-front/front-cost-ceilings.json')
 REGENERATED = (*BUILD_INPUTS, *DOCUMENTS)
 STAMP = '.buck2/sync-stamp.json'
 SYNC_HINT = 'run python3 tools/buck2/sync.py'
@@ -184,7 +186,7 @@ def require(root: Path) -> None:
 def lane_written(paths) -> list[str]:
     """The generated files among the paths a lane change writes (adds or
     edits): no lane commits them."""
-    return sorted(path for path in paths if path in BUILD_INPUTS)
+    return sorted(path for path in paths if path in (*BUILD_INPUTS, *COST_CEILINGS))
 
 
 def refusal(paths) -> list[str]:
@@ -193,6 +195,10 @@ def refusal(paths) -> list[str]:
     touched = lane_written(paths)
     if not touched:
         return []
+    if costs := sorted(set(touched) & set(COST_CEILINGS)):
+        return [f'land owns measured cost ceilings: {", ".join(costs)}',
+                'Drop the ceilings diff. Measurements and savings are written by land; '
+                'request increases through a reviewed tools/cost-ceiling-requests/<lane>.json.']
     return [f'the change touches generated files, which no lane commits: {", ".join(touched)}',
             'sync.py regenerates the '
             'gitignored build files on demand. Drop them from the change:',

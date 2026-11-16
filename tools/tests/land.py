@@ -84,7 +84,7 @@ if [ "$1" = test ]; then
   case "$*" in
     *core-front-cost*)
       if [ -n "$FAKE_COST_CRASH" ]; then echo 'cost tool crashed' >&2; exit 1; fi
-      echo 'COST_REPORT {"target":"core-front-cost","findings":["parse: 201 exceeds 100"]}'
+      echo 'COST_REPORT {"target":"core-front-cost","findings":["parse: 201 exceeds 100"],"ceilings":{"m1":{"instructions_per_token":{"parse":205,"index":50,"resolve":30},"image_per_token":{"bytes_read":1.02}}}}'
       case "$*" in
         *--report-only*) ;;
         *) [ -z "$FAKE_COST_RED" ] || exit 1 ;;
@@ -166,6 +166,7 @@ class Land(unittest.TestCase):
                                'tools/buck2/rust_environment.py': (ROOT / 'tools/buck2/rust_environment.py').read_text(),
                                'tools/buck2/priorities.bzl': (ROOT / 'tools/buck2/priorities.bzl').read_text(),
                                'core/tools/std_api_index.py': (ROOT / 'core/tools/std_api_index.py').read_text(),
+                               'core/tools/cost_ceilings.py': (ROOT / 'core/tools/cost_ceilings.py').read_text(),
                                'core/tools/gate_evaluator.py': (ROOT / 'core/tools/gate_evaluator.py').read_text(),
                                'core/tools/std_native.py': (ROOT / 'core/tools/std_native.py').read_text(),
                                'core/tools/std_native_owners.json': (ROOT / 'core/tools/std_native_owners.json').read_text(),
@@ -205,10 +206,22 @@ class Land(unittest.TestCase):
         return done, log.read_text(), rows
 
     def cost_change(self):
-        ceiling = self.lane / 'crates/hirsel-core-front/cost-ceilings.json'
-        ceiling.parent.mkdir(parents=True)
-        ceiling.write_text('{}')
-        self.git(self.lane, 'add', str(ceiling))
+        self.git(self.lane, 'checkout', '-q', 'main')
+        directory = self.lane / 'crates/hirsel-core-front'
+        directory.mkdir(parents=True)
+        (directory / 'cost-ceilings.json').write_text(json.dumps(dict(
+            policy='fixture', finished_budget_per_line=60000, corpora={})))
+        (directory / 'front-cost-ceilings.json').write_text(json.dumps(dict(
+            policy='fixture', history=['old measurements'], suite_targets_instructions={}, corpora=dict(m1=dict(
+                observation=dict(tokens=10), source_bytes=50, tokens=10,
+                instructions_per_token=dict(parse=100, index=80))))))
+        self.git(self.lane, 'add', str(directory))
+        self.git(self.lane, 'commit', '-qm', 'base cost ceilings')
+        self.git(self.lane, 'push', '-q', 'origin', 'main')
+        self.git(self.lane, 'checkout', '-q', 'my-lane')
+        self.git(self.lane, 'rebase', 'main')
+        (directory / 'source.rs').write_text('compiler source change')
+        self.git(self.lane, 'add', str(directory / 'source.rs'))
         self.git(self.lane, 'commit', '-qm', 'exercise a cost-relevant land')
 
     def test_front_cost_overrun_lands_and_reaches_ticket_event(self):
@@ -221,6 +234,14 @@ class Land(unittest.TestCase):
         self.assertEqual(cost['tickets'], ['my-lane'])
         self.assertEqual(rows[-1][0], 'LANDED')
         self.assertIn('exercise a cost-relevant land', self.main_log())
+        saved = json.loads(self.git(self.origin, 'show', 'main:crates/hirsel-core-front/front-cost-ceilings.json'))
+        self.assertEqual(saved['corpora']['m1']['instructions_per_token'], dict(parse=100, index=50, resolve=30))
+        self.assertEqual(saved['corpora']['m1']['image_per_token'], dict(bytes_read=1.02))
+        self.assertNotIn('observation', json.dumps(saved))
+        self.assertNotIn('history', saved)
+        source = json.loads((self.lane / 'crates/hirsel-core-front/front-cost-ceilings.json').read_text())
+        self.assertEqual(source['corpora']['m1']['instructions_per_token'], dict(parse=100, index=80))
+
 
     def test_cost_tool_crash_refuses_the_push(self):
         self.cost_change()
@@ -228,7 +249,45 @@ class Land(unittest.TestCase):
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn('core cost tool failed', refused.stdout)
         self.assertIn('cost tool crashed', refused.stdout)
-        self.assertEqual(self.main_log(), ['base'])
+        self.assertEqual(self.main_log(), ['base cost ceilings', 'base'])
+
+    def test_lane_ceiling_edits_are_refused(self):
+        self.cost_change()
+        path = self.lane / 'crates/hirsel-core-front/front-cost-ceilings.json'
+        data = json.loads(path.read_text())
+        data['corpora']['m1']['instructions_per_token']['parse'] = 999
+        path.write_text(json.dumps(data))
+        self.git(self.lane, 'add', str(path))
+        self.git(self.lane, 'commit', '-qm', 'hand edit a ceiling')
+        refused = self.land()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('land owns measured cost ceilings', refused.stdout)
+        self.assertEqual(self.main_log(), ['base cost ceilings', 'base'])
+
+    def test_lane_cannot_delete_cost_ceilings_to_skip_measurement(self):
+        self.cost_change()
+        self.git(self.lane, 'rm', 'crates/hirsel-core-front/cost-ceilings.json')
+        self.git(self.lane, 'commit', '-qm', 'delete cost ceilings')
+        refused = self.land()
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('land owns measured cost ceilings', refused.stdout)
+        self.assertEqual(self.main_log(), ['base cost ceilings', 'base'])
+
+    def test_reviewed_increase_is_applied_by_land_and_logged(self):
+        self.cost_change()
+        request = self.lane / 'tools/cost-ceiling-requests/my-lane.json'
+        request.parent.mkdir(parents=True)
+        request.write_text(json.dumps(dict(file='crates/hirsel-core-front/front-cost-ceilings.json',
+            cell=['corpora', 'm1', 'instructions_per_token', 'parse'], previous=100,
+            value=250, reason='reviewed new source support')))
+        self.git(self.lane, 'add', str(request))
+        self.git(self.lane, 'commit', '-qm', 'request an explained increase')
+        accepted, log, events = self.wrapped_land(FAKE_COST_RED='1')
+        self.assertEqual(accepted.returncode, 0, log)
+        saved = json.loads(self.git(self.origin, 'show', 'main:crates/hirsel-core-front/front-cost-ceilings.json'))
+        self.assertEqual(saved['corpora']['m1']['instructions_per_token']['parse'], 205)
+        self.assertIn('reviewed new source support', events[-1][-1])
+        self.assertEqual(self.git(self.origin, 'ls-tree', '--name-only', 'main', str(request.relative_to(self.lane))), '')
 
     def test_red_core_custody_refuses_the_push(self):
         (self.lane / 'broken-custody').write_text('broken sample\n')
@@ -1830,6 +1889,24 @@ class Units(unittest.TestCase):
             self.assertEqual(report(path, third), 1)
             self.assertIn('LAND FAILED owner ticket 2 EXIT 1', third.getvalue())
             self.assertNotIn('LANDED', third.getvalue())
+            # Old and new landers append to this same durable stream.
+            with path.open('a', newline='') as output:
+                csv.writer(output, delimiter='\t').writerow([
+                    'LANDED', 'old', '3', '/tmp/old.log', '0', 'old-sha', 'old-submitted',
+                    '2026-11-16T00:00:00Z'])
+            cost = dict(target='core-front-cost', findings=['parse: 201 exceeds 100'])
+            append(path, 'LANDED', dict(record, ticket='4', landed='new-sha', costs=[cost]), '/tmp/new.log', 0)
+            mixed = io.StringIO()
+            self.assertEqual(report(path, mixed), 2)
+            self.assertIn('LAND LANDED old ticket 3 EXIT 0 landed old-sha log /tmp/old.log', mixed.getvalue())
+            self.assertIn('LAND LANDED owner ticket 4 EXIT 0 landed new-sha log /tmp/new.log', mixed.getvalue())
+            self.assertIn('parse: 201 exceeds 100', mixed.getvalue())
+            with path.open(newline='') as source:
+                rows = list(csv.reader(source, delimiter='\t'))
+            self.assertEqual(rows[-1][:7], ['LANDED', 'owner', '4', '/tmp/new.log', '0', 'new-sha', 'submitted'])
+            self.assertRegex(rows[-1][7], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+            self.assertEqual(json.loads(rows[-1][8]), [cost])
+
 
     def test_a_live_ticket_must_still_name_the_checked_head(self):
         module = runpy.run_path(str(ROOT / 'tools/land'))
@@ -1961,7 +2038,7 @@ class CoreCostGuard(unittest.TestCase):
             def run(command):
                 commands.append(command)
                 return subprocess.CompletedProcess(command, 0,
-                    'COST_REPORT {"target":"core-front-cost","findings":["parse: 201 exceeds 100"]}\n', '')
+                    'COST_REPORT {"target":"core-front-cost","findings":["parse: 201 exceeds 100"],"ceilings":{"m1":{"instructions_per_token":{"parse":205,"index":50,"resolve":30},"image_per_token":{"bytes_read":1.02}}}}\n', '')
             with patch.dict(report.__globals__, ROOT=root, run=run, say=messages.append,
                             changed_paths=lambda *_: {'crates/hirsel-core-front/src/body/mod.rs'}):
                 rows = report('base', 'tree')

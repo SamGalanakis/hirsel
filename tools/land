@@ -719,9 +719,9 @@ def land_tool_suite(base, tree):
 def core_cost_report(base, tree):
     """Ceiling findings ride; a measurement tool failure refuses the push."""
     ceiling = ROOT / 'crates/hirsel-core-front/cost-ceilings.json'
-    relevant = ('crates/hirsel-core-', 'crates/hirsel-intern/', 'core/core/', 'core/std/', 'core/programs/m1/', 'core/langarena/')
+    relevant = ('crates/hirsel-core-', 'crates/hirsel-intern/', 'core/core/', 'core/std/', 'core/programs/m1/', 'core/langarena/', 'tools/cost-ceiling-requests/')
     if not ceiling.is_file() or not any(
-            path.startswith(relevant) or path in {'Cargo.toml', 'Cargo.lock', 'tools/buck2/profile.bzl', 'tools/buck2/defs.bzl', 'tools/buck2/sync.py', 'core/tools/measure.py', 'core/tools/request_cost.py'}
+            path.startswith(relevant) or path in {'Cargo.toml', 'Cargo.lock', 'tools/buck2/profile.bzl', 'tools/buck2/defs.bzl', 'tools/buck2/sync.py', 'core/tools/measure.py', 'core/tools/request_cost.py', 'core/tools/cost_ceilings.py'}
             for path in changed_paths(base, tree)):
         return []
     rows = []
@@ -929,7 +929,8 @@ class Batch:
             commits = git('rev-list', '--reverse', f'{tip}..{new}').stdout.split()
             if diff.returncode:
                 self.fail(member, 1, 'cannot inspect the lane change; refusing to push')
-            elif refused := generated.refusal(diff.stdout.splitlines()):
+            elif refused := generated.refusal([*diff.stdout.splitlines(),
+                    *(changed_paths(tip, new) & set(generated.COST_CEILINGS))]):
                 self.fail(member, 1, refused[-1], refused[:-1])
             elif not commits:
                 self.fail(member, 0, 'nothing to land; HEAD is on origin/main')
@@ -1002,8 +1003,30 @@ class Batch:
             raise Race()
         return False
 
+    def ratchet(self, tip, landed):
+        if not self.costs:
+            return tip
+        writer = runpy.run_path(str(ROOT / 'core/tools/cost_ceilings.py'))
+        written, changes = writer['ratchet'](ROOT, self.costs)
+        for row in self.costs:
+            row['ratchet'] = [change for change in changes if change['file'] == writer['FILES'][row['target']]]
+            if row['findings']:
+                say('cost regression in ' + ', '.join(row['tickets']) + ': ' + '; '.join(row['findings']))
+            print('COST_REPORT ' + json.dumps(row), flush=True)
+        say(writer['POLICY'])
+        if not written:
+            return tip
+        if git('add', '--', *written).returncode or git('commit', '-qm', 'land: ratchet measured cost ceilings').returncode:
+            raise Refusal('cannot commit measured cost ceilings')
+        updated = revision('HEAD')
+        landed[-1][1].append(updated)
+        self.contents[updated] = self.contents[tip]
+        say(f'committed measured cost ceilings in {updated[:12]}')
+        return updated
+
     def publish(self, tip, landed):
         """Push a green tip at once, and hand each ticket it newly lands its commits."""
+        tip = self.ratchet(tip, landed)
         done = {member for member, _ in self.landed}
         fresh = [(member, commits) for member, commits in landed if member not in done]
         if not fresh:
@@ -1127,7 +1150,7 @@ class Batch:
             if report := self.green(tree, applied, self.pushed):
                 self.fail(member, 1, 'main-repair target passed but the standalone gate is red', report)
                 continue
-            self.proof = (self.pushed, tree, {member.ticket: member.head})
+            self.proof = (self.pushed, tree, {member.ticket: member.head}, self.costs)
             self.publish(tree, applied)
             remaining = [m for m in members if m not in {m for m, _ in self.landed}
                          and (m is self.own or m in self.queue.live([m]))]
@@ -1165,7 +1188,8 @@ class Batch:
                     if not unchanged(tree):
                         raise Refusal('the worktree changed after rebase; refusing to push')
                     say('main moved only by known-failures rows; clean rebase reuses all passed checks')
-                    self.proof = (self.main, tree, submitted)
+                    self.costs = previous[3]
+                    self.proof = (self.main, tree, submitted, self.costs)
                     self.publish(tree, applied)
                     return self.pushed
         members = self.screen(self.pushed, members)
@@ -1193,7 +1217,7 @@ class Batch:
                     if rest := [m for m in group if m not in gone]:
                         pending.insert(0, rest)
                 else:
-                    self.proof = (base, tree, {member.ticket: member.head for member in group})
+                    self.proof = (base, tree, {member.ticket: member.head for member in group}, self.costs)
                     self.publish(tree, applied)
             elif len(group) == 1:
                 self.verify_base(base, report)
@@ -1318,7 +1342,8 @@ def train(queue):
         if diff.returncode:
             say('cannot inspect the lane change; refusing to push')
             return 1
-        changed = diff.stdout.splitlines()
+        changed = [*diff.stdout.splitlines(),
+                   *(changed_paths(main_sha, 'HEAD') & set(generated.COST_CEILINGS))]
         if refused := generated.refusal(changed):
             print('\n'.join('land: ' + line for line in refused), flush=True)
             return 1

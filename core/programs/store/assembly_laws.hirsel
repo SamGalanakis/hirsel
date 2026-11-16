@@ -1,0 +1,45 @@
+// Public-API regression law appended by core/tools/store_tests.py only.
+// Store identity/catalog rules: write, read, drop and recreate twice. Each
+// iteration must find exactly its newly written (1, i), so the result is true.
+fn assembly_bucket(v: u64) -> Result[u64, Capacity] {
+    Ok(v % 4)
+}
+
+pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    result.unwrap(store.create_table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
+    let mut t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
+    let mut ix = result.unwrap(store.index(db, mut t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
+    for i in 0u64 .. 2 {
+        let done = store.run(mut db, fn(mut tx: store.Tx) -> Result[(), store.Error] {
+            store.put(mut tx, t, 1, i)
+        })
+        match take done {
+            Ok(Committed(_)) => {},
+            _ => return false
+        }
+        if result.unwrap(store.get(store.snapshot(db), store.shape(t), 1)) != Some(i) {
+            return false
+        }
+        let mut rows = result.unwrap(store.find(store.snapshot(db), ix, Unbounded, Unbounded))
+        if result.unwrap(store.next(mut rows)) != Some((1u64, i)) {
+            return false
+        }
+        result.unwrap(store.drop_table(mut db, take t))
+        result.unwrap(store.create_table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
+        t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
+        result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
+        ix = result.unwrap(store.index(db, mut t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
+    }
+    true
+}
+
+@test
+fn test_assembly_indexed_recreate(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_assembly_indexed_recreate(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

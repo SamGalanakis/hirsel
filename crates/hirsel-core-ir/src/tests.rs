@@ -35,6 +35,25 @@ fn load(name: &str, text: &str) -> Module {
     parse(text).unwrap_or_else(|e| panic!("{name}: line {}: {}", e.line, e.message))
 }
 
+#[test]
+fn closed_type_identity_has_one_row_and_keeps_its_package() {
+    let mut m = load(
+        "types",
+        "core v1\ntype t0 = own \"a@1/m/Value\" { x: u8 }\n",
+    );
+    wf::module(&m).unwrap();
+    // A producer creating the same row twice is a malformed module, even when
+    // no call has yet exposed the unequal TypeIds.
+    m.types.push(m.types[0].clone());
+    assert!(
+        wf::module(&m)
+            .unwrap_err()
+            .contains("duplicate closed type rows")
+    );
+    m.types[1].name = "b@1/m/Value".into();
+    wf::module(&m).unwrap();
+}
+
 /// Bug: the printer drops or renames something the parser reads (a failure target,
 /// an anchor, a flag result, an instance type), or the parser reads a field into
 /// the wrong table. Law: print is the inverse of parse on canonical text, and

@@ -132,8 +132,8 @@ pub struct Emitter {
     items: HashMap<DefPath, ItemId>,
     /// Per non-generic definition of the program, its function row once mentioned.
     rows: HashMap<usize, (FuncId, SigId)>,
-    /// `module.types` rows by canonical text.
-    types: HashMap<String, TypeRef>,
+    /// The row interner shared by source shapes and materialized templates.
+    types: crate::layout::ShapeNames,
     /// The recipes of `module.types`, recomputed when rows were added.
     recipes: Vec<Recipe>,
     recipe_scratch: hirsel_core_layout::RecipeScratch,

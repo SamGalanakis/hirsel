@@ -929,6 +929,13 @@
 //!
 //! # Instances
 //!
+//! A module has one row for each closed layout identity (FORM #109), named by its
+//! canonical type text including the package. Shapes reserve that row before
+//! filling its references, including recursive ones; substitution and closure
+//! import use the same reservation. Well-formedness refuses duplicate closed
+//! names even before a call exposes unequal TypeIds. Rigid `$i` rows belong to
+//! templates and do not identify closed types.
+//!
 //! A function row names an instance: a definition plus the canonical text of each
 //! closed type argument and of each implementation chosen for a constraint. Sizes
 //! are not part of the key: they are a function of the types and the target, and

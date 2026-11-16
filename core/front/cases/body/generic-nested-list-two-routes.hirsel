@@ -7,6 +7,7 @@ fn later() -> u64 {
     result.unwrap(list.push(mut rows, list.new()))
     list.len(rows)
 }
+
 fn route[T](take value: T) -> u64 {
     let mut inner: List[T] = list.new()
     result.unwrap(list.push(mut inner, take value))
@@ -14,5 +15,15 @@ fn route[T](take value: T) -> u64 {
     result.unwrap(list.push(mut outer, take inner))
     list.len(outer) + later()
 }
-pub fn check() -> u64 { route(7u8) }
-pub fn main() -> Result[(), Exit] { if check() == 2 { Ok(()) } else { Error(Exit(status:1)) } }
+
+pub fn check() -> u64 {
+    route(7u8)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if check() == 2 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

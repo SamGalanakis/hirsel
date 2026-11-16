@@ -31,12 +31,19 @@ fn refs_ok(f: &hirsel_core_layout::FieldTy, n: usize) -> bool {
 pub fn module(m: &Module) -> R {
     let mut closed = std::collections::HashMap::new();
     let mut duplicates = Vec::new();
-    for (row, shape) in m.types.iter().enumerate().filter(|(_, s)| !s.name.contains('$')) {
+    for (row, shape) in m
+        .types
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.name.contains('$'))
+    {
         if let Some(first) = closed.insert(&shape.name, row) {
             duplicates.push(format!("t{first}/t{row} {}", shape.name));
         }
     }
-    need(duplicates.is_empty(), || format!("duplicate closed type rows: {}", duplicates.join("; ")))?;
+    need(duplicates.is_empty(), || {
+        format!("duplicate closed type rows: {}", duplicates.join("; "))
+    })?;
     let mut failures = None;
     for (i, t) in m.types.iter().enumerate() {
         let fields = match &t.body {

@@ -15,7 +15,7 @@ from std_native import ROOT, wait_load
 BYTE_LAWS = ('model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'foreign', 'frames', 'follow', 'node_ids',
              'typed_indexes', 'schema_numbers', 'catalog_invalid', 'index_refusal',
              'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget',
-             'look', 'look_faults', 'changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal')
+             'look', 'look_faults', 'changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal', 'assembly_indexed_recreate')
 NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS), 'test_reader_task', 'test_memory_identity', 'test_typed_snapshot_task', 'test_look_task'}
 
 
@@ -49,7 +49,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hirsel-store-laws-') as tmp:
         work = Path(tmp)
         manifest = work / 'inputs.json'
-        manifest.write_text(json.dumps(inputs(args.root.resolve())))
+        corpus = inputs(args.root.resolve())
+        # Regression laws are ordinary source in this test build. They do not
+        # enter the published store module or its measurement manifest.
+        library = corpus['packages'][-1]['sources'][0]
+        adapted = work / 'store-with-assembly-laws.hirsel'
+        adapted.write_text(Path(library['file']).read_text() + '\n' +
+                           (args.root / 'core/programs/store/assembly_laws.hirsel').read_text())
+        library['file'] = str(adapted)
+        manifest.write_text(json.dumps(corpus))
         if args.compiler is not None:
             for control in ('look_put_refused', 'look_info_refused'):
                 negative = inputs(args.root.resolve())

@@ -13,13 +13,33 @@ use hirsel_core_layout::{
 };
 use rustc_hash::FxHashMap as HashMap;
 
+/// One canonical layout identity (FORM #109) has one row. Reserve before filling
+/// references, so recursive shapes use this same operation as ordinary shapes,
+/// template substitution and imported argument closures.
+pub(crate) type ShapeNames = HashMap<String, TypeRef>;
+pub(crate) fn intern_shape(
+    shapes: &mut Vec<Shape>,
+    names: &mut ShapeNames,
+    shape: Shape,
+) -> (TypeRef, bool) {
+    match names.entry(shape.name.clone()) {
+        std::collections::hash_map::Entry::Occupied(entry) => (*entry.get(), false),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            let row = TypeRef(shapes.len() as u32);
+            shapes.push(shape);
+            entry.insert(row);
+            (row, true)
+        }
+    }
+}
+
 /// A shape table being extended: rows are keyed by canonical text, which is also the
 /// row's name, so one closed type has one row whichever body names it.
 pub(crate) struct Shapes<'p, T: TyRead> {
     pub decls: &'p crate::Rows<crate::decls::TypeDecl>,
     pub types: &'p mut T,
     pub shapes: &'p mut Vec<Shape>,
-    pub of: &'p mut HashMap<String, TypeRef>,
+    pub of: &'p mut ShapeNames,
     /// A body module's table: a finalizer or clone body names a function row this
     /// table cannot name yet, so it is left to [`Self::hooks`].
     pub module: bool,
@@ -58,19 +78,21 @@ impl<T: TyRead> Shapes<'_, T> {
         }
         // Reserve the index first: a field reaching this type through an indirection
         // (`List[Tree]` in `Tree`) names it before its body is known.
-        let r = TypeRef(self.shapes.len() as u32);
-        self.shapes.push(Shape {
-            name: name.clone(),
-            repr: LRepr::Own,
-            carried: carried(self.decls, &*self.types, ty).unwrap_or(Carried::Address),
-            body: Body::Record(vec![]),
-            finalizer: None,
-            clone: None,
-            codec: None,
-            grant: 0,
-            held: None,
-        });
-        self.of.insert(name, r);
+        let (r, _) = intern_shape(
+            self.shapes,
+            self.of,
+            Shape {
+                name,
+                repr: LRepr::Own,
+                carried: carried(self.decls, &*self.types, ty).unwrap_or(Carried::Address),
+                body: Body::Record(vec![]),
+                finalizer: None,
+                clone: None,
+                codec: None,
+                grant: 0,
+                held: None,
+            },
+        );
         let (repr, body, finalizer, held) = match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => (
                 LRepr::Own,
@@ -344,19 +366,21 @@ impl<T: TyRead> Shapes<'_, T> {
             None if decl.structural => hirsel_core_layout::Width::U64,
             None => return None,
         };
-        let r = TypeRef(self.shapes.len() as u32);
-        self.shapes.push(Shape {
-            name: name.clone(),
-            repr: LRepr::Compact(width),
-            carried: Carried::Address,
-            body: Body::Record(vec![]),
-            finalizer: None,
-            clone: None,
-            codec: None,
-            grant: 0,
-            held: None,
-        });
-        self.of.insert(name, r);
+        let (r, _) = intern_shape(
+            self.shapes,
+            self.of,
+            Shape {
+                name,
+                repr: LRepr::Compact(width),
+                carried: Carried::Address,
+                body: Body::Record(vec![]),
+                finalizer: None,
+                clone: None,
+                codec: None,
+                grant: 0,
+                held: None,
+            },
+        );
         let body = self.body(decl, &args, true)?;
         self.shapes[r.index()].body = body;
         Some(r)
@@ -464,19 +488,21 @@ impl<T: TyRead> Shapes<'_, T> {
         let seq = FieldTy::Locator(Box::new(FieldTy::SeqSpan(Box::new(
             self.field_in(elem, true)?,
         ))));
-        let r = TypeRef(self.shapes.len() as u32);
-        self.shapes.push(Shape {
-            name: name.clone(),
-            repr: LRepr::Stable,
-            carried: Carried::Address,
-            body: record(vec![("seq", seq), ("count", FieldTy::Scalar(Scalar::U64))]),
-            finalizer: None,
-            clone: None,
-            codec: None,
-            grant: 0,
-            held: None,
-        });
-        self.of.insert(name, r);
+        let (r, _) = intern_shape(
+            self.shapes,
+            self.of,
+            Shape {
+                name,
+                repr: LRepr::Stable,
+                carried: Carried::Address,
+                body: record(vec![("seq", seq), ("count", FieldTy::Scalar(Scalar::U64))]),
+                finalizer: None,
+                clone: None,
+                codec: None,
+                grant: 0,
+                held: None,
+            },
+        );
         Some(r)
     }
     fn map_field(&mut self, args: &[TyId]) -> Option<FieldTy> {

@@ -171,7 +171,7 @@ pub fn materialize(
         return Err("the entry has undetermined generic type arguments".into());
     }
     let mut module = source.clone();
-    let mut names = Names::of(&module);
+    let mut names = names_of(&module);
     let roots = arguments
         .iter()
         .map(|closure| import(&mut module, &mut names, closure))
@@ -225,7 +225,7 @@ pub fn materialize_glue(
     arguments: &[&Closure],
 ) -> Result<(Module, FuncId), String> {
     let mut module = Module::default();
-    let mut names = Names::of(&module);
+    let mut names = names_of(&module);
     let roots = arguments
         .iter()
         .map(|closure| import(&mut module, &mut names, closure))
@@ -256,7 +256,7 @@ pub fn import_instance(
     identity: &Identity,
     arguments: &[&Closure],
 ) -> Result<InstanceId, String> {
-    let mut names = Names::of(module);
+    let mut names = names_of(module);
     let key = InstanceKey {
         definition: identity.definition.clone(),
         arguments: arguments
@@ -302,21 +302,14 @@ fn clear_rigid(module: &mut Module) {
 /// The materialising module's own row names. A module's producer gives each name one
 /// row (lowering's `of`); rows that enter from a closure are checked against the
 /// module's row of their name before they share it ([`import`]).
-pub(super) struct Names(HashMap<String, TypeId>);
-impl Names {
-    pub(super) fn of(module: &Module) -> Self {
-        let mut names = HashMap::default();
-        for (i, shape) in module.types.iter().enumerate() {
-            names.entry(shape.name.clone()).or_insert(TypeId(i as u32));
-        }
-        Self(names)
-    }
-    fn get(&self, name: &str) -> Option<TypeId> {
-        self.0.get(name).copied()
-    }
-    fn add(&mut self, name: String, row: TypeId) {
-        self.0.entry(name).or_insert(row);
-    }
+type Names = crate::layout::ShapeNames;
+fn names_of(module: &Module) -> Names {
+    module
+        .types
+        .iter()
+        .enumerate()
+        .map(|(i, shape)| (shape.name.clone(), TypeRef(i as u32)))
+        .collect()
 }
 
 /// The rows of `closure` in `module`: each position is the module's row of its name or
@@ -326,16 +319,12 @@ fn import(module: &mut Module, names: &mut Names, closure: &Closure) -> Result<T
     let mut rows = Vec::with_capacity(closure.rows.len());
     let mut fresh = vec![];
     for (position, row) in closure.rows.iter().enumerate() {
-        rows.push(match names.get(&row.shape.name) {
-            Some(existing) => existing,
-            None => {
-                let id = TypeId(module.types.len() as u32);
-                module.types.push(row.shape.clone());
-                names.add(row.shape.name.clone(), id);
-                fresh.push((position, id));
-                id
-            }
-        });
+        let (id, added) = crate::layout::intern_shape(&mut module.types, names, row.shape.clone());
+        let id = TypeId(id.0);
+        if added {
+            fresh.push((position, id));
+        }
+        rows.push(id);
     }
     for (position, id) in fresh {
         let row = &closure.rows[position];
@@ -501,35 +490,13 @@ impl Substitution<'_> {
         };
         let mut shape = self.module.types[old.index()].clone();
         shape.name = name.render(&self.names);
-        if let Some(ty) = self.rows.get(&shape.name) {
-            self.types.insert(old, ty);
-            return ty;
-        }
-        #[cfg(any(test, feature = "test-assembly"))]
-        {
-            // A later materialization round can rebuild the `Names` view after a
-            // source body was restored. Reuse the module's canonical row as well;
-            // shape names are the identity of closed layouts (FORM #109), so making
-            // a second row here would give an equivalent signature a different
-            // TypeId and leave its call arguments out of sync with the callee.
-            let canonical = shape.name.clone();
-            if let Some((i, _)) = self
-                .module
-                .types
-                .iter()
-                .enumerate()
-                .find(|(_, shape)| shape.name == canonical)
-            {
-                let ty = TypeId(i as u32);
-                self.types.insert(old, ty);
-                self.rows.add(canonical, ty);
-                return ty;
-            }
-        }
-        let row = TypeId(self.module.types.len() as u32);
+        let (row, added) =
+            crate::layout::intern_shape(&mut self.module.types, self.rows, shape.clone());
+        let row = TypeId(row.0);
         self.types.insert(old, row);
-        self.rows.add(shape.name.clone(), row);
-        self.module.types.push(shape.clone());
+        if !added {
+            return row;
+        }
         shape.held = shape.held.map(|held| self.field(&held, false));
         self.module.types[row.index()].held = shape.held.clone();
         let compact = matches!(shape.repr, hirsel_core_layout::Repr::Compact(_));
@@ -612,53 +579,7 @@ impl Substitution<'_> {
         let abi = self.signature_abis.get(&old).cloned().unwrap_or_default();
         let plan = scalar_abi::Plan::signature(self.module, &mut sig, &abi);
         self.plans.insert(old, plan);
-        #[cfg(any(test, feature = "test-assembly"))]
-        let same_type = |a: TypeId, b: TypeId, module: &Module| {
-            a == b
-                || module.types.get(a.index()).map(|x| &x.name)
-                    == module.types.get(b.index()).map(|x| &x.name)
-        };
-        #[cfg(any(test, feature = "test-assembly"))]
-        let same_param = |a: &Param, b: &Param, module: &Module| match (a, b) {
-            (Param::Value(x), Param::Value(y)) => x == y,
-            (Param::Address { place: x, loan: lx }, Param::Address { place: y, loan: ly }) => {
-                lx == ly
-                    && match (x, y) {
-                        (PlaceTy::Declared(x), PlaceTy::Declared(y)) => same_type(*x, *y, module),
-                        _ => x == y,
-                    }
-            }
-            _ => false,
-        };
-        #[cfg(any(test, feature = "test-assembly"))]
-        let same_signature = |other: &Signature, module: &Module| {
-            other.params.len() == sig.params.len()
-                && other
-                    .params
-                    .iter()
-                    .zip(&sig.params)
-                    .all(|(a, b)| same_param(a, b, module))
-                && match (other.dest, sig.dest) {
-                    (Some(a), Some(b)) => same_type(a, b, module),
-                    (None, None) => true,
-                    _ => false,
-                }
-                && other.results == sig.results
-                && other.never == sig.never
-        };
-        let row = {
-            #[cfg(any(test, feature = "test-assembly"))]
-            {
-                self.module
-                    .signatures
-                    .iter()
-                    .position(|old| same_signature(old, self.module))
-            }
-            #[cfg(not(any(test, feature = "test-assembly")))]
-            {
-                self.module.signatures.iter().position(|old| *old == sig)
-            }
-        };
+        let row = self.module.signatures.iter().position(|old| *old == sig);
         if let Some(row) = row {
             let id = SigId(row as u32);
             self.signatures.insert(old, id);
@@ -844,39 +765,6 @@ fn fill(
         };
         call.signature = s.signature(call.signature);
     }
-    #[cfg(any(test, feature = "test-assembly"))]
-    {
-        // A substituted call's destination/address is part of the same closed
-        // signature as its callee. Keep the address row on that canonical TypeId;
-        // otherwise two equivalent layout rows can survive in one assembled module
-        // and the well-formedness check quite correctly rejects the call.
-        for call in &body.calls {
-            let signature = &s.module.signatures[call.signature.index()];
-            let params = signature
-                .dest
-                .map(|ty| Param::Address {
-                    place: PlaceTy::Declared(ty),
-                    loan: Loan::Mut,
-                })
-                .into_iter()
-                .chain(signature.params.iter().copied());
-            let Some(args) = call.args.get(&body.pools.args) else {
-                continue;
-            };
-            for (arg, param) in args.iter().zip(params) {
-                if let (
-                    Arg::Address(address),
-                    Param::Address {
-                        place: PlaceTy::Declared(ty),
-                        ..
-                    },
-                ) = (arg, param)
-                {
-                    body.addresses[address.index()].ty = PlaceTy::Declared(ty);
-                }
-            }
-        }
-    }
     for inst in &mut body.insts {
         match inst {
             Inst::FunctionRef { function, .. } => *function = s.function(*function),
@@ -1033,10 +921,9 @@ impl Emitter {
                 && let Some((source, template)) = self.templates.get(&key.definition).cloned()
             {
                 let arguments = key.arguments.clone();
-                let mut rows = Names::of(&self.module);
                 fill(
                     &mut self.module,
-                    &mut rows,
+                    &mut self.types,
                     source,
                     f,
                     &template,

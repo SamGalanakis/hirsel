@@ -827,7 +827,10 @@ impl Driver {
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
             let mut fresh: Vec<(DefPath, ContentHash)> = Vec::new();
-            let duplicated: BTreeSet<&DefPath> = {
+            // A duplicate definition is a refusal of the declarations.
+            let duplicated: BTreeSet<&DefPath> = if declarations_accepted {
+                BTreeSet::new()
+            } else {
                 let mut seen = BTreeSet::new();
                 (p.fns.base_len()..p.fns.len())
                     .map(|f| &p.fns[f].path)

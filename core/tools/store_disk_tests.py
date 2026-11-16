@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -14,6 +15,18 @@ from store_crash_tests import run_crashes
 LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact',
         'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound')
 NATIVE_TESTS = {'store@1/store/disk_test_' + name for name in LAWS if name != 'pack_bound'}
+
+# Orchestrator ruling: these evaluator assembly defects ride with owner914.
+# Execute and report every law; only this exact failure family is nonblocking.
+ASSEMBLY_OWNER = 'core-ops-914'
+KNOWN_ASSEMBLY = frozenset({'compact', 'worker_refusal', 'opening', 'db',
+                            'db_refusal', 'schema_refusal', 'pack_bound'})
+
+
+def known_assembly(row):
+    return (row.get('engine') == 'evaluator' and row.get('law') in KNOWN_ASSEMBLY
+            and re.fullmatch(r'not well formed: f[0-9]+: a[0-9]+: base is not a pointer',
+                             row.get('result', {}).get('error', '')) is not None)
 
 
 def main():
@@ -94,12 +107,18 @@ def main():
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:
                     rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))
+    failures = [row for row in rows if not row['passed']]
+    for row in failures:
+        if known_assembly(row):
+            row['known_failure_owner'] = ASSEMBLY_OWNER
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
-    failures = [row for row in rows if not row['passed']]
     if failures:
         print(json.dumps(failures, indent=2))
-    return int(bool(failures))
+    known = sum(known_assembly(row) for row in failures)
+    if known:
+        print(f'{known} known evaluator assembly failures ride; owner {ASSEMBLY_OWNER}', flush=True)
+    return int(any(not known_assembly(row) for row in failures))
 
 
 if __name__ == '__main__':

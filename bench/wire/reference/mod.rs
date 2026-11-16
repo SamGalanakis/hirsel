@@ -227,6 +227,7 @@ struct Peer {
     subs: HashSet<u32>,
     tx: mpsc::Sender<Output>,
     pending: Option<Frame>,
+    calls: Arc<Calls>,
     overrun: bool,
 }
 impl Peer {
@@ -240,7 +241,8 @@ impl Peer {
         }
         true
     }
-    fn send(&mut self, frame: Frame) -> bool {
+    fn send(&mut self, mut frame: Frame) -> bool {
+        self.calls.settle_at_delivery(&mut frame);
         if !self.flush() {
             return false;
         }
@@ -328,6 +330,7 @@ enum Command {
         principal: Principal,
         slots: Vec<Option<usize>>,
         tx: mpsc::Sender<Output>,
+        calls: Arc<Calls>,
     },
     Frame(u64, Frame),
     Leave(u64),
@@ -353,6 +356,7 @@ impl Head {
                     principal,
                     slots,
                     tx,
+                    calls,
                 } => {
                     self.peers.insert(
                         id,
@@ -362,6 +366,7 @@ impl Head {
                             tx,
                             subs: HashSet::new(),
                             pending: None,
+                            calls,
                             overrun: false,
                         },
                     );
@@ -739,16 +744,22 @@ async fn session(
         ws.send(Message::Binary(codec::encode(&Frame::Placed(entry)).into()))
             .await?;
     }
+    let calls = Arc::new(Calls::new(
+        principal,
+        slots.clone(),
+        ingress.limits,
+        ingress.rates,
+    ));
     let (out, mut outgoing) = mpsc::channel(OUTBOX);
     tx.send(Command::Join {
         id,
         principal,
-        slots: slots.clone(),
+        slots,
         tx: out.clone(),
+        calls: calls.clone(),
     })
     .await?;
     let (mut writer, mut reader) = ws.split();
-    let calls = Calls::new(principal, slots, ingress.limits, ingress.rates);
     let (refused, mut refusals) = mpsc::channel::<HeldRefusal>(1 + crate::Q);
     let read = async {
         while let Some(message) = reader.next().await {
@@ -839,6 +850,15 @@ async fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn calls(principal: Principal) -> Arc<Calls> {
+        Arc::new(Calls::new(
+            principal,
+            vec![Some(0)],
+            Limits::benchmark(),
+            Arc::new(Mutex::new(HashMap::new())),
+        ))
+    }
+
     #[test]
     fn rows_allowance_keeps_the_v211_refusal_reserve() {
         fn send(count: u32) -> Output {
@@ -849,6 +869,7 @@ mod tests {
                 subs: HashSet::from([1, 2]),
                 tx,
                 pending: None,
+                calls: calls([0; 16]),
                 overrun: false,
             };
             let image = vec![0; IMAGE_BYTES];
@@ -860,6 +881,10 @@ mod tests {
                 p: 0,
                 outcome: Outcome::Returned(vec![0, 0, 0, 0, 1]),
             }];
+            assert!(matches!(
+                peer.calls.admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
+                Admission::Forward
+            ));
             assert!(peer.send(Frame::Batch(1, vec![1], rows, done)));
             rx.try_recv().unwrap()
         }
@@ -891,12 +916,19 @@ mod tests {
                     subs: HashSet::from([1]),
                     tx,
                     pending: None,
+                    calls: calls([3; 16]),
                     overrun: false,
                 },
             )]),
             board_runs: 1,
             groups: 0,
         };
+        assert!(matches!(
+            head.peers[&1]
+                .calls
+                .admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
+            Admission::Forward
+        ));
         assert!(
             head.execute(vec![Command::Frame(
                 1,
@@ -940,6 +972,7 @@ mod tests {
             subs: HashSet::new(),
             tx,
             pending: None,
+            calls: calls([0; 16]),
             overrun: false,
         };
         for n in 1..=3 {
@@ -948,6 +981,10 @@ mod tests {
                 key: vec![0],
                 value: Some(vec![n as u8]),
             };
+            assert!(matches!(
+                p.calls.admit(1, n, 0, 30000, &0u32.to_le_bytes()),
+                Admission::Forward
+            ));
             assert!(p.send(Frame::Batch(
                 n,
                 vec![],

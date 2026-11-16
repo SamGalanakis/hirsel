@@ -7,7 +7,12 @@ use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
-type Owed = HashMap<(u32, u64), VecDeque<(OwnedSemaphorePermit, Instant)>>;
+struct HeldSend {
+    unit: OwnedSemaphorePermit,
+    until: Instant,
+    settled: bool,
+}
+type Owed = HashMap<(u32, u64), VecDeque<HeldSend>>;
 pub(super) type Rates = Arc<Mutex<HashMap<Principal, Bucket>>>;
 
 pub(super) struct Calls {
@@ -75,10 +80,11 @@ impl Calls {
             .unwrap()
             .entry((stream, p))
             .or_default()
-            .push_back((
+            .push_back(HeldSend {
                 unit,
-                Instant::now() + Duration::from_millis(u64::from(deadline)),
-            ));
+                until: Instant::now() + Duration::from_millis(u64::from(deadline)),
+                settled: false,
+            });
         Admission::Forward
     }
 
@@ -96,6 +102,26 @@ impl Calls {
         })
     }
 
+    pub fn settle_at_delivery(&self, frame: &mut Frame) {
+        let done = match frame {
+            Frame::Batch(_, _, _, d) | Frame::Reset(_, d) => d,
+            _ => return,
+        };
+        let mut book = self.owed.lock().unwrap();
+        for d in done {
+            let send = book
+                .get_mut(&(d.stream, d.p))
+                .unwrap()
+                .iter_mut()
+                .find(|s| !s.settled)
+                .unwrap();
+            if Instant::now() >= send.until {
+                d.outcome = Outcome::Abandoned;
+            }
+            send.settled = true;
+        }
+    }
+
     /// Called when the writer takes the frame, before any socket await.
     pub fn hand_to_writer(&self, frame: &mut Frame) {
         let done = match frame {
@@ -105,11 +131,8 @@ impl Calls {
         let mut book = self.owed.lock().unwrap();
         for d in done {
             let sends = book.get_mut(&(d.stream, d.p)).unwrap();
-            let (unit, until) = sends.pop_front().unwrap();
-            if Instant::now() >= until {
-                d.outcome = Outcome::Abandoned;
-            }
-            drop(unit);
+            let send = sends.pop_front().unwrap();
+            drop(send.unit);
             if sends.is_empty() {
                 book.remove(&(d.stream, d.p));
             }
@@ -120,6 +143,48 @@ impl Calls {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn writer_delay_does_not_rewrite_a_chosen_outcome() {
+        let calls = Calls::new(
+            [0; 16],
+            vec![Some(0)],
+            Limits::benchmark(),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        assert!(matches!(
+            calls.admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
+            Admission::Forward
+        ));
+        let answer = Outcome::Returned(vec![0, 0, 0, 0, 1]);
+        let mut frame = Frame::Batch(
+            1,
+            vec![],
+            vec![],
+            vec![Done {
+                stream: 0,
+                p: 0,
+                outcome: answer.clone(),
+            }],
+        );
+        // The answer is chosen before expiry, then waits in the outgoing queue.
+        calls.settle_at_delivery(&mut frame);
+        calls.owed.lock().unwrap().get_mut(&(0, 0)).unwrap()[0].until =
+            Instant::now() - Duration::from_millis(1);
+        calls.hand_to_writer(&mut frame);
+        assert_eq!(
+            frame,
+            Frame::Batch(
+                1,
+                vec![],
+                vec![],
+                vec![Done {
+                    stream: 0,
+                    p: 0,
+                    outcome: answer
+                }]
+            )
+        );
+    }
     #[test]
     fn writer_handoff_frees_units_and_sixth_unsent_refusal_closes() {
         let calls = Calls::new(

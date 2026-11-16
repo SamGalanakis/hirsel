@@ -417,9 +417,9 @@ fn parallel_builds_launch_at_once() {
 }
 
 /// Build `files` (name, source) as project `project` over std imaged into
-/// `dir/cache`, with debug lines, into `store`: the executable's bytes and its
-/// run's exit and stderr.
-fn reach_files_build(dir: &Path, project: &str, files: &[(&str, &str)], store: &str) -> (Vec<u8>, (Option<i32>, Vec<u8>)) {
+/// `dir/cache`, with debug lines, into `store` on `backend`: the executable's
+/// bytes and its run's exit and stderr.
+fn reach_files_build(dir: &Path, project: &str, files: &[(&str, &str)], store: &str, backend: Backend) -> (Vec<u8>, (Option<i32>, Vec<u8>)) {
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let project = dir.join(project);
     if project.exists() {
@@ -435,7 +435,7 @@ fn reach_files_build(dir: &Path, project: &str, files: &[(&str, &str)], store: &
         .check_reachable_with_product(request, &dir.join("cache"), &mut Meter::new(false))
         .unwrap();
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
-    let mut options = native_options(Backend::Cranelift, dir);
+    let mut options = native_options(backend, dir);
     options.store = dir.join(store).join("native");
     options.output = dir.join(store).join("program");
     options.debug_lines = true;
@@ -475,11 +475,44 @@ fn reach_source_places_are_the_current_sources() {
     let lines = ["app@1/other.hirsel:2", "app@1/other.hirsel:5", "app@1/other.hirsel:2", "app@1/other.hirsel:2", "app@1/other.hirsel:5", "app@1/main.hirsel:5"];
     let dir = tempfile::tempdir().unwrap();
     for (n, files) in steps.iter().enumerate() {
-        let (primed, ran) = reach_files_build(dir.path(), "app", files, "primed");
-        let (fresh, expected) = reach_files_build(dir.path(), "app", files, &format!("fresh{n}"));
+        let (primed, ran) = reach_files_build(dir.path(), "app", files, "primed", Backend::Cranelift);
+        let (fresh, expected) = reach_files_build(dir.path(), "app", files, &format!("fresh{n}"), Backend::Cranelift);
         assert_eq!(ran.0, Some(101), "step {n}: {:?}", String::from_utf8_lossy(&ran.1));
         assert!(String::from_utf8_lossy(&ran.1).contains(lines[n]), "step {n}: {}", String::from_utf8_lossy(&ran.1));
         assert_eq!(ran, expected, "step {n}: what the program reports");
         assert!(primed == fresh, "step {n}: the primed store's executable is a fresh store's");
+    }
+}
+
+/// A generic body that names `code.identity` dispatches over every function
+/// item of the program, so a store that built another program's function
+/// table must not serve its body: a build in the primed store is the build of
+/// the same files into an empty one. Steps over one store: a program with a
+/// spare module; the spare module dropped (a served stale table reaches the
+/// dropped item: OutsideReached); a new module whose function the entry
+/// describes (a served stale table lacks it: the dispatch traps). Oracle: the
+/// empty store's executable, and exit 0 (the identity matches). Mutant: the
+/// key's function table left out (`DefinitionKey::functions` None), red.
+#[test]
+#[ignore = "explicit native integration target"]
+fn reach_code_identity_dispatch_follows_the_function_table() {
+    const NAMED: &str = "fn named[F](s: StaticFn[F], want: Bytes) -> bool {\n    code.identity(s) == want\n}\nfn double(x: u64) -> u64 {\n    x * 2\n}\n";
+    let local = format!("{NAMED}pub fn main() -> Result[(), Exit] {{\n    if named(code.describe(double), code.identity(code.describe(double))) {{ Ok(()) }} else {{ Error(Exit(status: 3)) }}\n}}\n");
+    let other = format!("{NAMED}pub fn main() -> Result[(), Exit] {{\n    if named(code.describe(other.pick), code.identity(code.describe(other.pick))) {{ Ok(()) }} else {{ Error(Exit(status: 3)) }}\n}}\n");
+    let steps: [&[(&str, &str)]; 3] = [
+        &[("main.hirsel", &local), ("spare.hirsel", "pub fn spare(x: u64) -> u64 { x }\n")],
+        &[("main.hirsel", &local)],
+        &[("main.hirsel", &other), ("other.hirsel", "pub fn pick(x: u64) -> u64 { x + 1 }\n")],
+    ];
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let dir = tempfile::tempdir().unwrap();
+        for (n, files) in steps.iter().enumerate() {
+            let case = format!("{backend:?} step {n}");
+            let (primed, ran) = reach_files_build(dir.path(), "app", files, "primed", backend);
+            let (fresh, expected) = reach_files_build(dir.path(), "app", files, &format!("fresh{n}"), backend);
+            assert_eq!(expected.0, Some(0), "{case}: {}", String::from_utf8_lossy(&expected.1));
+            assert_eq!(ran, expected, "{case}: what the program reports");
+            assert!(primed == fresh, "{case}: the primed store's executable is a fresh store's");
+        }
     }
 }

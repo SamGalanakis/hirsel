@@ -799,6 +799,7 @@ impl Driver {
                     &resolutions,
                     &resolution_inputs,
                     compiler_identity()?,
+                    image.as_ref().map(|i| i.identity),
                     image_directory.as_ref().map(|i| &*i.headers),
                     image_directory.as_ref().map(|i| &i.anchors),
                 )
@@ -810,6 +811,7 @@ impl Driver {
                 &resolutions,
                 &resolution_inputs,
                 compiler_identity()?,
+                image.as_ref().map(|i| i.identity),
                 image_directory.as_ref().map(|i| &*i.headers),
                 image_directory.as_ref().map(|i| &i.anchors),
             )?

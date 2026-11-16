@@ -15,6 +15,10 @@ pub struct DefinitionKey {
     pub signatures: ContentHash,
     pub lookups: ContentHash,
     pub environment: ContentHash,
+    /// The program's function table (`Keys::functions`), for a body that names
+    /// `core.code.identity`: that lowering dispatches over every function item
+    /// the program declares, not over the names the body resolves.
+    pub functions: Option<ContentHash>,
 }
 
 fn token_identity(item: Item<'_>, end: usize, domain: &str) -> ContentHash {
@@ -231,6 +235,12 @@ pub(crate) struct Keys {
     /// order: with the environment, entry and image, what a body's key reads
     /// outside its own item (see `lib.rs`, the key shape).
     pub(crate) items: ContentHash,
+    /// `core.code.identity`, when the index has core.
+    code_identity: Option<DefinitionId>,
+    /// The function items a `code.identity` dispatch chooses from, in program
+    /// order: the image's, then each request item's header and whether it has
+    /// a body.
+    functions: ContentHash,
 }
 impl Keys {
     pub fn new(
@@ -239,6 +249,7 @@ impl Keys {
         resolutions: &[Vec<Arc<Resolution>>],
         inputs: &CorpusManifest,
         compiler: ContentHash,
+        image: Option<ContentHash>,
         image_headers: Option<&Headers>,
         image_anchors: Option<&hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>>,
     ) -> io::Result<Self> {
@@ -262,7 +273,11 @@ impl Keys {
             items.push((0u8, keys.module_identity(index, m.id)?));
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
                 let digest = header_identity(item);
-                items.push((1u8, digest));
+                // A function item with a body is a `code.identity` candidate;
+                // its header tokens alone do not say whether it has one.
+                let end = header_end(item);
+                let has_body = end < item.source_text().len();
+                items.push((1u8 + u8::from(has_body), digest));
                 let Some(definition) = index.item_definition(m.id, ordinal as u32, item) else {
                     let root = item.tree.node(item.root);
                     if root.token.is_none()
@@ -290,7 +305,6 @@ impl Keys {
                     )));
                 };
                 let path = index.definition_path(definition);
-                let end = header_end(item);
                 let mut reads = BTreeSet::new();
                 let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
@@ -317,7 +331,7 @@ impl Keys {
                 headers.rows[definition.0 as usize] = Some(Header {
                     digest,
                     source: body_identity(item),
-                    has_body: end < item.source_text().len(),
+                    has_body,
                     header_end: end as u32,
                     site: index.get(definition).site,
                     body_reads: body_reads.into_iter().collect(),
@@ -351,12 +365,22 @@ impl Keys {
         keys.headers = headers;
         keys.anchors = anchors;
         keys.environment = environment;
-        keys.items = ContentHash::of_parts_stream("hirsel.key-items.v1", |parts| {
+        keys.items = ContentHash::of_parts_stream("hirsel.key-items.v2", |parts| {
             for (tag, hash) in &items {
                 parts.part_byte_slice(*tag, &hash.0);
             }
             Ok(())
         })?;
+        keys.functions = ContentHash::of_parts(
+            "hirsel.key-functions.v1",
+            [&encode(&(image, keys.items))?[..]],
+        );
+        keys.code_identity = index
+            .symbols
+            .find("code")
+            .and_then(|code| index.core_module(code))
+            .zip(index.symbols.find("identity"))
+            .and_then(|(code, name)| index.definition(code, name));
         Ok(keys)
     }
     fn bare(index: &NameIndex, headers: Headers) -> Self {
@@ -373,6 +397,8 @@ impl Keys {
             prelude: vec![],
             prelude_closure: Default::default(),
             items: ContentHash::default(),
+            code_identity: None,
+            functions: ContentHash::default(),
         }
     }
 
@@ -701,11 +727,21 @@ impl Keys {
             hirsel_core_front::cost_scope!("key work", "lookup rows");
             self.lookups(index, module, resolution)?
         };
+        let functions = self
+            .code_identity
+            .filter(|&id| {
+                resolution
+                    .names
+                    .iter()
+                    .any(|name| name.target == Target::Definition(id))
+            })
+            .map(|_| self.functions);
         Ok(DefinitionKey {
             body: self.dependency(index, own.0 as usize)?.source,
             signatures,
             lookups,
             environment: self.environment,
+            functions,
         })
     }
     /// One part over the body's lookups outside the item: their count, then

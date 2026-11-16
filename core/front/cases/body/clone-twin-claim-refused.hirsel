@@ -1,0 +1,5 @@
+type P { n: u64 }
+@twin(P) type A { n: u64 }
+@twin(P) type B { n: u64 }
+// expect: refuse MEM-17 at 3:1
+// expect: cause MEM-17 at 3:1 from 2:1

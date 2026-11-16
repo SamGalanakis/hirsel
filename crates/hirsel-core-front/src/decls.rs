@@ -2276,10 +2276,43 @@ impl Program<'_> {
     /// symmetrically, when their fields (or arms and payloads) have the same names in
     /// the same order and each pair of types pairs.
     fn check_twins(&mut self) {
+        let mut claimed = rustc_hash::FxHashMap::<DeclId, (DeclId, Site)>::default();
+        let mut prefix_loaded = false;
         for d in self.decls.base_len()..self.decls.len() {
             let Some((ty, site)) = self.decls[d].twin().copied() else {
                 continue;
             };
+            if let TyKind::Adt(target, xs) = self.types.kind(ty) {
+                if xs.is_empty() {
+                    let target = *target;
+                    if target.index() < self.decls.base_len() && !prefix_loaded {
+                        for first in 0..self.decls.base_len() {
+                            if let Some((ty, site)) = self.decls[first].twin().copied()
+                                && let TyKind::Adt(target, xs) = self.types.kind(ty)
+                                && xs.is_empty()
+                            {
+                                claimed.insert(*target, (DeclId(first as u32), site));
+                            }
+                        }
+                        prefix_loaded = true;
+                    }
+                    if let Some(&(first, first_site)) = claimed.get(&target) {
+                        let mut r = refusal(
+                            "MEM-17",
+                            site,
+                            format!(
+                                "type `{}` already has declared twin `{}`",
+                                self.decls[target.index()].path,
+                                self.decls[first.index()].path,
+                            ),
+                        );
+                        r.causal.push(first_site);
+                        self.refusals.push(r);
+                        continue;
+                    }
+                    claimed.insert(target, (DeclId(d as u32), site));
+                }
+            }
             let why = match self.types.kind(ty) {
                 TyKind::Error => continue,
                 TyKind::Adt(e, xs) if xs.is_empty() && self.decls[e.index()].role.is_none() => {

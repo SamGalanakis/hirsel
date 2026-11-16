@@ -2702,8 +2702,8 @@ fn resolution_edges_rebuild_like_fresh() {
 /// path it builds (`siblings`), and a closed `List[u64]` row's codec hook is
 /// std's `of_list` (`signatures`, beside the prelude). Each edit, checked over
 /// the base's store, reports and publishes what an empty store does. Oracle:
-/// the fresh check, whose verdict is hand-derived (a rival twin of `Row`
-/// declared first takes `thaw`'s selection; std without `of_u64` builds no
+/// the fresh check, whose verdict is hand-derived (without its twin annotation,
+/// RowS cannot be cloned as Row; std without `of_u64` builds no
 /// codec of u64; without `of_list` a list row has no codec hook). Red on a key
 /// without one of them: the stored record of `thaw`, `c` or `l` was reused.
 #[test]
@@ -2713,7 +2713,7 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     const CODEC: &str = "fn c() -> std.codec.Codec[u64] { std.codec.of() }\n";
     const LIST: &str = "fn l(take xs: List[u64]) -> List[u64] { xs }\n";
     let one = format!("{ROW}{THAW}");
-    let rival = format!("{ROW}@twin(Row) stable type RowT {{ n: u64 }}\n{THAW}");
+    let unpaired = format!("{ROW}{}", THAW.replace("@twin(Row) ", ""));
     let libraries = tempfile::tempdir().unwrap();
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     // Copies of core and std whose std lacks one maker: `of_u64`, or `of_list`.
@@ -2748,14 +2748,14 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     let no_list = without("of_list", '[');
     let cases = [
         (
-            "a rival twin arrives",
+            "the twin annotation leaves",
             (&shipped, &one),
-            (&shipped, &rival),
+            (&shipped, &unpaired),
             false,
         ),
         (
-            "the rival twin leaves",
-            (&shipped, &rival),
+            "the twin annotation returns",
+            (&shipped, &unpaired),
             (&shipped, &one),
             true,
         ),

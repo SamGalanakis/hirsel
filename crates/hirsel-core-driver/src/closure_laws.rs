@@ -331,12 +331,11 @@ fn root(take g: Guard[u64]) -> u64 { hold(take g) }\n";
 #[test]
 fn clone_in_glue_is_one_instance_per_target() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "type Row { n: u64 }\n\
+    let source = "stable type Row { n: u64 }\n\
 @twin(Row) stable type RowS { n: u64 }\n\
-@twin(Row) stable type RowT { n: u64 }\n\
 fn root(r: Region, x: Row, y: Row) -> u64 {\n\
     let s: Result[RowS in r, Capacity] = clone_in(r, x)\n\
-    let t: Result[RowT in r, Capacity] = clone_in(r, y)\n\
+    let t: Result[Row in r, Capacity] = clone_in(r, y)\n\
     1u64\n\
 }\n";
     let product = check(source, dir.path(), &mut Driver::default());

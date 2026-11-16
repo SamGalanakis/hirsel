@@ -306,9 +306,19 @@ fn child_index[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K
 /// writer branch. New children are stamped before parents. Failed allocations
 /// may consume ids but never publish a partial version; key and value return.
 pub fn insert[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m: OMap[K, V], take k: K, take v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), (Capacity, (K, V))] {
-    match inserted(mut ids, m, k, v) {
+    let row = match arc.new(Entry(key: take k, value: take v)) {
+        Ok(take entry) => take entry,
+        Error((c, take entry)) => {
+            let Entry(key: returned_key, value: returned_value) = take entry
+            return Error((c, (take returned_key, take returned_value)))
+        }
+    }
+    match inserted(mut ids, m, row) {
         Ok(take next_map) => Ok(take next_map),
-        Error(c) => Error((c, (take k, take v))),
+        Error(c) => {
+            let Entry(key: returned_key, value: returned_value) = result.unwrap(arc.try_unwrap(take row))
+            Error((c, (take returned_key, take returned_value)))
+        }
     }
 }
 
@@ -316,19 +326,29 @@ pub fn insert[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
 /// The input root stays alive until publication, so this uses path copying
 /// even when its caller owns the only version. No rollback allocation occurs.
 pub fn insert_recover[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], take k: K, take v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), (Capacity, (OMap[K, V], (K, V)))] {
-    match inserted(mut ids, m, k, v) {
+    let row = match arc.new(Entry(key: take k, value: take v)) {
+        Ok(take entry) => take entry,
+        Error((c, take entry)) => {
+            let Entry(key: returned_key, value: returned_value) = take entry
+            return Error((c, (take m, (take returned_key, take returned_value))))
+        }
+    }
+    match inserted(mut ids, m, row) {
         Ok(take next_map) => Ok(take next_map),
-        Error(c) => Error((c, (take m, (take k, take v))))
+        Error(c) => {
+            let Entry(key: returned_key, value: returned_value) = result.unwrap(arc.try_unwrap(take row))
+            Error((c, (take m, (take returned_key, take returned_value))))
+        }
     }
 }
 
-fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m: OMap[K, V], k: K, v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), Capacity] {
+fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m: OMap[K, V], incoming: Arc[Entry[K, V]]) -> Result[(OMap[K, V], Option[Replaced[K, V]]), Capacity] {
     let mut replaced: Option[Replaced[K, V]] = None
     let pieces = match m.head {
-        Some(n) => insert_node(mut ids, mut replaced, n, k, v)?,
+        Some(n) => insert_node(mut ids, mut replaced, n, incoming)?,
         None => {
             let mut rows: List[Arc[Entry[K, V]]] = list.with_capacity(1)?
-            result.capacity_only(list.push(mut rows, new_entry(k, v)?))?
+            result.capacity_only(list.push(mut rows, arc.share(incoming)))?
             let mut out: List[Arc[Node[K, V]]] = list.with_capacity(1)?
             ids += 1
             result.capacity_only(list.push(mut out, pack_leaf(ids, take rows)?))?
@@ -343,7 +363,8 @@ fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m:
     Ok((OMap(head: Some(take h)), take replaced))
 }
 
-fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], n: Arc[Node[K, V]], k: K, v: V) -> Result[List[Arc[Node[K, V]]], Capacity] {
+fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], n: Arc[Node[K, V]], incoming: Arc[Entry[K, V]]) -> Result[List[Arc[Node[K, V]]], Capacity] {
+    let k = view incoming.key
     let i = lower(n.rows, k)
     let hit = i < list.len(n.rows) && key_order(n.rows, i, k) == Equal
     if hit {
@@ -361,7 +382,7 @@ fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
     }
     let mut a: List[Arc[Entry[K, V]]] = list.with_capacity(cut)?
     let mut b: List[Arc[Entry[K, V]]] = list.with_capacity(total - cut)?
-    let row = new_entry(k, v)?
+    let row = arc.share(incoming)
     for j in 0 .. total {
         let old = if j > i && !hit {
             j - 1
@@ -393,12 +414,13 @@ fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
     Ok(take out)
 }
 
-fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], n: Arc[Node[K, V]], k: K, v: V) -> Result[List[Arc[Node[K, V]]], Capacity] {
+fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], n: Arc[Node[K, V]], incoming: Arc[Entry[K, V]]) -> Result[List[Arc[Node[K, V]]], Capacity] {
+    let k = view incoming.key
     if n.depth == 0 {
-        insert_leaf(mut ids, mut replaced, n, k, v)
+        insert_leaf(mut ids, mut replaced, n, incoming)
     } else {
         let at = child_index(n, k)
-        let changed = insert_node(mut ids, mut replaced, n.kids[at], k, v)?
+        let changed = insert_node(mut ids, mut replaced, n.kids[at], incoming)?
         let same_boundaries = list.len(changed) == 1 && {
             at > 0 || !before_minimum(n, k)
         }
@@ -587,22 +609,46 @@ fn as_pieces[K: ordered + shareable + send, V: shareable + send](take nodes: Lis
 /// Capacity consumes m; k/v are returned, and
 /// independently held versions remain valid. Keep a snapshot for rollback.
 pub fn insert_owned[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], take k: K, take v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), (Capacity, (K, V))] {
-    match owned_map(mut ids, take m, k, v) {
+    let mut pending = Some((take k, take v))
+    let mut map = take m
+    match replace(mut map.head, None) {
+        None => {},
+        Some(take original_head) => {
+            let mut h = take original_head
+            let old = try_replace_unique(mut ids, mut h, mut pending)
+            map.head = Some(take h)
+            if let Some(take replaced) = take old {
+                return Ok((take map, Some(take replaced)))
+            }
+        }
+    }
+    let (take pending_key, take pending_value) = option.unwrap(take pending)
+    let row = match arc.new(Entry(key: take pending_key, value: take pending_value)) {
+        Ok(take entry) => take entry,
+        Error((c, take entry)) => {
+            let Entry(key: returned_key, value: returned_value) = take entry
+            return Error((c, (take returned_key, take returned_value)))
+        }
+    }
+    match owned_map(mut ids, take map, row) {
         Ok(take next_map) => Ok(take next_map),
-        Error(c) => Error((c, (take k, take v)))
+        Error(c) => {
+            let Entry(key: returned_key, value: returned_value) = result.unwrap(arc.try_unwrap(take row))
+            Error((c, (take returned_key, take returned_value)))
+        }
     }
 }
 
-fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], k: K, v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), Capacity] {
+fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], incoming: Arc[Entry[K, V]]) -> Result[(OMap[K, V], Option[Replaced[K, V]]), Capacity] {
     let mut replaced: Option[Replaced[K, V]] = None
     let OMap(head: old) = take m
     let changed = match take old {
         None => {
             let empty: Node[K, V] = Node(stamp: 0, depth: 0, size: 0, rows: list.new(), kids: list.new(), lows: None)
             let h = result.capacity_only(arc.new(take empty))?
-            owned_arc(mut ids, mut replaced, take h, k, v)?
+            owned_arc(mut ids, mut replaced, take h, incoming)?
         },
-        Some(take h) => owned_arc(mut ids, mut replaced, take h, k, v)?
+        Some(take h) => owned_arc(mut ids, mut replaced, take h, incoming)?
     }
     let Pieces(first: left, second: right) = take changed
     let new_head = match take right {
@@ -617,26 +663,23 @@ fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, t
     Ok((OMap(head: Some(take new_head)), take replaced))
 }
 
-fn owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], take h: Arc[Node[K, V]], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
+fn owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], take h: Arc[Node[K, V]], incoming: Arc[Entry[K, V]]) -> Result[Pieces[K, V], Capacity] {
     let mut holder = take h
-    let right = edit_owned_arc(mut ids, mut replaced, mut holder, k, v)?
+    let right = edit_owned_arc(mut ids, mut replaced, mut holder, incoming)?
     Ok(Pieces(first: take holder, second: take right))
 }
 
-fn edit_owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], mut holder: Arc[Node[K, V]], k: K, v: V) -> Result[Option[Arc[Node[K, V]]], Capacity] {
+fn edit_owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], mut holder: Arc[Node[K, V]], incoming: Arc[Entry[K, V]]) -> Result[Option[Arc[Node[K, V]]], Capacity] {
+    let k = view incoming.key
     let edited = arc.with_unique(mut holder, scoped fn(mut node: Node[K, V]) -> Result[Option[Arc[Node[K, V]]], Capacity] {
         if node.depth == 0 {
             let at = lower(node.rows, k)
             let hit = at < list.len(node.rows) && key_order(node.rows, at, k) == Equal
             if hit {
-                let total = list.len(node.rows)
-                list.swap(mut node.rows, at, total - 1)
-                let mut row = option.unwrap(list.pop(mut node.rows))
-                replaced = Some(overwrite_row(mut row, k, v)?)
-                result.capacity_only(list.push(mut node.rows, take row))?
-                list.swap(mut node.rows, at, total - 1)
+                let old = list.set(mut node.rows, at, arc.share(incoming))
+                replaced = Some(Replaced(value: Held(take old)))
             } else {
-                let row = new_entry(k, v)?
+                let row = arc.share(incoming)
                 let capacity = if list.len(node.rows) < 32 {
                     32u64
                 } else {
@@ -656,7 +699,7 @@ fn edit_owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u
             let old_size = node.kids[at].size
             list.swap(mut node.kids, at, total - 1)
             let mut selected = option.unwrap(list.pop(mut node.kids))
-            let right = edit_owned_arc(mut ids, mut replaced, mut selected, k, v)?
+            let right = edit_owned_arc(mut ids, mut replaced, mut selected, incoming)?
             let mut size = selected.size
             result.capacity_only(list.push(mut node.kids, take selected))?
             list.swap(mut node.kids, at, total - 1)
@@ -687,28 +730,61 @@ fn edit_owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u
     match take edited {
         Some(take changed) => take changed,
         None => {
-            let Pieces(first: left, second: right) = as_pieces(insert_node(mut ids, mut replaced, holder, k, v)?)
+            let Pieces(first: left, second: right) = as_pieces(insert_node(mut ids, mut replaced, holder, incoming)?)
             holder = take left
             Ok(take right)
         },
     }
 }
 
-fn overwrite_row[K: ordered + shareable + send, V: shareable + send](mut holder: Arc[Entry[K, V]], k: K, v: V) -> Result[Replaced[K, V], Capacity] {
-    let edited = arc.with_unique(mut holder, scoped fn(mut row: Entry[K, V]) -> Result[V, Capacity] {
-        let key = copied(k)?
-        let value = copied(v)?
-        row.key = take key
-        let old = replace(mut row.value, take value)
-        Ok(take old)
+fn try_replace_unique[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut holder: Arc[Node[K, V]], mut pending: Option[(K, V)]) -> Option[Replaced[K, V]] {
+    let edited = arc.with_unique(mut holder, scoped fn(mut node: Node[K, V]) -> Option[Replaced[K, V]] {
+        let old = if node.depth == 0 {
+            let at = match pending {
+                Some((k, _)) => lower(node.rows, k),
+                None => return None
+            }
+            let hit = match pending {
+                Some((k, _)) => at < list.len(node.rows) && key_order(node.rows, at, k) == Equal,
+                None => false
+            }
+            if !hit {
+                return None
+            }
+            let total = list.len(node.rows)
+            list.swap(mut node.rows, at, total - 1)
+            let mut row = option.unwrap(list.pop(mut node.rows))
+            let old = arc.with_unique(mut row, scoped fn(mut data: Entry[K, V]) -> Replaced[K, V] {
+                let (take key, take value) = option.unwrap(replace(mut pending, None))
+                data.key = take key
+                let old = replace(mut data.value, take value)
+                Replaced(value: Moved(take old))
+            })
+            result.unwrap(list.push(mut node.rows, take row))
+            list.swap(mut node.rows, at, total - 1)
+            take old
+        } else {
+            let at = match pending {
+                Some((k, _)) => child_index_node(node, k),
+                None => return None
+            }
+            let total = list.len(node.kids)
+            list.swap(mut node.kids, at, total - 1)
+            let mut child = option.unwrap(list.pop(mut node.kids))
+            let old = try_replace_unique(mut ids, mut child, mut pending)
+            result.unwrap(list.push(mut node.kids, take child))
+            list.swap(mut node.kids, at, total - 1)
+            take old
+        }
+        if let Some(_) = old {
+            ids += 1
+            node.stamp = ids
+        }
+        take old
     })
     match take edited {
-        Some(take old) => Ok(Replaced(value: Moved(old?))),
-        None => {
-            let row = new_entry(k, v)?
-            let old = replace(mut holder, take row)
-            Ok(Replaced(value: Held(take old)))
-        }
+        Some(take old) => take old,
+        None => None
     }
 }
 

@@ -1080,3 +1080,85 @@ fn shared_payload_copy_budget() -> bool {
         }
     }
 }
+
+// Inputs already own their 2 KiB payload. Only holders and nodes are charged
+// inside the bound, including for an empty consuming map's reserved leaf.
+// expect: run insert_moves_payloads() = true
+fn insert_moves_payloads() -> bool {
+    for mode in 0u64 .. 3 {
+        let mut ids: u64 = 0
+        let m: omap.OMap[Bytes, Bytes] = omap.new()
+        let key = large_byte_row(7)
+        let value = large_byte_row(9)
+        if mode == 0 {
+            let answer = result.unwrap(bound bytes 1024 {
+                omap.insert(mut ids, m, take key, take value)
+            })
+            match take answer {
+                Ok((take changed, _)) => if omap.len(changed) != 1 || option.unwrap(omap.get(changed, large_byte_row(7)))[1023] != 9 {
+                    return false
+                },
+                Error(_) => return false
+            }
+        } else if mode == 1 {
+            let answer = result.unwrap(bound bytes 1024 {
+                omap.insert_owned(mut ids, take m, take key, take value)
+            })
+            match take answer {
+                Ok((take changed, _)) => if omap.len(changed) != 1 || option.unwrap(omap.get(changed, large_byte_row(7)))[1023] != 9 {
+                    return false
+                },
+                Error(_) => return false
+            }
+        } else {
+            let answer = result.unwrap(bound bytes 1024 {
+                omap.insert_recover(mut ids, take m, take key, take value)
+            })
+            match take answer {
+                Ok((take changed, _)) => if omap.len(changed) != 1 || option.unwrap(omap.get(changed, large_byte_row(7)))[1023] != 9 {
+                    return false
+                },
+                Error(_) => return false
+            }
+        }
+    }
+    true
+}
+
+// Refuse before row allocation and after partial path construction. Recovered
+// dynamic payloads must survive intact after every temporary holder is freed.
+// expect: run moved_capacity_payloads() = true
+fn moved_capacity_payloads() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[Bytes, Bytes] = omap.new()
+    for i in 0u64 .. 80 {
+        let (take changed, _) = result.unwrap(omap.insert(mut ids, m, byte_key(i), byte_key(i)))
+        m = take changed
+    }
+    let old_id = omap.node_id(option.unwrap(omap.root(m)))
+    let mut refused: u64 = 0
+    let mut completed: u64 = 0
+    for i in 0u64 .. 32 {
+        let key = large_byte_row(81)
+        let value = large_byte_row(99)
+        let held = omap.snapshot(m)
+        let answer = result.unwrap(bound bytes i * 64 {
+            omap.insert_recover(mut ids, take held, take key, take value)
+        })
+        match take answer {
+            Error((_, (take returned_map, (take returned_key, take returned_value)))) => {
+                refused += 1
+                if omap.len(returned_map) != 80 || omap.node_id(option.unwrap(omap.root(returned_map))) != old_id || list.len(returned_key) != 1024 || returned_key[0] != 81 || returned_key[1023] != 81 || list.len(returned_value) != 1024 || returned_value[0] != 99 || returned_value[1023] != 99 {
+                    return false
+                }
+            },
+            Ok((take changed, _)) => {
+                completed += 1
+                if omap.len(changed) != 81 {
+                    return false
+                }
+            }
+        }
+    }
+    refused > 1 && completed > 0 && omap.len(m) == 80
+}

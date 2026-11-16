@@ -24,10 +24,16 @@ redistribute O(log n) nodes, at most 32 holders per node. `ids` is the writer's
 last issued u64, shared across all branches. Every new node receives the next
 id after its children; an exhausted counter raises checked Overflow. Capacity
 preserves m; insertion returns its taken key/value. Failed attempts may consume
-ids, which must never be reused. These APIs continue to borrow m.
+ids, which must never be reused. These APIs continue to borrow m. Successful inserts move their inputs into
+one shared row. On Capacity, temporary path holders are dropped before the
+row is unwrapped to recover the original inputs, without copying them.
 
 `insert_owned(mut ids,take m,take k,take v)` is a separate consuming update.
 At a unique Arc, `arc.with_unique` lends the payload for in-place edits.
+An overwrite whose entire path and row are unique moves the raw inputs only
+after acquiring those borrows, then completes without allocation. Other
+updates first move the inputs into one row shared by the draft and recovery
+holder.
 The node stays allocated, including the left half of a split; a split allocates
 only the new sibling. Shared nodes use path copying. Branches retain their shared
 separator block while boundaries stay unchanged and rebuild it when they change.

@@ -19,3 +19,7 @@ path = "crc.rs"
 [[bin]]
 name = "m4-store-mem"
 path = "store_mem.rs"
+
+[[bin]]
+name = "m4-store-pcopy"
+path = "store_pcopy.rs"

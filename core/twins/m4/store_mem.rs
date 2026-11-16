@@ -1,4 +1,7 @@
-//! R1–R3's specified BTreeMap<Vec<u8>, Vec<u8>> twin. Pending parity review by 889.
+//! R2's twin, R3's twin, and R1's in-place bound (STORE-SPEC v2.9 §6): BTreeMap<Vec<u8>, Vec<u8>>.
+//! R1 here keeps no old version, so it is a bound, never R1's target (store_pcopy.rs is).
+//! R3 does I3's per-call check as the store's `get` on a Snapshot does: one lookup of the
+//! table's catalog key in the snapshot's catalog map, whose entry must hold the handle's id.
 //! Account is id u64, balance i64, owner length u64 and "owner000": 32 bytes.
 //! Values carry schema number 0 (u16 LE), keys table id 1 (u32 BE) then u64 BE.
 use std::{
@@ -69,6 +72,7 @@ fn main() {
         }
     }
     let mut map = Arc::new(m);
+    let catalog = Arc::new(BTreeMap::from([(b"accounts".to_vec(), 1u32)]));
     println!("READY");
     std::io::stdout().flush().unwrap();
     gate.read_exact(&mut [0]).unwrap();
@@ -84,12 +88,14 @@ fn main() {
             .sum(),
         "R3" => {
             let held = Arc::clone(&map);
+            let names = Arc::clone(&catalog);
             std::thread::spawn(move || {
                 let mut state: u64 = 1;
                 let mut sum = 0u64;
                 for _ in 0..100000 {
                     let k = sm(state) % 100000;
                     state = state.wrapping_add(0x9E3779B97F4A7C15);
+                    assert_eq!(names.get(&b"accounts"[..]), Some(&1), "Stale(1)");
                     sum += observed(decode(&held[&key(k)]), k);
                 }
                 sum

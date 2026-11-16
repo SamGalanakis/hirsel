@@ -64,3 +64,74 @@ The store library's frame will be larger. The ratio is published with its frame 
 951's tx twin isolates 10,000 overflow panics inside 100,000 transactions: 496.0M instructions in total (HOOK-FINDINGS.md:131-134). If its panics cost what these do, 342M of that total is unwinding.
 
 The fault library's ratio is its isolate of the same body (an owned buffer, then an out-of-range index), compared with this figure.
+
+## Store rows: which twin is each row's baseline (STORE-SPEC v2.12 §6, Q3)
+
+A row's baseline does the work the spec requires of the store on that row. A twin that skips required work is published beside the fair twin as a bound, never as the target.
+
+| Row | Twin | Status |
+|---|---|---|
+| R1 target | `store_pcopy.rs` (`m4-store-pcopy R1 <gate>`) | fair: the work listed below |
+| R1 reference | `store_im.rs` (`im::OrdMap`, base kept, 64-wide nodes) | reference: wider nodes than the spec's, and no catalog, clock or isolation work |
+| R1 bound | `store_mem.rs R1` (`BTreeMap` updated in place, no old version) | bound, never the target |
+| R2 | `store_mem.rs R2` (`BTreeMap::range`, a decode per row) | fair: a read keeps no old version, and the store's one Span and one I3 check are per range, not per row |
+| R3 | `store_mem.rs R3` (`Arc<BTreeMap>` on a spawned thread) | fair: one lookup of the table's catalog key in the snapshot's catalog map per `get` (I3) |
+| R4 | `durable_commit.rs` | bound until S3 is on main; requirement below |
+| R5 | none (`group_commit.rs`) | waits for S3; requirement below |
+| R6 | none | waits for S2; requirement below |
+| R7 | none (`open.rs`) | waits for S2; requirement below |
+| R8 | none | waits for S2 (the pin waits for S4); requirement below |
+
+**`store_pcopy.rs`, R1's target.**
+- Node layout:
+  - A leaf is a `Vec<Arc<Entry>>` of 16 to 32 rows in key order. A row is one `Arc<Entry>`, and an `Entry` owns its key and value bytes. This matches std.omap's one canonical entry per row.
+  - A branch is a `Vec<Child>` of 16 to 32 children. A child is its subtree's minimum row (the same `Arc` the leaf holds) and an `Arc<Node>`.
+  - Only the root may hold fewer. A node that reaches 33 splits into 16 and 17, as std.omap does. Ascending puts therefore give both trees the same depth and the same path copied per put.
+- What it shares:
+  - A put copies only the root-to-leaf path. Each copy is a new vector whose other elements are one count increment each.
+  - Every other node, every row and the catalog tree are shared with the base version.
+  - The transaction keeps the base roots until publish, so the copy is never skipped. Publish drops them.
+- Work per commit (§3.1):
+  - one wall-clock read;
+  - the body under `catch_unwind`;
+  - the resident check;
+  - publish at version + 1;
+  - no COMMIT encode (a memory store, Q2).
+- Work per put:
+  - I3's catalog check;
+  - encode;
+  - the path copy;
+  - the op-list append;
+  - I4's account update, using the replaced stored entry's size returned by the insert (v2.10 T2).
+- Work per fetch:
+  - I3's catalog check;
+  - the lookup;
+  - the `Point` record of the data-tree key;
+  - the decode.
+- Checks after the gate:
+  - fan-out on every node, and key order;
+  - 100,000 rows at version 100,000;
+  - the account at 118 B per row (§1.11).
+- Build it as `store_mem.rs` is built (std only, the S4 flags).
+
+**What each twin must do once its slice is on main.**
+- **R4** (S3):
+  - Write the store's exact 97-byte COMMIT frame (§2.4) with its xxh3-64 check, so the file bytes match.
+  - Do R1's per-commit work.
+  - Then one write and one `fdatasync` per commit.
+  - Today's `durable_commit.rs` writes a 56-byte CRC-32 frame, updates a `BTreeMap` in place, and reads no clock.
+- **R5** (S3):
+  - R4's per-commit work.
+  - A writer thread and a journal thread that drains up to 64 frames or 4 MiB per `fdatasync`.
+  - §3.1's END policy: an END write and sync when the queue is idle, or every 64th group.
+- **R6** (S2):
+  - Walk the cut's new nodes and encode each NODE frame with its xxh3-64 check.
+  - Update a persistent node table's counts.
+  - Write and sync a pack, then make the manifest with §3.2's 7 syncs.
+- **R7** (S2):
+  - Read the same pack and check every frame's xxh3-64 (§2.8).
+  - Rebuild the persistent nodes and build the per-node table.
+  - `sync` each live segment (§3.2).
+- **R8** (S2; the pin in S4):
+  - Hold the rows plus a per-node record table (96 B per node, §1.11).
+  - For the pin, hold a persistent map that keeps the old version across 10,000 commits.

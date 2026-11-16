@@ -1,7 +1,8 @@
 # Store
 
 Package `store`, module `store`, implements the M4 store in Hirsel over
-`std.omap.OMap[Bytes, Bytes]`. The S1 package has memory stores, typed tables and
+`std.omap.OMap[Bytes, Arc[Bytes]]`. Keys remain inline and stored values are shared
+when a path is copied. The S1 package has memory stores, typed tables and
 indexes, isolated transactions, read sets, frozen cursors and snapshots,
 CallInfo, followers, resident admission and foreign-handle checks.
 
@@ -13,7 +14,8 @@ equality. A key schema change is `Schema`; an unknown row schema number is
 `Stale`. Initial table/index id is 1, schema number is 0 and schema epoch is 1.
 
 `run` and `run_on` execute the callback under `isolate`. A successful body publishes
-one set of roots after frame encoding and resident admission. An abort, fault or
+one set of roots after resident admission. A memory store encodes no COMMIT;
+a store with a journal encodes it before admission. An abort, fault or
 refusal publishes nothing. An abort returns `Undone { value, ticket: None }`
 in memory (§7); reply retention belongs to the streams slice. `fetch` and `range`
 read through a shareable `Shape`; `put` and `delete` use a `Table`. `fetch` returns
@@ -57,9 +59,13 @@ delete subtracts. Accounting with retained roots is conservative between cuts.
 Issued node-id ranges are logged before a map operation, so a
 fault or Capacity cannot return issued ids to the allocator.
 
-The contract follows STORE-SPEC v2.8. The format has a 16-byte frame head and seed-zero XXH3-64, bound to
+The transaction limit is 16,777,280 COMMIT payload bytes, excluding the 16-byte
+head. Body-time arithmetic enforces it before publishing. The account uses the
+stored value's length, including its schema number, when subtracting an old row.
+
+The contract follows STORE-SPEC v2.11. The format has a 16-byte frame head and seed-zero XXH3-64, bound to
 store identity, file role, sequence and byte offset, then head bytes 0–8 and the
-payload. S1 emits COMMIT bytes but has no files or background tasks. Its waiting
+payload. S1 tests the encoder directly but has no files or background tasks. Its waiting
 APIs have immediate memory paths. Disk recovery and checkpoints belong to S2;
 journal durability to S3; pins, forks and migration to S4; streams and scopes to
 S5. There is no durability promise for a memory store.

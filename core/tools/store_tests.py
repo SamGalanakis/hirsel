@@ -16,8 +16,10 @@ BYTE_LAWS = ('model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'for
              'typed_indexes', 'schema_numbers', 'catalog_invalid', 'index_refusal',
              'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget',
              'look', 'look_faults', 'changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal',
-             'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover')
-NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS), 'test_reader_task', 'test_memory_identity', 'test_typed_snapshot_task', 'test_look_task'}
+             'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover',
+             'frame_size', 'frame_size_boundary', 'stored_size')
+NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS if name != 'frame_size_boundary'),
+                'test_reader_task', 'test_memory_identity', 'test_typed_snapshot_task', 'test_look_task'}
 
 
 def inputs(root):
@@ -120,6 +122,23 @@ def main():
                         and len(tests) == len(NATIVE_TESTS) and all(t.get('passed') for t in tests))
                 rows.append(dict(engine=engine, passed=good, result=report))
                 print(f'{engine}: {sum(bool(t.get("passed")) for t in tests)}/{len(NATIVE_TESTS)} passed', flush=True)
+                # L29's new16MiB vectors keep the stored rows, op list and direct
+                # encoder buffers live together. Its128MiB root is separate
+                # from the existing laws' unchanged64MiB root.
+                boundary = list(command)
+                boundary[boundary.index('--filter') + 1] = 'store@1/store/frame_size_boundary'
+                boundary[boundary.index('--limit') + 1] = str(128 * 1024 * 1024)
+                result = subprocess.run(boundary, capture_output=True, text=True)
+                try:
+                    report = json.loads(result.stdout)
+                except ValueError:
+                    report = {'stdout': result.stdout, 'stderr': result.stderr}
+                tests = report.get('tests', [])
+                good = (result.returncode == 0 and len(tests) == 1
+                        and tests[0].get('definition') == 'store@1/store/frame_size_boundary'
+                        and tests[0].get('passed'))
+                rows.append(dict(engine=engine, law='frame_size_boundary', passed=good, result=report))
+                print(f'{engine} frame_size_boundary: {"PASS" if good else "FAIL"}', flush=True)
                 # Only the concurrent law runs under seeded scheduling. Repeating
                 # the serial laws would have no alternative event streams.
                 cc = args.cc or (Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'

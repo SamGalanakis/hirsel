@@ -2,6 +2,16 @@
 
 Sources: `core/twins/m4/durable_commit.rs` (`m4-durable-commit`) and `core/twins/m4/isolate.rs` (`m4-isolate`).
 
+`store_im.rs` is the M4 store's persistent reference column from the R1 cost
+study. Its R1 workload holds an `im::OrdMap` base version across each put and
+drops it after the read-back. It takes `R1` and a gate FIFO path, and uses the
+READY/DONE protocol from `core/tools/store_bench.py`. Build it with im15.1.0's
+atomic Arc configuration and the pinned dependencies built by
+`core/tools/omap_bench.py`, passing `--extern im=<deps>/libim.rlib` and
+`-Ldependency=<deps>`. The R1 result is5,000,750,000. It is a reference, with
+64-wide nodes, rather than the fan-out-matched target twin; ratio publication
+and the required catalog, clock and isolation work belong to that target.
+
 Method:
 - rustc 1.99.0 (b940084d7), the twins' release profile: opt 3, overflow checks on, CGU 1, no LTO.
 - CPU 16 (`taskset -c 16`), holding /tmp/hirsel-langarena-measure.lock.

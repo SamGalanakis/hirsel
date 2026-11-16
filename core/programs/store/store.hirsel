@@ -33,9 +33,9 @@ pub type Fault {
 pub type Error = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Diverged(u32) | Foreign
 
 type Roots: shareable + send {
-    data: std.omap.OMap[Bytes, Bytes],
-    streams: std.omap.OMap[Bytes, Bytes],
-    catalog: std.omap.OMap[Bytes, Bytes]
+    data: std.omap.OMap[Bytes, Arc[Bytes]],
+    streams: std.omap.OMap[Bytes, Arc[Bytes]],
+    catalog: std.omap.OMap[Bytes, Arc[Bytes]]
 }
 
 fn empty_roots() -> Roots {
@@ -141,7 +141,7 @@ pub opaque type Snapshot: shareable + send {
 }
 
 type ByteRows: send {
-    cursor: std.omap.Cursor[Bytes, Bytes]
+    cursor: std.omap.Cursor[Bytes, Arc[Bytes]]
 }
 
 fn sm(x: u64) -> u64 {
@@ -269,7 +269,7 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
         let outcome = body(mut tx)
         let frame: Option[Bytes] = match outcome {
             Error(_) => None,
-            Ok(_) => {
+            Ok(_) => if let Some(_) = db.journal {
                 let encoded = encode_commit(ci, tx.ops, db.file_seq, db.file_end)
                 match take encoded {
                     Ok(take raw) => Some(take raw),
@@ -278,6 +278,8 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
                         None
                     }
                 }
+            } else {
+                None
             }
         }
         let Tx(store: _, roots: take roots, ids: _, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: _, wrote: wrote, ops: _, op_ids: _, info: _) = take tx
@@ -449,7 +451,10 @@ fn fetch_bytes(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
 }
 
 fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
-    let p = physical(id, key)?
+    put_physical(mut tx, physical(id, key)?, copied(val)?)
+}
+
+fn put_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
     if list.len(p) > 4096 {
         return Error(Limit(Key))
     }
@@ -467,15 +472,17 @@ fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
     }
     let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 9 + list.len(p) + list.len(val))
     let saved_key = copied(p)?
-    if frame > 16777216 {
+    if frame - 16 > 16777280 {
         return Error(Limit(Transaction))
     }
     let mut ids = reserve_ids(mut tx)?
-    let updated = std.omap.insert(mut ids, tx.roots.data, take p, copied(val)?)
+    let saved_value = copied(val)?
+    let shared_value = capacity(result.capacity_only(arc.new(take val)))?
+    let updated = std.omap.insert(mut ids, tx.roots.data, take p, take shared_value)
     match take updated {
         Error((c, _)) => Error(refused(mut tx, c)),
         Ok(take data) => {
-            record_op(mut tx, take saved_key, Some(copied(val)?))?
+            record_op(mut tx, take saved_key, Some(take saved_value))?
             tx.roots.data = take data
             // Main without a retained durable root subtracts the replaced entry (I4).
             tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
@@ -493,7 +500,7 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
         None => return Ok(false)
     }
     let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 5 + list.len(p))
-    if frame > 16777216 {
+    if frame - 16 > 16777280 {
         return Error(Limit(Transaction))
     }
     let mut ids = reserve_ids(mut tx)?
@@ -541,14 +548,14 @@ fn range_bytes(tx: Tx, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[By
     byte_cursor(tx.roots.data, low, high)
 }
 
-fn byte_cursor(data: std.omap.OMap[Bytes, Bytes], low: Bytes, high: Bytes) -> Result[ByteRows, Error] {
+fn byte_cursor(data: std.omap.OMap[Bytes, Arc[Bytes]], low: Bytes, high: Bytes) -> Result[ByteRows, Error] {
     match std.omap.range(data, Included(copied(low)?), Excluded(copied(high)?)) {
         Ok(take cursor) => Ok(ByteRows(cursor: take cursor)),
         Error((c, _)) => Error(Full(c))
     }
 }
 
-fn next_bytes(mut rows: ByteRows) -> Result[Option[(Bytes, Bytes)], Error] {
+fn next_bytes(mut rows: ByteRows) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     capacity(std.omap.next(mut rows.cursor))
 }
 
@@ -1252,7 +1259,7 @@ pub opaque type Rows[K, V]: send {
     table: u32,
     key: std.codec.Key[K],
     readers: Arc[Readers[V]],
-    data: std.omap.OMap[Bytes, Bytes],
+    data: std.omap.OMap[Bytes, Arc[Bytes]],
     skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.Stop]]
 }
 
@@ -1331,9 +1338,10 @@ pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.id)?
-    let found = fetch_bytes(tx, t.id, encode_key(t.key, k)?)?
-    match take found {
-        Some(take raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
+    let p = physical(t.id, encode_key(t.key, k)?)?
+    record(tx, Point(copied(p)?))?
+    match std.omap.get(tx.roots.data, p) {
+        Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
     }
 }
@@ -1348,9 +1356,13 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     writable(tx, t)?
     let key = encode_key(t.key, k)?
     let p = physical(t.id, key)?
-    let previous = match std.omap.get(tx.roots.data, p) {
-        Some(old) => Some(row_value(t.readers, t.id, old)?),
-        None => None
+    let previous: Option[V] = if list.len(t.indexes) == 0 {
+        None
+    } else {
+        match std.omap.get(tx.roots.data, p) {
+            Some(old) => Some(row_value(t.readers, t.id, old)?),
+            None => None
+        }
     }
     for ix in t.indexes {
         let new_key = index_key(ix, v, key)?
@@ -1373,7 +1385,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     let mut raw: Bytes = list.new()
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     capacity(std.codec.encode(t.readers.codec, v, mut raw))?
-    put_bytes(mut tx, t.id, key, raw)
+    put_physical(mut tx, take p, take raw)
 }
 
 fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
@@ -1404,9 +1416,9 @@ pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] 
         return Error(Foreign)
     }
     readable(s.roots, t.catalog_key, t.id)?
-    let found = get_bytes(s, t.id, encode_key(t.key, k)?)?
-    match take found {
-        Some(take raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
+    let p = physical(t.id, encode_key(t.key, k)?)?
+    match std.omap.get(s.roots.data, p) {
+        Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
     }
 }
@@ -1420,7 +1432,7 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
     Ok(Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(s.roots.data), skip: None))
 }
 
-fn indexed_rows[J, K, V](data: std.omap.OMap[Bytes, Bytes], ix: Index[J, K, V], take cursor: ByteRows) -> Result[Rows[K, V], Error] {
+fn indexed_rows[J, K, V](data: std.omap.OMap[Bytes, Arc[Bytes]], ix: Index[J, K, V], take cursor: ByteRows) -> Result[Rows[K, V], Error] {
     let k = ix.key
     let start = 4u64
     let made: Result[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.Stop], (Capacity, (u64, std.codec.Key[J]))] = fn(raw: Bytes, mut at: u64) -> Result[(), std.codec.Stop] {
@@ -1662,7 +1674,8 @@ fn catalog_entry(db: Db, k: Bytes) -> Result[Catalog, Error] {
 }
 
 fn catalog_put(mut db: Db, roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Error] {
-    let inserted = std.omap.insert(mut db.next_node, roots.catalog, copied(k)?, copied(v)?)
+    let shared_value = capacity(result.capacity_only(arc.new(copied(v)?)))?
+    let inserted = std.omap.insert(mut db.next_node, roots.catalog, copied(k)?, take shared_value)
     let catalog = match take inserted {
         Ok(take tree) => take tree,
         Error((c, _)) => return Error(Full(c))
@@ -1798,7 +1811,8 @@ pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
         }
         let empty: Bytes = list.new()
         live = int.saturating_add(live, entry(physical_key, empty))
-        roots.data = capacity(result.capacity_only(std.omap.insert(mut db.next_node, roots.data, take physical_key, take empty)))?
+        let shared_empty = capacity(result.capacity_only(arc.new(take empty)))?
+        roots.data = capacity(result.capacity_only(std.omap.insert(mut db.next_node, roots.data, take physical_key, take shared_empty)))?
     }
     roots = catalog_put(mut db, roots, k, raw)?
     meta.epoch += 1
@@ -2731,7 +2745,7 @@ pub type Change {
 }
 
 type DiffPart {
-    node: Arc[std.omap.Node[Bytes, Bytes]],
+    node: Arc[std.omap.Node[Bytes, Arc[Bytes]]],
     at: u64
 }
 
@@ -3265,7 +3279,7 @@ pub fn law_changes_rewritten_equal(c: Clock) -> bool {
     for k in 0u64 .. 96 {
         let x = option.unwrap(result.unwrap(next_bytes(mut left)))
         let y = option.unwrap(result.unwrap(next_bytes(mut right)))
-        if x.0 != result.unwrap(physical(1, key_word(k))) || x.1 != key_word(k + 1) || x != y {
+        if x.0 != result.unwrap(physical(1, key_word(k))) || list.len(x.1) != 8 || decode_word(x.1) != k + 1 || x != y {
             return false
         }
         sum += decode_word(x.1)
@@ -3971,4 +3985,157 @@ fn test_read_cover(c: Clock) -> Result[(), ()] waits {
     } else {
         Error(())
     }
+}
+
+type FrameRow {
+    present: bool,
+    op: u8,
+    size: u64,
+    key_size: u64
+}
+
+// L29(a): an independent slot history counts the fields in section2.4.
+// An overwritten key has one final op; deleting an absent key adds none.
+// Table keys have12 bytes; the index keys have20 and empty values.
+pub fn law_frame_size(c: Clock) -> bool {
+    let mut db = test_db(c, 1073741824)
+    let budgeted = result.unwrap(bound bytes 80 {
+        execute(mut db, 16, fn(mut tx: Tx) -> Result[u64, Error] {
+            let _ = info(mut tx)
+            Ok(19)
+        })
+    })
+    match take budgeted {
+        Ok(Committed(done)) => if done.value != 19 { return false },
+        _ => return false
+    }
+    let outcome = result.unwrap(execute(mut db, 17, fn(mut tx: Tx) -> Result[bool, Error] {
+        let mut model: List[FrameRow] = list.new()
+        for slot in 0u64 .. 24 {
+            let width = if slot < 12 { 12u64 } else { 20u64 }
+            capacity(result.capacity_only(list.push(mut model, FrameRow(present: false, op: 0, size: 0, key_size: width))))?
+        }
+        for step in 0u64 .. 96 {
+            let k = sm(step) % 24
+            let id: u32 = if k < 12 { 1 } else { 2 }
+            let mut key = key_word(k % 12)
+            if id == 2 {
+                capacity(list.append(mut key, key_word(k % 4)))?
+            }
+            if step % 5 == 0 {
+                let removed = delete_bytes(mut tx, id, key)?
+                if removed != model[k].present {
+                    return Ok(false)
+                }
+                if removed {
+                    model[k].present = false
+                    model[k].op = 2
+                    model[k].size = 0
+                }
+            } else {
+                let size = if id == 2 { 0u64 } else { sm(step + 1) % 33 }
+                let mut value: Bytes = capacity(list.with_capacity(size))?
+                capacity(list.fill(mut value, size, int.truncate(step)))?
+                put_bytes(mut tx, id, key, value)?
+                model[k].present = true
+                model[k].op = 1
+                model[k].size = size
+            }
+            // head16 + branch4 + version8 + at8 + sections1 + data-tag1 + count4.
+            let mut expected: u64 = 16 + 4 + 8 + 8 + 1 + 1 + 4
+            for row in model {
+                if row.op == 1 {
+                    expected += 1 + 4 + row.key_size + 4 + row.size
+                } else if row.op == 2 {
+                    expected += 1 + 4 + row.key_size
+                }
+            }
+            let ci = info(mut tx)
+            let raw = capacity(encode_commit(ci, tx.ops, 1, 72))?
+            if tx.frame_bytes != expected || list.len(raw) != expected || read_le(raw, 4, 4) != expected - 16 {
+                return Ok(false)
+            }
+        }
+        Ok(true)
+    }))
+    match take outcome {
+        Committed(done) => done.value,
+        _ => false
+    }
+}
+
+@test
+fn test_frame_size(c: Clock) -> Result[(), ()] {
+    if law_frame_size(c) { Ok(()) } else { Error(()) }
+}
+
+fn frame_boundary(c: Clock, last: u64, accepted: bool) -> bool {
+    let mut db = test_db(c, 1073741824)
+    let result = result.unwrap(execute(mut db, 17, fn(mut tx: Tx) -> Result[u64, Error] {
+        for k in 0u64 .. 16 {
+            let size = if k == 15 { last } else { 1048576u64 }
+            let mut value: Bytes = capacity(list.with_capacity(size))?
+            capacity(list.fill(mut value, size, 0u8))?
+            put_bytes(mut tx, 1, key_word(k), value)?
+        }
+        let ci = info(mut tx)
+        let raw = capacity(encode_commit(ci, tx.ops, 1, 72))?
+        // U1: payload26 +16*(op1+key-length4+key12+value-length4)
+        // +15*1048576 +last; the frame also has its16-byte head.
+        let expected = 16 + 26 + 16 * 21 + 15 * 1048576 + last
+        if tx.frame_bytes != expected || list.len(raw) != expected || read_le(raw, 4, 4) != expected - 16 {
+            fail("L29 frame size")
+        }
+        Ok(expected)
+    }))
+    match take result {
+        Committed(done) => accepted && done.value == 15729018 + last && db.head == 1 && std.omap.len(db.roots.data) == 16,
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => !accepted && db.head == 0 && std.omap.len(db.roots.data) == 0,
+        _ => false
+    }
+}
+
+// L29(b), U1's hand-derived payload cap-1, cap, and cap+1. The stored values
+// include schema0's two zero bytes. No journal or frame allocation in execute.
+pub fn law_frame_size_boundary(c: Clock) -> bool {
+    frame_boundary(c, 1048277, true) && frame_boundary(c, 1048278, true) && frame_boundary(c, 1048279, false)
+}
+
+@test
+fn frame_size_boundary(c: Clock) -> Result[(), ()] {
+    if law_frame_size_boundary(c) { Ok(()) } else { Error(()) }
+}
+
+// T2: key12 rounds to16; schema0's value2+8 rounds to16, schema1's2+16
+// rounds to24. Replacing the old stored row must therefore add exactly8.
+// Subtracting a re-encode of the resolved old value would add nothing.
+pub fn law_stored_size(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, "sizes", std.codec.key_u64(), old_codec()))
+    let old = result.unwrap(table(mut db, "sizes", std.codec.key_u64(), old_codec()))
+    let first = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, old, 1, OldAccount(balance: 10))
+    }))
+    if let Committed(_) = first {} else { return false }
+    let held = snapshot(db)
+    let current = result.unwrap(table(mut db, "sizes", std.codec.key_u64(), new_codec()))
+    let sh = shape(current)
+    let before = db.resident
+    let changed = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, current, 1, NewAccount(balance: 10, bonus: 7))
+    }))
+    if let Committed(_) = changed {} else { return false }
+    if db.resident != before + 8 { return false }
+    let second = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, current, 1, NewAccount(balance: 11, bonus: 9))
+    }))
+    if let Committed(_) = second {} else { return false }
+    let a = option.unwrap(result.unwrap(get(held, sh, 1)))
+    let b = option.unwrap(result.unwrap(get(snapshot(db), sh, 1)))
+    db.resident == before + 8 && a.balance == 10 && a.bonus == 7 && b.balance == 11 && b.bonus == 9
+}
+
+@test
+fn test_stored_size(c: Clock) -> Result[(), ()] waits {
+    if law_stored_size(c) { Ok(()) } else { Error(()) }
 }

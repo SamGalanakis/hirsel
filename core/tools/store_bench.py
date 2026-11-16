@@ -19,6 +19,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--artifacts', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--store-source', type=Path,
+                   help='store source to freeze before preparing either native configuration')
     p.add_argument('--samples', type=int, choices=range(1, 6), default=1)
     p.add_argument('--prepare', action='store_true')
     p.add_argument('--measure', action='store_true')
@@ -36,6 +38,12 @@ def main():
                         'LD_LIBRARY_PATH': str(ROOT / 'tools/buck2/toolchains/llvm-files/lib')}
     if args.prepare:
         manifest = inputs(ROOT)
+        source = args.store_source or ROOT / 'core/programs/store/store.hirsel'
+        frozen = out / 'store.hirsel'
+        frozen.write_text(source.read_text())
+        for item in manifest['packages'][-1]['sources']:
+            if item['modules'] == ['store']:
+                item['file'] = str(frozen)
         manifest['packages'][-1]['sources'].append(dict(file=str(ROOT / 'core/programs/store/bench.hirsel'),
                                                        modules=['bench'], signatures=False))
         (out / 'inputs.json').write_text(json.dumps(manifest))

@@ -31,7 +31,7 @@ const OPS: [(CodecOp, &str); 4] = [
 /// `Schema`, then per component its row, `Codec` and `Result[_, Stop]`. Naming the
 /// components keeps their types in the key's closures, where a field alone would not
 /// (a String field is the `seq u8` a Bytes field is).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rows {
     pub tuple: TypeId,
     pub codec: TypeId,
@@ -41,7 +41,7 @@ pub struct Rows {
     pub schema: TypeId,
     pub parts: Vec<Part>,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Part {
     pub ty: TypeId,
     pub codec: TypeId,
@@ -731,62 +731,8 @@ impl Emitter {
         if self.module.types[row.index()].codec.is_some() {
             return;
         }
-        let TyKind::Tuple(xs) = t.kind(ty).clone() else {
+        let Some((of, rows)) = self.tuple_codec_rows(p, t, ty) else {
             return;
-        };
-        let std = |name: &str| {
-            p.fns.iter().position(|f| {
-                f.path.0.package.name == "std"
-                    && f.path.0.modules == ["codec"]
-                    && f.path.0.name == name
-            })
-        };
-        let (Some(take), Some(put), Some(describe)) =
-            (std("take_with"), std("put_with"), std("schema_of"))
-        else {
-            return;
-        };
-        let of = p.fns[take].path.clone();
-        let (bytes, codec, decoded) = {
-            let fd = &p.fns[take];
-            (fd.params[0].ty, fd.params[2].ty, fd.result)
-        };
-        let (written, schema) = (p.fns[put].result, p.fns[describe].params[0].ty);
-        let rows_of = |e: &mut Self, t: &mut _, x: TyId| -> Option<(TypeId, TypeId, TypeId)> {
-            let c = subst(t, codec, &[x]);
-            let d = subst(t, decoded, &[x]);
-            Some((
-                e.type_row(p, t, x)?,
-                e.type_row(p, t, c)?,
-                e.type_row(p, t, d)?,
-            ))
-        };
-        let Some((tuple, codec_row, decoded_row)) = rows_of(self, t, ty) else {
-            return;
-        };
-        let mut parts = vec![];
-        for x in xs {
-            let Some((ty, codec, decoded)) = rows_of(self, t, x) else {
-                return;
-            };
-            self.tuple_codec(p, t, x, ty);
-            parts.push(Part { ty, codec, decoded });
-        }
-        let (Some(written), Some(bytes), Some(schema)) = (
-            self.type_row(p, t, written),
-            self.type_row(p, t, bytes),
-            self.type_row(p, t, schema),
-        ) else {
-            return;
-        };
-        let rows = Rows {
-            tuple,
-            codec: codec_row,
-            decoded: decoded_row,
-            written,
-            bytes,
-            schema,
-            parts,
         };
         let op = CodecOp::Of;
         let f = if has_param(t, ty) {
@@ -813,5 +759,71 @@ impl Emitter {
             f
         };
         self.module.types[row.index()].codec = Some(hirsel_core_layout::FuncRef(f.0));
+    }
+    pub(super) fn tuple_codec_rows(
+        &mut self,
+        p: &Program,
+        t: &mut impl TyRead,
+        ty: TyId,
+    ) -> Option<(DefPath, Rows)> {
+        let TyKind::Tuple(xs) = t.kind(ty).clone() else {
+            return None;
+        };
+        let std = |name: &str| {
+            p.fns.iter().position(|f| {
+                f.path.0.package.name == "std"
+                    && f.path.0.modules == ["codec"]
+                    && f.path.0.name == name
+            })
+        };
+        let (Some(take), Some(put), Some(describe)) =
+            (std("take_with"), std("put_with"), std("schema_of"))
+        else {
+            return None;
+        };
+        let of = p.fns[take].path.clone();
+        let (bytes, codec, decoded) = {
+            let fd = &p.fns[take];
+            (fd.params[0].ty, fd.params[2].ty, fd.result)
+        };
+        let (written, schema) = (p.fns[put].result, p.fns[describe].params[0].ty);
+        let rows_of = |e: &mut Self, t: &mut _, x: TyId| -> Option<(TypeId, TypeId, TypeId)> {
+            let c = subst(t, codec, &[x]);
+            let d = subst(t, decoded, &[x]);
+            Some((
+                e.type_row(p, t, x)?,
+                e.type_row(p, t, c)?,
+                e.type_row(p, t, d)?,
+            ))
+        };
+        let Some((tuple, codec_row, decoded_row)) = rows_of(self, t, ty) else {
+            return None;
+        };
+        let mut parts = vec![];
+        for x in xs {
+            let Some((ty, codec, decoded)) = rows_of(self, t, x) else {
+                return None;
+            };
+            parts.push(Part { ty, codec, decoded });
+        }
+        let (Some(written), Some(bytes), Some(schema)) = (
+            self.type_row(p, t, written),
+            self.type_row(p, t, bytes),
+            self.type_row(p, t, schema),
+        ) else {
+            return None;
+        };
+        Some((
+            of,
+            Rows {
+                tuple,
+                codec: codec_row,
+                decoded: decoded_row,
+                written,
+                bytes,
+                schema,
+                parts,
+            },
+        ))
     }
 }

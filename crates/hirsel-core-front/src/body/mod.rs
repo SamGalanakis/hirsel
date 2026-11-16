@@ -177,6 +177,7 @@ pub struct Emitter {
     recipes: Vec<Recipe>,
     recipe_scratch: hirsel_core_layout::RecipeScratch,
     generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
+    generic_codecs: std::collections::BTreeMap<TypeId, templates::CodecRecipe>,
     generic_calls: std::collections::BTreeMap<FuncId, GenericCall>,
     #[cfg(any(test, feature = "test-assembly"))]
     templates: HashMap<DefPath, (FuncId, GenericTemplate)>,
@@ -411,8 +412,7 @@ impl Emitter {
         Ok((function, self.source_signature(function)))
     }
 
-    /// Gives the row of `ty`, a List, Map, Option or Result that holds a parameter and no
-    /// tuple, std's maker at its arguments as its codec hook, when an instance takes the
+    /// Gives the row of `ty`, a List, Map, Option or Result that holds a parameter, std's maker at its arguments as its codec hook, when an instance takes the
     /// row for a `codec`-bound parameter: `of` there reaches the maker once substitution
     /// instantiates the hook with the row. A closed row has its hook from layout
     /// (`layout::Shapes::structural_codec`), since a closed row's hook is part of it in the
@@ -541,12 +541,14 @@ impl Emitter {
             module: true,
             hooks: vec![],
             codecs: p.structural_codecs(),
+            tuple_codecs: vec![],
         };
         let r = f(&mut s);
         if r.is_none() {
             s.truncate(mark);
         }
         let hooks = std::mem::take(&mut s.hooks);
+        let tuples = std::mem::take(&mut s.tuple_codecs);
         for (row, hook, f, arguments) in hooks {
             // A generic row's finalizer or clone body is its template's instance at the
             // row's arguments, materialized as any other generic callee.
@@ -582,6 +584,9 @@ impl Emitter {
                 crate::layout::Hook::Clone => shape.clone = func,
                 crate::layout::Hook::Codec => shape.codec = func,
             }
+        }
+        for (row, ty) in tuples {
+            self.tuple_codec(p, t, ty, TypeId(row.0));
         }
         r
     }
@@ -2321,6 +2326,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     nested: std::mem::take(&mut self.nested),
                     types: self.e.generic_names.clone(),
                     calls: self.e.generic_calls.clone(),
+                    codecs: self.e.generic_codecs.clone(),
                 };
                 #[cfg(any(test, feature = "test-assembly"))]
                 self.e

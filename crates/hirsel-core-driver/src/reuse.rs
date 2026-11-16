@@ -758,7 +758,8 @@ impl Keys {
     }
     /// What every body reads beside its names: the prelude's closures
     /// (`prelude_closure`) and the closures of std's structural codec makers
-    /// (`hirsel_core_front::STRUCTURAL_CODECS`), each or its absence, in every std
+    /// (`hirsel_core_front::STRUCTURAL_CODECS`) and tuple protocol signatures,
+    /// each or its absence, in every std
     /// the index holds. Laying out a closed codec List, Map, Option or Result row
     /// makes its maker the row's codec hook, so every body reads them as it reads
     /// the prelude; std is not core's image, so this part is the request's, not
@@ -772,7 +773,11 @@ impl Keys {
         if let (Some(std), Some(codec)) = (index.symbols.find("std"), index.symbols.find("codec")) {
             for p in index.packages.iter().filter(|p| p.name == std) {
                 let module = index.child(p.root, codec);
-                for (_, maker) in hirsel_core_front::STRUCTURAL_CODECS {
+                for maker in hirsel_core_front::STRUCTURAL_CODECS
+                    .iter()
+                    .map(|(_, maker)| *maker)
+                    .chain(hirsel_core_front::TUPLE_CODEC_READS)
+                {
                     let id = module.and_then(|m| {
                         index
                             .symbols

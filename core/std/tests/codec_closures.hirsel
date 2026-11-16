@@ -1,0 +1,59 @@
+// expect: run codec_tuple_closure() = true
+pub fn codec_tuple_closure() -> bool {
+    let c: codec.Codec[(u64, u64)] = codec.of()
+    let pair = tuple_route((19u64, 18u64))
+    pair == (19u64, 18u64) && codec.least(c) == 16
+}
+
+fn tuple_route[T](take x: T) -> T {
+    let _ = (0u64, 0u64)
+    take x
+}
+
+// expect: run codec_option_closure() = 37
+pub fn codec_option_closure() -> u64 {
+    match option_route(37u64) {
+        Some(take x) => x,
+        None => 0
+    }
+}
+
+fn option_route[T: send](take x: T) -> Option[T] {
+    option_local(Some(take x))
+}
+
+fn option_local[T](take x: T) -> T {
+    let _ = Some(0u64)
+    take x
+}
+
+type NoCodec {
+    value: u64
+}
+
+// expect: run noncodec_payload_stays_unhooked() = 37
+pub fn noncodec_payload_stays_unhooked() -> u64 {
+    match option_route(NoCodec(value: 37)) {
+        Some(take x) => x.value,
+        None => 0
+    }
+}
+
+// A legacy protocol helper alone is not evidence of the codec bound.
+// expect: run protocol_maker_does_not_grant_bound() = 37
+pub fn protocol_maker_does_not_grant_bound() -> u64 {
+    let e: codec.DecodeError = Truncated(37u64)
+    match error_route(take e) {
+        Some(Truncated(n)) => n,
+        _ => 0
+    }
+}
+
+fn error_route[T: send](take x: T) -> Option[T] {
+    error_local(Some(take x))
+}
+
+fn error_local[T](take x: T) -> T {
+    let _: Option[codec.DecodeError] = None
+    take x
+}

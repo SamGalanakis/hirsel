@@ -40,6 +40,8 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     pub hooks: Vec<(TypeRef, Hook, u32, Vec<TyId>)>,
     /// The core types whose codec maker is std's ([`crate::Program::structural_codecs`]).
     pub codecs: &'p [(DeclId, u32)],
+    /// Closed codec tuples get their hook even when no source call requests it.
+    pub tuple_codecs: Vec<(TypeRef, TyId)>,
 }
 
 /// A row's declared function: its finalizer (`Shape::finalizer`), its clone body
@@ -58,7 +60,7 @@ impl<T: TyRead> Shapes<'_, T> {
     /// generic body reaches it at the instance's argument row. Every such row of a body
     /// module gets it here, since a closed row's hook is part of it in the closure hash. A
     /// row holding a parameter gets one where an instance asks for it (body/mod.rs
-    /// `structural_codec`); a row holding a tuple has none (its codec is not built).
+    /// `structural_codec`); closed tuple components carry their derived hooks too.
     fn structural_codec(
         &mut self,
         r: TypeRef,
@@ -160,6 +162,15 @@ impl<T: TyRead> Shapes<'_, T> {
                 (LRepr::Own, body, None, self.field(ty))
             }
             TyKind::Tuple(xs) => {
+                if self.module
+                    && !self.codecs.is_empty()
+                    && !has_param(&*self.types, ty)
+                    && crate::decls::has_bounds(self.decls, &*self.types, ty, &[])
+                        & crate::decls::CODEC
+                        != 0
+                {
+                    self.tuple_codecs.push((r, ty));
+                }
                 let mut fields = vec![];
                 for (i, x) in xs.into_iter().enumerate() {
                     fields.push(Field {
@@ -494,6 +505,7 @@ impl<T: TyRead> Shapes<'_, T> {
         self.shapes.truncate(mark);
         self.of.retain(|_, r| (r.0 as usize) < mark);
         self.hooks.retain(|(r, ..)| (r.0 as usize) < mark);
+        self.tuple_codecs.retain(|(r, _)| (r.0 as usize) < mark);
     }
 
     /// The table block of a `SeqIndex` of `elem` (MEM-12, MEM-24): the sequence's
@@ -756,6 +768,7 @@ pub(crate) fn recipes(p: &mut Program) {
         module: false,
         hooks: vec![],
         codecs: &[],
+        tuple_codecs: vec![],
     };
     let mut roots = vec![];
     for (i, decl) in s.decls.own_iter().enumerate() {

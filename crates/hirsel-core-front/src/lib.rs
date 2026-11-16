@@ -158,6 +158,9 @@ pub const SIBLING_READS: [(&str, &str, &str, &[&str]); 2] = [
     // and body/templates.rs `codec_maker` at an instance).
     ("std", "codec", "of", &body::BUILTIN_CODEC_MAKERS),
 ];
+/// Tuple codec row construction reads these protocol signatures even when the
+/// source never calls `codec.of`; the driver's prelude component records them.
+pub const TUPLE_CODEC_READS: [&str; 3] = ["take_with", "put_with", "schema_of"];
 /// The core prelude types whose codec is std's structural maker, each with that
 /// maker in `std.codec` (EXPANSION 9.1). Laying out a closed codec row of one of
 /// them reads its maker (the row's codec hook, layout.rs `structural_codec`), and

@@ -7,6 +7,22 @@ use hirsel_core_ir::{Closure, ClosureHook, Identity};
 use hirsel_core_layout::{Body as ShapeBody, FieldTy, FuncRef};
 use std::collections::BTreeMap;
 
+/// Potential codec hooks are recorded without creating a constrained function
+/// instance. Once closed, a recipe is admitted only when all its arguments are codec.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum CodecRecipe {
+    Structural {
+        definition: DefPath,
+        arguments: Vec<TypeId>,
+        signature: SigId,
+        dictionaries: Vec<NameRecipe>,
+    },
+    Tuple {
+        of: DefPath,
+        rows: super::codec_glue::Rows,
+    },
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CopySize {
     pub value: ValueId,
@@ -30,6 +46,7 @@ pub struct GenericTemplate {
     pub nested: BTreeMap<FuncId, GenericTemplate>,
     pub types: BTreeMap<TypeId, NameRecipe>,
     pub calls: BTreeMap<FuncId, GenericCall>,
+    pub codecs: BTreeMap<TypeId, CodecRecipe>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -444,22 +461,22 @@ pub(super) fn codec_maker(
 
 /// std's maker of each built-in type, by the type's row name: a scalar, `()`, String
 /// or DecodeError. `of` and every maker are siblings in std's `codec` module.
-const BUILTIN_CODECS: [(&str, &str); 15] = [
-    ("()", "of_unit"),
-    ("bool", "of_bool"),
-    ("char", "of_char"),
-    ("u8", "of_u8"),
-    ("u16", "of_u16"),
-    ("u32", "of_u32"),
-    ("u64", "of_u64"),
-    ("i8", "of_i8"),
-    ("i16", "of_i16"),
-    ("i32", "of_i32"),
-    ("i64", "of_i64"),
-    ("f32", "of_f32"),
-    ("f64", "of_f64"),
-    ("core@1/core/String", "of_string"),
-    ("std@1/codec/DecodeError", "of_decode_error"),
+const BUILTIN_CODECS: [(&str, &str, bool); 15] = [
+    ("()", "of_unit", true),
+    ("bool", "of_bool", true),
+    ("char", "of_char", true),
+    ("u8", "of_u8", true),
+    ("u16", "of_u16", true),
+    ("u32", "of_u32", true),
+    ("u64", "of_u64", true),
+    ("i8", "of_i8", true),
+    ("i16", "of_i16", true),
+    ("i32", "of_i32", true),
+    ("i64", "of_i64", true),
+    ("f32", "of_f32", true),
+    ("f64", "of_f64", true),
+    ("core@1/core/String", "of_string", true),
+    ("std@1/codec/DecodeError", "of_decode_error", false),
 ];
 /// The makers of [`BUILTIN_CODECS`], which a body naming `of` reads
 /// ([`crate::SIBLING_READS`]).
@@ -477,7 +494,15 @@ pub const BUILTIN_CODEC_MAKERS: [&str; 15] = {
 pub(super) fn builtin_codec(name: &str) -> Option<&'static str> {
     BUILTIN_CODECS
         .iter()
-        .find_map(|&(row, maker)| (row == name).then_some(maker))
+        .find_map(|&(row, maker, _)| (row == name).then_some(maker))
+}
+
+/// Scalar/String/unit makers witness their implicit codec bound. A legacy
+/// protocol helper alone does not; nominal types get the bound from declarations.
+fn builtin_codec_bound(name: &str) -> bool {
+    BUILTIN_CODECS
+        .iter()
+        .any(|&(row, _, bound)| row == name && bound)
 }
 
 struct Substitution<'a> {
@@ -489,6 +514,7 @@ struct Substitution<'a> {
     type_names: &'a BTreeMap<TypeId, NameRecipe>,
     call_names: &'a BTreeMap<FuncId, GenericCall>,
     nested: &'a BTreeMap<FuncId, GenericTemplate>,
+    codecs: &'a BTreeMap<TypeId, CodecRecipe>,
     error: Option<String>,
     types: HashMap<TypeId, TypeId>,
     functions: HashMap<FuncId, FuncId>,
@@ -535,9 +561,83 @@ impl Substitution<'_> {
             .map(|f| FuncRef(self.function(FuncId(f.0)).0));
         shape.clone = shape.clone.map(|f| FuncRef(self.function(FuncId(f.0)).0));
         shape.codec = shape.codec.map(|f| FuncRef(self.function(FuncId(f.0)).0));
+        if shape.codec.is_none()
+            && let Some(recipe) = self.codecs.get(&old).cloned()
+        {
+            shape.codec = self.codec(recipe).map(|f| FuncRef(f.0));
+        }
         self.module.types[row.index()] = shape;
         crate::layout::word_carriage(&mut self.module.types, row.index());
         row
+    }
+    fn codec(&mut self, recipe: CodecRecipe) -> Option<FuncId> {
+        let available = |module: &Module, ty: TypeId| {
+            let shape = &module.types[ty.index()];
+            shape.codec.is_some() || builtin_codec_bound(&shape.name)
+        };
+        match recipe {
+            CodecRecipe::Structural {
+                definition,
+                arguments,
+                signature,
+                dictionaries,
+            } => {
+                let arguments = arguments
+                    .into_iter()
+                    .map(|a| self.ty(a))
+                    .collect::<Vec<_>>();
+                if !arguments.iter().all(|&a| available(self.module, a)) {
+                    return None;
+                }
+                let key = InstanceKey {
+                    definition,
+                    arguments,
+                    dictionaries: dictionaries.iter().map(|d| d.render(&self.names)).collect(),
+                };
+                if let Some(f) = self
+                    .module
+                    .functions
+                    .iter()
+                    .position(|f| self.module.instances[f.instance.index()] == key)
+                {
+                    return Some(FuncId(f as u32));
+                }
+                let signature = self.signature(signature);
+                let instance = InstanceId(self.module.instances.len() as u32);
+                self.module.instances.push(key);
+                let f = FuncId(self.module.functions.len() as u32);
+                self.module.functions.push(Function {
+                    instance,
+                    signature,
+                    body: None,
+                });
+                Some(f)
+            }
+            CodecRecipe::Tuple { of, mut rows } => {
+                rows.tuple = self.ty(rows.tuple);
+                for part in &mut rows.parts {
+                    part.ty = self.ty(part.ty);
+                }
+                if !rows.parts.iter().all(|p| available(self.module, p.ty)) {
+                    return None;
+                }
+                rows.codec = self.ty(rows.codec);
+                rows.decoded = self.ty(rows.decoded);
+                rows.written = self.ty(rows.written);
+                rows.bytes = self.ty(rows.bytes);
+                rows.schema = self.ty(rows.schema);
+                for part in &mut rows.parts {
+                    part.codec = self.ty(part.codec);
+                    part.decoded = self.ty(part.decoded);
+                }
+                Some(super::codec_glue::row(
+                    self.module,
+                    &of,
+                    &rows,
+                    super::codec_glue::CodecOp::Of,
+                ))
+            }
+        }
     }
     /// The template field `ty` at the instance's arguments, written as a source row
     /// writes it (FORM #109): a row held inline whose type a holder writes otherwise
@@ -762,6 +862,7 @@ fn fill(
         type_names: &template.types,
         call_names: &template.calls,
         nested: &template.nested,
+        codecs: &template.codecs,
         error: None,
         types: HashMap::default(),
         functions: [(source, target)].into_iter().collect(),
@@ -1055,6 +1156,70 @@ impl Emitter {
             return;
         }
         self.generic_names.insert(row, NameRecipe::of(p, t, ty));
+        let arity = self.generic_names[&row]
+            .0
+            .iter()
+            .filter_map(|part| {
+                if let NamePart::Parameter(i) = part {
+                    Some(*i as usize + 1)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        // Preserve semantic exclusions (views, callables, resource payloads) before
+        // layout erases a view to the bytes of its referent. Parameters are optimistic
+        // here; the closed recipe checks their actual codec makers during fill.
+        let possible = crate::decls::has_bounds(&p.decls, t, ty, &vec![crate::decls::CODEC; arity])
+            & crate::decls::CODEC
+            != 0;
+        if possible {
+            match t.kind(ty).clone() {
+                TyKind::Tuple(_) => {
+                    if let Some((of, rows)) = self.tuple_codec_rows(p, t, ty) {
+                        self.generic_codecs
+                            .insert(row, CodecRecipe::Tuple { of, rows });
+                    }
+                }
+                TyKind::Adt(d, args) => {
+                    if let Some(&(_, maker)) = p.structural_codecs().iter().find(|(x, _)| *x == d) {
+                        let arguments = args
+                            .iter()
+                            .map(|&x| self.type_row(p, t, x))
+                            .collect::<Option<Vec<_>>>();
+                        if let Some(arguments) = arguments
+                            && let Ok((sig, abi)) = self.signature_inst(p, t, maker as usize, &args)
+                        {
+                            let signature = self.sig_abi(sig, abi);
+                            let mut dictionaries = vec![];
+                            for (generic, &arg) in p.fns[maker as usize].generics.iter().zip(&args)
+                            {
+                                for bit in 0..u16::BITS {
+                                    if generic.bounds & (1 << bit) != 0 {
+                                        dictionaries.push(NameRecipe::dictionary(
+                                            &crate::decls::bound_names(1 << bit),
+                                            &NameRecipe::of(p, t, arg),
+                                        ));
+                                    }
+                                }
+                            }
+                            self.generic_codecs.insert(
+                                row,
+                                CodecRecipe::Structural {
+                                    definition: p.fns[maker as usize].path.clone(),
+                                    arguments,
+                                    signature,
+                                    dictionaries,
+                                },
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
         match t.kind(ty).clone() {
             TyKind::Tuple(xs) => {
                 for x in xs {

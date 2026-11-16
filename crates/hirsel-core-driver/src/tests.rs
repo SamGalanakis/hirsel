@@ -2771,6 +2771,7 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     const THAW: &str = "@twin(Row) stable type RowS { n: u64 }\nfn thaw(s: RowS) -> Result[Row, Capacity] { clone(s) }\n";
     const CODEC: &str = "fn c() -> std.codec.Codec[u64] { std.codec.of() }\n";
     const LIST: &str = "fn l(take xs: List[u64]) -> List[u64] { xs }\n";
+    const TUPLE: &str = "fn pair() -> (u64, u64) { (1u64, 2u64) }\n";
     let one = format!("{ROW}{THAW}");
     let unpaired = format!("{ROW}{}", THAW.replace("@twin(Row) ", ""));
     // The invalid history is still an input: its cached body refusal must not leak
@@ -2808,6 +2809,7 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     };
     let renamed = without("of_u64", '(');
     let no_list = without("of_list", '[');
+    let no_schema = without("schema_of", '[');
     let cases = [
         (
             "the twin annotation leaves",
@@ -2855,6 +2857,18 @@ fn program_inputs_rebuild_bodies_like_fresh() {
             "std's List maker returns",
             (&no_list, &LIST.to_owned()),
             (&shipped, &LIST.to_owned()),
+            true,
+        ),
+        (
+            "a tuple's implicit schema protocol leaves",
+            (&shipped, &TUPLE.to_owned()),
+            (&no_schema, &TUPLE.to_owned()),
+            true,
+        ),
+        (
+            "a tuple's implicit schema protocol returns",
+            (&no_schema, &TUPLE.to_owned()),
+            (&shipped, &TUPLE.to_owned()),
             true,
         ),
     ];

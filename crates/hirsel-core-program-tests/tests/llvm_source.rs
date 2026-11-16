@@ -765,7 +765,6 @@ fn probe(s: u64) -> u64 {
     }
 }
 
-
 #[test]
 fn fallible_step_regions_refund_partial_work_and_check_strided_remainders() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");

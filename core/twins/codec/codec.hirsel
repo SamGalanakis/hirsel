@@ -1,0 +1,201 @@
+// Codec measurement: workload (rows, floats, strings) x mode (setup, encode, decode).
+// setup builds n values and encodes them once; encode re-encodes them r times; decode
+// decodes the one encoding r times. A mode's cost less setup's is r passes. The check
+// reads only the count and the last value, so a decode pass costs the decode alone.
+pub type Account {
+    id: u64,
+    owner: String,
+    balance: i64
+}
+
+fn account_encode(x: Account, mut out: Bytes) -> Result[(), Capacity] {
+    std.codec.put_u64(x.id, mut out)?
+    std.codec.put_string(x.owner, mut out)?
+    std.codec.put_i64(x.balance, mut out)
+}
+
+fn account_decode(b: Bytes, mut at: u64) -> Result[Account, std.codec.Stop] {
+    let id = std.codec.take_u64(b, mut at)?
+    let owner = std.codec.take_string(b, mut at)?
+    let balance = std.codec.take_i64(b, mut at)?
+    Ok(Account(id: id, owner: take owner, balance: balance))
+}
+
+fn account_schema(mut s: std.codec.Schema, c: std.codec.Codec[Account]) -> Result[(), Capacity] {
+    std.codec.define(mut s, "bench.Account", 0)?
+    if std.codec.record(mut s, 3)? {
+        return Ok(())
+    }
+    std.codec.field(mut s, "id")?
+    std.codec.schema_u64(mut s)?
+    std.codec.field(mut s, "owner")?
+    std.codec.schema_string(mut s)?
+    std.codec.field(mut s, "balance")?
+    std.codec.schema_i64(mut s)?
+    std.codec.close(mut s)
+    Ok(())
+}
+
+fn accounts() -> std.codec.Codec[Account] {
+    std.codec.make(account_encode, account_decode, account_schema, 24)
+}
+
+fn rows_encode(x: List[Account], mut out: Bytes) -> Result[(), Capacity] {
+    std.codec.put_list(x, accounts(), mut out)
+}
+
+fn rows_decode(b: Bytes, mut at: u64) -> Result[List[Account], std.codec.Stop] {
+    std.codec.take_list(b, mut at, accounts())
+}
+
+fn rows_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[Account]]) -> Result[(), Capacity] {
+    std.codec.schema_list(mut s, accounts())
+}
+
+fn rows() -> std.codec.Codec[List[Account]] {
+    std.codec.make(rows_encode, rows_decode, rows_schema, 8)
+}
+
+fn floats_encode(x: List[f64], mut out: Bytes) -> Result[(), Capacity] {
+    std.codec.put_list(x, std.codec.of_f64(), mut out)
+}
+
+fn floats_decode(b: Bytes, mut at: u64) -> Result[List[f64], std.codec.Stop] {
+    std.codec.take_list(b, mut at, std.codec.of_f64())
+}
+
+fn floats_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[f64]]) -> Result[(), Capacity] {
+    std.codec.schema_list(mut s, std.codec.of_f64())
+}
+
+fn floats() -> std.codec.Codec[List[f64]] {
+    std.codec.make(floats_encode, floats_decode, floats_schema, 8)
+}
+
+fn strings_encode(x: List[String], mut out: Bytes) -> Result[(), Capacity] {
+    std.codec.put_list(x, std.codec.of_string(), mut out)
+}
+
+fn strings_decode(b: Bytes, mut at: u64) -> Result[List[String], std.codec.Stop] {
+    std.codec.take_list(b, mut at, std.codec.of_string())
+}
+
+fn strings_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[String]]) -> Result[(), Capacity] {
+    std.codec.schema_list(mut s, std.codec.of_string())
+}
+
+fn strings() -> std.codec.Codec[List[String]] {
+    std.codec.make(strings_encode, strings_decode, strings_schema, 8)
+}
+
+// Owner k: "owner-" then k's decimal digits, 7 to 11 bytes.
+fn owner_of(k: u64) -> Result[String, Capacity] {
+    let mut s = string.from("owner-")?
+    string.push_u64(mut s, k)?
+    Ok(take s)
+}
+
+fn run[T](c: std.codec.Codec[T], xs: T, mode: u64, r: u64, check: fn(T) -> u64) -> Result[u64, Capacity] {
+    let mut out: Bytes = list.new()
+    std.codec.encode(c, xs, mut out)?
+    let mut sum: u64 = list.len(out)
+    let mut i: u64 = 0
+    while i < r {
+        if mode == 1 {
+            list.clear(mut out)
+            std.codec.encode(c, xs, mut out)?
+            sum += list.len(out)
+        } else if mode == 2 {
+            match std.codec.decode(c, out)? {
+                Ok(back) => {
+                    sum += check(back)
+                }
+                Error(_) => return Ok(0)
+            }
+        }
+        i += 1
+    }
+    Ok(sum)
+}
+
+fn check_rows(xs: List[Account]) -> u64 {
+    let last = xs[list.len(xs) - 1]
+    list.len(xs) + last.id + string.byte_len(last.owner)
+}
+
+fn check_floats(xs: List[f64]) -> u64 {
+    list.len(xs) + (float.to_bits64(xs[list.len(xs) - 1]) & 0xff)
+}
+
+fn check_strings(xs: List[String]) -> u64 {
+    list.len(xs) + string.byte_len(xs[list.len(xs) - 1])
+}
+
+fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, Capacity] {
+    if work == 0 {
+        let mut xs: List[Account] = list.with_capacity(n)?
+        let mut k: u64 = 0
+        while k < n {
+            let wide: i64 = int.truncate(k)
+            let a = Account(id: k, owner: owner_of(k)?, balance: wide - 50000)
+            match list.push(mut xs, take a) {
+                Ok(()) => {}
+                Error((f, _)) => return Error(f)
+            }
+            k += 1
+        }
+        run(rows(), xs, mode, r, check_rows)
+    } else if work == 1 {
+        let mut xs: List[f64] = list.with_capacity(n)?
+        let mut k: u64 = 0
+        while k < n {
+            let x: f64 = float.from_int(k)
+            match list.push(mut xs, x * 0.37 + 1.5) {
+                Ok(()) => {}
+                Error((f, _)) => return Error(f)
+            }
+            k += 1
+        }
+        run(floats(), xs, mode, r, check_floats)
+    } else {
+        let mut xs: List[String] = list.with_capacity(n)?
+        let mut k: u64 = 0
+        while k < n {
+            match list.push(mut xs, owner_of(k)?) {
+                Ok(()) => {}
+                Error((f, _)) => return Error(f)
+            }
+            k += 1
+        }
+        run(strings(), xs, mode, r, check_strings)
+    }
+}
+
+fn number(s: String) -> u64 {
+    let parsed: Result[u64, ParseError] = int.parse(s)
+    match parsed {
+        Ok(v) => v,
+        Error(_) => 0
+    }
+}
+
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let (Some(w), Some(m), Some(n), Some(r)) = (args.get(argv, 0), args.get(argv, 1), args.get(argv, 2), args.get(argv, 3)) else {
+        return Error(Exit(status: 2))
+    }
+    let v = match bench(number(w), number(m), number(n), number(r)) {
+        Ok(v) => v,
+        Error(_) => return Error(Exit(status: 3))
+    }
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, v) {
+        return Error(Exit(status: 3))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 3))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2))
+    }
+}

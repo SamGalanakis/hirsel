@@ -175,7 +175,6 @@ impl CheckRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileProduct {
     pub module: ModuleId,
-    pub path: PathBuf,
     pub source: ContentHash,
     pub syntax: SyntaxFile,
     pub names: Vec<Definition>,
@@ -547,7 +546,6 @@ impl Driver {
                         package: p.package.clone(),
                         modules: s.modules.clone(),
                     },
-                    s.file.clone(),
                     s.signatures,
                     bytes,
                     hash,
@@ -563,10 +561,19 @@ impl Driver {
         };
         let produce = matches!(request.library, LibraryInput::Produce);
         let reachable_only = matches!(request.library, LibraryInput::ReachableImage(_));
-        let source_stamps: Vec<_> = sources.iter().map(|s| s.4).collect();
+        // A file is read for its bytes alone: the snapshot names each source
+        // by its module and digest, never by where the checkout lives.
+        let source_stamps: Vec<_> = sources.iter().map(|s| (&s.0, s.1, s.3)).collect();
+        let dependencies: Vec<_> = request
+            .inputs
+            .packages
+            .iter()
+            .map(|p| (&p.package, &p.dependencies))
+            .collect();
         let snapshot = ContentHash::of_bytes(&encode(&(
             compiler,
-            &request.inputs,
+            &request.inputs.core,
+            dependencies,
             source_stamps,
             image.as_ref().map(|i| i.identity),
             produce,
@@ -617,7 +624,7 @@ impl Driver {
         let mut modules = vec![];
         let mut syntax_diagnostics = vec![];
         let mut syntax_resources = vec![];
-        for (path, _, signatures, bytes, _) in &sources {
+        for (path, signatures, bytes, _) in &sources {
             let output = parse_bytes(
                 bytes,
                 if *signatures {
@@ -986,7 +993,7 @@ impl Driver {
                 .or_default()
                 .push((DefinitionId((base + i) as u32), *d));
         }
-        for (m, (path, file, _, bytes, source)) in modules.into_iter().zip(sources) {
+        for (m, (path, _, bytes, source)) in modules.into_iter().zip(sources) {
             let rows = names.remove(&m.id).unwrap_or_default();
             publication.files.insert(
                 (
@@ -999,7 +1006,6 @@ impl Driver {
             let module_names = rows.into_iter().map(|(_, d)| d).collect();
             result.files.push(Arc::new(FileProduct {
                 module: m.id,
-                path: file,
                 source,
                 syntax: m.syntax,
                 names: module_names,

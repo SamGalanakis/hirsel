@@ -425,6 +425,42 @@ mod tests {
             }],
         }
     }
+    /// An image is a function of its sources and request: one library imaged
+    /// under two checkout paths gives the same root and byte-equal records.
+    #[test]
+    fn image_records_do_not_depend_on_the_checkout_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "pub fn identity[T](take x: T) -> T { x }\npub fn answer() -> u64 { 7 }\n";
+        let stores = ["a", "second-place/b"].map(|checkout| {
+            let checkout = dir.path().join(checkout);
+            std::fs::create_dir_all(&checkout).unwrap();
+            let product = PackageProduct::sources(
+                library(source, &checkout),
+                &checkout.join("products"),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+            let root = product.image.store_root();
+            let mut records = BTreeMap::new();
+            let mut pending = vec![root.clone()];
+            while let Some(dir) = pending.pop() {
+                for file in std::fs::read_dir(&dir).unwrap() {
+                    let path = file.unwrap().path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else {
+                        let name = path.strip_prefix(&root).unwrap().to_owned();
+                        records.insert(name, std::fs::read(&path).unwrap());
+                    }
+                }
+            }
+            (product.image.identity, records)
+        });
+        assert_eq!(stores[0].0, stores[1].0, "image root");
+        let names = |i: usize| stores[i].1.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(names(0), names(1), "record names");
+        assert!(stores[0].1 == stores[1].1, "record bytes");
+    }
     #[test]
     fn program_does_not_decode_unreached_published_function_rows() {
         let dir = tempfile::tempdir().unwrap();

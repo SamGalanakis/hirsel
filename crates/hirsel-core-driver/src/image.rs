@@ -15,7 +15,6 @@ pub enum LibraryInput {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ImageFile {
     pub module: ModuleId,
-    pub path: PathBuf,
     pub names: Vec<Definition>,
     pub row: ContentHash,
 }
@@ -308,7 +307,6 @@ impl Driver {
             sources.insert(file.module, store.put(&encode(&file.syntax.source)?)?);
             files.push(ImageFile {
                 module: file.module,
-                path: file.path.clone(),
                 names: file.names.clone(),
                 row: store.put(&encode(file.as_ref())?)?,
             });

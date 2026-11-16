@@ -4,9 +4,12 @@
 // build, the same executable bytes and exit. Both primed paths are held to it: one
 // driver across the sequence (memory and disk) and a new driver per request (disk
 // alone). Sources are edited in place, as an editor does. Oracle: the empty store,
-// which no earlier request can reach. Cases: the programs of option-l-review-1034
-// and the request sequences of l-body-review-1036 (their fixtures and RUN receipts
-// are under /workspace/code/hirsel-briefs/{option-l-review-1034,l-body-review-1036}).
+// which no earlier request can reach. Each sequence is primed as A, A', B...: A' is
+// A with a newline appended to every source outside core and std, the same shape in
+// other bytes, so a store that publishes on the second request with one shape holds
+// a generation before B. Cases: the programs of option-l-review-1034, the request
+// sequences of l-body-review-1036 and the shapes of l-body-review-1039 (fixtures
+// and RUN receipts under /workspace/code/hirsel-briefs/<review>/).
 
 /// A source's text: literal, or a file of this checkout with one replacement
 /// (`find` empty: `with` appended).
@@ -36,19 +39,34 @@ struct Req {
     dir: &'static str,
     /// This request's directory is a link to the named directory.
     link: Option<&'static str>,
+    /// A change to the native options of a build.
+    native: Option<fn(&mut NativeOptions)>,
+    /// Core is checked through a package product cache kept beside the store,
+    /// as `check --core-product` does.
+    core_product: bool,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Fault {
     None,
-    /// The selected check root's record is removed after the first request.
+    /// The selected check root's record is removed before the first request after A'.
     MissingRoot,
     /// An unpublished partial record sits in the store's temporary directory.
     TornTemp,
+}
+/// The gate decision OPTION-L v3.1 predicts for a sequence's last request after
+/// its priming: l-body-review-1039's settled column, falling back where a module of
+/// the generation before it is refused (v3.1 gate condition 4). Recorded for the
+/// gate's own law; nothing here reads it yet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Gate {
+    Fast,
+    Fallback,
 }
 struct Seq {
     name: &'static str,
     steps: Vec<Req>,
     fault: Fault,
+    gate: Gate,
 }
 fn lit(text: &'static str) -> Text {
     Text::Lit(text)
@@ -92,6 +110,8 @@ fn check(packages: Vec<Pkg>) -> Req {
         build: false,
         dir: "src",
         link: None,
+        native: None,
+        core_product: false,
     }
 }
 fn build(packages: Vec<Pkg>) -> Req {
@@ -102,10 +122,37 @@ fn build(packages: Vec<Pkg>) -> Req {
     }
 }
 fn seq(name: &'static str, steps: Vec<Req>) -> Seq {
+    let gate = match GATES.binary_search_by_key(&name, |g| g.0) {
+        Ok(i) => GATES[i].1,
+        Err(_) => panic!("{name}: no recorded gate class"),
+    };
     Seq {
         name,
         steps,
         fault: Fault::None,
+        gate,
+    }
+}
+fn llvm(options: &mut NativeOptions) {
+    options.backend = Backend::Llvm;
+}
+fn optimize(options: &mut NativeOptions) {
+    options.optimize = true;
+}
+fn debug_lines(options: &mut NativeOptions) {
+    options.debug_lines = true;
+}
+fn root_limit(options: &mut NativeOptions) {
+    options.root_limit = 4 * 1_048_576;
+}
+/// `name` or `name@version`.
+fn package_id(spec: &str) -> PackageId {
+    match spec.split_once('@') {
+        Some((name, version)) => PackageId {
+            name: name.into(),
+            version: version.into(),
+        },
+        None => package(spec),
     }
 }
 /// One app package over core.
@@ -117,7 +164,7 @@ fn app(files: &[(&'static str, &'static str, &'static str)]) -> Vec<Pkg> {
             &["core"],
             files
                 .iter()
-                .map(|(file, modules, text)| src(modules, file, false, lit(text)))
+                .map(|(file, modules, text)| src(modules, file, false, lit(*text)))
                 .collect(),
         ),
     ]
@@ -128,7 +175,12 @@ fn checkout() -> PathBuf {
 }
 /// Write `req`'s sources under `root`, removing the previous request's files it
 /// no longer has, and return its manifest.
-fn materialize(req: &Req, root: &Path, written: &mut BTreeSet<PathBuf>) -> CorpusManifest {
+fn materialize(
+    req: &Req,
+    pad: bool,
+    root: &Path,
+    written: &mut BTreeSet<PathBuf>,
+) -> CorpusManifest {
     let dir = root.join(req.dir);
     if let Some(target) = req.link {
         if !dir.exists() {
@@ -141,16 +193,16 @@ fn materialize(req: &Req, root: &Path, written: &mut BTreeSet<PathBuf>) -> Corpu
         let mut manifest = match p.name {
             "core" => PackageProduct::bundled_manifest(&checkout().join("core/core")),
             "std" => PackageProduct::bundled_std_manifest(&checkout().join("core/std")),
-            name => PackageManifest {
-                package: package(name),
+            spec => PackageManifest {
+                package: package_id(spec),
                 dependencies: vec![],
                 sources: vec![],
             },
         };
-        manifest.dependencies = p.deps.iter().map(|d| package(d)).collect();
+        manifest.dependencies = p.deps.iter().map(|d| package_id(d)).collect();
         let bundled = manifest.sources.len();
         for s in &p.sources {
-            let text = match s.text {
+            let mut text = match s.text {
                 Text::Lit(text) => text.to_owned(),
                 Text::Repo(path, find, with) => {
                     let base = std::fs::read_to_string(checkout().join(path)).unwrap();
@@ -162,7 +214,10 @@ fn materialize(req: &Req, root: &Path, written: &mut BTreeSet<PathBuf>) -> Corpu
                     }
                 }
             };
-            let file = dir.join(p.name).join(&s.file);
+            if pad && !matches!(p.name, "core" | "std") {
+                text.push('\n');
+            }
+            let file = dir.join(&manifest.package.name).join(&s.file);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             if std::fs::read_to_string(&file).ok().as_deref() != Some(&text) {
                 std::fs::write(&file, text).unwrap();
@@ -200,7 +255,8 @@ fn materialize(req: &Req, root: &Path, written: &mut BTreeSet<PathBuf>) -> Corpu
 #[derive(Debug, PartialEq)]
 struct Answer {
     check: serde_json::Value,
-    root: ContentHash,
+    /// None when the core package product refuses before the check.
+    root: Option<ContentHash>,
     native: Option<serde_json::Value>,
 }
 fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) -> Answer {
@@ -232,17 +288,42 @@ fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) ->
     });
     Answer {
         check,
-        root: product.root,
+        root: Some(product.root),
         native,
     }
 }
-fn request(req: &Req, inputs: CorpusManifest, store: PathBuf) -> CheckRequest {
-    CheckRequest {
+/// Answer one request from the store at `store`. A core package product that
+/// is incomplete refuses the request with an error, and that error is its answer.
+fn request(
+    driver: &mut Driver,
+    req: &Req,
+    inputs: CorpusManifest,
+    store: PathBuf,
+    options: Option<NativeOptions>,
+) -> Answer {
+    let products = store.with_extension("products");
+    let request = CheckRequest {
         inputs,
         store,
         library: LibraryInput::Sources,
         entry: req.entry.map(|e| DefPath::from_full(e).unwrap()),
-    }
+    };
+    let meter = &mut Meter::new(false);
+    let product = if req.core_product {
+        match driver.check_with_core_product(request, &products, meter) {
+            Ok(product) => product,
+            Err(refused) => {
+                return Answer {
+                    check: serde_json::json!({ "core_product": refused.to_string() }),
+                    root: None,
+                    native: None,
+                };
+            }
+        }
+    } else {
+        driver.check(request, meter).unwrap()
+    };
+    answer(&product, req, options.as_ref())
 }
 fn fault(store: &Path, fault: Fault) {
     match fault {
@@ -270,44 +351,59 @@ fn run_sequence(seq: &Seq, backend: Option<Backend>) -> (Vec<String>, Vec<String
     let mut written = BTreeSet::new();
     let mut resident = Driver::default();
     let (mut failures, mut roots) = (vec![], vec![]);
-    let options = |tag: &str| {
-        backend.map(|backend| NativeOptions {
-            store: dir.path().join(format!("{tag}-native")),
-            output: dir.path().join(format!("{tag}-program")),
-            ..native_options(backend, dir.path())
+    let options = |tag: &str, req: &Req| {
+        backend.map(|backend| {
+            let mut options = NativeOptions {
+                store: dir.path().join(format!("{tag}-native")),
+                output: dir.path().join(format!("{tag}-program")),
+                ..native_options(backend, dir.path())
+            };
+            if let Some(change) = req.native {
+                change(&mut options);
+            }
+            options
         })
     };
-    for (n, req) in seq.steps.iter().enumerate() {
-        let inputs = materialize(req, &root, &mut written);
-        let resident_product = resident
-            .check(
-                request(req, inputs.clone(), dir.path().join("resident")),
-                &mut Meter::new(false),
-            )
-            .unwrap();
-        let resident_answer = answer(&resident_product, req, options("resident").as_ref());
-        let disk_product = Driver::default()
-            .check(
-                request(req, inputs.clone(), dir.path().join("disk")),
-                &mut Meter::new(false),
-            )
-            .unwrap();
-        let disk_answer = answer(&disk_product, req, options("disk").as_ref());
-        if n == 0 {
+    // A, A', then the rest; the fault lands before the first request after A'.
+    let steps = [(&seq.steps[0], false), (&seq.steps[0], true)]
+        .into_iter()
+        .chain(seq.steps[1..].iter().map(|req| (req, false)));
+    for (n, (req, pad)) in steps.enumerate() {
+        if n == 2 {
             fault(&dir.path().join("resident"), seq.fault);
             fault(&dir.path().join("disk"), seq.fault);
+        }
+        let inputs = materialize(req, pad, &root, &mut written);
+        let resident_answer = request(
+            &mut resident,
+            req,
+            inputs.clone(),
+            dir.path().join("resident"),
+            options("resident", req),
+        );
+        let disk_answer = request(
+            &mut Driver::default(),
+            req,
+            inputs.clone(),
+            dir.path().join("disk"),
+            options("disk", req),
+        );
+        if n == 0 {
             continue;
         }
         let fresh_store = dir.path().join(format!("fresh{n}"));
-        let fresh_product = Driver::default()
-            .check(request(req, inputs, fresh_store), &mut Meter::new(false))
-            .unwrap();
-        let fresh = answer(&fresh_product, req, options(&format!("fresh{n}")).as_ref());
+        let fresh = request(
+            &mut Driver::default(),
+            req,
+            inputs,
+            fresh_store,
+            options(&format!("fresh{n}"), req),
+        );
         for (path, primed) in [("resident", &resident_answer), ("disk", &disk_answer)] {
             if (&primed.check, &primed.native) != (&fresh.check, &fresh.native) {
                 failures.push(format!(
-                    "{} step {n} ({path} store): primed {:#} {:?}\n  fresh {:#} {:?}",
-                    seq.name, primed.check, primed.native, fresh.check, fresh.native
+                    "{} step {n} ({path} store, predicted gate {:?}): primed {:#} {:?}\n  fresh {:#} {:?}",
+                    seq.name, seq.gate, primed.check, primed.native, fresh.check, fresh.native
                 ));
             } else if primed.root != fresh.root {
                 roots.push(format!("{} step {n} ({path} store)", seq.name));
@@ -1071,9 +1167,271 @@ fn parse(take s: String) -> Result[Email, String] {
     ]
 }
 
+/// The shapes of l-body-review-1039 that a driver request expresses, as two- and
+/// three-request histories.
+#[rustfmt::skip]
+fn review_1039_sequences() -> Vec<Seq> {
+    vec![
+        seq("dependency_version", vec![
+        check(vec![
+            core(vec![]),
+            pkg("lib", &["core", "app"], vec![src("a", "lib_a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))]),
+            pkg("app", &["core", "lib"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:lib.a.f()))}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("lib@2", &["core", "app"], vec![src("a", "lib_a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))]),
+            pkg("app", &["core", "lib@2"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:lib.a.f()))}"###))])])]),
+        seq("dependency_order", vec![
+        check(vec![
+            core(vec![]),
+            pkg("lib", &["core", "app"], vec![src("a", "lib_a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))]),
+            pkg("app", &["core", "lib"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:lib.a.f()))}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("lib", &["core", "app"], vec![src("a", "lib_a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))]),
+            pkg("app", &["lib", "core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:lib.a.f()))}"###))])])]),
+        seq("core_source_edit", vec![
+        check(vec![
+            core(vec![src("review", "core_review.hirsel", true, lit(r###"pub fn spare()->u8{1u8}"###))]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        check(vec![
+            core(vec![src("review", "core_review.hirsel", true, lit(r###"pub fn spare()->u8{2u8}"###))]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])])]),
+        seq("std_dependency_added", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type R:codec{x:u8}"###))])]),
+        check(vec![
+            core(vec![]),
+            std_pkg(),
+            pkg("app", &["core", "std"], vec![src("a", "a.hirsel", false, lit(r###"pub type R:codec{x:u8}"###))])])]),
+        seq("finalizer_cross_module", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub resource type R{x:u8} drop(r){}
+pub fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"fn use(take r:a.R){}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub resource type R{x:u8} drop(r){}
+pub fn f()->u8{2u8}"###)), src("b", "b.hirsel", false, lit(r###"fn use(take r:a.R){}"###))])])]),
+        seq("codec_owner_body", vec![
+        check(vec![
+            core(vec![]),
+            std_pkg(),
+            pkg("app", &["core", "std"], vec![src("a", "a.hirsel", false, lit(r###"pub type R:codec{x:u8=1u8}
+pub fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"fn use(x:a.R){}"###))])]),
+        check(vec![
+            core(vec![]),
+            std_pkg(),
+            pkg("app", &["core", "std"], vec![src("a", "a.hirsel", false, lit(r###"pub type R:codec{x:u8=1u8}
+pub fn f()->u8{2u8}"###)), src("b", "b.hirsel", false, lit(r###"fn use(x:a.R){}"###))])])]),
+        seq("generic_cross_clone", vec![
+        check(vec![
+            core(vec![src("held", "core_held.hirsel", true, lit(r###"pub type P{x:u8}
+pub fn make(x:u8)->P{P(x:x)}
+pub fn value(p:P)->u8{p.x}"###)), src("hook", "core_hook.hirsel", true, lit(r###"clone(p:held.P){Ok(held.make(held.value(p)))}"###))]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn use[T](x:T)->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"fn f(x:core.held.P)->Result[core.held.P,Capacity]{let _=a.use(x);clone(x)}"###))])]),
+        check(vec![
+            core(vec![src("held", "core_held.hirsel", true, lit(r###"pub type P{x:u8}
+pub fn make(x:u8)->P{P(x:x)}
+pub fn value(p:P)->u8{let x=p.x; x}"###)), src("hook", "core_hook.hirsel", true, lit(r###"clone(p:held.P){Ok(held.make(held.value(p)))}"###))]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn use[T](x:T)->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"fn f(x:core.held.P)->Result[core.held.P,Capacity]{let _=a.use(x);clone(x)}"###))])])]),
+        seq("declaration_pass_order", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(x:Inline[u8]){}"###)), src("b", "b.hirsel", false, lit(r###"type R{x:Inline[u8]}"###)), src("c", "c.hirsel", false, lit(r###"pub fn g()->u8{1u8}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(x:Inline[u8]){}"###)), src("b", "b.hirsel", false, lit(r###"type R{x:Inline[u8]}"###)), src("c", "c.hirsel", false, lit(r###"pub fn g()->u8{2u8}"###))])])]),
+        seq("global_summary_refusal", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"type R:plain{x:u8}
+fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"fn g(){}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"type R:plain{x:u8}
+fn f()->u8{2u8}"###)), src("b", "b.hirsel", false, lit(r###"fn g(){}"###))])])]),
+        seq("test_signature_reference_order", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(){b.law()}"###)), src("b", "b.hirsel", false, lit(r###"@test pub fn law(){}"###)), src("c", "c.hirsel", false, lit(r###"fn g(){}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(){b.law()}"###)), src("b", "b.hirsel", false, lit(r###"@test pub fn law(){}"###)), src("c", "c.hirsel", false, lit(r###"fn g(){let _=0u8}"###))])])]),
+        seq("same_shape_refused_constant", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub const X:u8=false
+fn f(){}"###)), src("b", "b.hirsel", false, lit(r###"pub const Y:u8=a.X"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub const X:u8=false
+fn f(){let _=0u8}"###)), src("b", "b.hirsel", false, lit(r###"pub const Y:u8=a.X"###))])])]),
+        seq("cycle_two_current", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn f(n:u8)->u8{if n==0u8{7u8}else{b.g(n-1u8)}}"###)), src("b", "b.hirsel", false, lit(r###"pub fn g(n:u8)->u8{a.f(n)}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f(2u8)))}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn f(n:u8)->u8{if n==0u8{9u8}else{b.g(n-1u8)}}"###)), src("b", "b.hirsel", false, lit(r###"pub fn g(n:u8)->u8{let x=n; a.f(x)}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f(2u8)))}"###))])])]),
+        seq("generic_instance_new_type", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn id[T:plain](x:T)->T{x}"###)), src("b", "b.hirsel", false, lit(r###"pub fn f()->u8{a.id(7u8)}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:b.f()))}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn id[T:plain](x:T)->T{x}"###)), src("b", "b.hirsel", false, lit(r###"pub fn f()->u8{let _=a.id(3u64); a.id(7u8)}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:b.f()))}"###))])])]),
+        seq("generic_refused_then_demanded", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn bad[T](x:T)->u8{x}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:7u8))}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn bad[T](x:T)->u8{x}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.bad(true)))}"###))])])]),
+        seq("constant_with_current_owner", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub const X:u8=7u8
+pub fn f()->u8{X}"###)), src("b", "b.hirsel", false, lit(r###"pub const Y:u8=a.X"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:b.Y))}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub const X:u8=7u8
+pub fn f()->u8{let x=X; x}"###)), src("b", "b.hirsel", false, lit(r###"pub const Y:u8=a.X"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:b.Y))}"###))])])]),
+        seq("constant_parts_forward", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type R{x:u8}
+pub const X:R=b.Y
+pub fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"pub const Y:a.R=a.R(x:7u8)"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.X.x))}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type R{x:u8}
+pub const X:R=b.Y
+pub fn f()->u8{2u8}"###)), src("b", "b.hirsel", false, lit(r###"pub const Y:a.R=a.R(x:7u8)"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.X.x))}"###))])])]),
+        seq("twin_current_owner", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A{x:u8}
+pub fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B{x:u8}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub type A{x:u8}
+pub fn f()->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"@twin(a.A) pub type B{x:u8}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###))])])]),
+        seq("decl_count_fallback", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub type R{x:u8}
+pub fn f()->u8{7u8}"###))])])]),
+        seq("code_identity_body", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{1u8}"###)), src("b", "b.hirsel", false, lit(r###"pub fn named[F](s:StaticFn[F],want:Bytes)->bool{code.identity(s)==want}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{let _=b.named(code.describe(a.f),code.identity(code.describe(a.f)));Error(Exit(status:a.f()))}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"pub fn named[F](s:StaticFn[F],want:Bytes)->bool{code.identity(s)==want}"###)), src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{let _=b.named(code.describe(a.f),code.identity(code.describe(a.f)));Error(Exit(status:a.f()))}"###))])])]),
+        seq("reach_to_full", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###)), src("z", "z.hirsel", false, lit(r###"fn bad()->u8{false}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###)), src("z", "z.hirsel", false, lit(r###"fn bad()->u8{false}"###))])])]),
+        seq("full_to_reach", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###)), src("z", "z.hirsel", false, lit(r###"fn bad()->u8{false}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###)), src("z", "z.hirsel", false, lit(r###"fn bad()->u8{false}"###))])])]),
+        seq("entry_warning_interleave", vec![
+        Req { entry: Some("app@1/a/main"), ..check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn main()->Result[(),Exit] waits{Ok(())}"###)), src("b", "b.hirsel", false, lit(r###"pub fn other()->Result[(),Exit]{Ok(())}"###))])]) },
+        Req { entry: Some("app@1/b/other"), ..check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn main()->Result[(),Exit] waits{Ok(())}"###)), src("b", "b.hirsel", false, lit(r###"pub fn other()->Result[(),Exit]{Ok(())}"###))])]) },
+        Req { entry: Some("app@1/a/main"), ..check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn main()->Result[(),Exit] waits{Ok(())}"###)), src("b", "b.hirsel", false, lit(r###"pub fn other()->Result[(),Exit]{Ok(())}"###))])]) }]),
+        seq("publish_body_third", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{9u8}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{9u8}"###))])])]),
+        seq("publish_refused_second", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{false}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])])]),
+        Seq { fault: Fault::TornTemp, ..seq("publish_uncommitted_second", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{9u8}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{9u8}"###))])])]) },
+        seq("publish_check_build_check", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])])]),
+        seq("backend_llvm", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        Req { native: Some(llvm), ..build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]) }]),
+        seq("optimization", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        Req { native: Some(optimize), ..build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]) }]),
+        seq("debug_lines", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        Req { native: Some(debug_lines), ..build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]) }]),
+        seq("root_limit", vec![
+        build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]),
+        Req { native: Some(root_limit), ..build(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("main", "main.hirsel", false, lit(r###"pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"###)), src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{7u8}"###))])]) }]),
+    ]
+}
+
 /// Sequences over the request tuple, faults, entry policy and a module ring
 /// (l-body-review-1036 tuple_state.py and entry_policy.py).
 fn tuple_sequences() -> Vec<Seq> {
+    const MAIN0: &str = "pub fn main()->Result[(),Exit]{Ok(())}";
     const MAIN1: &str = "pub fn main()->Result[(),Exit]{Error(Exit(status:other.V))}";
     let relocated = |dir| Req {
         dir,
@@ -1111,7 +1469,51 @@ fn tuple_sequences() -> Vec<Seq> {
             .collect();
         check(vec![core(vec![]), pkg("app", &["core"], sources)])
     };
+    // core/ordering enumerates A,C,B,P,Q both times; the file names alone set
+    // the traversal, and the traversal decides which twin pairs with which.
+    let ordering = |label: &str, names: [usize; 5]| {
+        let texts = [
+            "pub type A{n:u64}",
+            "@twin(A) pub type C{n:u64}",
+            "@twin(A) pub type B{n:u64}",
+            "@twin(Q) pub type P{x:A}",
+            "pub type Q{x:B}",
+        ];
+        let sources = texts
+            .iter()
+            .zip(names)
+            .map(|(text, name)| {
+                src(
+                    "ordering",
+                    &format!("ordering_{label}{name}.hirsel"),
+                    false,
+                    lit(*text),
+                )
+            })
+            .collect();
+        Req {
+            core_product: true,
+            ..check(vec![
+                core(sources),
+                pkg(
+                    "app",
+                    &["core"],
+                    vec![src("main", "main.hirsel", false, lit(MAIN0))],
+                ),
+            ])
+        }
+    };
     vec![
+        // Q,P,B,C,A is accepted; the same bytes renamed to traverse A,C,B,P,Q
+        // are refused fresh, so a package record keyed by modules alone serves
+        // the first order's acceptance.
+        seq(
+            "product_order",
+            vec![
+                ordering("a", [4, 3, 2, 1, 0]),
+                ordering("b", [0, 1, 2, 3, 4]),
+            ],
+        ),
         seq(
             "checkout_relocated",
             vec![relocated("src"), relocated("moved")],
@@ -1208,33 +1610,6 @@ fn tuple_sequences() -> Vec<Seq> {
                 edited("pub fn f()->u8{1u8}"),
             ],
         ),
-        seq(
-            "entry_waits_policy",
-            vec![
-                Req {
-                    entry: Some("app@1/a/main"),
-                    ..check(app(&[
-                        (
-                            "a.hirsel",
-                            "a",
-                            "pub fn main()->Result[(),Exit] waits{Ok(())}",
-                        ),
-                        ("b.hirsel", "b", "pub fn other()->Result[(),Exit]{Ok(())}"),
-                    ]))
-                },
-                Req {
-                    entry: Some("app@1/b/other"),
-                    ..check(app(&[
-                        (
-                            "a.hirsel",
-                            "a",
-                            "pub fn main()->Result[(),Exit] waits{Ok(())}",
-                        ),
-                        ("b.hirsel", "b", "pub fn other()->Result[(),Exit]{Ok(())}"),
-                    ]))
-                },
-            ],
-        ),
         seq("ring", vec![ring(false), ring(true)]),
         // The copies of a duplicate definition share one name and one key.
         seq(
@@ -1256,11 +1631,11 @@ fn tuple_sequences() -> Vec<Seq> {
         ),
     ]
 }
-/// Not request sequences here: product_order (package order of an equal module
-/// set) is check-product-959's case; image_recursion compares an image layer with
+/// Not request sequences here: image_recursion compares an image layer with
 /// sources; resource needs a process allocation limit.
 fn sequences() -> Vec<Seq> {
     let mut seqs = review_sequences();
+    seqs.extend(review_1039_sequences());
     seqs.extend(tuple_sequences());
     seqs
 }
@@ -1269,9 +1644,152 @@ fn sequences() -> Vec<Seq> {
 /// agree, with the cause.
 const UNEQUAL_ROOTS: &[&str] = &[];
 
+/// Each sequence's predicted gate class (see [`Gate`]), sorted by name. Unmarked
+/// rows are l-body-review-1039's settled column (programs/*-v3.md, NEW-SEQUENCES.md).
+#[rustfmt::skip]
+const GATES: &[(&str, Gate)] = &[
+    ("alias_cycle_added", Gate::Fallback),
+    ("alias_cycle_body", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("alias_target", Gate::Fallback),
+    ("backend_llvm", Gate::Fast),
+    ("body_parse_refusal", Gate::Fallback),
+    ("body_test_reference", Gate::Fast),
+    ("bound_transitive", Gate::Fallback),
+    ("check_to_build", Gate::Fallback),
+    ("checkout_relocated", Gate::Fast),
+    ("clone_added", Gate::Fallback),
+    ("clone_body", Gate::Fast),
+    ("clone_winner_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("clone_winner_removed", Gate::Fallback),
+    ("code_identity_body", Gate::Fast),
+    ("codec_context_added", Gate::Fallback),
+    ("codec_default", Gate::Fallback),
+    ("codec_field_changed", Gate::Fallback),
+    ("codec_owner_body", Gate::Fast),
+    ("comptime_absent", Gate::Fallback),
+    ("constant_call_absent", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("constant_cycle", Gate::Fallback),
+    ("constant_dfs_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("constant_parts_forward", Gate::Fast),
+    ("constant_projection", Gate::Fallback),
+    ("constant_ready_queue", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("constant_value", Gate::Fallback),
+    ("constant_with_current_owner", Gate::Fast),
+    ("constructor_body", Gate::Fallback),
+    ("constructor_body_fixed", Gate::Fallback), // not in 1039: b gains a type, shape changes
+    ("constructor_const", Gate::Fallback),
+    ("constructor_const_fixed", Gate::Fallback), // not in 1039: b gains a type, shape changes
+    ("constructor_pattern", Gate::Fallback),
+    ("core_source_edit", Gate::Fast),
+    ("cycle_two_current", Gate::Fast),
+    ("debug_lines", Gate::Fast),
+    ("decl_count_fallback", Gate::Fallback),
+    ("declaration_pass_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("default_argument_absent", Gate::Fallback),
+    ("dependency_order", Gate::Fast),
+    ("dependency_version", Gate::Fallback),
+    ("doc_trivia", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("duplicate_copy_body", Gate::Fallback), // not in 1039: A refuses the duplicate
+    ("entry_warning_interleave", Gate::Fallback),
+    ("extension_candidate", Gate::Fallback),
+    ("extension_new_ambiguous", Gate::Fallback),
+    ("failure_body", Gate::Fast),
+    ("finalizer_body", Gate::Fallback),
+    ("finalizer_cross_module", Gate::Fast),
+    ("foreign_duplicate_span", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("foreign_private_span", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("full_to_reach", Gate::Fallback),
+    ("generic_body", Gate::Fast),
+    ("generic_body_result", Gate::Fast),
+    ("generic_cross_clone", Gate::Fast),
+    ("generic_instance_new_type", Gate::Fast),
+    ("generic_refused_then_demanded", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("generic_transitive", Gate::Fast),
+    ("global_summary_refusal", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("header_alternates", Gate::Fast), // not in 1039: B's shape falls back and does not publish; A' published A's generation
+    ("header_type_before_function", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("header_type_before_function_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("holds_transitive", Gate::Fallback),
+    ("implicit_capacity", Gate::Fallback),
+    ("index_builtin", Gate::Fallback),
+    ("index_duplicate", Gate::Fallback),
+    ("inline_cycle", Gate::Fallback),
+    ("keyword_module", Gate::Fallback),
+    ("lang12_direct", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("lang12_mutual_break", Gate::Fallback),
+    ("lang12_mutual_growth", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("lang12_permutation", Gate::Fast),
+    ("lang12_reset", Gate::Fast),
+    ("lang12_unused_parameter", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("lang12_wrapper_module", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("lang12_wrapper_own", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("lang12_wrapper_package", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("layout_embedded", Gate::Fallback),
+    ("layout_failure_removed", Gate::Fallback),
+    ("layout_first_failure_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("layout_global_failure", Gate::Fallback),
+    ("macro_absent", Gate::Fallback),
+    ("manifest_permuted", Gate::Fast),
+    ("module_split", Gate::Fallback),
+    ("native_const", Gate::Fallback),
+    ("native_foreign_body", Gate::Fast),
+    ("native_reorder", Gate::Fast),
+    ("negative_module_head", Gate::Fallback),
+    ("new_body_refusal", Gate::Fast),
+    ("opaque_private_field", Gate::Fallback),
+    ("optimization", Gate::Fast),
+    ("parse_mode_changed", Gate::Fallback),
+    ("prelude_negative_type", Gate::Fallback),
+    ("private_alias", Gate::Fallback),
+    ("private_function_body", Gate::Fast),
+    ("product_order", Gate::Fallback), // 1036: fallback, the source tuple reorders
+    ("publish_body_third", Gate::Fast),
+    ("publish_check_build_check", Gate::Fast), // 1039 cold history: fallback; here A' published the check generation and the build does not replace it
+    ("publish_refused_second", Gate::Fast),
+    ("publish_uncommitted_second", Gate::Fast),
+    ("reach_to_full", Gate::Fallback),
+    ("reexport_alias", Gate::Fallback),
+    ("repair_one_body_refusal", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("reverse_twin", Gate::Fallback),
+    ("reverse_twin_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("ring", Gate::Fast),
+    ("root_limit", Gate::Fast),
+    ("root_missing", Gate::Fallback),
+    ("same_module_file_tie", Gate::Fallback),
+    ("same_shape_refused_constant", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("source_moves_module", Gate::Fallback),
+    ("std_dependency_added", Gate::Fallback),
+    ("symbol_body_insertion", Gate::Fast),
+    ("symlink_directory", Gate::Fast),
+    ("test_added", Gate::Fallback),
+    ("test_body_added", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("test_header_flip", Gate::Fallback),
+    ("test_signature_before_reference_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("test_signature_reference_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("twin_body", Gate::Fallback),
+    ("twin_current_owner", Gate::Fast),
+    ("two_body_refusals_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("unchanged_body_refusal", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("unpublished_temp", Gate::Fast),
+    ("unreachable_body_refusal", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("via_conversion_body", Gate::Fast),
+    ("via_representation", Gate::Fallback),
+    ("waits_body", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("waits_header", Gate::Fallback),
+];
+
 #[test]
 fn request_sequences_answer_as_an_empty_store() {
-    run_sequences(sequences(), None, UNEQUAL_ROOTS);
+    let seqs = sequences();
+    let names: BTreeSet<&str> = seqs.iter().map(|s| s.name).collect();
+    assert_eq!(names.len(), seqs.len(), "sequence names are distinct");
+    let stale: Vec<&str> = GATES
+        .iter()
+        .map(|g| g.0)
+        .filter(|n| !names.contains(n))
+        .collect();
+    assert!(stale.is_empty(), "gate classes of no sequence: {stale:?}");
+    run_sequences(seqs, None, UNEQUAL_ROOTS);
 }
 #[test]
 #[ignore = "explicit native integration target"]

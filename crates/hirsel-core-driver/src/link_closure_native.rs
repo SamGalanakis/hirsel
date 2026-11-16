@@ -96,3 +96,30 @@ fn a_file_the_link_reads_keys_the_executable() {
     };
     assert!(refused.contains("response file"), "{refused}");
 }
+
+/// Two byte-equal C drivers at two places are one toolchain: the second link
+/// is reused, and its executable is the first's (review 1043 F2).
+#[test]
+#[ignore = "explicit native integration target"]
+fn a_driver_copy_is_the_same_toolchain() {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let source = "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7)) }\n";
+    let product = Driver::default()
+        .check(source_request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    let mut built = |place: &str| {
+        let place = dir.path().join(place).join("bin");
+        std::fs::create_dir_all(&place).unwrap();
+        options.link = Link::Driver(appending_driver(&place, "clang", ""));
+        let built = product.build(&entry, &options).unwrap();
+        run_clean(&built.executable, 7);
+        (built.linked, built.identity, std::fs::read(&built.executable).unwrap())
+    };
+    let (_, first_image, first) = built("driver-one");
+    let (linked, image, second) = built("driver-two");
+    assert_eq!(image, first_image, "a driver copy changed the executable key");
+    assert!(!linked, "a driver copy relinked");
+    assert!(first == second, "a driver copy linked other bytes");
+}

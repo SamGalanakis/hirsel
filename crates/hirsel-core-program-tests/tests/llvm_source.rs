@@ -812,7 +812,8 @@ fn strided(s: u64, stride: u64) -> u64 {
     }) { Ok(n) => 1000 + n, Error(e) => e.steps }
 }
 "#;
-    let (module, names) = hirsel_core_program_tests::SourceProgram::lower_with_core(source, None, &root);
+    let (module, names) =
+        hirsel_core_program_tests::SourceProgram::lower_with_core(source, None, &root);
     let mut cases = Vec::new();
     for s in 0..=64 {
         cases.push(Case {
@@ -865,7 +866,8 @@ fn strided(s: u64, stride: u64) -> u64 {
         );
     }
     for facts in [false, true] {
-        let ir = emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
         verify_ir(&ir);
         for optimization in [Optimization::None, Optimization::Speed] {
             let object =

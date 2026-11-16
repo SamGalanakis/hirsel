@@ -2663,4 +2663,3 @@ fn verify_ir(ir: &str) {
     let llvm = LlvmModule::parse(&context, "test", ir).unwrap();
     llvm.verify().unwrap_or_else(|e| panic!("{e}\n{ir}"));
 }
-

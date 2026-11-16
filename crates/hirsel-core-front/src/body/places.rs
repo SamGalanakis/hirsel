@@ -587,6 +587,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
             Use::Mut(hold) => {
+                if !self.step_write(s, n) {
+                    return;
+                }
                 if !v.origin.writable() {
                     let cause = self.declared_at(s);
                     self.refuse_from(

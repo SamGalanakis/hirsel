@@ -4022,3 +4022,9 @@ fn twin_claims_are_unique_and_name_the_first_declaration() {
         assert!(failures.is_empty(), "{case}: {failures:?}");
     }
 }
+
+#[test]
+fn step_bounds_rules() {
+    let failures = run_case(&root().join("cases/body/step-bounds.hirsel"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

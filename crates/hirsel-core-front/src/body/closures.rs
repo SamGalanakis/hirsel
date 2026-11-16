@@ -17,17 +17,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value.is_some() && self.view_descriptor_offender(value).is_some()
     }
 
+    pub(super) fn step_descriptor_forbidden(&mut self, value: Option<ValueId>) -> bool {
+        let Some(&born) = self.step_scopes.last() else {
+            return false;
+        };
+        let Some(id) = self.descriptors.of(value) else {
+            return true;
+        };
+        self.view_descriptor_offender_at(id, &mut Vec::new(), Some(born))
+            .is_some()
+    }
+
     fn view_descriptor_offender(&mut self, value: Option<ValueId>) -> Option<NodeId> {
         let value = value?;
         let Some(id) = self.descriptors.of(Some(value)) else {
             return Some(self.node);
         };
-        self.view_descriptor_offender_at(id, &mut Vec::new())
+        self.view_descriptor_offender_at(id, &mut Vec::new(), None)
     }
 
     /// Inspect projected types and follow the finite descriptor graph once. A
     /// received unqualified callback is unknown, including through an alias.
-    fn view_descriptor_offender_at(&mut self, id: u32, seen: &mut Vec<u32>) -> Option<NodeId> {
+    fn view_descriptor_offender_at(
+        &mut self,
+        id: u32,
+        seen: &mut Vec<u32>,
+        born: Option<(u32, u32)>,
+    ) -> Option<NodeId> {
         if seen.contains(&id) {
             return None;
         }
@@ -44,7 +60,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             });
             captures.extend_from_slice(projected);
         }
-        if let Some(capture) = captures.iter().find(|c| c.mode != Mode::View) {
+        if let Some(capture) = captures.iter().find(|c| {
+            born.map_or(c.mode != Mode::View, |(frame, born)| {
+                let var = self.var(c.slot);
+                c.mode == Mode::Mut
+                    && (var.frame_level < frame || var.frame_level == frame && var.born < born)
+            })
+        }) {
             return Some(capture.site);
         }
         let fields = self.descriptors.fields[id as usize]
@@ -84,7 +106,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             .project(child, anchors::Component::Field(field));
                     }
                     if let Some(child) = child
-                        && let Some(site) = self.view_descriptor_offender_at(child, seen)
+                        && let Some(site) = self.view_descriptor_offender_at(child, seen, born)
                     {
                         return Some(site);
                     }
@@ -95,7 +117,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         for (_, child) in fields {
-            if let Some(site) = self.view_descriptor_offender_at(child, seen) {
+            if let Some(site) = self.view_descriptor_offender_at(child, seen, born) {
                 return Some(site);
             }
         }
@@ -409,6 +431,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             scratch.roots.clear();
             result
         };
+        self.step_callback(ty, value, n);
         self.activate(value, call, n);
         scratch.vals.clear();
         scratch.vals.resize(args.len(), None);
@@ -2079,6 +2102,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if c.path.is_none() {
                 self.capture_slot_source(c.slot, n, false);
                 if c.mode == Mode::Mut {
+                    self.step_write(c.slot, n);
                     self.capture_write(c.slot, self.span(n))
                 }
             }

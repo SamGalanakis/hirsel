@@ -254,6 +254,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.anchors.expressions.insert(e, fact);
                     }
                 }
+                self.step_callback(g.params[i].ty, vals[i], e);
                 self.activate(vals[i], call, e);
                 self.determined(f, found, checked, e);
                 continue;
@@ -355,6 +356,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.anchors.expressions.insert(e, fact);
                 }
             }
+            self.step_callback(g.params[i].ty, vals[i], e);
             self.activate(vals[i], call, e);
         }
         for &(i, e) in later.iter() {

@@ -292,17 +292,17 @@ is core's plain record `{ steps: u64 }`.
   optimisation adds, removes, merges or moves a step; an engine may count several steps at
   once only where it then stops at the same step as counting one at a time would.
 
-```hirsel unbuilt
+```hirsel
 fn spin(n: u64) -> Result[u64, OutOfTime] {
   bound steps 1000 { let mut i: u64 = 0; while i < n { i += 1 }; i }   // Error(OutOfTime(steps: 1000)) when n > 1000
 }
 ```
-```hirsel unbuilt
-fn first(xs: List[u64]) -> Result[Option[u64], OutOfTime] {
+```hirsel
+fn first(xs: List[u64]) -> Result[Option[View[u64]], OutOfTime] in xs {
   bound steps 1 { list.get(xs, 0) }    // one call: one step
 }
 ```
-```hirsel unbuilt
+```hirsel
 fn tries(n: u64) -> Result[u64, OutOfTime] {
   bound steps 1000 {
     match isolate(fn() -> u64 { let mut i: u64 = 0; while i < n { i += 1 }; i }) {
@@ -312,7 +312,7 @@ fn tries(n: u64) -> Result[u64, OutOfTime] {
   }                                    // Error(OutOfTime(steps: 1000)) when the loop runs out
 }
 ```
-```hirsel unbuilt
+```hirsel
 fn bump(mut n: u64) -> Result[(), OutOfTime] {
   bound steps 10 { n = n + 1 }         // refused: MEM-30, n is declared outside the scope
 }

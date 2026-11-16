@@ -1172,6 +1172,7 @@ struct Cx<'c, 'a, 'e> {
     /// takes it.
     placing: Option<Placing>,
     scope_slots: Vec<u32>,
+    step_scopes: Vec<(u32, u32)>,
     copies: Vec<CopySize>,
     allocations: Vec<AllocationLayout>,
     numeric_sites: Vec<scalar_abi::NumericSite>,
@@ -1311,6 +1312,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             tail_ty: UNIT,
             placing: None,
             scope_slots: vec![],
+            step_scopes: vec![],
             copies: vec![],
             allocations: vec![],
             numeric_sites: vec![],

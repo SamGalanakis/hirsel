@@ -130,7 +130,7 @@ pub struct Program<'a> {
 /// The core types lowering builds, matches or lays out without the program naming
 /// them: a capacity failure, a string literal, a region, a `Causes` element. A
 /// body's reuse key covers every one, since no resolved name of the body reaches it.
-pub const PRELUDE: [&str; 13] = [
+pub const PRELUDE: [&str; 14] = [
     "String",
     "Result",
     "Capacity",
@@ -144,6 +144,7 @@ pub const PRELUDE: [&str; 13] = [
     "FloatError",
     "Bytes",
     "Option",
+    "OutOfTime",
 ];
 /// The items body lowering calls by a path it builds from a callee the body
 /// resolves, keeping the callee's package and modules and replacing its name:
@@ -204,6 +205,7 @@ impl<'a> Program<'a> {
             "FloatError" => 10,
             "Bytes" => 11,
             "Option" => 12,
+            "OutOfTime" => 13,
             _ => panic!("`{name}` is not a core prelude type"),
         };
         debug_assert_eq!(PRELUDE[slot], name);

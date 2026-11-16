@@ -101,6 +101,10 @@ pub type Capacity {
     available: u64
 }
 
+pub type OutOfTime {
+    steps: u64
+}
+
 pub type Closed[T] = Closed(T)
 
 pub type SendError[T] = Full(T) | Closed(T)
@@ -124,7 +128,7 @@ pub type Cause {
     site: Site
 }
 
-pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity | Tape
+pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity | Tape | OutOfTime
 
 pub type BuildError = Capacity(Capacity) | Overflow
 

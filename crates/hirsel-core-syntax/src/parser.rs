@@ -1337,10 +1337,15 @@ impl Parser<'_> {
             return Ok(self.node(s, NodeKind::Region, Some(n), &[b]));
         }
         if self.eat(sym::BOUND) {
-            self.expect(sym::BYTES)?;
+            let unit = if self.at(sym::STEPS) {
+                Some(self.bump())
+            } else {
+                self.expect(sym::BYTES)?;
+                None
+            };
             let value = self.expr(0)?;
             let body = self.block()?;
-            return Ok(self.node(s, NodeKind::Bound, None, &[value, body]));
+            return Ok(self.node(s, NodeKind::Bound, unit, &[value, body]));
         }
         if self.at(sym::FN) && self.word(1) != sym::LPAREN {
             return self.fail("LANG-5", "expected expression before next function");

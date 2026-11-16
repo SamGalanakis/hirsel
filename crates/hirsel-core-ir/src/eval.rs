@@ -121,7 +121,7 @@ struct Cause {
     site: Option<Anchor>,
 }
 /// `CauseKind` in declaration order, its case ordinals.
-const CAUSE_KINDS: [&str; 8] = [
+const CAUSE_KINDS: [&str; 9] = [
     "Overflow",
     "Bounds",
     "Division",
@@ -130,6 +130,7 @@ const CAUSE_KINDS: [&str; 8] = [
     "Cancelled",
     "Capacity",
     "Tape",
+    "OutOfTime",
 ];
 /// A cause cell: core's `Cause` (32 bytes: the `Fail` carrier at 0, `Site` at 24),
 /// then the next cell's pointer. `CauseKind` is the carrier's capacity niche (FORM

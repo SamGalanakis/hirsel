@@ -239,7 +239,7 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
 #[test]
 fn new_forms_have_written_nodes() {
     let f = good(
-        "stable type P[in r] { x: u64 }\nfn f[in r](x: P in r) -> u64 where r: r { let mut y: u64; region a { bound bytes 8 { loop { break (x, 1).0 } } } }\n",
+        "stable type P[in r] { x: u64 }\nfn f[in r](x: P in r) -> u64 where r: r { let mut y: u64; region a { bound bytes 8 { bound steps 10 { loop { break (x, 1).0 } } } } }\n",
     );
     let kinds: Vec<_> = f
         .items()

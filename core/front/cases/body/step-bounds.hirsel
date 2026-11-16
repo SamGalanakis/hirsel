@@ -1,0 +1,39 @@
+// MEM-30: the three specification examples, typed before execution lowering.
+// expect: gap step bound execution is not built
+// expect: refuse MEM-30 at 15:22
+fn spin(n: u64) -> Result[u64, OutOfTime] {
+    bound steps 1000 {
+        let mut i: u64 = 0
+        while i < n { i += 1 }
+        i
+    }
+}
+fn first(xs: List[u64]) -> Result[Option[View[u64]], OutOfTime] in xs {
+    bound steps 1 { list.get(xs, 0) }
+}
+fn bump(mut n: u64) -> Result[(), OutOfTime] {
+    bound steps 10 { n = n + 1 }
+}
+
+fn lend(mut n: u64) {
+    let _ = bound steps 10 { replace(mut n, 7) }
+}
+fn callback(body: scoped fn()) {
+    let _ = bound steps 10 { body() }
+}
+fn captured() {
+    let mut n = 0u64
+    let body = scoped fn() { let _ = bound steps 1 { n += 1 } }
+    body()
+}
+fn local_callback() {
+    let _ = bound steps 10 {
+        let mut n = 0u64
+        let body = scoped fn() { n += 1 }
+        body()
+    }
+}
+
+// expect: refuse MEM-30 at 19:38
+// expect: refuse MEM-30 at 22:30
+// expect: refuse MEM-30 at 26:54

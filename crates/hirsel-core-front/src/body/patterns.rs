@@ -1884,6 +1884,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     pub(super) fn bound_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        if self.token_text(n) == "steps" {
+            return self.step_bound(n, want);
+        }
         let c = self.kids(n);
         let (size_ty, bytes) = self.expr(c[0], expect(scalar(Scalar::U64)));
         if size_ty == NEVER {
@@ -1978,5 +1981,61 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let value = self.land(exit);
         self.dead |= was_dead;
         (result, value)
+    }
+    fn step_bound(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let c = self.kids(n);
+        let (size, _) = self.expr(c[0], expect(scalar(Scalar::U64)));
+        if size == NEVER {
+            return (NEVER, None);
+        }
+        let Some(d) = self.p.core_decl("OutOfTime") else {
+            return self.gap_ty(n, "OutOfTime is not declared by core");
+        };
+        let error = self.t.mk(TyKind::Adt(d, vec![]));
+        let body_want = want.and_then(|mut w| {
+            if w.payload != 0 {
+                w.payload -= 1;
+                Some(w)
+            } else {
+                self.result_parts(w.ty)
+                    .and_then(|(_, t, e)| (e == Some(error)).then_some(t))
+                    .and_then(expect)
+            }
+        });
+        self.step_scopes.push((self.frame_level, self.born));
+        let (body, _) = self.expr(c[1], body_want);
+        self.step_scopes.pop();
+        let Some(result) = self.p.core_decl("Result") else {
+            return self.gap_ty(n, "Result is not declared by core");
+        };
+        let ty = self.t.mk(TyKind::Adt(result, vec![body, error]));
+        self.gap(n, "step bound execution is not built");
+        (ty, None)
+    }
+    pub(super) fn step_place_outside(&self, slot: u32) -> bool {
+        self.step_scopes.last().is_some_and(|&(frame, born)| {
+            let var = self.var(slot);
+            var.frame_level < frame || var.frame_level == frame && var.born < born
+        })
+    }
+    pub(super) fn step_write(&mut self, slot: u32, n: NodeId) -> bool {
+        if self.step_place_outside(slot) {
+            self.refuse("MEM-30", n, "a step bound cannot mutate an outer place");
+            false
+        } else {
+            true
+        }
+    }
+    pub(super) fn step_callback(&mut self, ty: TyId, value: Option<ValueId>, n: NodeId) {
+        if !self.step_scopes.is_empty()
+            && self.contains_callback_kind::<true>(ty)
+            && self.step_descriptor_forbidden(value)
+        {
+            self.refuse(
+                "MEM-30",
+                n,
+                "a step bound needs a visible callback descriptor without outer mutation",
+            );
+        }
     }
 }

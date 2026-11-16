@@ -111,6 +111,33 @@ class PinnedRequestToolchain(unittest.TestCase):
                     FRONT['request_cost'].toolchain(root, dict(llvm=llvm, kit=kit))
 
 
+class ReportOnly(unittest.TestCase):
+    def test_overrun_reports_but_missing_counter_still_fails(self):
+        from unittest.mock import patch
+        import contextlib
+        import io
+        run = GUARD['run']
+        metrics = dict(instructions=100, stages=[dict(name='check/lower', instructions=90)])
+        product = dict(diagnostics=[], incomplete=[])
+        limits = dict(corpora=dict(m1=dict(code_lines=1, check_lower_per_line=50,
+                     whole_request_per_line=60, whole_process_per_line=70)),
+                     completion_forecast=dict(m1=dict(complete_bodies=1, bodies=1,
+                         missing_check_lower_per_line=0, additional_publication_per_line=0)),
+                     finished_budget_per_line=60000, forecast_revision='fixture', regression_policy='explain the rise')
+        def samples(*_):
+            return [('m1', 1, product, metrics, 120)]
+        with patch.dict(run.__globals__, sample_sources=samples):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                with self.assertRaisesRegex(ValueError, '90.00 instructions/line'):
+                    run(None, None, limits)
+                run(None, None, limits, report_only=True)
+            self.assertIn('whole process: 120.00 instructions/line exceeds 70', output.getvalue())
+            metrics['counter_refusal'] = 'counter unavailable'
+            with self.assertRaisesRegex(ValueError, 'counter unavailable'):
+                run(None, None, limits, report_only=True)
+
+
 class ProcessCeiling(unittest.TestCase):
     def test_startup_regression_fails_when_driver_cost_is_unchanged(self):
         metrics = {'instructions': 10000, 'stages': [{'name': 'check/lower', 'instructions': 5000}]}

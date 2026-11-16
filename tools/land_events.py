@@ -1,11 +1,12 @@
 """Durable submission and completion rows shared by land and its detached wrapper."""
 import csv
 import fcntl
+import json
 import os
 from pathlib import Path
 import time
 
-FIELDS = ('state', 'lane', 'ticket', 'log', 'exit', 'landed', 'submitted', 'at')
+FIELDS = ('state', 'lane', 'ticket', 'log', 'exit', 'landed', 'submitted', 'at', 'costs')
 
 
 def append_event(path, state, record, log, code=''):
@@ -15,6 +16,7 @@ def append_event(path, state, record, log, code=''):
         fcntl.flock(output, fcntl.LOCK_EX)
         row = dict(record, state=state, log=str(log), exit=code,
                    at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        row['costs'] = json.dumps(row.get('costs', []), separators=(',', ':'))
         csv.writer(output, delimiter='\t').writerow([row.get(key, '') for key in FIELDS])
         output.flush()
         os.fsync(output.fileno())
@@ -37,7 +39,7 @@ def report_events(path, output):
                 if not raw.endswith(b'\n'):
                     break
                 [values] = list(csv.reader([raw.decode()], delimiter='\t'))
-                if len(values) != len(FIELDS):
+                if len(values) not in (len(FIELDS) - 1, len(FIELDS)):
                     raise ValueError('malformed land event')
                 row = dict(zip(FIELDS, values))
                 if row['state'] not in ('SUBMITTED', 'LANDED', 'FAILED'):
@@ -47,6 +49,8 @@ def report_events(path, output):
                     suffix += f" landed {row['landed']}"
                 print(f"LAND {row['state']} {row['lane']} ticket {row['ticket'] or '?'}{suffix} log {row['log']}",
                       file=output, flush=True)
+                for cost in json.loads(row.get('costs') or '[]'):
+                    print('COST_REPORT ' + json.dumps(cost), file=output, flush=True)
                 offset += len(raw)
                 count += 1
         seen.seek(0)

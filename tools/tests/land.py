@@ -82,6 +82,15 @@ if [ "$1" = test ]; then
       if [ -f broken-core-suite ]; then echo 'core evaluator body failed' >&2; exit 1; fi ;;
   esac
   case "$*" in
+    *core-front-cost*)
+      if [ -n "$FAKE_COST_CRASH" ]; then echo 'cost tool crashed' >&2; exit 1; fi
+      echo 'COST_REPORT {"target":"core-front-cost","findings":["parse: 201 exceeds 100"]}'
+      case "$*" in
+        *--report-only*) ;;
+        *) [ -z "$FAKE_COST_RED" ] || exit 1 ;;
+      esac ;;
+  esac
+  case "$*" in
     *new-required-gate*)
       echo '✗ Fail: root//:new-required-gate'
       echo 'error: the newly required gate was executed'
@@ -194,6 +203,32 @@ class Land(unittest.TestCase):
         with events.open(newline='') as source:
             rows = list(csv.reader(source, delimiter='\t'))
         return done, log.read_text(), rows
+
+    def cost_change(self):
+        ceiling = self.lane / 'crates/hirsel-core-front/cost-ceilings.json'
+        ceiling.parent.mkdir(parents=True)
+        ceiling.write_text('{}')
+        self.git(self.lane, 'add', str(ceiling))
+        self.git(self.lane, 'commit', '-qm', 'exercise a cost-relevant land')
+
+    def test_front_cost_overrun_lands_and_reaches_ticket_event(self):
+        self.cost_change()
+        accepted, log, rows = self.wrapped_land(FAKE_COST_RED='1')
+        self.assertEqual(accepted.returncode, 0, log)
+        self.assertIn('parse: 201 exceeds 100', log)
+        self.assertIn('parse: 201 exceeds 100', rows[-1][-1])
+        cost = json.loads(rows[-1][-1])[0]
+        self.assertEqual(cost['tickets'], ['my-lane'])
+        self.assertEqual(rows[-1][0], 'LANDED')
+        self.assertIn('exercise a cost-relevant land', self.main_log())
+
+    def test_cost_tool_crash_refuses_the_push(self):
+        self.cost_change()
+        refused = self.land(FAKE_COST_CRASH='1')
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn('core cost tool failed', refused.stdout)
+        self.assertIn('cost tool crashed', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
 
     def test_red_core_custody_refuses_the_push(self):
         (self.lane / 'broken-custody').write_text('broken sample\n')
@@ -1925,12 +1960,15 @@ class CoreCostGuard(unittest.TestCase):
             messages, commands = [], []
             def run(command):
                 commands.append(command)
-                return subprocess.CompletedProcess(command, 1, 'm1: 50001 exceeds 50000\n', '')
+                return subprocess.CompletedProcess(command, 0,
+                    'COST_REPORT {"target":"core-front-cost","findings":["parse: 201 exceeds 100"]}\n', '')
             with patch.dict(report.__globals__, ROOT=root, run=run, say=messages.append,
                             changed_paths=lambda *_: {'crates/hirsel-core-front/src/body/mod.rs'}):
-                self.assertIsNone(report('base', 'tree'))
-            self.assertEqual(commands[0][-1], '//:core-check-cost')
-            self.assertIn('RED', messages[-1])
+                rows = report('base', 'tree')
+            self.assertIn('//:core-check-cost', commands[0])
+            self.assertIn('//:core-front-cost', commands[1])
+            self.assertIn('--test-arg=--report-only', commands[0])
+            self.assertEqual(rows[0]['findings'], ['parse: 201 exceeds 100'])
             commands.clear()
             with patch.dict(report.__globals__, ROOT=root, run=run, say=messages.append,
                             changed_paths=lambda *_: {'README.md'}):

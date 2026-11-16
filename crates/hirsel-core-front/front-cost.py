@@ -127,7 +127,7 @@ def suite_edit(compiler, runtime, out, tools, profile_front=False, prepare=True)
     return front(metrics)
 
 
-def run(compiler, runtime, out, ceilings=None, tools=None, image_profiler=None):
+def run(compiler, runtime, out, ceilings=None, tools=None, image_profiler=None, report_only=False):
     tools = tools or request_cost.toolchain(ROOT)
     rows = {}
     for name, lines, product, metrics, process in GUARD['sample_sources'](compiler, out):
@@ -170,8 +170,12 @@ def run(compiler, runtime, out, ceilings=None, tools=None, image_profiler=None):
     if ceilings:
         print('Suite F targets (instructions, separate from current ceilings): '
               + json.dumps(ceilings['suite_targets_instructions']))
+    print('COST_REPORT ' + json.dumps(dict(target='core-front-cost', findings=failures)), flush=True)
     if failures:
-        raise ValueError('\n'.join(failures))
+        if report_only:
+            print('\n'.join(failures))
+        else:
+            raise ValueError('\n'.join(failures))
     return rows
 
 
@@ -185,6 +189,7 @@ def main():
     parser.add_argument('--record', action='store_true', help='initial same-binary baseline; later updates must only lower saved stage limits')
     parser.add_argument('--test-threads', type=int, help=argparse.SUPPRESS)
     parser.add_argument('--buck-tool-inputs', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--report-only', action='store_true', help='report ceiling findings; tool errors still fail')
     args = parser.parse_args()
     runtime = args.runtime
     if runtime is None:
@@ -195,7 +200,7 @@ def main():
     tools = request_cost.toolchain(ROOT, inputs)
     def execute(out):
         out.mkdir(parents=True, exist_ok=True)
-        rows = run(compiler, runtime, out, limits, tools, args.image_profiler.resolve())
+        rows = run(compiler, runtime, out, limits, tools, args.image_profiler.resolve(), args.report_only)
         if args.record:
             args.ceilings.write_text(json.dumps(dict(
                 revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),

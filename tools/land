@@ -93,7 +93,7 @@ CORE_ACCEPTANCE = (
     '//:land-core-library-modes', '//:core-llvm-aarch64-front',
     '//:core-llvm-aarch64-runtime', '//:core-llvm-aarch64-abi', '//:core-llvm-aarch64-failure',
     '//:core-llvm-native', '//:core-driver-provider-m3', '//:core-m2b', '//:core-m2b-host', '//:core-store-s1', '//:core-store-s2', '//:core-runner-r0',
-    '//:test-core-m1-runner', '//:core-recursive-instances', '//:core-check-cost-unit', '//:core-front-cost', '//:core-bookkeeping-stop', '//:core-memory-report', '//:core-closed-pipe', '//:core-store-no-sync',
+    '//:test-core-m1-runner', '//:core-recursive-instances', '//:core-check-cost-unit', '//:core-bookkeeping-stop', '//:core-memory-report', '//:core-closed-pipe', '//:core-store-no-sync',
     '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
     '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64',
     '//:core-aarch64-provider', '//:land-core-evaluator', '//:core-event-order', '//:land-core-native-capabilities',
@@ -717,18 +717,24 @@ def land_tool_suite(base, tree):
 
 
 def core_cost_report(base, tree):
-    """Print both core cost ceilings at land time; budget reds ride by host policy."""
+    """Ceiling findings ride; a measurement tool failure refuses the push."""
     ceiling = ROOT / 'crates/hirsel-core-front/cost-ceilings.json'
-    relevant = ('crates/hirsel-core-', 'crates/hirsel-intern/', 'core/core/', 'core/std/', 'core/programs/m1/')
+    relevant = ('crates/hirsel-core-', 'crates/hirsel-intern/', 'core/core/', 'core/std/', 'core/programs/m1/', 'core/langarena/')
     if not ceiling.is_file() or not any(
-            path.startswith(relevant) or path in {'Cargo.toml', 'Cargo.lock', 'tools/buck2/profile.bzl', 'tools/buck2/defs.bzl', 'core/tools/measure.py'}
+            path.startswith(relevant) or path in {'Cargo.toml', 'Cargo.lock', 'tools/buck2/profile.bzl', 'tools/buck2/defs.bzl', 'tools/buck2/sync.py', 'core/tools/measure.py', 'core/tools/request_cost.py'}
             for path in changed_paths(base, tree)):
-        return
-    result = run([BUCK2, 'test', *CONFIG, '//:core-check-cost'])
-    # Keep observations in every affected ticket's log, including successful samples.
-    print(result.stdout + result.stderr, flush=True)
-    say('core cost guard passed' if result.returncode == 0 else
-        'core cost guard RED; budget/counter findings ride under host-rules')
+        return []
+    rows = []
+    for target in ('core-check-cost', 'core-front-cost'):
+        result = run([BUCK2, 'test', *CONFIG, '//:' + target,
+                      '--', '--test-arg=--report-only'])
+        output = result.stdout + result.stderr
+        print(output, flush=True)
+        if result.returncode:
+            raise Refusal('core cost tool failed; refusing to push\n' + first_error(output))
+        rows.extend(json.loads(match) for match in re.findall(r'COST_REPORT (\{[^\n]+\})', output))
+    say('core cost rows are report-only; regressions belong to the tickets in this merged tree')
+    return rows
 
 
 def changed_paths(before, after):
@@ -885,6 +891,7 @@ class Batch:
         # The last green check, kept if its push loses a race: (base, tree, submitted heads).
         self.proof = None
         self.base_checks = {}
+        self.costs = []
 
     def fail(self, member, code, message, report=()):
         if member is self.own:
@@ -1047,10 +1054,11 @@ class Batch:
                 self.fail(member, 1, message, report)
         for member, commits in fresh:
             if member is self.own:
-                outcome(landed=commits[-1])
+                outcome(landed=commits[-1], costs=self.costs)
             else:
                 self.queue.deliver(member, dict(
-                    code=0, report=[], commits=commits,
+                    code=0, report=['COST_REPORT ' + json.dumps(row) for row in self.costs],
+                    costs=self.costs, commits=commits,
                     message=f'landed {commits[-1][:12]} on main in a batch of {len(fresh)} led by '
                             f'{self.own.lane} ({self.checked} checks): ' + ' '.join(commits)))
         if len(fresh) > 1 or self.checked > 1:
@@ -1068,7 +1076,9 @@ class Batch:
                                  tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)
         if report is None:
             self.base_checks[tree, 'full'] = None
-            core_cost_report(base, tree)
+            self.costs = core_cost_report(base, tree)
+            for row in self.costs:
+                row.update(tree=tree, tickets=[member.lane for member, _ in applied])
         return report
 
     def resolve(self, members, previous=None):
@@ -1212,7 +1222,7 @@ def delivered(queue):
         print('\n'.join(result['report']), flush=True)
     say(result['message'])
     if commits := result.get('commits'):
-        outcome(landed=commits[-1])
+        outcome(landed=commits[-1], costs=result.get('costs', []))
     return result['code']
 
 

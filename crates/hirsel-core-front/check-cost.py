@@ -111,7 +111,7 @@ def sample_sources(compiler, output, profile_front=False):
         yield name, lines, product, metrics, process
 
 
-def run(compiler, output, ceilings, request_compiler=None):
+def run(compiler, output, ceilings, request_compiler=None, report_only=False):
     failures = []
     for name, lines, product, metrics, process in sample_sources(compiler, output):
         ceiling = ceilings['corpora'][name]
@@ -137,8 +137,13 @@ def run(compiler, output, ceilings, request_compiler=None):
         failures.extend(f'{name}: {e}' for e in errors + budget_errors)
     if request_compiler is not None:
         failures.extend(run_product(request_compiler, output / 'product', ceilings))
+    print('COST_REPORT ' + json.dumps(dict(target='core-check-cost', findings=failures)), flush=True)
     if failures:
-        raise ValueError('\n'.join(failures) + '\n' + ceilings['regression_policy'])
+        message = '\n'.join(failures) + '\n' + ceilings['regression_policy']
+        if report_only:
+            print(message)
+        else:
+            raise ValueError(message)
 
 
 
@@ -242,14 +247,15 @@ def main():
     parser.add_argument('--request-compiler', type=Path, required=True)
     parser.add_argument('--out', type=Path, help='new evidence directory, otherwise a temporary directory')
     parser.add_argument('--ceilings', type=Path, default=Path(__file__).with_name('cost-ceilings.json'))
+    parser.add_argument('--report-only', action='store_true', help='report ceiling findings; tool errors still fail')
     args = parser.parse_args()
     ceilings = json.loads(args.ceilings.read_text())
     if args.out:
         args.out.mkdir(parents=True, exist_ok=False)
-        run(args.compiler.resolve(), args.out.resolve(), ceilings, args.request_compiler.resolve())
+        run(args.compiler.resolve(), args.out.resolve(), ceilings, args.request_compiler.resolve(), args.report_only)
     else:
         with tempfile.TemporaryDirectory(prefix='hirsel-check-cost-') as out:
-            run(args.compiler.resolve(), Path(out), ceilings, args.request_compiler.resolve())
+            run(args.compiler.resolve(), Path(out), ceilings, args.request_compiler.resolve(), args.report_only)
 
 
 if __name__ == '__main__':

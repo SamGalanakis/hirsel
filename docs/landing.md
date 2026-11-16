@@ -73,9 +73,13 @@ daemon serves one command at a time while another holds a different state, so se
 concurrent checks would wait for each other. Clippy then only reads reports. Last, it
 runs the core acceptance suites (`CORE_ACCEPTANCE` in `tools/land`), with `//:test-land`
 when the change touches the land tool, and prints the core cost guard's report when the
-change touches the front end, the core libraries or the M1 programs; a cost red is
+change touches the front end, the core libraries or the M1 programs. Both
+`//:core-check-cost` and `//:core-front-cost` run with `--report-only`; a cost red is
 reported, not refused. The land checkout's daemon keeps 128 remote actions in flight, a
 lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`).
+Measurement tool crashes still refuse the push. The rows, including regressions,
+are retained in each ticket's log and completion event. `//:core-check-cost-unit`
+stays in acceptance because it tests synthetic inputs, not measured ceilings.
 
 The queue controller updates to its rebased tree's `tools/land` before leading.
 For every candidate, including waiting tickets and bisection groups, a fresh Python

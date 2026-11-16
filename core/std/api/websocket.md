@@ -13,3 +13,34 @@ offer rejects any selected protocol. Unoffered protocols and every extension are
 `input[end..]` as the initial frame input. `request` constructs the fixed
 `/hirsel` request. Refused 426 requires a `Sec-WebSocket-Version: 13` response
 header. All paths expose Capacity separately from protocol refusal.
+
+`decoder` and `next` consume arbitrarily split input, stop at one event, and
+advance a caller-owned cursor. A Ping is immediate even inside a fragmented
+message; its inline payload must go to the sole writer as a Pong. Text and
+binary messages are distinct events. Text UTF-8 state spans fragments and
+control frames. A Close event contains a validated payload to echo. Reject and
+Close terminate decoding and release partial assembly.
+
+`encoder` validates outgoing frames and appends one wire frame. It tracks
+fragmentation and close state. The owner retains that frame and its send
+cursor until it is fully written, and flushes any Close under one absolute
+close deadline. The driver also owns the composite upgrade deadline and idle
+Ping/Pong timers. The runner applies its binary-only policy above this module.
+
+Frames and assembled messages share the configured payload cap. The decoder
+reserves nothing from a declared length. Its inline header is at most 14 bytes;
+control payloads use 125 inline bytes. Arriving data grows one assembly buffer
+by powers of two starting at four, capped at max_frame. The configured cap
+must be a nonzero power of two. New storage is admitted before old
+storage is refunded; each allocation rounds to eight bytes. For the default
+power-of-two cap, growth peaks at 1.5 times that cap, plus rounding. With receive scratch S = 8192, the peak bound is
+`g(k) = S + round8(cap(k)) + round8(cap(k)/2)`, where
+`cap(k) = min(next_pow2(max(k, 4)), max_frame)`. Thus g(3) is 8208 bytes
+and g(262144) is 401408 bytes. Wsock must fund its receive scratch before recv and account for
+assembly growth, retained messages and decoding separately. Sending does not
+transfer their charge.
+
+The shape adapts tungstenite 89576c6's handshake and frame machines and
+Goose's hypothetical sans-I/O server sketch in `docs/design/coroutines.md`.
+The change from tungstenite is growth from received bytes rather than its
+declared-length reservation. RFC and upstream hand vectors are the oracles.

@@ -1,0 +1,398 @@
+// RFC 6455 and tungstenite 89576c6 frame/mod.rs:316-430.
+fn unhex(s: String) -> Bytes {
+    let raw = string.as_bytes(s)
+    let mut b: Bytes = list.new()
+    let mut at: u64 = 0
+    while at < list.len(raw) {
+        if raw[at] == 32 {
+            at += 1;
+            continue
+        }
+        let a = raw[at]
+        let c = raw[at + 1]
+        let hi = if a >= b'a' {
+            a - b'a' + 10
+        } else {
+            a - b'0'
+        }
+        let lo = if c >= b'a' {
+            c - b'a' + 10
+        } else {
+            c - b'0'
+        }
+        result.unwrap(list.push(mut b, hi * 16 + lo))
+        at += 2
+    }
+    take b
+}
+
+fn event(e: websocket.Event) -> u16 {
+    match e {
+        Need => 0,
+        Message(_) => 2,
+        Text(_) => 1,
+        Ping(_) => 9,
+        Pong(_) => 10,
+        Closed(_) => 8,
+        Reject(code) => code,
+        Ended => 65535
+    }
+}
+
+fn first(b: Bytes, role: websocket.Role, max: u64) -> u16 {
+    let mut d = websocket.decoder(role, max)
+    let mut at: u64 = 0
+    event(result.unwrap(websocket.next(mut d, b, mut at)))
+}
+
+fn payload(e: websocket.Event, expected: Bytes) -> bool {
+    match e {
+        Message(b) => b == expected,
+        Text(b) => b == expected,
+        _ => false
+    }
+}
+
+fn control(e: websocket.Event, kind: u16, expected: Bytes) -> bool {
+    let c = match e {
+        Ping(c) => {
+            if kind != 9 {
+                return false
+            };
+            c
+        },
+        Pong(c) => {
+            if kind != 10 {
+                return false
+            };
+            c
+        },
+        Closed(c) => {
+            if kind != 8 {
+                return false
+            };
+            c
+        },
+        _ => return false
+    }
+    let mut b: Bytes = list.new()
+    result.unwrap(websocket.control(c, mut b))
+    b == expected
+}
+
+// tungstenite frame/mod.rs: read_frames. Mutant: consume_next_frame_tail.
+// expect: run read_frames() = true
+fn read_frames() -> bool {
+    let b = unhex("82 07 01 02 03 04 05 06 07 82 03 03 02 01 99")
+    let mut d = websocket.decoder(Client, 256)
+    let mut at: u64 = 0
+    let a = payload(result.unwrap(websocket.next(mut d, b, mut at)), unhex("01 02 03 04 05 06 07")) && at == 9
+    let c = payload(result.unwrap(websocket.next(mut d, b, mut at)), unhex("03 02 01")) && at == 14
+    a && c && first(list.slice(b, at, list.len(b)), Client, 256) == 0
+}
+
+// tungstenite from_partially_read: partial header/payload saved between calls.
+// Mutant: forget_partial_payload.
+// expect: run from_partially_read() = true
+fn from_partially_read() -> bool {
+    let mut d = websocket.decoder(Client, 256)
+    let a = unhex("82 07 01")
+    let mut at: u64 = 0
+    let partial = event(result.unwrap(websocket.next(mut d, a, mut at))) == 0 && websocket.buffered(d) == 1
+    let b = unhex("02 03 04 05 06 07")
+    at = 0
+    partial && payload(result.unwrap(websocket.next(mut d, b, mut at)), unhex("01 02 03 04 05 06 07")) && at == 6
+}
+
+// Oversized length is rejected from the ten-byte header before a mask/payload.
+// Partial legal length holds arrived bytes, with rounded/growing allocation,
+// not its 256 KiB declaration. Mutant: reserve_declared.
+// expect: run length_before_reserve() = true
+fn length_before_reserve() -> bool {
+    let b = unhex("82 ff 00 00 00 00 00 04 00 01")
+    let refused = bound bytes 0 {
+        let mut d = websocket.decoder(Server, 262144)
+        let mut at: u64 = 0
+        match websocket.next(mut d, b, mut at) {
+            Ok(e) => event(take e) == 1009 && at == 10 && websocket.capacity(d) == 0,
+            Error(_) => false
+        }
+    }
+    let c = unhex("82 ff 00 00 00 00 00 04 00 00 00 00 00 00 61 62 63")
+    let partial = bound bytes 8208 {
+        let scratch: Bytes = result.unwrap(list.with_capacity(8192))
+        let mut d = websocket.decoder(Server, 262144)
+        let mut at: u64 = 0
+        match websocket.next(mut d, c, mut at) {
+            Ok(e) => event(take e) == 0 && websocket.buffered(d) == 3 && websocket.capacity(d) == 4 && list.capacity(scratch) == 8192,
+            Error(_) => false
+        }
+    }
+    result.unwrap(refused) && result.unwrap(partial)
+}
+
+// RFC 6455 section 5.7 Hello, mask 37fa213d. Hand-derived masked bytes.
+// Mutants: accept_unmasked, accept_masked_server, wrong_mask_phase.
+// expect: run masks_both_roles() = true
+fn masks_both_roles() -> bool {
+    let b = unhex("82 85 37 fa 21 3d 7f 9f 4d 51 58")
+    let mut d = websocket.decoder(Server, 256)
+    let mut at: u64 = 0
+    let decoded = payload(result.unwrap(websocket.next(mut d, b, mut at)), result.unwrap(b"Hello"))
+    let mut split = websocket.decoder(Server, 256)
+    at = 0
+    let partial = event(result.unwrap(websocket.next(mut split, list.slice(b, 0, 8), mut at))) == 0
+    at = 0
+    decoded && partial && payload(result.unwrap(websocket.next(mut split, list.slice(b, 8, 11), mut at)), result.unwrap(b"Hello"))
+}
+
+// Binary fragment + Ping emits Pong work before continuation has arrived.
+// Mutants: pong_after_message, ping_breaks_assembly.
+// expect: run binary_ping_mid_fragments() = true
+fn binary_ping_mid_fragments() -> bool {
+    let b = unhex("02 81 00 00 00 00 61 89 81 00 00 00 00 70")
+    let mut d = websocket.decoder(Server, 256)
+    let mut at: u64 = 0
+    let ping = control(result.unwrap(websocket.next(mut d, b, mut at)), 9, result.unwrap(b"p")) && at == list.len(b) && websocket.buffered(d) == 1
+    let c = unhex("80 82 00 00 00 00 62 63")
+    at = 0
+    ping && payload(result.unwrap(websocket.next(mut d, c, mut at)), result.unwrap(b"abc"))
+}
+
+// F16: U+20AC split across text fragments, with an intervening Ping.
+// Mutants: validate_utf8_per_frame, ping_resets_utf8, reject_all_text.
+// expect: run ping_mid_fragments() = true
+fn ping_mid_fragments() -> bool {
+    let b = unhex("01 01 e2 89 01 70 80 02 82 ac")
+    let mut d = websocket.decoder(Client, 256)
+    let mut at: u64 = 0
+    let ping = control(result.unwrap(websocket.next(mut d, b, mut at)), 9, result.unwrap(b"p")) && at == 6
+    let text = match result.unwrap(websocket.next(mut d, b, mut at)) {
+        Text(v) => v == unhex("e2 82 ac"),
+        _ => false
+    }
+    ping && text && first(unhex("01 01 e2 80 02 28 a1"), Client, 256) == 1007 && first(unhex("01 01 e2 80 00"), Client, 256) == 1007 && first(unhex("81 01 e2"), Client, 256) == 1007 && first(unhex("81 02 c0 80"), Client, 256) == 1007 && first(unhex("81 03 ed a0 80"), Client, 256) == 1007 && first(unhex("81 04 f4 90 80 80"), Client, 256) == 1007
+}
+
+// RFC 6455 protocol guards, with one counterexample per deleted check.
+// Mutant: skip_rsv.
+// expect: run rejects_rsv() = 1002
+fn rejects_rsv() -> u16 {
+    first(unhex("c2 00"), Client, 256)
+}
+
+// Mutant: allow_large_control.
+// expect: run rejects_large_control() = 1002
+fn rejects_large_control() -> u16 {
+    first(unhex("89 7e"), Client, 256)
+}
+
+// Mutant: allow_fragmented_control.
+// expect: run rejects_fragmented_control() = 1002
+fn rejects_fragmented_control() -> u16 {
+    first(unhex("09 00"), Client, 256)
+}
+
+// Mutant: allow_stray_continuation.
+// expect: run rejects_stray_continuation() = 1002
+fn rejects_stray_continuation() -> u16 {
+    first(unhex("80 00"), Client, 256)
+}
+
+// Mutant: allow_reserved_opcode.
+// expect: run rejects_reserved_opcode() = 1002
+fn rejects_reserved_opcode() -> u16 {
+    first(unhex("83 00"), Client, 256)
+}
+
+// Mutant: allow_nested_data.
+// expect: run rejects_nested_data() = 1002
+fn rejects_nested_data() -> u16 {
+    let mut d = websocket.decoder(Client, 256)
+    let mut at: u64 = 0
+    event(result.unwrap(websocket.next(mut d, unhex("02 00 82 00"), mut at)))
+}
+
+// Mutant: accept_unmasked.
+// expect: run rejects_unmasked_client() = 1002
+fn rejects_unmasked_client() -> u16 {
+    first(unhex("82 00"), Server, 256)
+}
+
+// Mutant: accept_masked_server.
+// expect: run rejects_masked_server() = 1002
+fn rejects_masked_server() -> u16 {
+    first(unhex("82 80 00 00 00 00"), Client, 256)
+}
+
+// tungstenite parse_overflow / size_limit_hit, plus canonical length checks.
+// Mutants: ignore_length_high_bit, allow_nonminimal_length, skip_size_limit.
+// expect: run frame_lengths() = true
+fn frame_lengths() -> bool {
+    first(unhex("82 7f ff ff ff ff ff ff ff ff"), Client, 262144) == 1002 && first(unhex("82 7e 00 01"), Client, 262144) == 1002 && first(unhex("82 7f 00 00 00 00 00 00 00 7e"), Client, 262144) == 1002 && first(unhex("82 07 01 02 03 04 05 06 07"), Client, 4) == 1009
+}
+
+// F17 / RFC 6455 section 7.4: a code is 1000..1014 except 1004..1006,
+// or an application/private code 3000..4999. Empty is allowed.
+// Mutants: close_one_byte, accept_reserved_close_code, skip_reason_utf8.
+// expect: run close_validation() = true
+fn close_validation() -> bool {
+    let mut d = websocket.decoder(Client, 256)
+    let mut at: u64 = 0
+    let b = unhex("88 05 03 e8 62 79 65")
+    let closed = control(result.unwrap(websocket.next(mut d, b, mut at)), 8, unhex("03 e8 62 79 65"))
+    closed && event(result.unwrap(websocket.next(mut d, b, mut at))) == 65535 && first(unhex("88 00"), Client, 256) == 8 && first(unhex("88 01 00"), Client, 256) == 1002 && first(unhex("88 02 03 ed"), Client, 256) == 1002 && first(unhex("88 02 03 e7"), Client, 256) == 1002 && first(unhex("88 03 03 e8 ff"), Client, 256) == 1007 && first(unhex("88 04 03 e8 e2 82"), Client, 256) == 1007 && first(unhex("88 02 0b b8"), Client, 256) == 8
+}
+
+// Full legal payload and fragmented assembly at the configured limit. No
+// second assembly buffer; max+1 fails from its header. Mutant: skip_assembly_cap.
+// expect: run assembly_at_limit() = true
+fn assembly_at_limit() -> bool {
+    let mut b = unhex("02 7e 00 80")
+    result.unwrap(list.fill(mut b, 128, b'a'))
+    result.unwrap(list.append(mut b, unhex("80 7e 00 80")))
+    result.unwrap(list.fill(mut b, 128, b'b'))
+    let mut d = websocket.decoder(Client, 256)
+    let mut at: u64 = 0
+    let full = match result.unwrap(websocket.next(mut d, b, mut at)) {
+        Message(v) => list.len(v) == 256 && v[0] == b'a' && v[127] == b'a' && v[128] == b'b' && v[255] == b'b',
+        _ => false
+    }
+    let mut over = websocket.decoder(Client, 128)
+    at = 0
+    full && event(result.unwrap(websocket.next(mut over, b, mut at))) == 1009
+}
+
+// Every split point in the masked frame gives exactly one final message.
+// Mutants: mask_offset_from_read_chunk, forget_header_prefix.
+// expect: run all_splits() = true
+fn all_splits() -> bool {
+    let b = unhex("82 85 37 fa 21 3d 7f 9f 4d 51 58")
+    for k in 0u64 .. list.len(b) {
+        let mut d = websocket.decoder(Server, 256)
+        let mut at: u64 = 0
+        if event(result.unwrap(websocket.next(mut d, list.slice(b, 0, k), mut at))) != 0 {
+            return false
+        }
+        at = 0
+        if !payload(result.unwrap(websocket.next(mut d, list.slice(b, k, list.len(b)), mut at)), result.unwrap(b"Hello")) {
+            return false
+        }
+    }
+    true
+}
+
+// Hand-derived encoding and tungstenite write_frames Ping/Pong vectors.
+// Mutants: encoder_wrong_mask, pong_wrong_opcode, close_allows_data.
+// expect: run encode_vectors() = true
+fn encode_vectors() -> bool {
+    let mut client = websocket.encoder(Client, 256)
+    let mut out: Bytes = list.new()
+    let mask: Inline[u8, 4] =[0x37, 0xfa, 0x21, 0x3d]
+    let masked = result.unwrap(websocket.encode(mut client, true, 2, result.unwrap(b"Hello"), mask, mut out)) == Ok(()) && out == unhex("82 85 37 fa 21 3d 7f 9f 4d 51 58")
+    let mut server = websocket.encoder(Server, 256)
+    list.clear(mut out)
+    let no_mask: Inline[u8, 4] =[0; 4]
+    let ping = result.unwrap(websocket.encode(mut server, true, 9, unhex("04 05"), no_mask, mut out)) == Ok(())
+    let pong = result.unwrap(websocket.encode(mut server, true, 10, unhex("01"), no_mask, mut out)) == Ok(()) && out == unhex("89 02 04 05 8a 01 01")
+    list.clear(mut out)
+    let closed = result.unwrap(websocket.encode(mut server, true, 8, unhex("03 e8"), no_mask, mut out)) == Ok(()) && out == unhex("88 02 03 e8")
+    masked && ping && pong && closed && result.unwrap(websocket.encode(mut server, true, 2, result.unwrap(b"x"), no_mask, mut out)) == Error(1002)
+}
+
+// The sender has the same fragmentation, text and size contract as the reader.
+// Mutants: encoder_skip_total, encoder_utf8_per_frame, encoder_skip_close_check.
+// expect: run encode_validation() = true
+fn encode_validation() -> bool {
+    let mut e = websocket.encoder(Server, 4)
+    let mut out: Bytes = list.new()
+    let mask: Inline[u8, 4] =[0; 4]
+    let start = result.unwrap(websocket.encode(mut e, false, 1, unhex("e2"), mask, mut out)) == Ok(())
+    let ping = result.unwrap(websocket.encode(mut e, true, 9, result.unwrap(b"p"), mask, mut out)) == Ok(())
+    let finished = result.unwrap(websocket.encode(mut e, true, 0, unhex("82 ac"), mask, mut out)) == Ok(())
+    let invalid = result.unwrap(websocket.encode(mut e, true, 8, unhex("00"), mask, mut out)) == Error(1002)
+    let before = list.len(out)
+    let long = result.unwrap(websocket.encode(mut e, true, 2, result.unwrap(b"fives"), mask, mut out)) == Error(1009) && list.len(out) == before
+    start && ping && finished && invalid && long
+}
+
+// Default cap exercised under g(max_frame), with recv-sized slices. The
+// input belongs to the caller, scratch is funded before reading. Mutant:
+// reserve_declared (caught for a tiny arrival in length_before_reserve).
+fn receive_default(raw: Bytes) -> bool {
+    result.unwrap(bound bytes 401408 {
+        let scratch: Bytes = result.unwrap(list.with_capacity(8192))
+        let mut d = websocket.decoder(Client, 262144)
+        let mut offset: u64 = 0
+        let mut done = false
+        while offset < list.len(raw) {
+            let end = if list.len(raw) - offset > 8192 {
+                offset + 8192
+            } else {
+                list.len(raw)
+            }
+            let mut at: u64 = 0
+            match websocket.next(mut d, list.slice(raw, offset, end), mut at) {
+                Ok(Message(v)) => {
+                    if list.len(v) != 262144 || v[0] != b'a' || v[262143] != b'a' {
+                        return false
+                    };
+                    done = true
+                },
+                Ok(Need) => {},
+                _ => return false
+            }
+            if at != end - offset {
+                return false
+            }
+            offset = end
+        }
+        done && list.capacity(scratch) == 8192
+    })
+}
+
+// expect: run full_default_limit() = true
+fn full_default_limit() -> bool {
+    let mut one = unhex("82 7f 00 00 00 00 00 04 00 00")
+    result.unwrap(list.fill(mut one, 262144, b'a'))
+    let mut fragments = unhex("02 7f 00 00 00 00 00 02 00 00")
+    result.unwrap(list.fill(mut fragments, 131072, b'a'))
+    result.unwrap(list.append(mut fragments, unhex("80 7f 00 00 00 00 00 02 00 00")))
+    result.unwrap(list.fill(mut fragments, 131072, b'a'))
+    receive_default(one) && receive_default(fragments)
+}
+
+// Checking UTF-8 on each completed frame rather than across fragments loses
+// both invalid continuations and incomplete final scalars.
+// Mutant: utf8_checked_per_frame_only.
+// expect: run utf8_cross_fragment_invalid() = true
+fn utf8_cross_fragment_invalid() -> bool {
+    first(unhex("01 01 e2 80 02 28 a1"), Client, 256) == 1007 && first(unhex("01 01 e2 80 00"), Client, 256) == 1007
+}
+
+// The assembled bytes survive a Ping even when the caller discards the
+// control event. This independently catches assembly loss.
+// Mutant: ping_breaks_assembly.
+// expect: run ping_preserves_assembly() = true
+fn ping_preserves_assembly() -> bool {
+    let mut d = websocket.decoder(Client, 256)
+    let mut at: u64 = 0
+    let first_part = unhex("02 01 61 89 01 70")
+    let ignored = result.unwrap(websocket.next(mut d, first_part, mut at))
+    at = 0
+    payload(result.unwrap(websocket.next(mut d, unhex("80 02 62 63"), mut at)), result.unwrap(b"abc"))
+}
+
+// The read-ahead offset is handed directly to the decoder; no copying or
+// discarded tail between the handshake and the first frame. Mutant: drop_tail.
+// expect: run upgrade_frame_handoff() = true
+fn upgrade_frame_handoff() -> bool {
+    let mut input = result.unwrap(result.unwrap(websocket.request(result.unwrap(b"example.com"), result.unwrap(b"the sample nonce"), false)))
+    result.unwrap(list.append(mut input, unhex("82 83 00 00 00 00 61 62 63")))
+    let mut at = match result.unwrap(websocket.server(input)) {
+        Upgraded(end, _) => end,
+        _ => return false
+    }
+    let mut d = websocket.decoder(Server, 262144)
+    payload(result.unwrap(websocket.next(mut d, input, mut at)), result.unwrap(b"abc")) && at == list.len(input)
+}

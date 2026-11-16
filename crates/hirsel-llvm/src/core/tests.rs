@@ -471,12 +471,13 @@ static void record_event(void *state, HirselCoreEvent e) {
     if (e.kind>=10 && e.kind<=13) { assert(arc_count<4096); arc_events[arc_count++]=e; }
 }
 static size_t file_closes, file_deliveries;
-static HirselCoreHostOutcome file_issue(void *state, HirselCoreHostRequest *r) {
+static HirselCoreHostOutcome file_legacy_issue(void *state, HirselCoreHostRequest *r) {
     (void)state; HirselCoreHostOutcome out={0};
     if (r->operation==0) out.value=r->handle;
     else { assert(r->operation==3); file_closes++; hirsel_core_test_drop_trace(r->handle); out.status=1; out.error.tag=5; out.error.code=5; }
     return out;
 }
+static HirselCoreStep file_issue(void *state, HirselCoreHostRequest *r, uint64_t token) { (void)token; HirselCoreStep s={0}; s.outcome=file_legacy_issue(state,r); return s; }
 static HirselCoreHostOutcome file_deliver(void *state, HirselCoreHostRequest *r, HirselCoreHostOutcome out) {
     (void)state; if(r->operation==3) file_deliveries++; return out;
 }
@@ -2792,11 +2793,12 @@ b1:
     .unwrap();
     wf::module(&module).unwrap();
     let bindings = r#"
-static HirselCoreHostOutcome clock_issue(void *state, HirselCoreHostRequest *request) {
+static HirselCoreHostOutcome clock_legacy_issue(void *state, HirselCoreHostRequest *request) {
     (void)state; assert(request->operation==10); hirsel_core_test_drop_trace(7+request->handle); HirselCoreHostOutcome out={0};
     if(request->handle) out.status=1; else out.value=1234567;
     return out;
 }
+static HirselCoreStep clock_issue(void *state, HirselCoreHostRequest *request, uint64_t token) { (void)token; HirselCoreStep s={0}; s.outcome=clock_legacy_issue(state,request); return s; }
 static HirselCoreHostOutcome clock_deliver(void *state, HirselCoreHostRequest *request, HirselCoreHostOutcome out) {
     (void)state; assert(request->operation==10); return out;
 }

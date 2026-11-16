@@ -61,7 +61,7 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_op(HirselCoreContext *ctx,uint8_t 
     HirselCoreHostOutcome out=__real_hirsel_core_host_op(ctx,op,handle,b,mode,site);
     s.active=old;return out;
 }
-static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
+static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) {
     (void)state; HirselCoreHostOutcome out={0};
     if(crash_mode() && s.crash_pending && !s.crashed) {
         s.crashed=1; s.crash_pending=0; out.error.tag=5; out.error.code=125; return out;
@@ -156,6 +156,9 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
     }
     return out;
 }
+static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) {
+    (void)token; HirselCoreStep s={0}; s.outcome=legacy_issue(state,r); return s;
+}
 static HirselCoreHostOutcome deliver(void *state,HirselCoreHostRequest *r,HirselCoreHostOutcome out) {
     (void)state;
     if(issued() && r->operation==(!strstr(s.mode,"write")?1:2) && !strncmp(s.mode,"delivery-",9)) {
@@ -170,7 +173,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,c
     (void)names;(void)sources;CHECK(input->args_len==1 && input->parameters_len==4);
     CHECK(input->args[0].len<sizeof s.mode);memcpy(s.mode,input->args[0].data,input->args[0].len);
     s.entry=main;memcpy(s.file,is("read")?"abc":"old",3);s.length=3;
-    HirselCoreProvider provider={&s,issue,deliver};
+    HirselCoreProvider provider={&s,0,issue,0,0,deliver};
     HirselCoreEntryGrant caps[4];uint64_t grants[4];
     for(size_t i=0;i<4;i++) {uint8_t k=input->parameters[i].kind;caps[i]=(HirselCoreEntryGrant){k,&provider,k==0?7:0};grants[i]=i+1;}
     HirselCoreBuffer args[1];for(size_t i=0;i<1;i++) args[i]=(HirselCoreBuffer){(uint8_t*)input->args[i].data,input->args[i].len,0};

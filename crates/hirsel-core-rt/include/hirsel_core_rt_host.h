@@ -22,11 +22,17 @@ typedef struct {
     uint64_t written;
     uint8_t status;
 } HirselCoreHostOutcome;
+typedef struct { uint8_t kind; uint64_t deadline_ns; } HirselCoreWait;
+typedef struct { uint8_t kind; HirselCoreHostOutcome outcome; uint64_t deadline_ns; } HirselCoreStep;
 typedef struct {
     void *state;
-    HirselCoreHostOutcome (*issue)(void *, HirselCoreHostRequest *);
+    HirselCoreWait (*wait)(void *, HirselCoreHostRequest *, uint64_t);
+    HirselCoreStep (*issue)(void *, HirselCoreHostRequest *, uint64_t);
+    HirselCoreStep (*resume)(void *, HirselCoreHostRequest *, uint64_t);
+    HirselCoreHostOutcome (*abort)(void *, HirselCoreHostRequest *, uint64_t, uint8_t);
     HirselCoreHostOutcome (*deliver)(void *, HirselCoreHostRequest *, HirselCoreHostOutcome);
 } HirselCoreProvider;
+void hirsel_core_ready(uint64_t token);
 HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
 /* FORM #50: outcome layout value@0, error.tag@8, error.code@12, written@16,
    status@24 (failure convention 3c242a8a). error 0 succeeds; 1..5 are IoError

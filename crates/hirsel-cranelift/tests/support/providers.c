@@ -28,7 +28,7 @@ static void require(int condition) { if(!condition) abort(); }
 static int path_is(HirselCoreHostRequest *r,const char *s) {
     return r->path_len==strlen(s) && !memcmp(r->path,s,r->path_len);
 }
-static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
+static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) {
     struct world *w=state;
     if(w->seeding) return (HirselCoreHostOutcome){.value=111};
     if(w->matrix==2) { require(r->operation==3); return (HirselCoreHostOutcome){0}; }
@@ -103,6 +103,7 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
     }
     return (HirselCoreHostOutcome){0};
 }
+static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) { (void)token; HirselCoreStep s={0}; s.outcome=legacy_issue(state,r); return s; }
 static HirselCoreHostOutcome deliver(void *state,HirselCoreHostRequest *r,HirselCoreHostOutcome out) {
     struct world *w=state;
     if(!w->seeding && w->matrix!=2) w->deliveries++;

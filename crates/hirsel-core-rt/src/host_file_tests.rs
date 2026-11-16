@@ -9,11 +9,11 @@ struct Track {
     mode: String,
     sentinel: Option<File>,
 }
-unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
+unsafe extern "C" fn legacy_issue(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: fixture owns the tracker and OS provider throughout the run.
     unsafe {
         let t = &mut *state.cast::<Track>();
-        let out = (t.provider.issue)(t.provider.state, request);
+        let out = (t.provider.issue)(t.provider.state, request, 0).outcome;
         if (*request).operation == OPEN && out.error == IoError::OK {
             t.opens += 1;
             t.fd = (*t.provider.state.cast::<crate::os::OsProvider>()).file_descriptor(out.value);
@@ -40,6 +40,13 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
             }
         }
         out
+    }
+}
+unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, _: u64) -> Step {
+    Step {
+        kind: STEP_DONE,
+        outcome: legacy_issue(state, request),
+        deadline_ns: 0,
     }
 }
 unsafe extern "C" fn deliver(state: *mut u8, request: *mut Request, out: Outcome) -> Outcome {
@@ -76,7 +83,10 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
         // provider even after this local vtable disappears at entry return.
         let provider = Provider {
             state: track.cast(),
+            wait: None,
             issue,
+            resume: None,
+            abort: None,
             deliver,
         };
         if mode == "refusal" {

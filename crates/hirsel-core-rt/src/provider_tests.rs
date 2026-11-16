@@ -589,9 +589,19 @@ fn mkdtemp_bounds_and_pending_cancellation_happen_before_issue() {
     unsafe extern "C" fn forbidden(_: *mut u8, _: *mut Request) -> Outcome {
         panic!("operation must not issue")
     }
+    unsafe extern "C" fn step_forbidden(s: *mut u8, r: *mut Request, _: u64) -> Step {
+        Step {
+            kind: STEP_DONE,
+            outcome: forbidden(s, r),
+            deadline_ns: 0,
+        }
+    }
     let provider = Provider {
         state: std::ptr::null_mut(),
-        issue: forbidden,
+        wait: None,
+        issue: step_forbidden,
+        resume: None,
+        abort: None,
         deliver,
     };
     for cancel in [false, true] {
@@ -664,6 +674,13 @@ fn issued_operations_deliver_even_when_cancellation_arrives_at_delivery() {
             ..Outcome::default()
         }
     }
+    unsafe extern "C" fn step_issue(s: *mut u8, r: *mut Request, _: u64) -> Step {
+        Step {
+            kind: STEP_DONE,
+            outcome: issue(s, r),
+            deadline_ns: 0,
+        }
+    }
     unsafe extern "C" fn delivery(state: *mut u8, _: *mut Request, result: Outcome) -> Outcome {
         // SAFETY: delivery borrows the same script state after issue.
         unsafe {
@@ -679,7 +696,10 @@ fn issued_operations_deliver_even_when_cancellation_arrives_at_delivery() {
     };
     let provider = Provider {
         state: (&mut state as *mut Script).cast(),
-        issue,
+        wait: None,
+        issue: step_issue,
+        resume: None,
+        abort: None,
         deliver: delivery,
     };
     let mut bytes = *b"abcdef";
@@ -729,6 +749,13 @@ fn scripted_host_errors_preserve_the_named_partial_effect_contracts() {
             }
         }
     }
+    unsafe extern "C" fn step_issue(s: *mut u8, r: *mut Request, _: u64) -> Step {
+        Step {
+            kind: STEP_DONE,
+            outcome: issue(s, r),
+            deadline_ns: 0,
+        }
+    }
     for operation in [
         OPEN,
         READ,
@@ -767,7 +794,10 @@ fn scripted_host_errors_preserve_the_named_partial_effect_contracts() {
         };
         let provider = Provider {
             state: (&mut state as *mut Script).cast(),
-            issue,
+            wait: None,
+            issue: step_issue,
+            resume: None,
+            abort: None,
             deliver,
         };
         // SAFETY: live script and caller capacity for both provider phases.

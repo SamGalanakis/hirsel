@@ -73,7 +73,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
                 assert_eq!(libc::close(os.file_descriptor(r.handle)), 0);
             }
             let provider = os.provider();
-            return (provider.issue)(provider.state, r);
+            return (provider.issue)(provider.state, r, 0).outcome;
         }
         let mut out = Outcome::default();
         if matches!(s.scenario, Scenario::Unavailable) && r.operation == OPEN {
@@ -164,6 +164,27 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
             _ => unreachable!(),
         }
         out
+    }
+}
+unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> Wait {
+    unsafe {
+        (*state.cast::<State>()).os.as_mut().map_or(
+            Wait {
+                kind: WAIT_READY,
+                deadline_ns: 0,
+            },
+            |os| {
+                let provider = os.provider();
+                (provider.wait.unwrap())(provider.state, request, token)
+            },
+        )
+    }
+}
+unsafe extern "C" fn step_issue(s: *mut u8, r: *mut Request, _: u64) -> Step {
+    Step {
+        kind: STEP_DONE,
+        outcome: issue(s, r),
+        deadline_ns: 0,
     }
 }
 unsafe extern "C" fn deliver(state: *mut u8, r: *mut Request, out: Outcome) -> Outcome {
@@ -504,7 +525,10 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
     });
     let provider = Provider {
         state: (&mut *state as *mut State).cast(),
-        issue,
+        wait: Some(wait),
+        issue: step_issue,
+        resume: None,
+        abort: None,
         deliver,
     };
     let grants = [
@@ -958,6 +982,13 @@ unsafe extern "C" fn scripted_sleep(_: *mut u8, request: *mut Request) -> Outcom
     }
     Outcome::default()
 }
+unsafe extern "C" fn scripted_sleep_step(s: *mut u8, r: *mut Request, _: u64) -> Step {
+    Step {
+        kind: STEP_DONE,
+        outcome: scripted_sleep(s, r),
+        deadline_ns: 0,
+    }
+}
 
 unsafe extern "C" fn scripted_deliver(_: *mut u8, _: *mut Request, out: Outcome) -> Outcome {
     out
@@ -967,7 +998,10 @@ unsafe extern "C" fn scripted_deliver(_: *mut u8, _: *mut Request, out: Outcome)
 fn replayed_sleep_does_not_wait() {
     let provider = Provider {
         state: ptr::null_mut(),
-        issue: scripted_sleep,
+        wait: None,
+        issue: scripted_sleep_step,
+        resume: None,
+        abort: None,
         deliver: scripted_deliver,
     };
     let mut context = Context::new(1 << 20);

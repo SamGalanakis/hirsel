@@ -68,8 +68,9 @@ fn close_request(handle: u64, site: u64) -> Request {
 unsafe fn issue(file: File, request: *mut Request) -> Outcome {
     // SAFETY: caller pins the request and provider state through both callbacks.
     unsafe {
-        let result = (file.provider.issue)(file.provider.state, request);
-        (file.provider.deliver)(file.provider.state, request, result)
+        let result =
+            (file.provider.issue)(file.provider.state, request, crate::tasks::current_id());
+        (file.provider.deliver)(file.provider.state, request, result.outcome)
     }
 }
 unsafe fn close(context: *mut Context, file: File) {
@@ -102,20 +103,20 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
             };
         }
         let provider = *provider;
-        let issued = (provider.issue)(provider.state, request);
-        let mut result = (provider.deliver)(provider.state, request, issued);
+        let issued = (provider.issue)(provider.state, request, crate::tasks::current_id());
+        let mut result = (provider.deliver)(provider.state, request, issued.outcome);
         if result.status == 0 && result.error == IoError::OK {
             result.value = (*(*context).host_files).insert(File {
                 provider,
                 handle: result.value,
             });
-        } else if issued.status == 0 && issued.error == IoError::OK {
+        } else if issued.outcome.status == 0 && issued.outcome.error == IoError::OK {
             // Delivery failed after a committed open: the unpublished file is ours.
             close(
                 context,
                 File {
                     provider,
-                    handle: issued.value,
+                    handle: issued.outcome.value,
                 },
             );
         }

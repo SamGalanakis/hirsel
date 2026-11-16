@@ -496,6 +496,13 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
             }
         }
     }
+    unsafe extern "C" fn step_issue(s: *mut u8, r: *mut Request, _: u64) -> Step {
+        Step {
+            kind: STEP_DONE,
+            outcome: issue(s, r),
+            deadline_ns: 0,
+        }
+    }
     unsafe extern "C" fn delivery(state: *mut u8, _: *mut Request, out: Outcome) -> Outcome {
         // SAFETY: issue completed; only delivery now borrows this script.
         unsafe {
@@ -512,7 +519,10 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
             let s = input.cast::<*mut Script>().read();
             let provider = Provider {
                 state: s.cast(),
-                issue,
+                wait: None,
+                issue: step_issue,
+                resume: None,
+                abort: None,
                 deliver: delivery,
             };
             let mut byte = 0u8;

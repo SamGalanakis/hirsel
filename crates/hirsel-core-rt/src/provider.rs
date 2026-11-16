@@ -73,14 +73,40 @@ pub struct Outcome {
     pub status: u8,
 }
 
-/// Both callbacks may suspend at scheduler boundaries. Issue may supply a replayed
-/// result instead of touching the OS. Delivery always runs after an issued call,
-/// even if cancellation was requested meanwhile. State is host-owned for the run.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Wait {
+    pub kind: u8,
+    pub deadline_ns: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Step {
+    pub kind: u8,
+    pub outcome: Outcome,
+    pub deadline_ns: u64,
+}
+pub const WAIT_READY: u8 = 0;
+pub const WAIT_UNTIL: u8 = 1;
+pub const WAIT_PARK: u8 = 2;
+pub const STEP_DONE: u8 = 0;
+pub const STEP_PENDING: u8 = 1;
+unsafe extern "C" fn wait_ready(_: *mut u8, _: *mut Request, _: u64) -> Wait {
+    Wait {
+        kind: WAIT_READY,
+        deadline_ns: 0,
+    }
+}
+
+/// Four-state provider ABI: C (cancelled), W (waiting), I (issued), D (delivered).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Provider {
     pub state: *mut u8,
-    pub issue: unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome,
+    pub wait: Option<unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait>,
+    pub issue: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step,
+    pub resume: Option<unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step>,
+    pub abort: Option<unsafe extern "C" fn(*mut u8, *mut Request, u64, u8) -> Outcome>,
     pub deliver: unsafe extern "C" fn(*mut u8, *mut Request, Outcome) -> Outcome,
 }
 
@@ -122,14 +148,25 @@ pub unsafe extern "C" fn hirsel_core_host(
         }
         let provider = &*provider;
         let previous = crate::os::set_current_context(context);
-        if request.operation == SLEEP_UNTIL && provider.issue as usize == crate::os::issue as usize
-        {
-            let deadline = if request.buffer.len >= 8 {
-                *(request.buffer.data.cast::<u64>())
-            } else {
-                0
-            };
-            if crate::os::wait_until(context, provider.state, deadline, request.site) != 0 {
+        let token = crate::tasks::current_id();
+        let wait = provider.wait.unwrap_or(wait_ready);
+        loop {
+            let w = wait(provider.state, request, token);
+            match w.kind {
+                WAIT_READY => break,
+                WAIT_UNTIL => {
+                    let now = crate::os::monotonic_ns();
+                    let duration =
+                        std::time::Duration::from_nanos(w.deadline_ns.saturating_sub(now));
+                    crate::tasks::sleep_for(
+                        context,
+                        duration.min(std::time::Duration::from_millis(1)),
+                    );
+                }
+                WAIT_PARK => crate::tasks::park_provider(token),
+                _ => break,
+            }
+            if crate::tasks::check_cancel(context, request.site) != 0 {
                 crate::os::set_current_context(previous);
                 return Outcome {
                     status: 1,
@@ -137,8 +174,42 @@ pub unsafe extern "C" fn hirsel_core_host(
                 };
             }
         }
-        let outcome = (provider.issue)(provider.state, request);
-        let outcome = (provider.deliver)(provider.state, request, outcome);
+        let mut step = (provider.issue)(provider.state, request, token);
+        while step.kind == STEP_PENDING {
+            if crate::tasks::check_cancel(context, request.site) != 0 {
+                step.outcome = provider.abort.map_or(
+                    Outcome {
+                        status: 1,
+                        ..Outcome::default()
+                    },
+                    |abort| abort(provider.state, request, token, 1),
+                );
+                break;
+            }
+            if step.deadline_ns != 0 {
+                let now = crate::os::monotonic_ns();
+                if now >= step.deadline_ns {
+                    if let Some(abort) = provider.abort {
+                        step.outcome = abort(provider.state, request, token, 2);
+                    }
+                    break;
+                }
+                crate::tasks::sleep_for(
+                    context,
+                    std::time::Duration::from_nanos(step.deadline_ns - now),
+                );
+            } else {
+                crate::tasks::park_provider(token);
+            }
+            step = provider.resume.map_or(
+                Step {
+                    kind: STEP_DONE,
+                    ..step
+                },
+                |resume| resume(provider.state, request, token),
+            );
+        }
+        let outcome = (provider.deliver)(provider.state, request, step.outcome);
         crate::os::set_current_context(previous);
         outcome
     }

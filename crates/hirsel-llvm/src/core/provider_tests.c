@@ -1,6 +1,6 @@
 static bool created, subdir_created;
 static uint64_t clock_reads;
-static HirselCoreHostOutcome scripted_issue(void *state, HirselCoreHostRequest *r) {
+static HirselCoreHostOutcome scripted_legacy_issue(void *state, HirselCoreHostRequest *r) {
     (void)state; HirselCoreHostOutcome out={0};
     switch(r->operation) {
     case 0:
@@ -42,6 +42,7 @@ static HirselCoreHostOutcome scripted_issue(void *state, HirselCoreHostRequest *
     }
     return out;
 }
+static HirselCoreStep scripted_issue(void *state, HirselCoreHostRequest *r, uint64_t token) { (void)token; HirselCoreStep s={0}; s.outcome=scripted_legacy_issue(state,r); return s; }
 static HirselCoreHostOutcome scripted_deliver(void *state, HirselCoreHostRequest *r, HirselCoreHostOutcome out) {
     (void)state; (void)r; return out;
 }

@@ -1,6 +1,6 @@
 //! Linux descriptor-relative host operations. No path is authorized by a prior
 //! canonicalization. openat2 resolves every traversal beneath its granted fd.
-use crate::{Context, provider::*};
+use crate::provider::*;
 use std::{
     cell::Cell,
     collections::BTreeMap,
@@ -20,15 +20,11 @@ pub(crate) fn set_current_context(context: *mut crate::Context) -> *mut crate::C
     CURRENT_CONTEXT.with(|current| current.replace(context))
 }
 
-fn current_context() -> *mut crate::Context {
-    CURRENT_CONTEXT.with(Cell::get)
-}
-
 pub struct OsProvider {
+    clock: Instant,
     directories: BTreeMap<u64, OwnedFd>,
     files: BTreeMap<u64, OwnedFd>,
     next: u64,
-    clock: Instant,
     temporary: u64,
     pub stdout: OwnedFd,
     pub stderr: OwnedFd,
@@ -40,10 +36,10 @@ impl OsProvider {
     }
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
         Self {
+            clock: Instant::now(),
             directories: BTreeMap::new(),
             files: BTreeMap::new(),
             next: 1,
-            clock: Instant::now(),
             temporary: 0,
             stdout,
             stderr,
@@ -76,14 +72,13 @@ impl OsProvider {
             .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
         id
     }
-    pub(crate) fn remaining_until(&self, deadline: u64) -> u64 {
-        let now = u64::try_from(self.clock.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        deadline.saturating_sub(now)
-    }
     pub fn provider(&mut self) -> Provider {
         Provider {
             state: (self as *mut Self).cast(),
+            wait: Some(wait),
             issue,
+            resume: None,
+            abort: None,
             deliver,
         }
     }
@@ -295,14 +290,7 @@ impl OsProvider {
                 .unwrap_or_else(|_| crate::process::stop(b"Clock"));
             }
             SLEEP_UNTIL => {
-                let deadline = if request.buffer.len >= 8 {
-                    unsafe { *(request.buffer.data.cast::<u64>()) }
-                } else {
-                    0
-                };
-                if self.sleep_until(deadline, request.site)? {
-                    out.status = 1;
-                }
+                // Waiting is owned by the scheduler; issue completes at once.
             }
             SYNC => {
                 let fd = self.files[&request.handle].as_raw_fd();
@@ -347,46 +335,7 @@ impl OsProvider {
     }
 
     fn monotonic_ns(&self) -> u64 {
-        u64::try_from(self.clock.elapsed().as_nanos())
-            .unwrap_or_else(|_| crate::process::stop(b"Clock"))
-    }
-
-    /// Wait on the host monotonic clock. The short absolute slices let a
-    /// cancellation requested by another scheduler participant be observed
-    /// without ever advancing the clock value ourselves.
-    fn sleep_until(&self, deadline: u64, site: u64) -> io::Result<bool> {
-        const SLICE_NS: u64 = 1_000_000;
-        loop {
-            let now = self.monotonic_ns();
-            if now >= deadline {
-                return Ok(false);
-            }
-            let context = current_context();
-            if !context.is_null() {
-                // SAFETY: the provider callback pins this task context for the
-                // synchronous operation and the cancellation flag is atomic.
-                if unsafe { crate::tasks::check_cancel(context, site) } != 0 {
-                    return Ok(true);
-                }
-            }
-            let wait = deadline.saturating_sub(now).min(SLICE_NS);
-            let absolute = monotonic_clock_ns()?
-                .checked_add(wait)
-                .ok_or_else(|| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
-            let timespec = ns_to_timespec(absolute)?;
-            // SAFETY: CLOCK_MONOTONIC and TIMER_ABSTIME use a valid timespec.
-            let result = unsafe {
-                libc::clock_nanosleep(
-                    libc::CLOCK_MONOTONIC,
-                    libc::TIMER_ABSTIME,
-                    &timespec,
-                    std::ptr::null_mut(),
-                )
-            };
-            if result != 0 && result != libc::EINTR {
-                return Err(io::Error::from_raw_os_error(result));
-            }
-        }
+        u64::try_from(self.clock.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 }
 
@@ -408,49 +357,45 @@ fn monotonic_clock_ns() -> io::Result<u64> {
         .and_then(|value| value.checked_add(nanos))
         .ok_or_else(|| io::Error::from_raw_os_error(libc::EOVERFLOW))
 }
-
-fn ns_to_timespec(ns: u64) -> io::Result<libc::timespec> {
-    let seconds = ns / 1_000_000_000;
-    let nanos = ns % 1_000_000_000;
-    Ok(libc::timespec {
-        tv_sec: libc::time_t::try_from(seconds)
-            .map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?,
-        tv_nsec: libc::c_long::try_from(nanos)
-            .map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?,
-    })
-}
-
-/// Park an OS clock wait in the task scheduler, checking cancellation whenever
-/// the parked task is resumed. The provider issue itself remains synchronous
-/// and is called only after the deadline has been reached.
-pub(crate) unsafe fn wait_until(
-    context: *mut Context,
-    state: *mut u8,
-    deadline: u64,
-    site: u64,
-) -> u8 {
-    // SAFETY: the provider state is the live OsProvider selected by its issue
-    // function, and the context belongs to the current task.
-    unsafe {
-        let provider = &*state.cast::<OsProvider>();
-        loop {
-            let remaining = provider.remaining_until(deadline);
-            if remaining == 0 {
-                return 0;
-            }
-            crate::tasks::sleep_for(context, std::time::Duration::from_nanos(remaining));
-            if crate::tasks::check_cancel(context, site) != 0 {
-                return 1;
-            }
-        }
-    }
+pub(crate) fn monotonic_ns() -> u64 {
+    monotonic_clock_ns().unwrap_or(u64::MAX)
 }
 
 /// # Safety
 /// State is the run's live OsProvider; request meets the provider ABI contract.
-pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
-    // SAFETY: OS adapter issues synchronously, without task callbacks or suspension.
-    unsafe { crate::tasks::host_operation(state, request, issue_on_stack) }
+pub unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, _: u64) -> Wait {
+    if unsafe { (*request).operation } != SLEEP_UNTIL {
+        return Wait {
+            kind: WAIT_READY,
+            deadline_ns: 0,
+        };
+    }
+    let deadline = unsafe {
+        if (*request).buffer.len >= 8 {
+            *(*request).buffer.data.cast::<u64>()
+        } else {
+            0
+        }
+    };
+    let now = unsafe { (&*state.cast::<OsProvider>()).clock.elapsed().as_nanos() as u64 };
+    if deadline <= now {
+        Wait {
+            kind: WAIT_READY,
+            deadline_ns: 0,
+        }
+    } else {
+        Wait {
+            kind: WAIT_UNTIL,
+            deadline_ns: deadline,
+        }
+    }
+}
+pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, _: u64) -> Step {
+    Step {
+        kind: STEP_DONE,
+        outcome: unsafe { crate::tasks::host_operation(state, request, issue_on_stack) },
+        deadline_ns: 0,
+    }
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.

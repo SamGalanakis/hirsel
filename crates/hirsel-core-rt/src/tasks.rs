@@ -11,7 +11,7 @@ use std::{
     alloc::{Layout, alloc, dealloc},
     cell::Cell as Local,
     ptr::{self, NonNull},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
     time::{Duration, Instant},
 };
 
@@ -124,6 +124,7 @@ impl Default for SchedulerProvider {
     }
 }
 thread_local! { static CURRENT: Local<*mut Task> = const { Local::new(ptr::null_mut()) }; }
+static PROVIDER_RUN: AtomicPtr<Scheduler> = AtomicPtr::new(ptr::null_mut());
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Ready,
@@ -167,6 +168,7 @@ struct Scheduler {
     all: *mut Task,
     next: u64,
     provider: SchedulerProvider,
+    worker: Option<std::thread::Thread>,
 }
 const HOST_STACK_BYTES: usize = 64 << 10;
 impl Scheduler {
@@ -482,6 +484,34 @@ pub(crate) unsafe fn sleep_for(_context: *mut Context, duration: Duration) {
         hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
     }
 }
+pub(crate) unsafe fn park_provider(_token: u64) {
+    let task = CURRENT.get();
+    if task.is_null() {
+        std::thread::yield_now();
+        return;
+    }
+    unsafe {
+        let run = (*task).run;
+        PROVIDER_RUN.store(run, Ordering::Release);
+        (*task).state = State::Blocked;
+        hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
+    }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_ready(_token: u64) {
+    // Providers call this from their readiness callback. The current worker's
+    // scheduler is woken; the next scheduler turn re-runs resume/wait.
+    let run = PROVIDER_RUN.load(Ordering::Acquire);
+    if run.is_null() {
+        return;
+    }
+    unsafe {
+        (*run).wake();
+        if let Some(worker) = &(*run).worker {
+            worker.unpark();
+        }
+    }
+}
 pub(crate) fn wake() {
     let task = CURRENT.get();
     if task.is_null() {
@@ -585,6 +615,7 @@ pub unsafe fn run_root(
         all: ptr::null_mut(),
         next: 1,
         provider,
+        worker: Some(std::thread::current()),
     };
     let descriptor = ValueLayout {
         bytes: input_bytes,
@@ -624,6 +655,7 @@ pub unsafe fn run_root(
     crate::peak::allocated((&*root as *const Task).cast(), size_of::<Task>());
     // SAFETY: root's stable allocation and both stacks stay live through the loop.
     unsafe {
+        PROVIDER_RUN.store(&mut run, Ordering::Release);
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
         root.refunds = Some(
@@ -660,6 +692,7 @@ pub unsafe fn run_root(
             ptr::copy_nonoverlapping(root.result.as_ptr(), destination, result_bytes);
         }
         (*context).events = 0;
+        PROVIDER_RUN.store(ptr::null_mut(), Ordering::Release);
         root.failed
     }
 }

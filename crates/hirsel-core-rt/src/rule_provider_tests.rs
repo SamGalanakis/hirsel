@@ -66,26 +66,33 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
         tape.points.push((0, request.operation, request.site));
         if tape.replay {
             let recorded = tape.values[tape.at];
-            Outcome {
+            return Outcome {
                 value: recorded.value,
                 error: recorded.error,
                 written: recorded.written,
                 status: recorded.status,
-            }
+            };
         } else if request.operation == WRITE {
             tape.effects
                 .extend_from_slice(std::slice::from_raw_parts(request.buffer.data, 2));
-            Outcome {
+            return Outcome {
                 written: 2,
                 error: IoError::from_errno(libc::ENOSPC),
                 ..Outcome::default()
-            }
+            };
         } else {
-            Outcome {
+            return Outcome {
                 value: 887,
                 ..Outcome::default()
-            }
+            };
         }
+    }
+}
+unsafe extern "C" fn step_issue(s: *mut u8, r: *mut Request, _: u64) -> Step {
+    Step {
+        kind: STEP_DONE,
+        outcome: unsafe { issue(s, r) },
+        deadline_ns: 0,
     }
 }
 unsafe extern "C" fn delivery(state: *mut u8, request: *mut Request, result: Outcome) -> Outcome {
@@ -118,7 +125,10 @@ fn recorded_run(replay: Option<Vec<Recorded>>) -> (Tape, Vec<Recorded>, Vec<(u8,
     };
     let provider = Provider {
         state: (&mut tape as *mut Tape).cast(),
-        issue,
+        wait: None,
+        issue: step_issue,
+        resume: None,
+        abort: None,
         deliver: delivery,
     };
     let mut data = *b"abcdef";

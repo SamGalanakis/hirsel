@@ -253,9 +253,10 @@ pub(crate) struct Toolchain {
     /// The runtime archive alone: objects are emitted in process against its
     /// ABI, so a different C driver or linker relinks them but compiles none.
     pub(crate) runtime: ContentHash,
-    /// The digest of the (name, value) pairs a capture's child tools run
-    /// under ([`CAPTURE_VARIABLES`]), and nothing else of the environment:
-    /// an installation's link takes none.
+    /// The keyed environment digest: the (name, value) pairs a capture's
+    /// child tools run under ([`CAPTURE_VARIABLES`]; an installation's link
+    /// takes none) and the compiler's own output reads
+    /// ([`COMPILER_VARIABLES`]), and nothing else of the environment.
     pub(crate) environment: ContentHash,
 }
 
@@ -351,7 +352,7 @@ fn installed_toolchain(
             [crate::encode(&(identity, &archive.content))?.as_slice()],
         ),
         runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.content.0.as_slice()]),
-        environment: tool_environment(&[]),
+        environment: keyed_environment(&[]),
     };
     let recipe = LinkRecipe {
         schema: LINK_RECIPE_SCHEMA,
@@ -556,6 +557,14 @@ fn capture_keyed_link_recipe(
 /// capture writes has an explicit path. No locale: a child runs in the C
 /// locale, which changes no argv.
 const CAPTURE_VARIABLES: [&str; 2] = ["PATH", "LD_LIBRARY_PATH"];
+/// The compiler's own environment reads that can change its output, on the
+/// same keyed list as [`CAPTURE_VARIABLES`] but never passed to a child. Its
+/// other reads change no output: `HIRSEL_MEMORY_LIMIT` only refuses a
+/// request, and a refused result is never published; `XDG_CACHE_HOME`,
+/// `HOME` and the default C driver's `LLVM_SYS_231_PREFIX` choose a place,
+/// whose bytes key what is read there; `HIRSEL_LLVM_PRINTED_ORACLE` writes a
+/// side report.
+const COMPILER_VARIABLES: [&str; 1] = [hirsel_llvm_lazy::core::NO_FACTS_VARIABLE];
 
 /// What a capture's child tools observe besides their argv and the files
 /// they read: the listed variables (`PATH` is the request's search path),
@@ -600,10 +609,11 @@ impl CaptureEnvironment {
             .collect()
     }
 
-    /// The listed (name, value) pairs alone: what a request record takes
-    /// from the environment. The directory and umask key the capture file.
+    /// The keyed environment digest over the listed pairs: what a request
+    /// takes from the environment. The directory and umask key the capture
+    /// file.
     fn digest(&self) -> ContentHash {
-        tool_environment(&self.pairs())
+        keyed_environment(&self.pairs())
     }
 
     fn key(&self, driver_key: &str) -> io::Result<String> {
@@ -625,16 +635,28 @@ impl CaptureEnvironment {
     }
 }
 
-/// `hirsel.tool-environment.v1` over the listed (name, value) pairs.
-fn tool_environment(pairs: &[(&str, &[u8])]) -> ContentHash {
+/// `hirsel.keyed-environment.v1` over `children`, the (name, value) pairs a
+/// toolchain's child tools run under, then the listed compiler reads. A
+/// request takes nothing else from the environment.
+fn keyed_environment(children: &[(&str, &[u8])]) -> ContentHash {
+    use std::os::unix::ffi::OsStrExt;
+    let compiler = COMPILER_VARIABLES
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (name, value)));
     let mut bytes = Vec::new();
-    for (name, value) in pairs {
-        for part in [name.as_bytes(), value] {
-            bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
-            bytes.extend_from_slice(part);
-        }
+    let mut part = |part: &[u8]| {
+        bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(part);
+    };
+    for (name, value) in children {
+        part(name.as_bytes());
+        part(value);
     }
-    ContentHash::of_parts("hirsel.tool-environment.v1", [&bytes[..]])
+    for (name, value) in compiler {
+        part(name.as_bytes());
+        part(value.as_bytes());
+    }
+    ContentHash::of_parts("hirsel.keyed-environment.v1", [&bytes[..]])
 }
 
 /// This process's umask, as the kernel reports it; a child inherits it.

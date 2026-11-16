@@ -183,7 +183,8 @@ pub(crate) struct Head {
     /// The toolchain image and the link recipe's identity.
     pub toolchain: ContentHash,
     pub recipe: ContentHash,
-    /// The digest of the child tools' listed environment.
+    /// The keyed environment digest (the child tools' and the compiler's
+    /// listed variables).
     pub tools: ContentHash,
     /// The entry policy's digest.
     pub policy: ContentHash,

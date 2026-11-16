@@ -157,11 +157,14 @@ fn carriers(
 
 /// Whether to use the producer's optimization facts. Setting the diagnostic
 /// switch suppresses every emitter-supplied fact, while retaining ABI attributes
-/// and stack probes. Drivers include this choice in native object cache keys.
+/// and stack probes. Drivers include this choice in native object cache keys,
+/// and the variable is on the driver's keyed environment list.
 pub fn facts_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("HIRSEL_LLVM_NO_FACTS").is_none())
+    *ENABLED.get_or_init(|| std::env::var_os(NO_FACTS_VARIABLE).is_none())
 }
+/// The diagnostic switch [`facts_enabled`] reads.
+pub const NO_FACTS_VARIABLE: &str = "HIRSEL_LLVM_NO_FACTS";
 
 /// Whether this engine implements the requested target's native ABI.
 pub fn supports_target(triple: &str) -> bool {

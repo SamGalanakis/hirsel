@@ -6,6 +6,9 @@ Run the tests your change can break, commit it, then run:
 tools/land-run /tmp/<lane>-land.log
 ```
 
+Use `--alone` to check and push only this ticket. It is also a FIFO batch
+boundary: tickets behind it cannot join an earlier batch.
+
 `tools/land --withdraw` stops this checkout's queued or running land after verifying its recorded process start time.
 
 `tools/land-run` is the body of the detached user unit described in the host
@@ -74,9 +77,19 @@ change touches the front end, the core libraries or the M1 programs; a cost red 
 reported, not refused. The land checkout's daemon keeps 128 remote actions in flight, a
 lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`).
 
+The queue controller updates to its rebased tree's `tools/land` before leading.
+For every candidate, including waiting tickets and bisection groups, a fresh Python
+process loads `fast` or `full` from that merged tree's `tools/land`, with that
+tree's helper modules and acceptance list. Adding a required target or validation
+rule therefore takes effect in the change's own land. The log records the checked
+commit and its `tools/land` blob. The controller retains queue ownership and its
+heartbeat while the worker runs. Withdrawal unwinds both the worker and its check.
+
 It pushes the exact checked commit SHA, after verifying that HEAD and the worktree
 still match. A red check refuses the push. Source conflicts stop and abort the rebase;
-resolve them yourself and run land again. Land does not commit generated files.
+resolve them yourself and run land again. Ignored build inventories remain untracked;
+registered tracked documents are regenerated and amended into the candidate after
+rebasing, before their whole-file checks.
 `tools/sweep` runs the longer native suites (both engines, AArch64, the laws, m2b and
 the land tool's own tests) on current main when asked; it has no automatic schedule.
 
@@ -88,11 +101,13 @@ toolchain under `RUSTUP_HOME` (default `~/.rustup`), then `CARGO_HOME/bin`
 subprocess receives that explicit PATH, including nested preparation and
 build-file generation, so the batch head needs no shell Rust setup.
 
-A batch runs its head's tools/land, so every other ticket in it is checked
-by the tool already on main. Before publishing a ticket, land therefore
+Before publishing a ticket, land retains its target compatibility preflight. It
 queries this tree for each target literal in main's tools/land and refuses
 submission naming any that is missing: a change that renames such a target
 keeps the old name working (an alias or a test suite) in the same commit.
+New tickets have a pending `result: null` slot. Legacy batchers skip any ticket
+with a result key, so they cannot deliver a ticket that requires merged-tree
+validation. Upgraded batchers distinguish a pending slot from a completed result.
 
 When every new main commit touches only `tools/known-failures.tsv`, a
 previously passed batch rebases and pushes without running any check again,
@@ -176,6 +191,37 @@ change alone, on a green tree, is red; the culprit exits with that check's
 first error, and the rest land. A red that does not repeat blames nobody.
 A ticket withdrawn mid-batch leaves every group not yet checked.
 A batch of one is a single land.
+
+## Red main and repairs
+
+A failing candidate does not establish that the candidate caused the failure.
+Before bisecting a full failure, land checks bare main once. A named target that
+also fails there establishes a red base; unnamed checks must reproduce the same
+error. An unrelated base failure stops attribution without blaming a ticket.
+Green candidate checks can prove a subsequently published base green, without
+running that base again.
+
+Land records a reproduced failure in the queue's `red-main.json`, keyed by the
+exact base commit, and reports `main is red at <target>, first seen at <commit>`
+to every waiting ticket. The commit is the first observed failing base, not a
+claim that land bisected the introduction. It stops candidate bisection. If no
+verified repair is queued, the blocked cohort exits with the same diagnosis and
+no candidate is blamed. Later tickets on that same base reuse the diagnosis.
+
+A repair requests priority with:
+
+```sh
+tools/land-run /tmp/<repair>-land.log --repair-main //:failing-target
+```
+
+The FIFO owner may check that request ahead of its waiting cohort only for a
+target reproduced red on main. The repair must make that target pass, then pass
+every ordinary gate by itself. Its standalone push precedes resuming the cohort.
+A cached diagnosis is rechecked on bare main before granting priority. If the
+failure cleared, FIFO order remains. A green base, a different target, a still-red
+target, or another failing gate grants no repair shortcut. A repair label does
+not relax a check, change its arguments or authorize a red push. Successful
+publication clears the old diagnosis and notices.
 
 Every pushed tree has passed checks, reused only for row-only moves as above. Before the push, the
 head confirms that it still owns the queue head and that every batched

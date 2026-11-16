@@ -2,6 +2,8 @@
 """Land this worktree's commits on origin/main.
 
     tools/land-run /tmp/<lane>-land.log  # detached user unit body
+    tools/land-run /tmp/<lane>-land.log --alone
+    tools/land-run /tmp/<repair>-land.log --repair-main //:failing-target
     tools/land --withdraw  # stop this checkout's queued or running land
 
 Join the common git directory's FIFO ticket queue, then fetch and rebase
@@ -14,7 +16,7 @@ belong to its next ticket and its branch stays untouched. The queue head
 lands a batch: its own commits, then
 those of up to 15 waiting tickets in ticket order, checked once together in
 a land-owned detached checkout and pushed in one push; a conflicting ticket leaves the batch,
-and a red batch bisects until its culprits are found, pushing each green group
+and a red batch on a green base bisects until its culprits are found, pushing each green group
 at once (docs/landing.md). A waiting ticket landed in a batch exits with its
 own landed commits. A push rejected because main moved goes back to the rebase
 with full jitter and no attempt limit. Row-only main moves reuse a batch's
@@ -30,6 +32,7 @@ is appended to `hirsel-landings.jsonl` in the common git directory.
 """
 
 from contextlib import contextmanager
+import argparse
 import fcntl
 import itertools
 import json
@@ -42,6 +45,7 @@ import signal
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 
 ROOT = Path(subprocess.run(['git', 'rev-parse', '--show-toplevel'], capture_output=True, text=True,
@@ -137,13 +141,14 @@ class LandQueue:
     EXPIRES = 15 * 60
     HEARTBEAT = 10
 
-    def __init__(self, lane):
+    def __init__(self, lane, alone=False, repair=None):
         common = git('rev-parse', '--path-format=absolute', '--git-common-dir')
         if common.returncode or not common.stdout.strip():
             raise ValueError('cannot locate the common git directory')
         self.directory = Path(common.stdout.strip()) / 'land-queue'
         self.directory.mkdir(exist_ok=True)
         self.lane = lane or SOURCE.name
+        self.alone, self.repair = alone, repair
         self.identity = self.process(os.getpid())
         self.ticket = None
         self.record = {}
@@ -287,7 +292,11 @@ class LandQueue:
                     # `head` is the commit a batch head lands for this ticket.
                     self.write(self.ticket, dict(pid=os.getpid(), process_start=self.identity,
                                                 started=now, heartbeat=now, lane=self.lane,
-                                                worktree=str(SOURCE), head=submitted))
+                                                worktree=str(SOURCE), head=submitted,
+                                                alone=self.alone, repair=self.repair, result=None))
+                    # A pending result slot is also the protocol boundary: old
+                    # batchers skip any ticket with a result key. They cannot
+                    # deliver a new ticket without merged-tree validation.
                     outcome(lane=self.lane, ticket=self.ticket.name, submitted=submitted)
                     os.environ['HIRSEL_LAND_TICKET'] = self.ticket.name
                 say(f'queued ticket {self.ticket.name} for {self.lane}')
@@ -295,12 +304,17 @@ class LandQueue:
             self.worker = threading.Thread(target=self.heartbeat, daemon=True)
             self.worker.start()
             last = None
+            notice = None
             announced = 0
             while True:
                 with self.locked():
                     if self.lost.is_set() or not self.refresh():
                         raise ValueError('queue ticket expired or was removed; refusing to land')
-                    if 'result' in self.record:
+                    if self.record.get('notice') != notice:
+                        notice = self.record.get('notice')
+                        if notice:
+                            say(notice)
+                    if self.record.get('result') is not None:
                         self.result = self.record['result']
                         return self
                     tickets = self.tickets()
@@ -326,7 +340,7 @@ class LandQueue:
             self.__exit__(None, None, None)
             raise
 
-    def claim(self, limit, branches, skip=()):
+    def claim(self, limit, branches, skip=(), include_special=False):
         """Up to `limit` live tickets behind this head, oldest first, each with the commit it lands.
 
         A ticket names its commit; one queued by an older tools/land is taken at
@@ -337,7 +351,7 @@ class LandQueue:
         members = []
         with self.locked():
             for path in self.tickets():
-                if len(members) == limit:
+                if limit is not None and len(members) == limit:
                     break
                 if int(path.name) <= int(self.ticket.name) or path.name in skip:
                     continue
@@ -345,8 +359,12 @@ class LandQueue:
                     record = json.loads(path.read_text())
                 except (OSError, ValueError):
                     continue
-                if 'result' in record:
+                if record.get('result') is not None:
                     continue
+                if not include_special and (record.get('alone') or record.get('repair')):
+                    # Standalone tickets are FIFO barriers on green main.
+                    # Only a reproduced red base permits a repair to pass it.
+                    break
                 if reason := self.stale(record):
                     path.unlink()
                     say(f'dropped ticket {path.name} for {record["lane"]} from the batch: {reason}')
@@ -369,7 +387,7 @@ class LandQueue:
                     record = json.loads((self.directory / member.ticket).read_text())
                 except (OSError, ValueError):
                     continue
-                if (self.owned(member, record) and not self.stale(record) and 'result' not in record
+                if (self.owned(member, record) and not self.stale(record) and record.get('result') is None
                         and record.get('head', member.head) == member.head):
                     alive.append(member)
             return alive
@@ -388,6 +406,41 @@ class LandQueue:
             if self.owned(member, record):
                 record['result'] = result
                 self.write(path, record)
+
+    def red_base(self, base):
+        path = self.directory / 'red-main.json'
+        with self.locked():
+            fact = json.loads(path.read_text()) if path.exists() else None
+        return fact if fact and fact['base'] == base else None
+
+    def record_red(self, base, report, targets):
+        with self.locked():
+            path = self.directory / 'red-main.json'
+            old = json.loads(path.read_text()) if path.exists() else None
+            first = old['first_seen'] if old and old['targets'] == targets else base
+            fact = dict(base=base, first_seen=first, targets=targets, report=report)
+            self.write(path, fact)
+        return fact
+
+    def clear_red(self, base):
+        with self.locked():
+            path = self.directory / 'red-main.json'
+            if path.exists() and json.loads(path.read_text())['base'] == base:
+                path.unlink()
+            for ticket in self.tickets():
+                record = json.loads(ticket.read_text())
+                if 'notice' in record:
+                    record.pop('notice')
+                    self.write(ticket, record)
+
+    def notify_red(self, message):
+        """One diagnosis for the whole cohort, without blaming its changes."""
+        with self.locked():
+            for path in self.tickets():
+                record = json.loads(path.read_text())
+                if record.get('result') is None and record.get('notice') != message:
+                    record['notice'] = message
+                    self.write(path, record)
 
     def __exit__(self, *ignored):
         self.stop.set()
@@ -504,6 +557,7 @@ def run(command):
             os.killpg(process.pid, signal.SIGTERM)
         except OSError:
             pass
+        process.wait()
         raise
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
@@ -521,12 +575,11 @@ def check(name, command):
 
 
 def previous_tool_refusal():
-    """Why main's tools/land could not check this tree, or None.
+    """Retain the preflight target-compatibility rule for older queued tickets.
 
-    A batch runs its head's tools/land, so every other change in it is checked
-    by the tool already on main: a change that renames or removes a target
-    that tool asks for would break the whole batch, and must keep the old name
-    working in the same commit."""
+    Validation itself runs from each merged tree. A submitted change still
+    keeps main's named targets available to an older ticket's checks.
+    """
     if (fetched := git('fetch', '-q', 'origin', 'main')).returncode:
         return 'git fetch failed\n' + fetched.stderr
     shown = git('show', 'origin/main:tools/land')
@@ -547,6 +600,59 @@ def move(tree):
     """Check out a tree detached in this worktree, which must stay clean."""
     if git('checkout', '-q', '--detach', tree).returncode or not unchanged(tree):
         raise Refusal(f'cannot check out {tree[:12]} cleanly; refusing to push')
+
+
+VALIDATE = '''import json, pathlib, runpy, signal, sys
+mode, tree, base, output, screened, target = sys.argv[1:]
+land = runpy.run_path('tools/land', run_name='land_validation')
+signal.signal(signal.SIGTERM, land['withdraw_signal'])
+if mode == 'target':
+    report = (land['check']('repair: prepare.py', [sys.executable, 'tools/buck2/prepare.py'])
+              or land['check']('repair: sync.py', [sys.executable, 'tools/buck2/sync.py', '--if-stale'])
+              or land['check']('repair target ' + target,
+                  [land['BUCK2'], 'test', *land['CONFIG'], '-c', 'hirsel.full=true', target,
+                   '--', '--test-arg=--test-threads=1']))
+elif mode == 'fast':
+    report = land['fast'](tree, base)
+else:
+    report = land['full'](tree, base, screened == '1')
+pathlib.Path(output).write_text(json.dumps(report))
+'''
+
+
+def candidate_check(mode, tree, base, screened=False, target=''):
+    """Load checks and their acceptance list from the tree being checked.
+
+    The controller keeps its queue ownership and heartbeat. A fresh process
+    imports this tree's tools/land and its helper modules, including when a
+    waiting ticket changes validation logic after the controller was loaded.
+    """
+    move(tree)
+    tool = git('rev-parse', tree + ':tools/land').stdout.strip()
+    say(f'{mode} checks from merged tree {tree[:12]}, tools/land {tool}')
+    with tempfile.TemporaryDirectory(prefix='hirsel-land-check-') as directory:
+        output = Path(directory) / 'report.json'
+        done = run([PY, '-c', VALIDATE, mode, tree, base, str(output), str(int(screened)), target])
+        print(done.stdout + done.stderr, end='', flush=True)
+        if done.returncode or not output.is_file():
+            return ['FAIL  candidate validation worker', *first_error(done.stderr + done.stdout).splitlines()]
+        return json.loads(output.read_text())
+
+
+def failed_checks(report):
+    for line in report:
+        if line.startswith('failing targets: '):
+            return sorted(set(line.removeprefix('failing targets: ').split(', ')))
+    return [report[0].removeprefix('FAIL  ')]
+
+
+def matching_checks(candidate, base):
+    """Named target failures match by target; unnamed checks need the same error."""
+    wanted = {name.removeprefix('root') for name in failed_checks(candidate)}
+    targets = failed_checks(base)
+    if all(name.startswith(('root//', '//')) for name in targets):
+        return [name for name in targets if name.removeprefix('root') in wanted]
+    return targets if candidate == base else []
 
 
 def fast(tree, base=None):
@@ -727,6 +833,11 @@ class Race(Exception):
     """A push rejected because main moved."""
 
 
+class MainRed(Exception):
+    def __init__(self, fact):
+        self.fact = fact
+
+
 def branches():
     """Each worktree's checked-out branch and its tip, from the common git directory."""
     found = {}
@@ -773,6 +884,7 @@ class Batch:
         self.pushed = main_sha
         # The last green check, kept if its push loses a race: (base, tree, submitted heads).
         self.proof = None
+        self.base_checks = {}
 
     def fail(self, member, code, message, report=()):
         if member is self.own:
@@ -842,21 +954,24 @@ class Batch:
             members = [member for member, _ in applied]
             if not applied:
                 return members
-            if not (report := fast(tip, base)):
+            if not (report := candidate_check('fast', tip, base)):
                 self.screened.add(git('rev-parse', tip + '^{tree}').stdout.strip())
                 return members
+            if (base, 'fast') not in self.base_checks:
+                self.base_checks[base, 'fast'] = candidate_check('fast', base, base)
+            if failed := self.base_checks[base, 'fast']:
+                if targets := matching_checks(report, failed):
+                    raise MainRed(self.queue.record_red(base, failed, targets))
+                raise Refusal('main fails a different fast check; refusing to blame a ticket\n' + '\n'.join(failed))
             if len(applied) == 1:
                 self.red(members[0], report)
                 return []
-            if fast(base, base):
-                say('the base fails the fast checks itself; the screen blames no ticket')
-                return members
             # trees[i] holds the first i tickets: trees[low] passes, trees[high] fails.
             trees = [base, *(commits[-1] for _, commits in applied)]
             low, high = 0, len(applied)
             while high - low > 1:
                 middle = (low + high) // 2
-                if found := fast(trees[middle], base):
+                if found := candidate_check('fast', trees[middle], base):
                     high, report = middle, found
                 else:
                     low = middle
@@ -922,6 +1037,7 @@ class Batch:
                 log.write(json.dumps(dict(landed=commits[-1], pushed=tip, base=self.pushed, branch=member.lane,
                                           unchecked_rebase=False, at=at), sort_keys=True) + '\n')
         self.landed += fresh
+        self.queue.clear_red(self.pushed)
         self.pushed = tip
         done |= {member for member, _ in fresh}
         for conflict in list(self.conflicts):
@@ -948,12 +1064,73 @@ class Batch:
             tickets = f' with {len(applied)} tickets: ' + ', '.join(str(member) for member, _ in applied)
         say(f'attempt {self.attempt}: checking {tree[:12]} on origin/main {base[:12]}' + tickets)
         tree_id = git('rev-parse', tree + '^{tree}')
-        report = full(tree, base, tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)
+        report = candidate_check('full', tree, base,
+                                 tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)
         if report is None:
+            self.base_checks[tree, 'full'] = None
             core_cost_report(base, tree)
         return report
 
     def resolve(self, members, previous=None):
+        if fact := self.queue.red_base(self.pushed):
+            return self.recover(members, fact)
+        try:
+            return self.resolve_groups(members, previous)
+        except MainRed as red:
+            return self.recover(members, red.fact)
+
+    def recover(self, members, fact):
+        """Only a reproduced red base grants a repair request priority.
+
+        A matching request must turn that target green, then pass the full
+        merged-tree gate alone. Without a verified repair the whole cohort
+        receives the same base diagnosis, with no candidate bisection.
+        """
+        message = (f'main is red at {", ".join(fact["targets"])}, '
+                   f'first seen at {fact["first_seen"]}; refusing to push a red tree; no ticket is blamed')
+        say(message)
+        self.queue.notify_red(message)
+        waiting = self.queue.claim(None, branches(), include_special=True)
+        requests = [self.own, *waiting]
+        done = {member for member, _ in self.landed}
+        for member in requests:
+            target = (member.record or self.queue.record).get('repair')
+            if member in done or not target or target.removeprefix('root') not in (
+                    name.removeprefix('root') for name in fact['targets']):
+                continue
+            if not any(key[0] == self.pushed for key in self.base_checks):
+                # A cached diagnosis avoids checking every blocked ticket.
+                # It does not grant priority after a transient failure clears.
+                if candidate_check('target', self.pushed, self.pushed, target=target) is None:
+                    self.queue.clear_red(self.pushed)
+                    say('the cached main failure no longer reproduces; keeping FIFO order')
+                    return self.resolve_groups(members)
+            tree, applied = self.apply(self.pushed, [member])
+            if not applied:
+                continue
+            if report := candidate_check('target', tree, self.pushed, target=target):
+                say(f'main-repair ticket {int(member.ticket)} does not fix {target}')
+                self.fail(member, 1, f'main-repair request does not fix {target}', report)
+                continue
+            say(f'verified main-repair target {target} for ticket {int(member.ticket)}; checking alone')
+            self.checked += 1
+            if report := self.green(tree, applied, self.pushed):
+                self.fail(member, 1, 'main-repair target passed but the standalone gate is red', report)
+                continue
+            self.proof = (self.pushed, tree, {member.ticket: member.head})
+            self.publish(tree, applied)
+            remaining = [m for m in members if m not in {m for m, _ in self.landed}
+                         and (m is self.own or m in self.queue.live([m]))]
+            return self.resolve(remaining) if remaining else self.pushed
+        # Include tickets outside the original batch cap. One base failure
+        # blocks all of them, without running their identical failing gates.
+        for member in [self.own, *self.queue.claim(None, branches(), include_special=True)]:
+            if member not in {m for m, _ in self.landed}:
+                self.fail(member, 1, message, fact['report'])
+        move(self.pushed)
+        return self.pushed
+
+    def resolve_groups(self, members, previous=None):
         """Check groups of tickets one at a time and push each green one at once.
 
         A group is checked on the tip pushed so far; a green group is pushed
@@ -981,7 +1158,7 @@ class Batch:
                     self.proof = (self.main, tree, submitted)
                     self.publish(tree, applied)
                     return self.pushed
-        members = self.screen(self.main, members)
+        members = self.screen(self.pushed, members)
         pending = [members] if members else []
         while pending:
             group = pending.pop(0)
@@ -1009,13 +1186,23 @@ class Batch:
                     self.proof = (base, tree, {member.ticket: member.head for member in group})
                     self.publish(tree, applied)
             elif len(group) == 1:
+                self.verify_base(base, report)
                 self.red(group[0], report)
             else:
+                self.verify_base(base, report)
                 half = len(group) // 2
                 say(f'red batch; bisecting into {", ".join(map(str, group[:half]))} and '
                     f'{", ".join(map(str, group[half:]))}')
                 pending[:0] = [group[:half], group[half:]]
         return self.pushed
+
+    def verify_base(self, base, candidate_report):
+        if (base, 'full') not in self.base_checks:
+            self.base_checks[base, 'full'] = candidate_check('full', base, base)
+        if report := self.base_checks[base, 'full']:
+            if targets := matching_checks(candidate_report, report):
+                raise MainRed(self.queue.record_red(base, report, targets))
+            raise Refusal('main fails a different check; refusing to blame a ticket\n' + '\n'.join(report))
 
 
 def delivered(queue):
@@ -1046,9 +1233,12 @@ def main():
         except (OSError, ValueError, KeyError) as error:
             say(f'withdraw failed: {error}')
             return 1
-    if sys.argv[1:]:
-        print(__doc__, file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--alone', action='store_true', help='check and push this ticket by itself')
+    parser.add_argument('--repair-main', metavar='TARGET', help='request verified priority for a red main target')
+    options = parser.parse_args()
+    if options.repair_main and not re.fullmatch(r'(?:root)?//:[A-Za-z0-9_.+-]+', options.repair_main):
+        parser.error('--repair-main requires a target such as //:core-recursive-instances')
     status = git('status', '--porcelain')
     if not os.environ.get('HIRSEL_LAND_TICKET') and (status.returncode or status.stdout.strip()):
         say('the worktree has uncommitted changes; commit them first')
@@ -1065,7 +1255,7 @@ def main():
     branch = os.environ.get('HIRSEL_LAND_BRANCH') or git('branch', '--show-current').stdout.strip()
     previous_signal = signal.signal(signal.SIGTERM, withdraw_signal)
     try:
-        with LandQueue(branch) as queue:
+        with LandQueue(branch, options.alone, options.repair_main) as queue:
             if queue.result:
                 return delivered(queue)
             with checkout(queue):
@@ -1137,7 +1327,8 @@ def train(queue):
         if not unchanged(head):
             say('the worktree changed before checks; refusing to push')
             return 1
-        waiting = [member for member in queue.claim(BATCH - 1, branches())
+        waiting = [member for member in queue.claim(
+                       0 if queue.record.get('alone') or queue.record.get('repair') else BATCH - 1, branches())
                    if git('cat-file', '-e', member.head + '^{commit}').returncode == 0]
         members = [Member(queue.ticket.name, queue.lane, head), *waiting]
         if waiting:

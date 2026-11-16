@@ -73,11 +73,23 @@ FAKE_BUCK = '''#!/bin/sh
 if [ "$1" = test ]; then
   case "$*" in
     *hirsel-core-ir-unittest*)
+      if [ -n "$FAKE_TARGET_LOG" ]; then git rev-parse HEAD >> "$FAKE_TARGET_LOG"; fi
+      if [ -f main-red ]; then
+        echo '✗ Fail: root//:hirsel-core-ir-unittest'
+        echo 'error: main fixture is red'
+        exit 1
+      fi
       if [ -f broken-core-suite ]; then echo 'core evaluator body failed' >&2; exit 1; fi ;;
   esac
   case "$*" in
+    *new-required-gate*)
+      echo '✗ Fail: root//:new-required-gate'
+      echo 'error: the newly required gate was executed'
+      exit 1 ;;
+  esac
+  case "$*" in
     *land-core-evaluator*)
-      if [ -n "$FAKE_LAW_GATE" ]; then
+      if [ -n "$FAKE_LAW_GATE" ] && [ -d core/std/tests ]; then
         exec python3 core/tools/gate_evaluator.py --root . --evaluator "$FAKE_CORE_EVALUATOR"
       fi ;;
   esac
@@ -105,7 +117,7 @@ FAKES = {
     'tools/buck2/event_logs.py': "PASS, SKIP, OMITTED = 'PASS', 'SKIP', 'OMITTED'\nif __name__ == '__main__':\n import subprocess, sys\n if sys.argv[1] == 'test':\n  sys.exit(subprocess.call(['.buck2/bin/buck2', *sys.argv[1:]]))\n",
     # The first Clippy run lands another lane's commit on origin, as a lane landing meanwhile would.
     'tools/buck2/clippy.py': '''import os, subprocess, sys
-if os.environ.get('FAKE_CLIPPY_RED'):
+if os.environ.get('FAKE_CLIPPY_RED') and os.path.exists('change.txt'):
     print('error[E0063]: missing field')
     sys.exit(1)
 other = os.environ.get('FAKE_OTHER_LANE')
@@ -117,7 +129,7 @@ if other and not os.path.exists(other):
     subprocess.run(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=other, check=True)
 ''',
     'tools/buck2/fmt.py': '''import os, sys
-if os.environ.get('FAKE_FMT_RED'):
+if os.environ.get('FAKE_FMT_RED') and os.path.exists('change.txt'):
     print('checking 3 files')
     print('Diff in crates/a/src/lib.rs at line 1:')
     sys.exit(1)
@@ -706,6 +718,7 @@ for line in sys.stdin:
 # Only the first lane's own tree: it lands alone, and later batches do not hold.
 if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists():
     import time
+    (root / 'holding-pid').write_text(str(os.getpid()))
     (root / 'holding').touch()
 
     while not (root / 'release').exists():
@@ -726,10 +739,10 @@ if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists
             self.git(lane, 'commit', '-qm', f'lane {i}')
         return checks, lanes
 
-    def start_land(self, lane):
+    def start_land(self, lane, arguments=()):
         log = (self.top / (lane.name + '.log')).open('w+')
         self.addCleanup(log.close)
-        proc = subprocess.Popen([sys.executable, '-c', DRIVER], cwd=lane,
+        proc = subprocess.Popen([sys.executable, '-c', DRIVER, *arguments], cwd=lane,
                                 env=self.env, stdout=log, stderr=log, text=True)
         def cleanup():
             if proc.poll() is None:
@@ -752,7 +765,7 @@ if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists
         [line] = [line for line in output.splitlines() if line.startswith('land: landed ') and ' led by ' in line]
         return line.rsplit(': ', 1)[1].split()
 
-    def batch_lanes(self, count, edits=None, old=(), red=None, hold_build=False, prepare=None):
+    def batch_lanes(self, count, edits=None, old=(), red=None, hold_build=False, prepare=None, arguments=None):
         """`count` worktrees with one commit each, queued in lane order behind a live ticket this test holds.
 
         Lanes in `old` are queued as an older tools/land queues them: a ticket
@@ -819,7 +832,7 @@ if not (root / 'release-build').exists():
                 ticket(i + 2, sleeper.pid, lane.name if i else 'my-lane', lane)
                 lands.append(sleeper)
             else:
-                lands.append(self.start_land(lane))
+                lands.append(self.start_land(lane, (arguments or {}).get(i, ())))
             self.wait_for(lambda i=i: len(self.queued()) == i + 2)
         for i in range(count):
             if i not in old:
@@ -829,6 +842,202 @@ if not (root / 'release-build').exists():
 
     def subjects(self, shas):
         return [self.git(self.origin, 'show', '-s', '--format=%s', sha).strip() for sha in shas]
+
+    def add_required_gate(self, lane):
+        path = lane / 'tools/land'
+        path.write_text(path.read_text().replace('CORE_ACCEPTANCE = (',
+                                                "CORE_ACCEPTANCE = ('//:new-required-gate',", 1))
+        self.git(lane, 'add', 'tools/land')
+
+    def test_waiting_tickets_own_acceptance_list_checks_its_land(self):
+        def prepare(lane, i):
+            (lane / f'lane-{i}.txt').write_text(f'{i}\n')
+            self.git(lane, 'add', f'lane-{i}.txt')
+            if i == 1:
+                self.add_required_gate(lane)
+        checks, lanes, lands, holder = self.batch_lanes(2, prepare=prepare)
+        holder.unlink()
+        outputs = [self.finish_land(land, i) for i, land in enumerate(lands)]
+        self.assertIn('root//:new-required-gate', outputs[1])
+        self.assertIn('newly required gate was executed', outputs[1])
+        self.assertNotIn('lane 1', self.main_log())
+        self.assertIn('lane 0', self.main_log())
+        self.assertEqual(self.queued(), [])
+
+    def test_waiting_tickets_own_validation_logic_checks_its_land(self):
+        def prepare(lane, i):
+            path = f'lane-{i}.txt'
+            (lane / path).write_text(f'{i}\n')
+            self.git(lane, 'add', path)
+            if i == 1:
+                tool = lane / 'tools/land'
+                tool.write_text(tool.read_text().replace(
+                    'def full(tree, base, screened=False):\n',
+                    "def full(tree, base, screened=False):\n"
+                    "    if (ROOT / 'lane-1.txt').exists():\n"
+                    "        return ['FAIL  merged policy', 'new validation logic ran']\n", 1))
+                self.git(lane, 'add', 'tools/land')
+        checks, lanes, lands, holder = self.batch_lanes(2, prepare=prepare)
+        holder.unlink()
+        self.finish_land(lands[0])
+        output = self.finish_land(lands[1], 1)
+        self.assertIn('new validation logic ran', output)
+        self.assertNotIn('lane 1', self.main_log())
+
+    def test_stale_leader_updates_to_mains_acceptance_list(self):
+        other = self.top / 'updated-main'
+        self.git(self.top, 'clone', '-q', str(self.origin), str(other))
+        self.add_required_gate(other)
+        self.git(other, 'commit', '-qm', 'main adds a required gate')
+        self.git(other, 'push', '-q', 'origin', 'main')
+        refused = self.land()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('rebased tree has another tools/land; running it', refused.stdout)
+        self.assertIn('main is red at root//:new-required-gate', refused.stdout)
+        self.assertEqual(self.main_log(), ['main adds a required gate', 'base'])
+
+    def test_legacy_batcher_cannot_deliver_new_protocol_ticket(self):
+        def prepare(lane, i):
+            (lane / f'lane-{i}.txt').write_text(f'{i}\n')
+            self.git(lane, 'add', f'lane-{i}.txt')
+            if i == 1:
+                self.add_required_gate(lane)
+            else:
+                tool = lane / 'tools/land'
+                source = tool.read_text()
+                begin, end = source.index('    def claim('), source.index('    def owned(')
+                legacy = source[begin:end].replace("if record.get('result') is not None:",
+                                                   "if 'result' in record:")
+                source = source[:begin] + legacy + source[end:]
+                begin, end = source.index('def candidate_check('), source.index('def failed_checks(')
+                source = source[:begin] + (
+                    "def candidate_check(mode, tree, base, screened=False, target=''):\n"
+                    "    return fast(tree, base) if mode == 'fast' else full(tree, base, screened)\n\n\n"
+                ) + source[end:]
+                tool.write_text(source)
+                self.git(lane, 'add', 'tools/land')
+        checks, lanes, lands, holder = self.batch_lanes(2, prepare=prepare)
+        holder.unlink()
+        leader = self.finish_land(lands[0])
+        waiter = self.finish_land(lands[1], 1)
+        self.assertNotIn('batch of 2 tickets', leader)
+        self.assertIn('new-required-gate', waiter)
+        self.assertNotIn('lane 1', self.main_log())
+
+    def red_main_fixture(self):
+        (self.lane / 'main-red').write_text('a broken accepted target on main\n')
+        self.git(self.lane, 'add', 'main-red')
+        self.git(self.lane, 'commit', '-qm', 'red main fixture')
+        self.env['FAKE_TARGET_LOG'] = str(self.top / 'target-checks')
+
+    def test_red_main_is_checked_once_and_reported_to_the_whole_cohort(self):
+        self.red_main_fixture()
+        checks, lanes, lands, holder = self.batch_lanes(3)
+        base = self.git(self.origin, 'rev-parse', 'main').strip()
+        holder.unlink()
+        outputs = [self.finish_land(land, 1) for land in lands]
+        for output in outputs:
+            self.assertIn('main is red at root//:hirsel-core-ir-unittest', output)
+            self.assertIn('first seen at ' + base, output)
+            self.assertIn('no ticket is blamed', output)
+            self.assertNotIn('bisecting', output)
+        probes = (self.top / 'target-checks').read_text().splitlines()
+        self.assertEqual(probes.count(base), 1)
+        self.assertEqual(len(probes), 2, 'one candidate and one bare-main check')
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main').strip(), base)
+        # A later cohort sees the same recorded base failure, without running
+        # the failing target again or changing its first observed commit.
+        output = self.land()
+        self.assertNotEqual(output.returncode, 0)
+        self.assertIn('first seen at ' + base, output.stdout)
+        self.assertEqual((self.top / 'target-checks').read_text().splitlines(), probes)
+        self.assertEqual(self.queued(), [])
+
+    def test_verified_main_repair_lands_alone_ahead_of_waiting_cohort(self):
+        self.red_main_fixture()
+        def prepare(lane, i):
+            (lane / f'lane-{i}.txt').write_text(f'{i}\n')
+            self.git(lane, 'add', f'lane-{i}.txt')
+            if i == 2:
+                (lane / 'main-red').unlink()
+                self.git(lane, 'add', 'main-red')
+        checks, lanes, lands, holder = self.batch_lanes(3, prepare=prepare,
+            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+        base = self.git(self.origin, 'rev-parse', 'main').strip()
+        holder.unlink()
+        outputs = [self.finish_land(land) for land in lands]
+        pushed = (checks / 'received').read_text().splitlines()
+        self.assertEqual(len(pushed), 2)
+        self.assertEqual(self.subjects(pushed[:1]), ['lane 2'])
+        self.assertEqual(self.git(self.origin, 'log', '--format=%s', f'{base}..{pushed[0]}').splitlines(), ['lane 2'])
+        self.assertIn('verified main-repair target //:hirsel-core-ir-unittest', outputs[0])
+        self.assertIn('checking alone', outputs[0])
+        self.assertEqual(self.main_log()[:3], ['lane 1', 'lane 0', 'lane 2'])
+        self.assertEqual(self.queued(), [])
+
+    def test_repair_label_does_not_grant_priority_on_green_main(self):
+        checks, lanes, lands, holder = self.batch_lanes(3,
+            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+        holder.unlink()
+        outputs = [self.finish_land(land) for land in lands]
+        pushed = (checks / 'received').read_text().splitlines()
+        self.assertEqual(self.subjects(pushed), ['lane 1', 'lane 2'])
+        self.assertNotIn('verified main-repair', ''.join(outputs))
+        self.assertEqual(self.main_log()[:3], ['lane 2', 'lane 1', 'lane 0'])
+
+    def test_cleared_cached_failure_does_not_grant_repair_priority(self):
+        checks, lanes, lands, holder = self.batch_lanes(3,
+            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+        base = self.git(self.origin, 'rev-parse', 'main').strip()
+        # A transient failure was observed earlier at the same source commit.
+        (holder.parent / 'red-main.json').write_text(json.dumps(dict(
+            base=base, first_seen=base, targets=['root//:hirsel-core-ir-unittest'],
+            report=['FAIL  Core suites', 'failing targets: root//:hirsel-core-ir-unittest'])))
+        holder.unlink()
+        outputs = [self.finish_land(land) for land in lands]
+        pushed = (checks / 'received').read_text().splitlines()
+        self.assertEqual(self.subjects(pushed), ['lane 1', 'lane 2'])
+        self.assertIn('cached main failure no longer reproduces; keeping FIFO order', outputs[0])
+        self.assertNotIn('verified main-repair', ''.join(outputs))
+
+    def test_main_repair_still_has_to_pass_every_other_gate(self):
+        self.red_main_fixture()
+        def prepare(lane, i):
+            (lane / f'lane-{i}.txt').write_text(f'{i}\n')
+            self.git(lane, 'add', f'lane-{i}.txt')
+            if i == 2:
+                (lane / 'main-red').unlink()
+                (lane / 'broken-custody').touch()
+                self.git(lane, 'add', 'main-red', 'broken-custody')
+        checks, lanes, lands, holder = self.batch_lanes(3, prepare=prepare,
+            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+        base = self.git(self.origin, 'rev-parse', 'main')
+        holder.unlink()
+        outputs = [self.finish_land(land, 1) for land in lands]
+        self.assertIn('main-repair target passed but the standalone gate is red', outputs[2])
+        self.assertIn('custody native agreement failed', outputs[2])
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), base)
+        self.assertFalse((checks / 'received').exists())
+
+    def test_alone_ticket_is_a_fifo_barrier_and_lands_by_itself(self):
+        checks, lanes, lands, holder = self.batch_lanes(3, arguments={1: ['--alone']})
+        holder.unlink()
+        outputs = [self.finish_land(land) for land in lands]
+        self.assertEqual(self.subjects((checks / 'received').read_text().splitlines()),
+                         ['lane 0', 'lane 1', 'lane 2'])
+        self.assertNotIn('batch of', ''.join(outputs))
+
+    def test_repair_label_cannot_bypass_a_still_red_target(self):
+        self.red_main_fixture()
+        checks, lanes, lands, holder = self.batch_lanes(3,
+            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+        base = self.git(self.origin, 'rev-parse', 'main')
+        holder.unlink()
+        outputs = [self.finish_land(land, 1) for land in lands]
+        self.assertIn('does not fix //:hirsel-core-ir-unittest', ''.join(outputs))
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), base)
+        self.assertFalse((checks / 'received').exists())
+        self.assertEqual(self.queued(), [])
 
     def test_a_batch_of_three_clean_changes_lands_with_one_check_run(self):
         checks, lanes, lands, holder = self.batch_lanes(3)
@@ -932,8 +1141,10 @@ if not (root / 'release-build').exists():
         outputs = [self.finish_land(land, 1 if i == 2 else 0) for i, land in enumerate(lands)]
         self.assertIn('error[E0425]: red.txt is red', outputs[2])
         self.assertIn('refusing to push a red tree', outputs[2])
-        # All four red; lanes 0-1 green and pushed; lanes 2-3 red on that tip; lane 2 red; lane 3 green.
-        self.assertEqual(outputs[0].count('workspace build'), 5, outputs[0])
+        # Five candidate builds, plus one bare-main check before blaming any
+        # ticket. The passed lanes 0-1 already prove the later base is green.
+        self.assertEqual(outputs[0].count('workspace build'), 6, outputs[0])
+        self.assertIn('with 5 checks', outputs[0])
         received = (checks / 'received').read_text().splitlines()
         self.assertEqual(self.subjects(received), ['lane 1', 'lane 3'])
         self.assertEqual(self.subjects(self.landed(outputs[1])), ['lane 1'])
@@ -950,8 +1161,10 @@ if not (root / 'release-build').exists():
         self.finish_land(lands[2], 128 + signal.SIGTERM)
         (checks / 'release-build').touch()
         outputs = [self.finish_land(land) for i, land in enumerate(lands) if i != 2]
-        # All four red; lanes 0-1 green and pushed; lane 3 alone green; lane 2 never again.
-        self.assertEqual(outputs[0].count('workspace build'), 3, outputs[0])
+        # Three candidate builds and one bare-main check; withdrawn lane 2
+        # is never built again during attribution.
+        self.assertEqual(outputs[0].count('workspace build'), 4, outputs[0])
+        self.assertIn('with 3 checks', outputs[0])
         self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 1', 'lane 0', 'hold first build'])
         self.assertEqual(self.queued(), [])
 
@@ -1273,10 +1486,17 @@ if not (root / 'release-retry').exists():
         checks, lanes = self.queue_lanes()
         first = self.start_land(lanes[0])
         self.wait_for(lambda: (checks / 'holding').exists())
+        checker = int((checks / 'holding-pid').read_text())
+        self.addCleanup(lambda: (checks / 'release').touch())
         result = subprocess.run([sys.executable, 'tools/land', '--withdraw'], cwd=lanes[0],
                                 env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('queue ticket released', self.finish_land(first, 143))
+        process = runpy.run_path(str(ROOT / 'tools/land'))['LandQueue'].process
+        deadline = time.monotonic() + 5
+        while process(checker) is not None and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertIsNone(process(checker), 'withdrawal must stop the validation worker and its checker')
         self.assertEqual(self.queued(), [])
         self.assertEqual(self.git(lanes[0], 'branch', '--show-current').strip(), 'my-lane')
         self.assertEqual(self.main_log(), ['base'])
@@ -1505,6 +1725,17 @@ if not marker.exists():
 
 
 class Units(unittest.TestCase):
+    def test_unrelated_base_failure_is_not_attributed_to_the_candidate(self):
+        land = runpy.run_path(str(ROOT / 'tools/land'))
+        verify = land['Batch'].verify_base
+        batch = SimpleNamespace(base_checks={}, queue=SimpleNamespace(
+            record_red=lambda *args: self.fail('an unrelated base failure is not the same target')))
+        candidate = ['FAIL  Core suites', 'failing targets: root//:candidate-target']
+        bare_main = ['FAIL  Core suites', 'failing targets: root//:different-target']
+        with patch.dict(verify.__globals__, candidate_check=lambda *args: bare_main):
+            with self.assertRaisesRegex(land['Refusal'], 'main fails a different check'):
+                verify(batch, 'base', candidate)
+
     def test_a_red_suite_report_names_each_failing_target_with_its_own_error(self):
         # The shape of `buck2 test` output on 2026-11-14: the failing target's section first, then a
         # passing target whose "104 passed" was the whole old excerpt (the last 40 lines of the run).

@@ -255,17 +255,6 @@ struct Child {
     primary: Option<Cell>,
     /// Its causes, primary first, while no `Causes` holds them.
     chain: Vec<Cause>,
-    /// A task whose first wait is still pending.  The evaluator has no host
-    /// thread to park, so a waiting child is resumed at its join point; this
-    /// lets runnable siblings make progress in the same order as the native
-    /// scheduler (CONC-7/10).
-    deferred: Option<DeferredChild>,
-}
-struct DeferredChild {
-    task: Task,
-    function: FuncId,
-    args: Vec<u64>,
-    limit: usize,
 }
 struct Chan {
     item: TypeRef,
@@ -509,51 +498,6 @@ fn cause(r: RaiseCause) -> &'static str {
 }
 
 impl Machine<'_> {
-    fn contains_sleep(&self, f: FuncId, seen: &mut Vec<bool>) -> bool {
-        if seen[f.index()] {
-            return false;
-        }
-        seen[f.index()] = true;
-        let Some(body) = self.m.functions[f.index()].body.as_ref() else {
-            return false;
-        };
-        body.insts.iter().any(|inst| {
-            let Inst::Call { call } = inst else {
-                return false;
-            };
-            match body.calls[call.index()].callee {
-                Callee::Runtime(RtOp::Host(HostOp::SleepUntil)) => true,
-                Callee::Direct(g) => self.contains_sleep(g, seen),
-                _ => false,
-            }
-        })
-    }
-
-    fn finish_deferred(&mut self, i: usize) {
-        let Some(deferred) = self.children[i].deferred.take() else {
-            return;
-        };
-        let mut child = deferred.task;
-        let returned = self.call(&mut child, deferred.function, &deferred.args);
-        self.end_limit(deferred.limit);
-        let ok = returned.is_ok();
-        let status = match child.chain.first().map(|c| c.kind) {
-            _ if ok => 0,
-            Some("Cancelled") => 2,
-            _ => 1,
-        };
-        let result = self.children[i].result;
-        let carried = self.m.types[self.children[i].r.index()].carried;
-        if let (Ok(values), Carried::Value(t)) = (&returned, carried) {
-            self.store(result, bytes_of(t), values[0]);
-        }
-        let c = &mut self.children[i];
-        c.status = status;
-        c.cells = child.cells;
-        c.chain = child.chain;
-        c.primary = child.obligations[0];
-    }
-
     // ---- memory
     /// Rc and Arc counts differ in atomicity only, which one task cannot observe;
     /// what the evaluator checks is that every operation names its node's kind.
@@ -580,8 +524,9 @@ impl Machine<'_> {
                 ok(0, 0)
             }
             HostOp::WallMs | HostOp::MonoNs => {
-                // The host clock is monotonic and deadline arithmetic cannot
-                // turn a maximum deadline into an evaluator panic (CONC-7).
+                // The host clock is monotonic (native reads CLOCK_MONOTONIC,
+                // hirsel-core-rt os::monotonic_ns): a read after a sleep to the
+                // maximum deadline stays there instead of wrapping (CONC-7).
                 self.world.clock = self.world.clock.saturating_add(1);
                 vec![self.world.clock - 1]
             }
@@ -1157,12 +1102,6 @@ impl Machine<'_> {
             FieldTy::Handle(Handle::Task) => {
                 // CONC-8: the child has already ended; drop its result unjoined.
                 let i = (self.load(at, 8) - TASK_BASE) as usize;
-                if let Some(deferred) = self.children[i].deferred.take() {
-                    // A child that is still waiting is cancelled by abandoning its
-                    // handle; its body must not run after the parent has failed.
-                    self.end_limit(deferred.limit);
-                    self.children[i].status = 2;
-                }
                 let (status, result, r) = {
                     let c = &self.children[i];
                     (c.status, c.result, c.r)
@@ -1478,37 +1417,19 @@ impl Machine<'_> {
                     Carried::Value(t) => args.push(self.load(xb, bytes_of(t))),
                     Carried::Nothing => {}
                 }
-                let mut seen = vec![false; self.m.functions.len()];
-                let deferred = self.contains_sleep(f, &mut seen);
-                let (status, cells, chain, primary, deferred_child) = if deferred {
-                    (
-                        0,
-                        Vec::new(),
-                        Vec::new(),
-                        None,
-                        Some(DeferredChild {
-                            task: child,
-                            function: f,
-                            args,
-                            limit: lim,
-                        }),
-                    )
-                } else {
-                    let returned = self.call(&mut child, f, &args);
-                    if let (Ok(values), Carried::Value(t)) = (&returned, rc) {
-                        self.store(rb, bytes_of(t), values[0]);
-                    }
-                    let ok = returned.is_ok();
-                    self.end_limit(lim);
-                    let status = match child.chain.first().map(|c| c.kind) {
-                        _ if ok => 0,
-                        Some("Cancelled") => 2,
-                        _ => 1,
-                    };
-                    let (cells, chain) = (child.cells, child.chain);
-                    let primary = child.obligations[0];
-                    (status, cells, chain, primary, None)
+                let returned = self.call(&mut child, f, &args);
+                if let (Ok(values), Carried::Value(t)) = (&returned, rc) {
+                    self.store(rb, bytes_of(t), values[0]);
+                }
+                let ok = returned.is_ok();
+                self.end_limit(lim);
+                let status = match child.chain.first().map(|c| c.kind) {
+                    _ if ok => 0,
+                    Some("Cancelled") => 2,
+                    _ => 1,
                 };
+                let (cells, chain) = (child.cells, child.chain);
+                let primary = child.obligations[0];
                 self.children.push(Child {
                     status,
                     result: rb,
@@ -1520,7 +1441,6 @@ impl Machine<'_> {
                     cells,
                     chain,
                     primary,
-                    deferred: deferred_child,
                 });
                 vec![TASK_BASE + self.children.len() as u64 - 1, 0]
             }
@@ -1532,7 +1452,6 @@ impl Machine<'_> {
                         a[0]
                     )
                 }) as usize;
-                self.finish_deferred(i);
                 let status = self.children[i].status;
                 if status == 0 {
                     let n = self.held(TypeRef(r.0)) as usize;
@@ -1549,20 +1468,7 @@ impl Machine<'_> {
             }
             RtOp::CauseNext => vec![self.load(a[0] + CELL_NEXT, 8)],
             RtOp::CauseValue => vec![a[0]],
-            RtOp::Cancel => {
-                let i = a[0].checked_sub(TASK_BASE).expect("cancel of a task") as usize;
-                if let Some(deferred) = self.children[i].deferred.take() {
-                    self.end_limit(deferred.limit);
-                    self.children[i].status = 2;
-                    self.children[i].chain = vec![Cause {
-                        kind: "Cancelled",
-                        message: [0; 3],
-                        site: None,
-                    }];
-                }
-                vec![]
-            }
-            RtOp::CheckCancel => vec![], // completed children have no pending request
+            RtOp::Cancel | RtOp::CheckCancel => vec![], // every child has already ended
             // Isolation (crate docs): a reservation on entry, set aside with the
             // active chain; refunded when the body returns; on a caught failure the
             // chain becomes a `Causes`, and the reserved cell takes the place of the

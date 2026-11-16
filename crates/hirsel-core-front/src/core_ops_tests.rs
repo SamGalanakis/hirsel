@@ -464,84 +464,52 @@ fn host_rename_and_sleep_rows_are_replayable_in_evaluator() {
     assert_eq!(run.used, 0);
 }
 
+/// A child's effects before its first wait are visible to the parent after the
+/// parent's own wait (CONC-10, CONC-13; both native engines agree). The
+/// sleep-deferral device broke both: the first read 1, the second faulted.
 #[test]
-fn evaluator_sleep_wait_runs_a_runnable_peer_first() {
-    let source = r#"
-type Input:send { clock: Clock, out: Stdout }
-fn sleeper(take x: Input) waits {
-    let v = take x
-    let now = host.mono_ns(v.clock)
-    host.sleep_until(v.clock, now + 20_000_000u64)
-    result.unwrap(stdout.write(v.out, "S"))
-}
-fn peer(take out: Stdout) waits { result.unwrap(stdout.write(out, "P")) }
-fn f(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits {
-    let a = result.unwrap(task.spawn(tasks, bytes 4096, Input(clock: clock, out: out), sleeper))
-    let b = result.unwrap(task.spawn(tasks, bytes 4096, out, peer))
-    result.unwrap(task.join(take a))
-    result.unwrap(task.join(take b))
-    0u64
-}
-"#;
-    let (index, modules) = canonical(source);
-    let p = Program::declare(&index, &modules);
-    let mut emitter = Emitter::new();
-    let mut entry = None;
-    for (f, fd) in p
-        .fns
-        .iter()
-        .enumerate()
-        .filter(|(_, fd)| fd.path.0.package.name == "app")
-    {
-        let check = p.check_lower(f, &mut emitter);
-        assert!(
-            check.refusals.is_empty() && check.gaps.is_empty(),
-            "{check:?}"
-        );
-        if fd.path.0.name == "f" {
-            entry = check.function;
-        }
-    }
-    emitter.materialize_instances().unwrap();
-    wf::module(&emitter.module).unwrap();
-    let run = eval::run(&emitter.module, entry.unwrap(), &[1, 1, 1], 1 << 20);
-    assert_eq!(run.outcome, eval::Outcome::Returned(vec![0]));
-    assert_eq!(run.stdout, b"PS");
-}
-
-#[test]
-fn evaluator_sleep_cancellation_and_parent_failure_do_not_overflow_clock() {
+fn child_effects_before_its_sleep_reach_the_parent() {
     let cases = [
         (
             r#"
-fn sleeper(take c: Clock) waits { host.sleep_until(c, 18446744073709551615u64) }
-fn f(tasks: Tasks, clock: Clock) -> u64 waits {
-    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, clock, sleeper))
+type In:send { clock: Clock, h: Latest[u64] }
+fn number(x: u64) -> u64 { x }
+fn child(take s: In) waits {
+    let In(clock: clock, h: h) = take s
+    latest.publish(h, result.unwrap(arc.new(2u64)))
     let now = host.mono_ns(clock)
-    host.sleep_until(clock, now + 1_000_000u64)
-    task.cancel(mut h)
-    match task.join(take h) { Error(Cancelled(take causes)) => { let _ = take causes; 67u64 }, _ => 0u64 }
+    host.sleep_until(clock, now + 20_000_000u64)
+}
+fn f(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits {
+    let h = result.unwrap(latest.new(result.unwrap(arc.new(1u64))))
+    let t = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, h: latest.handle(h)), child))
+    let now = host.mono_ns(clock)
+    host.sleep_until(clock, now + 60_000_000u64)
+    let seen = number(latest.read(h))
+    result.unwrap(task.join(take t))
+    seen
 }
 "#,
-            67,
+            2,
         ),
         (
             r#"
-type Pair:send { tasks: Tasks, clock: Clock }
-fn sleeper(take c: Clock) waits { host.sleep_until(c, 18446744073709551615u64) }
-fn parent(take x: Pair) waits {
-    let v = take x
-    let _ = result.unwrap(task.spawn(v.tasks, bytes 4096, v.clock, sleeper))
-    let now = host.mono_ns(v.clock)
-    host.sleep_until(v.clock, now + 1_000_000u64)
-    fail("parent")
+type In:send { clock: Clock, tx: Sender[u64] }
+fn child(take s: In) waits {
+    let In(clock: clock, tx: tx) = take s
+    result.unwrap(channel.send(tx, 7u64))
+    let now = host.mono_ns(clock)
+    host.sleep_until(clock, now + 20_000_000u64)
 }
-fn f(tasks: Tasks, clock: Clock) -> u64 waits {
-    let h = result.unwrap(task.spawn(tasks, bytes 16384, Pair(tasks: tasks, clock: clock), parent))
-    match task.join(take h) { Error(Failed(take causes)) => { let _ = take causes; 70u64 }, _ => 0u64 }
+fn f(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, tx: take tx), child))
+    let v = result.unwrap(channel.receive(rx))
+    result.unwrap(task.join(take h))
+    v
 }
 "#,
-            70,
+            7,
         ),
     ];
     for (source, expected) in cases {
@@ -566,7 +534,7 @@ fn f(tasks: Tasks, clock: Clock) -> u64 waits {
         }
         emitter.materialize_instances().unwrap();
         wf::module(&emitter.module).unwrap();
-        let run = eval::run(&emitter.module, entry.unwrap(), &[1, 1], 1 << 20);
+        let run = eval::run(&emitter.module, entry.unwrap(), &[1, 1, 1], 1 << 20);
         assert_eq!(
             run.outcome,
             eval::Outcome::Returned(vec![expected]),

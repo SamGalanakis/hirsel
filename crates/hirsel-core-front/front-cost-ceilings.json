@@ -216,13 +216,13 @@
         "image index": 203.79778742473042
       },
       "image_per_token": {
-        "records_opened": 0.001971152499649909,
-        "bytes_read": 7.849460859823554,
-        "digests": 0.001971152499649909,
-        "digest_bytes": 7.771740652569668,
+        "records_opened": 0.0024567987676795966,
+        "bytes_read": 10.042279232600476,
+        "digests": 0.0024567987676795966,
+        "digest_bytes": 9.944007281893294,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
-        "row_demands": 0.03022433832796527,
+        "row_demands": 0.03113849600896233,
         "nodes_decoded": 5.601456378658451e-05
       }
     }
@@ -806,6 +806,55 @@
         "tokens": 35705
       },
       "evidence": "std-seed-api-889/tally/front-cost.log"
+    },
+    {
+      "reason": "std.codec adds a nineteenth std module (140 operations: Codec, Key, schemas, resolution); suite-edit's image now opens its records and reads its bytes. The five suite-edit image cells red in land ticket 4892 receive the larger of the land and local observations plus 2 percent; instruction, source-stage, index and m1/std cells are unchanged.",
+      "changes": {
+        "suite-edit": {
+          "records_opened": {
+            "before": 0.001971152499649909,
+            "after": 0.0024567987676795966
+          },
+          "bytes_read": {
+            "before": 7.849460859823554,
+            "after": 10.042279232600476
+          },
+          "digests": {
+            "before": 0.001971152499649909,
+            "after": 0.0024567987676795966
+          },
+          "digest_bytes": {
+            "before": 7.771740652569668,
+            "after": 9.944007281893294
+          },
+          "row_demands": {
+            "before": 0.03022433832796527,
+            "after": 0.03113849600896233
+          }
+        }
+      },
+      "observation": {
+        "land": {
+          "records_opened": 86,
+          "bytes_read": 351529,
+          "digests": 86,
+          "digest_bytes": 348089,
+          "row_demands": 1090,
+          "tokens": 35705
+        },
+        "local": {
+          "records_opened": 84,
+          "bytes_read": 343217,
+          "digests": 84,
+          "digest_bytes": 339857,
+          "row_demands": 1090,
+          "tokens": 35705
+        }
+      },
+      "evidence": [
+        "/tmp/std-codec-1008-land.log",
+        "std-codec-1008/evidence/front-cost.log"
+      ]
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

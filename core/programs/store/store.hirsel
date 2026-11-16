@@ -2425,6 +2425,61 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
     Ok(Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(s.roots.data), skip: None))
 }
 
+// RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
+// gives the Span a `range` over the same bounds records.
+pub fn key_span[K, V](t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Read, Error] {
+    Ok(Span(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?, lower_bytes(t.id, typed_bound(t.key, hi)?, true)?))
+}
+
+// AG3: every data-tree row in [lo, hi) of s, as changes(empty, s) gives it, so a Cover's
+// initial rows and its changed rows reach `published_value` alike.
+pub fn span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] {
+    let mut out: List[Change] = list.new()
+    if hi <= lo {
+        return Ok(take out)
+    }
+    let mut rows = byte_cursor(s.roots.data, copied(lo)?, copied(hi)?)?
+    while let Some((k, v)) = next_bytes(mut rows)? {
+        capacity(result.capacity_only(list.push(mut out, Change(tree_key: take k, value: Some(copied(v)?)))))?
+    }
+    Ok(take out)
+}
+
+// AG3: the value a publisher sends for a Change of t, in t's current codec without the u16
+// schema prefix. An older number is read with its Reader and encoded again, because the old
+// encoding may differ in length and layout. A key of another table (an index row's key
+// included) is Missing("table").
+pub fn published_value[K, V](t: Shape[K, V], c: Change) -> Result[Option[Bytes], Error] {
+    let mine = prefix(t.id)?
+    if list.len(c.tree_key) < 4 || list.slice(c.tree_key, 0, 4) != list.slice(mine, 0, 4) {
+        return Error(Missing("table"))
+    }
+    let raw = match c.value {
+        Some(v) => v,
+        None => return Ok(None)
+    }
+    if list.len(raw) < 2 {
+        return Error(Decode(Truncated(0)))
+    }
+    let number: u16 = int.truncate(read_le(raw, 0, 2))
+    let mut out: Bytes = capacity(list.with_capacity(list.len(raw) - 2))?
+    if number == t.readers.current {
+        capacity(list.append(mut out, list.slice(raw, 2, list.len(raw))))?
+        return Ok(Some(take out))
+    }
+    let v = row_value(t.readers, t.id, raw)?
+    capacity(std.codec.encode(t.readers.codec, v, mut out))?
+    Ok(Some(take out))
+}
+
+// Whether a changed data-tree key falls in a read: equal to a Point, or in a Span's [low, high).
+pub fn reads_key(r: Read, key: Bytes) -> bool {
+    match r {
+        Point(p) => p == key,
+        Span(low, high) => low <= key && key < high
+    }
+}
+
 fn indexed_rows[J, K, V](data: std.omap.OMap[Bytes, Arc[Bytes]], ix: Index[J, K, V], take cursor: ByteRows) -> Result[Rows[K, V], Error] {
     let k = ix.key
     let start = 4u64
@@ -3401,6 +3456,121 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
         _ => return false
     }
     db.heads[0].head == epoch
+}
+
+// L34 (STORE-SPEC v2.23 AG3): the published value of a row is its value in the table's
+// current codec, without the u16 schema prefix. Row 1 is stored under schema 0 (OldAccount),
+// row 2 under schema 1 (NewAccount, bonus defaulting to 7). The expected bytes are written out
+// by hand from codec.md: a record is its fields in order, each u64 8 bytes little-endian.
+// Wrong implementations: strip two bytes (row 1 gives 8 bytes), keep the prefix, or publish a
+// row of another table.
+fn two_words(a: u8, b: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(list.push(mut out, a))
+    for _ in 0u64 .. 7 {
+        result.unwrap(list.push(mut out, 0u8))
+    }
+    result.unwrap(list.push(mut out, b))
+    for _ in 0u64 .. 7 {
+        result.unwrap(list.push(mut out, 0u8))
+    }
+    out
+}
+
+fn with_value(c: Change, number: u8, rest: u64) -> Change {
+    let mut v: Bytes = list.new()
+    result.unwrap(list.push(mut v, number))
+    for _ in 0u64 .. rest {
+        result.unwrap(list.push(mut v, 0u8))
+    }
+    Change(tree_key: result.unwrap(copied(c.tree_key)), value: Some(take v))
+}
+
+pub fn law_published_value(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), old_codec())))
+    result.unwrap(create_table(mut db, spec("other", std.codec.key_u64(), std.codec.of_u64())))
+    let old = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), old_codec()))
+    let other = result.unwrap(table(mut db, "other", std.codec.key_u64(), std.codec.of_u64()))
+    let empty = snapshot(db)
+    if !typed_put(mut db, other, 1, 5) {
+        return false
+    }
+    let first = run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, old, 1, OldAccount(balance: 10))
+    })
+    match take first {
+        Ok(Committed(_)) => {},
+        _ => return false
+    }
+    let current = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), new_codec()))
+    let second = run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, current, 2, NewAccount(balance: 20, bonus: 9))
+    })
+    match take second {
+        Ok(Committed(_)) => {},
+        _ => return false
+    }
+    let now = snapshot(db)
+    let sh = shape(current)
+    let acc = result.unwrap(span_changes(now, result.unwrap(prefix(sh.id)), result.unwrap(prefix(sh.id + 1))))
+    if list.len(acc) != 2 || result.unwrap(published_value(sh, acc[0])) != Some(two_words(10, 7)) || result.unwrap(published_value(sh, acc[1])) != Some(two_words(20, 9)) {
+        return false
+    }
+    // changes(empty, now) publishes the same values, and the row of "other" is not t's.
+    let mut ours = 0u64
+    let mut foreign = 0u64
+    for ch in result.unwrap(changes(empty, now)) {
+        match published_value(sh, ch) {
+            Ok(Some(v)) => {
+                let i = if ch.tree_key == acc[0].tree_key { 0u64 } else { 1u64 }
+                if ch.tree_key != acc[i].tree_key || Some(v) != result.unwrap(published_value(sh, acc[i])) {
+                    return false
+                }
+                ours += 1
+            },
+            Error(Missing(_)) => {
+                foreign += 1
+            },
+            _ => return false
+        }
+    }
+    if ours != 2 || foreign != 1 {
+        return false
+    }
+    match published_value(sh, with_value(acc[0], 7u8, 9)) {
+        Error(Stale(id)) => if id != sh.id {
+            return false
+        },
+        _ => return false
+    }
+    match published_value(sh, with_value(acc[0], 0u8, 0)) {
+        Error(Decode(Truncated(at))) => if at != 0 {
+            return false
+        },
+        _ => return false
+    }
+    let gone = run(mut db, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete(mut tx, current, 1)
+    })
+    match take gone {
+        Ok(Committed(_)) => {},
+        _ => return false
+    }
+    let removed = result.unwrap(changes(now, snapshot(db)))
+    list.len(removed) == 1 && removed[0].tree_key == acc[0].tree_key && match published_value(sh, removed[0]) {
+        Ok(None) => true,
+        _ => false
+    }
+}
+
+@test
+fn test_published_value(c: Clock) -> Result[(), ()] waits {
+    if law_published_value(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test
@@ -5456,11 +5626,7 @@ fn test_index_writes(c: Clock) -> Result[(), ()] waits {
 fn read_set_hit(reads: List[Read], delta: List[Change]) -> bool {
     for change in delta {
         for read in reads {
-            let hit = match read {
-                Point(key) => key == change.tree_key,
-                Span(low, high) => low <= change.tree_key && change.tree_key < high
-            }
-            if hit {
+            if reads_key(read, change.tree_key) {
                 return true
             }
         }
@@ -5735,6 +5901,95 @@ pub fn law_read_cover(c: Clock) -> bool waits {
 @test
 fn test_read_cover(c: Clock) -> Result[(), ()] waits {
     if law_read_cover(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// R2's Cover reads (RUNNER-SPEC §4). Keys 1..5 of "data" are put after `before`, so
+// changes(before, after) lists their five data-tree rows in key order (d[0] is key 1): that
+// list is the oracle for which rows a span holds. A row of table "other" is never in a span
+// of "data". A span's bytes equal the Span a range over the same bounds records.
+fn same_rows(got: List[Change], want: List[Change], from: u64, n: u64) -> bool {
+    if list.len(got) != n {
+        return false
+    }
+    for i in 0u64 .. n {
+        if got[i].tree_key != want[from + i].tree_key || got[i].value != want[from + i].value {
+            return false
+        }
+    }
+    true
+}
+
+fn span_rows(s: Snapshot, r: Read) -> List[Change] {
+    match r {
+        Span(lo, hi) => result.unwrap(span_changes(s, lo, hi)),
+        Point(_) => list.new()
+    }
+}
+
+pub fn law_read_spans(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("data", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(create_table(mut db, spec("other", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "data", std.codec.key_u64(), std.codec.of_u64()))
+    let o = result.unwrap(table(mut db, "other", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, o, 3, 7) {
+        return false
+    }
+    let before = snapshot(db)
+    for k in 1u64 .. 6 {
+        if !typed_put(mut db, t, k, k * 10) {
+            return false
+        }
+    }
+    let after = snapshot(db)
+    let d = result.unwrap(changes(before, after))
+    if list.len(d) != 5 {
+        return false
+    }
+    let sh = shape(t)
+    let mid = result.unwrap(key_span(sh, Included(2), Excluded(4)))
+    let shifted = result.unwrap(key_span(sh, Excluded(2), Included(4)))
+    let all = result.unwrap(key_span(sh, Unbounded, Unbounded))
+    let point = Point(result.unwrap(copied(d[0].tree_key)))
+    let none = result.unwrap(key_span(sh, Included(3), Excluded(3)))
+    if !same_rows(span_rows(after, mid), d, 1, 2) || !same_rows(span_rows(after, shifted), d, 2, 2) || !same_rows(span_rows(after, all), d, 0, 5) || list.len(span_rows(before, all)) != 0 || list.len(span_rows(after, none)) != 0 || reads_key(none, d[2].tree_key) {
+        return false
+    }
+    if !reads_key(mid, d[1].tree_key) || !reads_key(mid, d[2].tree_key) || reads_key(mid, d[0].tree_key) || reads_key(mid, d[3].tree_key) || !reads_key(point, d[0].tree_key) || reads_key(point, d[1].tree_key) {
+        return false
+    }
+    let observed = result.unwrap(look(after, fn(tx: Tx) -> Result[(), Error] {
+        let _ = range(tx, sh, Included(2), Excluded(4))?
+        let _ = range(tx, sh, Excluded(2), Included(4))?
+        Ok(())
+    }))
+    let got = match take observed {
+        Seen(take x) => take x,
+        _ => return false
+    }
+    list.len(got.reads) == 2 && same_read(got.reads[0], mid) && same_read(got.reads[1], shifted)
+}
+
+fn same_read(a: Read, b: Read) -> bool {
+    match a {
+        Point(x) => match b {
+            Point(y) => x == y,
+            _ => false
+        },
+        Span(l, h) => match b {
+            Span(m, i) => l == m && h == i,
+            _ => false
+        }
+    }
+}
+
+@test
+fn test_read_spans(c: Clock) -> Result[(), ()] waits {
+    if law_read_spans(c) {
         Ok(())
     } else {
         Error(())

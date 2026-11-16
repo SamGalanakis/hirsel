@@ -16,7 +16,7 @@ BYTE_LAWS = ('model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'for
              'typed_indexes', 'schema_numbers', 'catalog_invalid', 'index_refusal',
              'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget',
              'look', 'look_faults', 'changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal',
-             'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover',
+             'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover', 'read_spans', 'published_value',
              'frame_size', 'frame_size_boundary', 'stored_size', 'shared_payload_copy', 'branches', 'pin_settle', 'migrate', 'step_bounds', 'streams', 'scopes')
 NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS if name != 'frame_size_boundary'),
                 'test_reader_task', 'test_memory_identity', 'test_typed_snapshot_task', 'test_look_task'}

@@ -491,19 +491,16 @@ pub fn take_result[T, E](b: Bytes, mut at: u64, ct: Codec[T], ce: Codec[E]) -> R
     Ok(Error(take e))
 }
 
-/// A `codec via R (to, from)` type: its bytes are R's bytes of to(x).
-pub fn put_via[T, R](x: T, to: fn(T) -> Result[R, Capacity], c: Codec[R], mut out: Bytes) -> Result[(), Capacity] {
-    let r = to(x)?
-    (c.encoder)(r, mut out)
-}
-
-/// R's value, then from; a refusal by from is Value at the value's first byte.
-pub fn take_via[T, R](b: Bytes, mut at: u64, c: Codec[R], from: fn(take R) -> Option[T]) -> Result[T, Stop] {
+/// A `codec via R (to, from)` type decodes an R under R's codec, then calls from once; an
+/// Error from it is dropped and the result is Value where the R began (SEM-10). Encoding
+/// needs no step of its own: `to` returns a view anchored to its argument, which no
+/// callable type holds (LANG-13), so a generated encode is `put_with(to(x), c, mut out)`.
+pub fn take_via[T, R, E](b: Bytes, mut at: u64, c: Codec[R], from: fn(take R) -> Result[T, E]) -> Result[T, Stop] {
     let start = at
     let r = (c.decoder)(b, mut at)?
     match from(take r) {
-        Some(x) => Ok(take x),
-        None => Error(Bad(Value(start)))
+        Ok(x) => Ok(take x),
+        Error(_) => Error(Bad(Value(start)))
     }
 }
 
@@ -1446,8 +1443,10 @@ fn default_of(p: Plan, def: u64, name_at: u64) -> u64 {
     SKIP
 }
 
-// Variants keep their declared index, so tags pass through. A writer's variant the
-// reader removed is Invalid where a value uses it; the reader may append variants.
+// Variants keep their declared index, so tags pass through. A writer's variant the reader
+// removed resolves, and a value holding it is Schema at the writer's entry for it; a
+// variant the writer removed resolves whatever the reader has, and a value holding it is
+// Invalid at its tag. The reader may append variants.
 fn sum_node(mut p: Plan, wk: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u64, u64)]) -> Result[Result[u64, u64], Capacity] {
     let wn = list.len(ws)
     if wn > list.len(rs) {
@@ -1464,7 +1463,7 @@ fn sum_node(mut p: Plan, wk: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u6
     t = 0
     for (live, name_at, fields_at) in ws {
         let (rlive, rname, rfields) = rs[t]
-        if !same_name(p.all, name_at, rname) || !live && rlive {
+        if !same_name(p.all, name_at, rname) {
             return Ok(Error(name_at - 1))
         }
         let here = list.len(p.ops)
@@ -1487,8 +1486,13 @@ fn sum_node(mut p: Plan, wk: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u6
                 cr = skip(p.all, cr)
                 k += 1
             }
-        } else {
+        } else if live {
+            // The reader removed it: a value holding it is Schema at the writer's entry.
             emit(mut p, 1)?
+            emit(mut p, name_at - 1)?
+        } else {
+            // The writer removed it, so no value of the writer's holds it.
+            emit(mut p, 2)?
             emit(mut p, 0)?
         }
         t += 1
@@ -1721,11 +1725,17 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
                 let tag_at = at
                 let small = take_u32(b, mut at)?
                 let tag: u64 = int.widen(small)
-                if tag >= ops[next + 1] || ops[ops[next + 2 + tag]] != 0 {
+                if tag >= ops[next + 1] {
+                    return Error(Bad(Invalid(tag_at)))
+                }
+                let v = ops[next + 2 + tag]
+                if ops[v] == 1 {
+                    return Error(Bad(Schema(ops[v + 1])))
+                }
+                if ops[v] != 0 {
                     return Error(Bad(Invalid(tag_at)))
                 }
                 tag_word(mut o, small)?
-                let v = ops[next + 2 + tag]
                 if ops[v + 1] > 0 {
                     push_frame(mut stack, frame(5, v + 2, ops[v + 1], 0))?
                 }

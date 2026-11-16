@@ -651,23 +651,28 @@ fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema) -> Result[(
 }
 
 // Variant evolution. Appended at the end: the old writer's Circle reads unchanged (2).
-// Removed by tombstone: the writer's Circle reads (2), its Rect is Invalid at its tag
-// (2000). Refused, as Schema: a writer with more variants than the reader declares, at
-// the writer's kind byte (32); a renamed variant, at the writer's entry for it (61). A
-// resolver that matched variants by position only, or let a removed tag through,
-// fails it.
-// expect: run variant_evolution() = (2, 2, 2000, 6032, 6061)
-fn variant_evolution() -> (u64, u64, u64, u64, u64) {
+// Removed by the reader's tombstone: the writer's Circle reads (2); a value holding its
+// Rect is Schema at the writer's entry for Rect (85, SEM-10). Removed by the writer's
+// tombstone, read by a reader that still has Rect: Circle reads (2), and Rect, which no
+// such writer holds, is Invalid at its tag. Refused, as Schema: a writer with more
+// variants than the reader declares, at the writer's kind byte (32); a renamed variant,
+// at the writer's entry for it (61). A resolver that matched variants by position only,
+// let a removed tag through, called a held removed variant malformed bytes, or refused a
+// writer's tombstone against a live variant, fails it.
+// expect: run variant_evolution() = (2, 2, 6085, 2, 2000, 6032, 6061)
+fn variant_evolution() -> (u64, u64, u64, u64, u64, u64, u64) {
     let circle = unhex("01000000 000000000000f03f")
     let rect = unhex("02000000 0100000000000000 0200000000000000")
     let a = shape_through(shapes(), old_shape_schema, circle)
     let cut = codec.make(shape_encode, cut_shape_decode, cut_shape_schema, 4)
     let b = shape_through(cut, shape_schema, circle)
     let c = shape_through(cut, shape_schema, rect)
+    let d = shape_through(shapes(), cut_shape_schema, circle)
+    let e = shape_through(shapes(), cut_shape_schema, rect)
     let reader_old = codec.make(shape_encode, shape_decode, old_shape_schema, 4)
-    let d = shape_through(reader_old, shape_schema, circle)
-    let e = shape_through(shapes(), renamed_shape_schema, circle)
-    (a, b, c, d, e)
+    let f = shape_through(reader_old, shape_schema, circle)
+    let g = shape_through(shapes(), renamed_shape_schema, circle)
+    (a, b, c, d, e, f, g)
 }
 
 // A tag is the variant's position as four little-endian bytes (SEM-10): Rect(1, 2) by
@@ -1000,6 +1005,112 @@ fn foreign_codec_type() -> (bool, bool, bool) {
     let b = prefixes(failures(), unhex("0300000000000000 06000000 0900000000000000"))
     let c = result.unwrap(codec.schema(failures())) == unhex("01 0200000000000000 0900000000000000 742e4661696c757265 0000000000000000 00 0200000000000000 00 0200000000000000 6174 06 00 0300000000000000 776879 13 0100000000000000 1500000000000000 7374642e636f6465632e4465636f64654572726f72 0000000000000000 01 0700000000000000 00 0900000000000000 5472756e6361746564 0100000000000000 06 00 0700000000000000 496e76616c6964 0100000000000000 06 00 0400000000000000 55746638 0100000000000000 06 00 0900000000000000 4475706c6963617465 0100000000000000 06 00 0800000000000000 547261696c696e67 0100000000000000 06 00 0600000000000000 536368656d61 0100000000000000 06 00 0500000000000000 56616c7565 0100000000000000 06 13 0000000000000000")
     (a, b, c)
+}
+
+// (g) `via R (to, from)`, SEM-10's Range: `type RangeWire: codec { lo: u64, hi: u64 }`,
+// `type Range: codec via RangeWire (to: wire, from: check) { w: RangeWire }`. The encode
+// calls `to` in place, since its anchored view fits no callable type (LANG-13); the
+// decode hands `from` to take_via; the schema is Range's path over RangeWire's.
+type RangeWire {
+    lo: u64,
+    hi: u64
+}
+
+type Range {
+    w: RangeWire
+}
+
+fn wire(r: Range) -> View[RangeWire] in r {
+    view r.w
+}
+
+fn check(take w: RangeWire) -> Result[Range, ()] {
+    if w.lo <= w.hi {
+        Ok(Range(w: w))
+    } else {
+        Error(())
+    }
+}
+
+fn range_wire_encode(x: RangeWire, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_u64(x.lo, mut out)?
+    codec.put_u64(x.hi, mut out)
+}
+
+fn range_wire_decode(b: Bytes, mut at: u64) -> Result[RangeWire, codec.Stop] {
+    let lo = codec.take_u64(b, mut at)?
+    let hi = codec.take_u64(b, mut at)?
+    Ok(RangeWire(lo: lo, hi: hi))
+}
+
+fn range_wire_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.RangeWire", 0)?
+    if codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    codec.field(mut s, "lo")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "hi")?
+    codec.schema_u64(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn range_wires() -> codec.Codec[RangeWire] {
+    codec.make(range_wire_encode, range_wire_decode, range_wire_schema, 16)
+}
+
+fn range_encode(x: Range, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_with(wire(x), range_wires(), mut out)
+}
+
+fn range_decode(b: Bytes, mut at: u64) -> Result[Range, codec.Stop] {
+    codec.take_via(b, mut at, range_wires(), check)
+}
+
+fn range_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Range", 0)?
+    if codec.via(mut s)? {
+        return Ok(())
+    }
+    codec.schema_of(mut s, range_wires())?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn ranges() -> codec.Codec[Range] {
+    codec.make(range_encode, range_decode, range_schema, 16)
+}
+
+fn range_at(b: Bytes, start: u64) -> u64 {
+    match codec.decode_at(ranges(), b, start) {
+        Ok(Ok(x)) => x.w.hi - x.w.lo,
+        Ok(Error(e)) => code(e),
+        Error(_) => 9999
+    }
+}
+
+// Range(2, 5) is RangeWire's bytes; hi below lo is Value where the RangeWire began, at 0
+// and at 4 behind "abcd"; through the resolver from Range's own schema it reads (3), and
+// a writer whose path is RangeWire's is Schema. A via that wrote its own frame, checked
+// before decoding R, reported the offset after R, or resolved R without the path, fails it.
+// expect: run via_range() = (true, 7000, 7004, 3, true)
+fn via_range() -> (bool, u64, u64, u64, bool) {
+    let ok = unhex("0200000000000000 0500000000000000")
+    let bad = unhex("0500000000000000 0200000000000000")
+    let mut late = unhex("61626364")
+    result.unwrap(list.append(mut late, bad))
+    let mine = result.unwrap(codec.schema(ranges()))
+    let theirs = result.unwrap(codec.schema(range_wires()))
+    let read = match through(ranges(), mine, ok) {
+        Ok(x) => x.w.hi - x.w.lo,
+        Error(k) => k
+    }
+    let other = match through(ranges(), theirs, ok) {
+        Ok(_) => false,
+        Error(k) => k / 1000 == 6
+    }
+    (prefixes(ranges(), ok) && enc(ranges(), result.unwrap(check(RangeWire(lo: 2, hi: 5)))) == ok, range_at(bad, 0), range_at(late, 4), read, other)
 }
 
 // Keys. Big-endian, sign flipped, 0x00 escaped as 00 ff and 00 00 ending a run, by hand.

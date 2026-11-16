@@ -107,7 +107,6 @@ typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_
 typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; } HirselCoreStaticDescriptor;
 void hirsel_core_release_static_last(HirselCoreContext *, void *, const HirselCoreStaticDescriptor *);
 void hirsel_core_release_static_own_enqueue(HirselCoreWorklist *, void *, const HirselCoreStaticDescriptor *);
-void hirsel_core_release_static_enqueue(HirselCoreWorklist *, void *, bool atomic, const HirselCoreStaticDescriptor *);
 /* Inline Arc completion hooks. With task = ctx[CONTEXT_EVENTS] != 0, call
    unwrapped always, and initialized/shared/released only when the acquire
    byte task[TASK_ARC_GATE] is nonzero: set while recording, otherwise exactly

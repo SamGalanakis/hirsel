@@ -366,6 +366,106 @@ mod tests {
         })
     }
     #[test]
+    fn shared_path_release_keeps_exact_peak_retained_and_child_refund_order() {
+        use crate::{block, counted};
+        use std::ptr::NonNull;
+        unsafe extern "C" fn empty(
+            _: *mut Context,
+            _: *mut u8,
+            _: *mut u64,
+            _: *mut counted::Worklist,
+        ) -> bool {
+            true
+        }
+        static CHILD: block::Descriptor = block::Descriptor {
+            recipe: empty,
+            charge: 16,
+            payload_offset: crate::abi_layout::NODE_PAYLOAD as u64,
+        };
+        unsafe extern "C" fn path(
+            context: *mut Context,
+            payload: *mut u8,
+            cursor: *mut u64,
+            work: *mut counted::Worklist,
+        ) -> bool {
+            // SAFETY: four initialized Arc holders occupy the parent's payload.
+            // Shared children continue locally; the unique child finishes before
+            // the parent's next field, exactly as generated mechanical glue does.
+            unsafe {
+                while *cursor < 4 {
+                    if *cursor == 2 {
+                        assert_eq!((*context).available(), 72);
+                    }
+                    let child = NonNull::new_unchecked(
+                        payload.cast::<*mut u8>().add(*cursor as usize).read(),
+                    );
+                    *cursor += 1;
+                    if counted::decrement(child, true) {
+                        crate::abi::hirsel_core_release_static_own_enqueue(work, child, &CHILD);
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+        static PARENT: block::Descriptor = block::Descriptor {
+            recipe: path,
+            charge: 40,
+            payload_offset: crate::abi_layout::NODE_PAYLOAD as u64,
+        };
+        let mut context = Context::new(128);
+        let run = Run::start(&context);
+        let shared = block::allocate(context.payer(None), Some(16), 16, 8, block::STATIC).unwrap();
+        let unique = block::allocate(context.payer(None), Some(16), 16, 8, block::STATIC).unwrap();
+        let parent = block::allocate(context.payer(None), Some(40), 40, 8, block::STATIC).unwrap();
+        // SAFETY: initialize fresh counted storage and transfer three shared
+        // holders and the only unique holder into the four-field parent.
+        unsafe {
+            counted::initialize(shared, true);
+            counted::initialize(unique, true);
+            counted::initialize(parent, false);
+            for _ in 0..3 {
+                counted::share(shared, true);
+            }
+            let fields = parent.as_ptr().add(8).cast::<*mut u8>();
+            for (i, child) in [shared, unique, shared, shared].into_iter().enumerate() {
+                fields.add(i).write(child.as_ptr());
+            }
+        }
+        // Charges are 16+16+40. Each STATIC prefix adds 32 native bytes.
+        assert_eq!(
+            figures(),
+            Figures {
+                charged: 72,
+                retained: 168,
+                slack: 0
+            }
+        );
+        // SAFETY: the root's last holder transfers its exact descriptor.
+        unsafe {
+            assert!(counted::decrement(parent, false));
+            crate::abi::hirsel_core_release_static_last(&mut context, parent, &PARENT);
+        }
+        assert_eq!(context.available(), 112);
+        assert_eq!(
+            figures(),
+            Figures {
+                charged: 16,
+                retained: 48,
+                slack: 0
+            }
+        );
+        // SAFETY: the external shared holder is now the only one left.
+        unsafe {
+            assert!(counted::decrement(shared, true));
+            crate::abi::hirsel_core_release_static_last(&mut context, shared, &CHILD);
+        }
+        assert_eq!(context.available(), 128);
+        assert_eq!(figures(), Figures::default());
+        drop(run);
+        assert_eq!(LAST.get(), 72);
+    }
+    #[test]
     fn charged_is_root_reservation_and_retained_is_live_native_requests() {
         let mut context = Context::new(1000);
         let run = Run::start(&context);

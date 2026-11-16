@@ -74,7 +74,11 @@ header. Writer/copy/index code and Child/Bounds/Overflow checks belong to the
 emitter. Region close refunds the aggregate entries and frees chunks.
 
 Rc/Arc share and nonlast release inline; last release uses allocation-free,
-constant-stack resumable glue. A scheduler binds native task execution on resume
+constant-stack resumable glue. Recipes decrement retained children inline and
+continue locally; only a dead descendant returns to the intrusive worklist.
+The traversal keeps depth-first refund order. A worklist node funded by the
+current canonical record refunds directly before deallocation; other payers
+retain the existing forwarded or remote settlement path. A scheduler binds native task execution on resume
 and unbinds before moving it to another worker. Foreign refunds accumulate in
 prepaid per-slot mailboxes until the payer task's event. Resuming only binds
 execution custody and caches that task's inbox. MEM-26 also makes growth of a

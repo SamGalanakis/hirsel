@@ -1003,25 +1003,6 @@ pub unsafe extern "C" fn hirsel_core_release_static_own_enqueue(
         crate::block::push_static(&mut *list, node, descriptor);
     }
 }
-/// Consume a Fixed counted holder, enqueueing only on last release. No status;
-/// Arc retains the same decrement and event before its last-release work.
-/// # Safety
-/// Live holder under the count/event discipline, exclusive worklist, exact descriptor.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release_static_enqueue(
-    list: *mut Worklist,
-    node: NonNull<u8>,
-    atomic: bool,
-    descriptor: *const crate::block::Descriptor,
-) {
-    // SAFETY: caller transfers a holder and the same immutable concrete descriptor.
-    unsafe {
-        if counted::decrement(node, atomic) {
-            crate::block::push_static(&mut *list, node, descriptor);
-        }
-    }
-}
-
 /// Full-new admission, replacement, carrier install, then original-payer refund.
 /// # Safety
 /// The consuming sequence carrier is exclusively owned and has nonzero capacity.

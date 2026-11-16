@@ -110,6 +110,10 @@ impl Glue<'_, '_, '_> {
                 &[],
                 &[list, node, charge, carrier, recipe],
             )?;
+            let no = self.b.ins().iconst(types::I8, 0);
+            self.b.ins().return_(&[no]);
+            self.b.switch_to_block(done);
+            return Ok(());
         }
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
@@ -220,6 +224,7 @@ impl Glue<'_, '_, '_> {
                 let next = self.b.ins().iadd_imm_s(rank, 1);
                 self.b.ins().store(MemFlagsData::trusted(), next, slot, 0);
                 let node = self.load(base, 0);
+                let mut yields = true;
                 match field {
                     // Its ordinary glue: the finalizer, then the fields. A counted
                     // payload holds no resource, so this cannot fail.
@@ -249,6 +254,7 @@ impl Glue<'_, '_, '_> {
                                 node,
                                 charge,
                             )?;
+                            yields = false;
                         } else {
                             let descriptor = self.descriptor(*t, false);
                             self.call(
@@ -260,23 +266,37 @@ impl Glue<'_, '_, '_> {
                         }
                     }
                     FieldTy::Rc(t) | FieldTy::Arc(t) => {
-                        let atomic = self
-                            .b
-                            .ins()
-                            .iconst(types::I8, i64::from(matches!(field, FieldTy::Arc(_))));
+                        let atomic = matches!(field, FieldTy::Arc(_));
                         if hirsel_core_layout::terminal(
                             &self.tables.input.types,
                             self.tables.layouts,
                             field,
                         ) {
-                            self.release(node, *t, matches!(field, FieldTy::Arc(_)))?;
+                            self.release(node, *t, atomic)?;
+                            yields = false;
                         } else {
+                            let last = fast::decrement(&mut self.b, node, atomic);
+                            if atomic {
+                                fast::arc_event(
+                                    &mut self.b,
+                                    &mut self.calls,
+                                    self.object,
+                                    self.ctx,
+                                    "hirsel_core_arc_released",
+                                    &[B],
+                                    &[last],
+                                )?;
+                            }
+                            let last_block = self.b.create_block();
+                            self.b.set_cold_block(last_block);
+                            self.b.ins().brif(last, last_block, &[], skip, &[]);
+                            self.b.switch_to_block(last_block);
                             let descriptor = self.descriptor(*t, true);
                             self.call(
-                                "hirsel_core_release_static_enqueue",
-                                &[P, P, B, P],
+                                "hirsel_core_release_static_own_enqueue",
+                                &[P, P, P],
                                 &[],
-                                &[list, node, atomic, descriptor],
+                                &[list, node, descriptor],
                             )?;
                         }
                     }
@@ -284,6 +304,7 @@ impl Glue<'_, '_, '_> {
                         let logical =
                             field_size(&self.tables.input.types, self.tables.layouts, e).2;
                         self.enqueue_buffer(field, base, node, logical, list)?;
+                        yields = false;
                     }
                     FieldTy::Map(k, v) => {
                         let logical = field_size(&self.tables.input.types, self.tables.layouts, k)
@@ -291,11 +312,16 @@ impl Glue<'_, '_, '_> {
                             + field_size(&self.tables.input.types, self.tables.layouts, v).2
                             + 16;
                         self.enqueue_buffer(field, base, node, logical, list)?;
+                        yields = false;
                     }
                     _ => unreachable!(),
                 }
-                let no = self.b.ins().iconst(types::I8, 0);
-                self.b.ins().return_(&[no]);
+                if yields {
+                    let no = self.b.ins().iconst(types::I8, 0);
+                    self.b.ins().return_(&[no]);
+                } else {
+                    self.b.ins().jump(skip, &[]);
+                }
                 self.b.switch_to_block(skip);
             }
             Plan::Fields(fields) => {

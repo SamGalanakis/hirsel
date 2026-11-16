@@ -369,12 +369,13 @@ unsafe extern "C" fn mixed_fixed_chain(
             *cursor = 1;
             if let Some(child) = NonNull::new(payload.cast::<*mut u8>().read()) {
                 if crate::block::funding(child).native_tag() & 3 == crate::block::STATIC as usize {
-                    crate::abi::hirsel_core_release_static_enqueue(
-                        work,
-                        child,
-                        false,
-                        &FIXED_CHAIN,
-                    );
+                    if counted::decrement(child, false) {
+                        crate::abi::hirsel_core_release_static_own_enqueue(
+                            work,
+                            child,
+                            &FIXED_CHAIN,
+                        );
+                    }
                 } else {
                     counted::enqueue(&mut *work, child, false, 16, mixed_fixed_chain);
                 }

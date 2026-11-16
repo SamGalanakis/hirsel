@@ -555,17 +555,9 @@ pub(super) fn share(
     Ok(())
 }
 
-pub(super) fn release(
-    b: &mut FunctionBuilder<'_>,
-    calls: &mut calls::Calls<'_>,
-    object: &mut ObjectModule,
-    operands: [Value; 2],
-    cleanup: (u64, Option<cranelift_module::DataId>),
-    atomic: bool,
-) -> Result<()> {
-    let [context, node] = operands;
+pub(super) fn decrement(b: &mut FunctionBuilder<'_>, node: Value, atomic: bool) -> Value {
     let one = b.ins().iconst(types::I64, 1);
-    let last = if atomic {
+    if atomic {
         // SeqCst includes the required Release decrement and Acquire on last.
         let old = b.ins().atomic_rmw(
             types::I64,
@@ -590,7 +582,19 @@ pub(super) fn release(
             memory_layout::NODE_COUNT as i32,
         );
         b.ins().icmp_imm_s(IntCC::Equal, next, 0)
-    };
+    }
+}
+
+pub(super) fn release(
+    b: &mut FunctionBuilder<'_>,
+    calls: &mut calls::Calls<'_>,
+    object: &mut ObjectModule,
+    operands: [Value; 2],
+    cleanup: (u64, Option<cranelift_module::DataId>),
+    atomic: bool,
+) -> Result<()> {
+    let [context, node] = operands;
+    let last = decrement(b, node, atomic);
     if atomic {
         arc_event(
             b,

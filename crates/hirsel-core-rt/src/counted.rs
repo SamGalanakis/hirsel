@@ -6,7 +6,8 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 
 /// Generated resumable mechanical glue. Cursor starts at zero in native node
-/// bookkeeping. Clean fields in spec order; advance the cursor, enqueue at most
+/// bookkeeping. Clean fields in spec order, scanning nonlast holders locally.
+/// Advance the cursor, enqueue at most
 /// one descendant, then return false to resume after that descendant. Return
 /// true only when all fields are clean and nothing was enqueued in this call.
 /// Never recurse, allocate, fail, run user code, or free the current node.
@@ -173,7 +174,7 @@ pub(crate) unsafe fn drain(context: *mut Context, list: &mut Worklist) {
             let (recipe, payload, cursor, next, charge) = block::resume_state(node);
             if recipe(context, payload, cursor, list) {
                 list.head = next;
-                block::free_graph(node, charge);
+                block::free_graph_in(&*context, node, charge);
             }
         }
     }

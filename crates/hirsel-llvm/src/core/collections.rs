@@ -133,7 +133,7 @@ impl FunctionEmitter<'_> {
     }
     pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &Value) {
         if hirsel_core_layout::storage_free(&self.module.types, field) {
-            self.ret(&Type::I1, &FALSE);
+            self.br(Label::plain("resume"));
             return;
         }
         let entries = Entries::new(self.module, self.recipes, field);
@@ -159,10 +159,14 @@ impl FunctionEmitter<'_> {
                     ptr(Value::global(symbol(field))),
                 ],
             );
+            self.ret(&Type::I1, &FALSE);
+            self.block(empty);
+            self.br(Label::plain("resume"));
+            return;
         }
-        self.ret(&Type::I1, &FALSE);
+        self.br(Label::plain("resume"));
         self.block(empty);
-        self.ret(&Type::I1, &FALSE);
+        self.br(Label::plain("resume"));
     }
 }
 
@@ -210,6 +214,8 @@ pub(super) fn glue(
             let payload = Value::Local(Local::PAYLOAD);
             let element = Label::plain("element");
             let done = Label::plain("done");
+            e.br(Label::plain("resume"));
+            e.block(Label::plain("resume"));
             let cursor = e.load(&i64, &cursor_at, 0);
             let length = e.carrier_word(&payload, 8);
             let index = e.bin(Binary::UDiv, &i64, &cursor, &int(count));
@@ -227,7 +233,7 @@ pub(super) fn glue(
                 let removed = Label::plain("removed");
                 e.cond(&live, live_label, removed);
                 e.block(removed);
-                e.ret(&Type::I1, &FALSE);
+                e.br(Label::plain("resume"));
                 e.block(live_label);
             }
             let inner = e.bin(Binary::URem, &i64, &cursor, &int(count));
@@ -237,7 +243,7 @@ pub(super) fn glue(
                 e.mechanical_field(f, &at, &inner, base)?;
                 base += steps;
             }
-            e.ret(&Type::I1, &FALSE);
+            e.br(Label::plain("resume"));
             e.block(done);
         }
         e.ret(&Type::I1, &true.into());

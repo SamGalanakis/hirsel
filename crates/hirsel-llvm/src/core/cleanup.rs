@@ -579,7 +579,7 @@ impl FunctionEmitter<'_> {
                     &[CONTEXT, p.clone(), site],
                     &CallAttrs::default(),
                 ));
-                self.ret(&Type::I1, &FALSE);
+                self.br(Label::plain("resume"));
             }
             FieldTy::Inline(t) => {
                 let drop = self.recipes[t.index()].drop.as_ref().unwrap();
@@ -611,7 +611,7 @@ impl FunctionEmitter<'_> {
                         self.mechanical_field(&f.ty, &at, &local, offset)?;
                         offset += mechanical_count(self.module, self.recipes, &f.ty)?;
                     }
-                    self.ret(&Type::I1, &FALSE);
+                    self.br(Label::plain("resume"));
                 }
             }
             FieldTy::Array(e, _) => {
@@ -622,22 +622,16 @@ impl FunctionEmitter<'_> {
                 let off = self.bin(Binary::Mul, &i64, &index, &int(stride));
                 let at = self.offset_by(p, &off);
                 self.mechanical_field(e, &at, &inner, 0)?;
-                self.ret(&Type::I1, &FALSE);
+                self.br(Label::plain("resume"));
             }
             FieldTy::Seq(_) | FieldTy::Map(_, _) => self.enqueue_collection(field, p),
             FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                 let node = self.load(&Type::Ptr, p, 1);
                 let logical = self.recipes[t.index()].logical_size.unwrap();
-                let (name, charge) = if matches!(field, FieldTy::Box(_)) {
-                    (
-                        "hirsel_core_release_static_own_enqueue",
-                        hirsel_core_layout::charge::boxed(logical).unwrap(),
-                    )
+                let charge = if matches!(field, FieldTy::Box(_)) {
+                    hirsel_core_layout::charge::boxed(logical).unwrap()
                 } else {
-                    (
-                        "hirsel_core_release_static_enqueue",
-                        hirsel_core_layout::charge::counted(logical).unwrap(),
-                    )
+                    hirsel_core_layout::charge::counted(logical).unwrap()
                 };
                 if hirsel_core_layout::terminal(&self.module.types, self.recipes, field) {
                     if matches!(field, FieldTy::Box(_)) {
@@ -645,21 +639,39 @@ impl FunctionEmitter<'_> {
                     } else {
                         self.release_node(&node, *t, matches!(field, FieldTy::Arc(_)))?;
                     }
-                    self.ret(&Type::I1, &FALSE);
+                    self.br(Label::plain("resume"));
                     self.block(skip);
                     return Ok(());
-                }
-                let mut args = vec![ptr(Local::WORKLIST), ptr(node)];
-                if !matches!(field, FieldTy::Box(_)) {
-                    args.push(zeroext(Type::I1, matches!(field, FieldTy::Arc(_))));
                 }
                 let owner = if matches!(field, FieldTy::Box(_)) {
                     "own"
                 } else {
+                    let atomic = matches!(field, FieldTy::Arc(_));
+                    let last = self.decrement_node(&node, atomic);
+                    let retained = self.bin(Binary::Xor, &Type::I1, &last, &true.into());
+                    let nonlast = Label::new("child_nonlast", n);
+                    let last_label = Label::new("child_last", n);
+                    self.likely(&retained, nonlast, last_label);
+                    self.block(nonlast);
+                    if atomic {
+                        self.arc_event("hirsel_core_arc_released", &[zeroext(Type::I1, false)]);
+                    }
+                    self.br(Label::plain("resume"));
+                    self.block(last_label);
+                    if atomic {
+                        self.effect(Operation::Fence(Ordering::Acquire));
+                        self.arc_event("hirsel_core_arc_released", &[zeroext(Type::I1, true)]);
+                    }
                     "counted"
                 };
-                args.push(ptr(Value::global(format!("core_static_{owner}_{}", t.0))));
-                self.runtime_void(name, &args);
+                self.runtime_void(
+                    "hirsel_core_release_static_own_enqueue",
+                    &[
+                        ptr(Local::WORKLIST),
+                        ptr(node),
+                        ptr(Value::global(format!("core_static_{owner}_{}", t.0))),
+                    ],
+                );
                 self.ret(&Type::I1, &FALSE);
             }
             _ => unreachable!(),
@@ -737,6 +749,8 @@ fn counted_glue(
         );
         let field = FieldTy::Inline(TypeRef(t as u32));
         let cursor_at = Value::Local(Local::CURSOR);
+        e.br(Label::plain("resume"));
+        e.block(Label::plain("resume"));
         let cursor = e.load(&Type::I64, &cursor_at, 0);
         let next = e.bin(Binary::Add, &Type::I64, &cursor, &int(1));
         e.store(&Type::I64, &next, &cursor_at, 0);

@@ -291,6 +291,11 @@ pub(crate) unsafe fn funding<'a>(payload: NonNull<u8>) -> &'a Payer {
 /// Exclusive cleaned block; native size/alignment/kind and logical charge are exact.
 #[inline]
 pub(crate) unsafe fn free(payload: NonNull<u8>, charge: u64) {
+    // SAFETY: caller supplies exclusive cleaned storage and its exact charge.
+    unsafe { free_with(payload, charge, None) }
+}
+#[inline]
+unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>) {
     // SAFETY: native kind/alignment are encoded in the sole payer word.
     unsafe {
         let payer = *funding(payload);
@@ -308,18 +313,30 @@ pub(crate) unsafe fn free(payload: NonNull<u8>, charge: u64) {
         };
         let offset = (prefix(kind) + usize::from(index == 7) * 8).next_multiple_of(alignment);
         if charge != 0 || kind != RESOURCE {
-            payer.settle(charge);
+            if let Some(context) = context {
+                payer.with_tag(0).settle_in(context, charge);
+            } else {
+                payer.settle(charge);
+            }
         }
         crate::allocator::deallocate_raw(payload.as_ptr().sub(offset));
     }
 }
 /// # Safety
 /// The dead GRAPH node's fields are completely cleaned.
+#[cfg(test)]
 pub(crate) unsafe fn free_graph(payload: NonNull<u8>, charge: u64) {
     // SAFETY: caller transfers the exclusively owned dead graph block.
     unsafe {
         free(payload, charge);
     }
+}
+/// # Safety
+/// The worklist owns a cleaned node, its exact charge and a live task context.
+#[inline]
+pub(crate) unsafe fn free_graph_in(context: &Context, payload: NonNull<u8>, charge: u64) {
+    // SAFETY: caller transfers exclusive storage; the original payer stays pinned.
+    unsafe { free_with(payload, charge, Some(context)) }
 }
 /// Raw-byte Rust owner. Native layout operands correspond to emitter constants
 /// or storage lengths; payload cleanup belongs to the emitter.

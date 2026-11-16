@@ -17,6 +17,7 @@ fn record(name: &str, repr: Repr, fields: Vec<Field>) -> Shape {
         body: Body::Record(fields),
         finalizer: None,
         clone: None,
+        codec: None,
         grant: 0,
         held: None,
     }
@@ -37,6 +38,7 @@ fn variant(name: &str, repr: Repr, cases: Vec<(&str, Vec<Field>)>) -> Shape {
         ),
         finalizer: None,
         clone: None,
+        codec: None,
         grant: 0,
         held: None,
     }

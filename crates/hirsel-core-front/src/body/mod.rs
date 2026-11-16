@@ -462,7 +462,18 @@ impl Emitter {
             // A generic row's finalizer or clone body is its template's instance at the
             // row's arguments, materialized as any other generic callee.
             let func = if arguments.is_empty() {
-                self.hook_row(p, f as usize)
+                if hook == crate::layout::Hook::Codec {
+                    // A maker is an ordinary function: its row has its own signature.
+                    match self.row(p, f as usize) {
+                        Ok((func, _)) => func,
+                        Err(_) => {
+                            self.module.types[row.index()].codec = None;
+                            continue;
+                        }
+                    }
+                } else {
+                    self.hook_row(p, f as usize)
+                }
             } else {
                 self.instance(p, t, f as usize, &arguments).ok()?.0
             };
@@ -471,6 +482,7 @@ impl Emitter {
             match hook {
                 crate::layout::Hook::Finalizer => shape.finalizer = func,
                 crate::layout::Hook::Clone => shape.clone = func,
+                crate::layout::Hook::Codec => shape.codec = func,
             }
         }
         r

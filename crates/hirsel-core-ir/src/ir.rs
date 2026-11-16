@@ -1391,11 +1391,12 @@ pub struct ClosureHook {
 }
 
 /// A row of a [`Closure`]: the shape with every row it names replaced by that row's
-/// closure position and its hooks unset, and its finalizer and clone body as hooks.
+/// closure position and its hooks unset, and its finalizer, clone body and codec maker
+/// as hooks.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClosureRow {
     pub shape: Shape,
-    pub hooks: [Option<ClosureHook>; 2],
+    pub hooks: [Option<ClosureHook>; 3],
 }
 
 /// The rows a root row reaches, independent of any module's numbering: positions are
@@ -1472,6 +1473,7 @@ impl Module {
             let hooks = [
                 hook(shape.finalizer.take(), &mut order, &mut rows, &mut pending),
                 hook(shape.clone.take(), &mut order, &mut rows, &mut pending),
+                hook(shape.codec.take(), &mut order, &mut rows, &mut pending),
             ];
             rows[order[&t] as usize] = Some(ClosureRow { shape, hooks });
         }

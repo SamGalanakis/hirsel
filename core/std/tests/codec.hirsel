@@ -1507,3 +1507,137 @@ fn row_at(r: codec.Reader[Row], b: Bytes) -> (u64, u64, i64) {
         Error(_) => (9999, 0, 0)
     }
 }
+
+// The derive (EXPANSION section 0) against its twins. Each declaration below is a twin's,
+// and the codec the checker generates for it must write the twin's bytes, schema and
+// fingerprint, read what the twin reads and refuse what it refuses at the same offset.
+// A schema's path is its definition's (std.tests.codec.DRow) where a twin writes t.Row,
+// so a twin's schema is compared at the derived path (`at_path`).
+type DRow: codec {
+    id: u64,
+    name: String,
+    score: i64 = 7
+}
+
+type DTomb: codec {
+    id: u64,
+    removed note: String,
+    name: String,
+    score: i64 = 7
+}
+
+type DShape: codec = Dot | Circle(f64) | Rect(u64, u64)
+
+type DCut: codec = Dot | Circle(f64) | removed Rect(u64, u64)
+
+type DGap: codec = Dot | removed Circle(f64) | Rect(u64, u64)
+
+// The schema b with its first definition's path replaced by `path`. Its path is at byte
+// 9, after the version byte and the definition count (schema_by_hand).
+fn at_path(b: Bytes, path: String) -> Bytes {
+    let mut at: u64 = 9
+    let n = match codec.take_u64(b, mut at) {
+        Ok(n) => n,
+        Error(_) => 0
+    }
+    let mut out: Bytes = list.new()
+    result.unwrap(list.append(mut out, list.slice(b, 0, 9)))
+    result.unwrap(codec.put_string(path, mut out))
+    result.unwrap(list.append(mut out, list.slice(b, 17 + n, list.len(b))))
+    take out
+}
+
+// The derived codec's schema is the twin's at the derived path, and so is its fingerprint.
+fn same_schema[T](c: codec.Codec[T], twin: Bytes, path: String) -> bool {
+    let want = at_path(twin, path)
+    result.unwrap(codec.schema(c)) == want && result.unwrap(codec.fingerprint(c)) == codec.fingerprint_of(want)
+}
+
+fn drow_through(writer: Bytes, b: Bytes) -> (u64, u64, i64) {
+    let c: codec.Codec[DRow] = codec.of()
+    match through(c, at_path(writer, "std.tests.codec.DRow"), b) {
+        Ok(x) => (x.id, string.byte_len(x.name), x.score),
+        Error(k) => (k, 0, 0)
+    }
+}
+
+fn dtomb_through(writer: Bytes, b: Bytes) -> (u64, u64, i64) {
+    let c: codec.Codec[DTomb] = codec.of()
+    match through(c, at_path(writer, "std.tests.codec.DTomb"), b) {
+        Ok(x) => (x.id, string.byte_len(x.name), x.score),
+        Error(k) => (k, 0, 0)
+    }
+}
+
+// A record with a defaulted field (EXPANSION 1) and a tombstone (2). Row(5, "ab", 3)'s
+// bytes and the twin's schema; least 24; version 1's bytes read with score defaulted
+// (5, 2, 7) and reordered fields undone (6, 3, 7), as evolution_reads_old_rows; the
+// writer's note dropped by the tombstone (8, 1, 7); and the offsets of
+// resolution_checks_writer_bytes (1008, 5018, 3016). A derive that reorders fields, drops
+// the default from the schema or numbers past the tombstone fails it.
+// expect: run derived_record() = (true, true, 24, (5, 2, 7), (6, 3, 7), (8, 1, 7), (1008, 5018, 3016))
+fn derived_record() -> (bool, bool, u64, (u64, u64, i64), (u64, u64, i64), (u64, u64, i64), (u64, u64, u64)) {
+    let c: codec.Codec[DRow] = codec.of()
+    let t: codec.Codec[DTomb] = codec.of()
+    let written = enc(c, DRow(id: 5, name: "ab", score: 3)) == enc(rows(), row(5, "ab"))
+    let schemas = same_schema(c, schema_bytes(row_schema), "std.tests.codec.DRow") && same_schema(t, schema_bytes(tomb_schema), "std.tests.codec.DTomb")
+    let a = drow_through(schema_bytes(v1_schema), enc(rows_v1(), row(5, "ab")))
+    let b = drow_through(schema_bytes(swapped_schema), enc(rows_swapped(), row(6, "abc")))
+    let d = dtomb_through(schema_bytes(noted_schema), enc(rows_noted(), row(8, "x")))
+    let v1 = at_path(schema_bytes(v1_schema), "std.tests.codec.DRow")
+    let e = refusal(c, v1, unhex("0500000000000000 0200000000000000 61"))
+    let f = refusal(c, v1, unhex("0500000000000000 0200000000000000 6162 00"))
+    let g = refusal(t, at_path(schema_bytes(noted_schema), "std.tests.codec.DTomb"), unhex("0500000000000000 0100000000000000 ff 0100000000000000 61"))
+    (written, schemas, codec.least(c), a, b, d, (e, f, g))
+}
+
+fn dshape_code(x: DShape) -> u64 {
+    match x {
+        Dot => 1,
+        Circle(_) => 2,
+        Rect(w, h) => 30 + w + h
+    }
+}
+
+fn dcut_code(x: DCut) -> u64 {
+    match x {
+        Dot => 1,
+        Circle(_) => 2
+    }
+}
+
+// A sum (EXPANSION 3) and a removed variant (2). Rect(1, 2) by hand and the twin's
+// schema; least 4; tags_are_u32's refusals (2000, 2000, 5004) and prefixes; the old
+// writer's Circle (2). With Rect removed: the twin's schema, Circle read (2), a held Rect
+// Schema at the writer's entry (variant_evolution's 6085, 13 bytes on: the path
+// std.tests.codec.DCut is 13 bytes longer than t.Shape), and Rect's own tag refused on
+// decode, Invalid at the tag (2000). With Circle removed before it, Rect keeps tag 2: the
+// same bytes by hand, read back (0), and Circle's tag Invalid at the tag (2000). A derive
+// that puts the tag after the payload, numbers live variants only, or decodes the removed
+// tag as a value fails it.
+// expect: run derived_sum() = (true, true, 4, (2000, 2000, 5004, true), 2, true, (2, 6098, 2000), (true, 0, 2000))
+fn derived_sum() -> (bool, bool, u64, (u64, u64, u64, bool), u64, bool, (u64, u64, u64), (bool, u64, u64)) {
+    let c: codec.Codec[DShape] = codec.of()
+    let cut: codec.Codec[DCut] = codec.of()
+    let circle = unhex("01000000 000000000000f03f")
+    let rect = unhex("02000000 0100000000000000 0200000000000000")
+    let r: DShape = Rect(1, 2)
+    let written = enc(c, r) == rect
+    let schema = same_schema(c, shape_schema_bytes(shape_schema), "std.tests.codec.DShape")
+    let tags = (outcome(c, unhex("03000000")), outcome(c, unhex("00000001")), outcome(c, unhex("0000000000000000")), prefixes(c, rect))
+    let old = match through(c, at_path(shape_schema_bytes(old_shape_schema), "std.tests.codec.DShape"), circle) {
+        Ok(x) => dshape_code(x),
+        Error(k) => k
+    }
+    let cut_schema = same_schema(cut, shape_schema_bytes(cut_shape_schema), "std.tests.codec.DCut")
+    let writer = at_path(shape_schema_bytes(shape_schema), "std.tests.codec.DCut")
+    let a = match through(cut, writer, circle) {
+        Ok(x) => dcut_code(x),
+        Error(k) => k
+    }
+    let b = refusal(cut, writer, rect)
+    let gap: codec.Codec[DGap] = codec.of()
+    let g: DGap = Rect(1, 2)
+    let gaps = (enc(gap, g) == rect, outcome(gap, rect), outcome(gap, circle))
+    (written, schema, codec.least(c), tags, old, cut_schema, (a, b, outcome(cut, rect)), gaps)
+}

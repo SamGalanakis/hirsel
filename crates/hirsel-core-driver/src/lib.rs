@@ -55,7 +55,7 @@ use hirsel_core_resolve::{
     CorpusManifest, Definition, DefinitionId, ModuleId, ModulePath, NameIndex, PackageManifest,
     Refusal, Resolution, ResolutionScratch, Site,
 };
-use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile, parse_bytes};
+use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -628,7 +628,15 @@ impl Driver {
         let mut syntax_diagnostics = vec![];
         let mut syntax_resources = vec![];
         for (path, signatures, bytes, _) in &sources {
-            let output = parse_bytes(
+            let derive = request
+                .inputs
+                .packages
+                .iter()
+                .find(|p| p.package == path.package)
+                .and_then(|p| {
+                    hirsel_core_resolve::codec_derive(&p.package, &p.dependencies, &path.modules)
+                });
+            let output = hirsel_core_resolve::parse_module(
                 bytes,
                 if *signatures {
                     ParseMode::Signatures
@@ -636,6 +644,7 @@ impl Driver {
                     ParseMode::Source
                 },
                 &mut symbols,
+                derive.as_ref(),
             );
             syntax_diagnostics.extend(output.diagnostics.into_iter().map(|d| (path, d)));
             if let Some(r) = output.resource_refusal {
@@ -1015,6 +1024,7 @@ impl Driver {
             }
         }
         meter.finish("check/lower");
+        derived_sites(&mut result, &modules);
         let mut names: BTreeMap<ModuleId, Vec<(DefinitionId, Definition)>> = BTreeMap::new();
         let base = index.definitions.base_len();
         for (i, d) in index.definitions.own_iter().enumerate() {
@@ -1133,6 +1143,57 @@ fn file_record(
     }
     record
 }
+/// A site in an item the codec derive generated (EXPANSION section 0) is reported at its
+/// declaration's name, once, and not at all when the declaration has a refusal of its own:
+/// the declaration's checks already refuse, at the field, a field that is not codec and a
+/// default of another type, which the generated items would repeat at text no one wrote.
+fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
+    let at = |site: &Site| {
+        let m = modules.iter().find(|m| m.id == site.module)?;
+        let (item, span) = hirsel_core_syntax::declaration_of(&m.syntax, site.item as usize)?;
+        Some(Site {
+            module: site.module,
+            item: item as u32,
+            span,
+        })
+    };
+    let own: std::collections::HashSet<_> = result
+        .diagnostics
+        .iter()
+        .filter(|r| at(&r.primary).is_none())
+        .map(|r| (r.primary.module, r.primary.item))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    result.diagnostics.retain_mut(|r| {
+        let Some(site) = at(&r.primary) else {
+            return true;
+        };
+        r.primary = site;
+        for causal in &mut r.causal {
+            if let Some(site) = at(causal) {
+                *causal = site;
+            }
+        }
+        !own.contains(&(site.module, site.item))
+            && seen.insert((
+                r.rule.clone(),
+                site.module,
+                site.item,
+                site.span.start,
+                r.message.clone(),
+            ))
+    });
+    let mut seen = std::collections::HashSet::new();
+    result.incomplete.retain_mut(|g| {
+        let Some(site) = at(&g.primary) else {
+            return true;
+        };
+        g.primary = site;
+        !own.contains(&(site.module, site.item))
+            && seen.insert((site.module, site.item, site.span.start, g.message.clone()))
+    });
+}
+
 /// A record's sites are canonical. An image body is reported as it stands, so
 /// bind its sites and anchors to the image's items once, when it is decoded;
 /// a request's own bodies bind the copies they report instead.

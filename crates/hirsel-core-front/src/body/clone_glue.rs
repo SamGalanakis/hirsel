@@ -1396,6 +1396,7 @@ mod kernel_clone_tests {
             body: ShapeBody::Record(fields),
             finalizer,
             clone: None,
+            codec: None,
             grant: 0,
             held: None,
         };

@@ -1033,6 +1033,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let TyKind::Param(_) = self.t.kind(ty) {
             return None;
         }
+        // A declared codec type's maker is the derived `<Name>$codec` at its arguments.
+        if let TyKind::Adt(d, args) = self.t.kind(ty).clone()
+            && let Some(maker) = self.p.decls[d.index()].codec().and_then(|c| c.maker)
+        {
+            return Some(self.emit_call(maker as usize, &args, vals, result, n));
+        }
         let name = crate::decls::layout_name(&self.p.decls, &self.t, ty);
         let maker = templates::builtin_codec(&name).and_then(|maker| {
             let mut path = self.p.fns[f].path.clone();

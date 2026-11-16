@@ -1,5 +1,5 @@
 use hirsel_core_ids::PackageId;
-use hirsel_core_syntax::{ParseMode, ParseOutput, Symbols, parse_bytes};
+use hirsel_core_syntax::{Derive, ParseMode, ParseOutput, Symbols, parse_bytes};
 use std::path::{Path, PathBuf};
 
 /// Tool input, not language syntax: one explicitly mapped module per source (PROG-1).
@@ -21,6 +21,50 @@ pub struct ParsedModule {
     pub parsed: ParseOutput,
 }
 use crate::{ModuleId, ModulePath, NameIndex};
+/// How the codec derive (EXPANSION section 0) names std's codec module from module
+/// `modules` of `package`, whose dependencies are `dependencies`: `codec` inside std,
+/// `std.codec` where std is a dependency. None where no derive runs: std's codec module
+/// itself, whose codecs are written by hand, and a package without std.
+pub fn codec_derive(
+    package: &PackageId,
+    dependencies: &[PackageId],
+    modules: &[String],
+) -> Option<Derive> {
+    let codec = if package.name == "std" {
+        if modules == ["codec"] {
+            return None;
+        }
+        "codec"
+    } else if dependencies.iter().any(|d| d.name == "std") {
+        "std.codec"
+    } else {
+        return None;
+    };
+    let mut path = package.name.clone();
+    for m in modules {
+        path.push('.');
+        path.push_str(m);
+    }
+    Some(Derive {
+        codec: codec.into(),
+        path,
+    })
+}
+
+/// The parse of one module's bytes, with the codec derive's items when `derive` is set.
+pub fn parse_module(
+    bytes: &[u8],
+    mode: ParseMode,
+    symbols: &mut Symbols,
+    derive: Option<&Derive>,
+) -> ParseOutput {
+    let output = parse_bytes(bytes, mode, symbols);
+    match derive {
+        Some(d) => hirsel_core_syntax::derive(output, mode, symbols, d),
+        None => output,
+    }
+}
+
 impl PackageManifest {
     /// Explicit directory-tool convention: relative path components name modules.
     /// Drivers with another manifest format supply their own `sources` instead.
@@ -97,7 +141,7 @@ impl PackageManifest {
                         modules: s.modules.clone(),
                     },
                     file: s.file.clone(),
-                    parsed: parse_bytes(
+                    parsed: parse_module(
                         &bytes,
                         if s.signatures {
                             ParseMode::Signatures
@@ -105,6 +149,7 @@ impl PackageManifest {
                             ParseMode::Source
                         },
                         symbols,
+                        codec_derive(&self.package, &self.dependencies, &s.modules).as_ref(),
                     ),
                 })
             })

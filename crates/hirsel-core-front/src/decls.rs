@@ -342,7 +342,7 @@ impl TypeDecl {
     pub fn codec(&self) -> Option<&crate::codec_decls::CodecDecl> {
         self.extra.as_ref().and_then(|e| e.codec.as_deref())
     }
-    fn codec_mut(&mut self) -> &mut crate::codec_decls::CodecDecl {
+    pub(crate) fn codec_mut(&mut self) -> &mut crate::codec_decls::CodecDecl {
         self.extra
             .get_or_insert_default()
             .codec
@@ -726,6 +726,7 @@ impl Program<'_> {
                 self.clone_hook(f);
             }
         }
+        self.bind_codec_makers();
     }
 
     /// MEM-17: `clone[..](x: T[..]) { .. }` is a core item, so a core type's copy is

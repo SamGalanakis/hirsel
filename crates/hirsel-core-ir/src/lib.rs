@@ -154,6 +154,12 @@
 //!   independent copy of `from`; otherwise `to` is as the byte copy left it, owns
 //!   nothing and is not cleaned, and the pair is the refused request. No engine
 //!   reads the field; the front derives the calls.
+//! - **A codec maker on a row** (`type tN = own "Row" codec fM { .. }`,
+//!   `Shape::codec`, SEM-10) is the row's `() -> Codec[T]`: the function a call of
+//!   `std.codec.of` at the row becomes (see Instances). It travels in the row's
+//!   closure, so an instance whose parameter is the row finds it there. No engine
+//!   reads the field, and only a call reaches it, so it adds nothing to a unit that
+//!   only holds the row.
 //!
 //! # Compact data (FORM v1b, spec 6ef88514)
 //!
@@ -935,8 +941,9 @@
 //! signature `() -> Codec[T]` that `of` has (SEM-10): a call at a closed T is lowered
 //! to the maker directly, and a call in a generic body at its parameter is the
 //! template's rigid row `std.codec.of[$i]`, which becomes the maker's row when an
-//! instance substitutes T. Well-formedness refuses a function row of `std.codec.of`
-//! whose type argument is closed.
+//! instance substitutes T: std's `of_X` beside `of` for a built-in T, otherwise the
+//! row's own codec maker (`Shape::codec`). Well-formedness refuses a function row of
+//! `std.codec.of` whose type argument is closed.
 //!
 //! An instance's signature is the closed signature of its substituted types (FORM
 //! #64): a parameter of a type argument is carried the way that type is carried in a

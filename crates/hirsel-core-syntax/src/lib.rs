@@ -1,6 +1,7 @@
 //! Lossless indexed syntax for the new core language, independent of semantic checking.
 //! Arenas and relative origins are extracted from hirsel-syntax; grammar nodes are new.
 
+mod derive;
 mod format;
 mod grammar;
 mod lexer;
@@ -9,6 +10,7 @@ mod package_format;
 mod parser;
 mod symbols;
 mod token;
+pub use derive::{Derive, declaration_of, derive, derived_from};
 pub use format::format;
 pub use lexer::{LexOutput, lex};
 pub use literals::{byte_value, character_value};

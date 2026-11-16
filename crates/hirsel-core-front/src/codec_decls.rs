@@ -9,6 +9,9 @@ pub struct CodecDecl {
     pub removed: Vec<RemovedDecl>,
     /// Parameters conditioning codec, including removed types or the via representation.
     pub params: Vec<u32>,
+    /// The derived maker `D$codec` (EXPANSION section 0), the function `codec.of`
+    /// resolves to at this type; None while the derive skips the type.
+    pub maker: Option<u32>,
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CodecVia {
@@ -38,6 +41,31 @@ impl TypeDecl {
     }
 }
 impl Program<'_> {
+    /// Binds each codec declaration of this program to its derived maker, the function
+    /// `<Name>$codec` the syntax derive generated beside it in the same module.
+    pub(crate) fn bind_codec_makers(&mut self) {
+        let mut makers = std::collections::HashMap::new();
+        for f in self.fns.base_len()..self.fns.len() {
+            let path = &self.fns[f].path.0;
+            if let Some(owner) = path.name.strip_suffix("$codec") {
+                makers.insert((&path.package, &path.modules, owner), f as u32);
+            }
+        }
+        let mut bound = vec![];
+        for d in self.decls.base_len()..self.decls.len() {
+            let decl = &self.decls[d];
+            if decl.declared & CODEC == 0 {
+                continue;
+            }
+            let path = &decl.path.0;
+            if let Some(&f) = makers.get(&(&path.package, &path.modules, path.name.as_str())) {
+                bound.push((d, f));
+            }
+        }
+        for (d, f) in bound {
+            self.decls[d].codec_mut().maker = Some(f);
+        }
+    }
     pub(crate) fn check_codec_declarations(&mut self) {
         for d in self.decls.base_len()..self.decls.len() {
             let decl = &self.decls[d];

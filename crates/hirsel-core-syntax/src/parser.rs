@@ -91,6 +91,15 @@ pub fn parse_bytes(bytes: &[u8], mode: ParseMode, symbols: &mut Symbols) -> Pars
 }
 
 pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput {
+    parse_derived(text, mode, symbols, usize::MAX)
+}
+/// Parse `text` whose bytes from `derived` on are generated (see `lexer::lex_derived`).
+pub(crate) fn parse_derived(
+    text: &str,
+    mode: ParseMode,
+    symbols: &mut Symbols,
+    derived: usize,
+) -> ParseOutput {
     if text.len() > u32::MAX as usize {
         return ParseOutput {
             syntax: SyntaxFile::default(),
@@ -100,7 +109,7 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
             }),
         };
     }
-    let output = lex(text, symbols);
+    let output = crate::lexer::lex_derived(text, symbols, derived);
     let lexical_diagnostics = output.diagnostics.len();
     let significant = output.significant;
     let canonical = output.canonical;

@@ -3177,3 +3177,66 @@ fn codec_of_without_the_bound_is_refused_at_the_call() {
         .collect();
     assert_eq!(sites, calls);
 }
+
+// A codec declaration's generated items repeat its refusals at text no one wrote, past the
+// end of the file. The declaration's own refusals stand (a field that is not codec, at the
+// field; a default of another type, at the default) and the generated ones are dropped; a
+// gap only the generated items meet (a tuple field's `of`) is reported once, at the
+// declaration's name. Spans by hand from the source.
+#[test]
+fn derived_codec_refusals_point_at_the_declaration() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let source = "type Plain { n: u64 }\n\
+                  type Held: codec { a: u64, f: Plain }\n\
+                  type Sum: codec = A | B(Plain)\n\
+                  type Late: codec { s: i64 = \"x\" }\n\
+                  type Pairs: codec { t: (u64, u64) }\n";
+    std::fs::write(app.join("main.hirsel"), source).unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let mut request = CheckRequest::program(&app, &root, &dir.path().join("store")).unwrap();
+    request.entry = None;
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    let span = |text: &str| {
+        let at = source.find(text).unwrap();
+        (at, at + text.len())
+    };
+    let mut refusals: Vec<_> = product
+        .machine_diagnostics()
+        .unwrap()
+        .into_iter()
+        .map(|d| {
+            let s = d.primary.span;
+            (d.rule.to_string(), (s.start as usize, s.end as usize))
+        })
+        .collect();
+    refusals.sort();
+    let b = source.find("B(Plain)").unwrap() + 2;
+    assert_eq!(
+        refusals,
+        vec![
+            ("LANG-11".to_string(), span("\"x\"")),
+            ("OWN-4".to_string(), span("f: Plain")),
+            ("OWN-4".to_string(), (b, b + 5)),
+        ]
+    );
+    let gaps: Vec<_> = product
+        .machine_incomplete()
+        .unwrap()
+        .into_iter()
+        .map(|g| {
+            let s = g.primary.span;
+            ((s.start as usize, s.end as usize), g.message.to_string())
+        })
+        .collect();
+    assert_eq!(
+        gaps,
+        vec![(
+            span("Pairs"),
+            "the codec of this type is not built".to_string()
+        )]
+    );
+}

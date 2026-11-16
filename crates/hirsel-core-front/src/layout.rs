@@ -28,12 +28,13 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     pub hooks: Vec<(TypeRef, Hook, u32, Vec<TyId>)>,
 }
 
-/// A row's core-declared function: its finalizer (`Shape::finalizer`) or its clone
-/// body (`Shape::clone`).
+/// A row's declared function: its finalizer (`Shape::finalizer`), its clone body
+/// (`Shape::clone`) or its derived codec maker (`Shape::codec`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Hook {
     Finalizer,
     Clone,
+    Codec,
 }
 
 impl<T: TyRead> Shapes<'_, T> {
@@ -65,6 +66,7 @@ impl<T: TyRead> Shapes<'_, T> {
             body: Body::Record(vec![]),
             finalizer: None,
             clone: None,
+            codec: None,
             grant: 0,
             held: None,
         });
@@ -310,6 +312,8 @@ impl<T: TyRead> Shapes<'_, T> {
                     None => None,
                 };
                 let finalizer = hook(Hook::Finalizer, decl.finalizer);
+                let codec = hook(Hook::Codec, decl.codec().and_then(|c| c.maker));
+                self.shapes[r.index()].codec = codec;
                 self.shapes[r.index()].grant = decl.grant;
                 let held = (decl.repr == Repr::Stable).then_some(FieldTy::Stable(r));
                 (repr, body, finalizer, held)
@@ -348,6 +352,7 @@ impl<T: TyRead> Shapes<'_, T> {
             body: Body::Record(vec![]),
             finalizer: None,
             clone: None,
+            codec: None,
             grant: 0,
             held: None,
         });
@@ -467,6 +472,7 @@ impl<T: TyRead> Shapes<'_, T> {
             body: record(vec![("seq", seq), ("count", FieldTy::Scalar(Scalar::U64))]),
             finalizer: None,
             clone: None,
+            codec: None,
             grant: 0,
             held: None,
         });

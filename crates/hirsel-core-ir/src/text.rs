@@ -190,7 +190,7 @@ fn fields(fs: &[hirsel_core_layout::Field]) -> String {
 }
 /// `own "Pair" { a: u64 }`, `own "u64" value u64 { 0: u64 }`, `own "()" nothing { }`,
 /// `resource "Temp" drop f3 grant 64 { .. }`, `own "u64" value u64 held u64 { 0: u64 }`,
-/// `compact u32 "Row" { .. }`, `own "Opt" | None { } | Some { v: u64 }`.
+/// `compact u32 "Row" { .. }`, `own "Opt" | None { } | Some { v: u64 }`, `own "Row" codec f4 { .. }`.
 fn shape(s: &Shape) -> String {
     use hirsel_core_layout::{Body as B, Repr, Width};
     let repr = match s.repr {
@@ -218,6 +218,9 @@ fn shape(s: &Shape) -> String {
     }
     if let Some(f) = s.clone {
         out += &format!(" clone f{}", f.0);
+    }
+    if let Some(f) = s.codec {
+        out += &format!(" codec f{}", f.0);
     }
     if s.grant != 0 {
         out += &format!(" grant {}", s.grant);
@@ -1033,6 +1036,11 @@ impl<'a> Line<'a> {
         } else {
             None
         };
+        let codec = if self.eat("codec") {
+            Some(FuncRef(self.id('f')?))
+        } else {
+            None
+        };
         let grant = if self.eat("grant") { self.num()? } else { 0 };
         let held = if self.eat("held") {
             Some(self.field_ty()?)
@@ -1059,6 +1067,7 @@ impl<'a> Line<'a> {
             body,
             finalizer,
             clone,
+            codec,
             grant,
             held,
         })

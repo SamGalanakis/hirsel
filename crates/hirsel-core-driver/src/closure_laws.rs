@@ -73,6 +73,7 @@ fn module_pad() -> hirsel_core_ir::Shape {
         body: hirsel_core_layout::Body::Record(vec![]),
         finalizer: None,
         clone: None,
+        codec: None,
         grant: 0,
         held: None,
     }

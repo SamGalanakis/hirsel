@@ -306,6 +306,10 @@ pub struct Shape {
     /// instead of walking the row's fields; it writes the copy to `to` and returns
     /// `(0, 0)`, or leaves `to` as it was and returns the refused request.
     pub clone: Option<FuncRef>,
+    /// A codec type's maker (SEM-10), `() -> Codec[T]` at this row: the function
+    /// `std.codec.of` calls at it. Unlike the finalizer it is no dependency of a unit
+    /// that only holds the row; only a call reaches it.
+    pub codec: Option<FuncRef>,
     /// `grant bytes n` (MEM-27).
     pub grant: u64,
     /// How a holder writes a field of this row's type when that is not

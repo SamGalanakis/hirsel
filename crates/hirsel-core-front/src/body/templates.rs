@@ -293,6 +293,9 @@ fn clear_rigid(module: &mut Module) {
         if rigid(module, module.types[t].clone) {
             module.types[t].clone = None;
         }
+        if rigid(module, module.types[t].codec) {
+            module.types[t].codec = None;
+        }
     }
 }
 
@@ -338,11 +341,14 @@ fn import(module: &mut Module, names: &mut Names, closure: &Closure) -> Result<T
         let row = &closure.rows[position];
         let mut shape = row.shape.clone();
         shape.map_refs(&mut |r| TypeRef(rows[r.index()].0));
-        let [finalizer, clone] = &row.hooks;
+        let [finalizer, clone, codec] = &row.hooks;
         shape.finalizer = finalizer
             .as_ref()
             .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
         shape.clone = clone
+            .as_ref()
+            .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
+        shape.codec = codec
             .as_ref()
             .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
         module.types[id.index()] = shape;
@@ -413,7 +419,11 @@ pub(super) fn codec_maker(
 ) -> Result<FuncId, String> {
     let name = &module.types[ty.index()].name;
     let Some(maker) = builtin_codec(name) else {
-        return Err(format!("{name} has no codec maker"));
+        // A declared codec type's row carries its derived maker.
+        return match module.types[ty.index()].codec {
+            Some(maker) => Ok(FuncId(maker.0)),
+            None => Err(format!("{name} has no codec maker")),
+        };
     };
     let mut definition = of.clone();
     definition.0.name = maker.into();
@@ -439,7 +449,8 @@ pub(super) fn codec_maker(
     Ok(FuncId(module.functions.len() as u32 - 1))
 }
 
-/// std's maker of the built-in type whose row is named `name`: a scalar, `()` or String.
+/// std's maker of the built-in type whose row is named `name`: a scalar, `()`, String
+/// or DecodeError.
 pub(super) fn builtin_codec(name: &str) -> Option<&'static str> {
     Some(match name {
         "()" => "of_unit",
@@ -456,6 +467,7 @@ pub(super) fn builtin_codec(name: &str) -> Option<&'static str> {
         "f32" => "of_f32",
         "f64" => "of_f64",
         "core@1/core/String" => "of_string",
+        "std@1/codec/DecodeError" => "of_decode_error",
         _ => return None,
     })
 }
@@ -1125,6 +1137,7 @@ mod tests {
             ]),
             finalizer: None,
             clone: None,
+            codec: None,
             grant: 0,
             held: None,
         };
@@ -1158,6 +1171,7 @@ mod tests {
             body: ShapeBody::Record(vec![]),
             finalizer: None,
             clone: None,
+            codec: None,
             grant: 0,
             held: None,
         };

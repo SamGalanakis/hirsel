@@ -11,8 +11,14 @@ pub struct LexOutput {
     pub canonical_offsets: Vec<u32>,
 }
 pub fn lex(text: &str, symbols: &mut Symbols) -> LexOutput {
+    lex_derived(text, symbols, usize::MAX)
+}
+/// Lex `text` whose bytes from `derived` on are generated (SEM-10's codec items): there a
+/// name may continue with `$`, which no source name has, so a generated name is no name a
+/// program can write or collide with.
+pub(crate) fn lex_derived(text: &str, symbols: &mut Symbols, derived: usize) -> LexOutput {
     symbols.reserve_for_source(text.len());
-    let mut scanner = Scanner::new(text, symbols);
+    let mut scanner = Scanner::new(text, symbols, derived);
     while scanner.pos < text.len() {
         scanner.next();
     }
@@ -25,6 +31,7 @@ struct Scanner<'a> {
     output: LexOutput,
     symbols: &'a mut Symbols,
     newline: bool,
+    derived: usize,
 }
 const BYTE_OTHER: u8 = 0;
 const BYTE_IDENT: u8 = 1;
@@ -56,7 +63,7 @@ const fn byte_classes() -> [u8; 256] {
     classes
 }
 impl<'a> Scanner<'a> {
-    fn new(text: &'a str, symbols: &'a mut Symbols) -> Self {
+    fn new(text: &'a str, symbols: &'a mut Symbols, derived: usize) -> Self {
         let bytes = text.as_bytes();
         Self {
             text,
@@ -71,6 +78,7 @@ impl<'a> Scanner<'a> {
             },
             symbols,
             newline: false,
+            derived,
         }
     }
     fn span(&self, start: usize, end: usize) -> Span {
@@ -170,7 +178,11 @@ impl<'a> Scanner<'a> {
             b'0'..=b'9' => self.number(),
             b if letter(b) => {
                 self.pos += 1;
-                while self.bytes.get(self.pos).is_some_and(|b| name_byte(*b)) {
+                while self
+                    .bytes
+                    .get(self.pos)
+                    .is_some_and(|&b| name_byte(b) || (b == b'$' && self.pos >= self.derived))
+                {
                     self.pos += 1;
                 }
                 symbol = self.symbols.intern(&self.text[start..self.pos]);

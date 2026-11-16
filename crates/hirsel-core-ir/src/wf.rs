@@ -89,6 +89,19 @@ pub fn module(m: &Module) -> R {
                 || format!("t{i}: only core declares a clone body, on an own row"),
             )?;
         }
+        if let Some(f) = t.codec {
+            // A codec type's maker (SEM-10): `() -> Codec[T]`, its result a declared row.
+            let sig = m
+                .functions
+                .get(f.0 as usize)
+                .and_then(|f| m.signatures.get(f.signature.index()));
+            need(
+                sig.is_some_and(|s| {
+                    s.params.is_empty() && s.results.is_empty() && s.dest.is_some()
+                }),
+                || format!("t{i}: codec maker is not () -> Codec[T]"),
+            )?;
+        }
     }
     hirsel_core_layout::compute(&m.types).map_err(|e| format!("layout: {e:?}"))?;
     for (i, s) in m.signatures.iter().enumerate() {

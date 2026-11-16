@@ -1,7 +1,7 @@
 //! Explicit source inputs for acceptance and stage measurements. No ambient old library.
 use crate::*;
 use hirsel_core_ids::PackageId;
-use hirsel_core_syntax::{ParseMode, ParseOutput, Symbols, TokenKind, lex, parse};
+use hirsel_core_syntax::{ParseMode, ParseOutput, Symbols, TokenKind, lex};
 use std::path::PathBuf;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CorpusManifest {
@@ -87,7 +87,15 @@ impl Corpus {
         let files = self
             .sources
             .iter()
-            .map(|s| parse(&s.text, s.mode, &mut symbols))
+            .map(|s| {
+                let derive = self
+                    .manifest
+                    .packages
+                    .iter()
+                    .find(|p| p.package == s.module.package)
+                    .and_then(|p| codec_derive(&p.package, &p.dependencies, &s.module.modules));
+                crate::parse_module(s.text.as_bytes(), s.mode, &mut symbols, derive.as_ref())
+            })
             .collect();
         ParsedCorpus {
             files,

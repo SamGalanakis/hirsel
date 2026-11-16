@@ -428,9 +428,17 @@ fn emit_module(
                 Linkage::Internal
             },
             // Inline the reserved ASCII append and share the UTF-8/growth body.
+            // A loop-free callable variant exists only to bind its call site's
+            // closure, so it is inlined there unless that site is cold. A variant
+            // with a loop amortizes its call and stays out of line.
             inline: match definition.as_str() {
                 "core@1/string/push_char" => Inline::Always,
                 "core@1/string/push_scalar" => Inline::Never,
+                _ if module.code_variants.contains_key(&FuncId(i as u32))
+                    && empty::loop_free(body) =>
+                {
+                    Inline::Always
+                }
                 _ => Inline::Default,
             },
             destination_size: destination,

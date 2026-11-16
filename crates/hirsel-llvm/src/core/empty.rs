@@ -24,6 +24,30 @@ fn successors(body: &Body, block: usize) -> Option<Vec<usize>> {
         _ => return None,
     })
 }
+/// Whether `body`'s blocks reachable from its entry form no cycle.
+pub(super) fn loop_free(body: &Body) -> bool {
+    // 0 unvisited, 1 on the current path, 2 finished.
+    let mut state = vec![0u8; body.blocks.len()];
+    let mut stack = vec![(0usize, successors(body, 0).unwrap_or_default(), 0usize)];
+    state[0] = 1;
+    while let Some((block, next, at)) = stack.last_mut() {
+        let Some(&s) = next.get(*at) else {
+            state[*block] = 2;
+            stack.pop();
+            continue;
+        };
+        *at += 1;
+        match state[s] {
+            1 => return false,
+            0 => {
+                state[s] = 1;
+                stack.push((s, successors(body, s).unwrap_or_default(), 0));
+            }
+            _ => {}
+        }
+    }
+    true
+}
 fn pure(body: &Body, constants: &[Option<u64>], inst: &Inst) -> bool {
     match inst {
         Inst::Binary {

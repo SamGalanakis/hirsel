@@ -453,6 +453,13 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
         LLVMValueRef promoted = LLVMAddFunction(module, label, new_ty); free(label);
         LLVMSetLinkage(promoted, LLVMInternalLinkage); LLVMSetFunctionCallConv(promoted, LLVMFastCallConv);
         {
+            // An always-inlined body stays so through its adapter.
+            unsigned always = LLVMGetEnumAttributeKindForName("alwaysinline", 12);
+            if (LLVMGetEnumAttributeAtIndex(f, LLVMAttributeFunctionIndex, always))
+                LLVMAddAttributeAtIndex(promoted, LLVMAttributeFunctionIndex,
+                    LLVMCreateEnumAttribute(context, always, 0));
+        }
+        {
             // Its carriers follow, one parameter earlier without the destination.
             Carrier cs[MAX_CARRIERS];
             unsigned nc = carriers_of(f, cs), kept = 0;

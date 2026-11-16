@@ -113,6 +113,23 @@ fn update_failure_retires() -> u64 {
     0
 }
 
+// When f fails after its value was taken, the slot already holds the vacant placeholder, so
+// cleaning the pool on the failure path cleans the String once (inlined update included).
+// expect: run update_failure_cleans_once() = fail Overflow
+fn update_failure_cleans_once() -> u64 {
+    let mut p: pool.Pool[String] = pool.new()
+    let b = match pool.insert(mut p, result.unwrap(string.from("taken"))) {
+        Ok(h) => h,
+        Error(_) => fail("pool test: insert refused"),
+    }
+    let top: u64 = 18446744073709551615
+    let r = pool.update(mut p, b, fn(mut s: String) -> u64 {
+        string.byte_len(s) + top
+    })
+    let _ = r
+    0
+}
+
 // expect: run with_capacity_is_empty() = 0
 fn with_capacity_is_empty() -> u64 {
     let p: pool.Pool[u64] = result.unwrap(pool.with_capacity(4))

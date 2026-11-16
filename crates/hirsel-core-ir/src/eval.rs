@@ -673,8 +673,24 @@ pub fn run_nans(m: &Module, f: FuncId, args: &[u64], limit: u64, nans: Nans) -> 
 /// Each described instance's code revision, supplied by the program's reach.
 pub type Revisions = std::collections::BTreeMap<ContentHash, ContentHash>;
 /// A run whose descriptors' revision carriers hold the supplied revisions.
-pub fn run_revisions(m: &Module, f: FuncId, args: &[u64], limit: u64, revisions: &Revisions) -> Report {
-    run_world(m, f, args, limit, WorldInput { revisions: Some(revisions), ..WorldInput::default() }).0
+pub fn run_revisions(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    revisions: &Revisions,
+) -> Report {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            revisions: Some(revisions),
+            ..WorldInput::default()
+        },
+    )
+    .0
 }
 /// A host caller's return place and explicit instruction allowance. The place is
 /// frame memory outside logical admission, just as a native caller's stack place.
@@ -848,7 +864,10 @@ fn run_world(
                 let carrier = *carriers.entry(root.identity().digest()).or_insert_with(|| {
                     let at = mach.block(24, None, 0, None);
                     let revision = match &root {
-                        RevisionRoot::Item(identity) => input.revisions.and_then(|r| r.get(&identity.digest())).copied(),
+                        RevisionRoot::Item(identity) => input
+                            .revisions
+                            .and_then(|r| r.get(&identity.digest()))
+                            .copied(),
                         RevisionRoot::Intrinsic(identity) => Some(intrinsic_revision(identity)),
                     };
                     if let Some(revision) = revision {

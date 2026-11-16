@@ -444,7 +444,14 @@ fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
             } else {
                 Some(fresh_keys(cs)?)
             }
-            return Ok(Pieces(first: pack_branch(mut ids, take cs, take lows)?, second: None))
+            let size = n.size + if let Some(_) = replaced {
+                0u64
+            } else {
+                1u64
+            }
+            ids += 1
+            let h: Arc[Node[K, V]] = result.capacity_only(arc.new(Node(stamp: ids, depth: n.depth, size: size, rows: list.new(), kids: take cs, lows: take lows)))?
+            return Ok(Pieces(first: take h, second: None))
         }
         split_branches(mut ids, take cs)
     }

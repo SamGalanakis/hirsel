@@ -1,0 +1,18 @@
+// A materialized generic body creates List[List[u8]] before its later callee
+// names the same type as List[Bytes]. Both grow calls must use one type row.
+// Each list has one element, so check returns 1 + 1 = 2, with all storage refunded.
+// expect: run check() = 2
+fn later() -> u64 {
+    let mut rows: List[Bytes] = list.new()
+    result.unwrap(list.push(mut rows, list.new()))
+    list.len(rows)
+}
+fn route[T](take value: T) -> u64 {
+    let mut inner: List[T] = list.new()
+    result.unwrap(list.push(mut inner, take value))
+    let mut outer: List[List[T]] = list.new()
+    result.unwrap(list.push(mut outer, take inner))
+    list.len(outer) + later()
+}
+pub fn check() -> u64 { route(7u8) }
+pub fn main() -> Result[(), Exit] { if check() == 2 { Ok(()) } else { Error(Exit(status:1)) } }

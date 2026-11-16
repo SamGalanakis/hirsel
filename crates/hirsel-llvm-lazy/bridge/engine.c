@@ -16,6 +16,8 @@
 #include "aggregate_phi.h"
 #include "failure_edges.h"
 extern void hirsel_llvm_promote_step_window(void *module);
+extern void hirsel_llvm_mark_loop_callbacks(void *module);
+extern void hirsel_llvm_inline_loop_callbacks(void *module);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
@@ -636,6 +638,12 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         // removes carrier clears/restores that its cleanup used to observe.
         LLVMErrorRef e = LLVMRunPasses(module, "default<O3>", machine, options);
         if (!e) {
+            hirsel_llvm_mark_loop_callbacks(module);
+            e = LLVMRunPasses(module,
+                "cgscc(argpromotion),ipsccp,cgscc(inline)", machine, options);
+        }
+        if (!e) {
+            hirsel_llvm_inline_loop_callbacks(module);
             hirsel_llvm_guard_copy_loops(module, machine);
             hirsel_llvm_promote_step_window(module);
             hirsel_scalarize_aggregate_phis(module, context);

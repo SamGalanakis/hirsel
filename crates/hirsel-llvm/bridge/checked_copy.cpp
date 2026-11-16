@@ -10,6 +10,7 @@
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Transforms/Utils/PromoteMemToReg.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/ScalarEvolutionExpressions.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
@@ -234,5 +235,38 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
     for (ReturnInst *R : Returns) { B.SetInsertPoint(R); Write(); }
     DominatorTree DT(F);
     PromoteMemToReg({Counter}, DT);
+  }
+}
+
+// Late argument promotion can expose a codec's function pointer only after the
+// ordinary inliner ran. Remember loop callbacks before constant propagation;
+// give their resolved, small bodies the loop-call preference before lifting fuel.
+extern "C" void hirsel_llvm_mark_loop_callbacks(void *Raw) {
+  auto &M = *static_cast<Module *>(Raw);
+  for (Function &F : M) {
+    if (F.isDeclaration()) continue;
+    DominatorTree DT(F);
+    LoopInfo LI(DT);
+    for (BasicBlock &BB : F) if (LI.getLoopFor(&BB))
+      for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I))
+        if (C->isIndirectCall() && !C->isInlineAsm())
+          C->setMetadata("hirsel.loop.callback", MDNode::get(M.getContext(), {}));
+  }
+}
+extern "C" void hirsel_llvm_inline_loop_callbacks(void *Raw) {
+  auto &M = *static_cast<Module *>(Raw);
+  SmallVector<CallInst *, 16> Calls;
+  for (Function &F : M) for (BasicBlock &BB : F) for (Instruction &I : BB)
+    if (auto *C = dyn_cast<CallInst>(&I))
+      if (C->getMetadata("hirsel.loop.callback")) Calls.push_back(C);
+  for (CallInst *C : Calls) {
+    C->setMetadata("hirsel.loop.callback", nullptr);
+    Function *Target = C->getCalledFunction();
+    if (!Target || Target->isDeclaration() || Target == C->getFunction() ||
+        Target->hasFnAttribute(Attribute::NoInline) ||
+        C->hasFnAttr(Attribute::NoInline) || Target->getInstructionCount() > 1024)
+      continue;
+    InlineFunctionInfo Info;
+    (void)InlineFunction(*C, Info, true);
   }
 }

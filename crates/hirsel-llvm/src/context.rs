@@ -229,6 +229,21 @@ impl<'context> Module<'context> {
                         machine: LLVMTargetMachineRef,
                     );
                 }
+                unsafe extern "C" {
+                    fn hirsel_llvm_mark_loop_callbacks(module: LLVMModuleRef);
+                    fn hirsel_llvm_inline_loop_callbacks(module: LLVMModuleRef);
+                }
+                hirsel_llvm_mark_loop_callbacks(self.raw);
+                let specialize = c_string("cgscc(argpromotion),ipsccp,cgscc(inline)");
+                error = LLVMRunPasses(self.raw, specialize.as_ptr(), machine.raw, options);
+                if !error.is_null() {
+                    let message = LLVMGetErrorMessage(error);
+                    let text = CStr::from_ptr(message).to_string_lossy().into_owned();
+                    LLVMDisposeErrorMessage(message);
+                    LLVMDisposePassBuilderOptions(options);
+                    return Err(text);
+                }
+                hirsel_llvm_inline_loop_callbacks(self.raw);
                 hirsel_llvm_guard_copy_loops(self.raw, machine.raw);
                 hirsel_llvm_promote_step_window(self.raw);
                 hirsel_llvm_scalarize_aggregate_phis(self.raw, self.context.raw);

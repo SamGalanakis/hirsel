@@ -769,6 +769,20 @@ fn probe(s: u64) -> u64 {
 fn fallible_step_regions_refund_partial_work_and_check_strided_remainders() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
     let source = r#"
+type Op { apply: fn(u64) -> u64 }
+fn nextword(x: u64) -> u64 { int.wrapping_add(x, 1u64) }
+fn halfword(x: u64) -> u64 { x / 2u64 }
+fn applyall(op: Op, n: u64) -> u64 {
+    let mut sum = 0u64
+    for i in 0u64 .. n { sum += (op.apply)(i) }
+    sum
+}
+fn boxed(s: u64, n: u64, choice: u64) -> u64 {
+    match (bound steps s {
+        if choice == 0 { applyall(Op(apply: nextword), n) }
+        else { applyall(Op(apply: halfword), n) }
+    }) { Ok(word) => 10000000000u64 + word, Error(e) => e.steps }
+}
 fn purebits(s: u64, n: u64) -> u64 {
     match (bound steps s {
         let mut crc: u32 = 0xffffffff
@@ -843,6 +857,31 @@ fn strided(s: u64, stride: u64) -> u64 {
     let (module, names) =
         hirsel_core_program_tests::SourceProgram::lower_with_core(source, None, &root);
     let mut cases = Vec::new();
+    // One batch call, then callback/latch plus the first callback's wrapping
+    // call: 1+3n for nextword, 1+2n for halfword. Both code pointers flow
+    // through a record into the same loop, including a slice boundary.
+    for n in [0u64, 4, 21846] {
+        for choice in [0, 1] {
+            let total = 1 + (if choice == 0 { 3 } else { 2 }) * n;
+            let sum = (0..n)
+                .map(|i| if choice == 0 { i + 1 } else { i / 2 })
+                .sum::<u64>();
+            for s in [0, total - 1, total, total + 1] {
+                let want = if s < total { s } else { 10_000_000_000 + sum };
+                assert_eq!(
+                    eval::run(&module, names["boxed"], &[s, n, choice], 1_000_000).outcome,
+                    eval::Outcome::Returned(vec![want]),
+                    "boxed s={s}, n={n}, choice={choice}",
+                );
+                cases.push(Case {
+                    function: names["boxed"],
+                    args: vec![s, n, choice],
+                    limit: 1_000_000,
+                    injection: None,
+                });
+            }
+        }
+    }
     // One scalar conversion, eight inner latches and one outer latch per
     // trip. Exercise exact bounds and both sides of the 65536-Step slice.
     for n in [0u64, 1, 8, 6554] {
@@ -1006,6 +1045,7 @@ fn strided(s: u64, stride: u64) -> u64 {
         })
         .collect::<Vec<_>>();
     let exports = [
+        "boxed",
         "purebits",
         "probe",
         "strided",

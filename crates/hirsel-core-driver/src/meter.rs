@@ -33,6 +33,90 @@ pub struct Measurements {
     /// entry/return instructions outside the paused window.
     pub observer_tares: [[u64; 2]; 3],
     pub observer_residual_instructions: u64,
+    /// The request's work counts, from the meter's creation to its last finish.
+    pub counters: Counters,
+}
+
+/// Counts of the work a request does, wherever in the process it happens.
+/// Each is counted at the one place that work is done.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct Counters {
+    /// Body keys derived (`Keys::for_body`), and the signature-closure parts
+    /// they hash, in bytes.
+    pub body_keys: u64,
+    pub body_key_bytes: u64,
+    /// Rows of the reach record decoded.
+    pub record_rows_read: u64,
+    /// Stored native objects opened: for a link, or for their bytes.
+    pub objects_opened: u64,
+    /// Files opened for their bytes: store records, selections and objects,
+    /// image records and pages, and sources.
+    pub files_opened: u64,
+    /// Image bytes read, by what they are: the directory and the declaration
+    /// table (whole, for every module), index pages, one file's product, one
+    /// body, one module's source text.
+    pub image_directory_bytes: u64,
+    pub image_declaration_bytes: u64,
+    pub image_page_bytes: u64,
+    pub image_file_bytes: u64,
+    pub image_body_bytes: u64,
+    pub image_source_bytes: u64,
+    /// Image file products and bodies read: one per module or body demanded.
+    pub image_files: u64,
+    pub image_bodies: u64,
+}
+
+/// One kind of work [`Counters`] counts.
+#[derive(Clone, Copy)]
+pub(crate) enum Count {
+    BodyKeys,
+    BodyKeyBytes,
+    RecordRowsRead,
+    ObjectsOpened,
+    FilesOpened,
+    ImageDirectoryBytes,
+    ImageDeclarationBytes,
+    ImagePageBytes,
+    ImageFileBytes,
+    ImageBodyBytes,
+    ImageSourceBytes,
+    ImageFiles,
+    ImageBodies,
+}
+const COUNTS: usize = Count::ImageBodies as usize + 1;
+static COUNTED: [std::sync::atomic::AtomicU64; COUNTS] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; COUNTS];
+
+/// Count `n` of `kind` for every meter now running.
+#[inline]
+pub(crate) fn count(kind: Count, n: u64) {
+    COUNTED[kind as usize].fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn counted() -> [u64; COUNTS] {
+    std::array::from_fn(|i| COUNTED[i].load(std::sync::atomic::Ordering::Relaxed))
+}
+
+impl Counters {
+    fn since(start: &[u64; COUNTS]) -> Self {
+        let now = counted();
+        let n = |kind: Count| now[kind as usize] - start[kind as usize];
+        Self {
+            body_keys: n(Count::BodyKeys),
+            body_key_bytes: n(Count::BodyKeyBytes),
+            record_rows_read: n(Count::RecordRowsRead),
+            objects_opened: n(Count::ObjectsOpened),
+            files_opened: n(Count::FilesOpened),
+            image_directory_bytes: n(Count::ImageDirectoryBytes),
+            image_declaration_bytes: n(Count::ImageDeclarationBytes),
+            image_page_bytes: n(Count::ImagePageBytes),
+            image_file_bytes: n(Count::ImageFileBytes),
+            image_body_bytes: n(Count::ImageBodyBytes),
+            image_source_bytes: n(Count::ImageSourceBytes),
+            image_files: n(Count::ImageFiles),
+            image_bodies: n(Count::ImageBodies),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -236,6 +320,7 @@ pub struct Meter {
     last: Option<u64>,
     last_overhead: u64,
     clock: Instant,
+    counted: [u64; COUNTS],
     pub result: Measurements,
 }
 impl Meter {
@@ -282,6 +367,7 @@ impl Meter {
             last: first,
             last_overhead: 0,
             clock: Instant::now(),
+            counted: counted(),
             result,
         };
         meter.calibrate();
@@ -461,6 +547,7 @@ impl Meter {
         self.result.instructions = value.zip(self.first).map(|(n, f)| n - f - overhead);
         self.last = value;
         self.clock = now;
+        self.result.counters = Counters::since(&self.counted);
         if let Some(image) = &self.image {
             self.result.image_access = image.result.borrow().clone();
             if let Some(error) = &self.result.image_access.counter_refusal {

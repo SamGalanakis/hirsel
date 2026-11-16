@@ -1265,6 +1265,8 @@ fn open_objects(
             }
             Err(e) => return Err(e.into()),
         };
+        crate::meter::count(crate::meter::Count::FilesOpened, 1);
+        crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
         bytes.clear();
         file.read_to_end(&mut bytes)?;
         counters.objects_verified += 1;

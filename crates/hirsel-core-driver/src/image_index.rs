@@ -222,6 +222,7 @@ impl DiskIndex {
             .store
             .get(hash)?
             .and_then(|bytes| {
+                crate::meter::count(crate::meter::Count::ImagePageBytes, bytes.len() as u64);
                 let _decode = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Decode);
                 decode::<Sections>(&bytes)
             })
@@ -253,6 +254,7 @@ impl DiskIndex {
             ))
         })?;
         self.checked.fetch_add(1, Ordering::Relaxed);
+        crate::meter::count(crate::meter::Count::ImagePageBytes, bytes.len() as u64);
         Ok(cell.get_or_init(|| Arc::from(bytes)))
     }
     fn read(&self, pages: &Pages, at: u64, out: &mut [u8]) -> io::Result<()> {

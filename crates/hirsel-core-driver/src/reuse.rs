@@ -641,6 +641,11 @@ impl Keys {
             components.push(self.prelude_closure(index)?);
             components.sort_unstable();
             components.dedup();
+            crate::meter::count(crate::meter::Count::BodyKeys, 1);
+            crate::meter::count(
+                crate::meter::Count::BodyKeyBytes,
+                32 * components.len() as u64,
+            );
             ContentHash::of_parts(
                 "hirsel.signature-closure.v3",
                 components.iter().map(|c| &c.0[..]),

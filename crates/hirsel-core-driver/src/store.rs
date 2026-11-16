@@ -469,6 +469,9 @@ impl Store {
         let Some(bytes) = self.read_whole(key, image.as_ref())? else {
             return Ok(None);
         };
+        if self.image {
+            crate::meter::count(crate::meter::Count::ImageBodyBytes, bytes.len() as u64);
+        }
         Ok(Body::split(bytes, key, image.as_ref()))
     }
     /// A body record's head and `ir_hash`, read under its address without
@@ -485,6 +488,7 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
+        crate::meter::count(crate::meter::Count::FilesOpened, 1);
         if let Some(image) = &image {
             image.opened();
         }
@@ -562,6 +566,7 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
+        crate::meter::count(crate::meter::Count::FilesOpened, 1);
         if let Some(image) = image {
             image.opened();
         }
@@ -613,6 +618,8 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
+        crate::meter::count(crate::meter::Count::FilesOpened, 1);
+        crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok((checksum(&bytes) == bare.check).then_some((bytes, file)))
@@ -623,6 +630,7 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
+        crate::meter::count(crate::meter::Count::FilesOpened, 1);
         let end = 32 + name.len();
         if bytes.len() != SELECTION + name.len()
             || &bytes[32..end] != name.as_bytes()

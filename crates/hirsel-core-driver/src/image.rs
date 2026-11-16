@@ -101,7 +101,10 @@ impl CoreImage {
         if let Some(directory) = self.directory.get() {
             return Ok(Arc::clone(directory));
         }
-        let directory = Arc::new(self.read::<ImageDirectory>(self.directory_hash)?);
+        let directory = Arc::new(self.read::<ImageDirectory>(
+            self.directory_hash,
+            crate::meter::Count::ImageDirectoryBytes,
+        )?);
         let _ = self.directory.set(Arc::clone(&directory));
         Ok(directory)
     }
@@ -157,7 +160,7 @@ impl CoreImage {
             let row = directory.sources.get(&module).ok_or_else(|| {
                 io::Error::other("native source module is not in its package image")
             })?;
-            self.read(*row)
+            self.read(*row, crate::meter::Count::ImageSourceBytes)
         })
     }
     fn file_inner(&self, index: usize) -> io::Result<Arc<FileProduct>> {
@@ -171,7 +174,8 @@ impl CoreImage {
             .get(index)
             .ok_or_else(|| io::Error::other("core image file demand outside reached directory"))?
             .row;
-        let file = Arc::new(self.read::<FileProduct>(row)?);
+        crate::meter::count(crate::meter::Count::ImageFiles, 1);
+        let file = Arc::new(self.read::<FileProduct>(row, crate::meter::Count::ImageFileBytes)?);
         self.files.lock().unwrap().insert(index, Arc::clone(&file));
         Ok(file)
     }
@@ -219,6 +223,11 @@ impl CoreImage {
                     .store
                     .get_body_head(record)?
                     .ok_or_else(|| self.body_miss(record))?;
+                crate::meter::count(crate::meter::Count::ImageBodies, 1);
+                crate::meter::count(
+                    crate::meter::Count::ImageBodyBytes,
+                    head.head().len() as u64,
+                );
                 let source = crate::body::IrSource {
                     store: self.store.clone(),
                     reader: Some(Arc::clone(&self.reader)),
@@ -240,13 +249,21 @@ impl CoreImage {
         if let Some(rows) = self.declarations.get() {
             return Ok(Arc::clone(rows));
         }
-        let rows = Arc::new(self.read::<Library>(self.directory()?.declarations)?);
+        let rows = Arc::new(self.read::<Library>(
+            self.directory()?.declarations,
+            crate::meter::Count::ImageDeclarationBytes,
+        )?);
         let _ = self.declarations.set(Arc::clone(&rows));
         Ok(rows)
     }
-    fn read<T: serde::de::DeserializeOwned>(&self, record: ContentHash) -> io::Result<T> {
+    fn read<T: serde::de::DeserializeOwned>(
+        &self,
+        record: ContentHash,
+        kind: crate::meter::Count,
+    ) -> io::Result<T> {
         let _image = crate::meter::ImageIndex::start(crate::meter::ImageIndexKind::Access);
         let bytes = self.store.get(record)?.ok_or_else(miss)?;
+        crate::meter::count(kind, bytes.len() as u64);
         self.reader.decode(|| decode(&bytes)).ok_or_else(miss)
     }
 }

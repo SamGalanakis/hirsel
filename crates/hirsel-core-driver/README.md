@@ -115,7 +115,11 @@ information is still unavailable. Native code production belongs to the emitters
 `--json` emits PROG-7 rule IDs, module paths with absolute file byte spans, causal
 sites, and declared/required facts supplied by the checker. Refusals exit 1; compiler
 gaps and tool/resource errors exit 2; an accepted check exits 0.
-`--metrics <file>` records exclusive user-instruction stages or a counter refusal.
+`--metrics <file>` records exclusive user-instruction stages or a counter refusal,
+and the request's counts: body keys built (calls and bytes), reach rows read,
+objects and files opened, and image bytes read by kind (directory, declarations,
+index pages, files, bodies, sources). `core/tools/request_profile.py ROW` samples
+one request-cost row with `perf record --call-graph dwarf` and reports it by stage.
 Their sum is the independently read counter interval. External process-tree perf
 also counts startup and reporting outside that interval; report that residual.
 

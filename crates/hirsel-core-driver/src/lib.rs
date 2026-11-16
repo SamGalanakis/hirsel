@@ -535,6 +535,7 @@ impl Driver {
             for s in &p.sources {
                 let bytes = {
                     hirsel_core_front::cost_scope!("non-check", "source file reads");
+                    crate::meter::count(crate::meter::Count::FilesOpened, 1);
                     std::fs::read(&s.file)?
                 };
                 let hash = {

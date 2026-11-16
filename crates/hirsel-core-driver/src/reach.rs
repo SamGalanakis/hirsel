@@ -161,6 +161,7 @@ pub(crate) fn decode_record(bytes: &[u8]) -> Option<Reach> {
     if read.schema != REACH_SCHEMA {
         return None;
     }
+    crate::meter::count(crate::meter::Count::RecordRowsRead, read.rows.len() as u64);
     let path = |i: u32| read.paths.get(i as usize);
     let instances = read
         .instances

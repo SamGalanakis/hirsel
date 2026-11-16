@@ -11,6 +11,7 @@ Method:
 - Hirsel is measured optimised (LLVM `--release`) and in development (Cranelift dev); Rust with the workspace profiles (opt 3 and opt 0, overflow checks on, CGU 1).
 - Runs are pinned to CPU 16 while holding /tmp/hirsel-langarena-measure.lock; `perf stat -e instructions:u` over the whole process, median of 20 samples; wall is the median of 5 unprofiled runs.
 - A pass = (MODE m − MODE 0) / R at N=100,000, R=20. Per element = a pass / N.
+- Gate: `core/tools/codec_encode.py --builder <hirsel> --runtime <release archive> --out <dir> --check` measures the two encode rows (median of 5) and fails when rows exceeds 2.80 or strings 2.20 its Rust twin (main 146/53 = 2.75, 80/37 = 2.16): main plus noise, a ratchet that drops when the encoders are inlined by their hot bodies.
 - Script: /workspace/code/hirsel-briefs/std-codec-1008/tools/measure2.py; raw samples in /tmp/m4.json (2026-11-16, with put_string reserving once).
 
 | one pass, N=100,000 | Hirsel LLVM / Rust opt 3, instructions | wall | Cranelift dev / Rust opt 0, instructions | wall |

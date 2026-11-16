@@ -6,7 +6,7 @@ use crate::{Gap, ItemRef, Program, refusal};
 use hirsel_core_ids::DefPath;
 use hirsel_core_layout::{Recipe, Scalar, Width};
 use hirsel_core_resolve::{DefinitionId, Site, Target};
-use hirsel_core_syntax::{NodeId, NodeKind};
+use hirsel_core_syntax::{NodeId, NodeKind, Symbol};
 
 /// Bound bits (OWN-4).
 pub const PLAIN: u16 = 1;
@@ -475,6 +475,8 @@ enum Visit {
 impl Program<'_> {
     /// Pass 1: register every type and function definition with its header names.
     pub(crate) fn register(&mut self) {
+        let mut attributes = rustc_hash::FxHashMap::default();
+        let mut members = rustc_hash::FxHashMap::default();
         for (m, module) in self.modules.iter().enumerate().skip(self.library_modules) {
             for (i, item) in module.syntax.items().enumerate() {
                 let root = item.tree.node(item.root);
@@ -484,7 +486,13 @@ impl Program<'_> {
                     item: i as u32,
                 };
                 let name_span = item.token_span(name);
+                attributes.clear();
                 if root.kind == NodeKind::CloneHook {
+                    for &c in item.tree.children(item.root) {
+                        if item.tree.node(c).kind == NodeKind::Attribute {
+                            self.claim_declaration_name(&mut attributes, at, c, "attribute");
+                        }
+                    }
                     let site = Site {
                         module: module.id,
                         item: i as u32,
@@ -568,7 +576,24 @@ impl Program<'_> {
                                 0
                             });
                         }
+                        NodeKind::Fields | NodeKind::Variants => {
+                            members.clear();
+                            let part = if n.kind == NodeKind::Fields {
+                                "field"
+                            } else {
+                                "variant"
+                            };
+                            for &member in item.tree.children(c) {
+                                if !matches!(
+                                    item.tree.node(member).kind,
+                                    NodeKind::RemovedField | NodeKind::RemovedVariant
+                                ) {
+                                    self.claim_declaration_name(&mut members, at, member, part);
+                                }
+                            }
+                        }
                         NodeKind::Attribute => {
+                            self.claim_declaration_name(&mut attributes, at, c, "attribute");
                             let t = n.token.unwrap();
                             is_test |= item.tree.token_text(item.text, t) == "test";
                             if item.tree.token_text(item.text, t) == "compact" {
@@ -691,6 +716,34 @@ impl Program<'_> {
             }
         }
         self.alias_state = vec![Visit::Todo as u8; self.decls.len() - self.decls.base_len()];
+    }
+
+    fn claim_declaration_name(
+        &mut self,
+        names: &mut rustc_hash::FxHashMap<Symbol, NodeId>,
+        at: ItemRef,
+        node: NodeId,
+        part: &str,
+    ) {
+        let item = self.item(at);
+        let token = item.tree.node(node).token.unwrap();
+        match names.entry(item.symbol(token)) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(node);
+            }
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let mut r = refusal(
+                    "LANG-7",
+                    self.site(at, node),
+                    format!(
+                        "duplicate {part} `{}`",
+                        item.tree.token_text(item.text, token)
+                    ),
+                );
+                r.causal.push(self.site(at, *e.get()));
+                self.refusals.push(r);
+            }
+        }
     }
 
     fn generics(&mut self, at: ItemRef, n: NodeId) -> Vec<Generic> {

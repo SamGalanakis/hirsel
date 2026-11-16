@@ -1,0 +1,5 @@
+type A { x: u64, x: u64, x: u64 }
+// expect: refuse LANG-7 at 1:18
+// expect: cause LANG-7 at 1:18 from 1:10
+// expect: refuse LANG-7 at 1:26
+// expect: cause LANG-7 at 1:26 from 1:10

@@ -1,0 +1,35 @@
+// expect: run distinct_names() = 23
+// expect: run mixed_attributes() = 11
+type A {
+    x: u64,
+    y: u64
+}
+
+type B {
+    x: u64,
+    y: u64
+}
+
+type Choice = Left(u64) | Right(u64)
+
+@twin(A)
+@compact(u16)
+stable type AS {
+    x: u64,
+    y: u64
+}
+
+fn distinct_names() -> u64 {
+    let a = A(x: 2u64, y: 3u64)
+    let b = B(x: 5u64, y: 7u64)
+    let c: Choice = Right(6u64)
+    a.x + a.y + b.x + b.y + match c {
+        Left(n) => n,
+        Right(n) => n
+    }
+}
+
+fn mixed_attributes() -> u64 {
+    let a = A(x: 5u64, y: 6u64)
+    a.x + a.y
+}

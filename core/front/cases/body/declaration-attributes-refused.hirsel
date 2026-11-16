@@ -1,0 +1,10 @@
+type P { n: u64 }
+@twin(P) @twin(P) type A { n: u64 }
+@compact(u16) @compact(u32) stable type S { n: u64 }
+@test @test fn f() -> Result[(), u64] { Ok(()) }
+// expect: refuse LANG-7 at 2:10
+// expect: cause LANG-7 at 2:10 from 2:1
+// expect: refuse LANG-7 at 3:15
+// expect: cause LANG-7 at 3:15 from 3:1
+// expect: refuse LANG-7 at 4:7
+// expect: cause LANG-7 at 4:7 from 4:1

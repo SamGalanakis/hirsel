@@ -3978,3 +3978,16 @@ fn written_anchor_activation_rules() {
     let failures = run_case(&root().join("cases/body/callable-written-anchor-activation.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn declaration_members_and_attributes_are_unique() {
+    for case in [
+        "declaration-attributes-refused",
+        "declaration-fields-refused",
+        "declaration-variants-refused",
+        "declaration-members-unique",
+    ] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}

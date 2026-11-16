@@ -774,7 +774,7 @@ fn recover_capacity() -> bool {
     refused > 0 && succeeded > 0
 }
 
-// Success through the recovering API keeps all earlier versions and cursors.
+// Success through the recovering API keeps all earlier versions.
 // expect: run recover_versions() = true
 fn recover_versions() -> bool {
     let mut ids: u64 = 0

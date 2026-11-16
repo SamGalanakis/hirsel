@@ -455,19 +455,34 @@ mod tests {
             }
         };
         let product = |rival, cache: &str| {
-            PackageProduct::sources(
+            let checked = Driver::default()
+                .check(
+                    CheckRequest {
+                        inputs: manifest(rival),
+                        store: dir.path().join(cache).join("checks"),
+                        library: LibraryInput::Sources,
+                        entry: None,
+                    },
+                    &mut Meter::new(false),
+                )
+                .unwrap();
+            assert_eq!(checked.accepted(), !rival, "{:?}", checked.diagnostics);
+            let diagnostics = encode(&checked.diagnostics).unwrap();
+            let image = PackageProduct::sources(
                 manifest(rival),
-                &dir.path().join(cache),
+                &dir.path().join(cache).join("images"),
                 &mut Meter::new(false),
             )
             .map(|p| p.image.identity)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+            (image, diagnostics)
         };
-        let first = product(false, "kept").unwrap();
-        assert_eq!(first, product(false, "fresh-legal").unwrap());
+        let first = product(false, "kept");
+        assert!(first.0.is_ok(), "{:?}", first.0);
+        assert_eq!(first, product(false, "fresh-legal"));
         let primed = product(true, "kept");
         let fresh = product(true, "fresh-rival");
-        let error = fresh.as_ref().unwrap_err();
+        let error = fresh.0.as_ref().unwrap_err();
         assert!(
             error.contains("already has declared twin") && error.contains("RowS"),
             "{error}"

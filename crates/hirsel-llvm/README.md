@@ -46,3 +46,8 @@ Invariants:
   final module order. Objects use the native LLVM builder; the text producer exists only
   for the printed-module oracle and diagnostic IR dumps, and no product path parses it.
 - `debug.rs` extracts LLVM's DWARF line rows once, before a native product is published.
+
+Source-program agreement lives in `hirsel-core-program-tests`, whose native
+fixtures emit the driver's reached definition units. Hand-built CoreIR and target
+ABI laws remain here. Admission injection and cleanup traces are explicit test
+emission options, so moving a law between crates preserves its observations.

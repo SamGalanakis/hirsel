@@ -44,7 +44,9 @@ Invariants:
   so lld can relax references that bind locally. Other references keep their original
   relocation.
 
-Native tests compile every CoreIR sample and front-end run case to an object, link it
-with a separately compiled C caller and the core runtime archive, and compare values,
-cause chains and logical balances with the CoreIR evaluator, on x86-64 and on AArch64
-under qemu (`//:hirsel-cranelift-test-core_native`, `-core_aarch64`).
+Native tests compile hand-built CoreIR samples to objects, link them with a
+separately compiled C caller and the core runtime archive, and compare values,
+cause chains and logical balances with the CoreIR evaluator, on x86-64 and on
+AArch64 under qemu (`//:hirsel-cranelift-test-core_native`, `-core_aarch64`).
+Source-program laws live in `hirsel-core-program-tests` and compile the driver's
+reached definition units through the same native C caller.

@@ -853,6 +853,7 @@ impl<'a> Seal<'a> {
             Inst::Const { .. }
             | Inst::ReadStatic { .. }
             | Inst::FunctionRef { .. }
+            | Inst::DescriptorRef { .. }
             | Inst::Address { .. }
             | Inst::Read { .. }
             | Inst::Pointer { .. }

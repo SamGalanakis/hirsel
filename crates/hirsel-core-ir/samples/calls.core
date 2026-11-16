@@ -16,21 +16,25 @@
 ; run: f2(1, 0) -> fail Division     ; division by zero (SEM-1)
 ; run: f3(47, 100) -> 111            ; q 4, r 7: widen(4 + 7) + 100
 ; run: f3(5, 0) -> 5
+; run: f5() -> true, false           ; one descriptor per function: f1's twice is one word, f0's another
 core v1
 item i0 = samples@0/calls/id
 item i1 = samples@0/calls/divmod
 item i2 = samples@0/calls/use
 type t0 = own "u32" value u32 { 0: u32 }
 type t1 = own "u64" value u64 { 0: u64 }
+static d0 = align 1 hex 6964           ; a descriptor's identity bytes
 sig g0 = (u32) -> (u32)
 sig g1 = (u64) -> (u64)
 sig g2 = (u32, u32) -> (u32, u32)
 sig g3 = (u32, u64) -> (u64)
+sig g4 = () -> (bool, bool)
 inst n0 = samples@0/calls/id [t0] []
 inst n1 = samples@0/calls/id [t1] []
 inst n2 = samples@0/calls/divmod [] []
 inst n3 = samples@0/calls/use [] []
 inst n4 = std@1/time/ticks [] []
+inst n5 = samples@0/calls/same [] []
 fn f0 = n0 g0 {
 b0(v0: u32):
   return v0
@@ -58,3 +62,12 @@ b0(v0: u32, v1: u64):
   return v10
 }
 fn f4 = n4 g1 extern
+fn f5 = n5 g4 {
+b0:
+  v0: ptr = descriptor f1, d0          ; a StaticFn: the descriptor's address
+  v1: ptr = descriptor f1, d0
+  v2: ptr = descriptor f0, d0
+  v3: bool = eq v0, v1
+  v4: bool = eq v0, v2
+  return v3, v4
+}

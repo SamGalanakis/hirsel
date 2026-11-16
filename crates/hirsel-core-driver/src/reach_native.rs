@@ -511,18 +511,20 @@ fn reach_source_places_are_the_current_sources() {
     }
 }
 
-/// A generic body that names `code.identity` dispatches over every function
-/// item of the program, so a store that built another program's function
-/// table must not serve its body: a build in the primed store is the build of
-/// the same files into an empty one. Steps over one store: a program with a
-/// spare module; the spare module dropped (a served stale table reaches the
-/// dropped item: OutsideReached); a new module whose function the entry
-/// describes (a served stale table lacks it: the dispatch traps). Oracle: the
-/// empty store's executable, and exit 0 (the identity matches). Mutant: the
-/// key's function table left out (`DefinitionKey::functions` None), red.
+/// A generic body that reads `code.identity` reads it from the StaticFn's
+/// descriptor, so its record holds no program's function list and a store
+/// serves it to any program: a build in the primed store is the build of the
+/// same files into an empty one. Steps over one store: a program with a spare
+/// module; the spare module dropped; a new module whose function the entry
+/// describes, so its descriptor is reached only through the entry's
+/// `describe`. Oracle: the empty store's executable, and exit 0 (the identity
+/// matches). This is the case of the fault where a store served a body that
+/// dispatched over another program's function table (reuse-history-fault-1031);
+/// its mutant, the table left out of the key, went with the table. The
+/// descriptor's own mutant is `reach_code_descriptor_is_one_per_function`'s.
 #[test]
 #[ignore = "explicit native integration target"]
-fn reach_code_identity_dispatch_follows_the_function_table() {
+fn reach_code_identity_follows_the_program() {
     const NAMED: &str = "fn named[F](s: StaticFn[F], want: Bytes) -> bool {\n    code.identity(s) == want\n}\nfn double(x: u64) -> u64 {\n    x * 2\n}\n";
     let local = format!("{NAMED}pub fn main() -> Result[(), Exit] {{\n    if named(code.describe(double), code.identity(code.describe(double))) {{ Ok(()) }} else {{ Error(Exit(status: 3)) }}\n}}\n");
     let other = format!("{NAMED}pub fn main() -> Result[(), Exit] {{\n    if named(code.describe(other.pick), code.identity(code.describe(other.pick))) {{ Ok(()) }} else {{ Error(Exit(status: 3)) }}\n}}\n");
@@ -671,6 +673,77 @@ fn reach_writer_crash_after_each_rename_then_builds_fresh() {
         if left > 0 {
             assert!(k > 0, "the edit renames something");
             break;
+        }
+    }
+}
+
+/// Build `files` as project `app` into `store`, like [`reach_files_build`],
+/// with the app's sources listed in reverse when `reversed`: the executable's
+/// bytes and its run's exit and stderr.
+fn descriptor_build(dir: &Path, files: &[(&str, &str)], store: &str, backend: Backend, optimize: bool, reversed: bool) -> (Vec<u8>, (Option<i32>, Vec<u8>)) {
+    let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let project = dir.join("app");
+    if project.exists() {
+        std::fs::remove_dir_all(&project).unwrap();
+    }
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(dir.join("cache")).unwrap();
+    for (name, source) in files {
+        std::fs::write(project.join(name), source).unwrap();
+    }
+    let mut request = CheckRequest::program(&project, &libraries, &dir.join(store).join("check")).unwrap();
+    if reversed {
+        request.inputs.packages.last_mut().unwrap().sources.reverse();
+    }
+    let product = Driver::default()
+        .check_reachable_with_product(request, &dir.join("cache"), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let mut options = native_options(backend, dir);
+    options.optimize = optimize;
+    options.store = dir.join(store).join("native");
+    options.output = dir.join(store).join("program");
+    let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
+    let output = Command::new(&built.executable).output().unwrap();
+    (std::fs::read(&built.executable).unwrap(), (output.status.code(), output.stderr))
+}
+
+/// One descriptor per function per program, and nothing observable depends
+/// on where it lies or in which order it was emitted. One function is
+/// described in two modules, in two instances of a generic body and through a
+/// record, each its own unit; the entry checks that every such StaticFn is one
+/// word, names one identity and calls one function, and that another
+/// function's StaticFn differs (exit 0 when all hold, else the number of the
+/// first that fails). Shapes: Cranelift dev, LLVM dev and LLVM release. Steps
+/// over one primed store: the program, then one module edited (mixed: its
+/// records rebuilt, the others served). Each step is built again in an empty
+/// store, and once more with the app's sources listed in reverse. Oracle: the
+/// empty store's executable and exit 0; the reversed build's executable is
+/// byte for byte the same. Mutant: the descriptor defined local to each unit
+/// (Cranelift `Linkage::Local`), red (exit 1: two words for one function).
+#[test]
+#[ignore = "explicit native integration target"]
+fn reach_code_descriptor_is_one_per_function() {
+    const A: &str = "pub fn f(x: u64) -> u64 {\n    x + 1\n}\npub fn g(x: u64) -> u64 {\n    x + 2\n}\npub fn here() -> StaticFn[fn(u64) -> u64] {\n    code.describe(f)\n}\n";
+    const B: &str = "pub type Held {\n    s: StaticFn[fn(u64) -> u64]\n}\npub fn there() -> StaticFn[fn(u64) -> u64] {\n    code.describe(a.f)\n}\npub fn held() -> Held {\n    Held(s: code.describe(a.f))\n}\npub fn inside[F](s: StaticFn[F]) -> StaticFn[fn(u64) -> u64] {\n    code.describe(a.f)\n}\npub fn same[F](s: StaticFn[F], t: StaticFn[F]) -> bool {\n    s == t\n}\npub fn named[F](s: StaticFn[F], t: StaticFn[F]) -> bool {\n    code.identity(s) == code.identity(t)\n}\n";
+    const MAIN: &str = "fn h(x: u8) -> u8 {\n    x\n}\nfn call(s: StaticFn[fn(u64) -> u64]) -> u64 {\n    let c = code.callable(s)\n    c(1)\n}\npub fn main() -> Result[(), Exit] {\n    let s = code.describe(a.f)\n    let g = code.describe(a.g)\n    if !(b.same(s, a.here())) {\n        return Error(Exit(status: 1u8))\n    }\n    if !(b.same(a.here(), b.there())) {\n        return Error(Exit(status: 2u8))\n    }\n    if !(b.same(s, b.inside(g))) {\n        return Error(Exit(status: 3u8))\n    }\n    if !(b.same(b.there(), b.inside(code.describe(h)))) {\n        return Error(Exit(status: 4u8))\n    }\n    if !(b.same(s, b.held().s)) {\n        return Error(Exit(status: 5u8))\n    }\n    if !(b.named(s, b.inside(code.describe(h)))) {\n        return Error(Exit(status: 6u8))\n    }\n    if !(!b.same(s, g) && !b.named(s, g)) {\n        return Error(Exit(status: 7u8))\n    }\n    if !(call(b.inside(g)) == 2 && call(g) == 3) {\n        return Error(Exit(status: 8u8))\n    }\n    if !(b.same(code.describe(h), code.describe(h))) {\n        return Error(Exit(status: 9u8))\n    }\n    Ok(())\n}\n";
+    let edited = format!("{B}pub fn spare() -> u64 {{\n    7\n}}\n");
+    let steps: [&[(&str, &str)]; 2] = [
+        &[("a.hirsel", A), ("b.hirsel", B), ("main.hirsel", MAIN)],
+        &[("a.hirsel", A), ("b.hirsel", &edited), ("main.hirsel", MAIN)],
+    ];
+    for (backend, optimize) in [(Backend::Cranelift, false), (Backend::Llvm, false), (Backend::Llvm, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        for (n, files) in steps.iter().enumerate() {
+            let case = format!("{backend:?} release={optimize} step {n}");
+            let (primed, ran) = descriptor_build(dir.path(), files, "primed", backend, optimize, false);
+            let (fresh, expected) = descriptor_build(dir.path(), files, &format!("fresh{n}"), backend, optimize, false);
+            let (reversed, reversed_ran) = descriptor_build(dir.path(), files, &format!("reversed{n}"), backend, optimize, true);
+            assert_eq!(expected.0, Some(0), "{case}: {}", String::from_utf8_lossy(&expected.1));
+            assert_eq!(ran, expected, "{case}: what the primed build reports");
+            assert_eq!(reversed_ran, expected, "{case}: what the reversed build reports");
+            assert!(primed == fresh, "{case}: the primed store's executable is a fresh store's");
+            assert!(reversed == fresh, "{case}: the reversed sources' executable is the listed sources'");
         }
     }
 }

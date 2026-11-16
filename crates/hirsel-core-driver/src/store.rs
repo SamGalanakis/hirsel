@@ -31,8 +31,8 @@ const BODY_HEADER: usize = 28;
 /// framed as one part. A body record's IR part is hashed by it, and so is a
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
-// Codec bound bits and the codec contextual symbol change declaration products.
-const VERSION: u32 = 34;
+// A StaticFn is its function's descriptor address (`Inst::DescriptorRef`).
+const VERSION: u32 = 35;
 pub(crate) const HEADER: usize = 12;
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;

@@ -89,6 +89,11 @@ pub fn symbol(module: &Module, function: FuncId) -> String {
     name
 }
 
+/// The link name of `function`'s static descriptor (`Inst::DescriptorRef`).
+fn descriptor_symbol(module: &Module, function: FuncId) -> String {
+    symbol(module, function) + "$static"
+}
+
 /// The `"hirsel-carriers"` marker: each LLVM parameter whose place the bridge
 /// may pass as words on cold calls (FORM #111), `m` when the callee may change it (`mut`,
 /// `take`, so its words come back) and `v` when it is frozen (`view`).
@@ -326,6 +331,44 @@ fn emit_module(
             align: data.align,
             absolute_symbol: false,
         });
+    }
+    // Each function a body of this unit describes, its descriptor `{code,
+    // length}` then the identity bytes, defined weak beside the function's code
+    // identity: every unit that describes it defines it, and the linker keeps
+    // one per program, as it keeps one body.
+    let mut described = BTreeSet::new();
+    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for inst in &body.insts {
+            let Inst::DescriptorRef {
+                function, identity, ..
+            } = *inst
+            else {
+                continue;
+            };
+            let name = descriptor_symbol(module, function);
+            if !described.insert(name.clone()) {
+                continue;
+            }
+            let bytes = &module.statics[identity.index()].bytes;
+            let identity = Type::bytes(bytes.len() as u64);
+            sink.global(&Global {
+                name: name.into(),
+                linkage: Linkage::WeakOdr,
+                constant: true,
+                externally_initialized: false,
+                ty: Type::structure([Type::Ptr, Type::I64, identity.clone()]),
+                init: Some(Value::Struct {
+                    packed: false,
+                    fields: vec![
+                        (Type::Ptr, Value::global(symbol(module, function))),
+                        (Type::I64, Value::Int(bytes.len() as i128)),
+                        (identity, Value::Bytes(bytes.to_vec())),
+                    ],
+                }),
+                align: 8,
+                absolute_symbol: false,
+            });
+        }
     }
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let mut items = Items::default();
@@ -1204,6 +1247,12 @@ impl FunctionEmitter<'_> {
             Inst::FunctionRef { result, function } => {
                 self.put(result, &Value::global(symbol(self.module, function)))
             }
+            Inst::DescriptorRef {
+                result, function, ..
+            } => self.put(
+                result,
+                &Value::global(descriptor_symbol(self.module, function)),
+            ),
             Inst::Unary {
                 result,
                 op,

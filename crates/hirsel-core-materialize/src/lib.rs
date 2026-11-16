@@ -146,7 +146,8 @@ pub fn children(module: &Module, root: FuncId) -> Vec<Child> {
 pub fn external_functions(module: &Module, root: FuncId) -> BTreeSet<FuncId> {
     let mut pending = vec![root];
     // A unit's layouts generate drop glue, including nested List/Rc fields.
-    // Its finalizers are dependencies even without a Call or FunctionRef.
+    // Its finalizers are dependencies even without a Call, FunctionRef or
+    // DescriptorRef.
     pending.extend(
         module
             .types
@@ -169,7 +170,8 @@ pub fn external_functions(module: &Module, root: FuncId) -> BTreeSet<FuncId> {
             }
         }
         for inst in &body.insts {
-            if let Inst::FunctionRef { function, .. } = inst {
+            if let Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } = inst
+            {
                 pending.push(*function);
             }
         }

@@ -36,9 +36,9 @@ impl<'a> Forwarding<'a> {
         for inst in &body.insts {
             match *inst {
                 Inst::Pointer { result, address } => pointers[result.index()] = Some(address),
-                Inst::ReadStatic { result, .. } | Inst::FunctionRef { result, .. } => {
-                    permanent[result.index()] = true
-                }
+                Inst::ReadStatic { result, .. }
+                | Inst::FunctionRef { result, .. }
+                | Inst::DescriptorRef { result, .. } => permanent[result.index()] = true,
                 Inst::Const { result, bits: 0 } if body.values[result.index()] == Ty::Ptr => {
                     permanent[result.index()] = true
                 }

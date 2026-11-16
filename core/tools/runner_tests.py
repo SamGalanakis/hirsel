@@ -4,7 +4,7 @@
 Every law runs on the evaluator (a law_ function) and natively on each selected backend
 (its test_ twin): R0's in core/programs/store/runner_laws.hirsel, R1's in
 core/programs/store/runner_calls.hirsel, and two generated modules, runner_p19 (one
-`place` of 1 and 100 entries, run in two tasks) and runner_l12 (describe across permuted
+`place` of 1, 100, 1,000 and 10,000 entries, run in two tasks) and runner_l12 (describe across permuted
 registrations, an added A field and a changed R). Each mutant applies its text changes
 to a copy of runner.hirsel and must turn its law red on the evaluator.
 """
@@ -21,11 +21,13 @@ from store_tests import inputs
 
 LAWS = ('p01_call', 'p02_start_finish', 'p09_describe', 'p13_duplicate_refused', 'p15_types_roundtrip',
         'p19_place_bound', 'l4_malformed_flood')
-# p19 at 1,000 entries waits on the generic code.identity dispatch: in a program that
-# reaches about 1,500 functions, its frame alone overflows a task's 64 KiB stack
-# (followups 2026-11-16 runner-build-1033 -> core-ops-914).
-SIZES = (1, 100)
-N_PLACE = 8 * 1024 * 1024
+SIZES = (1, 100, 1000, 10000)
+# place_n registers in chunks of CHUNK calls, one function each, so no one function's
+# frame grows with n (N13(b): a frame holds about 3,000 calls).
+CHUNK = 500
+# The bound one `place` and its describe run in: 10,000 entries take about 12 MiB on the
+# evaluator (the registry's map grows to 2 MiB while its old table is live).
+N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
          'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_held_head', 'l14_handles')
@@ -118,8 +120,13 @@ def p19_module(path):
     for i in range(max(SIZES)):
         lines.append(f'fn e{i}(take x: u64) -> Result[u64, Capacity] {{ Ok(x + {i}u64) }}')
     for n in SIZES:
+        chunks = range(0, n, CHUNK)
+        for c in chunks:
+            lines += ['', f'fn place_{n}_{c}(mut r: Reg) -> Result[(), runner.RegisterError] {{']
+            lines += [f'    runner.compute(mut r, code.describe(e{i}), 65536u64)?' for i in range(c, min(n, c + CHUNK))]
+            lines += ['    Ok(())', '}']
         lines += ['', f'fn place_{n}(mut r: Reg) -> Result[(), runner.RegisterError] {{']
-        lines += [f'    runner.compute(mut r, code.describe(e{i}), 65536u64)?' for i in range(n)]
+        lines += [f'    place_{n}_{c}(mut r)?' for c in chunks]
         lines += ['    Ok(())', '}']
     lines += ['', 'fn described(n: u64, entries: u64) -> Bytes {', '    let made = bound bytes n {',
               '        let mut r: Reg = runner.registry()', '        let placed = match entries {']
@@ -311,18 +318,21 @@ def main():
             permuted = work / 'runner_l12_permuted.hirsel'
             l12_module(permuted, L12[1], values['permuted'])
             l12_want = {'store@1/runner_l12/test_l12_describe'}
-            # p19's place builds as its own program, so its frame size is its own.
+            # p19's place builds as its own program, in the store the laws primed and in a
+            # fresh one: at 10,000 entries it reaches over 10,000 functions, each described.
             groups = (('laws', [(l12, 'runner_l12')], 'store@1/runner_', 'shared',
                        {f'store@1/runner_laws/test_{n}' for n in LAWS} | l12_want
                        | {f'store@1/runner_calls/test_{n}' for n in CALLS}),
                       ('p19', [(p19, 'runner_p19')], 'store@1/runner_p19/', 'shared',
+                       {'store@1/runner_p19/test_p19_place_twice'}),
+                      ('p19_fresh', [(p19, 'runner_p19')], 'store@1/runner_p19/', 'fresh',
                        {'store@1/runner_p19/test_p19_place_twice'}),
                       ('l12_permuted', [(permuted, 'runner_l12')], 'store@1/runner_l12/', 'shared', l12_want),
                       ('l12_permuted_fresh', [(permuted, 'runner_l12')], 'store@1/runner_l12/', 'fresh', l12_want))
             for engine in natives:
                 for group, extra, prefix, store, want in groups:
                     native = manifest(root, work, 'native_' + group, None, extra)
-                    code, report = native_run(args, engine, native, work / f'store-{engine}-{store}', prefix)
+                    code, report = native_run(args, engine, native, work / f'store-{engine}-{group if store == "fresh" else store}', prefix)
                     tests = report.get('tests', [])
                     for t in tests:
                         row(engine=engine, test=t['definition'], passed=bool(t.get('passed')), result=t)

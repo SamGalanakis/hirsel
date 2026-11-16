@@ -1084,13 +1084,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(value) = self.core_value(f, types, vals, result, n) {
             return value;
         }
-        if self.has_static_item_value && self.unsupported_static_item_argument(f, types, vals) {
-            self.gap(
-                n,
-                "static function identity dispatch is not built for this callable item",
-            );
-            return None;
-        }
         let (func, signature) = match self.instance_row(f, types) {
             Ok(row) => row,
             Err(what) => {
@@ -1184,62 +1177,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             None => first,
         }
-    }
-
-    fn unsupported_static_item_argument(
-        &mut self,
-        f: usize,
-        types: &[TyId],
-        vals: &[Option<ValueId>],
-    ) -> bool {
-        if self.p.fns[f].generics.is_empty() {
-            false
-        } else {
-            let params = self.p.fns[f]
-                .params
-                .iter()
-                .map(|param| param.ty)
-                .collect::<Vec<_>>();
-            params.into_iter().enumerate().any(|(i, param)| {
-                let ty = subst(&mut self.t, param, types);
-                let is_static = matches!(
-                    self.t.kind(self.bare(ty)),
-                    TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(crate::decls::Role::StaticFn)
-                );
-                is_static
-                    && vals[i].and_then(|value| self.function_values.get(&value)).is_some_and(
-                        |&function| !self.open_static_item_supported(function),
-                    )
-            })
-        }
-    }
-
-    fn open_static_item_supported(&self, function: FuncId) -> bool {
-        let Some(path) = self
-            .e
-            .module
-            .functions
-            .get(function.index())
-            .and_then(|row| self.e.module.instances.get(row.instance.index()))
-            .map(|key| &key.definition)
-        else {
-            return false;
-        };
-        let source_name = path
-            .0
-            .name
-            .split_once("$callable")
-            .map_or(path.0.name.as_str(), |(name, _)| name);
-        let Some(source) = self.p.fns.iter().find(|item| {
-            item.path.0.package == path.0.package
-                && item.path.0.modules == path.0.modules
-                && item.path.0.name == source_name
-        }) else {
-            return false;
-        };
-        source.generics.is_empty()
-            && !source.path.package_is("core", "1")
-            && !source.path.package_is("std", "1")
     }
 
     /// MEM-17: why `clone` or `clone_in` of an `x: T` expecting `U` is refused, if it is.

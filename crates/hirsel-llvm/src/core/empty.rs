@@ -59,6 +59,7 @@ fn pure(body: &Body, constants: &[Option<u64>], inst: &Inst) -> bool {
         Inst::Const { .. }
         | Inst::ReadStatic { .. }
         | Inst::FunctionRef { .. }
+        | Inst::DescriptorRef { .. }
         | Inst::Unary { .. }
         | Inst::Binary { .. }
         | Inst::Compare { .. }

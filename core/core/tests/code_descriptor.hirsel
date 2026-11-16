@@ -1,0 +1,68 @@
+// A program has one descriptor per function: a StaticFn of one function made in
+// different items, in two instances of one generic body, and compared inside a
+// generic body, is one word; it names the same identity bytes and calls the same
+// code, and a StaticFn of another function is never equal to it. Natively each item
+// and each instance is its own unit, so a descriptor copied per unit (or per object)
+// makes the words differ. Runs on the evaluator, Cranelift dev and LLVM release with
+// one expected value. Oracle, hand derived: every check holds, f(1) = 2, g(1) = 3.
+fn f(x: u64) -> u64 {
+    x + 1
+}
+
+fn g(x: u64) -> u64 {
+    x + 2
+}
+
+fn h(x: u8) -> u8 {
+    x
+}
+
+fn here() -> StaticFn[fn(u64) -> u64] {
+    code.describe(f)
+}
+
+fn there() -> StaticFn[fn(u64) -> u64] {
+    code.describe(f)
+}
+
+fn inside[F](s: StaticFn[F]) -> StaticFn[fn(u64) -> u64] {
+    code.describe(f)
+}
+
+fn same[F](s: StaticFn[F], t: StaticFn[F]) -> bool {
+    s == t
+}
+
+fn named[F](s: StaticFn[F], t: StaticFn[F]) -> bool {
+    code.identity(s) == code.identity(t)
+}
+
+fn call(s: StaticFn[fn(u64) -> u64]) -> u64 {
+    let c = code.callable(s)
+    c(1)
+}
+
+fn bit(holds: bool, n: u64) -> u64 {
+    if holds {
+        n
+    } else {
+        0
+    }
+}
+
+// expect: run one_descriptor_per_function() = 1023
+fn one_descriptor_per_function() -> u64 {
+    let s = code.describe(f)
+    let mut t = 0u64
+    t += bit(same(s, here()), 1)
+    t += bit(same(s, there()), 2)
+    t += bit(same(here(), inside(code.describe(g))), 4)
+    t += bit(same(there(), inside(code.describe(h))), 8)
+    t += bit(named(s, inside(code.describe(h))), 16)
+    t += bit(!same(s, code.describe(g)), 32)
+    t += bit(!named(s, code.describe(g)), 64)
+    t += bit(call(inside(code.describe(h))) == 2, 128)
+    t += bit(call(code.describe(g)) == 3, 256)
+    t += bit(same(code.describe(h), code.describe(h)), 512)
+    t
+}

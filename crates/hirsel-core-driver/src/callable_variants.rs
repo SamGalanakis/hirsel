@@ -338,7 +338,9 @@ impl Work<'_, '_> {
             })
             .collect::<Vec<_>>();
         dependencies.extend(body.insts.iter().filter_map(|i| match i {
-            Inst::FunctionRef { function, .. } => Some(*function),
+            Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } => {
+                Some(*function)
+            }
             _ => None,
         }));
         dependencies.extend(

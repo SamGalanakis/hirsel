@@ -393,26 +393,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
-    fn code_describe_target_valid(&mut self, n: NodeId) -> bool {
+    /// The function item `code.describe` names, refused unless it is a top-level
+    /// function whose generics are all regions (PROG-9).
+    fn code_describe_target(&mut self, n: NodeId) -> Option<usize> {
         let argument = self.kids(n).get(1).copied().unwrap_or(n);
-        let valid = self.p.target(self.at, argument).is_some_and(|target| {
+        let item = self.p.target(self.at, argument).and_then(|target| {
             let Target::Definition(id) = target else {
-                return false;
+                return None;
             };
             let Some(Def::Fn(index)) = self.p.by_definition[id.0 as usize] else {
-                return false;
+                return None;
             };
             let function = &self.p.fns[index as usize];
-            function.generics.iter().all(|generic| generic.region)
+            function
+                .generics
+                .iter()
+                .all(|generic| generic.region)
+                .then_some(index as usize)
         });
-        if !valid {
+        if item.is_none() {
             self.refuse(
                 "PROG-9",
                 argument,
                 "code.describe requires a top-level non-generic function name",
             );
         }
-        valid
+        item
     }
 
     /// Lower `core.isolate`'s value boundary (FORM #101).  The callback's failure
@@ -679,9 +685,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::LogNew => self.runtime_log_new(types[0], result, n),
             Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], result, n),
             Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
-            Kernel::CodeIdentity => self.runtime_code_identity(f, vals[0]?, types, result, n),
+            Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
-            Kernel::CodeDescribe => self.runtime_code_describe(vals[0]?, result, n),
+            Kernel::CodeDescribe => self.runtime_code_describe(result, n),
         }
     }
 
@@ -1882,180 +1888,91 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    fn runtime_code_describe(
-        &mut self,
-        value: ValueId,
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        if !self.code_describe_target_valid(n) {
+    /// PROG-9: a StaticFn is the address of its function's static descriptor,
+    /// `{code, length}` then the identity bytes (`Inst::DescriptorRef`). The
+    /// described function is the item's closed adapter, whatever body describes
+    /// it, so a program has one descriptor per function and StaticFn equality is
+    /// word equality.
+    fn runtime_code_describe(&mut self, result: TyId, n: NodeId) -> Option<ValueId> {
+        let item = self.code_describe_target(n)?;
+        let regions = (0..self.p.fns[item].generics.len())
+            .map(|i| self.t.mk(TyKind::Region(Root::Generic(i as u32))))
+            .collect::<Vec<_>>();
+        let callable = subst(&mut self.t, self.p.fns[item].callable, &regions);
+        let function = self.item_adapter_closed(item, &regions, callable, n)?;
+        // A closed adapter is no template of an enclosing generic body: carried
+        // under it, specialization would make a fresh row per instance.
+        self.nested.remove(&function);
+        let Some(bytes) = self.code_identity_bytes(function) else {
+            self.gap(n, "StaticFn identity source is not built");
             return None;
-        }
-        let word = match self.reinterpret(value, Ty::Ptr, Ty::Scalar(Scalar::U64), n) {
-            Some(word) => Some(word),
-            None => {
-                self.gap(n, "StaticFn word carriage is not built");
-                None
-            }
         };
-        if let Some(function) = self.function_values.get(&value).copied() {
-            if let Some(word) = word {
-                self.function_values.insert(word, function);
-                self.has_static_item_value = true;
-            }
+        let identity = self.e.static_bytes(&bytes);
+        let descriptor = self.value(Ty::Ptr);
+        self.inst(
+            Inst::DescriptorRef {
+                result: descriptor,
+                function,
+                identity,
+            },
+            n,
+        );
+        let word = self.reinterpret(descriptor, Ty::Ptr, Ty::Scalar(Scalar::U64), n);
+        if let Some(word) = word {
+            self.static_fns
+                .insert(word, (function, identity, bytes.len() as u64));
         }
         self.temp(result, word);
         word
     }
 
+    /// `code.identity(s)`: the bytes after `s`'s descriptor's two words, as a
+    /// view. A StaticFn this body described has its descriptor and length here;
+    /// any other has them in its word.
     fn runtime_code_identity(
         &mut self,
-        f: usize,
         value: ValueId,
-        types: &[TyId],
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let word = match self.static_fn_word(value, n) {
-            Some(word) => word,
-            None => {
-                self.gap(n, "StaticFn callable carriage is not built");
-                return None;
-            }
-        };
-        if let Some(function) = self.function_values.get(&value).copied() {
-            let Some(bytes) = self.code_identity_bytes(function) else {
-                self.gap(n, "StaticFn identity source is not built");
-                return None;
+        let (descriptor, length) =
+            if let Some(&(function, identity, length)) = self.static_fns.get(&value) {
+                let descriptor = self.value(Ty::Ptr);
+                self.inst(
+                    Inst::DescriptorRef {
+                        result: descriptor,
+                        function,
+                        identity,
+                    },
+                    n,
+                );
+                (descriptor, self.konst(Ty::Scalar(Scalar::U64), length, n)?)
+            } else {
+                let Some(descriptor) = self.static_fn_pointer(value, n) else {
+                    self.gap(n, "StaticFn identity carriage is not built");
+                    return None;
+                };
+                let eight = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
+                let at = self.address(
+                    AddressBase::Value(descriptor),
+                    &[Step::Byte(eight)],
+                    PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                    n,
+                );
+                (descriptor, self.read_bits(at, Ty::Scalar(Scalar::U64), n))
             };
-            let Some(value) = self.identity_carrier(&bytes, result, n) else {
-                self.gap(n, "StaticFn identity carrier is not built");
-                return None;
-            };
-            self.temp(result, Some(value));
-            return Some(value);
-        }
-
-        // A StaticFn may have crossed a parameter, record, list or map before this
-        // operation. Its eight-byte payload is still the ordinary FunctionRef code
-        // pointer, so recover the identity with a finite pointer dispatch over the
-        // non-generic function items that can produce this StaticFn type.
-        let callable = self.p.fns[f]
-            .params
-            .first()
-            .map(|param| subst(&mut self.t, param.ty, types))
-            .and_then(|ty| match self.t.kind(self.bare(ty)) {
-                TyKind::Adt(d, args)
-                    if self.p.decls[d.index()].role == Some(crate::decls::Role::StaticFn) =>
-                {
-                    args.first().copied()
-                }
-                _ => None,
-            })
-            .or_else(|| types.first().copied());
-        let Some(callable) = callable else {
-            self.gap(n, "StaticFn identity type is not built");
+        let sixteen = self.konst(Ty::Scalar(Scalar::U64), 16, n)?;
+        let at = self.address(
+            AddressBase::Value(descriptor),
+            &[Step::Byte(sixteen)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+            n,
+        );
+        let bytes = self.pointer(at, n);
+        let Some(value) = self.identity_carrier(bytes, length, result, n) else {
+            self.gap(n, "StaticFn identity carrier is not built");
             return None;
         };
-        // A generic `code.identity[F](s: StaticFn[F])` body keeps F open while
-        // its CoreIR row is emitted.  The StaticFn word itself is still a code
-        // pointer, so dispatch over the finite set of callable function items;
-        // F does not constrain which item supplied that word.  A closed StaticFn
-        // keeps the narrower callable-type filter used by ordinary bodies.
-        let open_static = has_param(&self.t, callable) || has_hole(&self.t, callable);
-        let indices = self
-            .p
-            .fns
-            .iter()
-            .enumerate()
-            .filter_map(|(i, fd)| {
-                let region_only = fd.generics.iter().all(|generic| generic.region);
-                (fd.body.is_some()
-                    && fd.drop_of.is_none()
-                    && fd.clone_of.is_none()
-                    && region_only
-                    && (!open_static || fd.generics.is_empty())
-                    && (!open_static
-                        || (!fd.path.package_is("core", "1") && !fd.path.package_is("std", "1")))
-                    && (open_static || fd.callable == callable))
-                    .then_some(i)
-            })
-            .collect::<Vec<_>>();
-        let mut items = Vec::with_capacity(indices.len());
-        for item in indices {
-            let item_types = self.p.fns[item]
-                .generics
-                .iter()
-                .enumerate()
-                .map(|(i, _)| self.t.mk(TyKind::Region(Root::Generic(i as u32))))
-                .collect::<Vec<_>>();
-            let candidate = subst(&mut self.t, self.p.fns[item].callable, &item_types);
-            let Some(function) = self.item_adapter_closed(item, &item_types, candidate, n) else {
-                continue;
-            };
-            let Some(bytes) = self.code_identity_bytes(function) else {
-                continue;
-            };
-            if open_static {
-                // The adapter was closed over the source item above. Do not carry
-                // its body template under the enclosing StaticFn[F] template: that
-                // would manufacture a fresh adapter row during specialization and
-                // break the caller's eight-byte FunctionRef identity.
-                self.nested.remove(&function);
-            }
-            items.push((function, bytes));
-        }
-        if items.is_empty() {
-            self.gap(n, "static function identity dispatch is not built");
-            return None;
-        }
-
-        let join = self.new_block(&[Ty::Ptr]);
-        for (function, bytes) in items {
-            let yes = self.new_block(&[]);
-            let no = self.new_block(&[]);
-            let candidate = self.value(Ty::Ptr);
-            self.inst(
-                Inst::FunctionRef {
-                    result: candidate,
-                    function,
-                },
-                n,
-            );
-            let candidate = self
-                .reinterpret(candidate, Ty::Ptr, Ty::Scalar(Scalar::U64), n)
-                .expect("a function reference is a pointer");
-            let equal = self.value(Ty::Scalar(Scalar::Bool));
-            self.inst(
-                Inst::Compare {
-                    result: equal,
-                    op: CompareOp::Eq,
-                    left: word,
-                    right: candidate,
-                },
-                n,
-            );
-            let yes_edge = self.edge(yes, &[]);
-            let no_edge = self.edge(no, &[]);
-            self.end(
-                Terminator::Branch {
-                    condition: equal,
-                    yes: yes_edge,
-                    no: no_edge,
-                },
-                Some(n),
-            );
-            self.start(yes);
-            let Some(carrier) = self.identity_carrier(&bytes, result, n) else {
-                self.gap(n, "StaticFn identity carrier is not built");
-                return None;
-            };
-            self.jump(join, &[carrier], n);
-            self.start(no);
-        }
-        self.end(Terminator::Unreachable, Some(n));
-        self.start(join);
-        let value = self.block_params(join)[0];
         self.temp(result, Some(value));
         Some(value)
     }
@@ -2080,7 +1997,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         crate::identity::code_identity(&self.p.decls, &self.t, fd)
     }
 
-    fn identity_carrier(&mut self, bytes: &[u8], result: TyId, n: NodeId) -> Option<ValueId> {
+    /// A `Bytes` view `{bytes, length, 0}` of static identity bytes.
+    fn identity_carrier(
+        &mut self,
+        bytes: ValueId,
+        length: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
         // A generic `identity[F]` result keeps its anchor on the StaticFn
         // parameter.  The carrier layout is still the ordinary Bytes row, so
         // erase only that semantic anchor when asking the emitter for storage.
@@ -2094,45 +2018,55 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         };
         let to = self.new_slot(PlaceTy::Declared(id), n);
-        let data = self.e.static_bytes(bytes);
-        let ptr = self.value(Ty::Ptr);
-        self.inst(Inst::ReadStatic { result: ptr, data }, n);
-        let len = self.konst(Ty::Scalar(Scalar::U64), bytes.len() as u64, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let carrier = self.pointer(to, n);
-        self.sequence_word(carrier, 0, Ty::Ptr, ptr, n);
-        self.sequence_word(carrier, 8, Ty::Scalar(Scalar::U64), len, n);
+        self.sequence_word(carrier, 0, Ty::Ptr, bytes, n);
+        self.sequence_word(carrier, 8, Ty::Scalar(Scalar::U64), length, n);
         self.sequence_word(carrier, 16, Ty::Scalar(Scalar::U64), zero, n);
         Some(self.pointer(to, n))
     }
 
+    /// `code.callable(s)`: the code word of `s`'s descriptor, or the function
+    /// itself when this body described `s`.
     fn runtime_code_callable(
         &mut self,
         value: ValueId,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let pointer = match self.static_fn_pointer(value, n) {
-            Some(pointer) => pointer,
-            None => {
+        let code = if let Some(&(function, _, _)) = self.static_fns.get(&value) {
+            let code = self.value(Ty::Ptr);
+            self.inst(
+                Inst::FunctionRef {
+                    result: code,
+                    function,
+                },
+                n,
+            );
+            code
+        } else {
+            let Some(descriptor) = self.static_fn_pointer(value, n) else {
                 self.gap(n, "StaticFn callable carriage is not built");
                 return None;
-            }
+            };
+            let at = self.address(
+                AddressBase::Value(descriptor),
+                &[],
+                PlaceTy::Value(Ty::Ptr),
+                n,
+            );
+            self.read_bits(at, Ty::Ptr, n)
         };
-        self.temp(result, Some(pointer));
-        Some(pointer)
+        self.temp(result, Some(code));
+        Some(code)
     }
 
+    /// A StaticFn's descriptor address: the value itself when it is carried as a
+    /// pointer, else its word reinterpreted.
     fn static_fn_pointer(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
         (self.b.values.get(value.index()) == Some(&Ty::Ptr))
             .then_some(value)
             .or_else(|| self.reinterpret(value, Ty::Scalar(Scalar::U64), Ty::Ptr, n))
-    }
-
-    fn static_fn_word(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
-        (self.b.values.get(value.index()) == Some(&Ty::Scalar(Scalar::U64)))
-            .then_some(value)
-            .or_else(|| self.reinterpret(value, Ty::Ptr, Ty::Scalar(Scalar::U64), n))
     }
 
     fn reinterpret(&mut self, value: ValueId, from: Ty, to: Ty, n: NodeId) -> Option<ValueId> {

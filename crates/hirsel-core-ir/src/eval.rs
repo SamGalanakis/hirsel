@@ -489,6 +489,9 @@ struct Machine<'m> {
     sched: Sched,
     /// Each task's thread link, held here only while that task runs.
     links: Vec<Option<Link<'m>>>,
+    /// By function, the address of its static descriptor (`Inst::DescriptorRef`),
+    /// 0 for a function no body describes. Functions of one code identity share one.
+    descriptors: Vec<u64>,
 }
 
 struct Footprint {
@@ -711,6 +714,7 @@ fn run_world(
             ..Sched::default()
         },
         links: vec![None],
+        descriptors: vec![0; m.functions.len()],
     };
     for s in &m.statics {
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
@@ -726,6 +730,38 @@ fn run_world(
         mach.mem[split(data).0].fixed = true;
         mach.mem[split(carrier).0].fixed = true;
         mach.world.args.push(carrier);
+    }
+    // One descriptor per code identity, as the linker keeps one per program:
+    // `{code, length}` then the identity bytes, where `code` is a function token.
+    let mut by_code = HashMap::new();
+    for body in m.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for inst in &body.insts {
+            let Inst::DescriptorRef {
+                function, identity, ..
+            } = *inst
+            else {
+                continue;
+            };
+            if mach.descriptors[function.index()] != 0 {
+                continue;
+            }
+            let code = m.code_identity(function);
+            let at = if let Some(&at) = by_code.get(&code) {
+                at
+            } else {
+                let bytes = &m.statics[identity.index()].bytes;
+                let mut block = Vec::with_capacity(16 + bytes.len());
+                block.extend_from_slice(&(FN_BASE + u64::from(function.0)).to_le_bytes());
+                block.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+                block.extend_from_slice(bytes);
+                let at = mach.block(block.len() as u64, None, 0, None);
+                mach.mem[split(at).0].bytes = block;
+                mach.mem[split(at).0].fixed = true;
+                by_code.insert(code, at);
+                at
+            };
+            mach.descriptors[function.index()] = at;
+        }
     }
     for shape in &m.types {
         let fields: Vec<&hirsel_core_layout::Field> = match &shape.body {
@@ -968,6 +1004,7 @@ impl<'m> Machine<'m> {
             scrambled: None,
             sched: Sched::default(),
             links: Vec::new(),
+            descriptors: Vec::new(),
         }
     }
 
@@ -2767,6 +2804,9 @@ impl Machine<'_> {
             Inst::FunctionRef { result, function } => {
                 vals[result.index()] = FN_BASE + u64::from(function.0)
             }
+            Inst::DescriptorRef {
+                result, function, ..
+            } => vals[result.index()] = self.descriptors[function.index()],
             // Statics are the first blocks, in module order.
             Inst::ReadStatic { result, data } => vals[result.index()] = ptr(data.index(), 0),
             Inst::Unary {

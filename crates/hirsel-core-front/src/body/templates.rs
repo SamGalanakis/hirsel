@@ -782,7 +782,9 @@ fn fill(
     }
     for inst in &mut body.insts {
         match inst {
-            Inst::FunctionRef { function, .. } => *function = s.function(*function),
+            Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } => {
+                *function = s.function(*function)
+            }
             Inst::Drop { ty, .. } | Inst::Release { ty, .. } => *ty = s.ty(*ty),
             Inst::Mark { ty, .. } | Inst::Unmark { ty, .. } => s.place(ty),
             _ => {}

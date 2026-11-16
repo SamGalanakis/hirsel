@@ -348,6 +348,17 @@ pub enum Inst {
         result: ValueId,
         function: FuncId,
     },
+    /// The address of `function`'s static descriptor (PROG-9): read-only words
+    /// `{code, length}` then the `length` bytes of `identity`, where `code` is
+    /// `function`'s code pointer and `identity` is its identity bytes. A program
+    /// has one descriptor per function: every unit that refers to it defines it
+    /// weak beside the function's code identity, and the linker keeps one, so
+    /// two descriptors' addresses are equal exactly when their functions are.
+    DescriptorRef {
+        result: ValueId,
+        function: FuncId,
+        identity: StaticId,
+    },
     Unary {
         result: ValueId,
         op: UnaryOp,

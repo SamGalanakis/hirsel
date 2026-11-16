@@ -606,6 +606,7 @@ fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
         Inst::Const { result, .. }
         | Inst::ReadStatic { result, .. }
         | Inst::FunctionRef { result, .. }
+        | Inst::DescriptorRef { result, .. }
         | Inst::RegionOpen { result } => defs.push(v(result)),
         Inst::Unary {
             result, operand, ..
@@ -1046,6 +1047,19 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             need(
                 function.index() < c.m.functions.len() && c.ty(result)? == Ty::Ptr,
                 || "bad function reference".into(),
+            )
+        }
+        Inst::DescriptorRef {
+            result,
+            function,
+            identity,
+        } => {
+            c.def(result)?;
+            need(
+                function.index() < c.m.functions.len()
+                    && identity.index() < c.m.statics.len()
+                    && c.ty(result)? == Ty::Ptr,
+                || "bad descriptor reference".into(),
             )
         }
         Inst::Unary {

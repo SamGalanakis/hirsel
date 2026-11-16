@@ -1059,14 +1059,12 @@ struct Cx<'c, 'a, 'e> {
     e: &'e mut Emitter,
     b: Body,
     func: Option<FuncId>,
-    /// Function references produced in this body, used by the PROG-9 descriptor
-    /// kernels to recover the single front-end identity encoder's source item.
-    function_values: HashMap<ValueId, FuncId>,
+    /// The StaticFn words `code.describe` produced in this body: each one's
+    /// described function, its identity static and that static's length, so a
+    /// `code.identity` or `code.callable` of one reads no descriptor.
+    static_fns: HashMap<ValueId, (FuncId, hirsel_core_ir::StaticId, u64)>,
     /// The growth path is cold (growth.rs).
     growth: growth::Growth,
-    /// Open StaticFn item admission is demanded only after code.describe produced
-    /// a known item in this body; ordinary calls need no parameter walk.
-    has_static_item_value: bool,
     /// The signature a source body's entry was emitted against. A row first mentioned
     /// by an earlier body may already be sealed to its word carriage; installing the
     /// body puts this signature back, so the next [`Emitter::seal`] converts the body.
@@ -1214,9 +1212,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             e,
             b: Body::default(),
             func: None,
-            function_values: HashMap::default(),
+            static_fns: HashMap::default(),
             growth: growth::Growth::default(),
-            has_static_item_value: false,
             emitted: None,
             ir_item,
             generated: false,
@@ -1603,12 +1600,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn inst(&mut self, i: Inst, n: NodeId) {
         crate::cost_scope!("phase", "CoreIR emission");
         if self.live() {
-            if let Inst::FunctionRef { result, function } = i {
-                self.function_values.insert(result, function);
-                self.open.push(Inst::FunctionRef { result, function });
-                self.open_anchors.push(self.anchor(n));
-                return;
-            }
             if let Inst::Call { call } = i
                 && self.growth.cold
             {
@@ -2255,12 +2246,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 let mut signatures = std::collections::BTreeMap::new();
                 let ids = std::iter::once(self.e.module.functions[f.index()].signature)
                     .chain(body.calls.iter().map(|c| c.signature))
-                    .chain(body.insts.iter().filter_map(|i| {
-                        if let Inst::FunctionRef { function, .. } = i {
+                    .chain(body.insts.iter().filter_map(|i| match i {
+                        Inst::FunctionRef { function, .. }
+                        | Inst::DescriptorRef { function, .. } => {
                             Some(self.e.module.functions[function.index()].signature)
-                        } else {
-                            None
                         }
+                        _ => None,
                     }));
                 for id in ids {
                     if let Some(abi) = self.e.signature_abis.get(&id) {

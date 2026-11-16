@@ -17,6 +17,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::Read { result, .. }
                 | Inst::ReadStatic { result, .. }
                 | Inst::FunctionRef { result, .. }
+                | Inst::DescriptorRef { result, .. }
                 | Inst::Pointer { result, .. }
                 | Inst::UpdateMask { result, .. }
                 | Inst::Case { result, .. }
@@ -183,6 +184,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 Inst::Const { .. }
                 | Inst::ReadStatic { .. }
                 | Inst::FunctionRef { .. }
+                | Inst::DescriptorRef { .. }
                 | Inst::Read { .. }
                 | Inst::StorageLive { .. }
                 | Inst::StorageDead { .. }
@@ -322,6 +324,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 Inst::Const { .. }
                 | Inst::ReadStatic { .. }
                 | Inst::FunctionRef { .. }
+                | Inst::DescriptorRef { .. }
                 | Inst::Unary { .. }
                 | Inst::Binary { .. }
                 | Inst::Compare { .. }

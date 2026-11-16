@@ -413,6 +413,18 @@ impl Printer {
                     Inst::FunctionRef { result, function } => {
                         format!("{} = fnref f{}", def(*result), function.0)
                     }
+                    Inst::DescriptorRef {
+                        result,
+                        function,
+                        identity,
+                    } => {
+                        format!(
+                            "{} = descriptor f{}, d{}",
+                            def(*result),
+                            function.0,
+                            identity.0
+                        )
+                    }
                     Inst::Unary {
                         result,
                         op,
@@ -1492,6 +1504,15 @@ impl BodyParser {
             Inst::FunctionRef {
                 result,
                 function: FuncId(l.id('f')?),
+            }
+        } else if op == "descriptor" {
+            one(&defs)?;
+            let function = FuncId(l.id('f')?);
+            l.expect(",")?;
+            Inst::DescriptorRef {
+                result,
+                function,
+                identity: StaticId(l.id('d')?),
             }
         } else if op == "mul_add" {
             one(&defs)?;

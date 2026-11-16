@@ -173,7 +173,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         fd.params.clear();
         // An item adapter closes the source function's generic arguments. Keeping
         // the enclosing generic declaration here leaves a body-less generic row;
-        // a FunctionRef emitted by open StaticFn identity then has no native body.
+        // a StaticFn described in a generic body then names no native body.
         if close_generics {
             fd.generics.clear();
             fd.has_region_parameters = false;

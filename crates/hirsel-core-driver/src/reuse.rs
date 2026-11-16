@@ -16,15 +16,14 @@ use std::collections::BTreeSet;
 ///   (`lookups`);
 /// - the compiler, core and package namespaces (`environment`);
 /// - and one field per form whose lowering reads beyond its resolved names,
-///   present only for bodies that name that form: `functions`, `twins` and
-///   `siblings`.
+///   present only for bodies that name that form: `twins` and `siblings`.
 ///
 /// A new read of a table over all functions, types, instances or modules, or of
 /// an item found by a path lowering builds itself, gets a field here (or a
 /// `hirsel_core_front::SIBLING_READS` row) in the same change. This is a list,
 /// not a recorded per-body read set, because the key is computed before the body
 /// is lowered: a recorded set would have to be stored with each record and its
-/// inputs re-hashed on every lookup (a second key phase on every hit), and three
+/// inputs re-hashed on every lookup (a second key phase on every hit), and two
 /// forms read beyond their names (see the reuse-history-fault-1031 audit).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DefinitionKey {
@@ -34,10 +33,6 @@ pub struct DefinitionKey {
     pub signatures: ContentHash,
     pub lookups: ContentHash,
     pub environment: ContentHash,
-    /// The program's function table (`Keys::functions`), for a body that names
-    /// `core.code.identity`: that lowering dispatches over every function item
-    /// the program declares, not over the names the body resolves.
-    pub functions: Option<ContentHash>,
     /// The program's twin declarations (`Keys::twins`), for a body that names
     /// `core.clone` or `core.clone_in`: MEM-17's selection finds an untwinned
     /// type's twin among every declaration (`twin_of`), not among the names
@@ -271,10 +266,6 @@ pub(crate) struct Keys {
     forms: Vec<(DefinitionId, Form)>,
     /// `forms`' definitions as a bit set, tested for every name of every body.
     form_bits: Vec<u64>,
-    /// The function items a `code.identity` dispatch chooses from, in program
-    /// order: the image's, then each request item's header and whether it has
-    /// a body.
-    functions: ContentHash,
     /// The twin pairs MEM-17's selection chooses from, in program order: the
     /// image's, then each request declaration's path and its `@twin` target.
     twins: ContentHash,
@@ -284,8 +275,6 @@ pub(crate) struct Keys {
 /// What a form's lowering reads beyond its names.
 #[derive(Clone, Copy)]
 enum Form {
-    /// `core.code.identity`: the program's function table.
-    Identity,
     /// `core.clone` and `core.clone_in`: the program's twin pairs.
     Clone,
     /// A `hirsel_core_front::SIBLING_READS` callee: the `Siblings` at this
@@ -303,7 +292,6 @@ struct Siblings {
 /// the sibling reads its `Form::Siblings` entries index.
 fn forms(index: &NameIndex) -> (Vec<(DefinitionId, Form)>, Vec<Siblings>) {
     let rows = [
-        ("core", "code", "identity", Form::Identity),
         ("core", "core", "clone", Form::Clone),
         ("core", "core", "clone_in", Form::Clone),
     ]
@@ -378,11 +366,8 @@ impl Keys {
             items.push((0u8, keys.module_identity(index, m.id)?));
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
                 let digest = header_identity(item);
-                // A function item with a body is a `code.identity` candidate;
-                // its header tokens alone do not say whether it has one.
+                items.push((1u8, digest));
                 let end = header_end(item);
-                let has_body = end < item.source_text().len();
-                items.push((1u8 + u8::from(has_body), digest));
                 let Some(definition) = index.item_definition(m.id, ordinal as u32, item) else {
                     let root = item.tree.node(item.root);
                     if root.token.is_none()
@@ -446,7 +431,7 @@ impl Keys {
                 headers.rows[definition.0 as usize] = Some(Header {
                     digest,
                     source: body_identity(item),
-                    has_body,
+                    has_body: end < item.source_text().len(),
                     header_end: end as u32,
                     site: index.get(definition).site,
                     body_reads: body_reads.into_iter().collect(),
@@ -480,16 +465,12 @@ impl Keys {
         keys.headers = headers;
         keys.anchors = anchors;
         keys.environment = environment;
-        keys.items = ContentHash::of_parts_stream("hirsel.key-items.v2", |parts| {
+        keys.items = ContentHash::of_parts_stream("hirsel.key-items.v1", |parts| {
             for (tag, hash) in &items {
                 parts.part_byte_slice(*tag, &hash.0);
             }
             Ok(())
         })?;
-        keys.functions = ContentHash::of_parts(
-            "hirsel.key-functions.v1",
-            [&encode(&(image, keys.items))?[..]],
-        );
         keys.twins = ContentHash::of_parts("hirsel.key-twins.v1", [&encode(&(image, twins))?[..]]);
         (keys.forms, keys.siblings) = forms(index);
         if let Some(last) = keys.forms.iter().map(|f| f.0.0 as usize).max() {
@@ -517,7 +498,6 @@ impl Keys {
             items: ContentHash::default(),
             forms: vec![],
             form_bits: vec![],
-            functions: ContentHash::default(),
             twins: ContentHash::default(),
             siblings: vec![],
         }
@@ -900,14 +880,13 @@ impl Keys {
         // Program inputs a body's lowering reads beyond its resolved names'
         // closures, each keyed only for the bodies that name the form that
         // reads it.
-        let (mut functions, mut twins, mut siblings) = (None, None, vec![]);
-        for &(id, form) in self
+        let (mut twins, mut siblings) = (None, vec![]);
+        for &(_, form) in self
             .forms
             .iter()
             .filter(|f| named.contains(&(f.0.0 as usize)))
         {
             match form {
-                Form::Identity => functions = Some(self.functions),
                 Form::Clone => twins = Some(self.twins),
                 Form::Siblings(k) => siblings.push(self.sibling_reads(index, k)?),
             }
@@ -919,7 +898,6 @@ impl Keys {
             signatures,
             lookups,
             environment: self.environment,
-            functions,
             twins,
             // One callee's hash is its own; several are hashed together.
             siblings: match siblings[..] {

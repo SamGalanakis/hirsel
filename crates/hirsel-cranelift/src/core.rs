@@ -98,6 +98,8 @@ pub(super) struct Tables<'a> {
     signatures: &'a [abi::Signature],
     functions: &'a [cranelift_module::FuncId],
     statics: &'a [cranelift_module::DataId],
+    /// By function, its static descriptor when a body of this unit describes it.
+    descriptors: &'a [Option<cranelift_module::DataId>],
     glues: &'a drop::Glues,
     task_entries: &'a task_entry::Glues,
     allocators: &'a [fast::Allocator],
@@ -244,6 +246,58 @@ pub fn emit_object_with_charge_observation(
         &(),
     )
 }
+/// Each function a body of this unit describes (`Inst::DescriptorRef`), its
+/// descriptor `{code, length}` then the identity bytes, defined weak beside
+/// the function's code identity: every unit that describes it defines it, and
+/// the linker keeps one per program, as it keeps one body.
+fn descriptors(
+    object: &mut ObjectModule,
+    input: &c::Module,
+    symbols: &[String],
+    functions: &[cranelift_module::FuncId],
+) -> Result<Vec<Option<cranelift_module::DataId>>> {
+    let mut descriptors = vec![None; input.functions.len()];
+    let mut defined = std::collections::HashSet::new();
+    for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for inst in &body.insts {
+            let c::Inst::DescriptorRef {
+                function, identity, ..
+            } = *inst
+            else {
+                continue;
+            };
+            if descriptors[function.index()].is_some() {
+                continue;
+            }
+            let id = object
+                .declare_data(
+                    &format!("{}$static", symbols[function.index()]),
+                    Linkage::Preemptible,
+                    false,
+                    false,
+                )
+                .map_err(error)?;
+            descriptors[function.index()] = Some(id);
+            // Two rows of one code identity name one descriptor.
+            if !defined.insert(id) {
+                continue;
+            }
+            let bytes = &input.statics[identity.index()].bytes;
+            let mut image = Vec::with_capacity(16 + bytes.len());
+            image.extend_from_slice(&[0; 8]);
+            image.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            image.extend_from_slice(bytes);
+            let mut data = DataDescription::new();
+            data.define(image.into_boxed_slice());
+            data.set_align(8);
+            let code = object.declare_func_in_data(functions[function.index()], &mut data);
+            data.write_function_addr(0, code);
+            object.define_data(id, &data).map_err(error)?;
+        }
+    }
+    Ok(descriptors)
+}
+
 fn emit(
     input: &c::Module,
     symbols: &[String],
@@ -320,6 +374,7 @@ fn emit(
         object.define_data(id, &desc).map_err(error)?;
         statics.push(id);
     }
+    let descriptors = descriptors(&mut object, input, symbols, &functions)?;
     drop(static_setup);
     let glues = {
         let _span = observer.enter("glue_declarations");
@@ -333,6 +388,7 @@ fn emit(
         signatures: &signatures,
         functions: &functions,
         statics: &statics,
+        descriptors: &descriptors,
         glues: &glues,
         task_entries: &task_entries,
         allocators: &allocators,

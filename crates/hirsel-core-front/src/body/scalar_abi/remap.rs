@@ -7,6 +7,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         Inst::Const { result, .. }
         | Inst::ReadStatic { result, .. }
         | Inst::FunctionRef { result, .. }
+        | Inst::DescriptorRef { result, .. }
         | Inst::Read { result, .. }
         | Inst::Pointer { result, .. }
         | Inst::RegionOpen { result } => {

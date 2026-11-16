@@ -40,6 +40,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub slots: Vec<ir::StackSlot>,
     pub functions: &'c [cranelift_module::FuncId],
     pub statics: &'c [cranelift_module::DataId],
+    pub descriptors: &'c [Option<cranelift_module::DataId>],
     pub signatures: &'c [abi::Signature],
     pub glues: &'c drop::Glues,
     pub task_entries: &'c task_entry::Glues,
@@ -214,6 +215,7 @@ pub(super) fn emit(
         slots,
         functions,
         statics,
+        descriptors: tables.descriptors,
         signatures,
         context,
         caller_site,
@@ -453,6 +455,15 @@ impl Function<'_, '_, '_> {
                     self.functions[function.index()],
                 );
                 let v = self.b.ins().func_addr(types::I64, func);
+                self.set(result, v);
+            }
+            Inst::DescriptorRef {
+                result, function, ..
+            } => {
+                let data = self.descriptors[function.index()]
+                    .expect("every described function of the unit has a descriptor");
+                let global = self.object.declare_data_in_func(data, self.b.func);
+                let v = self.b.ins().symbol_value(types::I64, global);
                 self.set(result, v);
             }
             Inst::Unary {

@@ -98,6 +98,12 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
         } else {
             config.stop_fd
         });
+        // Installation: a provider missing a callback is refused here, before
+        // any operation could use it (REPLAY-SPEC section 3).
+        crate::provider::install(config.provider);
+        for n in 0..config.capabilities_len {
+            crate::provider::install((*config.capabilities.add(n)).provider);
+        }
         let failed = crate::tasks::run_root(
             &mut context,
             invoke,

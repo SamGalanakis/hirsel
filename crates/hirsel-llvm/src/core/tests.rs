@@ -481,8 +481,11 @@ static HirselCoreStep file_issue(void *state, HirselCoreHostRequest *r, uint64_t
 static HirselCoreHostOutcome file_deliver(void *state, HirselCoreHostRequest *r, HirselCoreHostOutcome out) {
     (void)state; if(r->operation==3) file_deliveries++; return out;
 }
+static HirselCoreWait file_wait(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; return (HirselCoreWait){0,0}; }
+static HirselCoreStep file_resume(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; __builtin_abort(); }
+static HirselCoreHostOutcome file_abort(void *s,HirselCoreHostRequest *r,uint64_t t,uint8_t why) { (void)s;(void)r;(void)t;(void)why; __builtin_abort(); }
 static void prepare_files(HirselCoreContext *ctx, uint64_t last) {
-    HirselCoreProvider provider={.issue=file_issue,.deliver=file_deliver};
+    HirselCoreProvider provider={.wait=file_wait,.issue=file_issue,.resume=file_resume,.abort=file_abort,.deliver=file_deliver};
     for(uint64_t i=1;i<=last;i++) {
         HirselCoreHostRequest request={.operation=0,.handle=i};
         HirselCoreHostOutcome out=hirsel_core_host_file_open(ctx,&provider,&request);
@@ -2802,9 +2805,12 @@ static HirselCoreStep clock_issue(void *state, HirselCoreHostRequest *request, u
 static HirselCoreHostOutcome clock_deliver(void *state, HirselCoreHostRequest *request, HirselCoreHostOutcome out) {
     (void)state; assert(request->operation==10); return out;
 }
+static HirselCoreWait clock_wait(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; return (HirselCoreWait){0,0}; }
+static HirselCoreStep clock_resume(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; __builtin_abort(); }
+static HirselCoreHostOutcome clock_abort(void *s,HirselCoreHostRequest *r,uint64_t t,uint8_t why) { (void)s;(void)r;(void)t;(void)why; __builtin_abort(); }
 R1 EXTERNAL(void *context, uint64_t mode, uint64_t caller_site) {
     (void)caller_site;
-    HirselCoreProvider provider={.issue=clock_issue,.deliver=clock_deliver};
+    HirselCoreProvider provider={.wait=clock_wait,.issue=clock_issue,.resume=clock_resume,.abort=clock_abort,.deliver=clock_deliver};
     HirselCoreHostRequest request={.operation=10,.handle=mode};
     HirselCoreHostOutcome out=hirsel_core_host(context,&provider,&request);
     if(out.status) {

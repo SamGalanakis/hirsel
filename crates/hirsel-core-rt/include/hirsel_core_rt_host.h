@@ -22,6 +22,14 @@ typedef struct {
     uint64_t written;
     uint8_t status;
 } HirselCoreHostOutcome;
+/* Four-state provider ABI (C cancelled at entry, W waiting, I issued, D delivered).
+   Wait kind: 0 Ready, 1 Until(deadline_ns), 2 Park. Step kind: 0 Done, 1 Pending
+   (deadline_ns 0 is none). Deadlines are host CLOCK_MONOTONIC nanoseconds. abort why:
+   1 Cancel, 2 Deadline. All five callbacks are required: hirsel_core_run refuses a
+   provider with a NULL one ("run stop: Provider", status 102) before main. wait,
+   resume and abort are called by the scheduler at the moment of a wake, outside any
+   task, and must not block; issue and deliver run in the task; deliver runs exactly
+   once per operation that reaches D. */
 typedef struct { uint8_t kind; uint64_t deadline_ns; } HirselCoreWait;
 typedef struct { uint8_t kind; HirselCoreHostOutcome outcome; uint64_t deadline_ns; } HirselCoreStep;
 typedef struct {
@@ -32,6 +40,11 @@ typedef struct {
     HirselCoreHostOutcome (*abort)(void *, HirselCoreHostRequest *, uint64_t, uint8_t);
     HirselCoreHostOutcome (*deliver)(void *, HirselCoreHostRequest *, HirselCoreHostOutcome);
 } HirselCoreProvider;
+/* Readies the Park or Pending operation `token` (unique per operation in the
+   process). Any thread, task or callback may call it; the operation's scheduler
+   re-runs wait or resume at its next turn, before any task is popped. Readies that
+   arrive together are one wake; an unknown or finished token is ignored; a ready
+   that arrives before the operation parks applies at its next park. */
 void hirsel_core_ready(uint64_t token);
 HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
 /* FORM #50: outcome layout value@0, error.tag@8, error.code@12, written@16,

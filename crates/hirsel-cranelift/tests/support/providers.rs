@@ -51,7 +51,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
     let mut source = include_str!("providers.c").to_owned();
     declare_functions(&mut source, module);
     let mut main =
-        String::from("int main(void) { HirselCoreProvider provider={&world,0,issue,0,0,deliver};\n");
+        String::from("int main(void) { HirselCoreProvider provider={&world,world_wait,issue,world_resume,world_abort,deliver};\n");
     let mut want = Vec::new();
     for (i, run) in runs.iter().enumerate() {
         expected(run, &mut want);

@@ -2,26 +2,17 @@
 //! canonicalization. openat2 resolves every traversal beneath its granted fd.
 use crate::provider::*;
 use std::{
-    cell::Cell,
     collections::BTreeMap,
     ffi::CString,
     io,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
     path::Path,
-    time::Instant,
 };
 pub(crate) const TEMP_ATTEMPTS: usize = 128;
 
-thread_local! {
-    static CURRENT_CONTEXT: Cell<*mut crate::Context> = const { Cell::new(std::ptr::null_mut()) };
-}
-
-pub(crate) fn set_current_context(context: *mut crate::Context) -> *mut crate::Context {
-    CURRENT_CONTEXT.with(|current| current.replace(context))
-}
-
 pub struct OsProvider {
-    clock: Instant,
+    /// Host CLOCK_MONOTONIC at construction: mono_ns and sleep deadlines count from it.
+    epoch: u64,
     directories: BTreeMap<u64, OwnedFd>,
     files: BTreeMap<u64, OwnedFd>,
     next: u64,
@@ -36,7 +27,7 @@ impl OsProvider {
     }
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
         Self {
-            clock: Instant::now(),
+            epoch: monotonic_ns(),
             directories: BTreeMap::new(),
             files: BTreeMap::new(),
             next: 1,
@@ -75,10 +66,10 @@ impl OsProvider {
     pub fn provider(&mut self) -> Provider {
         Provider {
             state: (self as *mut Self).cast(),
-            wait: Some(wait),
+            wait,
             issue,
-            resume: None,
-            abort: None,
+            resume,
+            abort,
             deliver,
         }
     }
@@ -335,7 +326,7 @@ impl OsProvider {
     }
 
     fn monotonic_ns(&self) -> u64 {
-        u64::try_from(self.clock.elapsed().as_nanos()).unwrap_or(u64::MAX)
+        monotonic_ns().saturating_sub(self.epoch)
     }
 }
 
@@ -361,41 +352,48 @@ pub(crate) fn monotonic_ns() -> u64 {
     monotonic_clock_ns().unwrap_or(u64::MAX)
 }
 
+/// SLEEP_UNTIL waits until its deadline (program mono_ns, from `epoch`), given to
+/// the scheduler as host CLOCK_MONOTONIC; it is Ready once the deadline has
+/// passed. Every other operation is Ready at once.
 /// # Safety
 /// State is the run's live OsProvider; request meets the provider ABI contract.
 pub unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, _: u64) -> Wait {
-    if unsafe { (*request).operation } != SLEEP_UNTIL {
-        return Wait {
-            kind: WAIT_READY,
-            deadline_ns: 0,
-        };
-    }
-    let deadline = unsafe {
-        if (*request).buffer.len >= 8 {
-            *(*request).buffer.data.cast::<u64>()
+    // SAFETY: pinned request and provider state.
+    unsafe {
+        let request = &*request;
+        if request.operation != SLEEP_UNTIL || request.buffer.len < 8 {
+            return Wait::default();
+        }
+        let deadline = request.buffer.data.cast::<u64>().read_unaligned();
+        let epoch = (*state.cast::<OsProvider>()).epoch;
+        let at = epoch.saturating_add(deadline);
+        if at <= monotonic_ns() {
+            Wait::default()
         } else {
-            0
-        }
-    };
-    let now = unsafe { (&*state.cast::<OsProvider>()).clock.elapsed().as_nanos() as u64 };
-    if deadline <= now {
-        Wait {
-            kind: WAIT_READY,
-            deadline_ns: 0,
-        }
-    } else {
-        Wait {
-            kind: WAIT_UNTIL,
-            deadline_ns: deadline,
+            Wait {
+                kind: WAIT_UNTIL,
+                deadline_ns: at,
+            }
         }
     }
 }
+/// Every OS issue is Done at once (SLEEP_UNTIL has no effect to issue).
+/// # Safety
+/// As `wait`.
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, _: u64) -> Step {
     Step {
         kind: STEP_DONE,
         outcome: unsafe { crate::tasks::host_operation(state, request, issue_on_stack) },
         deadline_ns: 0,
     }
+}
+/// The OS provider never answers Pending, so the scheduler never resumes or
+/// aborts one of its operations.
+unsafe extern "C" fn resume(_: *mut u8, _: *mut Request, _: u64) -> Step {
+    unreachable!("the OS provider never answers Pending")
+}
+unsafe extern "C" fn abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
+    unreachable!("the OS provider never answers Pending")
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.

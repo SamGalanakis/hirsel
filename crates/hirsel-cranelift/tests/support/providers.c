@@ -104,6 +104,9 @@ static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) 
     return (HirselCoreHostOutcome){0};
 }
 static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) { (void)token; HirselCoreStep s={0}; s.outcome=legacy_issue(state,r); return s; }
+static HirselCoreWait world_wait(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; return (HirselCoreWait){0,0}; }
+static HirselCoreStep world_resume(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; __builtin_abort(); }
+static HirselCoreHostOutcome world_abort(void *s,HirselCoreHostRequest *r,uint64_t t,uint8_t why) { (void)s;(void)r;(void)t;(void)why; __builtin_abort(); }
 static HirselCoreHostOutcome deliver(void *state,HirselCoreHostRequest *r,HirselCoreHostOutcome out) {
     struct world *w=state;
     if(!w->seeding && w->matrix!=2) w->deliveries++;

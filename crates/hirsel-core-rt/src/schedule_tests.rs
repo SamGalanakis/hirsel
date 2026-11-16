@@ -519,10 +519,10 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
             let s = input.cast::<*mut Script>().read();
             let provider = Provider {
                 state: s.cast(),
-                wait: None,
+                wait: crate::provider::immediate::wait,
                 issue: step_issue,
-                resume: None,
-                abort: None,
+                resume: crate::provider::immediate::resume,
+                abort: crate::provider::immediate::abort,
                 deliver: delivery,
             };
             let mut byte = 0u8;

@@ -65,20 +65,12 @@ fn close_request(handle: u64, site: u64) -> Request {
         site,
     }
 }
-unsafe fn issue(file: File, request: *mut Request) -> Outcome {
-    // SAFETY: caller pins the request and provider state through both callbacks.
-    unsafe {
-        let result =
-            (file.provider.issue)(file.provider.state, request, crate::tasks::current_id());
-        (file.provider.deliver)(file.provider.state, request, result.outcome)
-    }
-}
 unsafe fn close(context: *mut Context, file: File) {
-    // SAFETY: sole file owner; cleanup cannot observe cancellation. OS issue uses
-    // the scheduler's guarded foreign-call stack, including during finalizers.
+    // SAFETY: sole file owner; cleanup cannot observe cancellation, so the
+    // driver's C check and W/I cancellation do not apply under the shield.
     unsafe {
         (*context).cancel_shield += 1;
-        let _ = issue(file, &mut close_request(file.handle, 0));
+        let _ = hirsel_core_host(context, &file.provider, &mut close_request(file.handle, 0));
         (*context).cancel_shield -= 1;
     }
 }
@@ -96,27 +88,20 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
 ) -> Outcome {
     // SAFETY: exclusive operation borrows; no registry borrow spans a callback.
     unsafe {
-        if crate::tasks::check_cancel(context, (*request).site) != 0 {
-            return Outcome {
-                status: 1,
-                ..Outcome::default()
-            };
-        }
+        let (issued, mut result) = drive(context, provider, request);
         let provider = *provider;
-        let issued = (provider.issue)(provider.state, request, crate::tasks::current_id());
-        let mut result = (provider.deliver)(provider.state, request, issued.outcome);
         if result.status == 0 && result.error == IoError::OK {
             result.value = (*(*context).host_files).insert(File {
                 provider,
                 handle: result.value,
             });
-        } else if issued.outcome.status == 0 && issued.outcome.error == IoError::OK {
+        } else if issued.status == 0 && issued.error == IoError::OK {
             // Delivery failed after a committed open: the unpublished file is ours.
             close(
                 context,
                 File {
                     provider,
-                    handle: issued.outcome.value,
+                    handle: issued.value,
                 },
             );
         }
@@ -152,7 +137,7 @@ pub unsafe extern "C" fn hirsel_core_host_file(
                     ..Outcome::default()
                 };
             }
-            issue(owned, request)
+            hirsel_core_host(context, &owned.provider, request)
         } else {
             hirsel_core_host(context, &owned.provider, request)
         }

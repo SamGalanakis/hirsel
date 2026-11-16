@@ -83,10 +83,10 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
         // provider even after this local vtable disappears at entry return.
         let provider = Provider {
             state: track.cast(),
-            wait: None,
+            wait: crate::provider::immediate::wait,
             issue,
-            resume: None,
-            abort: None,
+            resume: crate::provider::immediate::resume,
+            abort: crate::provider::immediate::abort,
             deliver,
         };
         if mode == "refusal" {

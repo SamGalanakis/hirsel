@@ -598,10 +598,10 @@ fn mkdtemp_bounds_and_pending_cancellation_happen_before_issue() {
     }
     let provider = Provider {
         state: std::ptr::null_mut(),
-        wait: None,
+        wait: crate::provider::immediate::wait,
         issue: step_forbidden,
-        resume: None,
-        abort: None,
+        resume: crate::provider::immediate::resume,
+        abort: crate::provider::immediate::abort,
         deliver,
     };
     for cancel in [false, true] {
@@ -696,10 +696,10 @@ fn issued_operations_deliver_even_when_cancellation_arrives_at_delivery() {
     };
     let provider = Provider {
         state: (&mut state as *mut Script).cast(),
-        wait: None,
+        wait: crate::provider::immediate::wait,
         issue: step_issue,
-        resume: None,
-        abort: None,
+        resume: crate::provider::immediate::resume,
+        abort: crate::provider::immediate::abort,
         deliver: delivery,
     };
     let mut bytes = *b"abcdef";
@@ -794,10 +794,10 @@ fn scripted_host_errors_preserve_the_named_partial_effect_contracts() {
         };
         let provider = Provider {
             state: (&mut state as *mut Script).cast(),
-            wait: None,
+            wait: crate::provider::immediate::wait,
             issue: step_issue,
-            resume: None,
-            abort: None,
+            resume: crate::provider::immediate::resume,
+            abort: crate::provider::immediate::abort,
             deliver,
         };
         // SAFETY: live script and caller capacity for both provider phases.

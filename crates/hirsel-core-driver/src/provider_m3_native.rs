@@ -75,6 +75,12 @@ mod provider_m3 {
             "delivery-write",
             "blocked-receive",
             "blocked-send",
+            // REPLAY-SPEC section 3 (a): a sleep does not block the scheduler,
+            // directly or through a five-callback wrapper; (d): every tag is
+            // delivered exactly once through the wrapper.
+            "s0-sleep-direct",
+            "s0-sleep-wrapper",
+            "s0-deliver",
         ] {
             let output = bounded_output(Command::new(&built.executable).arg(case));
             assert_eq!(
@@ -89,6 +95,15 @@ mod provider_m3 {
                 "{case}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+        }
+        // F3: each of the five callbacks is required; a NULL one stops the run
+        // at install, before main, with the named FAIL-15 stop.
+        for callback in 0..5 {
+            let case = format!("s0-null-{callback}");
+            let output = bounded_output(Command::new(&built.executable).arg(&case));
+            assert_eq!(output.status.code(), Some(102), "{case}: {output:?}");
+            assert!(output.stdout.is_empty(), "{case}: {output:?}");
+            assert_eq!(output.stderr, b"run stop: Provider\n", "{case}");
         }
     }
     #[test]

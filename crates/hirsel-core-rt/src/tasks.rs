@@ -11,8 +11,11 @@ use std::{
     alloc::{Layout, alloc, dealloc},
     cell::Cell as Local,
     ptr::{self, NonNull},
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
-    time::{Duration, Instant},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 #[repr(C)]
@@ -124,12 +127,14 @@ impl Default for SchedulerProvider {
     }
 }
 thread_local! { static CURRENT: Local<*mut Task> = const { Local::new(ptr::null_mut()) }; }
-static PROVIDER_RUN: AtomicPtr<Scheduler> = AtomicPtr::new(ptr::null_mut());
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Ready,
     Running,
     Blocked,
+    /// Parked in a provider operation's W or I. Only that operation's own wakes
+    /// (its timer, its token, a cancellation request) move it; `wake` does not.
+    Provider,
     Ended,
 }
 pub struct Task {
@@ -141,7 +146,9 @@ pub struct Task {
     run: *mut Scheduler,
     ready: *mut Task,
     timer_next: *mut Task,
-    timer_deadline: Option<Instant>,
+    /// Host CLOCK_MONOTONIC nanoseconds.
+    timer_deadline: Option<u64>,
+    operation: *mut Operation,
     all: *mut Task,
     state: State,
     id: u64,
@@ -168,7 +175,10 @@ struct Scheduler {
     all: *mut Task,
     next: u64,
     provider: SchedulerProvider,
-    worker: Option<std::thread::Thread>,
+    readies: Arc<Readies>,
+    /// Cancellation requests for tasks parked in a provider operation, in
+    /// request order, taken at the next scheduler turn.
+    cancels: Vec<*mut Task>,
 }
 const HOST_STACK_BYTES: usize = 64 << 10;
 impl Scheduler {
@@ -245,17 +255,12 @@ impl Scheduler {
         }
     }
 
-    unsafe fn insert_timer(&mut self, task: *mut Task, deadline: Instant) {
-        // SAFETY: the task is exclusively blocked and is not in either queue.
+    unsafe fn insert_timer(&mut self, task: *mut Task, deadline: u64) {
+        // SAFETY: the task is exclusively parked and is not in the timer list.
         unsafe {
             (*task).timer_deadline = Some(deadline);
             let mut link = &raw mut self.timers;
-            while !(*link).is_null()
-                && (*(*link))
-                    .timer_deadline
-                    .as_ref()
-                    .is_some_and(|at| *at <= deadline)
-            {
+            while !(*link).is_null() && (*(*link)).timer_deadline.is_some_and(|at| at <= deadline) {
                 link = &raw mut (**link).timer_next;
             }
             (*task).timer_next = *link;
@@ -281,10 +286,51 @@ impl Scheduler {
         }
     }
 
-    unsafe fn wake_timers(&mut self) {
-        // SAFETY: the timer list is sorted and owned by the idle scheduler.
+    /// One scheduler turn's wakes, before any pop: readiness, then cancellation
+    /// requests, then expired timers. Readiness first is the network rule that
+    /// readiness wins a tie with a deadline (net-proposal-999 D3).
+    unsafe fn take_wakes(&mut self) {
+        // SAFETY: no task is running; every parked operation's frame is pinned.
         unsafe {
-            let now = Instant::now();
+            if self.readies.pending.swap(false, Ordering::Acquire) {
+                let mut tokens = std::mem::take(&mut *self.readies.lock());
+                // Readies of one token in one turn are one wake, at its first
+                // ready; wakes run in the order the readies arrived.
+                let mut at = 0;
+                while at < tokens.len() {
+                    if tokens[..at].contains(&tokens[at]) {
+                        tokens.remove(at);
+                    } else {
+                        at += 1;
+                    }
+                }
+                for token in tokens {
+                    let mut task = self.all;
+                    while !task.is_null() {
+                        let operation = (*task).operation;
+                        if !operation.is_null() && (*operation).token == token {
+                            self.wake_operation(task, Wake::Ready);
+                            break;
+                        }
+                        task = (*task).all;
+                    }
+                }
+            }
+            if !self.cancels.is_empty() {
+                for task in std::mem::take(&mut self.cancels) {
+                    if (*task).state == State::Provider {
+                        self.wake_operation(task, Wake::Cancel);
+                    }
+                }
+            }
+            if self.timers.is_null() {
+                return;
+            }
+            let now = crate::os::monotonic_ns();
+            // Detach every expired timer first: a wait that answers Until(now)
+            // again re-arms for the next turn, so the other tasks still run.
+            let mut expired = ptr::null_mut::<Task>();
+            let mut tail = &raw mut expired;
             while !self.timers.is_null()
                 && (*self.timers)
                     .timer_deadline
@@ -294,20 +340,418 @@ impl Scheduler {
                 self.timers = (*task).timer_next;
                 (*task).timer_next = ptr::null_mut();
                 (*task).timer_deadline = None;
-                self.ready(task);
+                *tail = task;
+                tail = &raw mut (*task).timer_next;
+            }
+            while !expired.is_null() {
+                let task = expired;
+                expired = (*task).timer_next;
+                (*task).timer_next = ptr::null_mut();
+                self.wake_operation(task, Wake::Timer);
             }
         }
     }
 
-    fn wait_for_timer(&mut self) {
+    fn idle(&mut self) {
+        if self.readies.pending.load(Ordering::Acquire) || !self.cancels.is_empty() {
+            return;
+        }
+        // SAFETY: no task is running while the idle scheduler waits.
         let deadline = unsafe { self.timers.as_ref().and_then(|task| task.timer_deadline) };
+        // The scheduler thread waits here, never in a provider: readiness from
+        // any thread unparks it (hirsel_core_ready).
         match deadline {
-            Some(deadline) => {
-                std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
-                // SAFETY: no task is running while the idle scheduler waits.
-                unsafe { self.wake_timers() };
-            }
+            Some(deadline) => std::thread::park_timeout(Duration::from_nanos(
+                deadline.saturating_sub(crate::os::monotonic_ns()),
+            )),
             None => std::thread::park(),
+        }
+    }
+
+    unsafe fn runnable(&mut self, task: *mut Task, next: Next) {
+        // SAFETY: the task is parked; its operation frame is pinned.
+        unsafe {
+            self.remove_timer(task);
+            (*(*task).operation).phase = Phase::Runnable;
+            (*(*task).operation).next = next;
+            self.ready(task);
+        }
+    }
+
+    /// Run the parked operation's callback for one wake, at that moment and
+    /// outside any task. Returns true only when an operation that has just
+    /// entered W is ready at once: the task continues to issue without a
+    /// scheduling point, exactly as if it had not parked.
+    unsafe fn wake_operation(&mut self, task: *mut Task, wake: Wake) -> bool {
+        // SAFETY: called only by the idle scheduler with no current task; the
+        // operation frame lives on the parked task's stack until it delivers.
+        unsafe {
+            debug_assert!(CURRENT.get().is_null());
+            let op = (*task).operation;
+            let p = (*op).provider;
+            let (request, token) = ((*op).request, (*op).token);
+            match (*op).phase {
+                // Queued or running: its issue has not been called yet, or its
+                // outcome is decided. A ready taken now has nothing to report;
+                // readies the provider gives while issue runs are taken after
+                // the operation parks in I.
+                Phase::Runnable => false,
+                Phase::Entry | Phase::Waiting => {
+                    if wake == Wake::Cancel && !cancellable(task) {
+                        return false;
+                    }
+                    let w = (p.wait)(p.state, request, token);
+                    if wake == Wake::Cancel {
+                        // W -> C (CONC-7): the request fails the operation and
+                        // issue is never called, whatever wait answered.
+                        self.runnable(task, Next::Cancelled);
+                        return false;
+                    }
+                    match w.kind {
+                        WAIT_READY => {
+                            if (*op).phase == Phase::Entry {
+                                (*op).phase = Phase::Runnable;
+                                (*op).next = Next::Issue;
+                                return true;
+                            }
+                            self.runnable(task, Next::Issue);
+                            return false;
+                        }
+                        WAIT_UNTIL => {
+                            (*op).phase = Phase::Waiting;
+                            self.remove_timer(task);
+                            self.insert_timer(task, w.deadline_ns);
+                        }
+                        WAIT_PARK => {
+                            (*op).phase = Phase::Waiting;
+                            self.remove_timer(task);
+                        }
+                        _ => crate::process::stop(b"Provider"),
+                    }
+                    if wake == Wake::Parked {
+                        self.settle(task);
+                    }
+                    false
+                }
+                Phase::Issued => {
+                    match wake {
+                        Wake::Parked => self.settle(task),
+                        Wake::Ready => {
+                            let step = (p.resume)(p.state, request, token);
+                            self.stepped(task, step);
+                        }
+                        Wake::Cancel => {
+                            if cancellable(task) {
+                                let outcome = (p.abort)(p.state, request, token, ABORT_CANCEL);
+                                self.runnable(task, Next::Deliver(outcome));
+                            }
+                        }
+                        Wake::Timer => {
+                            let outcome = (p.abort)(p.state, request, token, ABORT_DEADLINE);
+                            self.runnable(task, Next::Deliver(outcome));
+                        }
+                    }
+                    false
+                }
+            }
+        }
+    }
+
+    /// An issue or resume answered: Done delivers, Pending stays in I with the
+    /// step's own deadline (0 is none).
+    unsafe fn stepped(&mut self, task: *mut Task, step: Step) {
+        // SAFETY: as wake_operation.
+        unsafe {
+            match step.kind {
+                STEP_DONE => self.runnable(task, Next::Deliver(step.outcome)),
+                STEP_PENDING => {
+                    self.remove_timer(task);
+                    (*(*task).operation).deadline = step.deadline_ns;
+                    if step.deadline_ns != 0 {
+                        self.insert_timer(task, step.deadline_ns);
+                    }
+                }
+                _ => crate::process::stop(b"Provider"),
+            }
+        }
+    }
+
+    /// A cancellation request made while the operation was not parked applies
+    /// at its park; readies are taken at the next turn, before it.
+    unsafe fn settle(&mut self, task: *mut Task) {
+        // SAFETY: as wake_operation.
+        unsafe {
+            let op = (*task).operation;
+            if cancel_pending((*task).context) {
+                self.wake_operation(task, Wake::Cancel);
+                if (*op).phase == Phase::Runnable {
+                    return;
+                }
+            }
+            if (*op).phase == Phase::Issued
+                && (*op).deadline != 0
+                && (*task).timer_deadline.is_none()
+            {
+                self.insert_timer(task, (*op).deadline);
+            }
+        }
+    }
+}
+
+/// A provider operation in W or I. It lives in the driver's frame on the task's
+/// stack, and the scheduler reaches it through `Task::operation` while parked.
+pub(crate) struct Operation {
+    provider: crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    token: u64,
+    phase: Phase,
+    /// The deadline of the step that left the operation in I; 0 is none.
+    deadline: u64,
+    next: Next,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Parked for its first wait, which the scheduler calls before any pop.
+    Entry,
+    /// W after Until or Park.
+    Waiting,
+    /// I after a Pending issue or resume.
+    Issued,
+    /// Not parked: running its issue or deliver, or queued to.
+    Runnable,
+}
+#[derive(Clone, Copy)]
+enum Next {
+    Issue,
+    Cancelled,
+    Deliver(crate::provider::Outcome),
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// The task has just parked its operation.
+    Parked,
+    Ready,
+    Cancel,
+    Timer,
+}
+use crate::provider::{
+    ABORT_CANCEL, ABORT_DEADLINE, MONO_NS, STEP_DONE, STEP_PENDING, Step, WAIT_PARK, WAIT_READY,
+    WAIT_UNTIL, WALL_MS,
+};
+/// wall_ms and mono_ns are not cancellation points (CONC-7; REPLAY-SPEC section 3, C).
+unsafe fn cancellable(task: *mut Task) -> bool {
+    // SAFETY: the parked operation's request is pinned by its driver frame.
+    unsafe {
+        let operation = (*(*(*task).operation).request).operation;
+        operation != WALL_MS && operation != MONO_NS
+    }
+}
+/// A request the task would observe at a cancellation point now.
+unsafe fn cancel_pending(context: *mut Context) -> bool {
+    // SAFETY: a parked task's context is pinned and not running.
+    unsafe {
+        (*context).cancel_requested.load(Ordering::Acquire)
+            && (*context).finalizing == 0
+            && (*context).cancel_shield == 0
+    }
+}
+
+/// Readiness tokens from `hirsel_core_ready`, which may run on any thread.
+struct Readies {
+    tokens: Mutex<Vec<u64>>,
+    pending: AtomicBool,
+    worker: std::thread::Thread,
+}
+impl Readies {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            tokens: Mutex::new(Vec::new()),
+            pending: AtomicBool::new(false),
+            worker: std::thread::current(),
+        })
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<u64>> {
+        self.tokens.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn push(&self, token: u64) {
+        self.lock().push(token);
+        self.pending.store(true, Ordering::Release);
+        self.worker.unpark();
+    }
+    /// Take `token` if it was readied; other tokens are not this waiter's.
+    fn take(&self, token: u64) -> bool {
+        self.pending.store(false, Ordering::Release);
+        let mut tokens = self.lock();
+        let found = tokens.contains(&token);
+        tokens.clear();
+        found
+    }
+}
+/// Every live waiter: each run's scheduler, and a scheduler-less operation
+/// while it waits. A token is unique in the process, so a ready reaches every
+/// waiter and only the one holding that operation acts on it.
+static WAITERS: Mutex<Vec<Arc<Readies>>> = Mutex::new(Vec::new());
+struct Registered(Arc<Readies>);
+impl Registered {
+    fn new() -> Self {
+        let readies = Readies::new();
+        WAITERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(readies.clone());
+        Self(readies)
+    }
+}
+impl Drop for Registered {
+    fn drop(&mut self) {
+        WAITERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|r| !Arc::ptr_eq(r, &self.0));
+    }
+}
+static TOKENS: AtomicU64 = AtomicU64::new(1);
+thread_local! { static ALONE: Registered = Registered::new(); }
+
+/// A provider readies the Park or Pending operation `token`. It may be called on
+/// any thread, from inside a callback or a task: it only records the token, and
+/// the operation's scheduler takes it at its next turn, before any task is
+/// popped. Taken in W it calls `wait`; in I it calls `resume`. Readies of one
+/// token in one turn are one wake. A token that is unknown, whose operation has
+/// delivered, or whose operation is queued or running (between parks) is
+/// dropped; a ready given while `issue` runs is taken after the operation parks
+/// in I, so `resume` follows it. `resume` may answer Pending again.
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_ready(token: u64) {
+    for waiter in WAITERS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        waiter.push(token);
+    }
+}
+
+/// W and I of one operation (REPLAY-SPEC section 3, driver steps 2 to 6). Runs
+/// in the task; `wait`, `resume` and `abort` are called by the scheduler. None
+/// means the operation was cancelled in W.
+/// # Safety
+/// The provider is installed; request is pinned through delivery.
+pub(crate) unsafe fn provider_operation(
+    context: *mut Context,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+) -> Option<crate::provider::Outcome> {
+    let token = TOKENS.fetch_add(1, Ordering::Relaxed);
+    if token == u64::MAX {
+        crate::process::stop(b"HostHandles");
+    }
+    let task = CURRENT.get();
+    if task.is_null() {
+        // SAFETY: forwarded.
+        return unsafe { alone(context, provider, request, token) };
+    }
+    let mut op = Operation {
+        provider: *provider,
+        request,
+        token,
+        phase: Phase::Entry,
+        deadline: 0,
+        next: Next::Issue,
+    };
+    // SAFETY: the frame outlives every park; the scheduler clears no field.
+    unsafe {
+        (*task).operation = &mut op;
+        park_operation(task);
+        let produced = loop {
+            match op.next {
+                Next::Issue => {
+                    let step = (provider.issue)(provider.state, request, token);
+                    match step.kind {
+                        STEP_DONE => break Some(step.outcome),
+                        STEP_PENDING => {
+                            op.phase = Phase::Issued;
+                            op.deadline = step.deadline_ns;
+                            park_operation(task);
+                        }
+                        _ => crate::process::stop(b"Provider"),
+                    }
+                }
+                Next::Cancelled => break None,
+                Next::Deliver(outcome) => break Some(outcome),
+            }
+        };
+        (*task).operation = ptr::null_mut();
+        produced
+    }
+}
+unsafe fn park_operation(task: *mut Task) {
+    // SAFETY: the active task switches to its scheduler, which reads the
+    // operation before any other task runs.
+    unsafe {
+        (*task).state = State::Provider;
+        hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
+    }
+}
+/// An operation with no scheduler (a direct ABI caller, or run teardown): no
+/// other task exists, so this thread waits for the wake itself. Callbacks see
+/// no task, as under a scheduler. Cancellation is checked only at entry: no
+/// task exists to request it later.
+unsafe fn alone(
+    _context: *mut Context,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    token: u64,
+) -> Option<crate::provider::Outcome> {
+    let p = provider;
+    // This thread's waiter is registered before the first callback, so a ready
+    // from inside `wait` or `issue` is not lost. The token is fresh, so the
+    // stale tokens cleared here are other operations'.
+    let readies = ALONE.with(|r| r.0.clone());
+    readies.take(0);
+    // Wait until readiness (true) or the deadline (false).
+    let block = |deadline: Option<u64>| -> bool {
+        loop {
+            if readies.pending.load(Ordering::Acquire) && readies.take(token) {
+                return true;
+            }
+            match deadline {
+                Some(at) => {
+                    let now = crate::os::monotonic_ns();
+                    if now >= at {
+                        return false;
+                    }
+                    std::thread::park_timeout(Duration::from_nanos(at - now));
+                }
+                None => std::thread::park(),
+            }
+        }
+    };
+    // SAFETY: provider contract; request pinned by the caller.
+    unsafe {
+        loop {
+            let w = (p.wait)(p.state, request, token);
+            match w.kind {
+                WAIT_READY => break,
+                WAIT_UNTIL => {
+                    block(Some(w.deadline_ns));
+                }
+                WAIT_PARK => {
+                    block(None);
+                }
+                _ => crate::process::stop(b"Provider"),
+            }
+        }
+        let mut step = (p.issue)(p.state, request, token);
+        loop {
+            match step.kind {
+                STEP_DONE => return Some(step.outcome),
+                STEP_PENDING => {
+                    let deadline = (step.deadline_ns != 0).then_some(step.deadline_ns);
+                    if block(deadline) {
+                        step = (p.resume)(p.state, request, token);
+                    } else {
+                        return Some((p.abort)(p.state, request, token, ABORT_DEADLINE));
+                    }
+                }
+                _ => crate::process::stop(b"Provider"),
+            }
         }
     }
 }
@@ -440,6 +884,11 @@ pub(crate) fn current_id() -> u64 {
     // SAFETY: TLS pins the live currently running task.
     unsafe { (*task).id }
 }
+/// Whether a task is running on this thread (tests assert where callbacks run).
+#[cfg(test)]
+pub(crate) fn in_task() -> bool {
+    !CURRENT.get().is_null()
+}
 pub(crate) fn identity() -> u64 {
     // SAFETY: channel/task creation occurs in an active run.
     let task = CURRENT.get();
@@ -468,50 +917,6 @@ pub unsafe fn checkpoint(blocked: bool) {
     }
 }
 
-/// Park the current task for a host wait. The scheduler, rather than the host
-/// stack, owns the sleep so other ready tasks can run on the worker.
-pub(crate) unsafe fn sleep_for(_context: *mut Context, duration: Duration) {
-    let task = CURRENT.get();
-    if task.is_null() {
-        std::thread::sleep(duration);
-        return;
-    }
-    // SAFETY: the active task owns its scheduler and fiber while it parks.
-    unsafe {
-        let run = (*task).run;
-        (*run).insert_timer(task, Instant::now() + duration);
-        (*task).state = State::Blocked;
-        hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
-    }
-}
-pub(crate) unsafe fn park_provider(_token: u64) {
-    let task = CURRENT.get();
-    if task.is_null() {
-        std::thread::yield_now();
-        return;
-    }
-    unsafe {
-        let run = (*task).run;
-        PROVIDER_RUN.store(run, Ordering::Release);
-        (*task).state = State::Blocked;
-        hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
-    }
-}
-#[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_ready(_token: u64) {
-    // Providers call this from their readiness callback. The current worker's
-    // scheduler is woken; the next scheduler turn re-runs resume/wait.
-    let run = PROVIDER_RUN.load(Ordering::Acquire);
-    if run.is_null() {
-        return;
-    }
-    unsafe {
-        (*run).wake();
-        if let Some(worker) = &(*run).worker {
-            worker.unpark();
-        }
-    }
-}
 pub(crate) fn wake() {
     let task = CURRENT.get();
     if task.is_null() {
@@ -615,8 +1020,14 @@ pub unsafe fn run_root(
         all: ptr::null_mut(),
         next: 1,
         provider,
-        worker: Some(std::thread::current()),
+        readies: Readies::new(),
+        cancels: Vec::new(),
     };
+    let registered = Registered(run.readies.clone());
+    WAITERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(run.readies.clone());
     let descriptor = ValueLayout {
         bytes: input_bytes,
         align: 16,
@@ -633,6 +1044,7 @@ pub unsafe fn run_root(
         ready: ptr::null_mut(),
         timer_next: ptr::null_mut(),
         timer_deadline: None,
+        operation: ptr::null_mut(),
         all: ptr::null_mut(),
         state: State::Ready,
         id: 0,
@@ -655,7 +1067,6 @@ pub unsafe fn run_root(
     crate::peak::allocated((&*root as *const Task).cast(), size_of::<Task>());
     // SAFETY: root's stable allocation and both stacks stay live through the loop.
     unsafe {
-        PROVIDER_RUN.store(&mut run, Ordering::Release);
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
         root.refunds = Some(
@@ -670,16 +1081,22 @@ pub unsafe fn run_root(
         run.all = root_pointer;
         run.ready(root_pointer);
         let previous = CURRENT.get();
+        let mut direct = ptr::null_mut::<Task>();
         loop {
             if root.state == State::Ended {
                 break;
             }
-            run.wake_timers();
-            let task = run.pop();
-            if task.is_null() {
-                run.wait_for_timer();
-                continue;
-            }
+            let task = if direct.is_null() {
+                run.take_wakes();
+                let task = run.pop();
+                if task.is_null() {
+                    run.idle();
+                    continue;
+                }
+                task
+            } else {
+                std::mem::replace(&mut direct, ptr::null_mut())
+            };
             CURRENT.set(task);
             (*task).state = State::Running;
             abi::task_resume((*task).context);
@@ -687,12 +1104,15 @@ pub unsafe fn run_root(
             hirsel_stack::switch(&mut run.idle, (*task).sp);
             crate::fiber::guard((0, 0));
             CURRENT.set(previous);
+            if (*task).state == State::Provider && run.wake_operation(task, Wake::Parked) {
+                direct = task;
+            }
         }
         if root.failed == 0 {
             ptr::copy_nonoverlapping(root.result.as_ptr(), destination, result_bytes);
         }
         (*context).events = 0;
-        PROVIDER_RUN.store(ptr::null_mut(), Ordering::Release);
+        drop(registered);
         root.failed
     }
 }
@@ -739,6 +1159,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
             ready: ptr::null_mut(),
             timer_next: ptr::null_mut(),
             timer_deadline: None,
+            operation: ptr::null_mut(),
             all: (*run).all,
             state: State::Ready,
             id,
@@ -783,6 +1204,9 @@ pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
             .cancel_requested
             .store(true, Ordering::Release);
         event(CANCEL, (*task).id, 0);
+        if (*task).state == State::Provider {
+            (*(*task).run).cancels.push(task);
+        }
         wake();
     }
 }

@@ -46,7 +46,10 @@ static HirselCoreStep scripted_issue(void *state, HirselCoreHostRequest *r, uint
 static HirselCoreHostOutcome scripted_deliver(void *state, HirselCoreHostRequest *r, HirselCoreHostOutcome out) {
     (void)state; (void)r; return out;
 }
-static const HirselCoreProvider scripted={.issue=scripted_issue,.deliver=scripted_deliver};
+static HirselCoreWait scripted_wait(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; return (HirselCoreWait){0,0}; }
+static HirselCoreStep scripted_resume(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; __builtin_abort(); }
+static HirselCoreHostOutcome scripted_abort(void *s,HirselCoreHostRequest *r,uint64_t t,uint8_t why) { (void)s;(void)r;(void)t;(void)why; __builtin_abort(); }
+static const HirselCoreProvider scripted={.wait=scripted_wait,.issue=scripted_issue,.resume=scripted_resume,.abort=scripted_abort,.deliver=scripted_deliver};
 static const HirselCoreEntryGrant scripted_grants[7]={
     [0]={.kind=4,.provider=&scripted,.handle=10},
     [1]={.kind=10,.provider=&scripted},

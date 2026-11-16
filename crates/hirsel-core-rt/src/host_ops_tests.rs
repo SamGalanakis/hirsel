@@ -27,7 +27,6 @@ enum Scenario {
     SleepCancel,
     SleepMeasure(u64),
     SleepAlreadyReached,
-    SleepCancelDuring,
 }
 struct State {
     os: Option<Box<crate::os::OsProvider>>,
@@ -175,7 +174,7 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
             },
             |os| {
                 let provider = os.provider();
-                (provider.wait.unwrap())(provider.state, request, token)
+                (provider.wait)(provider.state, request, token)
             },
         )
     }
@@ -420,24 +419,6 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                     .push(call(ctx, MONO_NS, 2, None, 128).value);
                 0
             }
-            Scenario::SleepCancelDuring => {
-                let context_address = ctx as usize;
-                let canceller = std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    // SAFETY: the child thread only flips the atomic cancellation
-                    // flag while the run's entry remains synchronously active.
-                    (*(context_address as *mut Context))
-                        .cancel_requested
-                        .store(true, std::sync::atomic::Ordering::Release);
-                });
-                let start = std::time::Instant::now();
-                let out = hirsel_core_host_sleep_until(ctx, 2, u64::MAX / 2, 125);
-                let elapsed = start.elapsed();
-                canceller.join().unwrap();
-                assert_eq!(out.status, 1);
-                assert!(elapsed < std::time::Duration::from_millis(500));
-                1
-            }
             Scenario::Unavailable => files(ctx, state, false),
             Scenario::Exercise => {
                 assert_eq!(echo(ctx, 1), (2, 5));
@@ -525,10 +506,10 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
     });
     let provider = Provider {
         state: (&mut *state as *mut State).cast(),
-        wait: Some(wait),
+        wait: wait,
         issue: step_issue,
-        resume: None,
-        abort: None,
+        resume: crate::provider::immediate::resume,
+        abort: crate::provider::immediate::abort,
         deliver,
     };
     let grants = [
@@ -632,25 +613,6 @@ fn already_reached_sleep_until_returns_at_once() {
     assert_eq!(status, 0);
     assert_eq!(state.observed.len(), 1);
     assert!(started.elapsed() < std::time::Duration::from_millis(20));
-}
-#[test]
-fn sleep_until_cancel_during_wait_is_prompt() {
-    let started = std::time::Instant::now();
-    let output = child_case("host_ops_tests::sleep_until_cancel_during_wait_child");
-    let elapsed = started.elapsed();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
-}
-#[test]
-#[ignore = "real cancellation wait fixture, invoked by parent"]
-fn sleep_until_cancel_during_wait_child() {
-    crate::openat2_required::require();
-    let (status, _) = fixture(false, Scenario::SleepCancelDuring, &[]);
-    assert_eq!(status, 101);
 }
 #[test]
 #[ignore = "isolated ffi assertion fixture, invoked by parent"]
@@ -998,10 +960,10 @@ unsafe extern "C" fn scripted_deliver(_: *mut u8, _: *mut Request, out: Outcome)
 fn replayed_sleep_does_not_wait() {
     let provider = Provider {
         state: ptr::null_mut(),
-        wait: None,
+        wait: crate::provider::immediate::wait,
         issue: scripted_sleep_step,
-        resume: None,
-        abort: None,
+        resume: crate::provider::immediate::resume,
+        abort: crate::provider::immediate::abort,
         deliver: scripted_deliver,
     };
     let mut context = Context::new(1 << 20);

@@ -125,10 +125,10 @@ fn recorded_run(replay: Option<Vec<Recorded>>) -> (Tape, Vec<Recorded>, Vec<(u8,
     };
     let provider = Provider {
         state: (&mut tape as *mut Tape).cast(),
-        wait: None,
+        wait: crate::provider::immediate::wait,
         issue: step_issue,
-        resume: None,
-        abort: None,
+        resume: crate::provider::immediate::resume,
+        abort: crate::provider::immediate::abort,
         deliver: delivery,
     };
     let mut data = *b"abcdef";

@@ -159,6 +159,15 @@ static HirselCoreHostOutcome legacy_issue(void *state,HirselCoreHostRequest *r) 
 static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) {
     (void)token; HirselCoreStep s={0}; s.outcome=legacy_issue(state,r); return s;
 }
+static HirselCoreWait ready_wait(void *state,HirselCoreHostRequest *r,uint64_t token) {
+    (void)state;(void)r;(void)token; HirselCoreWait w={0}; return w;
+}
+static HirselCoreStep never_resume(void *state,HirselCoreHostRequest *r,uint64_t token) {
+    (void)state;(void)r;(void)token; CHECK(0); HirselCoreStep st={0}; return st;
+}
+static HirselCoreHostOutcome never_abort(void *state,HirselCoreHostRequest *r,uint64_t token,uint8_t why) {
+    (void)state;(void)r;(void)token;(void)why; CHECK(0); HirselCoreHostOutcome o={0}; return o;
+}
 static HirselCoreHostOutcome deliver(void *state,HirselCoreHostRequest *r,HirselCoreHostOutcome out) {
     (void)state;
     if(issued() && r->operation==(!strstr(s.mode,"write")?1:2) && !strncmp(s.mode,"delivery-",9)) {
@@ -166,14 +175,99 @@ static HirselCoreHostOutcome deliver(void *state,HirselCoreHostRequest *r,Hirsel
     }
     return out;
 }
+/* REPLAY-SPEC section 3 standing cases, run as "s0-*" modes. A wrapper forwards
+   all five callbacks to an inner provider and counts each call per operation. */
+static HirselCoreProvider s0_inner, s0_outer;
+static unsigned s0_calls[5][19];
+static char s0_order[4]; static int s0_at;
+static HirselCoreWait s0_wait(void *st,HirselCoreHostRequest *r,uint64_t t) {s0_calls[0][r->operation]++;return s0_inner.wait(st,r,t);}
+static HirselCoreStep s0_issue(void *st,HirselCoreHostRequest *r,uint64_t t) {s0_calls[1][r->operation]++;return s0_inner.issue(st,r,t);}
+static HirselCoreStep s0_resume(void *st,HirselCoreHostRequest *r,uint64_t t) {s0_calls[2][r->operation]++;return s0_inner.resume(st,r,t);}
+static HirselCoreHostOutcome s0_abort(void *st,HirselCoreHostRequest *r,uint64_t t,uint8_t why) {s0_calls[3][r->operation]++;return s0_inner.abort(st,r,t,why);}
+static HirselCoreHostOutcome s0_deliver(void *st,HirselCoreHostRequest *r,HirselCoreHostOutcome o) {s0_calls[4][r->operation]++;return s0_inner.deliver(st,r,o);}
+static void s0_wrap(void) {
+    s0_outer=s0_inner; s0_outer.wait=s0_wait; s0_outer.issue=s0_issue; s0_outer.resume=s0_resume;
+    s0_outer.abort=s0_abort; s0_outer.deliver=s0_deliver;
+}
+static uint8_t s0_drop(HirselCoreContext *c,void *p) {(void)c;(void)p;return 0;}
+static const HirselCoreProvider *s0_selected;
+/* (a): the sleeper's 20 ms sleep must not block the scheduler, so the peer
+   finishes first: PS, with or without the wrapper. */
+static uint8_t s0_sleeper(HirselCoreContext *c,void *out,void *in) {
+    (void)out;(void)in;
+    HirselCoreHostRequest now={0}; now.operation=11;
+    uint64_t deadline=hirsel_core_host(c,s0_selected,&now).value+20000000;
+    HirselCoreHostRequest sleep={0}; sleep.operation=15; sleep.site=1;
+    sleep.buffer=(HirselCoreBuffer){(uint8_t*)&deadline,8,0};
+    CHECK(hirsel_core_host(c,s0_selected,&sleep).status==0);
+    s0_order[s0_at++]='S'; return 0;
+}
+static uint8_t s0_peer(HirselCoreContext *c,void *out,void *in) {(void)c;(void)out;(void)in;s0_order[s0_at++]='P';return 0;}
+static uint8_t s0_sleep_entry(HirselCoreContext *c,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {
+    (void)cfg; char in=0,res=0; HirselCoreValueLayout v={0,1,0,s0_drop}; HirselCoreTaskLayout l={v,v};
+    HirselCoreSpawn a=hirsel_core_spawn(c,4096,&in,s0_sleeper,l), b=hirsel_core_spawn(c,4096,&in,s0_peer,l);
+    CHECK(hirsel_core_join(c,a.task,&res,2).status==0 && hirsel_core_join(c,b.task,&res,3).status==0);
+    out->kind=0; out->exit=0; return 0;
+}
+static uint8_t s0_sleep(int wrapped) {
+    HirselCoreOsConfig os={0}; os.root_limit=1<<20; os.grant_mask=(1<<2)|(1<<9); os.stdout_fd=1; os.stderr_fd=2;
+    HirselCoreOpenProcess p=hirsel_core_os_process_new(&os); CHECK(p.process);
+    HirselCoreProcessConfig cfg=*hirsel_core_os_process_config(p.process);
+    s0_inner=*cfg.provider; s0_wrap();
+    s0_selected=wrapped?&s0_outer:cfg.provider; cfg.provider=s0_selected;
+    CHECK(hirsel_core_run(&cfg,s0_sleep_entry)==0);
+    CHECK(!strcmp(s0_order,"PS"));
+    if(wrapped) CHECK(s0_calls[0][15]>=2 && s0_calls[1][15]==1 && s0_calls[2][15]==0 && s0_calls[3][15]==0 && s0_calls[4][15]==1);
+    hirsel_core_os_process_free(p.process);
+    return 0;
+}
+/* (d): every tag is issued and delivered once through the wrapper. SLEEP_UNTIL
+   first waits Until a passed deadline, so its wait runs twice. */
+static HirselCoreWait s0_test_wait(void *st,HirselCoreHostRequest *r,uint64_t t) {
+    (void)st;(void)t; HirselCoreWait w={0};
+    if(r->operation==15 && s0_calls[0][15]==1) {w.kind=1;w.deadline_ns=1;}
+    return w;
+}
+static HirselCoreStep s0_test_issue(void *st,HirselCoreHostRequest *r,uint64_t t) {(void)st;(void)r;(void)t;HirselCoreStep x={0};return x;}
+static HirselCoreHostOutcome s0_test_deliver(void *st,HirselCoreHostRequest *r,HirselCoreHostOutcome o) {(void)st;(void)r;return o;}
+static uint8_t s0_deliver_entry(HirselCoreContext *c,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {
+    (void)cfg; uint8_t bytes[64]={0};
+    for(uint8_t op=0;op<=18;op++) {
+        uint64_t deadline=0; HirselCoreHostRequest r={0}; r.operation=op; r.site=op+1u;
+        r.path=bytes; r.buffer=(HirselCoreBuffer){bytes,0,sizeof bytes};
+        if(op==15) r.buffer=(HirselCoreBuffer){(uint8_t*)&deadline,8,8};
+        CHECK(hirsel_core_host(c,&s0_outer,&r).status==0 && s0_calls[4][op]==1);
+    }
+    for(unsigned op=0;op<=18;op++)
+        CHECK(s0_calls[0][op]==(op==15?2u:1u) && s0_calls[1][op]==1 && s0_calls[2][op]==0 && s0_calls[3][op]==0 && s0_calls[4][op]==1);
+    out->kind=0; out->exit=0; return 0;
+}
+static uint8_t s0_run(uint8_t (*entry)(HirselCoreContext*,const HirselCoreProcessConfig*,HirselCoreMainResult*)) {
+    HirselCoreProcessConfig cfg={0}; cfg.root_limit=1<<20; cfg.provider=&s0_outer; cfg.stop_fd=2;
+    return hirsel_core_run(&cfg,entry);
+}
+static uint8_t s0_case(void) {
+    s0_inner=(HirselCoreProvider){&s,s0_test_wait,s0_test_issue,never_resume,never_abort,s0_test_deliver}; s0_wrap();
+    if(is("s0-sleep-direct")) return s0_sleep(0);
+    if(is("s0-sleep-wrapper")) return s0_sleep(1);
+    if(is("s0-deliver")) {CHECK(s0_run(s0_deliver_entry)==0);return 0;}
+    /* A NULL callback is refused at install: "run stop: Provider", status 102,
+       before main runs. s0-null-N clears callback N (wait..deliver). */
+    if(!strncmp(s.mode,"s0-null-",8)) {
+        void **words=(void**)&s0_outer; words[1+(s.mode[8]-'0')]=0;
+        s0_run(s0_deliver_entry); CHECK(0);
+    }
+    CHECK(0); return 1;
+}
 static void diagnostic(void *state,const uint8_t *data,size_t len) {if(crash_mode() && s.crashed)return;(void)state;CHECK(write(2,data,len)==(ssize_t)len);}
 static void event(void *state,HirselCoreEvent e) {(void)state;if(e.kind==3)s.cancels++;}
 static uint8_t entry(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {s.root=ctx;return s.entry(ctx,cfg,out);}
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry main) {
     (void)names;(void)sources;CHECK(input->args_len==1 && input->parameters_len==4);
     CHECK(input->args[0].len<sizeof s.mode);memcpy(s.mode,input->args[0].data,input->args[0].len);
+    if(!strncmp(s.mode,"s0-",3)) return s0_case();
     s.entry=main;memcpy(s.file,is("read")?"abc":"old",3);s.length=3;
-    HirselCoreProvider provider={&s,0,issue,0,0,deliver};
+    HirselCoreProvider provider={&s,ready_wait,issue,never_resume,never_abort,deliver};
     HirselCoreEntryGrant caps[4];uint64_t grants[4];
     for(size_t i=0;i<4;i++) {uint8_t k=input->parameters[i].kind;caps[i]=(HirselCoreEntryGrant){k,&provider,k==0?7:0};grants[i]=i+1;}
     HirselCoreBuffer args[1];for(size_t i=0;i<1;i++) args[i]=(HirselCoreBuffer){(uint8_t*)input->args[i].data,input->args[i].len,0};

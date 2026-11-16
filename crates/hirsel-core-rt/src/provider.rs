@@ -91,127 +91,99 @@ pub const WAIT_UNTIL: u8 = 1;
 pub const WAIT_PARK: u8 = 2;
 pub const STEP_DONE: u8 = 0;
 pub const STEP_PENDING: u8 = 1;
-unsafe extern "C" fn wait_ready(_: *mut u8, _: *mut Request, _: u64) -> Wait {
-    Wait {
-        kind: WAIT_READY,
-        deadline_ns: 0,
-    }
-}
+pub const ABORT_CANCEL: u8 = 1;
+pub const ABORT_DEADLINE: u8 = 2;
 
-/// Four-state provider ABI: C (cancelled), W (waiting), I (issued), D (delivered).
+/// The four-state provider ABI (REPLAY-SPEC section 3): an operation is C (cancelled
+/// at entry), W (waiting before issue), I (issued, in progress) or D (delivered).
+/// Every callback is required. `wait`, `resume` and `abort` are called by the
+/// scheduler at the moment of a wake, outside any task, and must not block;
+/// `issue` and `deliver` run in the task. `Wait::deadline_ns` and
+/// `Step::deadline_ns` are host CLOCK_MONOTONIC nanoseconds; a step's 0 is none.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Provider {
     pub state: *mut u8,
-    pub wait: Option<unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait>,
+    pub wait: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait,
     pub issue: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step,
-    pub resume: Option<unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step>,
-    pub abort: Option<unsafe extern "C" fn(*mut u8, *mut Request, u64, u8) -> Outcome>,
+    pub resume: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step,
+    pub abort: unsafe extern "C" fn(*mut u8, *mut Request, u64, u8) -> Outcome,
     pub deliver: unsafe extern "C" fn(*mut u8, *mut Request, Outcome) -> Outcome,
 }
 
+/// Installation is where a provider is refused: a C provider with a NULL
+/// callback stops the run (`Provider`) before main, never at an operation.
 /// # Safety
-/// All pointers and buffer extents are the emitter's live borrowed operands.
-/// Provider callbacks obey the operation's custody and partial-effect contract.
+/// A non-null provider points at six readable pointer-sized words.
+pub(crate) unsafe fn install(provider: *const Provider) {
+    if provider.is_null() {
+        return;
+    }
+    // SAFETY: read as plain words, so a NULL never becomes a Rust fn value.
+    let words = unsafe { provider.cast::<[usize; 6]>().read() };
+    if words[1..].contains(&0) {
+        crate::process::stop(b"Provider");
+    }
+}
+
+/// # Safety
+/// All pointers and buffer extents are the emitter's live borrowed operands, and
+/// the provider is installed. Callbacks obey the operation's custody contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host(
     context: *mut Context,
     provider: *const Provider,
     request: *mut Request,
 ) -> Outcome {
+    // SAFETY: forwarded caller contract.
+    unsafe { drive(context, provider, request).1 }
+}
+
+/// Run one operation through C, W, I and D. Returns the outcome the provider
+/// produced (issue, resume or abort) and the one `deliver` returned; both are
+/// the Cancelled failure when the operation ends in C or is cancelled in W.
+/// # Safety
+/// Same contract as `hirsel_core_host`.
+pub(crate) unsafe fn drive(
+    context: *mut Context,
+    provider: *const Provider,
+    request: *mut Request,
+) -> (Outcome, Outcome) {
+    const CANCELLED: Outcome = Outcome {
+        value: 0,
+        error: IoError::OK,
+        written: 0,
+        status: 1,
+    };
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
-        let request = &mut *request;
-        if request.operation != WALL_MS && request.operation != MONO_NS {
-            if crate::tasks::check_cancel(context, request.site) != 0 {
-                return Outcome {
-                    status: 1,
-                    ..Outcome::default()
-                };
+        let site = (*request).site;
+        let operation = (*request).operation;
+        if operation != WALL_MS && operation != MONO_NS {
+            if crate::tasks::check_cancel(context, site) != 0 {
+                return (CANCELLED, CANCELLED);
             }
-            if request.operation == MKDTEMP
-                && request
+            if operation == MKDTEMP
+                && (*request)
                     .buffer
                     .len
                     .checked_add(32)
-                    .is_none_or(|n| n > request.buffer.capacity)
+                    .is_none_or(|n| n > (*request).buffer.capacity)
             {
-                causes::record(
-                    &mut *context,
-                    causes::Cause::new(causes::BOUNDS, request.site),
-                );
-                return Outcome {
-                    status: 1,
-                    ..Outcome::default()
-                };
+                causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
+                return (CANCELLED, CANCELLED);
             }
         }
-        let provider = &*provider;
-        let previous = crate::os::set_current_context(context);
-        let token = crate::tasks::current_id();
-        let wait = provider.wait.unwrap_or(wait_ready);
-        loop {
-            let w = wait(provider.state, request, token);
-            match w.kind {
-                WAIT_READY => break,
-                WAIT_UNTIL => {
-                    let now = crate::os::monotonic_ns();
-                    let duration =
-                        std::time::Duration::from_nanos(w.deadline_ns.saturating_sub(now));
-                    crate::tasks::sleep_for(
-                        context,
-                        duration.min(std::time::Duration::from_millis(1)),
-                    );
-                }
-                WAIT_PARK => crate::tasks::park_provider(token),
-                _ => break,
-            }
-            if crate::tasks::check_cancel(context, request.site) != 0 {
-                crate::os::set_current_context(previous);
-                return Outcome {
-                    status: 1,
-                    ..Outcome::default()
-                };
-            }
-        }
-        let mut step = (provider.issue)(provider.state, request, token);
-        while step.kind == STEP_PENDING {
-            if crate::tasks::check_cancel(context, request.site) != 0 {
-                step.outcome = provider.abort.map_or(
-                    Outcome {
-                        status: 1,
-                        ..Outcome::default()
-                    },
-                    |abort| abort(provider.state, request, token, 1),
-                );
-                break;
-            }
-            if step.deadline_ns != 0 {
-                let now = crate::os::monotonic_ns();
-                if now >= step.deadline_ns {
-                    if let Some(abort) = provider.abort {
-                        step.outcome = abort(provider.state, request, token, 2);
-                    }
-                    break;
-                }
-                crate::tasks::sleep_for(
-                    context,
-                    std::time::Duration::from_nanos(step.deadline_ns - now),
-                );
-            } else {
-                crate::tasks::park_provider(token);
-            }
-            step = provider.resume.map_or(
-                Step {
-                    kind: STEP_DONE,
-                    ..step
-                },
-                |resume| resume(provider.state, request, token),
-            );
-        }
-        let outcome = (provider.deliver)(provider.state, request, step.outcome);
-        crate::os::set_current_context(previous);
-        outcome
+        let provider = *provider;
+        let Some(produced) = crate::tasks::provider_operation(context, &provider, request) else {
+            // The scheduler failed the operation in W because a request is
+            // pending and unshielded; observing it records the cause.
+            let observed = crate::tasks::check_cancel(context, site);
+            debug_assert_eq!(observed, 1);
+            return (CANCELLED, CANCELLED);
+        };
+        let delivered = (provider.deliver)(provider.state, request, produced);
+        (produced, delivered)
     }
 }
 
@@ -220,4 +192,20 @@ pub unsafe extern "C" fn hirsel_core_host(
 /// Same borrowed request and state contract as Provider::deliver.
 pub unsafe extern "C" fn deliver(_: *mut u8, _: *mut Request, result: Outcome) -> Outcome {
     result
+}
+
+/// Callbacks for test providers whose operations are always Ready and Done:
+/// the scheduler never resumes or aborts them (REPLAY-SPEC section 3).
+#[cfg(test)]
+pub(crate) mod immediate {
+    use super::*;
+    pub(crate) unsafe extern "C" fn wait(_: *mut u8, _: *mut Request, _: u64) -> Wait {
+        Wait::default()
+    }
+    pub(crate) unsafe extern "C" fn resume(_: *mut u8, _: *mut Request, _: u64) -> Step {
+        unreachable!("an immediate provider never answers Pending")
+    }
+    pub(crate) unsafe extern "C" fn abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
+        unreachable!("an immediate provider never answers Pending")
+    }
 }

@@ -316,6 +316,9 @@ static HirselCoreHostOutcome file_legacy_issue(void *state,HirselCoreHostRequest
 }
 static HirselCoreStep file_issue(void *state,HirselCoreHostRequest *r,uint64_t token) { (void)token; HirselCoreStep s={0}; s.outcome=file_legacy_issue(state,r); return s; }
 static HirselCoreHostOutcome file_deliver(void *s,HirselCoreHostRequest *r,HirselCoreHostOutcome out) { return out; }
+static HirselCoreWait file_wait(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; return (HirselCoreWait){0,0}; }
+static HirselCoreStep file_resume(void *s,HirselCoreHostRequest *r,uint64_t t) { (void)s;(void)r;(void)t; __builtin_abort(); }
+static HirselCoreHostOutcome file_abort(void *s,HirselCoreHostRequest *r,uint64_t t,uint8_t why) { (void)s;(void)r;(void)t;(void)why; __builtin_abort(); }
 static HirselCoreStep wrong_provider(void *s,HirselCoreHostRequest *r,uint64_t token) { (void)s;(void)r;(void)token; __builtin_abort(); }
 static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
 "#);
@@ -395,7 +398,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             // Seed the authored input keys through real OPEN/registry operations;
             // the run owns and drains the unused fixture keys after observation.
             let maximum = args.iter().copied().max().unwrap_or(0);
-            writeln!(source, "HirselCoreProvider issuing={{0,0,file_issue,0,0,file_deliver}}; for(uint64_t key=1;key<=UINT64_C({maximum});key++) {{ HirselCoreHostRequest request={{.operation=0,.handle=key}}; HirselCoreHostOutcome opened=hirsel_core_host_file_open(ctx,&issuing,&request);if(opened.status || opened.error.tag || opened.value!=key) __builtin_abort(); }} traces=0;").unwrap();
+            writeln!(source, "HirselCoreProvider issuing={{0,file_wait,file_issue,file_resume,file_abort,file_deliver}}; for(uint64_t key=1;key<=UINT64_C({maximum});key++) {{ HirselCoreHostRequest request={{.operation=0,.handle=key}}; HirselCoreHostOutcome opened=hirsel_core_host_file_open(ctx,&issuing,&request);if(opened.status || opened.error.tag || opened.value!=key) __builtin_abort(); }} traces=0;").unwrap();
             writeln!(
                 process_calls,
                 "{{ uint8_t code=hirsel_core_run(&config,fixture{i}); if(code) {{ fprintf(stderr,\"fixture f{} args {:?} limit {limit} injection {injection:?}: process code %u\\n\",code); return 11; }} }}", f.0, args
@@ -589,7 +592,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         }
     }
     if host_files {
-        source.push_str("int main(void) { HirselCoreProvider other={0,0,wrong_provider,0,0,file_deliver}; HirselCoreProcessConfig config={.root_limit=1000000,.provider=&other,.diagnostic=diagnostic};\n");
+        source.push_str("int main(void) { HirselCoreProvider other={0,file_wait,wrong_provider,file_resume,file_abort,file_deliver}; HirselCoreProcessConfig config={.root_limit=1000000,.provider=&other,.diagnostic=diagnostic};\n");
         source.push_str(&process_calls);
     }
     source.push_str("return 0; }\n");

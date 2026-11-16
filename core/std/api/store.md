@@ -6,8 +6,11 @@ when a path is copied. The S1 package has memory stores, typed tables and
 indexes, isolated transactions, read sets, frozen cursors and snapshots,
 CallInfo, followers, resident admission and foreign-handle checks.
 
-`memory(clock, random, options)` draws a 16-byte StoreId once. `create_table`
-registers key and value schema dictionaries; `table` opens a handle and resolves
+`memory(clock, random, options)` draws a 16-byte StoreId once. A
+`TableSpec` is built by `spec(name, key, value)` and `with_index(mut s, name, by,
+key)`, which returns `Exists` for a repeated index name. `create_table(mut db, s)`
+registers the table's key and value schema dictionaries and every index in one
+schema commit; `table` opens a handle and resolves
 older schemas once into shared Readers. Every row starts with its u16 schema
 number. Schema numbers are append-only. Fingerprint equality is followed by byte
 equality. A key schema change is `Schema`; an unknown row schema number is
@@ -63,7 +66,7 @@ The transaction limit is 16,777,280 COMMIT payload bytes, excluding the 16-byte
 head. Body-time arithmetic enforces it before publishing. The account uses the
 stored value's length, including its schema number, when subtracting an old row.
 
-The contract follows STORE-SPEC v2.13. `open(tasks, dir, clock, random, options)`
+The contract follows STORE-SPEC v2.20. `open(tasks, dir, clock, random, options)`
 locks the directory, decodes its manifest and packs, replays journal frames and
 rotates to a new segment. Zero `group_commits` or `group_bytes` returns
 `Missing` naming that field before taking LOCK; memory ignores these bounds.
@@ -96,7 +99,27 @@ supplies CallInfo and the stream operation supplies position. `revision` is the
 has no revisions. It is written as a u32 length of 0 or 32, any other length is
 `Corrupt(Malformed)`, and a Some that is not 32 bytes is `Missing("revision")`
 before anything commits. Public stream producers
-belong to S5. Pins, forks and migration belong to S4.
+belong to S5.
+
+Branches and pins (§1.9, §1.12) are named heads of one open. `fork(mut db, name,
+from)` makes a branch at a Snapshot of this open; `branch(db, name)` finds one.
+`adopt(mut db, b)` makes b's head main's head only when b is not main, b's parent
+is 0 and main's head is still b's fork point; otherwise, or when b is no longer
+live, it is `Diverged(b)`. `delete_branch` removes a branch. `pin(mut db, name,
+s)`, `unpin` and `pinned` name retained snapshots. Every branch head and pin is
+written by each cut and restored by open and replay. A refusal for resident
+space first settles the account (§1.11 I4); a schema commit refuses on the
+conservative live figure. CALL frames name their branch.
+
+`migrate(mut db, from, to, f)` (§1.2, L31) rewrites every row of `from` through
+`f` into the spec `to` in one schema commit. It drops `from`'s indexes, takes the
+table id and then the spec's index ids from the id counter in spec order, and
+builds the indexes from the new rows. The rows take one new schema number, the
+source entry's `next`; numbers are never reused. A Capacity from `f` or an
+extractor, or a build past the ceiling, is `Full`; an oversized key is
+`Limit(Key)`; two rows with one new key, or a target name naming another live
+table, is `Exists`. Each refusal changes nothing. A handle or pin older than
+the migrate is `Stale`.
 
 `//:core-store-s1` selects the package's evaluator and native laws, including
 Cranelift, LLVM development and LLVM release, with look write/info checker

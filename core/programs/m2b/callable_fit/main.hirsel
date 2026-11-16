@@ -1,0 +1,202 @@
+pub fn case_minimal() -> u64 {
+    fits.case_minimal()
+}
+
+pub fn case_minimal_scoped() -> u64 {
+    fits.case_minimal_scoped()
+}
+
+pub fn case_minimal_take() -> u64 {
+    fits.case_minimal_take()
+}
+
+pub fn case_named_mut_plain() -> u64 {
+    fits.case_named_mut_plain()
+}
+
+pub fn case_generic_mut_plain() -> u64 {
+    fits.case_generic_mut_plain()
+}
+
+pub fn case_static_mut_plain() -> u64 {
+    fits.case_static_mut_plain()
+}
+
+pub fn case_record_mut_plain() -> u64 {
+    fits.case_record_mut_plain()
+}
+
+pub fn case_variant_mut_plain() -> u64 {
+    fits.case_variant_mut_plain()
+}
+
+pub fn case_named_mut_scoped() -> u64 {
+    fits.case_named_mut_scoped()
+}
+
+pub fn case_generic_mut_scoped() -> u64 {
+    fits.case_generic_mut_scoped()
+}
+
+pub fn case_static_mut_scoped() -> u64 {
+    fits.case_static_mut_scoped()
+}
+
+pub fn case_record_mut_scoped() -> u64 {
+    fits.case_record_mut_scoped()
+}
+
+pub fn case_variant_mut_scoped() -> u64 {
+    fits.case_variant_mut_scoped()
+}
+
+pub fn case_named_mut_view() -> u64 {
+    fits.case_named_mut_view()
+}
+
+pub fn case_generic_mut_view() -> u64 {
+    fits.case_generic_mut_view()
+}
+
+pub fn case_static_mut_view() -> u64 {
+    fits.case_static_mut_view()
+}
+
+pub fn case_record_mut_view() -> u64 {
+    fits.case_record_mut_view()
+}
+
+pub fn case_variant_mut_view() -> u64 {
+    fits.case_variant_mut_view()
+}
+
+pub fn case_named_take_plain() -> u64 {
+    fits.case_named_take_plain()
+}
+
+pub fn case_generic_take_plain() -> u64 {
+    fits.case_generic_take_plain()
+}
+
+pub fn case_static_take_plain() -> u64 {
+    fits.case_static_take_plain()
+}
+
+pub fn case_record_take_plain() -> u64 {
+    fits.case_record_take_plain()
+}
+
+pub fn case_variant_take_plain() -> u64 {
+    fits.case_variant_take_plain()
+}
+
+pub fn case_named_take_scoped() -> u64 {
+    fits.case_named_take_scoped()
+}
+
+pub fn case_generic_take_scoped() -> u64 {
+    fits.case_generic_take_scoped()
+}
+
+pub fn case_static_take_scoped() -> u64 {
+    fits.case_static_take_scoped()
+}
+
+pub fn case_record_take_scoped() -> u64 {
+    fits.case_record_take_scoped()
+}
+
+pub fn case_variant_take_scoped() -> u64 {
+    fits.case_variant_take_scoped()
+}
+
+pub fn case_named_take_view() -> u64 {
+    fits.case_named_take_view()
+}
+
+pub fn case_generic_take_view() -> u64 {
+    fits.case_generic_take_view()
+}
+
+pub fn case_static_take_view() -> u64 {
+    fits.case_static_take_view()
+}
+
+pub fn case_record_take_view() -> u64 {
+    fits.case_record_take_view()
+}
+
+pub fn case_variant_take_view() -> u64 {
+    fits.case_variant_take_view()
+}
+
+pub fn case_named_read_plain() -> u64 {
+    fits.case_named_read_plain()
+}
+
+pub fn case_generic_read_plain() -> u64 {
+    fits.case_generic_read_plain()
+}
+
+pub fn case_static_read_plain() -> u64 {
+    fits.case_static_read_plain()
+}
+
+pub fn case_record_read_plain() -> u64 {
+    fits.case_record_read_plain()
+}
+
+pub fn case_variant_read_plain() -> u64 {
+    fits.case_variant_read_plain()
+}
+
+pub fn case_named_read_scoped() -> u64 {
+    fits.case_named_read_scoped()
+}
+
+pub fn case_generic_read_scoped() -> u64 {
+    fits.case_generic_read_scoped()
+}
+
+pub fn case_static_read_scoped() -> u64 {
+    fits.case_static_read_scoped()
+}
+
+pub fn case_record_read_scoped() -> u64 {
+    fits.case_record_read_scoped()
+}
+
+pub fn case_variant_read_scoped() -> u64 {
+    fits.case_variant_read_scoped()
+}
+
+pub fn case_named_read_view() -> u64 {
+    fits.case_named_read_view()
+}
+
+pub fn case_generic_read_view() -> u64 {
+    fits.case_generic_read_view()
+}
+
+pub fn case_static_read_view() -> u64 {
+    fits.case_static_read_view()
+}
+
+pub fn case_record_read_view() -> u64 {
+    fits.case_record_read_view()
+}
+
+pub fn case_variant_read_view() -> u64 {
+    fits.case_variant_read_view()
+}
+
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let _ = argv
+    let mut output = string.new()
+    let _ = string.push_u64(mut output, case_minimal())
+    let _ = string.push(mut output, "\n")
+    match stdout.write(out, output) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2))
+    }
+}

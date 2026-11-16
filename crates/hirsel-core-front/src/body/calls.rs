@@ -277,11 +277,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 None => {
                     // A call takes the partly known parameter type as its expected type.
-                    let (at, v) = if let Some(hint) =
+                    let (at, mut v) = if let Some(hint) =
                         want.and_then(|w| self.payload_argument(g.result, pt, w))
                     {
                         self.expr_hinted(e, Some(hint))
-                    } else if matches!(self.kind(e), NodeKind::Closure | NodeKind::ScopedClosure) {
+                    } else if matches!(self.kind(e), NodeKind::Closure | NodeKind::ScopedClosure)
+                        || self.kind(e) == NodeKind::Path
+                            && matches!(self.p.target(self.at, e), Some(Target::Definition(id))
+                                if matches!(self.p.by_definition[id.0 as usize], Some(Def::Fn(_))))
+                    {
                         let w = Want {
                             ty: self.partial_rooted(pt, found, roots),
                             view: false,
@@ -332,6 +336,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             },
                             e,
                         );
+                        // Inference fixed the target; a type check alone does not
+                        // turn an eight-byte code word into its scoped carrier.
+                        if self.plain_view(at, inferred) {
+                            v = self.read_plain_view(inferred, v, e);
+                        }
+                        if self.plain_callable_fit(inferred, t) {
+                            v = self.fit_plain_callable(v, t, e);
+                        }
                     }
                     self.determined(f, found, checked, e);
                     v

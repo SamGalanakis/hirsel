@@ -1219,6 +1219,15 @@ fn integer_and_float_bounds_imply_their_types_bounds() {
 }
 
 #[test]
+fn inferred_callable_kind_fits_emit_their_carriers() {
+    let mut failures = run_case(&root().join("cases/body/callable-generic-fit.hirsel"));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-generic-fit-refused.hirsel"),
+    ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn codec_overrides_and_tombstones() {
     let mut report = vec![];
     for name in ["schema-accepted", "schema-refused", "via-refused"] {

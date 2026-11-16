@@ -1,0 +1,45 @@
+type Tx { n: u64 }
+fn named_mut(mut x: Tx) -> Result[u64, ()] { Ok(x.n) }
+fn use_mut_plain(mut x: Tx, callback: fn(mut Tx) -> Result[u64, ()]) { let _ = callback(mut x) }
+fn bad_mut_plain() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_mut); use_mut_plain(mut x, descriptor) }
+// expect: refuse LANG-11 at 4:111
+// expect: compared LANG-11 at 4:111 | core@1/core/StaticFn[fn(mut app@1/main/Tx) -> core@1/core/Result[u64, ()]] | fn(mut app@1/main/Tx) -> core@1/core/Result[u64, ()]
+fn use_mut_scoped(mut x: Tx, callback: scoped fn(mut Tx) -> Result[u64, ()]) { let _ = callback(mut x) }
+fn bad_mut_scoped() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_mut); use_mut_scoped(mut x, descriptor) }
+// expect: refuse LANG-11 at 8:113
+// expect: compared LANG-11 at 8:113 | core@1/core/StaticFn[fn(mut app@1/main/Tx) -> core@1/core/Result[u64, ()]] | scoped fn(mut app@1/main/Tx) -> core@1/core/Result[u64, ()]
+fn use_mut_view(mut x: Tx, callback: scoped[view] fn(mut Tx) -> Result[u64, ()]) { let _ = callback(mut x) }
+fn bad_mut_view() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_mut); use_mut_view(mut x, descriptor) }
+// expect: refuse LANG-11 at 12:109
+// expect: compared LANG-11 at 12:109 | core@1/core/StaticFn[fn(mut app@1/main/Tx) -> core@1/core/Result[u64, ()]] | scoped[view] fn(mut app@1/main/Tx) -> core@1/core/Result[u64, ()]
+fn named_take(take x: Tx) -> Result[u64, ()] { Ok(x.n) }
+fn use_take_plain(take x: Tx, callback: fn(take Tx) -> Result[u64, ()]) { let _ = callback(take x) }
+fn bad_take_plain() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_take); use_take_plain(take x, descriptor) }
+// expect: refuse LANG-11 at 17:115
+// expect: compared LANG-11 at 17:115 | core@1/core/StaticFn[fn(take app@1/main/Tx) -> core@1/core/Result[u64, ()]] | fn(take app@1/main/Tx) -> core@1/core/Result[u64, ()]
+fn use_take_scoped(take x: Tx, callback: scoped fn(take Tx) -> Result[u64, ()]) { let _ = callback(take x) }
+fn bad_take_scoped() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_take); use_take_scoped(take x, descriptor) }
+// expect: refuse LANG-11 at 21:117
+// expect: compared LANG-11 at 21:117 | core@1/core/StaticFn[fn(take app@1/main/Tx) -> core@1/core/Result[u64, ()]] | scoped fn(take app@1/main/Tx) -> core@1/core/Result[u64, ()]
+fn use_take_view(take x: Tx, callback: scoped[view] fn(take Tx) -> Result[u64, ()]) { let _ = callback(take x) }
+fn bad_take_view() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_take); use_take_view(take x, descriptor) }
+// expect: refuse LANG-11 at 25:113
+// expect: compared LANG-11 at 25:113 | core@1/core/StaticFn[fn(take app@1/main/Tx) -> core@1/core/Result[u64, ()]] | scoped[view] fn(take app@1/main/Tx) -> core@1/core/Result[u64, ()]
+fn named_read(x: Tx) -> Result[u64, ()] { Ok(x.n) }
+fn use_read_plain(x: Tx, callback: fn(Tx) -> Result[u64, ()]) { let _ = callback(x) }
+fn bad_read_plain() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_read); use_read_plain(x, descriptor) }
+// expect: refuse LANG-11 at 30:110
+// expect: compared LANG-11 at 30:110 | core@1/core/StaticFn[fn(app@1/main/Tx) -> core@1/core/Result[u64, ()]] | fn(app@1/main/Tx) -> core@1/core/Result[u64, ()]
+fn use_read_scoped(x: Tx, callback: scoped fn(Tx) -> Result[u64, ()]) { let _ = callback(x) }
+fn bad_read_scoped() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_read); use_read_scoped(x, descriptor) }
+// expect: refuse LANG-11 at 34:112
+// expect: compared LANG-11 at 34:112 | core@1/core/StaticFn[fn(app@1/main/Tx) -> core@1/core/Result[u64, ()]] | scoped fn(app@1/main/Tx) -> core@1/core/Result[u64, ()]
+fn use_read_view(x: Tx, callback: scoped[view] fn(Tx) -> Result[u64, ()]) { let _ = callback(x) }
+fn bad_read_view() { let mut x = Tx(n: 5u64); let descriptor = code.describe(named_read); use_read_view(x, descriptor) }
+// expect: refuse LANG-11 at 38:108
+// expect: compared LANG-11 at 38:108 | core@1/core/StaticFn[fn(app@1/main/Tx) -> core@1/core/Result[u64, ()]] | scoped[view] fn(app@1/main/Tx) -> core@1/core/Result[u64, ()]
+
+fn choose[T](callback: scoped[view] fn(T) -> T) -> u64 { 0u64 }
+fn identity[T: plain](x: T) -> T { x }
+fn incomplete() -> u64 { let n = choose(identity); n }
+// expect: refuse LANG-12 at 44:41

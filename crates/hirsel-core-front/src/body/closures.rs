@@ -280,7 +280,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             self.determined(f, &scratch.found, &mut scratch.checked, n);
         }
-        if scratch.found.iter().any(Option::is_none) {
+        if scratch
+            .found
+            .iter()
+            .any(|t| t.is_none_or(|t| has_hole(&self.t, t)))
+        {
             self.refuse(
                 "LANG-12",
                 n,

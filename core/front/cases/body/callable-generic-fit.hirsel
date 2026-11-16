@@ -1,0 +1,652 @@
+// LANG-13: a plain function fits a scoped callable of the same signature.
+fn invoke[R](f: scoped[view] fn() -> R) -> R {
+    f()
+}
+
+fn seven() -> u64 {
+    7u64
+}
+
+pub fn case_minimal() -> u64 {
+    let n = invoke(seven);
+    n
+}
+
+// expect: run case_minimal() = 7
+fn invoke_scoped[R](f: scoped fn() -> R) -> R {
+    f()
+}
+
+pub fn case_minimal_scoped() -> u64 {
+    let n = invoke_scoped(seven);
+    n
+}
+
+fn invoke_take[R](take f: scoped[view] fn() -> R) -> R {
+    f()
+}
+
+pub fn case_minimal_take() -> u64 {
+    let n = invoke_take(seven);
+    n
+}
+
+// expect: run case_minimal_scoped() = 7
+// expect: run case_minimal_take() = 7
+type Tx[T] {
+    n: T,
+    text: String
+}
+
+type Holder[F] {
+    callback: F
+}
+
+fn fresh() -> Tx[u64] {
+    let text = result.unwrap(string.from("x"));
+    Tx(n: 5u64, text: text)
+}
+
+type Fnmut = fn(mut Tx[u64]) -> Result[u64, ()]
+
+type Choicemut = Pickmut(Fnmut) | Emptymut
+
+fn named_mut(mut x: Tx[u64]) -> Result[u64, ()] {
+    x.n += 1u64;
+    Ok(x.n)
+}
+
+fn generic_mut[T: plain](mut x: Tx[T]) -> Result[T, ()] {
+    Ok(x.n)
+}
+
+fn apply_mut_plain[R](mut x: Tx[u64], callback: fn(mut Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(mut x)
+}
+
+pub fn case_named_mut_plain() -> u64 {
+    let mut x = fresh()
+    let answer = apply_mut_plain(mut x, named_mut)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_mut_plain() = 6
+pub fn case_generic_mut_plain() -> u64 {
+    let mut x = fresh()
+    let answer = apply_mut_plain(mut x, generic_mut)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_mut_plain() = 5
+pub fn case_static_mut_plain() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_mut)
+    let cb = code.callable(descriptor)
+    let answer = apply_mut_plain(mut x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_mut_plain() = 6
+pub fn case_record_mut_plain() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_mut)
+    let answer = apply_mut_plain(mut x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_mut_plain() = 6
+pub fn case_variant_mut_plain() -> u64 {
+    let mut x = fresh()
+    let choice = Pickmut(named_mut)
+    match choice {
+        Pickmut(cb) => {
+            let answer = apply_mut_plain(mut x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptymut => 0u64
+    }
+}
+
+// expect: run case_variant_mut_plain() = 6
+fn apply_mut_scoped[R](mut x: Tx[u64], callback: scoped fn(mut Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(mut x)
+}
+
+pub fn case_named_mut_scoped() -> u64 {
+    let mut x = fresh()
+    let answer = apply_mut_scoped(mut x, named_mut)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_mut_scoped() = 6
+pub fn case_generic_mut_scoped() -> u64 {
+    let mut x = fresh()
+    let answer = apply_mut_scoped(mut x, generic_mut)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_mut_scoped() = 5
+pub fn case_static_mut_scoped() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_mut)
+    let cb = code.callable(descriptor)
+    let answer = apply_mut_scoped(mut x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_mut_scoped() = 6
+pub fn case_record_mut_scoped() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_mut)
+    let answer = apply_mut_scoped(mut x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_mut_scoped() = 6
+pub fn case_variant_mut_scoped() -> u64 {
+    let mut x = fresh()
+    let choice = Pickmut(named_mut)
+    match choice {
+        Pickmut(cb) => {
+            let answer = apply_mut_scoped(mut x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptymut => 0u64
+    }
+}
+
+// expect: run case_variant_mut_scoped() = 6
+fn apply_mut_view[R](mut x: Tx[u64], callback: scoped[view] fn(mut Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(mut x)
+}
+
+pub fn case_named_mut_view() -> u64 {
+    let mut x = fresh()
+    let answer = apply_mut_view(mut x, named_mut)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_mut_view() = 6
+pub fn case_generic_mut_view() -> u64 {
+    let mut x = fresh()
+    let answer = apply_mut_view(mut x, generic_mut)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_mut_view() = 5
+pub fn case_static_mut_view() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_mut)
+    let cb = code.callable(descriptor)
+    let answer = apply_mut_view(mut x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_mut_view() = 6
+pub fn case_record_mut_view() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_mut)
+    let answer = apply_mut_view(mut x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_mut_view() = 6
+pub fn case_variant_mut_view() -> u64 {
+    let mut x = fresh()
+    let choice = Pickmut(named_mut)
+    match choice {
+        Pickmut(cb) => {
+            let answer = apply_mut_view(mut x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptymut => 0u64
+    }
+}
+
+// expect: run case_variant_mut_view() = 6
+type Fntake = fn(take Tx[u64]) -> Result[u64, ()]
+
+type Choicetake = Picktake(Fntake) | Emptytake
+
+fn named_take(take x: Tx[u64]) -> Result[u64, ()] {
+    Ok(x.n)
+}
+
+fn generic_take[T: plain](take x: Tx[T]) -> Result[T, ()] {
+    Ok(x.n)
+}
+
+fn apply_take_plain[R](take x: Tx[u64], callback: fn(take Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(take x)
+}
+
+pub fn case_named_take_plain() -> u64 {
+    let mut x = fresh()
+    let answer = apply_take_plain(take x, named_take)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_take_plain() = 5
+pub fn case_generic_take_plain() -> u64 {
+    let mut x = fresh()
+    let answer = apply_take_plain(take x, generic_take)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_take_plain() = 5
+pub fn case_static_take_plain() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_take)
+    let cb = code.callable(descriptor)
+    let answer = apply_take_plain(take x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_take_plain() = 5
+pub fn case_record_take_plain() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_take)
+    let answer = apply_take_plain(take x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_take_plain() = 5
+pub fn case_variant_take_plain() -> u64 {
+    let mut x = fresh()
+    let choice = Picktake(named_take)
+    match choice {
+        Picktake(cb) => {
+            let answer = apply_take_plain(take x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptytake => 0u64
+    }
+}
+
+// expect: run case_variant_take_plain() = 5
+fn apply_take_scoped[R](take x: Tx[u64], callback: scoped fn(take Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(take x)
+}
+
+pub fn case_named_take_scoped() -> u64 {
+    let mut x = fresh()
+    let answer = apply_take_scoped(take x, named_take)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_take_scoped() = 5
+pub fn case_generic_take_scoped() -> u64 {
+    let mut x = fresh()
+    let answer = apply_take_scoped(take x, generic_take)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_take_scoped() = 5
+pub fn case_static_take_scoped() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_take)
+    let cb = code.callable(descriptor)
+    let answer = apply_take_scoped(take x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_take_scoped() = 5
+pub fn case_record_take_scoped() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_take)
+    let answer = apply_take_scoped(take x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_take_scoped() = 5
+pub fn case_variant_take_scoped() -> u64 {
+    let mut x = fresh()
+    let choice = Picktake(named_take)
+    match choice {
+        Picktake(cb) => {
+            let answer = apply_take_scoped(take x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptytake => 0u64
+    }
+}
+
+// expect: run case_variant_take_scoped() = 5
+fn apply_take_view[R](take x: Tx[u64], callback: scoped[view] fn(take Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(take x)
+}
+
+pub fn case_named_take_view() -> u64 {
+    let mut x = fresh()
+    let answer = apply_take_view(take x, named_take)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_take_view() = 5
+pub fn case_generic_take_view() -> u64 {
+    let mut x = fresh()
+    let answer = apply_take_view(take x, generic_take)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_take_view() = 5
+pub fn case_static_take_view() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_take)
+    let cb = code.callable(descriptor)
+    let answer = apply_take_view(take x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_take_view() = 5
+pub fn case_record_take_view() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_take)
+    let answer = apply_take_view(take x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_take_view() = 5
+pub fn case_variant_take_view() -> u64 {
+    let mut x = fresh()
+    let choice = Picktake(named_take)
+    match choice {
+        Picktake(cb) => {
+            let answer = apply_take_view(take x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptytake => 0u64
+    }
+}
+
+// expect: run case_variant_take_view() = 5
+type Fnread = fn(Tx[u64]) -> Result[u64, ()]
+
+type Choiceread = Pickread(Fnread) | Emptyread
+
+fn named_read(x: Tx[u64]) -> Result[u64, ()] {
+    Ok(x.n)
+}
+
+fn generic_read[T: plain](x: Tx[T]) -> Result[T, ()] {
+    Ok(x.n)
+}
+
+fn apply_read_plain[R](x: Tx[u64], callback: fn(Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(x)
+}
+
+pub fn case_named_read_plain() -> u64 {
+    let mut x = fresh()
+    let answer = apply_read_plain(x, named_read)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_read_plain() = 5
+pub fn case_generic_read_plain() -> u64 {
+    let mut x = fresh()
+    let answer = apply_read_plain(x, generic_read)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_read_plain() = 5
+pub fn case_static_read_plain() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_read)
+    let cb = code.callable(descriptor)
+    let answer = apply_read_plain(x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_read_plain() = 5
+pub fn case_record_read_plain() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_read)
+    let answer = apply_read_plain(x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_read_plain() = 5
+pub fn case_variant_read_plain() -> u64 {
+    let mut x = fresh()
+    let choice = Pickread(named_read)
+    match choice {
+        Pickread(cb) => {
+            let answer = apply_read_plain(x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptyread => 0u64
+    }
+}
+
+// expect: run case_variant_read_plain() = 5
+fn apply_read_scoped[R](x: Tx[u64], callback: scoped fn(Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(x)
+}
+
+pub fn case_named_read_scoped() -> u64 {
+    let mut x = fresh()
+    let answer = apply_read_scoped(x, named_read)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_read_scoped() = 5
+pub fn case_generic_read_scoped() -> u64 {
+    let mut x = fresh()
+    let answer = apply_read_scoped(x, generic_read)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_read_scoped() = 5
+pub fn case_static_read_scoped() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_read)
+    let cb = code.callable(descriptor)
+    let answer = apply_read_scoped(x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_read_scoped() = 5
+pub fn case_record_read_scoped() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_read)
+    let answer = apply_read_scoped(x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_read_scoped() = 5
+pub fn case_variant_read_scoped() -> u64 {
+    let mut x = fresh()
+    let choice = Pickread(named_read)
+    match choice {
+        Pickread(cb) => {
+            let answer = apply_read_scoped(x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptyread => 0u64
+    }
+}
+
+// expect: run case_variant_read_scoped() = 5
+fn apply_read_view[R](x: Tx[u64], callback: scoped[view] fn(Tx[u64]) -> Result[R, ()]) -> Result[R, ()] {
+    callback(x)
+}
+
+pub fn case_named_read_view() -> u64 {
+    let mut x = fresh()
+    let answer = apply_read_view(x, named_read)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_named_read_view() = 5
+pub fn case_generic_read_view() -> u64 {
+    let mut x = fresh()
+    let answer = apply_read_view(x, generic_read)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_generic_read_view() = 5
+pub fn case_static_read_view() -> u64 {
+    let mut x = fresh()
+    let descriptor = code.describe(named_read)
+    let cb = code.callable(descriptor)
+    let answer = apply_read_view(x, cb)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_static_read_view() = 5
+pub fn case_record_read_view() -> u64 {
+    let mut x = fresh()
+    let holder = Holder(callback: named_read)
+    let answer = apply_read_view(x, holder.callback)
+    match answer {
+        Ok(n) => n,
+        Error(_) => 0u64
+    }
+}
+
+// expect: run case_record_read_view() = 5
+pub fn case_variant_read_view() -> u64 {
+    let mut x = fresh()
+    let choice = Pickread(named_read)
+    match choice {
+        Pickread(cb) => {
+            let answer = apply_read_view(x, cb)
+            match answer {
+                Ok(n) => n,
+                Error(_) => 0u64
+            }
+        },
+        Emptyread => 0u64
+    }
+}
+// expect: run case_variant_read_view() = 5

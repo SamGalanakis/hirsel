@@ -79,6 +79,14 @@
       "sources": [
         {"file": "core/programs/m2b/dispatch/client.hirsel", "modules": ["main"], "signatures": false}
       ]
+    },
+    {
+      "package": {"name": "callablefit", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
+      "sources": [
+        {"file": "core/front/cases/body/callable-generic-fit.hirsel", "modules": ["fits"], "signatures": false},
+        {"file": "core/programs/m2b/callable_fit/main.hirsel", "modules": ["main"], "signatures": false}
+      ]
     }
   ],
   "entries": [
@@ -94,6 +102,7 @@
     {"workload": "dispatch_server", "package": {"name": "server", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true},
     {"workload": "dispatch_server_changed", "package": {"name": "server", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true, "use": {"rpc": "rpc-changed"}, "role": true},
     {"workload": "dispatch_client", "package": {"name": "client", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true},
-    {"workload": "dispatch", "package": {"name": "client", "version": "1"}, "module": "main", "pair": true}
+    {"workload": "dispatch", "package": {"name": "client", "version": "1"}, "module": "main", "pair": true},
+    {"workload": "callable_fit", "package": {"name": "callablefit", "version": "1"}, "module": "main"}
   ]
 }

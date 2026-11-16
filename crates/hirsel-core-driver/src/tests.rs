@@ -2704,7 +2704,9 @@ fn resolution_edges_rebuild_like_fresh() {
 /// the base's store, reports and publishes what an empty store does. Oracle:
 /// the fresh check, whose verdict is hand-derived (without its twin annotation,
 /// RowS cannot be cloned as Row; std without `of_u64` builds no
-/// codec of u64; without `of_list` a list row has no codec hook). Red on a key
+/// codec of u64; without `of_list` a list row has no codec hook). A refused
+/// rival is a negative history: removing it must not keep its cached body refusal
+/// in the now-valid program. Red on a key
 /// without one of them: the stored record of `thaw`, `c` or `l` was reused.
 #[test]
 fn program_inputs_rebuild_bodies_like_fresh() {
@@ -2714,6 +2716,9 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     const LIST: &str = "fn l(take xs: List[u64]) -> List[u64] { xs }\n";
     let one = format!("{ROW}{THAW}");
     let unpaired = format!("{ROW}{}", THAW.replace("@twin(Row) ", ""));
+    // The invalid history is still an input: its cached body refusal must not leak
+    // into a later valid program. Both twin claims themselves are refused by MEM-17.
+    let rival = format!("{ROW}@twin(Row) stable type RowT {{ n: u64 }}\n{THAW}");
     let libraries = tempfile::tempdir().unwrap();
     let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     // Copies of core and std whose std lacks one maker: `of_u64`, or `of_list`.
@@ -2760,6 +2765,18 @@ fn program_inputs_rebuild_bodies_like_fresh() {
             true,
         ),
         (
+            "the refused rival leaves",
+            (&shipped, &rival),
+            (&shipped, &one),
+            true,
+        ),
+        (
+            "the refused rival arrives",
+            (&shipped, &one),
+            (&shipped, &rival),
+            false,
+        ),
+        (
             "std's u64 maker leaves",
             (&shipped, &CODEC.to_owned()),
             (&renamed, &CODEC.to_owned()),
@@ -2796,9 +2813,23 @@ fn program_inputs_rebuild_bodies_like_fresh() {
                 .check(request, &mut Meter::new(false))
                 .unwrap()
         };
-        check(base, "incremental");
+        let prior = check(base, "incremental");
         let built = check(edit, "incremental");
         let fresh = check(edit, "fresh");
+        let refused_rival = match case {
+            "the refused rival leaves" => Some(&prior),
+            "the refused rival arrives" => Some(&fresh),
+            _ => None,
+        };
+        if let Some(rival) = refused_rival {
+            assert!(
+                rival
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.rule == "MEM-17" && d.message.contains("already has declared twin")),
+                "{case}: the rival itself must be refused at its declaration"
+            );
+        }
         assert_eq!(
             fresh.accepted() && fresh.incomplete.is_empty(),
             accepted,

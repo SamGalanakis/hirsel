@@ -2,12 +2,24 @@
 // expect: run reciprocal() = 11
 // expect: run disjoint() = 13
 @twin(B)
-type A { n: u64 }
+type A {
+    n: u64
+}
+
 @twin(A)
-stable type B { n: u64 }
-type C { n: u64 }
+stable type B {
+    n: u64
+}
+
+type C {
+    n: u64
+}
+
 @twin(C)
-stable type D { n: u64 }
+stable type D {
+    n: u64
+}
+
 fn reciprocal() -> u64 {
     region r {
         let x = A(n: 11u64)
@@ -16,6 +28,7 @@ fn reciprocal() -> u64 {
         back.n
     }
 }
+
 fn disjoint() -> u64 {
     region r {
         let x = C(n: 13u64)

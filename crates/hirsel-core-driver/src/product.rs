@@ -427,52 +427,51 @@ mod tests {
             }],
         }
     }
-    /// One module's files are traversed in (module, file) order, and that order
-    /// decides which twin pairs with which. A package record is keyed by that
-    /// traversal: the same bytes renamed to traverse in another order are another
-    /// request, refused fresh and never served from the first order's record.
+    /// A legal twin pair is published first. Adding a rival in another file of
+    /// the same module must not reuse that image and hide the new refusal.
     #[test]
     fn a_package_record_is_keyed_by_its_source_traversal() {
         let dir = tempfile::tempdir().unwrap();
         let texts = [
-            "pub type A{n:u64}",
-            "@twin(A) pub type C{n:u64}",
-            "@twin(A) pub type B{n:u64}",
-            "@twin(Q) pub type P{x:A}",
-            "pub type Q{x:B}",
+            "pub type Row { n: u64 }",
+            "@twin(Row) pub stable type RowS { n: u64 }\nfn thaw(s: RowS) -> Result[Row, Capacity] { clone(s) }",
+            "@twin(Row) pub stable type RowT { n: u64 }",
         ];
-        // Enumerated A,C,B,P,Q both times; the file names alone set the traversal.
-        let manifest = |label: &str, names: [usize; 5]| CorpusManifest {
-            core: package("core"),
-            packages: vec![PackageManifest {
-                package: package("core"),
-                dependencies: vec![],
-                sources: texts
-                    .iter()
-                    .zip(names)
-                    .map(|(text, name)| {
-                        let file = dir.path().join(format!("{label}-{name}.hirsel"));
-                        std::fs::write(&file, text).unwrap();
-                        ModuleSource {
-                            file,
-                            modules: vec!["ordering".into()],
-                            signatures: false,
-                        }
-                    })
-                    .collect(),
-            }],
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+        let manifest = |rival: bool| {
+            let mut core = PackageProduct::bundled_manifest(&root);
+            for (i, text) in texts.iter().enumerate().take(if rival { 3 } else { 2 }) {
+                let file = dir.path().join(format!("{i}.hirsel"));
+                std::fs::write(&file, text).unwrap();
+                core.sources.push(ModuleSource {
+                    file,
+                    modules: vec!["ordering".into()],
+                    signatures: false,
+                });
+            }
+            CorpusManifest {
+                core: package("core"),
+                packages: vec![core],
+            }
         };
-        let product = |inputs, cache: &str| {
-            PackageProduct::sources(inputs, &dir.path().join(cache), &mut Meter::new(false))
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+        let product = |rival, cache: &str| {
+            PackageProduct::sources(
+                manifest(rival),
+                &dir.path().join(cache),
+                &mut Meter::new(false),
+            )
+            .map(|p| p.image.identity)
+            .map_err(|e| e.to_string())
         };
-        // Q,P,B,C,A: accepted and published.
-        product(manifest("a", [4, 3, 2, 1, 0]), "kept").unwrap();
-        // A,C,B,P,Q: refused, whether or not the first order's record is present.
-        let primed = product(manifest("b", [0, 1, 2, 3, 4]), "kept");
-        let fresh = product(manifest("b", [0, 1, 2, 3, 4]), "fresh");
-        assert!(fresh.is_err(), "the A,C,B,P,Q traversal is refused fresh");
+        let first = product(false, "kept").unwrap();
+        assert_eq!(first, product(false, "fresh-legal").unwrap());
+        let primed = product(true, "kept");
+        let fresh = product(true, "fresh-rival");
+        let error = fresh.as_ref().unwrap_err();
+        assert!(
+            error.contains("already has declared twin") && error.contains("RowS"),
+            "{error}"
+        );
         assert_eq!(primed, fresh);
     }
     /// An image is a function of its sources and request: one library imaged

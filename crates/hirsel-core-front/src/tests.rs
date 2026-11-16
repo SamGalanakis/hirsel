@@ -3995,7 +3995,9 @@ fn written_anchor_activation_rules() {
 #[test]
 fn twin_claims_are_unique_and_name_the_first_declaration() {
     for (first, second) in [("A", "B"), ("B", "A")] {
-        let source = format!("type P {{ n: u64 }}\n@twin(P) type {first} {{ n: u64 }}\n@twin(P) type {second} {{ n: u64 }}\n");
+        let source = format!(
+            "type P {{ n: u64 }}\n@twin(P) type {first} {{ n: u64 }}\n@twin(P) type {second} {{ n: u64 }}\n"
+        );
         let (index, modules) = program_inputs(&source);
         let p = Program::declare(&index, &modules);
         assert_eq!(p.refusals.len(), 1, "{:?}", p.refusals);
@@ -4004,7 +4006,14 @@ fn twin_claims_are_unique_and_name_the_first_declaration() {
         assert!(r.message.contains(&format!("app@1/main/{first}")), "{r:?}");
         assert_eq!(r.primary.item, 2);
         assert_eq!(r.primary.span, Span { start: 0, end: 8 });
-        assert_eq!(r.causal, [Site { module: r.primary.module, item: 1, span: Span { start: 0, end: 8 } }]);
+        assert_eq!(
+            r.causal,
+            [Site {
+                module: r.primary.module,
+                item: 1,
+                span: Span { start: 0, end: 8 }
+            }]
+        );
     }
     for case in ["clone-twin-claim-refused", "clone-twin-unique"] {
         let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));

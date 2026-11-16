@@ -235,14 +235,14 @@ const NEVER: u64 = 18446744073709551615u64
 
 // A client: its way into a session, the session's frames, and a watchdog that sends a
 // frame at version NEVER after 5 s, so a call left unanswered fails its case.
-type Conn { to: Sender[runner.Event], from: Receiver[runner.Told], dog: Task[()], session: Task[Result[(), runner.RegisterError]] }
+type Conn { to: Sender[runner.Event], from: Receiver[runner.Down], dog: Task[()], session: Task[Result[(), runner.RegisterError]] }
 
-type Dog: send { clock: Clock, at: u64, to: Sender[runner.Told] }
+type Dog: send { clock: Clock, at: u64, to: Sender[runner.Down] }
 
 fn bark(take d: Dog) -> () waits {
     host.sleep_until(d.clock, d.at)
     let Dog(clock: _, at: _, to: take to) = take d
-    let _ = channel.send(to, runner.Told(version: NEVER, stream: list.new(), p: 0u64, outcome: InDoubt))
+    let _ = channel.send(to, Batched(runner.Batch(version: NEVER, complete: list.new(), rows: list.new(), outcomes: list.new())))
 }
 
 type Drive: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks }
@@ -252,7 +252,7 @@ fn conn(tasks: Tasks, head: Sender[runner.Req], clock: Clock, q: u64) -> Conn {
 }
 
 fn conn_in(tasks: Tasks, head: Sender[runner.Req], clock: Clock, q: u64, n_session: u64) -> Conn {
-    let made: Result[(Sender[runner.Told], Receiver[runner.Told]), Capacity] = channel.new(64u64)
+    let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
     let (tx, rx) = result.unwrap(take made)
     let d = Dog(clock: clock, at: host.mono_ns(clock) + 5000000000u64, to: channel.sender(tx))
     let dog = match task.spawn(tasks, bytes 65536u64, take d, bark) {
@@ -271,12 +271,22 @@ fn ask(cn: Conn, clock: Clock, s: u64, p: u64, take key: Bytes, take arg: Bytes,
     }
 }
 
-fn frame(cn: Conn) -> runner.Told waits {
+// One answer: a session sends each Outcome row in a Batch of its own, with no rows.
+type Got { version: u64, stream: Bytes, p: u64, outcome: runner.Outcome }
+
+fn frame(cn: Conn) -> Got waits {
     match channel.receive(cn.from) {
-        Ok(take f) => {
-            want(f.version != NEVER, "calls: a call was not answered within 5 s")
-            take f
+        Ok(Batched(take b)) => {
+            want(b.version != NEVER, "calls: a call was not answered within 5 s")
+            want(list.len(b.rows) == 0u64 && list.len(b.outcomes) == 1u64, "calls: one Outcome row per Batch")
+            let runner.Batch(version: v, complete: _, rows: _, outcomes: take os) = take b
+            for take t in os {
+                let runner.Done(stream: take stream, p: p, outcome: take o) = take t
+                return Got(version: v, stream: take stream, p: p, outcome: take o)
+            }
+            fail("calls: empty Batch")
         },
+        Ok(_) => fail("calls: a frame other than a Batch"),
         Error(_) => fail("calls: client channel closed"),
     }
 }
@@ -380,11 +390,11 @@ fn survives(d: Drive, n: u64, frames: u64) -> bool waits {
         let arg: Bytes = result.unwrap(clone(bad))
         ask(cn, d.clock, 0u64, 0u64, k_named(), take arg, LATER)
         all = match channel.receive(cn.from) {
-            Ok(f) => f.version == 0u64 && match f.outcome {
+            Ok(Batched(b)) => b.version == 0u64 && list.len(b.outcomes) == 1u64 && match b.outcomes[0].outcome {
                 Refused(Malformed(_)) => true,
                 _ => false,
             },
-            Error(_) => false,
+            _ => false,
         }
         i += 1u64
     }

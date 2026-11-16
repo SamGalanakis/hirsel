@@ -197,7 +197,7 @@ fn ack(out: Stdout, v: u64) waits {
 // leave its sessions open and the head waiting, so it hangs up every session, drains
 // each channel to its close, and returns its verdict (empty when every call was answered
 // as expected) for the caller to fail on.
-type Client: send { from: List[Receiver[runner.Told]], to: List[Sender[runner.Event]], calls: List[Pos], out: Stdout }
+type Client: send { from: List[Receiver[runner.Down]], to: List[Sender[runner.Event]], calls: List[Pos], out: Stdout }
 
 fn later(calls: List[Pos], x: Pos) -> bool {
     for y in calls {
@@ -221,35 +221,42 @@ fn client(take c: Client) -> String waits {
             }
         }
         while owed > 0u64 && bad == "" {
-            let f = match channel.receive(from[i]) {
-                Ok(take f) => take f,
+            let b = match channel.receive(from[i]) {
+                Ok(Batched(take b)) => take b,
+                Ok(_) => {
+                    bad = "runner_crash: a frame other than a Batch"
+                    break
+                },
                 Error(_) => break,
             }
-            owed -= 1u64
-            answered += 1u64
-            let mut matched = false
-            for x in calls {
-                if x.from == i && u64_bytes(x.stream) == f.stream && x.p == f.p {
-                    let superseded = match f.outcome {
-                        Superseded => later(calls, x),
-                        _ => false,
-                    }
-                    if superseded || same(f.outcome, expected(x)) {
-                        matched = true
+            let v = b.version
+            for f in b.outcomes {
+                owed -= 1u64
+                answered += 1u64
+                let mut matched = false
+                for x in calls {
+                    if x.from == i && u64_bytes(x.stream) == f.stream && x.p == f.p {
+                        let superseded = match f.outcome {
+                            Superseded => later(calls, x),
+                            _ => false,
+                        }
+                        if superseded || same(f.outcome, expected(x)) {
+                            matched = true
+                        }
                     }
                 }
-            }
-            if !matched {
-                bad = "runner_crash: an answer is not its call's expected Outcome"
-            }
-            let reports = match f.outcome {
-                Returned(_) => true,
-                Failed(_) => true,
-                _ => false,
-            }
-            if reports && f.version > floor {
-                floor = f.version
-                ack(out, floor)
+                if !matched {
+                    bad = "runner_crash: an answer is not its call's expected Outcome"
+                }
+                let reports = match f.outcome {
+                    Returned(_) => true,
+                    Failed(_) => true,
+                    _ => false,
+                }
+                if reports && v > floor {
+                    floor = v
+                    ack(out, floor)
+                }
             }
         }
     }
@@ -281,12 +288,12 @@ fn served(take db: store.Db, c: Clock, tasks: Tasks, out: Stdout, sessions: u64,
     let (head, inbox) = result.unwrap(take made)
     let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
     let (_, joins) = result.unwrap(take joined)
-    let mut from: List[Receiver[runner.Told]] = list.new()
+    let mut from: List[Receiver[runner.Down]] = list.new()
     let mut to: List[Sender[runner.Event]] = list.new()
     let mut mine: List[Sender[runner.Event]] = list.new()
     let mut running: List[Task[Result[(), runner.RegisterError]]] = list.new()
     for _ in 0u64 .. sessions {
-        let pair: Result[(Sender[runner.Told], Receiver[runner.Told]), Capacity] = channel.new(64u64)
+        let pair: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
         let (tx, rx) = result.unwrap(take pair)
         let (s, t) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, take tx, c, 4u64, 2097152u64))
         result.unwrap(list.push(mut mine, channel.sender(s)))

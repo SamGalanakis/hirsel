@@ -827,8 +827,22 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take from: Rec
 // ---- §3: sessions. A client's call, in the session clock's mono_ns.
 pub type Call: send { stream: Bytes, p: u64, key: Bytes, arg: Bytes, deadline: u64 }
 
-// One answer to a client, in a frame at `version`.
-pub type Told: send { version: u64, stream: Bytes, p: u64, outcome: Outcome }
+// The head's answer to one send at the publisher's base: one Batch outcome row before batching.
+type Told: send { version: u64, stream: Bytes, p: u64, outcome: Outcome }
+
+// §3's server-to-client frames (WIRE-SPEC §3's Frame), as a session hands them to its client.
+// A Batch at `version` names in `complete` each sub whose whole initial result it carries
+// (F11), and carries subscription rows (F10: the data-tree key and the published value at
+// `version`, None for a removal) and Done rows, one per send answered. Until R3's frames,
+// a Done names its stream by the store's stream key and a row is SubRow, because `Row` is
+// the streams table's stored type.
+pub type SubRow: send { sub: u32, key: Bytes, value: Option[Bytes] }
+
+pub type Done: send { stream: Bytes, p: u64, outcome: Outcome }
+
+pub type Batch: send { version: u64, complete: List[u32], rows: List[SubRow], outcomes: List[Done] }
+
+pub type Down: send = Batched(Batch) | Ended(u32, Outcome) | Reset
 
 type Tick: send { stream: Bytes, p: u64, generation: u64 }
 
@@ -872,7 +886,7 @@ type Session[G: send, H: send]: send {
     inbox: Receiver[Event],
     me: Sender[Event],
     head: Sender[Req],
-    client: Sender[Told],
+    client: Sender[Down],
     clock: Clock,
     tasks: Tasks,
     q: u64
@@ -881,7 +895,7 @@ type Session[G: send, H: send]: send {
 // A session as a task under `bytes n_session`: it runs `place` itself under n_place
 // (rule 10), forwards to the head, and answers its client on `client`. The returned
 // sender is the client's way in; the task ends with Place's error if `place` fails.
-pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], take client: Sender[Told], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity] {
+pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], take client: Sender[Down], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity] {
     let (tx, rx): (Sender[Event], Receiver[Event]) = channel.new(64u64)?
     let s = Session(place: place, n_place: n_place, inbox: take rx, me: channel.sender(tx), head: channel.sender(head), client: take client, clock: clock, tasks: tasks, q: q)
     match task.spawn(tasks, bytes n_session, take s, session) {
@@ -912,8 +926,11 @@ fn refusal[G: send, H: send](r: Registry[G, H], s: Session[G, H], c: Call) -> Op
     }
 }
 
-fn tell(to: Sender[Told], version: u64, take stream: Bytes, p: u64, take o: Outcome) -> () waits {
-    let _ = channel.send(to, Told(version: version, stream: take stream, p: p, outcome: take o))
+// One Outcome row, in its own Batch at `version`.
+fn tell(to: Sender[Down], version: u64, take stream: Bytes, p: u64, take o: Outcome) -> () waits {
+    let mut outcomes: List[Done] = list.new()
+    result.unwrap(list.push(mut outcomes, Done(stream: take stream, p: p, outcome: take o)))
+    let _ = channel.send(to, Batched(Batch(version: version, complete: list.new(), rows: list.new(), outcomes: take outcomes)))
 }
 
 fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError] waits {
@@ -990,11 +1007,12 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                 }
                 if owed > 0u64 {
                     last = f.version
+                    let Told(version: v, stream: take stream, p: p, outcome: take o) = take f
                     for _ in 1u64 .. owed {
-                        let each: Told = result.unwrap(clone(f))
-                        let _ = channel.send(s.client, take each)
+                        let each: Outcome = result.unwrap(clone(o))
+                        tell(s.client, v, result.unwrap(clone(stream)), p, take each)
                     }
-                    let _ = channel.send(s.client, take f)
+                    tell(s.client, v, take stream, p, take o)
                 }
             },
             // One send's own deadline: that send alone is answered Abandoned; the slot stays.

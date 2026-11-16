@@ -4,13 +4,14 @@
 //
 // Format. Integers at their width, a float as its IEEE bits, a `char` as its scalar in a
 // u32, all little-endian; `bool` one byte, 0 or 1; `()` nothing. String, List and Map: a
-// u64 count, then the UTF-8 bytes, the elements, or key and value per entry in insertion
+// u32 count, then the UTF-8 bytes, the elements, or key and value per entry in insertion
 // order. Option, Result and every sum: the declared variant index, removed variants
 // counted, as a u32, then the variant's fields. A record or tuple: its fields in
 // declaration order; a removed field is not written. Nothing frames a value but its
 // type, so a value is decoded against the schema that wrote it. The version byte of a
-// schema fixes these widths: a decoder written from a version-1 schema alone, in any
-// language, reads u64 counts and lengths and u32 tags.
+// schema fixes these widths: a decoder written from a version-3 schema alone, in any
+// language, reads u32 counts and lengths and u32 tags. Counts above u32::MAX return
+// Capacity(requested: count, available: u32::MAX) before the count is written.
 /// SEM-10's decode errors; each u64 is a byte offset, into the writer's schema for
 /// `Schema` and into the decoded bytes otherwise. `Value(i)`: the `from` of a `via` codec
 /// refused the value that starts at i.
@@ -275,16 +276,25 @@ pub fn take_char(b: Bytes, mut at: u64) -> Result[char, Stop] {
     }
 }
 
+// The wire count is bounded even when the caller has a wider in-memory length.
+fn put_count(n: u64, mut out: Bytes) -> Result[(), Capacity] {
+    if n > 0xffffffff {
+        return Error(Capacity(requested: n, available: 0xffffffff))
+    }
+    let small: u32 = int.truncate(n)
+    put_u32(small, mut out)
+}
+
 pub fn put_string(x: String, mut out: Bytes) -> Result[(), Capacity] {
     let raw = string.as_bytes(x)
-    list.put_word_le(mut out, list.len(raw))?
+    put_count(list.len(raw), mut out)?
     list.append(mut out, raw)
 }
 
 /// The count, then exactly that many bytes, copied into exact capacity and checked UTF-8.
 pub fn take_string(b: Bytes, mut at: u64) -> Result[String, Stop] {
     let start = at
-    let n = take_u64(b, mut at)?
+    let n: u64 = int.widen(take_u32(b, mut at)?)
     if list.len(b) - at < n {
         return Error(Bad(Truncated(start)))
     }
@@ -380,7 +390,7 @@ pub fn take_with[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[T, Stop] {
 }
 
 pub fn put_list[T](xs: List[T], c: Codec[T], mut out: Bytes) -> Result[(), Capacity] {
-    list.put_word_le(mut out, list.len(xs))?
+    put_count(list.len(xs), mut out)?
     for x in xs {
         (c.encoder)(x, mut out)?
     }
@@ -391,7 +401,7 @@ pub fn put_list[T](xs: List[T], c: Codec[T], mut out: Bytes) -> Result[(), Capac
 /// bytes each cannot fit in what remains. A frame loop calls it for a recursive field.
 pub fn take_count(b: Bytes, mut at: u64, size: u64) -> Result[u64, Stop] {
     let start = at
-    let n = take_u64(b, mut at)?
+    let n: u64 = int.widen(take_u32(b, mut at)?)
     if size != 0 && n > (list.len(b) - at) / size {
         return Error(Bad(Truncated(start)))
     }
@@ -422,7 +432,7 @@ pub fn take_list[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[List[T], Stop]
 }
 
 pub fn put_map[K: key, V](m: Map[K, V], ck: Codec[K], cv: Codec[V], mut out: Bytes) -> Result[(), Capacity] {
-    list.put_word_le(mut out, map.len(m))?
+    put_count(map.len(m), mut out)?
     for (k, v) in m {
         (ck.encoder)(k, mut out)?
         (cv.encoder)(v, mut out)?
@@ -573,9 +583,9 @@ pub fn of[T: codec]() -> Codec[T] {
 // The structural codecs: `of` resolves to these at List, Option, Map and Result (Bytes is
 // List[u8]). Each is the field path itself, put_list and the rest with `of()` for the
 // elements, so a value encodes as the same type does as a field.
-/// The codec of List[E]: the u64 count, then each element. Ex: `let c: Codec[List[u64]] = codec.of()`
+/// The codec of List[E]: the u32 count, then each element. Ex: `let c: Codec[List[u64]] = codec.of()`
 pub fn of_list[E: codec]() -> Codec[List[E]] {
-    Codec(encoder: list_encode, decoder: list_decode, describer: describe_list, smallest: 8)
+    Codec(encoder: list_encode, decoder: list_decode, describer: describe_list, smallest: 4)
 }
 
 /// The codec of Option[E]: tag 0 for None, or tag 1 then the value.
@@ -583,9 +593,9 @@ pub fn of_option[E: codec]() -> Codec[Option[E]] {
     Codec(encoder: option_encode, decoder: option_decode, describer: describe_option, smallest: 4)
 }
 
-/// The codec of Map[K, V]: the u64 count, then key and value per entry in insertion order.
+/// The codec of Map[K, V]: the u32 count, then key and value per entry in insertion order.
 pub fn of_map[K: key + codec, V: codec]() -> Codec[Map[K, V]] {
-    Codec(encoder: map_encode, decoder: map_decode, describer: describe_map, smallest: 8)
+    Codec(encoder: map_encode, decoder: map_decode, describer: describe_map, smallest: 4)
 }
 
 /// The codec of Result[T, E]: tag 0 then the Ok value, or tag 1 then the Error value.
@@ -707,7 +717,7 @@ pub fn of_f64() -> Codec[f64] {
 }
 
 pub fn of_string() -> Codec[String] {
-    Codec(encoder: put_string, decoder: take_string, describer: describe_string, smallest: 8)
+    Codec(encoder: put_string, decoder: take_string, describer: describe_string, smallest: 4)
 }
 
 /// DecodeError's codec, as the derive writes a sum's: a store can keep a refusal.
@@ -791,16 +801,16 @@ fn decode_error_schema(mut s: Schema, _c: Codec[DecodeError]) -> Result[(), Capa
     Ok(())
 }
 
-// Schemas. A schema is bytes: a version byte (1), the definitions (a u64 count, then
+// Schemas. A schema is bytes: a version byte (3), the definitions (a u32 count, then
 // each), then the root type. A type is an opcode byte: 0 (), 1 bool, 2 char, 3-6 u8-u64,
 // 7-10 i8-i64, 11 f32, 12 f64, 13 String, 14 List and its element, 15 Map, its key and
-// value, 16 Option and its type, 17 Result, its ok and error types, 18 a tuple (a u64
-// arity, then the components), 19 a definition (its u64 index). A definition is its
-// nominal path, its type arguments (a u64 count, then each), a kind byte and a body:
-// 0 record (a u64 entry count, then per entry 0 for a field or 1 for a removed one, its
-// name and type), 1 sum (a u64 variant count, then per variant 0, or 1 for a removed one,
-// its name, a u64 field count and the field types), 2 via (the type it is written as).
-// A name is a u64 byte count and UTF-8. Definitions are numbered in the order a
+// value, 16 Option and its type, 17 Result, its ok and error types, 18 a tuple (a u32
+// arity, then the components), 19 a definition (its u32 index). A definition is its
+// nominal path, its type arguments (a u32 count, then each), a kind byte and a body:
+// 0 record (a u32 entry count, then per entry 0 for a field or 1 for a removed one, its
+// name and type), 1 sum (a u32 variant count, then per variant 0, or 1 for a removed one,
+// its name, a u32 field count and the field types), 2 via (the type it is written as).
+// A name is a u32 byte count and UTF-8. Definitions are numbered in the order a
 // depth-first walk from the root first meets them, so a type has one schema; defaults
 // are the reader's, never in the bytes.
 /// A schema being built: what a codec's schema function writes into.
@@ -913,7 +923,7 @@ pub fn schema_result[T, E](mut s: Schema, ct: Codec[T], ce: Codec[E]) -> Result[
 /// A tuple of n components; schema_of each follows.
 pub fn schema_tuple(mut s: Schema, n: u64) -> Result[(), Capacity] {
     opcode(mut s, 18)?
-    list.put_word_le(mut s.cur, n)
+    put_count(n, mut s.cur)
 }
 
 /// Starts the definition of a nominal type at its path; then its type arguments
@@ -922,7 +932,7 @@ pub fn define(mut s: Schema, path: String, arguments: u64) -> Result[(), Capacit
     let parent = replace(mut s.cur, list.new())
     push_own(mut s.saved, take parent)?
     name(mut s, path)?
-    list.put_word_le(mut s.cur, arguments)
+    put_count(arguments, mut s.cur)
 }
 
 /// One type argument of the definition begun by `define`.
@@ -979,14 +989,14 @@ fn body(mut s: Schema, kind: u8, n: u64) -> Result[bool, Capacity] {
     referenced?
     opcode(mut s, kind)?
     if kind != 2 {
-        list.put_word_le(mut s.cur, n)?
+        put_count(n, mut s.cur)?
     }
     Ok(false)
 }
 
 fn reference(mut b: Bytes, index: u64) -> Result[(), Capacity] {
     put_byte(mut b, 19)?
-    list.put_word_le(mut b, index)
+    put_count(index, mut b)
 }
 
 // The enclosing type's bytes become current again.
@@ -1045,14 +1055,14 @@ pub fn removed_field(mut s: Schema, path: String) -> Result[(), Capacity] {
 pub fn removed_variant(mut s: Schema, path: String, n: u64) -> Result[(), Capacity] {
     opcode(mut s, 1)?
     name(mut s, path)?
-    list.put_word_le(mut s.cur, n)
+    put_count(n, mut s.cur)
 }
 
 /// A live variant of the sum being defined, with n fields; schema_of each follows.
 pub fn variant(mut s: Schema, path: String, n: u64) -> Result[(), Capacity] {
     opcode(mut s, 0)?
     name(mut s, path)?
-    list.put_word_le(mut s.cur, n)
+    put_count(n, mut s.cur)
 }
 
 fn push_own[T](mut xs: List[T], take x: T) -> Result[(), Capacity] {
@@ -1080,13 +1090,13 @@ fn built[T](c: Codec[T]) -> Result[Schema, Capacity] {
 }
 
 fn finish(s: Schema) -> Result[Bytes, Capacity] {
-    let mut size: u64 = 9 + list.len(s.cur)
+    let mut size: u64 = 5 + list.len(s.cur)
     for d in s.defs {
         size += list.len(d)
     }
     let mut out: Bytes = list.with_capacity(size)?
-    put_byte(mut out, 1)?
-    list.put_word_le(mut out, list.len(s.defs))?
+    put_byte(mut out, 3)?
+    put_count(list.len(s.defs), mut out)?
     for d in s.defs {
         list.append(mut out, d)?
     }
@@ -1156,19 +1166,28 @@ const SKIP: u64 = 0xffffffffffffffff
 
 const DEFAULT: u64 = 0x8000000000000000
 
+// Four little-endian bytes in a schema whose enclosing bounds were checked.
+fn count_at(b: Bytes, at: u64) -> u64 {
+    let a: u64 = int.widen(b[at])
+    let c: u64 = int.widen(b[at + 1])
+    let d: u64 = int.widen(b[at + 2])
+    let e: u64 = int.widen(b[at + 3])
+    a | (c << 8) | (d << 16) | (e << 24)
+}
+
 // The end of the name at `at`, or None past `end`.
 fn name_end(b: Bytes, at: u64, end: u64) -> Option[u64] {
-    if end - at < 8 {
+    if end - at < 4 {
         return None
     }
-    let n = list.word_le(b, at)
-    if end - at - 8 < n {
+    let n = count_at(b, at)
+    if end - at - 4 < n {
         return None
     }
-    if utf8_stop(b, at + 8, at + 8 + n) != n {
+    if utf8_stop(b, at + 4, at + 4 + n) != n {
         return None
     }
-    Some(at + 8 + n)
+    Some(at + 4 + n)
 }
 
 // The end of the type at `at`, below `end`, every reference below `defs`: a count of the
@@ -1188,10 +1207,10 @@ fn type_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
         } else if x == 15 || x == 17 {
             owed += 2
         } else if x == 18 || x == 19 {
-            if end - i < 8 {
+            if end - i < 4 {
                 return Error(i - 1)
             }
-            let n = list.word_le(b, i)
+            let n = count_at(b, i)
             if x == 19 && n >= defs {
                 return Error(i - 1)
             }
@@ -1201,7 +1220,7 @@ fn type_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
                 }
                 owed += n
             }
-            i += 8
+            i += 4
         } else if x > 13 {
             return Error(i - 1)
         }
@@ -1215,11 +1234,11 @@ fn def_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
         Some(e) => e,
         None => return Error(at)
     }
-    if end - i < 9 {
+    if end - i < 5 {
         return Error(i)
     }
-    let args = list.word_le(b, i)
-    i += 8
+    let args = count_at(b, i)
+    i += 4
     let mut k: u64 = 0
     while k < args {
         i = type_end(b, i, end, defs)?
@@ -1233,11 +1252,11 @@ fn def_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
     if kind == 2 {
         return type_end(b, i, end, defs)
     }
-    if kind > 2 || end - i < 8 {
+    if kind > 2 || end - i < 4 {
         return Error(i - 1)
     }
-    let n = list.word_le(b, i)
-    i += 8
+    let n = count_at(b, i)
+    i += 4
     k = 0
     while k < n {
         if i >= end || b[i] > 1 {
@@ -1250,11 +1269,11 @@ fn def_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
         if kind == 0 {
             i = type_end(b, i, end, defs)?
         } else {
-            if end - i < 8 {
+            if end - i < 4 {
                 return Error(i)
             }
-            let fields = list.word_le(b, i)
-            i += 8
+            let fields = count_at(b, i)
+            i += 4
             let mut f: u64 = 0
             while f < fields {
                 i = type_end(b, i, end, defs)?
@@ -1268,18 +1287,18 @@ fn def_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
 
 // The definitions' offsets in `all` of the schema at `from`, checked; Error: the offset.
 fn scan(all: Bytes, from: u64, end: u64, mut defs: List[u64]) -> Result[Result[u64, u64], Capacity] {
-    if end == from || all[from] != 1 {
+    if end == from || all[from] != 3 {
         return Ok(Error(from))
     }
-    if end - from < 9 {
+    if end - from < 5 {
         return Ok(Error(from + 1))
     }
-    let n = list.word_le(all, from + 1)
+    let n = count_at(all, from + 1)
     if n > end - from {
         return Ok(Error(from + 1))
     }
     list.reserve(mut defs, n)?
-    let mut i = from + 9
+    let mut i = from + 5
     let mut k: u64 = 0
     while k < n {
         push_plain(mut defs, i)?
@@ -1309,9 +1328,9 @@ fn skip(b: Bytes, at: u64) -> u64 {
 
 // The offset of the kind byte of the definition at d.
 fn kind_at(b: Bytes, d: u64) -> u64 {
-    let mut i = d + 8 + list.word_le(b, d)
-    let args = list.word_le(b, i)
-    i += 8
+    let mut i = d + 4 + count_at(b, d)
+    let args = count_at(b, i)
+    i += 4
     let mut k: u64 = 0
     while k < args {
         i = skip(b, i)
@@ -1321,19 +1340,19 @@ fn kind_at(b: Bytes, d: u64) -> u64 {
 }
 
 fn same_name(b: Bytes, x: u64, y: u64) -> bool {
-    let n = list.word_le(b, x)
-    n == list.word_le(b, y) && list.slice(b, x + 8, x + 8 + n) == list.slice(b, y + 8, y + 8 + n)
+    let n = count_at(b, x)
+    n == count_at(b, y) && list.slice(b, x + 4, x + 4 + n) == list.slice(b, y + 4, y + 4 + n)
 }
 
 // The entries of the record or sum whose kind byte is at k: (live, name, type or fields).
 fn entries(b: Bytes, k: u64, mut out: List[(bool, u64, u64)]) -> Result[(), Capacity] {
-    let n = list.word_le(b, k + 1)
-    let mut i = k + 9
+    let n = count_at(b, k + 1)
+    let mut i = k + 5
     let mut e: u64 = 0
     while e < n {
         let live = b[i] == 0
         let at_name = i + 1
-        i = at_name + 8 + list.word_le(b, at_name)
+        i = at_name + 4 + count_at(b, at_name)
         match list.push(mut out, (live, at_name, i)) {
             Ok(()) => {}
             Error((f, _)) => return Error(f)
@@ -1341,8 +1360,8 @@ fn entries(b: Bytes, k: u64, mut out: List[(bool, u64, u64)]) -> Result[(), Capa
         if b[k] == 0 {
             i = skip(b, i)
         } else {
-            let fields = list.word_le(b, i)
-            i += 8
+            let fields = count_at(b, i)
+            i += 4
             let mut f: u64 = 0
             while f < fields {
                 i = skip(b, i)
@@ -1377,7 +1396,7 @@ fn task(mut p: Plan, w: u64, r: u64, slot: u64) -> Result[(), Capacity] {
 }
 
 fn def_at(p: Plan, at: u64) -> u64 {
-    let index = list.word_le(p.all, at + 1)
+    let index = count_at(p.all, at + 1)
     if at < p.wlen {
         p.wdefs[index]
     } else {
@@ -1416,14 +1435,14 @@ fn type_node(mut p: Plan, w: u64, r: u64) -> Result[Result[u64, u64], Capacity] 
         let r2 = skip(p.all, r + 1)
         task(mut p, w2, r2, index + 2)?
     } else if x == 18 {
-        let n = list.word_le(p.all, w + 1)
-        if n != list.word_le(p.all, r + 1) {
+        let n = count_at(p.all, w + 1)
+        if n != count_at(p.all, r + 1) {
             return Ok(Error(w))
         }
         emit(mut p, 5)?
         emit(mut p, n)?
-        let mut cw = w + 9
-        let mut cr = r + 9
+        let mut cw = w + 5
+        let mut cr = r + 5
         let mut k: u64 = 0
         while k < n {
             emit(mut p, 0)?
@@ -1582,8 +1601,8 @@ fn def_index(defs: List[u64], at: u64) -> u64 {
 }
 
 fn default_of(p: Plan, def: u64, name_at: u64) -> u64 {
-    let n = list.word_le(p.all, name_at)
-    let wanted = list.slice(p.all, name_at + 8, name_at + 8 + n)
+    let n = count_at(p.all, name_at)
+    let wanted = list.slice(p.all, name_at + 4, name_at + 4 + n)
     let mut i: u64 = 0
     for d in p.defaults {
         if d.def == def && string.as_bytes(d.field) == wanted {
@@ -1623,8 +1642,8 @@ fn sum_node(mut p: Plan, wk: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u6
             // Matched by a live variant or a tombstone, its types resolve against the
             // reader's; a value holding a variant the reader removed is Schema at the
             // writer's entry for it.
-            let m = list.word_le(p.all, fields_at)
-            if m != list.word_le(p.all, rfields) {
+            let m = count_at(p.all, fields_at)
+            if m != count_at(p.all, rfields) {
                 return Ok(Error(name_at - 1))
             }
             if rlive {
@@ -1635,8 +1654,8 @@ fn sum_node(mut p: Plan, wk: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u6
             }
             emit(mut p, m)?
             let base = list.len(p.ops)
-            let mut cw = fields_at + 8
-            let mut cr = rfields + 8
+            let mut cw = fields_at + 4
+            let mut cr = rfields + 4
             let mut k: u64 = 0
             while k < m {
                 emit(mut p, 0)?
@@ -1798,7 +1817,7 @@ fn leaf(code: u64, b: Bytes, mut at: u64, mut out: Bytes) -> Result[(), Stop] {
     } else if code == 12 {
         let _ = take_f64(b, mut at)?
     } else if code == 13 {
-        let n = take_u64(b, mut at)?
+        let n: u64 = int.widen(take_u32(b, mut at)?)
         if list.len(b) - at < n {
             return Error(Bad(Truncated(start)))
         }
@@ -1825,7 +1844,7 @@ fn leaf(code: u64, b: Bytes, mut at: u64, mut out: Bytes) -> Result[(), Stop] {
 
 fn word(mut o: Out, x: u64) -> Result[(), Stop] {
     let lo = list.len(o.raw)
-    admit(list.put_word_le(mut o.raw, x))?
+    admit(put_count(x, mut o.raw))?
     grow(mut o, lo)
 }
 
@@ -1851,7 +1870,7 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
                 leaf(ops[next + 1], b, mut at, mut o.raw)?
                 grow(mut o, lo)?
             } else if k == 1 || k == 2 {
-                let n = take_u64(b, mut at)?
+                let n: u64 = int.widen(take_u32(b, mut at)?)
                 word(mut o, n)?
                 if n > 0 {
                     push_frame(mut stack, frame(k, next, n, 0))?
@@ -2064,7 +2083,7 @@ pub fn read_at[T](r: Reader[T], b: Bytes, start: u64) -> Result[Result[T, Decode
 // a proper prefix of another's, so a tuple key is its components' bytes concatenated.
 // Unsigned integers big-endian at their width; signed ones the same with the sign bit
 // flipped; bool one byte, 0 or 1; String and Bytes their bytes with each 0x00 written
-// 0x00 0xff, then 0x00 0x00. A key schema is a schema whose version byte is 2.
+// 0x00 0xff, then 0x00 0x00. A key schema is a schema whose version byte is 4.
 /// The key codec of T. Generated key codecs and the built-in ones below are the makers.
 pub opaque type Key[T] {
     encoder: fn(T, mut Bytes) -> Result[(), Capacity],
@@ -2097,12 +2116,12 @@ pub fn decode_key[T](k: Key[T], b: Bytes) -> Result[Result[T, DecodeError], Capa
     }
 }
 
-/// The key's schema: version 2, then the definitions and the type as `schema` writes them.
+/// The key's schema: version 4, then the definitions and the type as `schema` writes them.
 pub fn key_schema[T](k: Key[T]) -> Result[Bytes, Capacity] {
     let mut s = builder()
     (k.describer)(mut s)?
     let mut b = finish(s)?
-    let _ = list.set(mut b, 0, 2)
+    let _ = list.set(mut b, 0, 4)
     Ok(take b)
 }
 

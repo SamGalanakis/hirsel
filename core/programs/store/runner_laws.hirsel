@@ -339,8 +339,9 @@ fn valid_peak(r: Reg, key: Bytes, arg: Bytes, n: u64) -> u64 {
 // trailing byte, so each decodes the whole String before it is refused) all answer
 // Refused(Malformed) inside the smallest bound that holds one valid call: the flood's
 // peak charge is at most one valid call's. (c) v2.3: an entry registered with 4,096
-// bytes whose body returns 3,000 bytes, which encode to 3,008 more (6,008 together), is
-// Failed(OutOfBytes), and the caller goes on to a call that fits (100 bytes).
+// bytes whose body returns 3,000 bytes. Its 3,004-byte encoding charges 3,008 more
+// bytes (6,008 together). It is Failed(OutOfBytes), and the caller goes on to
+// a call that fits (100 bytes, encoded as 4 + 100 = 104).
 pub fn law_l4_malformed_flood() -> bool {
     let r = sized(16384u64)
     let key = key_of(code.identity(code.describe(size)), std.codec.of_string(), std.codec.of_u64())
@@ -396,7 +397,7 @@ pub fn law_l4_malformed_flood() -> bool {
         result.unwrap(std.codec.put_u64(100u64, mut a))
         a
     }) {
-        Returned(b) => list.len(b) == 108u64,
+        Returned(b) => list.len(b) == 104u64,
         _ => false,
     }
     small && large && held && over && fits

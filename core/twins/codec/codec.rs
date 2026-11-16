@@ -16,7 +16,7 @@ struct Truncated;
 
 trait Codec: Sized {
     const LEAST: usize;
-    fn encode(&self, out: &mut Vec<u8>);
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Truncated>;
     fn decode(b: &[u8], at: &mut usize) -> Result<Self, Truncated>;
 }
 
@@ -26,10 +26,17 @@ fn word(b: &[u8], at: &mut usize) -> Result<u64, Truncated> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+fn count(b: &[u8], at: &mut usize) -> Result<u32, Truncated> {
+    let bytes: [u8; 4] = b.get(*at..*at + 4).ok_or(Truncated)?.try_into().map_err(|_| Truncated)?;
+    *at += 4;
+    Ok(u32::from_le_bytes(bytes))
+}
+
 impl Codec for u64 {
     const LEAST: usize = 8;
-    fn encode(&self, out: &mut Vec<u8>) {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Truncated> {
         out.extend_from_slice(&self.to_le_bytes());
+        Ok(())
     }
     fn decode(b: &[u8], at: &mut usize) -> Result<Self, Truncated> {
         word(b, at)
@@ -38,8 +45,9 @@ impl Codec for u64 {
 
 impl Codec for i64 {
     const LEAST: usize = 8;
-    fn encode(&self, out: &mut Vec<u8>) {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Truncated> {
         out.extend_from_slice(&self.to_le_bytes());
+        Ok(())
     }
     fn decode(b: &[u8], at: &mut usize) -> Result<Self, Truncated> {
         Ok(word(b, at)? as i64)
@@ -48,8 +56,9 @@ impl Codec for i64 {
 
 impl Codec for f64 {
     const LEAST: usize = 8;
-    fn encode(&self, out: &mut Vec<u8>) {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Truncated> {
         out.extend_from_slice(&self.to_bits().to_le_bytes());
+        Ok(())
     }
     fn decode(b: &[u8], at: &mut usize) -> Result<Self, Truncated> {
         let x = word(b, at)?;
@@ -61,13 +70,15 @@ impl Codec for f64 {
 }
 
 impl Codec for String {
-    const LEAST: usize = 8;
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&(self.len() as u64).to_le_bytes());
+    const LEAST: usize = 4;
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Truncated> {
+        let n = u32::try_from(self.len()).map_err(|_| Truncated)?;
+        out.extend_from_slice(&n.to_le_bytes());
         out.extend_from_slice(self.as_bytes());
+        Ok(())
     }
     fn decode(b: &[u8], at: &mut usize) -> Result<Self, Truncated> {
-        let n = usize::try_from(word(b, at)?).map_err(|_| Truncated)?;
+        let n = usize::try_from(count(b, at)?).map_err(|_| Truncated)?;
         let bytes = b.get(*at..).ok_or(Truncated)?.get(..n).ok_or(Truncated)?;
         let s = String::from_utf8(bytes.to_vec()).map_err(|_| Truncated)?;
         *at += n;
@@ -76,15 +87,17 @@ impl Codec for String {
 }
 
 impl<T: Codec> Codec for Vec<T> {
-    const LEAST: usize = 8;
-    fn encode(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&(self.len() as u64).to_le_bytes());
+    const LEAST: usize = 4;
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Truncated> {
+        let n = u32::try_from(self.len()).map_err(|_| Truncated)?;
+        out.extend_from_slice(&n.to_le_bytes());
         for x in self {
-            x.encode(out);
+            x.encode(out)?;
         }
+        Ok(())
     }
     fn decode(b: &[u8], at: &mut usize) -> Result<Self, Truncated> {
-        let n = usize::try_from(word(b, at)?).map_err(|_| Truncated)?;
+        let n = usize::try_from(count(b, at)?).map_err(|_| Truncated)?;
         if n > (b.len() - *at) / T::LEAST {
             return Err(Truncated);
         }
@@ -97,11 +110,11 @@ impl<T: Codec> Codec for Vec<T> {
 }
 
 impl Codec for Account {
-    const LEAST: usize = 24;
-    fn encode(&self, out: &mut Vec<u8>) {
-        self.id.encode(out);
-        self.owner.encode(out);
-        self.balance.encode(out);
+    const LEAST: usize = 20;
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), Truncated> {
+        self.id.encode(out)?;
+        self.owner.encode(out)?;
+        self.balance.encode(out)
     }
     fn decode(b: &[u8], at: &mut usize) -> Result<Self, Truncated> {
         let id = u64::decode(b, at)?;
@@ -113,12 +126,16 @@ impl Codec for Account {
 
 fn run<T: Codec>(xs: &T, mode: u64, r: u64, check: fn(&T) -> u64) -> u64 {
     let mut out = Vec::new();
-    xs.encode(&mut out);
+    if xs.encode(&mut out).is_err() {
+        return 0;
+    }
     let mut sum = out.len() as u64;
     for _ in 0..r {
         if mode == 1 {
             out.clear();
-            xs.encode(&mut out);
+            if xs.encode(&mut out).is_err() {
+                return 0;
+            }
             sum += out.len() as u64;
         } else if mode == 2 {
             let mut at = 0;

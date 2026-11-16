@@ -2553,19 +2553,21 @@ pub fn law_typed_resident(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    // Catalog: 67 bytes, key 1||"rows" (5); r8 totals 72+8+62=142.
-    if db.resident != 142 {
+    // Scalar schemas are 1 + 4 + 1 = 6 bytes each. Catalog size is
+    // 17 + (4 + 6) + 2 + (2 + 8 + 4 + 6) + 2 + 4 + 4 = 59 bytes.
+    // Key 1||"rows" is 5 bytes. The charge is r8(59) + r8(5) + 62 = 134.
+    if db.resident != 134 {
         return false
     }
-    db.ceiling = 236
-    if !typed_put(mut db, t, 1, 10) || db.resident != 236 {
+    db.ceiling = 228
+    if !typed_put(mut db, t, 1, 10) || db.resident != 228 {
         return false
     }
     let out = run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, t, 2, 20)
     })
     match take out {
-        Ok(Refused(f)) => if f.requested != 330 || f.available != 236 {
+        Ok(Refused(f)) => if f.requested != 322 || f.available != 228 {
             return false
         },
         _ => return false
@@ -2579,7 +2581,7 @@ pub fn law_typed_resident(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    db.resident == 142
+    db.resident == 134
 }
 
 @test
@@ -3697,19 +3699,19 @@ pub fn law_read_liveness(c: Clock) -> bool waits {
     }
 }
 
-// L27(a): catalog142 + row94 =236 throughout; ceiling330 is one extra row.
+// L27(a): catalog134 + row94 =228 throughout; ceiling322 is one extra row.
 // Wrong implementation: charge every overwrite without subtracting its old row.
 pub fn law_overwrite_account(c: Clock) -> bool waits {
     let mut options = defaults()
-    options.resident_limit = 330
+    options.resident_limit = 322
     let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
     result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    if db.resident != 142 {
+    if db.resident != 134 {
         return false
     }
     for step in 0u64 .. 100000 {
-        if !typed_put(mut db, t, 1, step + 1) || db.resident != 236 {
+        if !typed_put(mut db, t, 1, step + 1) || db.resident != 228 {
             return false
         }
     }
@@ -6852,7 +6854,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
         match take made {
             Error(Full(_)) => {
                 refusals += 1
-                if db.head != 513 || db.resident != 142 + 512 * 94 || db.checkpointed != 2 || std.omap.len(db.roots.catalog) != 1 || std.omap.len(db.roots.data) != 512 {
+                if db.head != 513 || db.resident != 134 + 512 * 94 || db.checkpointed != 2 || std.omap.len(db.roots.catalog) != 1 || std.omap.len(db.roots.data) != 512 {
                     return false
                 }
                 let persisted = result.unwrap(disk_load(child, 1048576))

@@ -167,7 +167,7 @@ impl<'a> File<'a> {
                 "i64" => Ty::Scalar("i64", 8),
                 "f32" => Ty::Scalar("f32", 4),
                 "f64" => Ty::Scalar("f64", 8),
-                "String" => Ty::Scalar("string", 8),
+                "String" => Ty::Scalar("string", 4),
                 "Bytes" => Ty::List("u8"),
                 other => Ty::With(other),
             },
@@ -478,9 +478,9 @@ impl<'a> Group<'a> {
         let step = |s: &Step| match (s.edge, s.ty) {
             (Some((Edge::Direct, n)), _) => self.least(n, depth + 1),
             (Some((Edge::Option | Edge::Ok(_) | Edge::Error(_), _)), _) => Some(4),
-            (Some(_), _) => Some(8),
+            (Some(_), _) => Some(4),
             (None, Ty::Scalar(_, n)) => Some(*n),
-            (None, Ty::List(_) | Ty::Map(..)) => Some(8),
+            (None, Ty::List(_) | Ty::Map(..)) => Some(4),
             (None, Ty::Option(_) | Ty::Result(..)) => Some(4),
             (None, Ty::With(_)) => None,
         };
@@ -1020,7 +1020,7 @@ impl<'a> Gen<'a> {
     fn least(&mut self, ty: &Ty<'a>) -> Least {
         match *ty {
             Ty::Scalar(_, n) => Least::fixed(n),
-            Ty::List(_) | Ty::Map(..) => Least::fixed(8),
+            Ty::List(_) | Ty::Map(..) => Least::fixed(4),
             Ty::Option(_) | Ty::Result(..) => Least::fixed(4),
             Ty::With(t) => {
                 let c = self.of(t);

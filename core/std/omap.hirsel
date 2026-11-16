@@ -1,6 +1,6 @@
 // A persistent B+ tree. Nodes contain 1..32 entries/children; non-root nodes
 // contain 16..32. Leaf keys/values stay inline. Branches share separator
-// blocks across path copies alongside child holders. See API.md.
+// blocks across path copies alongside child holders. See api/omap.md.
 pub opaque type Node[K: ordered + shareable + send, V: shareable + send]: shareable + send {
     stamp: u64,
     depth: u64,

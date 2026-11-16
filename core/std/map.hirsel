@@ -1,7 +1,6 @@
 // Module `map`, extended (LANG-7): library members of the core module `map` (SEM-5). The
 // core members (new, len, get, insert, set, remove) are declared in core/core/map.hirsel.
-// Field legend: API.md, "Reading a contract"; layout, tombstones and compaction: API.md,
-// "Map and Set".
+// Field legend: API.md, "Reading a contract"; layout, tombstones and compaction: api/map.md and api/set.md.
 //
 // Representation: 24-byte header inline; one storage block of capacity x (size(K) +
 // size(V) + 16), rounded up to 8, charged to the limit where the map was made (MEM-26).

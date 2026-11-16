@@ -1,6 +1,5 @@
 // Module `tally`: counting and folding across tasks without shared state (Java LongAdder,
-// OTP counters, Linux per-CPU counters), library code over `channel` alone. Design: API.md,
-// "Tally"; study: atomics-moonshot-1009 section 3.1.
+// OTP counters, Linux per-CPU counters), library code over `channel` alone. Design: api/tally.md; study: atomics-moonshot-1009 section 3.1.
 //
 // An owner `Tally[T]` issues handles. Each handle is a `send` resource moved into a task; it
 // holds a local partial, made by the tally's `start` at issue, that the task changes in

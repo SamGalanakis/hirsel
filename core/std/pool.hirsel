@@ -1,5 +1,5 @@
 // Module `pool`: a generational slot pool (Rust slotmap / generational-arena), library code
-// as MEM-18 describes. Field legend: API.md, "Reading a contract"; design: API.md, "Pool".
+// as MEM-18 describes. Field legend: API.md, "Reading a contract"; design: api/pool.md.
 // It uses only core operations: `unique.new` for the pool's identity, `list.with_capacity`,
 // `list.push`, `list.get`, `list.set`, `list.len`, `replace` and checked arithmetic.
 //

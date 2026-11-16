@@ -396,6 +396,21 @@ class Land(unittest.TestCase):
         self.assertIn('conflicts in: core/std/api/example.md', refused.stdout)
         self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), before)
 
+    def test_std_module_requires_its_contract(self):
+        (self.lane / 'core/std/api/example.md').unlink()
+        checked = subprocess.run([sys.executable, 'core/tools/std_api_index.py', '--write'],
+                                 cwd=self.lane, capture_output=True, text=True)
+        self.assertEqual(checked.returncode, 1)
+        self.assertIn('missing module contract core/std/api/example.md', checked.stderr)
+
+    def test_std_index_links_related_module_contracts(self):
+        source = self.lane / 'core/core/clock.hirsel'
+        source.parent.mkdir(parents=True)
+        source.write_text('pub fn read() -> u64 { 0 }\n')
+        (self.lane / 'core/std/api/clock.md').write_text('# Clock\n')
+        subprocess.run([sys.executable, 'core/tools/std_api_index.py', '--write'], cwd=self.lane, check=True)
+        self.assertIn('- [clock](api/clock.md)', (self.lane / 'core/std/API-INDEX.md').read_text())
+
     def test_std_index_checks_and_rewrites_the_whole_document(self):
         path = self.lane / 'core/std/API-INDEX.md'
         wanted = path.read_bytes()

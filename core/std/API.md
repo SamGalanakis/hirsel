@@ -3,8 +3,7 @@
 The seed holds the library contracts that the nine M1 workloads (`NINE.md`) need, plus the few
 operations that complete their families. Each module is one source file in this directory:
 its types, and each function's signature, contract and body. This document holds what the files
-share: how to read a contract, the design of each family, and the spec gaps that still shape a
-signature. Every signature and every implementation lives in exactly one place, its `.hirsel`
+share: how to read contracts, name modules, and run their contract tests. Every signature and every implementation lives in exactly one place, its `.hirsel`
 file. The [operation index](API-INDEX.md) is generated from those files by
 `python3 core/tools/std_api_index.py --write` (`--check` exits 1 when it is stale).
 
@@ -31,11 +30,6 @@ file) are reached from another package through the package name: `std.order.comp
 `std.set.Set[u64]`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
 written bare (`Held(f)`, `NotUtf8`).
 
-**json.** `std.json` is the matched json workload's library: the compact document
-(`Json`, `Member`), its exact sizing pass (`size`), `parse` in one reservation, and the object
-key index (`ObjectIndex`: `index`, `get`, `shown`). Walking and positional access use core's
-`match`, `seq.len` and `indexed.get`. A key or a Str is read through `text.as_string`.
-
 **Authority.** The language rules are spec round 4 (`docs/spec/*.md` and `core/core/*.hirsel`
 at 0d649bad; rule ids such as MEM-26 refer to it). The core library is source in `core/core/`; the
 seed restates none of it. Everything here is library code over core. No rule is bent to make a
@@ -56,7 +50,16 @@ The generated [operation index](API-INDEX.md) lists every module and operation.
 Module contracts live in [api/](api/), one file per module named `<module>.md`.
 Add or update a module contract there; land regenerates the index and its links.
 
-**Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
-and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that
-they wrote themselves. That revalidation stays in std (no core entry point) until it shows in a
-profile.
+## Reading a contract
+
+The module's `.hirsel` file holds each signature and its operation contract.
+`Fails:` names the failure or returned error and which inputs survive it.
+`Alloc:` states the reservation and the limit charged. `View:` names the owner
+that anchors a returned view. `FREEZE` means that owner cannot be mutated while
+the view lives. `Prefix:` describes host effects that remain after failure or
+cancellation. `Cost:` gives the work bound; `Ex:` shows a call.
+
+`GROWTH` follows the module's allocation rule. For list-backed collections it
+reserves the replacement before refunding the old block; the module contract
+states the capacity rule. Module-specific layouts and algorithms live in
+`api/<module>.md`, reached through the generated operation index.

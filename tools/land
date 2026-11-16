@@ -102,6 +102,10 @@ CORE_ACCEPTANCE = (
 # Every other Core suite runs after the push (tools/land-post); a red there is a POSTRED
 # event naming the landed tickets, and blocks no one.
 POST_PUSH = (
+    '//:hirsel-core-program-tests-unittest',
+    '//:hirsel-core-program-tests-test-cranelift_source',
+    '//:hirsel-core-program-tests-test-cranelift_source_aarch64',
+    '//:hirsel-core-program-tests-test-llvm_source', '//:core-program-llvm-aarch64-runtime',
     '//:core-runner-r0', '//:land-core-native-capabilities',
     '//:hirsel-core-ids-unittest', '//:hirsel-core-diag-unittest', '//:hirsel-core-syntax-unittest',
     '//:hirsel-core-resolve-unittest', '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest',

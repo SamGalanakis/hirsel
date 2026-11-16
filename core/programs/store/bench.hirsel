@@ -1,0 +1,136 @@
+// R1–R3. The READY/DONE gate is std.omap's phase-measurement protocol.
+pub type Account: send {
+    id: u64,
+    owner: String,
+    balance: i64
+}
+
+fn account_put(a: Account, mut b: Bytes) -> Result[(), Capacity] {
+    std.codec.put_u64(a.id, mut b)?
+    std.codec.put_i64(a.balance, mut b)?
+    std.codec.put_string(a.owner, mut b)
+}
+
+fn account_take(b: Bytes, mut at: u64) -> Result[Account, std.codec.Stop] {
+    let id = std.codec.take_u64(b, mut at)?
+    let balance = std.codec.take_i64(b, mut at)?
+    let owner = std.codec.take_string(b, mut at)?
+    Ok(Account(id: id, owner: take owner, balance: balance))
+}
+
+fn account_schema(mut s: std.codec.Schema) -> Result[(), Capacity] {
+    std.codec.define(mut s, "store.bench.Account", 0)?
+    if std.codec.record(mut s, 3)? {
+        return Ok(())
+    }
+    std.codec.field(mut s, "id")?;
+    std.codec.schema_u64(mut s)?
+    std.codec.field(mut s, "balance")?;
+    std.codec.schema_i64(mut s)?
+    std.codec.field(mut s, "owner")?;
+    std.codec.schema_string(mut s)?
+    std.codec.close(mut s)
+    Ok(())
+}
+
+fn accounts() -> std.codec.Codec[Account] {
+    std.codec.make(account_put, account_take, account_schema, 24)
+}
+
+fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
+    let done = result.unwrap(store.run(mut db, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
+        let a = Account(id: i, owner: result.unwrap(string.from("owner000")), balance: int.narrow(i))
+        store.put(mut tx, t, i, a)?
+        let back = option.unwrap(store.fetch(tx, t, i)?)
+        if back.id != i || back.balance != int.narrow(i) || back.owner != "owner000" {
+            fail("store R1 wrong row")
+        }
+        Ok(back.id + string.byte_len(back.owner))
+    }))
+    match take done {
+        Committed(x) => x.value,
+        _ => fail("store R1 refused")
+    }
+}
+
+fn sm(x: u64) -> u64 {
+    let mut z = int.wrapping_add(x, 0x9E3779B97F4A7C15u64)
+    z = int.wrapping_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9u64)
+    z = int.wrapping_mul(z ^ (z >> 27), 0x94D049BB133111EBu64)
+    z ^ (z >> 31)
+}
+
+type Reader: send {
+    held: store.Snapshot,
+    sh: store.Shape[u64, Account]
+}
+
+fn reader(take r: Reader) -> u64 {
+    let mut state: u64 = 1
+    let mut sum: u64 = 0
+    for _ in 0u64 .. 100000 {
+        let k = sm(state) % 100000
+        state = int.wrapping_add(state, 0x9E3779B97F4A7C15u64)
+        let a = option.unwrap(result.unwrap(store.get(r.held, r.sh, k)))
+        if a.id != k || a.balance != int.narrow(k) || a.owner != "owner000" {
+            fail("store R3 wrong row")
+        }
+        sum += a.id + string.byte_len(a.owner)
+    }
+    sum
+}
+
+pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let mode = option.unwrap(args.get(argv, 0))
+    let mut db = store.memory(clock, random, store.defaults())
+    result.unwrap(store.create_table(mut db, "accounts", std.codec.key_u64(), accounts()))
+    let t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts()))
+    if mode != "R1" {
+        for i in 0u64 .. 100000 {
+            let _ = insert(mut db, t, i)
+        }
+    }
+    let held = store.snapshot(db)
+    let sh = store.shape(t)
+    let mut gate = result.unwrap(host.open(dir, "gate", Read))
+    let mut byte: Bytes = result.unwrap(list.with_capacity(1))
+    result.unwrap(stdout.write(out, "READY\n"))
+    if result.unwrap(host.read(mut gate, mut byte)) != 1 {
+        return Error(Exit(status: 7))
+    }
+    let start = host.mono_ns(clock)
+    let mut sum: u64 = 0
+    if mode == "R1" {
+        for i in 0u64 .. 100000 {
+            sum += insert(mut db, t, i)
+        }
+    } else if mode == "R2" {
+        let mut rows = result.unwrap(store.scan(held, sh, Unbounded, Unbounded))
+        while let Some((k, a)) = result.unwrap(store.next(mut rows)) {
+            if a.id != k || a.balance != int.narrow(k) || a.owner != "owner000" {
+                fail("store R2 wrong row")
+            }
+            sum += a.id + string.byte_len(a.owner)
+        }
+    } else {
+        let payload = Reader(held: take held, sh: take sh)
+        let h = result.unwrap(task.spawn(tasks, bytes 16777216, take payload, reader))
+        sum = result.unwrap(task.join(take h))
+    }
+    let elapsed = host.mono_ns(clock) - start
+    let mut rendered = string.new()
+    result.unwrap(string.push(mut rendered, "DONE "))
+    result.unwrap(string.push_u64(mut rendered, sum))
+    result.unwrap(string.push(mut rendered, " "))
+    result.unwrap(string.push_u64(mut rendered, elapsed))
+    result.unwrap(string.push(mut rendered, "\n"))
+    result.unwrap(stdout.write(out, rendered))
+    list.clear(mut byte)
+    if result.unwrap(host.read(mut gate, mut byte)) != 1 {
+        return Error(Exit(status: 7))
+    }
+    if store.version(store.snapshot(db)) != 100001 {
+        return Error(Exit(status: 6))
+    }
+    Ok(())
+}

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -12,8 +13,10 @@ import tempfile
 from std_native import ROOT, wait_load
 
 
-BYTE_LAWS = ('model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'foreign', 'frames', 'follow', 'node_ids')
-NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS), 'test_reader_task', 'test_memory_identity'}
+BYTE_LAWS = ('model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'foreign', 'frames', 'follow', 'node_ids',
+             'typed_indexes', 'schema_numbers', 'catalog_invalid', 'index_refusal',
+             'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget')
+NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS), 'test_reader_task', 'test_memory_identity', 'test_typed_snapshot_task'}
 
 
 def inputs(root):
@@ -59,8 +62,17 @@ def main():
                     except ValueError:
                         report = {'stdout': result.stdout, 'stderr': result.stderr}
                     good = result.returncode == 0 and report.get('outcome') == {'kind': 'returned', 'values': [1]}
-                    rows.append(dict(engine=engine, law=name, passed=good, result=report))
-                    print(f'{engine} {name}: {"PASS" if good else "FAIL"}; admitted={report.get("used")}', flush=True)
+                    # Orchestrator's 2026-11-16 ruling: these assembly failures
+                    # belong to 914 and ride S1. Execute every eligible law;
+                    # distinguish blocked assembly from an executed answer.
+                    error = report.get('error', '')
+                    blocked = (error == 'generic source body is incomplete'
+                               or re.fullmatch(r'not well formed: f\d+: b\d+: direct call through another signature', error))
+                    rows.append(dict(engine=engine, law=name, passed=True if good else None if blocked else False,
+                                     blocked='core-ops-914' if blocked else None, result=report))
+                    status = 'PASS' if good else 'BLOCKED by evaluator assembly (914)' if blocked else 'FAIL'
+                    print(f'{engine} {name}: {status}; admitted={report.get("used")}'
+                          + (f'; {error}' if blocked else ''), flush=True)
             else:
                 if args.compiler is None or args.runtime is None:
                     p.error('native backends require --compiler and --runtime')
@@ -114,7 +126,7 @@ def main():
                 print(f'{engine}: follow across 32 schedules {"PASS" if good else "FAIL"}', flush=True)
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
-    failures = [row for row in rows if not row['passed']]
+    failures = [row for row in rows if row['passed'] is False]
     if failures:
         print(json.dumps(failures, indent=2))
     return int(bool(failures))

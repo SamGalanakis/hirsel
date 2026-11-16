@@ -15,3 +15,7 @@ path = "isolate.rs"
 [[bin]]
 name = "m4-crc"
 path = "crc.rs"
+
+[[bin]]
+name = "m4-store-mem"
+path = "store_mem.rs"

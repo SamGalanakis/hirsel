@@ -1,45 +1,57 @@
 // XXH3-64, seed zero and the default secret. Scalar recurrence adapted from
 // xxhash-rust 0.8.15 const_xxh3.rs and xxh3_common.rs; the streaming state keeps
 // the final stripe separately so add never needs to retain its input.
-const SECRET: Inline[u64,24] = [0xbe4ba423396cfeb8u64,0x1cad21f72c81017cu64,0xdb979083e96dd4deu64,0x1f67b3b7a4a44072u64,0x78e5c0cc4ee679cbu64,0x2172ffcc7dd05a82u64,0x8e2443f7744608b8u64,0x4c263a81e69035e0u64,0xcb00c391bb52283cu64,0xa32e531b8b65d088u64,0x4ef90da297486471u64,0xd8acdea946ef1938u64,0x3f349ce33f76faa8u64,0x1d4f0bc7c7bbdcf9u64,0x3159b4cd4be0518au64,0x647378d9c97e9fc8u64,0xc3ebd33483acc5eau64,0xeb6313faffa081c5u64,0x49daf0b751dd0d17u64,0x9e68d429265516d3u64,0xfca1477d58be162bu64,0xce31d07ad1b8f88fu64,0x280416958f3acb45u64,0x7e404bbbcafbd7afu64]
+const SECRET: Inline[u64, 24] =[0xbe4ba423396cfeb8u64, 0x1cad21f72c81017cu64, 0xdb979083e96dd4deu64, 0x1f67b3b7a4a44072u64, 0x78e5c0cc4ee679cbu64, 0x2172ffcc7dd05a82u64, 0x8e2443f7744608b8u64, 0x4c263a81e69035e0u64, 0xcb00c391bb52283cu64, 0xa32e531b8b65d088u64, 0x4ef90da297486471u64, 0xd8acdea946ef1938u64, 0x3f349ce33f76faa8u64, 0x1d4f0bc7c7bbdcf9u64, 0x3159b4cd4be0518au64, 0x647378d9c97e9fc8u64, 0xc3ebd33483acc5eau64, 0xeb6313faffa081c5u64, 0x49daf0b751dd0d17u64, 0x9e68d429265516d3u64, 0xfca1477d58be162bu64, 0xce31d07ad1b8f88fu64, 0x280416958f3acb45u64, 0x7e404bbbcafbd7afu64]
 
 pub opaque type Xxh3 {
     total: u64,
     stripes: u64,
     pending_len: u64,
     tail_len: u64,
-    short: Inline[u8,256],
-    pending: Inline[u8,64],
-    tail: Inline[u8,64],
-    acc: Inline[u64,8]
+    short: Inline[u8, 256],
+    pending: Inline[u8, 64],
+    tail: Inline[u8, 64],
+    acc: Inline[u64, 8]
 }
+
 pub fn start() -> Xxh3 {
-    Xxh3(total: 0, stripes: 0, pending_len: 0, tail_len: 0,
-        short: [0;256], pending: [0;64], tail: [0;64],
-        acc: [0xC2B2AE3Du64,0x9E3779B185EBCA87u64,0xC2B2AE3D27D4EB4Fu64,
-            0x165667B19E3779F9u64,0x85EBCA77C2B2AE63u64,0x85EBCA77u64,
-            0x27D4EB2F165667C5u64,0x9E3779B1u64])
+    Xxh3(total: 0, stripes: 0, pending_len: 0, tail_len: 0, short:[0; 256], pending:[0; 64], tail:[0; 64], acc:[0xC2B2AE3Du64, 0x9E3779B185EBCA87u64, 0xC2B2AE3D27D4EB4Fu64, 0x165667B19E3779F9u64, 0x85EBCA77C2B2AE63u64, 0x85EBCA77u64, 0x27D4EB2F165667C5u64, 0x9E3779B1u64])
 }
+
 fn secret(at: u64) -> u64 {
     let shift = (at % 8) * 8
     let low = SECRET[at / 8] >> shift
-    if shift == 0 { low } else { low | (SECRET[at / 8 + 1] << (64 - shift)) }
+    if shift == 0 {
+        low
+    } else {
+        low | (SECRET[at / 8 + 1] << (64 - shift))
+    }
 }
-fn word64(b: Inline[u8,64], at: u64) -> u64 {
+
+fn word64(b: Inline[u8, 64], at: u64) -> u64 {
     let mut n: u64 = 0
-    for i in 0u64 .. 8 { let byte: u64 = int.widen(b[at + i]); n = n | (byte << (i * 8)) }
+    for i in 0u64 .. 8 {
+        let byte: u64 = int.widen(b[at + i]);
+        n = n | (byte << (i * 8))
+    }
     n
 }
-fn small_word(b: Inline[u8,256], at: u64, width: u64) -> u64 {
+
+fn small_word(b: Inline[u8, 256], at: u64, width: u64) -> u64 {
     let mut n: u64 = 0
-    for i in 0u64 .. width { let byte: u64 = int.widen(b[at + i]); n = n | (byte << (i * 8)) }
+    for i in 0u64 .. width {
+        let byte: u64 = int.widen(b[at + i]);
+        n = n | (byte << (i * 8))
+    }
     n
 }
-fn lane(mut acc: Inline[u64,8], i: u64, data: u64, sec: u64) {
+
+fn lane(mut acc: Inline[u64, 8], i: u64, data: u64, sec: u64) {
     let keyed = data ^ secret(sec + i * 8)
     acc[i ^ 1] = int.wrapping_add(acc[i ^ 1], data)
     acc[i] = int.wrapping_add(acc[i], (keyed & 0xffffffffu64) * (keyed >> 32))
 }
+
 fn scramble(mut s: Xxh3) {
     s.stripes += 1
     if s.stripes == 16 {
@@ -50,74 +62,116 @@ fn scramble(mut s: Xxh3) {
         s.stripes = 0
     }
 }
+
 fn buffered_stripe(mut s: Xxh3) {
     let sec = s.stripes * 8
-    for i in 0u64 .. 8 { lane(mut s.acc, i, word64(s.pending, i * 8), sec) }
+    for i in 0u64 .. 8 {
+        lane(mut s.acc, i, word64(s.pending, i * 8), sec)
+    }
     scramble(mut s)
     s.pending_len = 0
 }
+
 /// Append b[lo,hi); bounds have the same checked semantics as list.slice.
 /// No allocation; retains no view of b. Empty ranges do nothing.
 pub fn add(mut s: Xxh3, b: Bytes, lo: u64, hi: u64) {
     let chunk = list.slice(b, lo, hi)
     let n = list.len(chunk)
-    if n == 0 { return }
+    if n == 0 {
+        return
+    }
     if s.total < 240 {
-        let count = if n < 240 - s.total { n } else { 240 - s.total }
-        for i in 0u64 .. count { s.short[s.total + i] = chunk[i] }
+        let count = if n < 240 - s.total {
+            n
+        } else {
+            240 - s.total
+        }
+        for i in 0u64 .. count {
+            s.short[s.total + i] = chunk[i]
+        }
     }
     if n >= 64 {
-        for i in 0u64 .. 64 { s.tail[i] = chunk[n - 64 + i] }
+        for i in 0u64 .. 64 {
+            s.tail[i] = chunk[n - 64 + i]
+        }
         s.tail_len = 64
     } else {
-        let keep = if s.tail_len < 64 - n { s.tail_len } else { 64 - n }
-        for i in 0u64 .. keep { s.tail[i] = s.tail[s.tail_len - keep + i] }
-        for i in 0u64 .. n { s.tail[keep + i] = chunk[i] }
+        let keep = if s.tail_len < 64 - n {
+            s.tail_len
+        } else {
+            64 - n
+        }
+        for i in 0u64 .. keep {
+            s.tail[i] = s.tail[s.tail_len - keep + i]
+        }
+        for i in 0u64 .. n {
+            s.tail[keep + i] = chunk[i]
+        }
         s.tail_len = keep + n
     }
     s.total = int.wrapping_add(s.total, n)
     let mut at: u64 = 0
     if s.pending_len > 0 {
         let room = 64 - s.pending_len
-        let count = if n < room { n } else { room }
-        for i in 0u64 .. count { s.pending[s.pending_len + i] = chunk[i] }
+        let count = if n < room {
+            n
+        } else {
+            room
+        }
+        for i in 0u64 .. count {
+            s.pending[s.pending_len + i] = chunk[i]
+        }
         s.pending_len += count
         at = count
-        if at == n { return }
+        if at == n {
+            return
+        }
         buffered_stripe(mut s)
     }
     while n - at > 64 {
         let sec = s.stripes * 8
-        for i in 0u64 .. 8 { lane(mut s.acc, i, list.word_le(chunk, at + i * 8), sec) }
+        for i in 0u64 .. 8 {
+            lane(mut s.acc, i, list.word_le(chunk, at + i * 8), sec)
+        }
         scramble(mut s)
         at += 64
     }
     s.pending_len = n - at
-    for i in 0u64 .. s.pending_len { s.pending[i] = chunk[at + i] }
+    for i in 0u64 .. s.pending_len {
+        s.pending[i] = chunk[at + i]
+    }
 }
+
 fn fold(a: u64, b: u64) -> u64 {
     let (hi, lo) = int.mul_wide(a, b)
     hi ^ lo
 }
+
 fn avalanche(x: u64) -> u64 {
     let z = int.wrapping_mul(x ^ (x >> 37), 0x165667919E3779F9u64)
     z ^ (z >> 32)
 }
+
 fn avalanche64(x: u64) -> u64 {
     let a = int.wrapping_mul(x ^ (x >> 33), 0xC2B2AE3D27D4EB4Fu64)
     let b = int.wrapping_mul(a ^ (a >> 29), 0x165667B19E3779F9u64)
     b ^ (b >> 32)
 }
+
 fn reverse(x: u64) -> u64 {
     let a = ((x & 0x00ff00ff00ff00ffu64) << 8) | ((x >> 8) & 0x00ff00ff00ff00ffu64)
     let b = ((a & 0x0000ffff0000ffffu64) << 16) | ((a >> 16) & 0x0000ffff0000ffffu64)
     (b << 32) | (b >> 32)
 }
-fn mix(b: Inline[u8,256], at: u64, sec: u64) -> u64 {
+
+fn mix(b: Inline[u8, 256], at: u64, sec: u64) -> u64 {
     fold(small_word(b, at, 8) ^ secret(sec), small_word(b, at + 8, 8) ^ secret(sec + 8))
 }
-fn short_hash(b: Inline[u8,256], n: u64) -> u64 {
-    if n == 0 { return avalanche64(secret(56) ^ secret(64)) }
+
+fn short_hash(b: Inline[u8, 256], n: u64) -> u64 {
+    if n == 0 {
+        return avalanche64(secret(56) ^ secret(64))
+    }
     if n < 4 {
         let first: u64 = int.widen(b[0])
         let middle: u64 = int.widen(b[n / 2])
@@ -157,23 +211,33 @@ fn short_hash(b: Inline[u8,256], n: u64) -> u64 {
         acc = int.wrapping_add(acc, mix(b, n - 16, 16))
         return avalanche(acc)
     }
-    for i in 0u64 .. 8 { acc = int.wrapping_add(acc, mix(b, i * 16, i * 16)) }
+    for i in 0u64 .. 8 {
+        acc = int.wrapping_add(acc, mix(b, i * 16, i * 16))
+    }
     acc = avalanche(acc)
-    for i in 8u64 .. (n / 16) { acc = int.wrapping_add(acc, mix(b, i * 16, (i - 8) * 16 + 3)) }
+    for i in 8u64 .. (n / 16) {
+        acc = int.wrapping_add(acc, mix(b, i * 16, (i - 8) * 16 + 3))
+    }
     avalanche(int.wrapping_add(acc, mix(b, n - 16, 119)))
 }
+
 /// Digest of all ranges added so far. Leaves s usable for further add calls.
 /// No allocation and no state change.
 pub fn finish(s: Xxh3) -> u64 {
-    if s.total <= 240 { return short_hash(s.short, s.total) }
+    if s.total <= 240 {
+        return short_hash(s.short, s.total)
+    }
     let mut acc = s.acc
-    for i in 0u64 .. 8 { lane(mut acc, i, word64(s.tail, i * 8), 121) }
+    for i in 0u64 .. 8 {
+        lane(mut acc, i, word64(s.tail, i * 8), 121)
+    }
     let mut sum = int.wrapping_mul(s.total, 0x9E3779B185EBCA87u64)
     for i in 0u64 .. 4 {
         sum = int.wrapping_add(sum, fold(acc[i * 2] ^ secret(11 + i * 16), acc[i * 2 + 1] ^ secret(19 + i * 16)))
     }
     avalanche(sum)
 }
+
 /// XXH3-64 with seed zero and the default secret over b[lo,hi). No allocation.
 pub fn xxh3(b: Bytes, lo: u64, hi: u64) -> u64 {
     let mut s = start()

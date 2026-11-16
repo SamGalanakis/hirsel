@@ -1,1 +1,3 @@
-pub fn main() -> Result[(), Exit] { Ok(()) }
+pub fn main() -> Result[(), Exit] {
+    Ok(())
+}

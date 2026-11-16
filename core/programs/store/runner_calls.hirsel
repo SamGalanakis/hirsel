@@ -47,6 +47,25 @@ fn crash(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
     Ok(xs[k])
 }
 
+// L3's handler: a write, one try_send on a channel of its own, then crash's fault
+// (Raised(2)). Nothing else in the runner or the store calls try_send, so the TRY_SEND
+// events (kind 7) in the evaluator's event log count this handler's runs, aborted ones
+// included.
+fn tally(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    let _ = store.put(mut tx, h.t, k, k)
+    let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
+    if let Ok((to, _)) = take made {
+        let _ = channel.try_send(to, k)
+    }
+    let xs: List[u64] = list.new()
+    Ok(xs[k])
+}
+
+// L2's entry: a String argument, decoded under 16,384 bytes.
+fn named(mut tx: store.Tx, h: Hd, take s: String) -> Result[u64, u32] {
+    Ok(string.byte_len(s))
+}
+
 // k rows in one commit: past a small resident_limit, the store refuses the commit.
 fn flood(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
     for i in 0u64 .. k {
@@ -63,6 +82,8 @@ fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(write), 65536u64)?
     runner.transact(mut r, code.describe(refuse), 65536u64)?
     runner.transact(mut r, code.describe(crash), 65536u64)?
+    runner.transact(mut r, code.describe(tally), 65536u64)?
+    runner.transact(mut r, code.describe(named), 16384u64)?
     runner.transact(mut r, code.describe(flood), 1048576u64)
 }
 
@@ -87,6 +108,29 @@ fn k_refuse() -> Bytes {
 
 fn k_flood() -> Bytes {
     key_of(code.identity(code.describe(flood)), std.codec.of_u64(), std.codec.of_u64())
+}
+
+fn k_named() -> Bytes {
+    key_of(code.identity(code.describe(named)), std.codec.of_string(), std.codec.of_u64())
+}
+
+// A String of n bytes, encoded; with `trailing`, one byte more, so its decode reads the
+// whole String before it is refused Malformed.
+fn string_arg(n: u64, trailing: bool) -> Bytes {
+    let mut s: Bytes = list.new()
+    for _ in 0u64 .. n {
+        result.unwrap(list.push(mut s, 97u8))
+    }
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_string(result.unwrap(string.from_utf8(take s)), mut b))
+    if trailing {
+        result.unwrap(list.push(mut b, 0u8))
+    }
+    b
+}
+
+fn k_tally() -> Bytes {
+    key_of(code.identity(code.describe(tally)), std.codec.of_u64(), std.codec.of_u64())
 }
 
 fn k_crash() -> Bytes {
@@ -180,6 +224,10 @@ fn bark(take d: Dog) -> () waits {
 type Drive: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks }
 
 fn conn(tasks: Tasks, head: Sender[runner.Req], clock: Clock, q: u64) -> Conn {
+    conn_in(tasks, head, clock, q, 2097152u64)
+}
+
+fn conn_in(tasks: Tasks, head: Sender[runner.Req], clock: Clock, q: u64, n_session: u64) -> Conn {
     let made: Result[(Sender[runner.Frame], Receiver[runner.Frame]), Capacity] = channel.new(64u64)
     let (tx, rx) = result.unwrap(take made)
     let d = Dog(clock: clock, at: host.mono_ns(clock) + 5000000000u64, to: channel.sender(tx))
@@ -187,7 +235,7 @@ fn conn(tasks: Tasks, head: Sender[runner.Req], clock: Clock, q: u64) -> Conn {
         Ok(take t) => take t,
         Error(_) => fail("calls: watchdog spawn"),
     }
-    let (to, session) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, take tx, clock, q, 2097152u64))
+    let (to, session) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, take tx, clock, q, n_session))
     Conn(to: take to, from: take rx, dog: take dog, session: take session)
 }
 
@@ -270,14 +318,30 @@ pub fn law_calls_two_streams(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     served(c, r, tasks, drive_two_streams)
 }
 
+// L6+L7's count form (v2.5): a frame reporting commit v is in its session's first Batch
+// at a version >= v. A Batch's frames share its version, so no earlier frame to the
+// session is at a version >= v unless it is at this frame's own.
+fn first_batch(mut seen: List[u64], f: runner.Frame) {
+    if let Some(v) = ok_value(f.outcome) {
+        for i in 0u64 .. list.len(seen) {
+            want(seen[i] < v || seen[i] == f.version, "first_batch: an earlier Batch at or above the commit")
+        }
+    }
+    result.unwrap(list.push(mut seen, f.version))
+}
+
 // V4 (release_at_commit_version): A and B, sent together, commit in one group (A at 4,
-// B at 6); both answers arrive in frames at the group's durable version, 6.
+// B at 6); both answers arrive in frames at the group's durable version, 6. Then C, sent
+// alone, commits at 8. Each answer is in the first Batch at or above its commit.
 fn drive_group(take d: Drive) -> () waits {
     let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    let mut seen: List[u64] = list.new()
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(1u64), LATER)
     ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(2u64), LATER)
     let x = frame(s0)
+    first_batch(mut seen, x)
     let y = frame(s0)
+    first_batch(mut seen, y)
     let (fa, fb) = if x.stream == sid(0u64) {
         (x, y)
     } else {
@@ -285,7 +349,66 @@ fn drive_group(take d: Drive) -> () waits {
     }
     want(ok_value(fa.outcome) == Some(4u64) && ok_value(fb.outcome) == Some(6u64), "group: commits at 4 and 6")
     want(fa.version == 6u64 && fb.version == 6u64, "group: both frames at the group's durable version")
+    ask(s0, d.clock, 2u64, 0u64, k_write(), u64_arg(3u64), LATER)
+    let z = frame(s0)
+    first_batch(mut seen, z)
+    want(ok_value(z.outcome) == Some(8u64) && z.version == 8u64, "group: C alone at 8")
     hang(take s0)
+}
+
+// L2 (v2.5): refused frames leave no charge in the session. n is the smallest n_session
+// in which a session answers one hostile frame (a 4,096-byte String plus one byte, so
+// its decode reads the whole String) Refused(Malformed) and ends cleanly: its idle peak
+// plus one hostile decode. Under n, 10,000 such frames are all Refused(Malformed) at
+// version 0, the client channel stays open, and the session ends without a fault. Then
+// p0 of the stream commits at 4: the version and the streams row did not move.
+fn survives(d: Drive, n: u64, frames: u64) -> bool waits {
+    let cn = conn_in(d.tasks, d.head, d.clock, 1u64, n)
+    let bad = string_arg(4096u64, true)
+    let mut all = true
+    let mut i = 0u64
+    while all && i < frames {
+        let arg: Bytes = result.unwrap(clone(bad))
+        ask(cn, d.clock, 0u64, 0u64, k_named(), take arg, LATER)
+        all = match channel.receive(cn.from) {
+            Ok(f) => f.version == 0u64 && match f.outcome {
+                Refused(Malformed(_)) => true,
+                _ => false,
+            },
+            Error(_) => false,
+        }
+        i += 1u64
+    }
+    let _ = channel.send(cn.to, runner.hang_up())
+    let Conn(to: _, from: _, dog: _, session: take s) = take cn
+    match task.join(take s) {
+        Ok(Ok(())) => all,
+        _ => false,
+    }
+}
+
+fn drive_session_charge(take d: Drive) -> () waits {
+    let mut lo = 0u64
+    let mut hi = 4194304u64
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2u64
+        if survives(d, mid, 1u64) {
+            hi = mid
+        } else {
+            lo = mid + 1u64
+        }
+    }
+    want(lo < 4194304u64, "session_charge: no session answers one hostile frame")
+    want(survives(d, lo, 10000u64), "session_charge: 10,000 refused frames under one hostile decode")
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(1u64), LATER)
+    let f = frame(s0)
+    want(ok_value(f.outcome) == Some(4u64), "session_charge: nothing committed, p0 at 4")
+    hang(take s0)
+}
+
+pub fn law_calls_session_charge(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_session_charge)
 }
 
 pub fn law_calls_group_version(c: Clock, r: Random, tasks: Tasks) -> bool waits {
@@ -375,6 +498,27 @@ fn drive_refusals(take d: Drive) -> () waits {
 
 pub fn law_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     served(c, r, tasks, drive_refusals)
+}
+
+// L3 (§8): a Failed position re-sent k times runs its handler exactly once. A Failed
+// run's effects are aborted, so no row the body writes survives to count its runs
+// (followups to runner-spec-1020). The count is tally's TRY_SEND events, which the
+// harness reads from the evaluator's event log: exactly 1 for this case. A head that
+// runs the body again for a Duplicate and discards the run gives 4. The data half runs
+// on every engine: p0 is admitted at 3 and its reply kept alone at 4, and each of the
+// three re-sends returns that stored reply.
+fn drive_runs_once(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 0u64)
+    for _ in 0u64 .. 4u64 {
+        ask(s0, d.clock, 0u64, 0u64, k_tally(), u64_arg(5u64), LATER)
+        let f = frame(s0)
+        want(is(f.outcome, Failed(Raised(2u32))) && f.version == 4u64, "runs_once: Failed(Raised(2)) at 4")
+    }
+    hang(take s0)
+}
+
+pub fn law_calls_runs_once(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_runs_once)
 }
 
 // refusals' store refusal (store_v22_admit, C3): the store refuses p0's effect commit
@@ -579,6 +723,11 @@ fn test_calls_two_streams(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] w
 }
 
 @test
+fn test_calls_session_charge(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_session_charge(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
 fn test_calls_group_version(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_calls_group_version(c, r, tasks) { Ok(()) } else { Error(()) }
 }
@@ -616,6 +765,11 @@ fn test_calls_held_head(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 @test
 fn test_calls_deadline_held(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_calls_deadline_held(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_runs_once(c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 @test

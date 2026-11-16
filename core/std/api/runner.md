@@ -20,7 +20,9 @@ function (`compute(mut r, f, n)`, `granted`, `transact`) takes the entry's byte 
 which the slot keeps; n is in neither the key nor `Described`. Each kind has one erased
 adapter. `describe(r, mut out)` appends the codec of `List[Described]`, in
 registration order. Each element holds the kind, the identity, the argument schema
-bytes, the result schema bytes and an empty error schema. Registration order, an
+bytes, the result schema bytes and the error schema bytes: E's schema for a
+`transact` entry, empty for `compute` and `granted`, whose only error is Capacity.
+The error schema is not in the key. Registration order, an
 added argument field and a changed result type each change these bytes, and two
 `place` runs in two tasks give equal bytes.
 
@@ -40,7 +42,7 @@ the granted entry. A spawn the place cannot grant returns `Budget`. `finish` joi
 that task, and a task that fails or is cancelled gives `Failed(Raised)`. A key that
 names no entry of the kind being asked for gives `NoEntry`.
 
-`transact(mut r, f)` registers a body `fn(mut store.Tx, H, take A) -> Result[R, E]`.
+`transact(mut r, f, n)` registers a body `fn(mut store.Tx, H, take A) -> Result[R, E]`.
 Only the head runs it, in a store run under the entry's n: `Ok` commits and its
 reply is written with the effects; `Error` aborts the effects and the head keeps the
 reply alone (see the S5 stand-in below).

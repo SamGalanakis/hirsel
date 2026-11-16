@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Run the runner's named laws and cases (RUNNER-SPEC v2.4 §9) from checkout sources.
+"""Run the runner's named laws and cases (RUNNER-SPEC v2.5 §8) from checkout sources.
 
 Every law runs on the evaluator (a law_ function) and natively on each selected backend
 (its test_ twin): R0's in core/programs/store/runner_laws.hirsel, R1's in
 core/programs/store/runner_calls.hirsel, and two generated modules, runner_p19 (one
 `place` of 1, 100, 1,000 and 10,000 entries, run in two tasks) and runner_l12 (describe across permuted
 registrations, an added A field and a changed R). Each mutant applies its text changes
-to a copy of runner.hirsel and must turn its law red on the evaluator.
+to a copy of runner.hirsel and must turn its law red on the evaluator. L4's high-water
+case builds core/programs/store/runner_rss.hirsel per native backend and compares
+ru_maxrss of its two modes.
 """
 import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -30,7 +33,70 @@ CHUNK = 500
 N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_held_head', 'l14_handles')
+         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_held_head', 'l14_handles')
+
+# Execution counts read from the evaluator's event log: (event kind, count). L3's tally
+# handler is the only caller of try_send (TRY_SEND is kind 7 in
+# crates/hirsel-core-layout/src/event.rs), and calls_runs_once runs it for one position: exactly once, however often
+# that position is re-sent.
+COUNTS = {'calls_runs_once': (7, 1)}
+
+
+def counted(name, report):
+    if name not in COUNTS:
+        return True
+    kind, want = COUNTS[name]
+    return sum(1 for e in report.get('events', []) if e[0] == kind) == want
+
+
+# Spec laws (RUNNER-SPEC v2.5 §8) whose named observation this harness does not make, so
+# no row reports them green. Each names what is missing.
+PARTIAL = (
+    ('L3/sender_in_h',
+     'calls_runs_once counts the handler\'s runs by TRY_SEND events in the evaluator\'s event '
+     'log (one per run, outside the transaction), so the count is evaluator-only. The spec\'s '
+     'form, a harness Sender[u64] carried in H, is not built: handles is a StaticFn over the '
+     'Db and has no way to receive a harness value (followups 2026-11-16 09:50).'),
+)
+
+# L4 (RUNNER-SPEC v2.5 §8): runner_rss.hirsel's program, built per native backend and run
+# in two modes, one valid call (0) and 10,000 malformed frames before it (1). Both exit 0
+# and mode 1's ru_maxrss is at most mode 0's plus one page: an allocation outside any
+# charge (R20) that a refused frame leaves behind raises the process high-water. Measured
+# without the launcher, both modes read the harness's own 30 MB.
+PAGE_KB = 4
+
+
+def maxrss(launcher, binary, mode):
+    out = subprocess.run([str(launcher), str(binary), mode], capture_output=True, text=True, check=True)
+    status, kb = out.stdout.split()
+    return int(status), int(kb)
+
+
+def l4_rss(args, root, work, engine):
+    inputs_path = manifest(root, work, 'rss', None, [(root / 'core/programs/store/runner_rss.hirsel', 'runner_rss')])
+    binary = work / f'runner_rss_{engine}'
+    command = [str(args.compiler.resolve()), 'build', '--inputs', str(inputs_path), '--source-core',
+               '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
+               '--store', str(work / f'store-rss-{engine}'), '--grant', 'Clock', '--grant', 'Tasks',
+               '--grant', 'Random', '--entry', 'store@1/runner_rss/main', '-o', str(binary)]
+    if args.cc:
+        command += ['--cc', str(args.cc.resolve())]
+    wait_load()
+    built = subprocess.run(command, capture_output=True, text=True)
+    if built.returncode != 0:
+        return False, {'build': built.stderr[-2000:]}
+    # runner_maxrss.c measures from a small parent (a child inherits its parent's
+    # high-water at fork, and this harness's is above the program's).
+    cc = args.cc or (Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
+                     if 'LLVM_SYS_231_PREFIX' in os.environ else Path(shutil.which('cc')))
+    launcher = work / 'runner_maxrss'
+    if not launcher.exists():
+        subprocess.run([str(cc), '-O1', str(root / 'core/tools/runner_maxrss.c'), '-o', str(launcher)], check=True)
+    valid, flood = maxrss(launcher, binary, '0'), maxrss(launcher, binary, '1')
+    figures = {'valid': valid, 'flood': flood, 'limit_kb': valid[1] + PAGE_KB}
+    return valid[0] == 0 and flood[0] == 0 and flood[1] <= valid[1] + PAGE_KB, figures
+
 
 # (name, [(old text, new text)], module, the law that must turn red). Each is a wrong
 # implementation the law names:
@@ -47,8 +113,19 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 #   sends were all answered (Abandoned, not re-sent), a second Outcome for one send.
 # - one_for_joined: one row for a head answer however many sends of the position are owed.
 # - latest_deadline: a joined send answered only when the latest send's deadline fires.
+# - refused_frames_kept (L2): a session that keeps each refused frame's bytes, so its
+#   charge grows with the flood.
 # - join_outside_account: a joined send takes no slot, so per-send timers are unbounded.
+# - rerun_on_duplicate (L3, C10): a head that runs the body again for a Duplicate, discards the
+#   run and answers the stored reply (red by its execution count, COUNTS).
 MUTANTS = (
+    ('rerun_on_duplicate',
+     [('                Ok(Ok(take o)) => commitless(mut hd, take q, take o),',
+       '                Ok(Ok(take o)) => {\n'
+       '                    let _ = effect(mut hd.db, hd.r, hd.h, hd.streams, q)\n'
+       '                    commitless(mut hd, take q, take o)\n'
+       '                },')],
+     'runner_calls', 'calls_runs_once'),
     ('duplicate_unchecked',
      [('    if map.contains(r.slots, key) {\n        return Error(AlreadyRegistered(take key))\n    }\n', '')],
      'runner_laws', 'p13_duplicate_refused'),
@@ -108,6 +185,14 @@ MUTANTS = (
      [('                        if owed[i].generation == t.generation {',
        '                        if owed[list.len(owed) - 1u64].generation == t.generation {')],
      'runner_calls', 'calls_held_head'),
+    ('refused_frames_kept',
+     [('    let mut used = 0u64\n', '    let mut used = 0u64\n    let mut kept: List[Bytes] = list.new()\n'),
+      ('                    let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c\n'
+       '                    tell(s.client, last, take stream, p, take o);',
+       '                    let Call(stream: take stream, p: p, key: _, arg: take arg, deadline: _) = take c\n'
+       '                    let _ = list.push(mut kept, take arg)\n'
+       '                    tell(s.client, last, take stream, p, take o);')],
+     'runner_calls', 'calls_session_charge'),
     ('join_outside_account',
      [('                let grows = fresh || owing > 0u64', '                let grows = fresh')],
      'runner_calls', 'calls_held_head'),
@@ -261,11 +346,13 @@ def main():
 
     def row(**r):
         rows.append(r)
-        print(' '.join(f'{k}={v}' for k, v in r.items() if k != 'result'), flush=True)
+        print(' '.join(f'{k}={v}' for k, v in r.items() if k != 'result' or r.get('law') == 'l4_ru_maxrss'), flush=True)
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
         base = manifest(root, work, 'inputs')
+        for law, missing in PARTIAL:
+            row(law=law, status='PARTIAL', passed=None, missing=missing)
         values = l12_values(evaluator, root, work, 'tree')
         row(engine='evaluator', law='l12', passed=l12_holds(values), result=values)
         p19 = work / 'runner_p19.hirsel'
@@ -279,7 +366,7 @@ def main():
             row(engine='evaluator', law='p19_place_twice', passed=value == 1, result=report)
             for name in CALLS:
                 value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
-                row(engine='evaluator', law=name, passed=value == 1, result=report)
+                row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
         # A mutant is red only when it builds and its law fails.
         if not args.no_mutants:
             text = (root / 'core/programs/store/runner.hirsel').read_text()
@@ -303,7 +390,8 @@ def main():
                 value, report = evaluate(evaluator, manifest(root, work, 'mutant_' + name, mutated),
                                          f'store@1/{module}/law_{law}')
                 # Red: the law returns false, or one of its `want` checks fails it (cause Fail only).
-                red = value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
+                red = (value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
+                       or (value == 1 and not counted(law, report)))
                 row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
         natives = [e for e in engines if e != 'evaluator']
         if natives:
@@ -340,9 +428,11 @@ def main():
                     row(engine=engine, group=group, selection=f'{len(selected & want)}/{len(want)}',
                         passed=code == 0 and selected == want,
                         result=sorted(want ^ selected) or report.get('stderr', ''))
+                held, figures = l4_rss(args, root, work, engine)
+                row(engine=engine, law='l4_ru_maxrss', passed=held, result=figures)
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
-    failures = [r for r in rows if not r['passed']]
+    failures = [r for r in rows if r.get('status') != 'PARTIAL' and not r['passed']]
     for r in failures:
         print('FAIL', json.dumps(r)[:2000])
     return int(bool(failures))

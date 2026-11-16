@@ -1,0 +1,118 @@
+// L4's native case (RUNNER-SPEC v2.5 §8): one program, two modes, compared by
+// core/tools/runner_tests.py on the process's ru_maxrss. argv: mode. Mode 0: one valid
+// call through a session and the head. Mode 1: 10,000 malformed calls (a 4,096-byte
+// String plus one byte, so each decode reads the whole String before it is refused),
+// then the same valid call. Refused frames leave nothing behind, so mode 1's high-water
+// is at most mode 0's plus one page.
+type Hd: send { t: store.Table[u64, u64] }
+
+type Calls = runner.Registry[(), Hd]
+
+fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
+    Ok(Hd(t: t))
+}
+
+fn named(mut tx: store.Tx, h: Hd, take s: String) -> Result[u64, u32] {
+    match store.put(mut tx, h.t, 0u64, string.byte_len(s)) {
+        Ok(()) => Ok(string.byte_len(s)),
+        Error(_) => Error(1u32),
+    }
+}
+
+fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(named), 16384u64)
+}
+
+fn k_named() -> Bytes {
+    let mut key: Bytes = list.new()
+    result.unwrap(list.append(mut key, code.identity(code.describe(named))))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_string())), mut key))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
+    key
+}
+
+fn string_arg(n: u64, trailing: bool) -> Bytes {
+    let mut s: Bytes = list.new()
+    for _ in 0u64 .. n {
+        result.unwrap(list.push(mut s, 97u8))
+    }
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_string(result.unwrap(string.from_utf8(take s)), mut b))
+    if trailing {
+        result.unwrap(list.push(mut b, 0u8))
+    }
+    b
+}
+
+const FAR: u64 = 18000000000000000000u64
+
+type D: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks, flood: u64 }
+
+fn answer(rx: Receiver[runner.Frame]) -> runner.Outcome waits {
+    match channel.receive(rx) {
+        Ok(take f) => {
+            let runner.Frame(version: _, stream: _, p: _, outcome: take o) = take f
+            take o
+        },
+        Error(_) => fail("runner_rss: client channel closed"),
+    }
+}
+
+fn drive(take d: D) -> () waits {
+    let made: Result[(Sender[runner.Frame], Receiver[runner.Frame]), Capacity] = channel.new(64u64)
+    let (tx, rx) = result.unwrap(take made)
+    let (to, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), 1048576u64, d.head, take tx, d.clock, 1u64, 2097152u64))
+    let key = k_named()
+    let bad = string_arg(4096u64, true)
+    for _ in 0u64 .. d.flood {
+        let k: Bytes = result.unwrap(clone(key))
+        let a: Bytes = result.unwrap(clone(bad))
+        let mut s: Bytes = list.new()
+        result.unwrap(std.codec.put_u64(0u64, mut s))
+        if let Error(_) = channel.send(to, runner.ask(runner.Call(stream: take s, p: 0u64, key: take k, arg: take a, deadline: FAR))) {
+            fail("runner_rss: session gone")
+        }
+        match answer(rx) {
+            Refused(Malformed(_)) => (),
+            _ => fail("runner_rss: a malformed call not Refused(Malformed)"),
+        }
+    }
+    let mut s: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(0u64, mut s))
+    if let Error(_) = channel.send(to, runner.ask(runner.Call(stream: take s, p: 0u64, key: take key, arg: string_arg(4096u64, false), deadline: FAR))) {
+        fail("runner_rss: session gone")
+    }
+    match answer(rx) {
+        Returned(_) => (),
+        _ => fail("runner_rss: the valid call not Returned"),
+    }
+    let _ = channel.send(to, runner.hang_up())
+    let _ = task.join(take session)
+}
+
+pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args) -> Result[(), Exit] waits {
+    let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let flood = if result.unwrap(std.int.parse_uint(m, 10u32)) == 1u64 { 10000u64 } else { 0u64 }
+    let mut db = store.memory(clock, random, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
+    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
+    let (head, inbox) = result.unwrap(take made)
+    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
+    let (_, joins) = result.unwrap(take joined)
+    let d = D(head: take head, clock: clock, tasks: tasks, flood: flood)
+    let driving = match task.spawn(tasks, bytes 33554432u64, take d, drive) {
+        Ok(take t) => take t,
+        Error(_) => return Error(Exit(status: 3)),
+    }
+    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), take inbox, take joins, tasks, 1048576u64) {
+        Ok(()) => (),
+        Error(_) => return Error(Exit(status: 4)),
+    }
+    match task.join(take driving) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 6)),
+    }
+}

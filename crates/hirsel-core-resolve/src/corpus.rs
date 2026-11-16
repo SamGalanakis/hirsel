@@ -123,8 +123,9 @@ impl Corpus {
         index.add_manifests(&self.manifest.packages);
         for (source, output) in self.sources.iter().zip(&parsed.files) {
             let module = index.module(&source.module).unwrap();
+            let occurrence = index.add_source();
             for (i, item) in output.syntax.items().enumerate() {
-                index.index_item(module, i as u32, item);
+                index.index_item(module, occurrence, i as u32, item);
             }
         }
         let core = index

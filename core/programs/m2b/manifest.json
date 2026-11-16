@@ -1,6 +1,19 @@
 {
   "packages": [
     {
+      "id": "clone-core",
+      "package": {"name": "core", "version": "1"}, "dependencies": [],
+      "sources": [
+        {"file": "core/programs/m2b/clone_occurrences/u.hirsel", "modules": ["clonehooks"], "signatures": false},
+        {"file": "core/programs/m2b/clone_occurrences/v.hirsel", "modules": ["clonehooks"], "signatures": false}
+      ]
+    },
+    {
+      "package": {"name": "cloneocc", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}],
+      "sources": [{"file": "core/programs/m2b/clone_occurrences/main.hirsel", "modules": ["main"], "signatures": false}]
+    },
+    {
       "package": {"name": "reclib", "version": "1"},
       "dependencies": [{"name": "core", "version": "1"}],
       "sources": [{"file": "core/front/cases/body/type-recursion-finite.hirsel", "modules": ["main"], "signatures": false}]
@@ -120,6 +133,7 @@
     }
   ],
   "entries": [
+    {"workload": "clone_occurrences", "package": {"name": "cloneocc", "version": "1"}, "module": "main", "use": {"core": "clone-core"}},
     {"workload": "recursive_types", "package": {"name": "recursion", "version": "1"}, "module": "main", "definition": "main"},
     {"workload": "static_mut", "package": {"name": "staticmut", "version": "1"}, "module": "main", "definition": "main"},
     {"workload": "table", "package": {"name": "table", "version": "1"}, "module": "main"},

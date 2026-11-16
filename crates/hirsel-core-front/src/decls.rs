@@ -490,7 +490,9 @@ impl Program<'_> {
                         item: i as u32,
                         span: name_span,
                     };
-                    if let Some(definition) = self.index.item_definition(module.id, i as u32, item)
+                    if let Some(definition) =
+                        self.index
+                            .item_definition(module.id, module.source, i as u32, item)
                     {
                         self.register_clone_hook(at, site, definition);
                     }

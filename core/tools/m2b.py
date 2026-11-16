@@ -68,7 +68,11 @@ def inputs(root, manifest, workload):
         package.pop('id', None)
         for source in package['sources']:
             source['file'] = str((root / source['file']).resolve())
-        packages.append(package)
+        existing = next((p for p in packages if p['package'] == package['package']), None)
+        if existing is None:
+            packages.append(package)
+        else:
+            existing['sources'].extend(package['sources'])
     return entry, {'core': core, 'packages': packages}
 
 

@@ -675,12 +675,13 @@ impl Driver {
             .into_iter()
             .map(|(path, syntax)| ModuleInput {
                 id: index.module(path).unwrap(),
+                source: index.add_source(),
                 syntax,
             })
             .collect();
         for m in &modules {
             for (i, item) in m.syntax.items().enumerate() {
-                index.index_item(m.id, i as u32, item);
+                index.index_item(m.id, m.source, i as u32, item);
             }
         }
         if let Some(core) = index
@@ -861,7 +862,7 @@ impl Driver {
                 let item = modules[fd.at.module as usize]
                     .syntax
                     .item(fd.at.item as usize);
-                let module = modules[fd.at.module as usize].id;
+                let module = &modules[fd.at.module as usize];
                 let recorded = if same_shape && !duplicated.contains(&fd.path) {
                     let source = keys.body_source(&index, &fd.path, module, fd.at.item, item)?;
                     recorded_definition(&store, &prior, &fd.path)?

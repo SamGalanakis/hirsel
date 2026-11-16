@@ -76,8 +76,9 @@ fn packages(sources: &[(&str, &str, &str)], mut symbols: Symbols) -> (NameIndex,
                 modules: vec![m.into()],
             })
             .unwrap();
+        let source = index.add_source();
         for (i, item) in syntax.items().enumerate() {
-            index.index_item(module, i as u32, item);
+            index.index_item(module, source, i as u32, item);
         }
         files.push((module, syntax));
     }
@@ -1232,4 +1233,35 @@ fn scratch_reuse_keeps_each_items_reads_sites_and_private_refusals() {
             .count(),
         2
     );
+}
+
+#[test]
+fn clone_hook_occurrences_in_one_module_have_distinct_definitions() {
+    let (index, files) = packages(
+        &[
+            ("core", "hooks", "type U { n: u64 }\nclone(x: U) {}"),
+            ("core", "hooks", "type V { n: u64 }\nclone(x: V) {}"),
+        ],
+        Symbols::default(),
+    );
+    assert!(index.diagnostics.is_empty(), "{:?}", index.diagnostics);
+    assert_eq!(files[0].0, files[1].0);
+    let definitions: Vec<_> = (1..=2)
+        .map(|source| {
+            index
+                .item_definition(
+                    files[source - 1].0,
+                    SourceId(source as u32),
+                    1,
+                    files[source - 1].1.item(1),
+                )
+                .unwrap()
+        })
+        .collect();
+    assert_ne!(definitions[0], definitions[1]);
+    assert_eq!(index.definition_path(definitions[0]).0.name, "U.$clone");
+    assert_eq!(index.definition_path(definitions[1]).0.name, "V.$clone");
+    // An image's source namespace stays reserved when the index is extended.
+    let mut extended = index.clone();
+    assert_eq!(extended.add_source(), SourceId(3));
 }

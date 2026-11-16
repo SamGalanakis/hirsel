@@ -1,0 +1,7 @@
+pub fn case_both_hooks() -> u64 {
+    core.clonehooks.clone_u() * 1000u64 + core.clonehooks.clone_v()
+}
+
+pub fn main(argv: Args, out: Stdout) -> Result[(), Exit] {
+    Ok(())
+}

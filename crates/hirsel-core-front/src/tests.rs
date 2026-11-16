@@ -69,7 +69,11 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
     let modules = ids
         .into_iter()
         .zip(syntax)
-        .map(|(id, syntax)| ModuleInput { id, syntax })
+        .map(|(id, syntax)| ModuleInput {
+            id,
+            source: index.add_source(),
+            syntax,
+        })
         .collect::<Vec<_>>();
     for d in &diagnostics {
         index
@@ -78,7 +82,7 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
     }
     for m in &modules {
         for (i, item) in m.syntax.items().enumerate() {
-            index.index_item(m.id, i as u32, item);
+            index.index_item(m.id, m.source, i as u32, item);
         }
     }
     let core = index
@@ -1532,7 +1536,9 @@ fn m1_program_manifest() {
         .sources
         .iter()
         .zip(parsed.files)
-        .map(|(source, parsed)| ModuleInput {
+        .enumerate()
+        .map(|(source_id, (source, parsed))| ModuleInput {
+            source: hirsel_core_resolve::SourceId(source_id as u32),
             id: index.module(&source.module).unwrap(),
             syntax: parsed.syntax,
         })
@@ -1554,6 +1560,7 @@ fn m1_program_manifest() {
             })
             .map(|m| ModuleInput {
                 id: m.id,
+                source: m.source,
                 syntax: m.syntax.clone(),
             })
             .collect();
@@ -1703,11 +1710,15 @@ fn sibling_main_wrapper_executes_the_sibling_body() {
     let modules = ids
         .into_iter()
         .zip(syntax)
-        .map(|(id, syntax)| ModuleInput { id, syntax })
+        .map(|(id, syntax)| ModuleInput {
+            id,
+            source: index.add_source(),
+            syntax,
+        })
         .collect::<Vec<_>>();
     for m in &modules {
         for (i, item) in m.syntax.items().enumerate() {
-            index.index_item(m.id, i as u32, item);
+            index.index_item(m.id, m.source, i as u32, item);
         }
     }
     let p = Program::declare(&index, &modules);

@@ -34,7 +34,9 @@ fn evaluate() -> Result<Value, String> {
         .sources
         .iter()
         .zip(parsed.files)
-        .map(|(source, output)| ModuleInput {
+        .enumerate()
+        .map(|(source_id, (source, output))| ModuleInput {
+            source: hirsel_core_resolve::SourceId(source_id as u32),
             id: index.module(&source.module).unwrap(),
             syntax: output.syntax,
         })

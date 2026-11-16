@@ -368,7 +368,8 @@ impl Keys {
                 let digest = header_identity(item);
                 items.push((1u8, digest));
                 let end = header_end(item);
-                let Some(definition) = index.item_definition(m.id, ordinal as u32, item) else {
+                let Some(definition) = index.item_definition(m.id, m.source, ordinal as u32, item)
+                else {
                     let root = item.tree.node(item.root);
                     if root.token.is_none()
                         || item.range.has_errors
@@ -814,12 +815,12 @@ impl Keys {
         &self,
         index: &NameIndex,
         path: &DefPath,
-        module: ModuleId,
+        module: &ModuleInput,
         ordinal: u32,
         item: Item<'_>,
     ) -> io::Result<ContentHash> {
         let own = index
-            .item_definition(module, ordinal, item)
+            .item_definition(module.id, module.source, ordinal, item)
             .ok_or_else(|| {
                 io::Error::other(format!(
                     "internal error: core reuse body `{path}` has no indexed definition"
@@ -831,19 +832,20 @@ impl Keys {
         &self,
         index: &NameIndex,
         path: &DefPath,
-        module: ModuleId,
+        module: &ModuleInput,
         ordinal: u32,
         item: Item<'_>,
         resolution: &Resolution,
     ) -> io::Result<DefinitionKey> {
         hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
         let own = index
-            .item_definition(module, ordinal, item)
+            .item_definition(module.id, module.source, ordinal, item)
             .ok_or_else(|| {
                 io::Error::other(format!(
                     "internal error: core reuse body `{path}` has no indexed definition"
                 ))
             })?;
+        let module = module.id;
         let pending = self.signature_start(index, module, own, resolution);
         // The forms (see `Form`) among the definitions the body names.
         let mut named = vec![];

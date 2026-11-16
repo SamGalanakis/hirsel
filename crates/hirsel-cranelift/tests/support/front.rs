@@ -44,11 +44,15 @@ pub fn lower(root: &Path, source: &str) -> (Module, HashMap<String, FuncId>) {
         .add_manifests(&[core, app])
         .into_iter()
         .zip(syntax)
-        .map(|(id, syntax)| ModuleInput { id, syntax })
+        .map(|(id, syntax)| ModuleInput {
+            id,
+            source: index.add_source(),
+            syntax,
+        })
         .collect::<Vec<_>>();
     for m in &modules {
         for (i, item) in m.syntax.items().enumerate() {
-            index.index_item(m.id, i as u32, item);
+            index.index_item(m.id, m.source, i as u32, item);
         }
     }
     let core = index

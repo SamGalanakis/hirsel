@@ -212,7 +212,9 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
         .sources
         .iter()
         .zip(parsed.files)
-        .map(|(s, p)| ModuleInput {
+        .enumerate()
+        .map(|(source_id, (s, p))| ModuleInput {
+            source: hirsel_core_resolve::SourceId(source_id as u32),
             id: index.module(&s.module).unwrap(),
             syntax: p.syntax,
         })
@@ -362,7 +364,9 @@ fn float_constant_tables_are_read_only_data() {
         .sources
         .iter()
         .zip(parsed.files)
-        .map(|(s, p)| ModuleInput {
+        .enumerate()
+        .map(|(source_id, (s, p))| ModuleInput {
+            source: hirsel_core_resolve::SourceId(source_id as u32),
             id: index.module(&s.module).unwrap(),
             syntax: p.syntax,
         })
@@ -451,7 +455,9 @@ fn generic_numeric_core_contracts() {
         .sources
         .iter()
         .zip(parsed.files)
-        .map(|(s, p)| ModuleInput {
+        .enumerate()
+        .map(|(source_id, (s, p))| ModuleInput {
+            source: hirsel_core_resolve::SourceId(source_id as u32),
             id: index.module(&s.module).unwrap(),
             syntax: p.syntax,
         })

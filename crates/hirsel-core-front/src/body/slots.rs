@@ -607,7 +607,9 @@ fn clone_kernel_hook_law() -> u64 {
             .sources
             .iter()
             .zip(parsed.files)
-            .map(|(s, p)| ModuleInput {
+            .enumerate()
+            .map(|(source_id, (s, p))| ModuleInput {
+                source: hirsel_core_resolve::SourceId(source_id as u32),
                 id: index.module(&s.module).unwrap(),
                 syntax: p.syntax,
             })

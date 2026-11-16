@@ -23,6 +23,11 @@ pub struct ModulePath {
     pub package: PackageId,
     pub modules: Vec<String>,
 }
+/// One source-file occurrence in this index, including files of the same module.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct SourceId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Site {
     pub module: ModuleId,
@@ -124,8 +129,9 @@ pub struct NameIndex {
     pub packages: Table<Package>,
     pub definitions: Table<Definition>,
     members: Map<(ModuleId, Symbol), DefinitionId>,
-    /// Clone bodies by (module, item ordinal); never in `members`, so no name finds one.
-    clone_items: Map<(ModuleId, u32), DefinitionId>,
+    /// Clone bodies by source-file occurrence and item ordinal; no name finds one.
+    clone_items: Map<(SourceId, u32), DefinitionId>,
+    sources: u32,
     children: Map<(ModuleId, Symbol), ModuleId>,
     package_ids: Map<(Symbol, Symbol), PackageKey>,
     dependencies: Table<PackageKey>,
@@ -172,6 +178,7 @@ impl NameIndex {
             definitions: Table::default(),
             members: Map::default(),
             clone_items: Map::default(),
+            sources: 0,
             children: Map::default(),
             package_ids: Map::default(),
             dependencies: Table::default(),
@@ -511,7 +518,13 @@ impl NameIndex {
             }
         }
     }
-    pub fn index_item(&mut self, module: ModuleId, ordinal: u32, item: Item<'_>) {
+    /// Allocate after retained image sources, so new files cannot reuse their identities.
+    pub fn add_source(&mut self) -> SourceId {
+        let source = SourceId(self.sources);
+        self.sources += 1;
+        source
+    }
+    pub fn index_item(&mut self, module: ModuleId, source: SourceId, ordinal: u32, item: Item<'_>) {
         let root = item.tree.node(item.root);
         let kind = match root.kind {
             NodeKind::Function => DefinitionKind::Function,
@@ -607,23 +620,24 @@ impl NameIndex {
             }
         }
         if kind == DefinitionKind::Clone {
-            self.clone_items.insert((module, ordinal), id);
+            self.clone_items.insert((source, ordinal), id);
         } else {
             self.members.insert((module, name), id);
         }
         self.definitions.push(d);
     }
-    /// The definition item `ordinal` of `module` declares: by its name, or for a
-    /// clone body by its position.
+    /// The definition declared by this source-file occurrence and local ordinal:
+    /// by its name, or for a clone body by its occurrence.
     pub fn item_definition(
         &self,
         module: ModuleId,
+        source: SourceId,
         ordinal: u32,
         item: Item<'_>,
     ) -> Option<DefinitionId> {
         let root = item.tree.node(item.root);
         if root.kind == NodeKind::CloneHook {
-            return self.clone_items.get(&(module, ordinal)).copied();
+            return self.clone_items.get(&(source, ordinal)).copied();
         }
         self.definition(module, item.symbol(root.token?))
     }

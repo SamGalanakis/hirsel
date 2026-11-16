@@ -43,6 +43,7 @@ use std::collections::HashMap;
 /// One module of the program, already parsed.
 pub struct ModuleInput {
     pub id: ModuleId,
+    pub source: hirsel_core_resolve::SourceId,
     pub syntax: SyntaxFile,
 }
 

@@ -217,9 +217,9 @@
       },
       "image_per_token": {
         "records_opened": 0.002571068477804229,
-        "bytes_read": 10.533638986136395,
+        "bytes_read": 10.533751015263968,
         "digests": 0.002571068477804229,
-        "digest_bytes": 10.430796247024226,
+        "digest_bytes": 10.430908276151799,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.03113849600896233,
@@ -984,6 +984,38 @@
       "evidence": [
         "std-ordered-map-998/store-copy/COST.md"
       ]
+    },
+    {
+      "reason": "Clone-hook wrong-result fix: the published NameIndex retains its physical-source allocator, one u32 (4 bytes), so image extension cannot reuse source occurrence IDs. Only the two image byte cells gain those four structural bytes. No instruction, event, probe, source-stage or target ceiling changes. Approved by orchestrator for this wrong-result fix. Rebased over the replaced-value structural growth history; its observations and other cells are preserved, and this increment remains exactly four bytes.",
+      "changes": {
+        "suite-edit": {
+          "bytes_read": {
+            "before": 10.533638986136395,
+            "after": 10.533751015263968
+          },
+          "digest_bytes": {
+            "before": 10.430796247024226,
+            "after": 10.430908276151799
+          }
+        }
+      },
+      "own_increment_bytes": 4,
+      "tokens": 35705,
+      "source_commit": "c675b5d3",
+      "evidence": [
+        "/tmp/std-codec-1008-land.log",
+        "/tmp/order-occurrences-913-front-cost-repro.log"
+      ],
+      "observation": {
+        "merged_bytes_read": 364545,
+        "merged_digest_bytes": 360985,
+        "local_bytes_read": 356041,
+        "local_digest_bytes": 352561,
+        "local_records_opened": 87,
+        "merged_limit_bytes_read": 364541,
+        "merged_limit_digest_bytes": 360981
+      },
+      "baseline_revision": "616cda9735b6b726129d915405687ec5655513bd"
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

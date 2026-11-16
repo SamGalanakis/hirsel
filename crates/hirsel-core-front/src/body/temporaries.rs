@@ -108,6 +108,29 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         address
     }
+    /// A constant defined in the entry block, so it dominates every use.
+    pub(super) fn entry_const(&mut self, t: Ty, bits: u64) -> ValueId {
+        let result = self.value(t);
+        self.entry_setup.push(Inst::Const { result, bits });
+        result
+    }
+    /// An address computed in the entry block from values the entry block defines.
+    pub(super) fn entry_address(
+        &mut self,
+        base: AddressBase,
+        steps: &[Step],
+        ty: PlaceTy,
+    ) -> AddressId {
+        debug_assert!(!steps.iter().any(|s| matches!(s, Step::Element(_))));
+        let steps = PoolRange::push(&mut self.b.pools.steps, steps.iter().copied());
+        self.b.addresses.push(AddressInfo { base, steps, ty });
+        let address = AddressId(self.b.addresses.len() as u32 - 1);
+        self.entry_setup.push(Inst::Address {
+            address,
+            fail: None,
+        });
+        address
+    }
     pub(super) fn spill_temporary(&mut self, i: usize, n: NodeId) {
         let cleanup::Owner::Temp(t) = self.owners[i] else {
             return;

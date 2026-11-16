@@ -1,0 +1,96 @@
+// LANG-13 / OWN-21: a closure reads its captures wherever its body uses them. A
+// capture's first use in the source may sit in an arm the first call does not
+// take; later uses, in the other arm, after the join or on a later iteration,
+// still read the captured place.
+// arm: f(1) = 4 + 1 = 5, f(0) = 3, f(2) = 4 + 2 = 6; 14.
+// joined: f(5) = 5 + 4 = 9, f(0) = 3 + 4 = 7; 16.
+// looped: f(3) runs i = 0, 1, 2: (1 + 4) + (3 + 4) + (3 + 4) = 19.
+// owning (by-value scalar captures): f(1) = 4 + 1 = 5, f(0) = 3; 8.
+// nested: g(1) = 5, g(0) = 3; 8.
+// expect: run arm() = 14
+// expect: run joined() = 16
+// expect: run looped() = 19
+// expect: run owning() = 8
+// expect: run nested() = 8
+type Pair {
+    a: u64,
+    b: u64
+}
+
+fn arm() -> u64 {
+    let p = Pair(a: 3, b: 4)
+    let f = scoped fn(x: u64) -> u64 {
+        if x == 0 {
+            p.a
+        } else {
+            p.b + x
+        }
+    }
+    f(1) + f(0) + f(2)
+}
+
+fn joined() -> u64 {
+    let p = Pair(a: 3, b: 4)
+    let f = scoped fn(x: u64) -> u64 {
+        let y = if x == 0 {
+            p.a
+        } else {
+            x
+        }
+        y + p.b
+    }
+    f(5) + f(0)
+}
+
+fn looped() -> u64 {
+    let p = Pair(a: 3, b: 4)
+    let f = scoped fn(n: u64) -> u64 {
+        let mut s: u64 = 0
+        for i in 0u64 .. n {
+            if i == 0 {
+                s += 1
+            } else {
+                s += p.a
+            }
+            s += p.b
+        }
+        s
+    }
+    f(3)
+}
+
+fn owning() -> u64 {
+    let a: u64 = 3
+    let b: u64 = 4
+    let f = result.unwrap(fn(x: u64) -> u64 {
+        if x == 0 {
+            a
+        } else {
+            b + x
+        }
+    })
+    f(1) + f(0)
+}
+
+fn nested() -> u64 {
+    let p = Pair(a: 3, b: 4)
+    let f = scoped fn(x: u64) -> u64 {
+        let g = scoped fn(y: u64) -> u64 {
+            if y == 0 {
+                p.a
+            } else {
+                p.b + y
+            }
+        }
+        g(x) + g(0)
+    }
+    f(1)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if arm() == 14 && joined() == 16 && looped() == 19 && owning() == 8 && nested() == 8 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

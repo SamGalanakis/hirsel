@@ -75,6 +75,18 @@ fn callable_item_conversions_cranelift(){callable_item_conversions(Backend::Cran
 #[ignore="explicit native integration target"]
 fn callable_item_conversions_llvm(){callable_item_conversions(Backend::Llvm);}
 
+// A capture first used in an arm the first call skips is read on every other path
+// (native-model-fault-1023): both engines agree with the evaluator.
+fn capture_first_use_branch(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-capture-first-use-branch.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn capture_first_use_branch_cranelift(){capture_first_use_branch(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn capture_first_use_branch_llvm(){capture_first_use_branch(Backend::Llvm);}
+
 fn captured_callback(backend: Backend) {
     ordered_case(backend, include_str!("../../../core/front/cases/body/callable-captured-callback.hirsel"));
 }

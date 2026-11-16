@@ -1639,37 +1639,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             synthetic,
         });
         let environment = frame.environment;
-        let binding = if let Some(environment) = environment.filter(|_| self.live()) {
-            let offset = self.konst(Ty::Scalar(Scalar::U64), offset, n).unwrap();
+        // The binding is made once, at the first source use, and every later use of the
+        // capture reuses it, in whatever block it is reached from. So it is computed in
+        // the entry block, which dominates them all, never at that first use.
+        let binding = if let Some(environment) = environment {
+            let offset = self.entry_const(Ty::Scalar(Scalar::U64), offset);
             let address = if owning {
                 self.rep(original.ty).ok().and_then(Rep::stored).map(|ty| {
-                    self.address(
-                        AddressBase::Value(environment),
-                        &[Step::Byte(offset)],
-                        ty,
-                        n,
-                    )
+                    self.entry_address(AddressBase::Value(environment), &[Step::Byte(offset)], ty)
                 })
             } else {
-                let address = self.address(
+                let address = self.entry_address(
                     AddressBase::Value(environment),
                     &[Step::Byte(offset)],
                     PlaceTy::Value(Ty::Ptr),
-                    n,
                 );
                 let pointer = self.value(Ty::Ptr);
-                self.inst(
-                    Inst::Read {
-                        result: pointer,
-                        address,
-                        mode: ReadMode::Bits,
-                    },
-                    n,
-                );
+                self.entry_setup.push(Inst::Read {
+                    result: pointer,
+                    address,
+                    mode: ReadMode::Bits,
+                });
                 self.rep(original.ty)
                     .ok()
                     .and_then(Rep::stored)
-                    .map(|ty| self.address(AddressBase::Value(pointer), &[], ty, n))
+                    .map(|ty| self.entry_address(AddressBase::Value(pointer), &[], ty))
             };
             Binding::Slot(address)
         } else {

@@ -2,7 +2,8 @@
 //! it on what they built; no product path does (we trust our own implementation).
 //! It checks references, single definition, arity, the operand typing each
 //! instruction states, that type rows have recipes, and that no failure path
-//! reaches a `return` (FAIL-14: nothing catches a failure). It does not check
+//! reaches a `return` (FAIL-14: nothing catches a failure), and that an address
+//! is used only where some evaluation of it can have run. It does not check
 //! dominance, drop-flag discipline or limit-scope balance.
 
 use crate::*;
@@ -539,7 +540,166 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
     if let Some(v) = c.defined.iter().position(|n| *n != 1) {
         return Err(format!("v{v} defined {} times", c.defined[v]));
     }
-    no_catch(b)
+    no_catch(b)?;
+    reaching_addresses(b)
+}
+
+/// The blocks control leaves `bi` for: its instructions' failure blocks and its
+/// terminator's targets.
+fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
+    let blk = &b.blocks[bi];
+    let mut out: Vec<BlockId> = blk
+        .insts
+        .get(&b.insts)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|i| i.fail(b))
+        .collect();
+    let edge = |e: &EdgeId| b.edges[e.index()].target;
+    match &b.terminators[bi] {
+        Terminator::Jump(e) => out.push(edge(e)),
+        Terminator::Branch { yes, no, .. } => out.extend([edge(yes), edge(no)]),
+        Terminator::Switch {
+            arms, otherwise, ..
+        } => {
+            out.extend(
+                arms.get(&b.pools.arms)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|a| edge(&a.edge)),
+            );
+            out.push(edge(otherwise));
+        }
+        Terminator::Raise { cleanup, .. } => out.extend(*cleanup),
+        Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
+    }
+    out
+}
+
+/// The addresses an instruction uses, not counting the one an `address`
+/// instruction evaluates (its base address is a use).
+fn addresses_used(b: &Body, i: &Inst) -> Vec<AddressId> {
+    match *i {
+        Inst::Address { address, .. } => match b.addresses.get(address.index()).map(|a| a.base) {
+            Some(AddressBase::Address(x)) => vec![x],
+            _ => vec![],
+        },
+        Inst::Read { address, .. }
+        | Inst::Store { address, .. }
+        | Inst::Pointer { address, .. }
+        | Inst::Case { address, .. }
+        | Inst::SetCase { address, .. }
+        | Inst::Drop { address, .. }
+        | Inst::Mark { address, .. }
+        | Inst::Unmark { address, .. } => vec![address],
+        Inst::Grow { carrier, .. } => vec![carrier],
+        Inst::Copy { to, from, .. } => vec![to, from],
+        Inst::Call { call } => b
+            .calls
+            .get(call.index())
+            .and_then(|c| c.args.get(&b.pools.args))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|a| match *a {
+                Arg::Address(x) => Some(x),
+                Arg::Value(_) => None,
+            })
+            .collect(),
+        Inst::Const { .. }
+        | Inst::ReadStatic { .. }
+        | Inst::FunctionRef { .. }
+        | Inst::Unary { .. }
+        | Inst::Binary { .. }
+        | Inst::Compare { .. }
+        | Inst::Convert { .. }
+        | Inst::IntArith { .. }
+        | Inst::MulAdd { .. }
+        | Inst::ScalarUnary { .. }
+        | Inst::StorageLive { .. }
+        | Inst::StorageDead { .. }
+        | Inst::UpdateMask { .. }
+        | Inst::Alloc { .. }
+        | Inst::Free { .. }
+        | Inst::RegionOpen { .. }
+        | Inst::RegionClose { .. }
+        | Inst::Trim { .. }
+        | Inst::LimitEnter { .. }
+        | Inst::LimitExit
+        | Inst::Share { .. }
+        | Inst::Release { .. }
+        | Inst::TryUnwrap { .. } => vec![],
+    }
+}
+
+/// An address is used only where its `address` instruction can have run: earlier
+/// in the use's block, or in a block from which control reaches the use's block.
+/// A block the entry does not reach is never run, and is not checked. Uses need
+/// not be dominated (crate docs, "Values, slots and addresses"), but a
+/// use no evaluation reaches reads an address that was never computed.
+fn reaching_addresses(b: &Body) -> R {
+    let mut evaluated: Vec<Vec<usize>> = vec![vec![]; b.addresses.len()];
+    for (bi, block) in b.blocks.iter().enumerate() {
+        for i in block.insts.get(&b.insts).unwrap_or_default() {
+            if let Inst::Address { address, .. } = *i {
+                evaluated[address.index()].push(bi);
+            }
+        }
+    }
+    // reached[a]: the blocks some evaluation of `a` reaches through at least one edge.
+    let mut reached: Vec<Option<Vec<bool>>> = vec![None; b.addresses.len()];
+    let mut reaches = |a: AddressId, to: usize| -> bool {
+        reached[a.index()].get_or_insert_with(|| {
+            let mut seen = vec![false; b.blocks.len()];
+            let mut work: Vec<BlockId> = evaluated[a.index()]
+                .iter()
+                .flat_map(|&d| successors(b, d))
+                .collect();
+            while let Some(k) = work.pop() {
+                if !std::mem::replace(&mut seen[k.index()], true) {
+                    work.extend(successors(b, k.index()));
+                }
+            }
+            seen
+        })[to]
+    };
+    let mut live = vec![false; b.blocks.len()];
+    let mut work = vec![BlockId(0)];
+    while let Some(k) = work.pop() {
+        if !std::mem::replace(&mut live[k.index()], true) {
+            work.extend(successors(b, k.index()));
+        }
+    }
+    for (bi, block) in b.blocks.iter().enumerate() {
+        if !live[bi] {
+            continue;
+        }
+        let insts = block.insts.get(&b.insts).unwrap_or_default();
+        let mut here = std::collections::HashSet::new();
+        let mut check = |a: AddressId, here: &std::collections::HashSet<AddressId>| {
+            need(here.contains(&a) || reaches(a, bi), || {
+                format!("b{bi}: a{} is used where no evaluation of it reaches", a.0)
+            })
+        };
+        let raised = match b.terminators[bi] {
+            Terminator::Raise {
+                cause: RaiseCause::Fail(a),
+                ..
+            } => Some(a),
+            _ => None,
+        };
+        for i in insts {
+            for a in addresses_used(b, i) {
+                check(a, &here)?;
+            }
+            if let Inst::Address { address, .. } = *i {
+                here.insert(address);
+            }
+        }
+        if let Some(a) = raised {
+            check(a, &here)?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether block `bi` opens with `rt.isolate_catch`: a handler (crate docs,
@@ -570,35 +730,6 @@ fn no_catch(b: &Body) -> R {
     need(b.blocks.is_empty() || !handler(b, 0), || {
         "the entry block is a handler".into()
     })?;
-    let succ = |bi: usize| -> Vec<BlockId> {
-        let blk = &b.blocks[bi];
-        let mut out: Vec<BlockId> = blk
-            .insts
-            .get(&b.insts)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|i| i.fail(b))
-            .collect();
-        let edge = |e: &EdgeId| b.edges[e.index()].target;
-        match &b.terminators[bi] {
-            Terminator::Jump(e) => out.push(edge(e)),
-            Terminator::Branch { yes, no, .. } => out.extend([edge(yes), edge(no)]),
-            Terminator::Switch {
-                arms, otherwise, ..
-            } => {
-                out.extend(
-                    arms.get(&b.pools.arms)
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|a| edge(&a.edge)),
-                );
-                out.push(edge(otherwise));
-            }
-            Terminator::Raise { cleanup, .. } => out.extend(*cleanup),
-            Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
-        }
-        out
-    };
     let mut seen = vec![false; b.blocks.len()];
     let mut work: Vec<BlockId> = (0..b.blocks.len())
         .flat_map(|bi| {
@@ -622,7 +753,7 @@ fn no_catch(b: &Body) -> R {
             !matches!(b.terminators[k.index()], Terminator::Return(_)),
             || format!("failure path reaches the return of b{}", k.0),
         )?;
-        work.extend(succ(k.index()));
+        work.extend(successors(b, k.index()));
     }
     Ok(())
 }

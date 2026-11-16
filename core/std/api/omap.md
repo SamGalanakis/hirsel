@@ -29,10 +29,10 @@ preserves m; insertion returns its taken key/value. Failed attempts may consume
 ids, which must never be reused. These APIs continue to borrow m.
 
 `insert_owned(mut ids,take m,take k,take v)` is a separate consuming update.
-At a unique Arc, it transfers the owned node through `try_unwrap`, edits its
-lists, then publishes it with a new id through `arc.new`; unchanged child
-holders move without increments. Shared nodes use the ordinary path-copy.
-Unwrap/new still frees and allocates one wrapper per visited unique node.
+At a unique Arc, `arc.with_unique` lends the payload for in-place edits.
+The node stays allocated, including the left half of a split; a split allocates
+only the new sibling. Shared nodes use path copying. Branches retain their shared
+separator block while boundaries stay unchanged and rebuild it when they change.
 Capacity consumes the draft m and returns k/v; keep an independent snapshot
 for rollback. Every held version and its node ids stay unchanged.
 
@@ -56,12 +56,12 @@ entry. A caller uninterested in the entry binds and drops the second tuple field
 | form | map input | success | Capacity | reason today |
 |---|---|---|---|---|
 | insert | borrowed | new map, optional old value holder | key/value; input remains valid | persistent update while retaining a version |
-| insert_owned | taken | new map, optional old value holder | key/value; draft consumed | unique-node transfer through try_unwrap/new |
+| insert_owned | taken | new map, optional old value holder | key/value; draft consumed | in-place edits through arc.with_unique |
 | insert_recover | taken | new map, optional old value holder | original map and key/value | strong recovery without fallible rollback |
 
-The two consuming forms differ because checked mutation of a unique Arc payload
-is unavailable. With that operation and a failure-atomic update algorithm,
-`insert_recover` can take the unique path and `insert_owned` can disappear.
+The consuming forms retain different recovery contracts. `insert_owned` edits unique
+payloads in place and may discard its draft on Capacity. `insert_recover` retains the
+original root; taking the unique path there requires a failure-atomic update algorithm.
 Borrowed `insert` continues to express a persistent update of a retained version.
 
 `range(m,take lower,take upper)` accepts `Unbounded`, `Included(k)` or

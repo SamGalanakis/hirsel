@@ -553,9 +553,9 @@ fn as_pieces[K: ordered + shareable + send, V: shareable + send](take nodes: Lis
     Pieces(first: option.unwrap(list.pop(mut out)), second: take second)
 }
 
-/// Consuming update. Unique nodes transfer their lists through try_unwrap;
-/// shared nodes use the ordinary path-copy. Each visited unique node is freed
-/// and reallocated by unwrap/new. Capacity consumes m; k/v are returned, and
+/// Consuming update. Unique nodes are edited in place through with_unique;
+/// shared nodes use the ordinary path-copy. Splits retain the left node and add a sibling.
+/// Capacity consumes m; k/v are returned, and
 /// independently held versions remain valid. Keep a snapshot for rollback.
 pub fn insert_owned[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], take k: K, take v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), (Capacity, (K, V))] {
     match owned_map(mut ids, take m, k, v) {
@@ -588,9 +588,16 @@ fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, t
 }
 
 fn owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], take h: Arc[Node[K, V]], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
-    match arc.try_unwrap(take h) {
-        Ok(take n) => owned_node(mut ids, mut replaced, take n, k, v),
-        Error(take shared) => Ok(as_pieces(insert_node(mut ids, mut replaced, shared, k, v)?))
+    let mut holder = take h
+    let edited = arc.with_unique(mut holder, scoped fn(mut node: Node[K, V]) -> Result[Option[Arc[Node[K, V]]], Capacity] {
+        edit_owned_node(mut ids, mut replaced, mut node, k, v)
+    })
+    match take edited {
+        Some(take changed) => {
+            let right = changed?
+            Ok(Pieces(first: take holder, second: take right))
+        },
+        None => Ok(as_pieces(insert_node(mut ids, mut replaced, holder, k, v)?))
     }
 }
 
@@ -606,6 +613,12 @@ fn push_at[T](mut xs: List[T], at: u64, take value: T) -> Result[(), Capacity] {
 
 fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], take n: Node[K, V], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
     let mut node = take n
+    let right = edit_owned_node(mut ids, mut replaced, mut node, k, v)?
+    let holder = result.capacity_only(arc.new(take node))?
+    Ok(Pieces(first: take holder, second: take right))
+}
+
+fn edit_owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], mut node: Node[K, V], k: K, v: V) -> Result[Option[Arc[Node[K, V]]], Capacity] {
     if node.depth == 0 {
         let at = lower(node.keys, k)
         let hit = at < list.len(node.keys) && key_order(node.keys, at, k) == Equal
@@ -629,10 +642,6 @@ fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
             push_at(mut node.values, at, take nv)?
         }
         node.size = list.len(node.keys)
-        if node.size > 32 {
-            let Node(stamp: _, depth: _, size: _, keys: ks, values: vs, kids: _, lows: _) = take node
-            return Ok(as_pieces(split_leaves(mut ids, take ks, take vs)?))
-        }
     } else {
         let at = child_index_node(node, k)
         let mut boundaries_changed = {
@@ -655,17 +664,77 @@ fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
             push_at(mut node.kids, at + 1, take r)?
         }
         node.size = node.size - old_size + size
-        if list.len(node.kids) > 32 {
-            return Ok(as_pieces(split_branches(mut ids, node.kids)?))
-        }
-        if boundaries_changed {
+        if boundaries_changed && list.len(node.kids) <= 32 {
             node.lows = Some(fresh_keys(node.kids)?)
         }
     }
     ids += 1
     node.stamp = ids
-    let holder = result.capacity_only(arc.new(take node))?
-    Ok(Pieces(first: take holder, second: None))
+    let count = if node.depth == 0 {
+        list.len(node.keys)
+    } else {
+        list.len(node.kids)
+    }
+    if count > 32 {
+        Ok(Some(split_owned_node(mut ids, mut node)?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn split_owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut node: Node[K, V]) -> Result[Arc[Node[K, V]], Capacity] {
+    let is_leaf = node.depth == 0
+    let total = if is_leaf {
+        list.len(node.keys)
+    } else {
+        list.len(node.kids)
+    }
+    let count = total - total / 2
+    let mut keys: List[K] = list.with_capacity(if is_leaf {
+        count
+    } else {
+        0
+    })?
+    let mut values: List[V] = list.with_capacity(if is_leaf {
+        count
+    } else {
+        0
+    })?
+    let mut kids: List[Arc[Node[K, V]]] = list.with_capacity(if is_leaf {
+        0
+    } else {
+        count
+    })?
+    let mut size = 0u64
+    for _ in 0 .. count {
+        if is_leaf {
+            result.capacity_only(list.push(mut keys, option.unwrap(list.pop(mut node.keys))))?
+            result.capacity_only(list.push(mut values, option.unwrap(list.pop(mut node.values))))?
+            size += 1
+        } else {
+            let child = option.unwrap(list.pop(mut node.kids))
+            size += child.size
+            result.capacity_only(list.push(mut kids, take child))?
+        }
+    }
+    for i in 0u64 .. count / 2 {
+        if is_leaf {
+            list.swap(mut keys, i, count - 1 - i)
+            list.swap(mut values, i, count - 1 - i)
+        } else {
+            list.swap(mut kids, i, count - 1 - i)
+        }
+    }
+    node.size -= size
+    let lows: Option[Arc[List[K]]] = if is_leaf {
+        None
+    } else {
+        node.lows = Some(fresh_keys(node.kids)?)
+        Some(fresh_keys(kids)?)
+    }
+    ids += 1
+    let right = Node(stamp: ids, depth: node.depth, size: size, keys: take keys, values: take values, kids: take kids, lows: take lows)
+    result.capacity_only(arc.new(take right))
 }
 
 fn child_index_node[K: ordered + shareable + send, V: shareable + send](n: Node[K, V], k: K) -> u64 {

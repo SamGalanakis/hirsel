@@ -968,3 +968,27 @@ fn separator_payload_budget() -> bool {
         }
     }
 }
+
+// Existing nodes and list capacities admit an overwrite under zero new bytes.
+// The old unwrap/new path frees the node and then refuses its replacement here.
+// expect: run owned_unique_reuses_nodes() = true
+fn owned_unique_reuses_nodes() -> bool {
+    let mut ids = 0u64
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    for i in 0u64 .. 80 {
+        let previous = take m
+        let (take next_map, _) = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 5))
+        m = take next_map
+    }
+    let previous = take m
+    let changed = result.unwrap(bound bytes 0 {
+        omap.insert_owned(mut ids, take previous, 40, 999)
+    })
+    match take changed {
+        Ok((take next_map, take old)) => omap.len(next_map) == 80 && option.unwrap(omap.get(next_map, 40)) == 999 && option.unwrap(omap.get(next_map, 39)) == 44 && option.unwrap(omap.get(next_map, 41)) == 46 && match take old {
+            Some(take replaced) => omap.replaced_value(replaced) == 45,
+            None => false
+        },
+        Error(_) => false
+    }
+}

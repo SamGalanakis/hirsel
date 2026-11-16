@@ -277,7 +277,6 @@ pub fn take_char(b: Bytes, mut at: u64) -> Result[char, Stop] {
 
 pub fn put_string(x: String, mut out: Bytes) -> Result[(), Capacity] {
     let raw = string.as_bytes(x)
-    list.reserve(mut out, 8 + list.len(raw))?
     list.put_word_le(mut out, list.len(raw))?
     list.append(mut out, raw)
 }

@@ -1222,10 +1222,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         source.generics.is_empty()
             && !source.path.package_is("core", "1")
             && !source.path.package_is("std", "1")
-            && source
-                .params
-                .iter()
-                .all(|param| matches!(param.mode, Mode::View | Mode::Take | Mode::Bytes))
     }
 
     /// MEM-17: why `clone` or `clone_in` of an `x: T` expecting `U` is refused, if it is.

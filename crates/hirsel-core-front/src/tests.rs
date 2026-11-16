@@ -1228,6 +1228,15 @@ fn inferred_callable_kind_fits_emit_their_carriers() {
 }
 
 #[test]
+fn generic_static_mut_calls_keep_direct_call_loans() {
+    let mut failures = run_case(&root().join("cases/body/callable-static-mut.hirsel"));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-static-mut-refused.hirsel"),
+    ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn codec_typed_static_registration() {
     let mut failures = run_case(&root().join("cases/body/callable-codec-register.hirsel"));
     failures.extend(run_case(
@@ -3713,7 +3722,7 @@ fn isolate_and_code_describe_rules() {
         &root().join("cases/body/callable-static-fn-generic.hirsel"),
     ));
     failures.extend(run_case(
-        &root().join("cases/body/callable-static-fn-open-item-gap.hirsel"),
+        &root().join("cases/body/callable-static-fn-open-mut.hirsel"),
     ));
     assert!(failures.is_empty(), "{failures:?}");
 }

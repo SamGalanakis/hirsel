@@ -1971,14 +1971,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .filter_map(|(i, fd)| {
                 let region_only = fd.generics.iter().all(|generic| generic.region);
                 (fd.body.is_some()
+                    && fd.drop_of.is_none()
+                    && fd.clone_of.is_none()
                     && region_only
                     && (!open_static || fd.generics.is_empty())
                     && (!open_static
                         || (!fd.path.package_is("core", "1") && !fd.path.package_is("std", "1")))
-                    && (!open_static
-                        || fd.params.iter().all(|param| {
-                            matches!(param.mode, Mode::View | Mode::Take | Mode::Bytes)
-                        }))
                     && (open_static || fd.callable == callable))
                     .then_some(i)
             })

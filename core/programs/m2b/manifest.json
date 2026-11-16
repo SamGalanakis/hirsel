@@ -1,6 +1,26 @@
 {
   "packages": [
     {
+      "package": {"name": "mutprobe4", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
+      "sources": [{"file": "core/programs/m2b/static_mut/transaction.hirsel", "modules": ["main"], "signatures": false}]
+    },
+    {
+      "package": {"name": "mutprobe8", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}],
+      "sources": [{"file": "core/programs/m2b/static_mut/generic.hirsel", "modules": ["main"], "signatures": false}]
+    },
+    {
+      "package": {"name": "mutlib", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}],
+      "sources": [{"file": "core/front/cases/body/callable-static-mut.hirsel", "modules": ["lib"], "signatures": false}]
+    },
+    {
+      "package": {"name": "staticmut", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "mutlib", "version": "1"}, {"name": "mutprobe4", "version": "1"}, {"name": "mutprobe8", "version": "1"}],
+      "sources": [{"file": "core/programs/m2b/static_mut/main.hirsel", "modules": ["main"], "signatures": false}]
+    },
+    {
       "package": {"name": "m2b", "version": "1"},
       "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
       "sources": [
@@ -90,6 +110,7 @@
     }
   ],
   "entries": [
+    {"workload": "static_mut", "package": {"name": "staticmut", "version": "1"}, "module": "main", "definition": "main"},
     {"workload": "table", "package": {"name": "table", "version": "1"}, "module": "main"},
     {"workload": "tx", "package": {"name": "tx", "version": "1"}, "module": "main"},
     {"workload": "replay", "package": {"name": "app", "version": "1"}, "module": "main", "grants": ["Clock"]},

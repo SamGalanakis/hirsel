@@ -1,0 +1,20 @@
+fn alias[T](f: StaticFn[fn(mut T, mut T)], mut x: T) {
+    let g = code.callable(f)
+    g(mut x, mut x)
+}
+fn view_later[T](f: StaticFn[fn(mut T, T)], mut x: T) {
+    let g = code.callable(f)
+    g(mut x, x)
+}
+fn frozen[T](f: StaticFn[fn(mut T)], mut x: T) {
+    let held = view x
+    let g = code.callable(f)
+    g(mut x)
+    let _ = held
+}
+// expect: refuse OWN-9 at 3:14
+// expect: refuse OWN-9 at 7:14
+// expect: refuse OWN-10 at 12:7
+// expect: cause OWN-9 at 3:14 from 3:7
+// expect: cause OWN-9 at 7:14 from 7:7
+// expect: cause OWN-10 at 12:7 from 10:16

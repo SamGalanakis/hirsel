@@ -1,0 +1,27 @@
+// RUNNER-SPEC section 1 probe: the generic transact adapter calls a StaticFn whose type has a
+// mut parameter. Reduced from p04.
+type Tx {
+    writes: u64
+}
+
+fn go[A](f: StaticFn[fn(mut Tx, take A) -> Result[bool, Capacity]], mut tx: Tx, take a: A) -> bool {
+    let g = code.callable(f);
+    match g(mut tx, take a) {
+        Ok(b) => b,
+        Error(_) => false
+    }
+}
+
+fn entry(mut tx: Tx, take i: u32) -> Result[bool, Capacity] {
+    tx.writes += 1u64;
+    Ok(true)
+}
+
+pub fn main() -> Result[(), Exit] {
+    let mut tx = Tx(writes: 0u64);
+    if go(code.describe(entry), mut tx, 1u32) {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

@@ -1,0 +1,14 @@
+// PROG-9: a mut parameter does not restrict generic identity lookup.
+fn touch(mut n: u64) -> u64 {
+    n += 1;
+    n
+}
+
+fn names[F](s: StaticFn[F]) -> u64 {
+    list.len(code.identity(s))
+}
+
+pub fn open_item() -> u64 {
+    names(code.describe(touch))
+}
+// expect: run open_item() = 31

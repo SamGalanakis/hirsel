@@ -1,0 +1,112 @@
+[
+  {
+    "name": "number_mtv_run",
+    "value": 38,
+    "used": 0
+  },
+  {
+    "name": "text_mtv_run",
+    "value": 32,
+    "used": 0
+  },
+  {
+    "name": "number_mvt_run",
+    "value": 38,
+    "used": 0
+  },
+  {
+    "name": "text_mvt_run",
+    "value": 32,
+    "used": 0
+  },
+  {
+    "name": "number_tmv_run",
+    "value": 38,
+    "used": 0
+  },
+  {
+    "name": "text_tmv_run",
+    "value": 32,
+    "used": 0
+  },
+  {
+    "name": "number_tvm_run",
+    "value": 38,
+    "used": 0
+  },
+  {
+    "name": "text_tvm_run",
+    "value": 32,
+    "used": 0
+  },
+  {
+    "name": "number_vmt_run",
+    "value": 38,
+    "used": 0
+  },
+  {
+    "name": "text_vmt_run",
+    "value": 32,
+    "used": 0
+  },
+  {
+    "name": "number_vtm_run",
+    "value": 38,
+    "used": 0
+  },
+  {
+    "name": "text_vtm_run",
+    "value": 32,
+    "used": 0
+  },
+  {
+    "name": "generic_scalar",
+    "value": 7,
+    "used": 0
+  },
+  {
+    "name": "generic_string",
+    "value": 3,
+    "used": 0
+  },
+  {
+    "name": "two_mut",
+    "value": 46,
+    "used": 0
+  },
+  {
+    "name": "failure_before_write",
+    "value": 1,
+    "used": 0
+  },
+  {
+    "name": "failure_after_write",
+    "value": 1,
+    "used": 0
+  },
+  {
+    "name": "failure_during_assignment",
+    "value": 1,
+    "used": 0
+  },
+  {
+    "name": "cross_number",
+    "value": 38,
+    "used": 0
+  },
+  {
+    "name": "cross_text",
+    "value": 32,
+    "used": 0
+  },
+  {
+    "name": "probe_transaction",
+    "value": 0,
+    "used": 0
+  },
+  {
+    "name": "probe_generic",
+    "value": 0,
+    "used": 0
+  }
+]

@@ -1,0 +1,344 @@
+// LANG-13 / OWN-11: typed StaticFn calls retain the ordinary argument loans.
+pub type Tx {
+    writes: u64,
+    text: String
+}
+
+pub fn adapt_mtv[A: codec, R: codec, E: codec](f: StaticFn[fn(mut Tx, take A, u64) -> Result[R, E]], mut tx: Tx, take a: A, n: u64) -> Result[R, E] {
+    let _ = code.identity(f)
+    let invoke = code.callable(f)
+    invoke(mut tx, take a, n)
+}
+
+fn number_mtv(mut tx: Tx, take a: u64, n: u64) -> Result[u64, u64] {
+    tx.writes += n;
+    Ok(a + 1u64)
+}
+
+pub fn number_mtv_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = 7u64
+    let r = result.unwrap(adapt_mtv(code.describe(number_mtv), mut tx, take a, 2u64))
+    tx.writes * 10u64 + r
+}
+
+// expect: run number_mtv_run() = 38
+fn text_mtv(mut tx: Tx, take a: String, n: u64) -> Result[String, u64] {
+    tx.writes += n;
+    Ok(take a)
+}
+
+pub fn text_mtv_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = result.unwrap(string.from("ok"))
+    let r = result.unwrap(adapt_mtv(code.describe(text_mtv), mut tx, take a, 2u64))
+    tx.writes * 10u64 + list.len(string.as_bytes(r))
+}
+
+// expect: run text_mtv_run() = 32
+pub fn adapt_mvt[A: codec, R: codec, E: codec](f: StaticFn[fn(mut Tx, u64, take A) -> Result[R, E]], mut tx: Tx, n: u64, take a: A) -> Result[R, E] {
+    let _ = code.identity(f)
+    let invoke = code.callable(f)
+    invoke(mut tx, n, take a)
+}
+
+fn number_mvt(mut tx: Tx, n: u64, take a: u64) -> Result[u64, u64] {
+    tx.writes += n;
+    Ok(a + 1u64)
+}
+
+pub fn number_mvt_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = 7u64
+    let r = result.unwrap(adapt_mvt(code.describe(number_mvt), mut tx, 2u64, take a))
+    tx.writes * 10u64 + r
+}
+
+// expect: run number_mvt_run() = 38
+fn text_mvt(mut tx: Tx, n: u64, take a: String) -> Result[String, u64] {
+    tx.writes += n;
+    Ok(take a)
+}
+
+pub fn text_mvt_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = result.unwrap(string.from("ok"))
+    let r = result.unwrap(adapt_mvt(code.describe(text_mvt), mut tx, 2u64, take a))
+    tx.writes * 10u64 + list.len(string.as_bytes(r))
+}
+
+// expect: run text_mvt_run() = 32
+pub fn adapt_tmv[A: codec, R: codec, E: codec](f: StaticFn[fn(take A, mut Tx, u64) -> Result[R, E]], take a: A, mut tx: Tx, n: u64) -> Result[R, E] {
+    let _ = code.identity(f)
+    let invoke = code.callable(f)
+    invoke(take a, mut tx, n)
+}
+
+fn number_tmv(take a: u64, mut tx: Tx, n: u64) -> Result[u64, u64] {
+    tx.writes += n;
+    Ok(a + 1u64)
+}
+
+pub fn number_tmv_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = 7u64
+    let r = result.unwrap(adapt_tmv(code.describe(number_tmv), take a, mut tx, 2u64))
+    tx.writes * 10u64 + r
+}
+
+// expect: run number_tmv_run() = 38
+fn text_tmv(take a: String, mut tx: Tx, n: u64) -> Result[String, u64] {
+    tx.writes += n;
+    Ok(take a)
+}
+
+pub fn text_tmv_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = result.unwrap(string.from("ok"))
+    let r = result.unwrap(adapt_tmv(code.describe(text_tmv), take a, mut tx, 2u64))
+    tx.writes * 10u64 + list.len(string.as_bytes(r))
+}
+
+// expect: run text_tmv_run() = 32
+pub fn adapt_tvm[A: codec, R: codec, E: codec](f: StaticFn[fn(take A, u64, mut Tx) -> Result[R, E]], take a: A, n: u64, mut tx: Tx) -> Result[R, E] {
+    let _ = code.identity(f)
+    let invoke = code.callable(f)
+    invoke(take a, n, mut tx)
+}
+
+fn number_tvm(take a: u64, n: u64, mut tx: Tx) -> Result[u64, u64] {
+    tx.writes += n;
+    Ok(a + 1u64)
+}
+
+pub fn number_tvm_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = 7u64
+    let r = result.unwrap(adapt_tvm(code.describe(number_tvm), take a, 2u64, mut tx))
+    tx.writes * 10u64 + r
+}
+
+// expect: run number_tvm_run() = 38
+fn text_tvm(take a: String, n: u64, mut tx: Tx) -> Result[String, u64] {
+    tx.writes += n;
+    Ok(take a)
+}
+
+pub fn text_tvm_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = result.unwrap(string.from("ok"))
+    let r = result.unwrap(adapt_tvm(code.describe(text_tvm), take a, 2u64, mut tx))
+    tx.writes * 10u64 + list.len(string.as_bytes(r))
+}
+
+// expect: run text_tvm_run() = 32
+pub fn adapt_vmt[A: codec, R: codec, E: codec](f: StaticFn[fn(u64, mut Tx, take A) -> Result[R, E]], n: u64, mut tx: Tx, take a: A) -> Result[R, E] {
+    let _ = code.identity(f)
+    let invoke = code.callable(f)
+    invoke(n, mut tx, take a)
+}
+
+fn number_vmt(n: u64, mut tx: Tx, take a: u64) -> Result[u64, u64] {
+    tx.writes += n;
+    Ok(a + 1u64)
+}
+
+pub fn number_vmt_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = 7u64
+    let r = result.unwrap(adapt_vmt(code.describe(number_vmt), 2u64, mut tx, take a))
+    tx.writes * 10u64 + r
+}
+
+// expect: run number_vmt_run() = 38
+fn text_vmt(n: u64, mut tx: Tx, take a: String) -> Result[String, u64] {
+    tx.writes += n;
+    Ok(take a)
+}
+
+pub fn text_vmt_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = result.unwrap(string.from("ok"))
+    let r = result.unwrap(adapt_vmt(code.describe(text_vmt), 2u64, mut tx, take a))
+    tx.writes * 10u64 + list.len(string.as_bytes(r))
+}
+
+// expect: run text_vmt_run() = 32
+pub fn adapt_vtm[A: codec, R: codec, E: codec](f: StaticFn[fn(u64, take A, mut Tx) -> Result[R, E]], n: u64, take a: A, mut tx: Tx) -> Result[R, E] {
+    let _ = code.identity(f)
+    let invoke = code.callable(f)
+    invoke(n, take a, mut tx)
+}
+
+fn number_vtm(n: u64, take a: u64, mut tx: Tx) -> Result[u64, u64] {
+    tx.writes += n;
+    Ok(a + 1u64)
+}
+
+pub fn number_vtm_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = 7u64
+    let r = result.unwrap(adapt_vtm(code.describe(number_vtm), 2u64, take a, mut tx))
+    tx.writes * 10u64 + r
+}
+
+// expect: run number_vtm_run() = 38
+fn text_vtm(n: u64, take a: String, mut tx: Tx) -> Result[String, u64] {
+    tx.writes += n;
+    Ok(take a)
+}
+
+pub fn text_vtm_run() -> u64 {
+    let mut tx = Tx(writes: 1u64, text: result.unwrap(string.from("held")))
+    let a = result.unwrap(string.from("ok"))
+    let r = result.unwrap(adapt_vtm(code.describe(text_vtm), 2u64, take a, mut tx))
+    tx.writes * 10u64 + list.len(string.as_bytes(r))
+}
+
+// expect: run text_vtm_run() = 32
+pub fn generic_mut[T](f: StaticFn[fn(mut T)], mut x: T) {
+    let _ = code.identity(f);
+    let g = code.callable(f);
+    g(mut x)
+}
+
+fn bump(mut n: u64) {
+    n += 3u64
+}
+
+fn replace(mut s: String) {
+    s = result.unwrap(string.from("new"))
+}
+
+pub fn two[T](f: StaticFn[fn(mut T, mut T)], mut x: T, mut y: T) {
+    let _ = code.identity(f);
+    let g = code.callable(f);
+    g(mut x, mut y)
+}
+
+fn both(mut x: u64, mut y: u64) {
+    x += 1u64;
+    y += 2u64
+}
+
+type Pair {
+    x: u64,
+    y: u64
+}
+
+pub fn generic_scalar() -> u64 {
+    let mut x = 4u64
+    generic_mut(code.describe(bump), mut x)
+    x
+}
+
+// expect: run generic_scalar() = 7
+pub fn generic_string() -> u64 {
+    let mut x = result.unwrap(string.from("old value"))
+    generic_mut(code.describe(replace), mut x)
+    list.len(string.as_bytes(x))
+}
+
+// expect: run generic_string() = 3
+pub fn two_mut() -> u64 {
+    let mut p = Pair(x: 3u64, y: 4u64)
+    two(code.describe(both), mut p.x, mut p.y)
+    p.x * 10u64 + p.y
+}
+
+// expect: run two_mut() = 46
+resource type Cell {
+    n: u64,
+    expected: u64
+} drop(c) {
+    if c.n != c.expected {
+        fail("last installed value changed")
+    }
+}
+
+resource type Explode {
+    zero: u64
+} drop(b) {
+    let _ = 1u64 / b.zero
+}
+
+fn before_write(mut c: Cell, take a: u64) {
+    let bomb = result.unwrap(Explode(zero: 0u64))
+}
+
+fn after_write(mut c: Cell, take a: u64) {
+    let bomb = result.unwrap(Explode(zero: 0u64));
+    c.n = a
+}
+
+fn during_assignment(mut c: Cell, take a: u64) {
+    c.n = failed_value()
+}
+
+fn failed_value() -> u64 {
+    let bomb = result.unwrap(Explode(zero: 0u64));
+    9u64
+}
+
+fn fail_call[A](f: StaticFn[fn(mut Cell, take A)], mut c: Cell, take a: A) {
+    let _ = code.identity(f);
+    let g = code.callable(f);
+    g(mut c, take a)
+}
+
+pub fn failure_before_write() -> u64 {
+    let caught = isolate(fn() -> u64 {
+        let mut c = result.unwrap(Cell(n: 5u64, expected: 5u64))
+        fail_call(code.describe(before_write), mut c, 9u64)
+        99u64
+    })
+    match caught {
+        Ok(Error(causes)) => {
+            let mut count = 0u64;
+            for cause in causes {
+                count += 1u64
+            };
+            count
+        },
+        _ => 99u64,
+    }
+}
+
+// expect: run failure_before_write() = 1
+pub fn failure_after_write() -> u64 {
+    let caught = isolate(fn() -> u64 {
+        let mut c = result.unwrap(Cell(n: 5u64, expected: 9u64))
+        fail_call(code.describe(after_write), mut c, 9u64)
+        99u64
+    })
+    match caught {
+        Ok(Error(causes)) => {
+            let mut count = 0u64;
+            for cause in causes {
+                count += 1u64
+            };
+            count
+        },
+        _ => 99u64,
+    }
+}
+
+// expect: run failure_after_write() = 1
+pub fn failure_during_assignment() -> u64 {
+    let caught = isolate(fn() -> u64 {
+        let mut c = result.unwrap(Cell(n: 5u64, expected: 5u64))
+        fail_call(code.describe(during_assignment), mut c, 9u64)
+        99u64
+    })
+    match caught {
+        Ok(Error(causes)) => {
+            let mut count = 0u64;
+            for cause in causes {
+                count += 1u64
+            };
+            count
+        },
+        _ => 99u64,
+    }
+}
+// expect: run failure_during_assignment() = 1

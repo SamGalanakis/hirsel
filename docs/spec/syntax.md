@@ -276,7 +276,7 @@ or `match` subject cannot end in an unparenthesized block. `for` patterns, `let`
 without `else`, and `let`-condition patterns are checked for refutability after parsing
 ([LANG-17](language.md#lang-17-match)). An attribute applies only to its own target:
 `@test` to a function, `@compact` to a `stable type`, `@twin` to a type; a repeated
-attribute, an attribute on another item, a representation keyword on an alias,
+attribute is refused by [LANG-7](language.md#lang-7-names), and an attribute on another item, a representation keyword on an alias,
 and `drop` on a declaration that is not `resource` are refused. A parameter marked `bytes`
 is a byte count of type `u64`, and its argument is written `bytes e`; the mark is part of the
 signature, as `take` is, and an argument whose mark does not match its parameter is

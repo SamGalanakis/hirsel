@@ -25,7 +25,7 @@ raised it:
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
 | `Capacity` | an allocation beyond a finalizer's grant ([MEM-27](budgets.md#mem-27-finalizer-grants)) |
 | `OutOfTime` | a step past the current step bound ([MEM-30](budgets.md#mem-30-step-bounds)) |
-| `Tape` | a provider operation whose tape refuses it before issue ([CAP-9](capabilities.md#cap-9-tapes)); provisional |
+| `Tape` | a provider operation whose tape refuses it before issue ([CAP-9](capabilities.md#cap-9-tapes)) |
 
 `Capacity` outside a finalizer is an error, never a failure.
 

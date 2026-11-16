@@ -71,7 +71,12 @@ the name of a visible local, a value definition of its own module or a prelude f
 may have the name of a module or a dependency package: in its scope the local wins, also as
 the first component of a dotted path, so adding a module or a dependency never makes an
 existing local illegal. `main`'s argument list is written `argv: Args` in this
-specification; `args: Args` is equally legal. Two definitions with one name in one module are refused. Variants are
+specification; `args: Args` is equally legal. Two definitions with one name in one module are refused. Each attribute kind occurs at
+most once on a declaration; a second occurrence is refused under LANG-7 at that attribute,
+with the first occurrence as the causal site. Live fields of a record have distinct names; a
+duplicate is refused under LANG-7 at the later field, with the first occurrence as the
+causal site. Live variants of a variant type have distinct names; a duplicate is refused
+under LANG-7 at the later variant, with the first occurrence as the causal site. Variants are
 written bare (`Ok(x)`, `None`) and selected by the expected type; with none, a variant names
 the one visible type that declares it, and a variant two visible types declare is refused
 here. A dotted path never names a variant. Core roles (`Result`, `Capacity`, the capability types) are fixed by definition

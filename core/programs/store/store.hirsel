@@ -32,7 +32,7 @@ pub type Fault {
     why: Why
 }
 
-pub type Error = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Exists(String) | Missing(String) | Diverged(u32) | Foreign
+pub type Error = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Diverged(u32) | Foreign
 
 pub opaque type Db {
     id: StoreId,
@@ -45,15 +45,29 @@ pub opaque type Db {
 
 pub opaque type Table[K, V]: send {
     store: StoreId,
-    id: u32
+    id: u32,
+    key: std.codec.Key[K],
+    value: std.codec.Codec[V]
 }
 
 pub opaque type Shape[K, V] {
     store: StoreId,
-    id: u32
+    id: u32,
+    key: std.codec.Key[K],
+    value: std.codec.Codec[V]
+}
+
+pub opaque type Index[J, K, V] {
+    store: StoreId,
+    table: u32,
+    id: u32,
+    key: std.codec.Key[J],
+    primary: std.codec.Key[K],
+    value: std.codec.Codec[V]
 }
 
 pub type Read = Point(u32, Bytes) | Span(u32, Bytes, Bytes)
+pub type Bound[K] = Unbounded | Incl(K) | Excl(K)
 
 pub type CallId {
     store: StoreId,
@@ -99,6 +113,12 @@ pub opaque type Rows: send {
     cursor: std.omap.Cursor[Bytes, Bytes]
 }
 
+pub opaque type TypedRows[K, V]: send {
+    cursor: std.omap.Cursor[Bytes, Bytes],
+    key: std.codec.Key[K],
+    value: std.codec.Codec[V]
+}
+
 pub opaque type Snapshot: send {
     store: StoreId,
     open: u64,
@@ -121,6 +141,12 @@ fn make_id(c: Clock) -> StoreId {
 
 fn ticket(id: StoreId, generation: u64) -> Ticket {
     Ticket(store: id, open: 0, mark: Cut(generation))
+}
+
+fn prefix(id: u32) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.with_capacity(8)?
+    list.put_word_le(mut out, int.widen(id))?
+    Ok(out)
 }
 
 pub fn defaults_id(c: Clock) -> StoreId {
@@ -154,13 +180,38 @@ pub fn identity(db: Db) -> StoreId {
     db.id
 }
 
-pub fn table[K, V](db: Db, take name: String) -> Result[Table[K, V], Error] {
+pub fn create_table[K, V](mut db: Db, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Ticket, Error] {
     let _ = take name
-    Ok(Table(store: db.id, id: 1))
+    let _ = key
+    let _ = value
+    db.version += 1
+    Ok(ticket(db.id, db.version))
+}
+
+pub fn table[K, V](db: Db, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    let _ = take name
+    Ok(Table(store: db.id, id: 1, key: take key, value: take value))
 }
 
 pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
-    Shape(store: t.store, id: t.id)
+    Shape(store: t.store, id: t.id, key: t.key, value: t.value)
+}
+
+pub fn create_index[J, K, V](mut db: Db, take t: Table[K, V], take name: String,
+    by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Ticket, Error] {
+    let _ = take t
+    let _ = take name
+    let _ = by
+    let _ = key
+    db.version += 1
+    Ok(ticket(db.id, db.version))
+}
+
+pub fn index[J, K, V](db: Db, take t: Table[K, V], take name: String,
+    by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+    let _ = take name
+    let _ = by
+    Ok(Index(store: db.id, table: t.id, id: 1, key: take key, primary: t.key, value: t.value))
 }
 
 pub fn run[R, A](mut db: Db, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
@@ -298,11 +349,127 @@ pub fn range_bytes(mut tx: Tx, table_id: u32, take lo: std.omap.Bound[Bytes], ta
     }
 }
 
-pub fn next(mut rows: Rows) -> Result[Option[(Bytes, Bytes)], Error] {
+pub fn next_bytes(mut rows: Rows) -> Result[Option[(Bytes, Bytes)], Error] {
     match std.omap.next(mut rows.cursor) {
         Ok(pair) => Ok(pair),
         Error(c) => Error(Full(c))
     }
+}
+
+fn typed_key[K, V](t: Table[K, V], key: K) -> Result[Bytes, Error] {
+    let mut out = match prefix(t.id) {
+        Ok(value) => value,
+        Error(cap) => return Error(Full(cap))
+    }
+    match std.codec.encode_key(t.key, key, mut out) {
+        Ok(()) => Ok(out),
+        Error(cap) => Error(Full(cap))
+    }
+}
+
+fn decode_typed[V](c: std.codec.Codec[V], raw: Bytes) -> Result[V, Error] {
+    match std.codec.decode(c, raw) {
+        Error(cap) => Error(Full(cap)),
+        Ok(Error(e)) => Error(Decode(e)),
+        Ok(Ok(value)) => Ok(value)
+    }
+}
+
+pub fn fetch[K, V](mut tx: Tx, t: Table[K, V], key: K) -> Result[Option[V], Error] {
+    let physical = typed_key(t, key)?
+    match fetch_bytes(mut tx, t.id, take physical)? {
+        None => Ok(None),
+        Some(raw) => match std.codec.decode(t.value, raw) {
+            Error(cap) => Error(Full(cap)),
+            Ok(Error(e)) => Error(Decode(e)),
+            Ok(Ok(value)) => Ok(Some(value))
+        }
+    }
+}
+
+pub fn put[K, V](mut tx: Tx, t: Table[K, V], key: K, value: V) -> Result[(), Error] {
+    let physical = typed_key(t, key)?
+    let mut raw: Bytes = list.new()
+    match std.codec.encode(t.value, value, mut raw) {
+        Ok(()) => {},
+        Error(cap) => return Error(Full(cap))
+    }
+    put_bytes(mut tx, t.id, take physical, take raw)
+}
+
+pub fn delete[K, V](mut tx: Tx, t: Table[K, V], key: K) -> Result[bool, Error] {
+    delete_bytes(mut tx, t.id, typed_key(t, key)?)
+}
+
+fn typed_bound[K, V](t: Table[K, V], limit: Bound[K], high: bool) -> Result[std.omap.Bound[Bytes], Error] {
+    match limit {
+        Unbounded => {
+            let mut p = match prefix(t.id) {
+                Ok(value) => value,
+                Error(cap) => return Error(Full(cap))
+            }
+            if high {
+                match list.push(mut p, 255u8) {
+                    Ok(()) => {},
+                    Error((cap, _)) => return Error(Full(cap))
+                }
+                Ok(Excluded(take p))
+            } else {
+                Ok(Included(take p))
+            }
+        },
+        Incl(key) => Ok(Included(typed_key(t, key)?)),
+        Excl(key) => Ok(Excluded(typed_key(t, key)?))
+    }
+}
+
+pub fn range[K, V](mut tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TypedRows[K, V], Error] {
+    let raw = range_bytes(mut tx, t.id, typed_bound(t, lo, false)?, typed_bound(t, hi, true)?)?
+    let Rows(cursor: take cursor) = take raw
+    Ok(TypedRows(cursor: take cursor, key: t.key, value: t.value))
+}
+
+pub fn next[K, V](take rows: TypedRows[K, V]) -> Result[Option[(K, V)], Error] {
+    let _ = take rows
+    Error(Missing("typed cursor decoding is added with S4"))
+}
+
+pub fn get[K, V](s: Snapshot, t: Shape[K, V], key: K) -> Result[Option[V], Error] {
+    if !same_id(s.store, t.store) {
+        return Error(Foreign)
+    }
+    let physical = typed_key(Table(store: t.store, id: t.id, key: t.key, value: t.value), key)?
+    match std.omap.get(s.root, physical) {
+        None => Ok(None),
+        Some(raw) => Ok(Some(decode_typed(t.value, raw)?))
+    }
+}
+
+pub fn scan[K, V](take s: Snapshot, t: Shape[K, V], take lo: Bound[K], take hi: Bound[K]) -> Result[TypedRows[K, V], Error] {
+    let shape_table = Table(store: t.store, id: t.id, key: t.key, value: t.value)
+    let cursor = match std.omap.range(s.root, typed_bound(shape_table, lo, false)?, typed_bound(shape_table, hi, true)?) {
+        Ok(take c) => take c,
+        Error((c, _)) => return Error(Full(c))
+    }
+    Ok(TypedRows(cursor: take cursor, key: t.key, value: t.value))
+}
+
+pub fn find[J, K, V](take s: Snapshot, ix: Index[J, K, V], take lo: Bound[J], take hi: Bound[J]) -> Result[TypedRows[K, V], Error] {
+    let _ = s
+    let _ = ix
+    let _ = lo
+    let _ = hi
+    Error(Missing("index lookup is added with S4"))
+}
+
+pub fn migrate[K, V, K2, V2](mut db: Db, take from: Table[K, V], take key: std.codec.Key[K2], take value: std.codec.Codec[V2],
+    f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[Ticket, Error] {
+    let _ = take from
+    let _ = key
+    let _ = value
+    let _ = f
+    db.version += 1
+    Ok(ticket(db.id, db.version))
 }
 
 pub fn info(tx: Tx) -> CallInfo {

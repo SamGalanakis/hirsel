@@ -1838,3 +1838,126 @@ fn derived_group() -> (u64, bool, bool, (u64, u64), (u64, u64, u64, u64), (bool,
     let generic = (again(g, unhex("0100000000000000 61 0100000000000000 0100000000000000 62 0000000000000000")), codec.least(g))
     (dexpr_sum(call), prefixes(c, call), again(a, arg), (codec.least(c), codec.least(a)), refused, generic)
 }
+
+// The schema b with every definition path `from` replaced by `to`, matched as the
+// length-prefixed string the schema holds.
+fn repath(b: Bytes, from: String, to: String) -> Bytes {
+    let mut needle: Bytes = list.new()
+    result.unwrap(codec.put_string(from, mut needle))
+    let mut with: Bytes = list.new()
+    result.unwrap(codec.put_string(to, mut with))
+    let n = list.len(needle)
+    let mut out: Bytes = list.new()
+    let mut i: u64 = 0
+    while i < list.len(b) {
+        let mut k: u64 = 0
+        while k < n && i + k < list.len(b) && b[i + k] == needle[k] {
+            k += 1
+        }
+        if k == n {
+            result.unwrap(list.append(mut out, with))
+            i += n
+        } else {
+            result.unwrap(list.push_copy(mut out, b[i]))
+            i += 1
+        }
+    }
+    take out
+}
+
+// SEM-10's Range derived (EXPANSION 7), its wire derived too.
+type DRangeWire: codec {
+    lo: u64,
+    hi: u64
+}
+
+type DRange: codec via DRangeWire(to: dwire, from: dcheck) {
+    w: DRangeWire
+}
+
+fn dwire(r: DRange) -> View[DRangeWire] in r {
+    view r.w
+}
+
+fn dcheck(take w: DRangeWire) -> Result[DRange, ()] {
+    if w.lo <= w.hi {
+        Ok(DRange(w: w))
+    } else {
+        Error(())
+    }
+}
+
+// A generic via: `to` and `from` at the declaration's parameter, over a nominal generic R.
+type DOrdered[T: ordered]: codec via DPair[T] (to: dord_pair, from: dordered) {
+    p: DPair[T]
+}
+
+fn dord_pair[T: ordered](o: DOrdered[T]) -> View[DPair[T]] in o {
+    view o.p
+}
+
+fn dordered[T: ordered](take p: DPair[T]) -> Result[DOrdered[T], ()] {
+    if p.left <= p.right {
+        Ok(DOrdered(p: p))
+    } else {
+        Error(())
+    }
+}
+
+// A via over a List has no `of[R]` to go through (std has no list codec value): not derived.
+type DNonEmpty[T]: codec via List[T] (to: dnon_items, from: dnonempty) {
+    items: List[T]
+}
+
+fn dnon_items[T](n: DNonEmpty[T]) -> View[List[T]] in n {
+    view n.items
+}
+
+fn dnonempty[T](take xs: List[T]) -> Result[DNonEmpty[T], ()] {
+    if list.len(xs) > 0 {
+        Ok(DNonEmpty(items: xs))
+    } else {
+        Error(())
+    }
+}
+
+fn drange_at(b: Bytes, start: u64) -> u64 {
+    let c: codec.Codec[DRange] = codec.of()
+    match codec.decode_at(c, b, start) {
+        Ok(Ok(x)) => x.w.hi - x.w.lo,
+        Ok(Error(e)) => code(e),
+        Error(_) => 9999
+    }
+}
+
+// DRange against the twin ranges(): Range(2, 5)'s bytes and every prefix; the twin's
+// schema with both paths derived, and its fingerprint; least 16 (RangeWire's); hi below lo
+// is Value where the wire began, at 0 and at 4 behind "abcd"; through its own schema it
+// reads 3, and through the wire's schema it is Schema. DOrdered[u64] (2, 5) round-trips,
+// (5, 2) is Value at 0, least 16 (DPair[u64]'s); DOrdered[String] ("a", "b") round-trips
+// and ("b", "a") is Value at 0.
+// expect: run derived_via() = (true, true, 16, (7000, 7004), 3, true, (true, 7000, 16, true, 7000))
+fn derived_via() -> (bool, bool, u64, (u64, u64), u64, bool, (bool, u64, u64, bool, u64)) {
+    let c: codec.Codec[DRange] = codec.of()
+    let ok = unhex("0200000000000000 0500000000000000")
+    let bad = unhex("0500000000000000 0200000000000000")
+    let mut late = unhex("61626364")
+    result.unwrap(list.append(mut late, bad))
+    let written = enc(c, result.unwrap(dcheck(DRangeWire(lo: 2, hi: 5)))) == ok && prefixes(c, ok)
+    let twin = result.unwrap(codec.schema(ranges()))
+    let want = repath(repath(twin, "t.Range", "std.tests.codec.DRange"), "t.RangeWire", "std.tests.codec.DRangeWire")
+    let schema = result.unwrap(codec.schema(c)) == want && result.unwrap(codec.fingerprint(c)) == codec.fingerprint_of(want)
+    let read = match through(c, result.unwrap(codec.schema(c)), ok) {
+        Ok(x) => x.w.hi - x.w.lo,
+        Error(k) => k
+    }
+    let w: codec.Codec[DRangeWire] = codec.of()
+    let other = match through(c, result.unwrap(codec.schema(w)), ok) {
+        Ok(_) => false,
+        Error(k) => k / 1000 == 6
+    }
+    let g: codec.Codec[DOrdered[u64]] = codec.of()
+    let s: codec.Codec[DOrdered[String]] = codec.of()
+    let generic = (again(g, ok), outcome(g, bad), codec.least(g), again(s, unhex("0100000000000000 61 0100000000000000 62")), outcome(s, unhex("0100000000000000 62 0100000000000000 61")))
+    (written, schema, codec.least(c), (drange_at(bad, 0), drange_at(late, 4)), read, other, generic)
+}

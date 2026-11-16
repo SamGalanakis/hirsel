@@ -83,8 +83,17 @@ struct Decl<'a> {
     /// Each parameter with its written bounds, if any.
     generics: Vec<(&'a str, Option<&'a str>)>,
     body: Body<'a>,
-    /// The bare names of this module's types its field and payload types mention.
+    /// `via R (to: .., from: ..)`: the codec is R's, through the two functions.
+    via: Option<Via<'a>>,
+    /// The bare names of this module's types its codec mentions: its field and payload
+    /// types, or a via type's R.
     mentions: BTreeSet<&'a str>,
+}
+struct Via<'a> {
+    /// R as written.
+    wire: &'a str,
+    to: &'a str,
+    from: &'a str,
 }
 enum Body<'a> {
     Record(Vec<Entry<'a>>),
@@ -192,7 +201,9 @@ impl<'a> File<'a> {
         let mut generics = vec![];
         let mut codec = false;
         let mut body = None;
+        let mut via = None;
         let mut mentions = BTreeSet::new();
+        let mut wire = BTreeSet::new();
         for &c in self.children(root) {
             match self.kind(c) {
                 NodeKind::Generics => {
@@ -207,7 +218,25 @@ impl<'a> File<'a> {
                 NodeKind::Bounds => {
                     codec = self.children(c).iter().any(|&b| self.name(b) == "codec");
                 }
-                NodeKind::CodecVia => return None, // not derived yet: `of` refuses it as a gap
+                NodeKind::CodecVia => {
+                    let v = self.children(c);
+                    // `of[R]` exists for a scalar, String, a parameter or a nominal codec
+                    // type; std has no codec value for a List, Option, Map, Result or tuple,
+                    // so a via over one is not derived and `of` refuses it as a gap.
+                    let nominal = matches!(
+                        self.kind(v[0]),
+                        NodeKind::TypePath | NodeKind::TypeArguments | NodeKind::UnitType
+                    ) && matches!(self.ty(item, v[0]), Ty::Scalar(..) | Ty::With(_));
+                    if !nominal {
+                        return None;
+                    }
+                    self.mentions(item, v[0], &mut wire);
+                    via = Some(Via {
+                        wire: self.text(item, v[0]),
+                        to: self.name(v[1]),
+                        from: self.name(v[2]),
+                    });
+                }
                 NodeKind::Fields => {
                     let entries = self.children(c).iter().map(|&f| {
                         let fc = self.children(f);
@@ -245,6 +274,9 @@ impl<'a> File<'a> {
                 _ => {}
             }
         }
+        if via.is_some() {
+            mentions = wire;
+        }
         for (g, _) in &generics {
             mentions.remove(g);
         }
@@ -252,6 +284,7 @@ impl<'a> File<'a> {
             name: self.name(root),
             generics,
             body: body.filter(|_| codec)?,
+            via,
             mentions,
         })
     }
@@ -348,7 +381,9 @@ enum Edge<'a> {
 }
 impl<'a> Group<'a> {
     fn new(members: Vec<&'a Decl<'a>>) -> Option<Self> {
-        if members.len() > 1 && members.iter().any(|m| !m.generics.is_empty()) {
+        if members.iter().any(|m| m.via.is_some())
+            || members.len() > 1 && members.iter().any(|m| !m.generics.is_empty())
+        {
             return None;
         }
         let members: Vec<_> = members
@@ -999,18 +1034,26 @@ impl<'a> Gen<'a> {
             self.generics.clone(),
             self.c,
         );
-        let body = match &decl.body {
-            Body::Record(entries) => self.record_encode(entries),
-            Body::Sum(variants) => self.sum_encode(variants),
+        let body = match (&decl.via, &decl.body) {
+            (Some(v), _) => {
+                let r = self.of(v.wire);
+                format!("    {c}.put_with({}(x$), {r}, mut out$)\n", v.to)
+            }
+            (None, Body::Record(entries)) => self.record_encode(entries),
+            (None, Body::Sum(variants)) => self.sum_encode(variants),
         };
         let header = format!(
             "fn {name}$encode{generics}(x$: {ty}, mut out$: Bytes) -> Result[(), Capacity]"
         );
         self.function(out, &header, &body);
-        let body = match (self.group, &decl.body) {
-            (Some((g, at)), _) => Machine::new(g, at).decode(&mut self),
-            (None, Body::Record(entries)) => self.record_decode(entries),
-            (None, Body::Sum(variants)) => self.sum_decode(variants),
+        let body = match (&decl.via, self.group, &decl.body) {
+            (Some(v), ..) => {
+                let r = self.of(v.wire);
+                format!("    {c}.take_via(b$, mut at$, {r}, {})\n", v.from)
+            }
+            (None, Some((g, at)), _) => Machine::new(g, at).decode(&mut self),
+            (None, None, Body::Record(entries)) => self.record_decode(entries),
+            (None, None, Body::Sum(variants)) => self.sum_decode(variants),
         };
         let header = format!(
             "fn {name}$decode{generics}(b$: Bytes, mut at$: u64) -> Result[{ty}, {c}.Stop]"
@@ -1128,6 +1171,15 @@ impl<'a> Gen<'a> {
             let a = self.of(p);
             let _ = writeln!(s, "    {c}.argument(mut s$, {a})?");
         }
+        if let Some(v) = &decl.via {
+            let r = self.of(v.wire);
+            let _ = writeln!(
+                s,
+                "    if {c}.via(mut s$)? {{\n        return Ok(())\n    }}\n    {c}.schema_of(mut s$, {r})?"
+            );
+            let _ = write!(s, "    {c}.close(mut s$)\n    Ok(())\n");
+            return s;
+        }
         let (kind, n) = match &decl.body {
             Body::Record(entries) => ("record", entries.len()),
             Body::Sum(variants) => ("sum", variants.len()),
@@ -1185,6 +1237,10 @@ impl<'a> Gen<'a> {
     /// over its live variants, a running minimum in lets when a payload's is a call.
     fn least_body(&mut self) -> (String, String) {
         let decl = self.decl;
+        if let Some(v) = &decl.via {
+            let r = self.of(v.wire);
+            return (String::new(), format!("{}.least({r})", self.c));
+        }
         match &decl.body {
             Body::Record(entries) => {
                 let l = entries

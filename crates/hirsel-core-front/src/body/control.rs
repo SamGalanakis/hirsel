@@ -515,6 +515,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.frames.last_mut().unwrap().header = Some(header);
         }
         self.loop_body(body);
+        self.source_step(n);
         if let Some(h) = self.frames.last().unwrap().header {
             self.jump(h, &[], body);
         }
@@ -567,6 +568,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.start(body);
         }
         self.loop_body(c[1]);
+        self.source_step(n);
         if let Some(h) = header {
             self.jump(h, &[], c[1]);
         }
@@ -940,6 +942,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.end_owners(self.frames[fi].owners, None, false, c[2]);
         self.depth -= 1;
         self.back_edge(fi, self.close_brace(c[2]));
+        self.source_step(n);
         if let Some((head, advance, out, index, limit, index_ir, index_slot)) = flow
             && !self.broken
         {
@@ -1151,6 +1154,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (NEVER, None);
         }
         self.unwind(self.frames[i].owners, self.frames[i].scopes, n);
+        self.source_step(n);
         if let Some(h) = self.frames[i].header {
             self.jump(h, &[], n);
         }

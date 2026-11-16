@@ -378,7 +378,14 @@ struct Reservation {
     chain: Vec<Cause>,
     cells: Vec<(usize, u64)>,
 }
+struct StepBound {
+    left: u64,
+    parent: Option<usize>,
+    users: usize,
+}
 struct Task {
+    step_bounds: Vec<usize>,
+    slice_steps: u64,
     limits: Vec<usize>,
     /// The active chain: the causes of the failure in progress, primary first.
     chain: Vec<Cause>,
@@ -460,6 +467,7 @@ struct Machine<'m> {
     recipes: Vec<Recipe>,
     mem: Blocks,
     limits: Vec<Limit>,
+    step_bounds: Vec<StepBound>,
     peak_reserved: u64,
     regions: Vec<Vec<usize>>,
     children: Vec<Child>,
@@ -711,6 +719,7 @@ fn run_world(
     revisions: &Revisions,
 ) -> (Report, Checked) {
     let mut mach = Machine {
+        step_bounds: Vec::new(),
         m,
         recipes: compute(&m.types).expect("layouts"),
         mem: Blocks::default(),
@@ -834,6 +843,8 @@ fn run_world(
     }
     // The root's primary cell is admitted with the run, outside its limit.
     let task = Task {
+        step_bounds: Vec::new(),
+        slice_steps: 0,
         limits: vec![0],
         chain: Vec::new(),
         cells: Vec::new(),
@@ -994,6 +1005,9 @@ fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>) {
             mach.child_main(&mut t, f, &args);
             None
         };
+        while let Some(bound) = t.step_bounds.pop() {
+            mach.step_release(bound);
+        }
         mach.links[k] = None;
         root
     }));
@@ -1030,6 +1044,7 @@ impl<'m> Machine<'m> {
     /// What a parked task's slot holds while its baton runs elsewhere.
     fn shell(&self) -> Machine<'m> {
         Machine {
+            step_bounds: Vec::new(),
             m: self.m,
             recipes: Vec::new(),
             mem: Blocks::default(),
@@ -2150,6 +2165,8 @@ impl Machine<'_> {
         }
         if count == 0 {
             let mut scratch = Task {
+                step_bounds: Vec::new(),
+                slice_steps: 0,
                 limits: Vec::new(),
                 chain: Vec::new(),
                 cells: Vec::new(),
@@ -2203,10 +2220,75 @@ impl Machine<'_> {
         }
     }
 
+    fn step_release(&mut self, mut bound: usize) {
+        loop {
+            let record = &mut self.step_bounds[bound];
+            record.users -= 1;
+            if record.users != 0 {
+                return;
+            }
+            let (parent, left) = (record.parent, record.left);
+            let Some(parent) = parent else {
+                return;
+            };
+            self.step_bounds[parent].left += left;
+            bound = parent;
+        }
+    }
+
     // ---- engine operations (CONC-3..6)
     fn rt(&mut self, t: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>> {
         let cur = *t.limits.last().unwrap();
         Ok(match op {
+            RtOp::StepEnter => {
+                let parent = t.step_bounds.last().copied();
+                let n = a[0];
+                if parent.is_some_and(|p| self.step_bounds[p].left < n) {
+                    vec![0]
+                } else {
+                    if let Some(p) = parent {
+                        self.step_bounds[p].left -= n;
+                        self.step_bounds[p].users += 1;
+                    }
+                    let id = self.step_bounds.len();
+                    self.step_bounds.push(StepBound {
+                        left: n,
+                        parent,
+                        users: 1,
+                    });
+                    t.step_bounds.push(id);
+                    vec![1]
+                }
+            }
+            RtOp::StepLeave => {
+                let bound = t.step_bounds.pop().expect("an open step scope");
+                self.step_release(bound);
+                vec![]
+            }
+            RtOp::StepCatch => {
+                let bound = t.step_bounds.pop().expect("an open step scope");
+                let caught = !t.chain.is_empty()
+                    && t.chain
+                        .iter()
+                        .all(|c| c.kind == "OutOfTime" && c.message[0] == bound as u64 + 1);
+                if caught {
+                    t.chain.clear();
+                    let mut cells = std::mem::take(&mut t.cells).into_iter();
+                    if t.obligations.last().is_some_and(Option::is_none) {
+                        let (limit, amount) = cells.next().expect("a cause's prepaid cell");
+                        *t.obligations.last_mut().unwrap() = Some(Cell {
+                            limit,
+                            amount,
+                            resource: t.obligations.len() > 1,
+                        });
+                    }
+                    for (limit, amount) in cells {
+                        self.refund(limit, amount);
+                    }
+                }
+                self.step_release(bound);
+                vec![u64::from(caught)]
+            }
             RtOp::Spawn { x, r } => {
                 let x = TypeRef(x.0);
                 let r = TypeRef(r.0);
@@ -2222,7 +2304,13 @@ impl Machine<'_> {
                 self.put(xb, &bytes);
                 let rb = self.block(self.held(r), None, 0, None);
                 // The child's primary cell is part of the spawn's charge to `cur`.
+                let inherited = t.step_bounds.last().copied();
+                if let Some(bound) = inherited {
+                    self.step_bounds[bound].users += 1;
+                }
                 let mut child = Task {
+                    step_bounds: inherited.into_iter().collect(),
+                    slice_steps: 0,
                     limits: vec![lim],
                     chain: Vec::new(),
                     cells: Vec::new(),
@@ -2348,7 +2436,13 @@ impl Machine<'_> {
             RtOp::IsolateCatch => {
                 let r = t.reserved.pop().expect("isolate_catch with no reservation");
                 assert!(!t.chain.is_empty(), "isolate_catch with no failure");
-                if t.chain[0].kind == "Cancelled" {
+                if t.chain.first().is_some_and(|cause| {
+                    cause.kind == "Cancelled"
+                        || (cause.kind == "OutOfTime"
+                            && t.step_bounds
+                                .iter()
+                                .any(|&id| cause.message[0] == id as u64 + 1))
+                }) {
                     // FAIL-16: not caught; the failure goes on past the isolate.
                     self.refund(r.limit, charge::CAUSE_CELL);
                     let (chain, cells) =
@@ -3261,6 +3355,28 @@ impl Machine<'_> {
                 );
                 for blk in blocks {
                     self.free(ptr(blk, 0));
+                }
+            }
+            Inst::Step { .. } => {
+                if let Some(&bound) = t.step_bounds.last() {
+                    if self.step_bounds[bound].left == 0 {
+                        let site = self.site(t);
+                        self.record(
+                            t,
+                            Cause {
+                                kind: "OutOfTime",
+                                message: [bound as u64 + 1, 0, 0],
+                                site,
+                            },
+                        );
+                        return Err(Stop::Chained);
+                    }
+                    self.step_bounds[bound].left -= 1;
+                    t.slice_steps += 1;
+                    if t.slice_steps == 65_536 {
+                        t.slice_steps = 0;
+                        self.park(None);
+                    }
                 }
             }
             Inst::LimitEnter {

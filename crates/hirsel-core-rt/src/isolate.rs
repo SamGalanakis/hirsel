@@ -81,10 +81,11 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
         let context = &mut *context;
         let mut reservation = context.isolates.pop().expect("isolate catch without enter");
         let caught = std::mem::take(&mut context.causes);
-        let cancelled = caught
-            .iter()
-            .next()
-            .is_some_and(|cause| cause.kind() == causes::CANCELLED);
+        let cancelled = caught.iter().next().is_some_and(|cause| {
+            cause.kind() == causes::CANCELLED
+                || (cause.kind() == causes::OUT_OF_TIME
+                    && crate::steps::is_active(context, cause.message.data.addr() as u64))
+        });
         if cancelled {
             drop(reservation.cell);
             let mut restored = reservation.saved;

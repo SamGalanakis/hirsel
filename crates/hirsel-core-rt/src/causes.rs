@@ -18,6 +18,7 @@ pub const CANCELLED: u8 = 5;
 pub const CAPACITY: u8 = 6;
 /// A provider operation its tape refused before issue (CAP-9, FAIL-2).
 pub const TAPE: u8 = 7;
+pub const OUT_OF_TIME: u8 = 8;
 
 /// Core's 32-byte Cause: `Fail`'s String at 0, then the site at 24. `CauseKind` is
 /// that String's niche (FORM #75): every other kind is a capacity at or above 2^63
@@ -172,6 +173,19 @@ impl Causes {
             next = cell.next;
             Some(&cell.cause)
         })
+    }
+    pub(crate) fn take_first(&mut self) -> Option<Box<Cell>> {
+        if self.head.is_null() {
+            return None;
+        }
+        // SAFETY: the chain owns this live first cell exclusively.
+        let mut cell = unsafe { Box::from_raw(self.head) };
+        self.head = cell.next;
+        if self.head.is_null() {
+            self.tail = ptr::null_mut();
+        }
+        cell.next = ptr::null_mut();
+        Some(cell)
     }
     pub fn into_raw(self) -> *mut Cell {
         ManuallyDrop::new(self).head

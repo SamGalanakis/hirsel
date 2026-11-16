@@ -192,6 +192,7 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::Case { .. }
                 | Inst::SetCase { .. }
                 | Inst::RegionOpen { .. }
+                | Inst::Step { .. }
                 | Inst::LimitExit
                 | Inst::Drop { .. }
                 | Inst::Mark { .. }
@@ -341,6 +342,7 @@ pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::RegionClose { .. }
                 | Inst::Trim { .. }
                 | Inst::LimitEnter { .. }
+                | Inst::Step { .. }
                 | Inst::LimitExit
                 | Inst::Share { .. }
                 | Inst::Release { .. }

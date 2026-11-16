@@ -175,3 +175,55 @@ fn finalizer_entry_refusal_is_a_capacity_value() {
         causes::resource_free(resource, 8);
     }
 }
+
+#[test]
+fn out_of_time_primary_bypasses_only_isolates_in_its_bound() {
+    let mut context = started(4096);
+    // SAFETY: this models engine cleanup with a primary and a finalizer cell.
+    unsafe {
+        let resource = causes::resource_new(&context, 8, 72, 8, 8).unwrap();
+        assert!(hirsel_core_isolate_enter(&mut context).entered);
+        assert!(crate::steps::hirsel_core_step_enter(&mut context, 0));
+        assert!(hirsel_core_isolate_enter(&mut context).entered);
+        context.steps -= 1;
+        assert_eq!(crate::steps::hirsel_core_step_out(&mut context, 41), 1);
+        causes::finalizer_begin(&mut context, resource);
+        causes::record(&mut context, Cause::new(causes::DIVISION, 42));
+        causes::finalizer_end(&mut context, resource);
+        causes::resource_free(resource, 8);
+        let inner = hirsel_core_isolate_catch(&mut context);
+        assert_eq!((inner.causes.is_null(), inner.status), (true, 1));
+        assert!(!crate::steps::hirsel_core_step_catch(&mut context));
+        let outer = hirsel_core_isolate_catch(&mut context);
+        assert_eq!(outer.status, 0);
+        let chain = Causes::from_raw(outer.causes);
+        assert_eq!(
+            chain.iter().map(|c| c.kind()).collect::<Vec<_>>(),
+            [causes::OUT_OF_TIME, causes::DIVISION]
+        );
+    }
+}
+
+#[test]
+fn secondary_cancellation_or_out_of_time_does_not_bypass_isolate() {
+    for secondary in [causes::CANCELLED, causes::OUT_OF_TIME] {
+        let mut context = started(4096);
+        // SAFETY: each obligation is used once, and the caught chain owns both cells.
+        unsafe {
+            let resource = causes::resource_new(&context, 8, 72, 8, 8).unwrap();
+            assert!(hirsel_core_isolate_enter(&mut context).entered);
+            causes::record(&mut context, Cause::new(causes::DIVISION, 51));
+            causes::finalizer_begin(&mut context, resource);
+            causes::record(&mut context, Cause::new(secondary, 52));
+            causes::finalizer_end(&mut context, resource);
+            causes::resource_free(resource, 8);
+            let caught = hirsel_core_isolate_catch(&mut context);
+            assert_eq!(caught.status, 0);
+            let chain = Causes::from_raw(caught.causes);
+            assert_eq!(
+                chain.iter().map(|c| c.kind()).collect::<Vec<_>>(),
+                [causes::DIVISION, secondary]
+            );
+        }
+    }
+}

@@ -192,6 +192,7 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         | Inst::StorageDead { .. }
         | Inst::Call { .. }
         | Inst::SetCase { .. }
+        | Inst::Step { .. }
         | Inst::LimitExit
         | Inst::Drop { .. } => {}
         Inst::Mark { count, .. } | Inst::Unmark { count, .. } => f(count),

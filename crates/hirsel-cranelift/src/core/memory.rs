@@ -417,6 +417,7 @@ impl Function<'_, '_, '_> {
                 self.set(admitted, ok);
                 self.set(available, values[2]);
             }
+            Inst::Step { .. } => {}
             Inst::LimitExit => {
                 if self.empty_bound {
                     return Ok(());

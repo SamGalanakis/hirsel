@@ -105,7 +105,10 @@ pub(crate) fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
             defs.push(v(result));
         }
         Inst::Store { address, value } => uses.extend([a(address), v(value)]),
-        Inst::StorageLive { .. } | Inst::StorageDead { .. } | Inst::LimitExit => {}
+        Inst::StorageLive { .. }
+        | Inst::StorageDead { .. }
+        | Inst::LimitExit
+        | Inst::Step { .. } => {}
         Inst::UpdateMask { result, mask, .. } => {
             uses.push(v(mask));
             defs.push(v(result));

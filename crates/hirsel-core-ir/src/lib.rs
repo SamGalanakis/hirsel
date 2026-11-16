@@ -434,7 +434,7 @@
 //! The `Cause` is in core's layout (32 bytes): `Fail`'s `String` carrier at 0 and the
 //! `Site` (u64) at 24. `CauseKind` is that carrier's capacity niche (FORM #75): kind
 //! `k` (declaration order: Overflow 0, Bounds 1, Division 2, Unwrap 3, Fail 4,
-//! Cancelled 5, Capacity 6) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
+//! Cancelled 5, Capacity 6, Tape 7, OutOfTime 8) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
 //! is that pointer, valid while the `Causes` lives. A `Fail` cause owns its message;
 //! cleaning the `Causes` frees it when its capacity is not 0.
 //!
@@ -483,6 +483,20 @@
 //! or a generated name with `$`). Every other body anchors each failure point in a
 //! non-core item: wf refuses one anchored in core, and the evaluator stops when an
 //! unanchored one would take its caller's site (SITES 6(b)).
+//!
+//! # Step bounds (MEM-30)
+//!
+//! `step` marks a source call, a source loop latch or an entry from core into
+//! user code. Core bodies and compiler glue carry no other Steps. It is fallible
+//! and retains its failure successor and source anchor through every transform.
+//! `rt.step_enter(n) -> bool` reserves from the current bound, or returns false
+//! without entering. `rt.step_leave()` refunds unused steps on normal exits.
+//! `rt.step_catch() -> bool` closes a failed scope and catches only chains made
+//! entirely of its own OutOfTime causes, refunding their cells. Other chains
+//! keep propagating. An OutOfTime primary bypasses isolate only while its owning
+//! bound remains active; secondary causes do not trigger bypass. Spawned tasks hold the same bound until they end. The native
+//! Context adds its fast-path step window at offset 16; the existing frozen
+//! current-limit and event words remain at offsets 0 and 8. Slice length is 65,536.
 //!
 //! # Isolation (FORM #101, FAIL-16)
 //!

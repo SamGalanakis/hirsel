@@ -440,6 +440,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             | "clone"
                             | "clone_in"
                     )));
+        self.source_step(n);
         let v = if builtin {
             self.intrinsic(f, tys, vals, n)
         } else {

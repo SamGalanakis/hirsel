@@ -609,6 +609,11 @@ pub enum Inst {
         live: bool,
         ty: PlaceTy,
     },
+    /// One MEM-30 source call, loop latch or entry from core into user code.
+    /// The attempted step fails before the source operation when exhausted.
+    Step {
+        fail: Option<BlockId>,
+    },
 }
 
 /// What an `Alloc` makes. The block's bookkeeping (its limit record,
@@ -763,6 +768,12 @@ pub enum RtOp {
     /// `isolate`'s handler: take the caught chain as a `Causes`, or fail on with
     /// it when its primary cause is `Cancelled`.
     IsolateCatch,
+    /// Reserve steps from the current bound; false leaves the stack unchanged.
+    StepEnter,
+    /// Close the current lexical step scope and refund unused steps.
+    StepLeave,
+    /// Close a failed step scope, catching only its own OutOfTime causes.
+    StepCatch,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -967,6 +978,9 @@ impl RtOp {
             RtOp::TapeEnd => (vec![V(u64_), V(u8_), V(p)], vec![u64_]),
             RtOp::TapeGrant => (vec![V(u64_), V(u8_), V(u64_)], vec![u64_]),
             RtOp::TapeAcross => (vec![V(u64_)], vec![bool_]),
+            RtOp::StepEnter => (vec![V(u64_)], vec![bool_]),
+            RtOp::StepLeave => (vec![], vec![]),
+            RtOp::StepCatch => (vec![], vec![bool_]),
             RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
             RtOp::IsolateLeave => (vec![], vec![]),
             RtOp::IsolateCatch => (vec![], vec![p]),
@@ -1040,7 +1054,10 @@ impl RtOp {
             | RtOp::TapeAcross
             | RtOp::IsolateEnter
             | RtOp::IsolateLeave
-            | RtOp::IsolateCatch => vec![],
+            | RtOp::IsolateCatch
+            | RtOp::StepEnter
+            | RtOp::StepLeave
+            | RtOp::StepCatch => vec![],
         }
     }
 }
@@ -1065,7 +1082,7 @@ impl Inst {
                 Callee::Runtime(op) => op.fails(),
                 Callee::Direct(_) | Callee::Indirect(_) => true,
             }),
-            Inst::Alloc { .. } | Inst::Grow { .. } | Inst::Drop { .. } => true,
+            Inst::Step { .. } | Inst::Alloc { .. } | Inst::Grow { .. } | Inst::Drop { .. } => true,
             _ => false,
         }
     }
@@ -1073,7 +1090,8 @@ impl Inst {
     /// The failure block the instruction names, if any.
     pub fn fail(&self, b: &Body) -> Option<BlockId> {
         match *self {
-            Inst::Unary { fail, .. }
+            Inst::Step { fail }
+            | Inst::Unary { fail, .. }
             | Inst::Binary { fail, .. }
             | Inst::Address { fail, .. }
             | Inst::Alloc { fail, .. }

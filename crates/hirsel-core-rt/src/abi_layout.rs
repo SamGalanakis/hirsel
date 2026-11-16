@@ -16,6 +16,7 @@ pub const PROCESS_CONFIG_GRANTS: i32 = 24;
 pub const MAIN_RESULT_KIND: i32 = 0;
 pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
+pub const CONTEXT_STEPS: usize = 16;
 pub const TASK_ARC_GATE: usize = 0;
 pub const LIMIT_AVAILABLE: usize = 0;
 pub const LIMIT_OUTSTANDING: usize = 8;

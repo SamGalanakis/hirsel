@@ -74,6 +74,7 @@ pub(crate) unsafe fn format_cause_at(
         "Cancelled",
         "Capacity",
         "Tape",
+        "OutOfTime",
     ][cause.kind() as usize];
     // A Tape cause has no payload; it names the reason the tape refused
     // (D-B4: "Tape(diverged at 812, Op) at <site>").

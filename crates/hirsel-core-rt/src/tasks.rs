@@ -1411,6 +1411,7 @@ pub unsafe fn run_root(
             abi::task_resume((*task).context);
             crate::fiber::guard((*task).stack.bounds());
             hirsel_stack::switch(&mut run.idle, (*task).sp);
+            crate::steps::settle(&mut *(*task).context);
             crate::fiber::guard((0, 0));
             CURRENT.set(previous);
             if (*task).state == State::Provider && run.wake_operation(task, Wake::Parked) {
@@ -1457,7 +1458,9 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         let parent = CURRENT.get();
         let run = (*parent).run;
         let id = (*run).id();
+        crate::steps::settle(&mut *context);
         let child_context = abi::task_child(context, &mut record, bytes, id);
+        crate::steps::resume(&mut *context);
         let task = Box::new(Task {
             arc_gate: AtomicBool::new((*run).provider.event.is_some()),
             recorded_refunds: AtomicBool::new(false),

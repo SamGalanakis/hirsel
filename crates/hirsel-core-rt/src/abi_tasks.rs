@@ -15,6 +15,8 @@ pub(crate) fn task_child(
     let primary = record.partition(hirsel_core_layout::charge::CAUSE_CELL);
     let mut context = Context::with_funding(reservation);
     context.primary = Some(crate::causes::Cell::prepaid(primary));
+    // SAFETY: parent is exclusively suspended inside this spawn operation.
+    context.step_bounds = unsafe { (*parent).step_bounds.last().cloned().into_iter().collect() };
     // SAFETY: spawner and child share the same run-owned provider configuration.
     context.run = unsafe { (*parent).run };
     // SAFETY: child inherits recording; spawn replaces the pointer before publication.
@@ -28,6 +30,9 @@ pub(crate) fn task_child(
 pub(crate) unsafe fn task_handover(context: *mut Context) {
     // SAFETY: child's remaining funding forwards to its live spawner without a value walk.
     unsafe {
+        crate::steps::settle(&mut *context);
+        (*context).step_bounds.clear();
+        crate::steps::resume(&mut *context);
         (*context).current.handover();
     }
 }
@@ -37,6 +42,7 @@ pub(crate) unsafe fn task_handover(context: *mut Context) {
 pub(crate) fn task_resume(context: *mut Context) {
     // SAFETY: the cooperative scheduler owns this task's exclusive execution.
     unsafe {
+        crate::steps::resume(&mut *context);
         (*context).current.bind();
         (*context).current.normalize();
     }

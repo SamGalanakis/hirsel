@@ -900,7 +900,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(result)
     }
 
-    fn runtime_branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId, n: NodeId) {
+    pub(super) fn runtime_branch(
+        &mut self,
+        condition: ValueId,
+        yes: BlockId,
+        no: BlockId,
+        n: NodeId,
+    ) {
         let yes = self.edge(yes, &[]);
         let no = self.edge(no, &[]);
         self.end(Terminator::Branch { condition, yes, no }, Some(n));
@@ -1566,7 +1572,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let logical = self.layout_size(r, true, n)?;
         let xrep = self.rep_at(x, n)?;
         let rid = self.runtime_type(r, n)?;
-        let (xid, input) = self.runtime_place(x, value, n)?;
+        let (xid, input, function) = self.task_entry_adapter(x, r, function, value, n)?;
         let u = Ty::Scalar(Scalar::U64);
         let one = self.konst(u, 1, n)?;
         let overhead = self.konst(

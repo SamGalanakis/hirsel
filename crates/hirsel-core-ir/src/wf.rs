@@ -752,6 +752,21 @@ fn catch(b: &Body, i: &Inst) -> bool {
     matches!(*i, Inst::Call { call } if b.calls[call.index()].callee == Callee::Runtime(RtOp::IsolateCatch))
 }
 
+fn step_catch(b: &Body, bi: usize) -> Option<ValueId> {
+    let Inst::Call { call } = *b.blocks[bi].insts.get(&b.insts)?.last()? else {
+        return None;
+    };
+    let site = &b.calls[call.index()];
+    (site.callee == Callee::Runtime(RtOp::StepCatch))
+        .then(|| {
+            site.results
+                .get(&b.pools.values)
+                .and_then(|v| v.first())
+                .copied()
+        })
+        .flatten()
+}
+
 /// FAIL-14, FAIL-16: no block reachable from a failure block returns normally,
 /// except past a handler, whose catch ends the failure. A catch opens its block,
 /// and only failure edges enter that block.
@@ -770,6 +785,23 @@ fn no_catch(b: &Body) -> R {
     need(b.blocks.is_empty() || !handler(b, 0), || {
         "the entry block is a handler".into()
     })?;
+    let mut normal = vec![false; b.blocks.len()];
+    let mut ordinary = vec![BlockId(0)];
+    while let Some(block) = ordinary.pop() {
+        if b.blocks.is_empty() || std::mem::replace(&mut normal[block.index()], true) {
+            continue;
+        }
+        need(step_catch(b, block.index()).is_none(), || {
+            format!("b{}: a step handler entered normally", block.0)
+        })?;
+        if !matches!(b.terminators[block.index()], Terminator::Raise { .. }) {
+            ordinary.extend(
+                successors_of_terminator(b, block.index())
+                    .into_iter()
+                    .map(|i| BlockId(i as u32)),
+            );
+        }
+    }
     let mut seen = vec![false; b.blocks.len()];
     let mut work: Vec<BlockId> = (0..b.blocks.len())
         .flat_map(|bi| {
@@ -787,6 +819,16 @@ fn no_catch(b: &Body) -> R {
         .collect();
     while let Some(k) = work.pop() {
         if std::mem::replace(&mut seen[k.index()], true) || handler(b, k.index()) {
+            continue;
+        }
+        if let Some(result) = step_catch(b, k.index()) {
+            let Terminator::Branch { condition, no, .. } = b.terminators[k.index()] else {
+                return Err(format!("b{}: step catch must branch on its result", k.0));
+            };
+            need(condition == result, || {
+                format!("b{}: step catch branches on another value", k.0)
+            })?;
+            work.push(b.edges[no.index()].target);
             continue;
         }
         need(
@@ -1211,6 +1253,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(bytes, Ty::Scalar(Scalar::U64))
         }
         Inst::LimitExit => Ok(()),
+        Inst::Step { fail } => c.fail(fail, true),
         Inst::Mark {
             address,
             count,

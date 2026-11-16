@@ -11,6 +11,12 @@ pub(super) struct CallableAbi {
     scoped_result: bool,
 }
 
+#[derive(Clone, Copy)]
+enum CallFailure {
+    Cleanup,
+    Handler(BlockId),
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
     #[inline(always)]
     pub(super) fn isolate_descriptor_forbidden(&mut self, value: Option<ValueId>) -> bool {
@@ -514,8 +520,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.callable_word(value, 8, n),
             )
         };
-        let fail = self.fail_to(n);
-        let v = self.emit_value_call(code, environment, abi, result, n, scratch, fail);
+        let v = self.emit_value_call(
+            code,
+            environment,
+            abi,
+            result,
+            n,
+            scratch,
+            CallFailure::Cleanup,
+        );
         if result == NEVER {
             self.dead = true;
         }
@@ -531,8 +544,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         vals: &[Option<ValueId>],
         n: NodeId,
     ) -> Option<ValueId> {
-        let fail = self.fail_to(n);
-        self.call_lowered_with_fail(ty, value, vals, n, fail)
+        self.call_lowered_with_fail(ty, value, vals, n, CallFailure::Cleanup)
     }
 
     /// Call a lowered callable with an explicit failure successor.  Isolation uses
@@ -545,7 +557,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
         fail: BlockId,
     ) -> Option<ValueId> {
-        self.call_lowered_with_fail(ty, value, &[], n, Some(fail))
+        self.call_lowered_with_fail(ty, value, &[], n, CallFailure::Handler(fail))
     }
 
     fn call_lowered_with_fail(
@@ -554,7 +566,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value: ValueId,
         vals: &[Option<ValueId>],
         n: NodeId,
-        fail: Option<BlockId>,
+        failure: CallFailure,
     ) -> Option<ValueId> {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
         let TyKind::Fn(params, result, _, callable) = self.t.kind(ty).clone() else {
@@ -575,7 +587,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.callable_word(Some(value), 8, n),
             )
         };
-        let v = self.emit_value_call(code, environment, abi, result, n, &mut scratch, fail);
+        let v = self.emit_value_call(code, environment, abi, result, n, &mut scratch, failure);
         self.call_scratch.push(scratch);
         v
     }
@@ -737,13 +749,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
         scratch: &mut CallScratch,
-        fail: Option<BlockId>,
+        failure: CallFailure,
     ) -> Option<ValueId> {
         if !self.live() {
             return None;
         }
         let code = code?;
         let abi = abi?;
+        let step_fail = match failure {
+            CallFailure::Cleanup => self.fail_to(n),
+            CallFailure::Handler(block) => Some(block),
+        };
+        self.callback_step_to(n, step_fail);
         let signature = abi.signature;
         let dest = self.e.module.signatures[signature.index()]
             .dest
@@ -789,6 +806,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .copied()
             .map(|t| self.value(t));
         let results = PoolRange::push(&mut self.b.pools.values, value);
+        let fail = match failure {
+            CallFailure::Cleanup => self.fail_to(n),
+            CallFailure::Handler(block) => Some(block),
+        };
         let call = CallId(self.b.calls.len() as u32);
         self.b.calls.push(CallSite {
             callee: Callee::Indirect(code),

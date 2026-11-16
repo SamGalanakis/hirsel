@@ -1,5 +1,5 @@
 // MEM-30: the three specification examples, typed before execution lowering.
-// expect: gap step bound execution is not built
+// Step-bound execution is checked in the evaluator cases.
 // expect: refuse MEM-30 at 15:22
 fn spin(n: u64) -> Result[u64, OutOfTime] {
     bound steps 1000 {

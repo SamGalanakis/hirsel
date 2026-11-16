@@ -134,6 +134,11 @@ impl FunctionEmitter<'_> {
         let p = |v: &Value| ptr(v.clone());
         let u = |v: &Value| word(v.clone());
         let values = match op {
+            RtOp::StepEnter | RtOp::StepLeave | RtOp::StepCatch => {
+                return Err(Error::Unsupported(
+                    "native step scopes are not built".into(),
+                ));
+            }
             RtOp::IsolateEnter => {
                 self.native_call("hirsel_core_isolate_enter", &[B, U], &[ptr(CONTEXT)])
             }

@@ -1670,6 +1670,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             self.open_anchors.push(self.anchor(n));
         }
     }
+    pub(super) fn source_step(&mut self, n: NodeId) {
+        if !self.fd.path.package_is("core", "1") && self.live() {
+            let fail = self.fail_to(n);
+            self.inst(Inst::Step { fail }, n);
+        }
+    }
+    pub(super) fn callback_step_to(&mut self, n: NodeId, fail: Option<BlockId>) {
+        self.inst(Inst::Step { fail }, n);
+    }
     fn konst(&mut self, t: Ty, bits: u64, n: NodeId) -> Option<ValueId> {
         if !self.live() {
             return None;
@@ -2234,6 +2243,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 let at = self.pointer(slot, body);
                 self.dest = Some((at, id));
             }
+        }
+        if self.fd.drop_of.is_some() || self.fd.clone_of.is_some() {
+            self.source_step(body);
         }
         let result = self.fd.result;
         let (_, v) = self.expr(

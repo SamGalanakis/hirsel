@@ -1,6 +1,7 @@
 //! Patterns are typed once into a body-local arena. Tests precede bindings and moves;
 //! exhaustiveness specializes constructor rows, including nested products and ranges.
 use super::*;
+use hirsel_core_ir::RtOp;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Head {
@@ -39,7 +40,14 @@ pub(super) struct Patterns {
 #[derive(Clone, Copy)]
 enum ScopeKind {
     Region(Option<ValueId>),
-    Bound { failed: usize },
+    Bound {
+        failed: usize,
+    },
+    StepBound {
+        failed: usize,
+        steps: Option<ValueId>,
+        error: TyId,
+    },
 }
 #[derive(Clone, Copy)]
 struct Scope {
@@ -1543,6 +1551,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.close_scope(scope, freezes, c[1], UNIT);
         self.end_owners(cond, None, false, c[1]);
         self.depth -= 1;
+        self.source_step(n);
         if let Some(h) = header {
             self.jump(h, &[], c[1]);
         }
@@ -1765,6 +1774,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match self.patterns.scopes[i].kind {
             ScopeKind::Region(Some(region)) => self.inst(Inst::RegionClose { region }, n),
             ScopeKind::Bound { .. } => self.inst(Inst::LimitExit, n),
+            ScopeKind::StepBound {
+                failed,
+                steps,
+                error,
+            } => {
+                if self.failing {
+                    let Some([caught, ..]) = self.runtime_row(RtOp::StepCatch, &[], n) else {
+                        return;
+                    };
+                    let yes = self.new_block(&[]);
+                    let no = self.new_block(&[]);
+                    self.runtime_branch(caught, yes, no, n);
+                    self.start(yes);
+                    let value = self.step_error(error, steps, n);
+                    self.exit_edge(self.patterns.scopes[i].frame.unwrap());
+                    self.goto(failed, error, value, n);
+                    self.start(no);
+                } else {
+                    self.runtime_row(RtOp::StepLeave, &[], n);
+                }
+            }
             _ => {}
         }
     }
@@ -1776,10 +1806,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// Some region or limit scope is open, so a failure must close it.
     pub(super) fn open_scopes(&self) -> bool {
-        self.patterns
-            .scopes
-            .iter()
-            .any(|s| matches!(s.kind, ScopeKind::Region(Some(_)) | ScopeKind::Bound { .. }))
+        self.patterns.scopes.iter().any(|s| {
+            matches!(
+                s.kind,
+                ScopeKind::Region(Some(_)) | ScopeKind::Bound { .. } | ScopeKind::StepBound { .. }
+            )
+        })
     }
     pub(super) fn capacity_ty(&mut self, n: NodeId) -> TyId {
         match self.p.core_decl("Capacity") {
@@ -1984,7 +2016,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     fn step_bound(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
-        let (size, _) = self.expr(c[0], expect(scalar(Scalar::U64)));
+        let (size, steps) = self.expr(c[0], expect(scalar(Scalar::U64)));
         if size == NEVER {
             return (NEVER, None);
         }
@@ -2002,15 +2034,78 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .and_then(expect)
             }
         });
+        let expected = body_want.filter(|w| w.payload == 0).map(|w| w.ty);
+        let mark = self.patterns.scopes.len();
+        self.push_frame(None, FrameKind::Block, None);
+        let fi = self.frames.len() - 1;
+        let was_dead = self.dead;
+        let failed = self.new_join();
+        if let Some(steps) = steps {
+            if let Some([admitted, ..]) = self.runtime_row(RtOp::StepEnter, &[Arg::Value(steps)], n)
+            {
+                let good = self.new_block(&[]);
+                let bad = self.new_block(&[]);
+                self.runtime_branch(admitted, good, bad, n);
+                self.start(bad);
+                let value = self.step_error(error, Some(steps), n);
+                self.exit_edge(fi);
+                self.goto(failed, error, value, n);
+                self.start(good);
+            }
+        }
+        let owners = self.owner_mark();
+        self.patterns.scopes.push(Scope {
+            kind: ScopeKind::StepBound {
+                failed,
+                steps,
+                error,
+            },
+            frame: Some(fi),
+            owners: self.owners.len(),
+        });
+        self.epoch += 1;
         self.step_scopes.push((self.frame_level, self.born));
-        let (body, _) = self.expr(c[1], body_want);
+        let (body, value) = self.expr(c[1], body_want);
         self.step_scopes.pop();
         let Some(result) = self.p.core_decl("Result") else {
             return self.gap_ty(n, "Result is not declared by core");
         };
-        let ty = self.t.mk(TyKind::Adt(result, vec![body, error]));
-        self.gap(n, "step bound execution is not built");
-        (ty, None)
+        let result = self
+            .t
+            .mk(TyKind::Adt(result, vec![expected.unwrap_or(body), error]));
+        self.end_owners(owners, value, false, n);
+        self.pattern_scope_exits(mark, n);
+        self.patterns.scopes.truncate(mark);
+        self.epoch += 1;
+        let exit = self.frames[fi].exit;
+        let good = self.wrap_case(result, 0, expected.unwrap_or(body), value, n);
+        self.exit_edge(fi);
+        self.goto(exit, result, good, n);
+        self.dead = false;
+        let failure = self.land(failed);
+        if failure.is_some() {
+            let bad = self.wrap_case(result, 1, error, failure, n);
+            self.goto(exit, result, bad, n);
+        }
+        self.pop_frame(n);
+        let value = self.land(exit);
+        self.dead |= was_dead;
+        (result, value)
+    }
+    fn step_error(&mut self, error: TyId, steps: Option<ValueId>, n: NodeId) -> Option<ValueId> {
+        let id = self.place_row(error, "OutOfTime without storage is not built", n)?;
+        if !self.live() {
+            return None;
+        }
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let field = self.address(
+            AddressBase::Address(to),
+            &[Step::Field(0)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+            n,
+        );
+        self.install(field, Rep::Scalar(Ty::Scalar(Scalar::U64)), steps, n);
+        Some(self.pointer(to, n))
     }
     pub(super) fn step_place_outside(&self, slot: u32) -> bool {
         self.step_scopes.last().is_some_and(|&(frame, born)| {

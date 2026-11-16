@@ -568,6 +568,7 @@ impl FunctionEmitter<'_> {
                 self.put(admitted, &yes);
                 self.put(available, &room);
             }
+            Inst::Step { .. } => {}
             Inst::LimitExit => {
                 if !self.empty_bounds.exits.contains(&index) {
                     self.runtime_void("hirsel_core_limit_exit", &[ptr(CONTEXT)]);

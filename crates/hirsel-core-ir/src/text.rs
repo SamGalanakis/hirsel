@@ -270,6 +270,9 @@ fn rt(op: RtOp) -> String {
         RtOp::IsolateEnter => "rt.isolate_enter".into(),
         RtOp::IsolateLeave => "rt.isolate_leave".into(),
         RtOp::IsolateCatch => "rt.isolate_catch".into(),
+        RtOp::StepEnter => "rt.step_enter".into(),
+        RtOp::StepLeave => "rt.step_leave".into(),
+        RtOp::StepCatch => "rt.step_catch".into(),
     }
 }
 fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
@@ -676,6 +679,7 @@ impl Printer {
                         v(bytes)
                     ),
                     Inst::LimitExit => "limit_exit".into(),
+                    Inst::Step { fail: f } => format!("step{}", fail(*f)),
                     Inst::Drop {
                         address,
                         ty,
@@ -1302,6 +1306,10 @@ impl BodyParser {
                     charge: l.value()?,
                 });
             }
+            Some("step") => {
+                l.next()?;
+                return Ok(Inst::Step { fail: l.fail()? });
+            }
             Some("limit_exit") => {
                 l.next()?;
                 return Ok(Inst::LimitExit);
@@ -1672,6 +1680,9 @@ impl BodyParser {
                 "isolate_enter" => RtOp::IsolateEnter,
                 "isolate_leave" => RtOp::IsolateLeave,
                 "isolate_catch" => RtOp::IsolateCatch,
+                "step_enter" => RtOp::StepEnter,
+                "step_leave" => RtOp::StepLeave,
+                "step_catch" => RtOp::StepCatch,
                 _ => match HostOp::ALL.into_iter().find(|op| op.name() == name) {
                     Some(op) => RtOp::Host(op),
                     None => return Err(format!("unknown engine operation `{t}`")),

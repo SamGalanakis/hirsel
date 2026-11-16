@@ -81,6 +81,7 @@ def main():
     fixtures = sorted(p for p in FIXTURES.glob('*.hirsel') if not args.only or p.stem in args.only)
     assert fixtures, 'no fixture selected'
     failures = []
+    unbuilt = 0
     for fixture in fixtures:
         text = fixture.read_text()
         found = re.search(r'pub fn main\(([^)]*)\)[^{]*?(waits)?\s*\{', text)
@@ -113,6 +114,12 @@ def main():
         if report.get('outcome') != outcome:
             failures.append(f'{fixture.stem}: evaluator {report.get("outcome")}')
             continue
+        sends = re.search(r'// hand-derived try-send: (\d+)', text)
+        if sends:
+            count = sum(e[0] == KIND['TRY_SEND'] for e in report['events'])
+            if count != int(sends.group(1)):
+                failures.append(f'{fixture.stem}: evaluator try-send count {count}, expected {sends.group(1)}')
+                continue
         fixture_linker = linker
         if '// provider: pending stdout' in text:
             provider_recorder = folder / 'recorder.o'
@@ -136,6 +143,13 @@ def main():
             while os.getloadavg()[0] > 32:
                 time.sleep(10)
             built = subprocess.run(command, capture_output=True, cwd=ROOT)
+            if '// native: unbuilt' in text:
+                if built.returncode and b'native step scopes are not built' in built.stdout + built.stderr:
+                    unbuilt += 1
+                    print(f'{fixture.stem}: evaluator hand count passed; native scope lowering is unbuilt', flush=True)
+                else:
+                    failures.append(f'{fixture.stem}: native expected the explicit step-scope feature gap')
+                continue
             if built.returncode:
                 failures.append(f'{fixture.stem}/{backend}: build {built.returncode}: {built.stdout[-2000:]!r} {built.stderr[-2000:]!r}')
                 continue
@@ -173,7 +187,7 @@ def main():
                     print(f'{fixture.stem}/{backend}: replay agrees', flush=True)
     for failure in failures:
         print('FAIL', failure, flush=True)
-    print(f'event order: {len(fixtures) - len(failures)} equal, {len(failures)} differ', flush=True)
+    print(f'event order: {len(fixtures) - len(failures) - unbuilt} equal, {unbuilt} evaluator-only, {len(failures)} differ', flush=True)
     return int(bool(failures))
 
 

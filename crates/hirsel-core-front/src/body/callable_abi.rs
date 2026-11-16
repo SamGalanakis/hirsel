@@ -294,6 +294,120 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         out.function
     }
+    /// A task's entry into user code carries its own Step. The runtime and both
+    /// native task thunks only invoke this ordinary front-produced callable.
+    pub(super) fn task_entry_adapter(
+        &mut self,
+        x: TyId,
+        r: TyId,
+        function: ValueId,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<(TypeId, AddressId, ValueId)> {
+        let callback = self
+            .t
+            .mk(TyKind::Fn(vec![(Mode::Take, x)], r, true, Callable::Plain));
+        let wrapped = self.t.mk(TyKind::Tuple(vec![callback, x]));
+        let id = self.runtime_type(wrapped, n)?;
+        let input = self.new_slot(PlaceTy::Declared(id), n);
+        let code = self.address(
+            AddressBase::Address(input),
+            &[Step::Field(0)],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        self.install(code, Rep::Scalar(Ty::Ptr), Some(function), n);
+        let xrep = self.rep_at(x, n)?;
+        if let Some(place) = xrep.stored() {
+            let at = self.address(AddressBase::Address(input), &[Step::Field(1)], place, n);
+            self.install(at, xrep, value, n);
+        }
+        let signature = match self.indirect_signature(&[(Mode::Take, wrapped)], r, &mut vec![]) {
+            Ok(s) => s,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let mut fd = self.fd.as_ref().clone();
+        fd.path.0.name = format!(
+            "{}$task_entry{}",
+            fd.path.0.name,
+            n.0 - self.item.range.nodes.start
+        );
+        fd.params.clear();
+        fd.result = r;
+        fd.drop_of = None;
+        fd.clone_of = None;
+        fd.body = None;
+        let mut child = Cx::new(self.p, self.definition, self.e);
+        child.fd = std::borrow::Cow::Owned(fd);
+        child.entry = false;
+        child.generated = false;
+        std::mem::swap(&mut child.t, &mut self.t);
+        let row = child.e.function(
+            &child.fd.path,
+            child.e.module.signatures[signature.index()].clone(),
+        );
+        child.e.install_source_signature(row, signature);
+        child.func = Some(row);
+        let sig = child.e.module.signatures[signature.index()].clone();
+        let has_dest = sig.dest.is_some();
+        let params = sig
+            .dest
+            .map(|_| Ty::Ptr)
+            .into_iter()
+            .chain(sig.params.iter().map(|p| match p {
+                Param::Value(t) => *t,
+                Param::Address { .. } => Ty::Ptr,
+            }))
+            .collect::<Vec<_>>();
+        let block = child.new_block(&params);
+        child.start(block);
+        let incoming = child.block_params(block);
+        if let Some(dest) = sig.dest {
+            child.dest = Some((incoming[0], dest));
+        }
+        let child_input = incoming[usize::from(has_dest) + 1];
+        let root = child.fields_of(AddressBase::Value(child_input), id, n);
+        let code = child.address(
+            AddressBase::Address(root),
+            &[Step::Field(0)],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        let code = child.read_bits(code, Ty::Ptr, n);
+        let value = if let Some(place) = xrep.stored() {
+            let at = child.address(AddressBase::Address(root), &[Step::Field(1)], place, n);
+            child.read_carried_rep(at, xrep, n)
+        } else {
+            None
+        };
+        child.temp(x, value);
+        let returned = child.call_lowered(callback, code, &[value], n);
+        child.ret(returned, n);
+        std::mem::swap(&mut child.t, &mut self.t);
+        let out = child.finish();
+        if let Some(template) = out.template {
+            self.nested.insert(row, template);
+        }
+        self.out.refusals.extend(out.refusals);
+        self.out.gaps.extend(out.gaps);
+        self.out.counts += out.counts;
+        if out.function.is_none() {
+            self.halt();
+            return None;
+        }
+        let code = self.value(Ty::Ptr);
+        self.inst(
+            Inst::FunctionRef {
+                result: code,
+                function: row,
+            },
+            n,
+        );
+        Some((id, input, code))
+    }
     fn adapter_call(
         &mut self,
         target: FuncId,

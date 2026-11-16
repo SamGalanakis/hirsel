@@ -16,6 +16,7 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 /* Frozen 64-bit emitter layouts; offsets in bytes, no atomic local accounting. */
 #define HIRSEL_CORE_CONTEXT_CURRENT_LIMIT 0
 #define HIRSEL_CORE_CONTEXT_EVENTS 8
+#define HIRSEL_CORE_CONTEXT_STEPS 16
 #define HIRSEL_CORE_TASK_ARC_GATE 0
 #define HIRSEL_CORE_LIMIT_AVAILABLE 0
 #define HIRSEL_CORE_LIMIT_OUTSTANDING 8
@@ -57,6 +58,12 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #define HIRSEL_CORE_NATIVE_RESOURCE 2
 #define HIRSEL_CORE_NATIVE_STATIC 3
 typedef struct HirselCoreContext HirselCoreContext;
+/* MEM-30. StepEnter false leaves the current bound unchanged. StepCatch closes
+   its bound and refunds/catches only a chain of that bound's OutOfTime causes. */
+bool hirsel_core_step_enter(HirselCoreContext *, uint64_t steps);
+void hirsel_core_step_leave(HirselCoreContext *);
+bool hirsel_core_step_catch(HirselCoreContext *);
+uint8_t hirsel_core_step_out(HirselCoreContext *, uint64_t site);
 typedef struct HirselCoreLimitRecord HirselCoreLimitRecord;
 typedef struct { uint64_t requested, available; } HirselCoreCapacity;
 typedef struct { void *pointer; HirselCoreCapacity capacity; } HirselCoreAllocation;
@@ -129,7 +136,7 @@ void hirsel_core_finalizer_begin(HirselCoreContext *, void *resource);
 void hirsel_core_finalizer_end(HirselCoreContext *, void *resource);
 void hirsel_core_resource_free(void *resource, uint64_t logical_field_storage);
 /* Cause kinds: 0 Overflow, 1 Bounds, 2 Division, 3 Unwrap, 4 Fail,
-   5 Cancelled, 6 Capacity. The kind is Fail's message's niche (FORM #75): kind k
+   5 Cancelled, 6 Capacity, 7 Tape, 8 OutOfTime. The kind is Fail's message's niche (FORM #75): kind k
    other than Fail is message.capacity == HIRSEL_CORE_CAUSE_KIND_START + k; a Fail's
    capacity is below that. Message ownership transfers to raise. */
 typedef struct { uint8_t *data; uint64_t len, capacity; } HirselCoreStringMessage;

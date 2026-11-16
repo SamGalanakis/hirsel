@@ -30,6 +30,7 @@ pub mod provider;
 pub mod region;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
+pub mod steps;
 pub mod tape;
 pub mod tasks;
 #[cfg(feature = "testing")]
@@ -58,6 +59,8 @@ pub struct Context {
     /// and install their own Task pointer before publication. It is immutable
     /// for the task's run, then cleared when the root returns.
     pub events: usize,
+    /// MEM-30 fast-path window, at the frozen offset CONTEXT_STEPS.
+    pub steps: i64,
     pub(crate) run: *const crate::process::Config,
     pub(crate) cancel_requested: AtomicBool,
     pub(crate) cancel_shield: usize,
@@ -70,6 +73,9 @@ pub struct Context {
     pub(crate) active_resource: *mut causes::Resource,
     pub(crate) host_files: *mut host_file::Files,
     pub(crate) isolates: Vec<crate::isolate::Reservation>,
+    pub(crate) step_bounds: Vec<std::sync::Arc<steps::Bound>>,
+    pub(crate) step_loaded: u64,
+    pub(crate) step_slice: u64,
 }
 
 impl Context {
@@ -84,6 +90,10 @@ impl Context {
         Self {
             current,
             events: 0,
+            steps: steps::UNBOUNDED,
+            step_bounds: Vec::new(),
+            step_loaded: 0,
+            step_slice: 0,
             run: std::ptr::null(),
             cancel_requested: AtomicBool::new(false),
             cancel_shield: 0,
@@ -181,6 +191,8 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        steps::settle(self);
+        self.step_bounds.clear();
         while self.bound_depth != 0 {
             self.limit_exit();
         }

@@ -7,7 +7,7 @@ typedef struct { HirselCoreCauseCell *causes; uint8_t status; } HirselCoreIsolat
    value, and returns the room without changing the task or cause chain. */
 HirselCoreIsolateEnter hirsel_core_isolate_enter(HirselCoreContext *);
 void hirsel_core_isolate_leave(HirselCoreContext *);
-/* status 1 passes a Cancelled primary through with the saved chain restored;
+/* status 1 passes a Cancelled or OutOfTime primary through with the saved chain restored;
    otherwise causes owns the caught chain and status is zero. */
 HirselCoreIsolateCatch hirsel_core_isolate_catch(HirselCoreContext *);
 #endif

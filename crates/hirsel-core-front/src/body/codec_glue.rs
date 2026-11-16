@@ -769,27 +769,10 @@ impl Emitter {
         let TyKind::Tuple(xs) = t.kind(ty).clone() else {
             return None;
         };
-        let std = |name: &str| {
-            p.fns.iter().position(|f| {
-                f.path.0.package.name == "std"
-                    && f.path.0.modules == ["codec"]
-                    && f.path.0.name == name
-            })
-        };
-        let (Some(take), Some(put), Some(describe)) =
-            (std("take_with"), std("put_with"), std("schema_of"))
-        else {
-            return None;
-        };
-        let of = p.fns[take].path.clone();
-        let (bytes, codec, decoded) = {
-            let fd = &p.fns[take];
-            (fd.params[0].ty, fd.params[2].ty, fd.result)
-        };
-        let (written, schema) = (p.fns[put].result, p.fns[describe].params[0].ty);
+        let protocol = p.tuple_codec_protocol()?;
         let rows_of = |e: &mut Self, t: &mut _, x: TyId| -> Option<(TypeId, TypeId, TypeId)> {
-            let c = subst(t, codec, &[x]);
-            let d = subst(t, decoded, &[x]);
+            let c = subst(t, protocol.codec, &[x]);
+            let d = subst(t, protocol.decoded, &[x]);
             Some((
                 e.type_row(p, t, x)?,
                 e.type_row(p, t, c)?,
@@ -807,14 +790,14 @@ impl Emitter {
             parts.push(Part { ty, codec, decoded });
         }
         let (Some(written), Some(bytes), Some(schema)) = (
-            self.type_row(p, t, written),
-            self.type_row(p, t, bytes),
-            self.type_row(p, t, schema),
+            self.type_row(p, t, protocol.written),
+            self.type_row(p, t, protocol.bytes),
+            self.type_row(p, t, protocol.schema),
         ) else {
             return None;
         };
         Some((
-            of,
+            protocol.of.clone(),
             Rows {
                 tuple,
                 codec: codec_row,

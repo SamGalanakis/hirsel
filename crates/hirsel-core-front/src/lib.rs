@@ -94,6 +94,15 @@ pub(crate) struct ItemInfo {
     pub uses: Vec<u32>,
 }
 
+struct TupleCodecProtocol {
+    of: DefPath,
+    bytes: TyId,
+    codec: TyId,
+    decoded: TyId,
+    written: TyId,
+    schema: TyId,
+}
+
 /// The declarations of one program: summaries and signatures, published once.
 pub struct Program<'a> {
     pub index: &'a NameIndex,
@@ -125,6 +134,7 @@ pub struct Program<'a> {
     pub(crate) alias_stack: Vec<(DeclId, Option<Site>)>,
     core_declarations: [std::sync::OnceLock<Option<DeclId>>; PRELUDE.len()],
     structural_codecs: std::sync::OnceLock<Vec<(DeclId, u32)>>,
+    tuple_codec_protocol: std::sync::OnceLock<Option<TupleCodecProtocol>>,
     /// Published type spellings shared by body arenas; local types stay local.
     layout_type_names: std::sync::OnceLock<Vec<std::sync::OnceLock<String>>>,
 }
@@ -262,6 +272,42 @@ impl<'a> Program<'a> {
                 })
                 .collect()
         })
+    }
+    /// Shared tuple codec signatures. The name index avoids demand-decoding the
+    /// published function prefix just to find the three protocol declarations.
+    fn tuple_codec_protocol(&self) -> Option<&TupleCodecProtocol> {
+        self.tuple_codec_protocol
+            .get_or_init(|| {
+                let std = |name: &str| {
+                    self.index
+                        .packages
+                        .iter()
+                        .filter(|p| self.index.symbols.text(p.name) == "std")
+                        .filter_map(|p| {
+                            self.function_id(&DefPath(hirsel_core_ids::ItemPath {
+                                package: hirsel_core_ids::PackageId {
+                                    name: "std".into(),
+                                    version: self.index.symbols.text(p.version).into(),
+                                },
+                                modules: vec!["codec".into()],
+                                name: name.into(),
+                            }))
+                        })
+                        .min()
+                };
+                let (take, put, describe) =
+                    (std("take_with")?, std("put_with")?, std("schema_of")?);
+                let fd = &self.fns[take];
+                Some(TupleCodecProtocol {
+                    of: fd.path.clone(),
+                    bytes: fd.params[0].ty,
+                    codec: fd.params[2].ty,
+                    decoded: fd.result,
+                    written: self.fns[put].result,
+                    schema: self.fns[describe].params[0].ty,
+                })
+            })
+            .as_ref()
     }
     fn core_decl_uncached(&self, name: &str) -> Option<DeclId> {
         let path = prelude_path(self.index, name)?;
@@ -407,6 +453,7 @@ impl<'a> Program<'a> {
             alias_stack: vec![],
             core_declarations: std::array::from_fn(|_| std::sync::OnceLock::new()),
             structural_codecs: std::sync::OnceLock::new(),
+            tuple_codec_protocol: std::sync::OnceLock::new(),
             layout_type_names: std::sync::OnceLock::new(),
         }
     }

@@ -118,7 +118,7 @@ it. A program reads the identity of a named function through `code` (PROG-9). No
 construct dispatches on a function's name or signature at run time, and nothing
 observable depends on a function's address or on the order of declarations
 ([SEM-8](semantics.md#sem-8-determinism)), so two bodies with the same checked meaning
-are interchangeable.
+are interchangeable, except to `code.revision` (PROG-9), which names the checked IR.
 
 ### PROG-9: Code descriptors
 
@@ -174,9 +174,27 @@ parameter names, to the order of its region generics or to its body does not. A 
 identity, and no alias connects the two. A later encoding may add an instance's closed type
 arguments and dictionaries after `D`; version 1 has none.
 
-`code.revision(s)`, a check of the body, is reserved ([reserved](reserved.md), D) and is
-never part of equality. An identity stored without a revision was matched by identity
-alone, so a changed body under an unchanged identity is not detected.
+`code.revision(s)` returns `Option[View[Bytes]] in s`: the function's **revision**, 32 bytes
+that name the code a call through `s` runs. It is a hash of the checked core IR of every
+instance (PROG-5) that the function reaches, std's and core's included, taken by the IR's own
+edges: calls and function values, among them the functions the checker selects from types,
+such as a codec maker. Each instance enters as its identity and its
+checked IR with the source positions and the optimisation-only facts removed; the reach is a
+set, so recursion and order do not matter. Nothing else enters: not the backend, the
+runtime, the target, the optimisation level or the root limit. So:
+
+- an edit to comments, layout, local or parameter names, item order, or an item the
+  function does not reach leaves the revision equal;
+- an edit that changes the checked IR of any instance the function reaches changes it,
+  including one that changes how a source is parsed, such as a line break before `-`;
+- the same program gives the same revision on every engine and optimisation level, and a
+  compiler that lowers a reached body differently gives a different one.
+
+The revision is never part of equality: two `StaticFn` values with equal identity bytes are
+equal whatever their revisions. It is `None` only when the program was assembled without its
+revisions, which a program `hirsel build` links never is. A store, registry or tape that
+keeps only identity bytes matches by identity alone, so a changed body under an unchanged
+identity is not detected; one that keeps the revision as well detects it.
 
 ```hirsel
 type Handler = fn(Bytes) -> Result[Bytes, Capacity]

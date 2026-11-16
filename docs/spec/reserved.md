@@ -133,7 +133,7 @@ itself, because an owning closure is never shareable. Requests resolve only to r
 entries; an ID grants no code execution authority and serializes no closure captures.
 *v1:* PROG-5, PROG-6, PROG-9, SEM-8: closed named functions without type parameters have
 identity bytes; the runner is a library over v1, not a language form; the code revision
-(hook D) is later.
+is `code.revision` (PROG-9).
 
 **R14.** "Callable and erased-value signatures carry independent invocation-allocation and
 cleanup-allocation summaries; omission conservatively permits allocation. `noalloc_drop`
@@ -229,7 +229,7 @@ allocator chunk size becomes a logical capacity (MEM-28).
 | O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits; authority only through arguments | open: authority facades (R19), static brands (R24) and callable results anchored to a place ([LANG-13](language.md#lang-13-callables)) |
 | F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; `isolate` (FAIL-16) | open: a single `Result[R, Causes]` form, which needs a per-boundary cause cell; a form that moves owned state into the body and back; `shield` |
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, the `via` override, tombstones, appended variants and the `u32` tag, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the schema fingerprint that keys a registered entry (R13) and the content hash of a declaration for stored data |
-| D, code descriptors | code identity; identity bytes of closed named functions (PROG-9), including typed `StaticFn` values passed into generic parameters; no address or order dependence | open: `code.revision(s) -> Option[Bytes]`, never part of equality; for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them |
+| D, code descriptors | code identity; identity bytes of closed named functions (PROG-9), including typed `StaticFn` values passed into generic parameters; no address or order dependence; the revision, `code.revision(s)` (PROG-9), never part of equality | open: for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them |
 | L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
 | I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; tapes and their substitutes (CAP-9); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, and `host.random` ([core](core.md#contracts-the-signatures-do-not-state)) | open: providers for `Net`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1; selection, shared limits, mutexes and atomics later |

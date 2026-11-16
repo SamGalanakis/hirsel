@@ -206,7 +206,9 @@ identically on every engine, build and optimisation level: the same values, outp
 `Capacity` and `OutOfTime` results, failure causes and sites, steps and slice ends
 ([MEM-30](budgets.md#mem-30-step-bounds)), cleanup order and run outcome. Nothing
 observable depends on addresses (of blocks or of functions), on the order of declarations
-in a source, on timing, on the host or on unrecorded scheduling.
+in a source, on timing, on the host or on unrecorded scheduling. The one value a compiler may change
+is a function's revision ([PROG-9](programs.md#prog-9-code-descriptors)), which names the
+checked IR its compiler made: it is still the same on every engine and optimisation level.
 
 ### SEM-9: Inline arrays
 

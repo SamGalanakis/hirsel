@@ -93,7 +93,7 @@ computes, with `Option` and `Result` taking bounds as tuples do. `Task[R]` is ne
 ([CONC-2](tasks.md#conc-2-the-send-bound)); its parameter's `R: send` constrains the
 result, not the handle. `Log[E]` is a handle to a separately admitted node that owns its
 entries ([MEM-29](memory.md#mem-29-append-only-logs)), and `StaticFn[F]` designates static
-identity bytes and a function ([PROG-9](programs.md#prog-9-code-descriptors)).
+identity bytes, a revision and a function ([PROG-9](programs.md#prog-9-code-descriptors)).
 
 ## Contracts the signatures do not state
 

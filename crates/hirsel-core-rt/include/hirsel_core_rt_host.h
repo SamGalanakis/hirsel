@@ -114,12 +114,14 @@ typedef struct HirselCoreProcessConfig {
     size_t capabilities_len;
     void (*close_grants)(void *); /* after main cleanup; admits nothing, cannot fail */
     const void *launch; /* immutable hirsel_core_ids::launch::Metadata, pinned for the run */
+    bool (*describe_output)(void *, const uint8_t *, size_t);
 } HirselCoreProcessConfig;
 typedef uint8_t (*HirselCoreEntry)(HirselCoreContext *, const HirselCoreProcessConfig *, HirselCoreMainResult *);
 uint8_t hirsel_core_run(const HirselCoreProcessConfig *, HirselCoreEntry);
 uint64_t hirsel_core_args_len(const HirselCoreContext *, uint64_t args);
 uint64_t hirsel_core_launch_word(const HirselCoreContext *, uint64_t field, uint64_t index);
 void hirsel_core_launch_target(const HirselCoreContext *, HirselCoreBuffer *output);
+bool hirsel_core_describe_emit(const HirselCoreContext *, const HirselCoreBuffer *);
 /* Null means None; otherwise one pinned capacity-0 String carrier per argument,
    borrowed until the run ends. The caller never frees it or its bytes. */
 const HirselCoreBuffer *hirsel_core_args_get(const HirselCoreContext *, uint64_t args, uint64_t index);

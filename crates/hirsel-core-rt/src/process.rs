@@ -42,6 +42,7 @@ pub struct Config {
     pub close_grants: Option<unsafe extern "C" fn(*mut u8)>,
     /// Immutable metadata pinned by the launch owner, never a per-session lookup.
     pub launch: *const hirsel_core_ids::launch::Metadata,
+    pub describe_output: Option<unsafe extern "C" fn(*mut u8, *const u8, usize) -> bool>,
 }
 
 pub const NOT_STARTED: u8 = 103;
@@ -89,6 +90,35 @@ pub unsafe extern "C" fn hirsel_core_launch_target(
             len: target.len(),
             capacity: 0,
         };
+    }
+}
+
+/// # Safety
+/// Context/config remain pinned for the run.
+pub(crate) unsafe fn deny_describe_capability(context: *const Context) {
+    // SAFETY: metadata belongs to this live context's launch.
+    if unsafe { hirsel_core_launch_word(context, 5, 0) } != 0 {
+        stop(b"DescribeCapability");
+    }
+}
+
+/// # Safety
+/// Buffer is a borrowed Bytes carrier; the callback consumes neither it nor data.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_describe_emit(
+    context: *const Context,
+    buffer: *const crate::provider::Buffer,
+) -> bool {
+    // SAFETY: the launcher pins Config and callback, and the caller pins buffer.
+    unsafe {
+        if hirsel_core_launch_word(context, 5, 0) == 0 {
+            return false;
+        }
+        let config = &*(*context).run;
+        let Some(write) = config.describe_output else {
+            return false;
+        };
+        write(config.state, (*buffer).data, (*buffer).len)
     }
 }
 

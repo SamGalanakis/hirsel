@@ -502,6 +502,7 @@ unsafe extern "C" fn diagnostic(state: *mut u8, p: *const u8, n: usize) {
 fn config(args: *const Buffer, args_len: usize, stderr: &mut Vec<u8>) -> Config {
     Config {
         launch: std::ptr::null(),
+        describe_output: None,
         root_limit: 1024,
         args,
         args_len,

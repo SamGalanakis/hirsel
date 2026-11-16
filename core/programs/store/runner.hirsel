@@ -243,6 +243,77 @@ pub fn describe[G: send, H: send](r: Registry[G, H], mut out: Bytes) -> Result[(
     std.codec.put_list(r.described, c, mut out)
 }
 
+pub type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64 }
+
+pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
+
+pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes)
+
+fn launch_emit(data: Bytes) -> bool { false }
+
+fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Result[Bytes, Capacity] {
+    let Registry(slots: take held_slots, described: take descriptions) = take r
+    let mut exported: List[Exported] = list.with_capacity(list.len(descriptions))?
+    for take d in descriptions {
+        let args_fp = std.codec.fingerprint_of(d.args)
+        let result_fp = std.codec.fingerprint_of(d.result)
+        match list.push(mut exported, Exported(described: take d, args_fp: args_fp, result_fp: result_fp)) {
+            Ok(()) => (),
+            Error((c, _)) => return Error(c),
+        }
+    }
+    let digest = launch_digest()?
+    let target = launch_target(a)?
+    let description = Describe(digest: take digest, target: take target, n_place: launch_word(0u64, 0u64), exported: take exported)
+    let codec: std.codec.Codec[Describe] = std.codec.of()
+    let mut out: Bytes = list.new()
+    std.codec.encode(codec, description, mut out)?
+    Ok(take out)
+}
+
+fn describe_response[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
+    let run = code.callable(place)
+    let ran = bound bytes launch_word(0u64, 0u64) {
+        let mut r: Registry[G, H] = registry()
+        let response: Result[Bytes, RegisterError] = match run(mut r) {
+            Ok(()) => match describe_registered(a, take r) {
+                Ok(take payload) => Ok(take payload),
+                Error(c) => Error(Full(c)),
+            },
+            Error(take e) => Error(take e),
+        }
+        take response
+    }
+    match take ran {
+        Ok(take answer) => take answer,
+        Error(c) => Error(Full(c)),
+    }
+}
+
+// The first branch precedes the caller's ordinary serve callback, including its
+// store open, listener and every capability use. No n_place runtime argument.
+pub fn main[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+    if launch_word(5u64, 0u64) == 0u64 {
+        return start_server()
+    }
+    match describe_response(a, place) {
+        Ok(take payload) => if launch_emit(payload) { Ok(()) } else { Error(Exit(status: 1u8)) },
+        Error(take e) => {
+            let error: DescribeError = match take e {
+                Full(c) => PlaceCapacity(room(c)),
+                AlreadyRegistered(take key) => AlreadyRegistered(take key),
+            }
+            let codec: std.codec.Codec[DescribeError] = std.codec.of()
+            let mut out: Bytes = list.new()
+            match std.codec.encode(codec, error, mut out) {
+                Ok(()) => { let _ = launch_emit(out) },
+                Error(_) => (),
+            }
+            Error(Exit(status: 2u8))
+        },
+    }
+}
+
 // A compute call in the caller's task, under the entry's n. A key that names no compute
 // entry is NoEntry.
 pub fn call[G: send, H: send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outcome {

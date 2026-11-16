@@ -780,6 +780,8 @@ pub enum RtOp {
     LaunchTarget {
         view: TypeId,
     },
+    /// Write a Bytes carrier through the private describe transport.
+    DescribeEmit,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1016,6 +1018,7 @@ impl RtOp {
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
             RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
+            RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::TapeOpen => (
                 vec![V(u64_), V(p), V(u8_), V(p), V(p), V(u64_), V(u64_), V(u64_)],
                 vec![u64_, u64_],
@@ -1133,6 +1136,7 @@ impl RtOp {
             | RtOp::ArgsLen
             | RtOp::ArgsGet
             | RtOp::LaunchWord
+            | RtOp::DescribeEmit
             | RtOp::Host(_)
             | RtOp::TapeOpen
             | RtOp::TapeEnd

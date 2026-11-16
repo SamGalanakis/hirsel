@@ -1657,6 +1657,7 @@ unsafe fn spawn_in(
 ) -> Spawned {
     // SAFETY: spawn is invoked by the current parent in its exclusive context.
     unsafe {
+        crate::process::deny_describe_capability(context);
         let mut record =
             match Block::new(&*context, charge::task(layout.result.logical, bytes), 1, 8) {
                 Ok(record) => record,

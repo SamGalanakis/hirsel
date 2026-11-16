@@ -146,6 +146,7 @@ pub struct OsProcess {
     diagnostic: Vec<u8>,
     config: Config,
     _launch: Box<hirsel_core_ids::launch::Metadata>,
+    describe_out: Option<OwnedFd>,
 }
 #[repr(C)]
 pub struct OpenProcess {
@@ -193,22 +194,8 @@ impl OsProcess {
         input: &OsConfig,
         probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
     ) -> Result<Box<Self>, StartupError> {
-        let mut os = Box::new(OsProvider::new(
-            duplicate(if input.grant_mask & (1 << STDOUT) != 0 {
-                input.stdout_fd
-            } else {
-                input.stderr_fd
-            })?,
-            duplicate(input.stderr_fd)?,
-        ));
-        let mut dirs = Vec::new();
-        // SAFETY: copy input bytes and pin descriptors; no input pointer escapes.
+        // SAFETY: copy launcher input before acquiring any program grant.
         unsafe {
-            for index in 0..input.directories_len {
-                dirs.push(os.grant(Path::new(OsStr::from_bytes(bytes(
-                    *input.directories.add(index),
-                ))))?);
-            }
             let mut args = Vec::with_capacity(input.args_len);
             for index in 0..input.args_len {
                 let value = bytes(*input.args.add(index));
@@ -240,6 +227,27 @@ impl OsProcess {
                 n_place,
                 describe_mode,
             ));
+            let mut os = Box::new(OsProvider::new(
+                duplicate(if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
+                    input.stdout_fd
+                } else {
+                    input.stderr_fd
+                })?,
+                duplicate(input.stderr_fd)?,
+            ));
+            let describe_out = if describe_mode {
+                Some(duplicate(input.stdout_fd)?)
+            } else {
+                None
+            };
+            let mut dirs = Vec::new();
+            if !describe_mode {
+                for index in 0..input.directories_len {
+                    dirs.push(os.grant(Path::new(OsStr::from_bytes(bytes(
+                        *input.directories.add(index),
+                    ))))?);
+                }
+            }
             let views = args
                 .iter()
                 .map(|a| Buffer {
@@ -253,7 +261,8 @@ impl OsProcess {
             } else {
                 std::slice::from_raw_parts(input.net_rules, input.net_rules_len).into()
             };
-            if input.grant_mask & (1 << NET) != 0
+            if !describe_mode
+                && input.grant_mask & (1 << NET) != 0
                 && (net_storage.is_empty() || net_storage.iter().any(|r| !r.valid()))
             {
                 return Err(StartupError::NetRules);
@@ -265,24 +274,39 @@ impl OsProcess {
             let provider = Box::new(os.provider());
             let provider_pointer = &*provider as *const Provider;
             let mut metadata = Vec::new();
-            for handle in dirs {
-                metadata.push(Grant {
-                    kind: DIR,
-                    provider: provider_pointer,
-                    handle,
-                });
-            }
-            for kind in NET..=TASKS {
-                if input.grant_mask & (1 << kind) != 0 {
+            if describe_mode {
+                // Main receives inert designations. The launch boundary denies
+                // every provider operation and spawn, so these grant no authority.
+                for index in 0..input.parameters_len {
+                    let kind = (*input.parameters.add(index)).kind;
+                    if kind != ARGS {
+                        metadata.push(Grant {
+                            kind,
+                            provider: provider_pointer,
+                            handle: 0,
+                        });
+                    }
+                }
+            } else {
+                for handle in dirs {
                     metadata.push(Grant {
-                        kind,
+                        kind: DIR,
                         provider: provider_pointer,
-                        handle: if kind == NET {
-                            (&*net_rules as *const crate::net::Rules) as u64
-                        } else {
-                            0
-                        },
+                        handle,
                     });
+                }
+                for kind in NET..=TASKS {
+                    if input.grant_mask & (1 << kind) != 0 {
+                        metadata.push(Grant {
+                            kind,
+                            provider: provider_pointer,
+                            handle: if kind == NET {
+                                (&*net_rules as *const crate::net::Rules) as u64
+                            } else {
+                                0
+                            },
+                        });
+                    }
                 }
             }
             metadata.push(Grant {
@@ -307,6 +331,7 @@ impl OsProcess {
                 capabilities_len: metadata.len(),
                 close_grants: Some(close_grants),
                 launch: &*launch,
+                describe_output: Some(describe_output),
             };
             let mut process = Box::new(Self {
                 sources: std::ptr::null(),
@@ -321,6 +346,7 @@ impl OsProcess {
                 diagnostic: vec![],
                 config,
                 _launch: launch,
+                describe_out,
             });
             let mut probe = Some(probe);
             for n in 0..input.parameters_len {
@@ -330,7 +356,7 @@ impl OsProcess {
                 if handle == 0 {
                     return Err(StartupError::MissingGrant(n));
                 }
-                if requirement.kind == DIR {
+                if requirement.kind == DIR && !describe_mode {
                     if let Some(probe) = probe.take() {
                         let designation = process._metadata[(handle - 1) as usize].handle;
                         probe(process.os.as_ref().unwrap(), designation)
@@ -387,6 +413,7 @@ unsafe extern "C" fn close_grants(state: *mut u8) {
     unsafe {
         let process = &mut *state.cast::<OsProcess>();
         drop(process.os.take());
+        drop(process.describe_out.take());
     }
 }
 unsafe extern "C" fn diagnostic(state: *mut u8, data: *const u8, len: usize) {
@@ -508,3 +535,28 @@ mod startup_host_tests;
 #[cfg(test)]
 #[path = "entry_layout_tests.rs"]
 mod layout_tests;
+
+unsafe extern "C" fn describe_output(state: *mut u8, data: *const u8, len: usize) -> bool {
+    // SAFETY: the run pins its response view and the launch owner pins its sink.
+    unsafe {
+        let process = &*state.cast::<OsProcess>();
+        let Some(out) = &process.describe_out else {
+            return false;
+        };
+        let mut sent = 0;
+        while sent < len {
+            let count = libc::write(out.as_raw_fd(), data.add(sent).cast(), len - sent);
+            if count < 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return false;
+            }
+            if count == 0 {
+                return false;
+            }
+            sent += count as usize;
+        }
+        true
+    }
+}

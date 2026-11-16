@@ -542,6 +542,7 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
     let carriers = args.iter().map(|a| literal(a)).collect::<Vec<_>>();
     let config = Config {
         launch: std::ptr::null(),
+        describe_output: None,
         root_limit: 4096,
         args: carriers.as_ptr(),
         args_len: carriers.len(),

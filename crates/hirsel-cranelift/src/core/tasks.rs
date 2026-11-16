@@ -195,6 +195,15 @@ impl Function<'_, '_, '_> {
                 )?;
                 0
             }
+            RtOp::DescribeEmit => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_describe_emit",
+                    &[P, P],
+                    &[B],
+                    &[self.context, args[0]],
+                )?[0];
+                1
+            }
             RtOp::ArgsGet => {
                 outputs[0] = self.c_call(
                     "hirsel_core_args_get",

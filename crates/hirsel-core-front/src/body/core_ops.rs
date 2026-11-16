@@ -348,12 +348,15 @@ operations! {
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
     if f.path.package_is("store", "1")
         && f.path.0.modules == ["runner"]
-        && matches!(f.path.0.name.as_str(), "launch_word" | "launch_text")
+        && matches!(
+            f.path.0.name.as_str(),
+            "launch_word" | "launch_text" | "launch_emit"
+        )
     {
-        return Some(if f.path.0.name == "launch_word" {
-            u16::MAX
-        } else {
-            u16::MAX - 1
+        return Some(match f.path.0.name.as_str() {
+            "launch_word" => u16::MAX,
+            "launch_text" => u16::MAX - 1,
+            _ => u16::MAX - 2,
         });
     }
     if !f.path.package_is("core", "1") || f.body.is_some() {
@@ -378,6 +381,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<Option<ValueId>> {
+        if self.p.core_operations[f] == Some(u16::MAX - 2) {
+            return Some(
+                self.runtime_row(RtOp::DescribeEmit, &[Arg::Value(vals[0]?)], n)
+                    .map(|v| v[0]),
+            );
+        }
         if self.p.core_operations[f] == Some(u16::MAX - 1) {
             let view = self.runtime_type(result, n)?;
             let output = self.new_slot(PlaceTy::Declared(view), n);
@@ -1520,7 +1529,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
         let Some(i) = p.core_operations[f] else {
             continue;
         };
-        if i >= u16::MAX - 1 {
+        if i >= u16::MAX - 2 {
             continue;
         }
         let Lane::Runtime(kernel) = OPERATIONS[i as usize].lane else {

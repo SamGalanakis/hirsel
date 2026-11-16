@@ -634,9 +634,11 @@ enum Reply<'m> {
     /// A task ended; the root's end carries its result and chain.
     Ended(Box<Machine<'m>>, Option<(X<Vec<u64>>, Vec<Cause>)>),
     Panicked(Box<dyn std::any::Any + Send>),
+    Stopped(Box<Machine<'m>>, &'static str),
 }
 /// The unwind payload of a torn-down task thread.
 struct Teardown;
+struct RunStop(&'static str);
 
 fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
     if let FieldTy::Array(e, n) = ty {
@@ -1162,6 +1164,14 @@ fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
                         return (baton, outcome, chain);
                     }
                 }
+                Reply::Stopped(mut machine, reason) => {
+                    machine
+                        .world
+                        .stderr
+                        .extend_from_slice(format!("run stop: {reason}\n").as_bytes());
+                    teardown(&mut resumes, &machine);
+                    return (machine, Outcome::Stopped(reason), Vec::new());
+                }
                 Reply::Panicked(payload) => {
                     // The panicking task's machine is gone with its stack; every
                     // other task is parked and is unwound before the panic goes on.
@@ -1206,6 +1216,11 @@ fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>) {
             let _ = reply.send(Reply::Ended(mach, root));
         }
         Err(payload) if payload.is::<Teardown>() => {}
+        Err(payload) if payload.is::<RunStop>() => {
+            let reason = payload.downcast::<RunStop>().unwrap().0;
+            mach.links[k] = None;
+            let _ = reply.send(Reply::Stopped(mach, reason));
+        }
         Err(payload) => {
             let _ = reply.send(Reply::Panicked(payload));
         }
@@ -1423,8 +1438,19 @@ impl Machine<'_> {
         };
         (bytes, data, len, cap)
     }
+    fn deny_describe_capability(&self) {
+        if self
+            .world
+            .launch
+            .as_ref()
+            .is_some_and(|launch| launch.is_describe())
+        {
+            std::panic::resume_unwind(Box::new(RunStop("DescribeCapability")));
+        }
+    }
     /// A provider row against [`World`]: an outcome `value, error, code, written`.
     fn host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+        self.deny_describe_capability();
         const NOT_FOUND: u64 = 1;
         const DENIED: u64 = 2;
         const EXISTS: u64 = 3;
@@ -2569,6 +2595,7 @@ impl Machine<'_> {
                 vec![u64::from(caught)]
             }
             RtOp::Spawn { x, r } => {
+                self.deny_describe_capability();
                 let x = TypeRef(x.0);
                 let r = TypeRef(r.0);
                 let n = a[0];
@@ -2756,6 +2783,15 @@ impl Machine<'_> {
             }
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
             RtOp::LaunchWord => vec![self.world.launch.as_ref().unwrap().word(a[0], a[1])],
+            RtOp::DescribeEmit => {
+                if self.world.launch.as_ref().unwrap().is_describe() {
+                    let (bytes, _, _, _) = self.carrier(a[0]);
+                    self.world.stdout.extend_from_slice(&bytes);
+                    vec![1]
+                } else {
+                    vec![0]
+                }
+            }
             RtOp::LaunchTarget { .. } => {
                 let (data, len) = self.world.launch_target;
                 self.store(a[0], 8, data);

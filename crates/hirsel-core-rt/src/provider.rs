@@ -179,6 +179,7 @@ pub(crate) unsafe fn drive(
 ) -> Outcome {
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
+        crate::process::deny_describe_capability(context);
         let site = (*request).site;
         let operation = (*request).operation;
         if cancellation_point(operation) {

@@ -1,0 +1,56 @@
+fn echo(take x: u64) -> Result[u64, Capacity] { Ok(x) }
+
+fn place(mut r: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
+    runner.compute(mut r, code.describe(echo), 1024u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(transaction), 1024u64, runner.DEFAULT_STEPS)
+}
+
+fn duplicate(mut r: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
+    place(mut r)?
+    place(mut r)
+}
+
+fn forever(mut r: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
+    loop {}
+}
+
+fn serve(d: Dir) -> Result[(), Exit] waits {
+    let file = match host.open(d, "opened-in-serve", Write) {
+        Ok(take file) => take file,
+        Error(_) => return Error(Exit(status: 73u8)),
+    }
+    let _ = host.close(take file)
+    Error(Exit(status: 71u8))
+}
+
+pub fn main(a: Args, d: Dir) -> Result[(), Exit] waits {
+    let start = scoped fn() -> Result[(), Exit] waits { serve(d) }
+    runner.main(a, code.describe(place), start)
+}
+
+pub fn main_duplicate(a: Args, d: Dir) -> Result[(), Exit] waits {
+    let start = scoped fn() -> Result[(), Exit] waits { serve(d) }
+    runner.main(a, code.describe(duplicate), start)
+}
+
+pub fn main_loop(a: Args, d: Dir) -> Result[(), Exit] waits {
+    let start = scoped fn() -> Result[(), Exit] waits { serve(d) }
+    runner.main(a, code.describe(forever), start)
+}
+
+fn status(take r: Result[(), Exit]) -> u64 {
+    match take r {
+        Ok(()) => 0u64,
+        Error(e) => int.widen(e.status),
+    }
+}
+
+pub fn law_main(a: Args, d: Dir) -> u64 waits { status(main(a, d)) }
+
+pub fn law_duplicate(a: Args, d: Dir) -> u64 waits { status(main_duplicate(a, d)) }
+
+pub fn main_capability(a: Args, d: Dir) -> Result[(), Exit] waits { serve(d) }
+
+pub fn law_capability(a: Args, d: Dir) -> u64 waits { status(serve(d)) }
+
+fn transaction(mut tx: store.Tx, h: (), take x: u64) -> Result[u64, bool] { Ok(x) }

@@ -21,6 +21,7 @@ fn launch_config(launch: &hirsel_core_ids::launch::Metadata) -> Config {
         capabilities_len: 0,
         close_grants: None,
         launch,
+        describe_output: None,
     }
 }
 
@@ -99,6 +100,80 @@ fn identity_unavailable() {
         assert_eq!(hirsel_core_launch_word(&context, 1, 0), 0);
         assert_eq!(hirsel_core_launch_word(&context, 0, 0), 73);
     }
+}
+
+#[test]
+fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
+    let path =
+        std::env::temp_dir().join(format!("hirsel-describe-entry-{}.out", std::process::id()));
+    let out = File::create(&path).unwrap();
+    let arguments = [
+        b"--hirsel-describe".as_slice(),
+        b"--hirsel-n-place=1",
+        b"argument",
+    ];
+    let views = arguments.map(|a| View {
+        data: a.as_ptr(),
+        len: a.len(),
+    });
+    let missing = b"/a-directory-that-describe-must-never-open";
+    let dirs = [View {
+        data: missing.as_ptr(),
+        len: missing.len(),
+    }];
+    let parameters = [DIR, CLOCK, TASKS, ARGS].map(|kind| Requirement { kind, index: 0 });
+    let target = b"x86_64-unknown-linux-gnu";
+    let input = OsConfig {
+        root_limit: 4096,
+        args: views.as_ptr(),
+        args_len: views.len(),
+        directories: dirs.as_ptr(),
+        directories_len: dirs.len(),
+        grant_mask: 0,
+        stdout_fd: out.as_raw_fd(),
+        stderr_fd: out.as_raw_fd(),
+        parameters: parameters.as_ptr(),
+        parameters_len: parameters.len(),
+        net_rules: std::ptr::null(),
+        net_rules_len: 0,
+        target: View {
+            data: target.as_ptr(),
+            len: target.len(),
+        },
+    };
+    let fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let before = fds();
+    // SAFETY: constructor copies its views and owns the duplicated descriptors.
+    unsafe {
+        let owner = hirsel_core_os_process_new(&input);
+        assert_eq!(owner.error, IoError::OK);
+        assert_eq!(fds(), before + 3); // stderr/stdout transport duplicates only.
+        {
+            let config = hirsel_core_os_process_config(owner.process);
+            let mut context = Context::new(4096);
+            context.run = config;
+            assert_eq!(hirsel_core_launch_word(&context, 5, 0), 1);
+            assert_eq!(hirsel_core_launch_word(&context, 0, 0), 1);
+            let a = hirsel_core_entry_grant(config, ARGS, 0);
+            assert_eq!(hirsel_core_args_len(&context, a), 1);
+            let argument = &*hirsel_core_args_get(&context, a, 0);
+            assert_eq!(
+                std::slice::from_raw_parts(argument.data, argument.len),
+                b"argument"
+            );
+            let output = Buffer {
+                data: b"abc".as_ptr().cast_mut(),
+                len: 3,
+                capacity: 0,
+            };
+            assert!(hirsel_core_describe_emit(&context, &output));
+        }
+        hirsel_core_os_process_free(owner.process);
+    }
+    assert_eq!(fds(), before);
+    assert_eq!(std::fs::read(&path).unwrap(), b"abc");
+    drop(out);
+    std::fs::remove_file(path).unwrap();
 }
 #[test]
 fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
@@ -393,6 +468,7 @@ fn product_start_double_isolate_catch_refunds_the_first_cause_cell() {
     }
     let config = Config {
         launch: std::ptr::null(),
+        describe_output: None,
         root_limit: 1024,
         args: ptr::null(),
         args_len: 0,
@@ -442,6 +518,7 @@ fn run_closes_grants_after_main_cleanup_and_before_reporting_status_without_admi
     let mut state = State { events: vec![] };
     let config = Config {
         launch: std::ptr::null(),
+        describe_output: None,
         root_limit: 1024,
         args: ptr::null(),
         args_len: 0,

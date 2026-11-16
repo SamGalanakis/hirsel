@@ -91,6 +91,7 @@ unsafe extern "C" fn grants_closed(_: *mut u8) {
 fn run_child(mut stop: Stop) {
     let config = Config {
         launch: std::ptr::null(),
+        describe_output: None,
         root_limit: 4096,
         args: std::ptr::null(),
         args_len: 0,

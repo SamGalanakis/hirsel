@@ -2,6 +2,7 @@
 //! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
 pub mod cli;
 pub mod cli_tools;
+pub mod describe;
 mod diagnostics;
 mod image;
 mod image_index;

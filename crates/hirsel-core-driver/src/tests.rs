@@ -62,6 +62,166 @@ fn private_runner_launch_hook_is_lowered_and_evaluated() {
         eval::Outcome::Returned(vec![419 + 32 + 4])
     );
 }
+
+fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Arc<CheckProduct> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut request =
+        CheckRequest::libraries(&root.join("core"), &directory.join("store")).unwrap();
+    request.inputs.packages.push(PackageManifest {
+        package: package("store"),
+        dependencies: vec![package("core"), package("std")],
+        sources: [
+            ("core/programs/store/store.hirsel", "store"),
+            ("core/programs/store/runner.hirsel", "runner"),
+            (
+                "crates/hirsel-core-driver/src/testdata/runner_launch.hirsel",
+                "runner_launch",
+            ),
+        ]
+        .into_iter()
+        .map(|(file, module)| hirsel_core_resolve::ModuleSource {
+            file: if module == "runner" {
+                runner_override
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| root.join(file))
+            } else {
+                root.join(file)
+            },
+            modules: vec![module.into()],
+            signatures: false,
+        })
+        .collect(),
+    });
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    product
+}
+
+fn run_runner_launch(
+    product: &CheckProduct,
+    name: &str,
+    n_place: u64,
+    describe: bool,
+) -> eval::Report {
+    let identity = hirsel_core_ir::Identity::plain(
+        DefPath::from_full(&format!("store@1/runner_launch/{name}")).unwrap(),
+    );
+    let units = product.units([identity.clone()], 65_536).unwrap();
+    let modules = units.modules().unwrap();
+    let (module, entry) = hirsel_core_materialize::join(&modules, &identity).unwrap();
+    let launch = hirsel_core_ids::launch::Metadata::embedded(
+        Some([7; 32]),
+        "test-target",
+        n_place,
+        describe,
+    );
+    eval::run_launch(&module, entry, &[0, 1], 64 * 1024 * 1024, &[], &launch)
+}
+
+#[test]
+fn runner_describe_launch_is_bounded_and_precedes_serve() {
+    let directory = tempfile::tempdir().unwrap();
+    let product = runner_launch_fixture(directory.path(), None);
+    let report = run_runner_launch(&product, "law_main", 1024 * 1024, true);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![0]));
+    assert!(report.stderr.is_empty());
+    assert!(!report.stdout.is_empty());
+    for allowance in [0, 1] {
+        let report = run_runner_launch(&product, "law_main", allowance, true);
+        assert_eq!(report.outcome, eval::Outcome::Returned(vec![2]));
+        assert_eq!(
+            report.stdout.len(),
+            crate::describe::PLACE_CAPACITY_ERR_LEN as usize
+        );
+        assert_eq!(&report.stdout[..4], &0u32.to_le_bytes());
+        let requested = u64::from_le_bytes(report.stdout[4..12].try_into().unwrap());
+        let available = u64::from_le_bytes(report.stdout[12..20].try_into().unwrap());
+        assert!(requested > available && available <= allowance);
+    }
+    let duplicate = run_runner_launch(&product, "law_duplicate", 1024 * 1024, true);
+    assert_eq!(duplicate.outcome, eval::Outcome::Returned(vec![2]));
+    assert_eq!(&duplicate.stdout[..4], &1u32.to_le_bytes());
+    assert!(duplicate.stdout[8..].starts_with(b"\x01store@1/runner_launch/echo("));
+    let denied = run_runner_launch(&product, "law_capability", 1024 * 1024, true);
+    assert_eq!(denied.outcome, eval::Outcome::Stopped("DescribeCapability"));
+    assert!(denied.stdout.is_empty());
+    let ordinary = run_runner_launch(&product, "law_main", 1024 * 1024, false);
+    assert_eq!(ordinary.outcome, eval::Outcome::Returned(vec![71]));
+    assert!(ordinary.stdout.is_empty());
+}
+#[test]
+#[should_panic(expected = "describe must finish before serve")]
+fn store_opened_in_describe_mutant_is_caught_by_the_launch_law() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = std::fs::read_to_string(root.join("core/programs/store/runner.hirsel")).unwrap();
+    let marker = "    if launch_word(5u64, 0u64) == 0u64 {";
+    assert!(source.contains(marker));
+    let mutant = source.replacen(marker, "    if launch_word(5u64, 0u64) != 0u64 { return start_server() }\n    if launch_word(5u64, 0u64) == 0u64 {", 1);
+    let path = directory.path().join("runner-mutant.hirsel");
+    std::fs::write(&path, mutant).unwrap();
+    let product = runner_launch_fixture(directory.path(), Some(&path));
+    let report = run_runner_launch(&product, "law_main", 1024 * 1024, true);
+    assert_eq!(
+        report.outcome,
+        eval::Outcome::Returned(vec![0]),
+        "describe must finish before serve"
+    );
+}
+
+#[test]
+fn runner_describe_capture_matches_reply_schema() {
+    let directory = tempfile::tempdir().unwrap();
+    let product = runner_launch_fixture(directory.path(), None);
+    let report = run_runner_launch(&product, "law_main", 1024 * 1024, true);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![0]));
+    let mut wire = report.stdout.as_slice();
+    fn count(wire: &mut &[u8]) -> usize {
+        let value = u32::from_le_bytes(wire[..4].try_into().unwrap()) as usize;
+        *wire = &wire[4..];
+        value
+    }
+    fn bytes<'a>(wire: &mut &'a [u8]) -> &'a [u8] {
+        let len = count(wire);
+        let value = &wire[..len];
+        *wire = &wire[len..];
+        value
+    }
+    assert_eq!(bytes(&mut wire), &[7; 32]);
+    assert_eq!(bytes(&mut wire), b"test-target");
+    assert_eq!(
+        u64::from_le_bytes(wire[..8].try_into().unwrap()),
+        1024 * 1024
+    );
+    wire = &wire[8..];
+    assert_eq!(count(&mut wire), 2);
+    assert_eq!(count(&mut wire), 0); // Described.kind = Compute.
+    assert!(bytes(&mut wire).starts_with(b"\x01store@1/runner_launch/echo("));
+    let args = bytes(&mut wire);
+    let result = bytes(&mut wire);
+    assert_eq!(args, result);
+    assert_eq!(args, &[3, 0, 0, 0, 0, 6]);
+    const U64_FP: u64 = 0x8dbfb7fd6918702c;
+    assert_eq!(&wire[..8], &U64_FP.to_le_bytes());
+    assert_eq!(&wire[8..16], &U64_FP.to_le_bytes());
+    wire = &wire[16..];
+    assert_eq!(count(&mut wire), 1); // Transact.
+    assert!(bytes(&mut wire).starts_with(b"\x01store@1/runner_launch/transaction("));
+    assert_eq!(bytes(&mut wire), &[3, 0, 0, 0, 0, 6]);
+    // Result[u64,bool], including its Result opcode 17 and error arm bool=1.
+    assert_eq!(bytes(&mut wire), &[3, 0, 0, 0, 0, 17, 6, 1]);
+    assert_eq!(&wire[..8], &U64_FP.to_le_bytes());
+    assert_eq!(&wire[8..16], &0xebc2239a2dc21ea8u64.to_le_bytes());
+    assert_eq!(wire.len(), 16);
+}
+
 /// Separate definition units must preserve generic calls and function values.
 /// The oracle is 20 + 21 + 1. Two definitions claiming the same code variant
 /// while returning different values are a link conflict.

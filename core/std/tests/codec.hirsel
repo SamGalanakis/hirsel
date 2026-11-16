@@ -1641,3 +1641,49 @@ fn derived_sum() -> (bool, bool, u64, (u64, u64, u64, bool), u64, bool, (u64, u6
     let gaps = (enc(gap, g) == rect, outcome(gap, rect), outcome(gap, circle))
     (written, schema, codec.least(c), tags, old, cut_schema, (a, b, outcome(cut, rect)), gaps)
 }
+
+// A generic type (EXPANSION 4): DPair[T] is a codec type when T is, and its derived items
+// take `T: codec`, so `codec.of[T]()` in them is T's own maker at each instance.
+type DPair[T]: codec {
+    left: T,
+    right: T
+}
+
+// of[DPair[T]] inside a generic body: the instance's row carries DPair[T]'s maker at its T.
+// `t` only fixes T.
+fn dpair_again[T: codec](b: Bytes, t: codec.Codec[T]) -> bool {
+    let c: codec.Codec[DPair[T]] = codec.of()
+    again(c, b)
+}
+
+fn dpair_schema[T: codec](t: codec.Codec[T]) -> Bytes {
+    let c: codec.Codec[DPair[T]] = codec.of()
+    result.unwrap(codec.schema(c))
+}
+
+// DPair[u64] against the twin pairs_u64: the same bytes, its schema at the derived path,
+// least 16, and Pair[String]'s writer refused at the first field type (generic_pair's
+// 6054, 15 bytes on: std.tests.codec.DPair is 15 bytes longer than t.Pair). Nested,
+// DPair[DPair[u64]] holds four u64s (least 32) and round-trips, and the same maker reached
+// through a generic body at T = DPair[u64] reads the same bytes and writes the same
+// schema, while at T = u64 it refuses them (trailing bytes). DPair[DPair[String]], made
+// after DPair[u64], writes its four strings by hand (count, then bytes) and reads them
+// back. An `of` that resolves a nested instance at the wrong level, or takes another
+// instance of the same declaration, fails it.
+// expect: run derived_generic() = (true, true, 16, 6069, (32, true, true, true, false), (true, true))
+fn derived_generic() -> (bool, bool, u64, u64, (u64, bool, bool, bool, bool), (bool, bool)) {
+    let c: codec.Codec[DPair[u64]] = codec.of()
+    let p: DPair[u64] = DPair(left: 1, right: 2)
+    let written = enc(c, p) == enc(pairs_u64(), Pair(left: 1, right: 2))
+    let schema = same_schema(c, result.unwrap(codec.schema(pairs_u64())), "std.tests.codec.DPair")
+    let s: codec.Codec[DPair[String]] = codec.of()
+    let held = refusal(c, result.unwrap(codec.schema(s)), unhex(""))
+    let n: codec.Codec[DPair[DPair[u64]]] = codec.of()
+    let four = unhex("0100000000000000 0200000000000000 0300000000000000 0400000000000000")
+    let nested = (codec.least(n), again(n, four), dpair_again(four, c), dpair_schema(c) == result.unwrap(codec.schema(n)), dpair_again(four, codec.of_u64()))
+    let ns: codec.Codec[DPair[DPair[String]]] = codec.of()
+    let v: DPair[DPair[String]] = DPair(left: DPair(left: "a", right: "b"), right: DPair(left: "c", right: "d"))
+    let strings = unhex("0100000000000000 61 0100000000000000 62 0100000000000000 63 0100000000000000 64")
+    let strung = (enc(ns, v) == strings, again(ns, strings))
+    (written, schema, codec.least(c), held, nested, strung)
+}

@@ -953,6 +953,15 @@ impl Emitter {
         for (source, _) in self.templates.values() {
             self.module.functions[source.index()].body = None;
         }
+        // Substitution adds rows to the module alone; a later check of one of their
+        // definitions (std's `of_u64`, demanded only through `of[$0]`) must find that
+        // row, not make a second one the call never reaches.
+        for (i, function) in self.module.functions.iter().enumerate() {
+            let key = &self.module.instances[function.instance.index()];
+            if !self.funcs.contains_key(key) {
+                self.funcs.insert(key.clone(), FuncId(i as u32));
+            }
+        }
         Ok(())
     }
 }

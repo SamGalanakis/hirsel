@@ -448,13 +448,26 @@ impl Payer {
         }
     }
 
-    pub(crate) fn finish_reserved(self) {
+    /// Hand a reservation's record over to the scope it leads to, returning the
+    /// cell's charge with it. The record is its own root until this handover
+    /// and its cell is its only charge, so the charge goes back to the record's
+    /// balance and `end_id` hands it to the live limit together with the unused
+    /// bytes (MEM-20), whichever task drops the cell: never to the inbox of the
+    /// task that reserved it, which may have ended.
+    pub(crate) fn finish_reserved(self, charge: u64) {
         let child = self.slot().id;
+        // SAFETY: the cell owns this unmerged record; no other handle charges it.
+        unsafe {
+            let r = &mut *self.local();
+            debug_assert!(r.parent.is_none() && r.outstanding == charge);
+            r.available += charge;
+            r.outstanding = 0;
+        }
         let funding = Funding { payer: self };
         // `end_id` merges the child into its parent and releases the parent-edge
         // pin `isolate_reserve` took, but preserves the child's own handle pin.
         // The reservation cell is that handle's final owner; release it, and
-        // the slot returns to the free list once its charge is refunded.
+        // the slot returns to the free list.
         funding.end_id();
         funding.payer.forest().release(child);
         std::mem::forget(funding);

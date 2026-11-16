@@ -191,3 +191,16 @@ Release build (`--target-platforms //tools/buck2:release`, runtime `hirsel-core-
 | 10,000 small writes, forwarding wrapper (C) | either | 3,416,445 | 3,758,110 | +10.0% |
 
 The two C rows are `measure/provider-wrap-writes.c`; they run no generated code, so they are the same for both engines. A provider whose `wait` and `deliver` are the OS provider's own runs the operation body with direct calls; every other provider, the wrapper here, calls through pointers and pays the identity check: +6 instructions per write against the pointer-only body (3,698,246), while the OS provider saves 12 (3,638,111 before). That trade was accepted on 2026-11-16 (review 1025 F2). **Line: the wrapper row stays at or under 3,776,900 (+0.5%).** `python3 crates/hirsel-core-rt/measure-provider.py --runtime <archive>` measures both C rows and exits 1 over the line.
+
+## Isolate and bound calls
+
+One local entry call: decode the argument, call the entry and encode the result inside a `bytes n` bound and `isolate` (RUNNER-SPEC section 8, p03 mode 2, copied unchanged to `measure/isolate-call`). Instructions per call on the release build, (median at 40,000 calls − median at 20,000) / 20,000, medians of five on CPU 4.
+
+| commit | LLVM | Cranelift |
+|---|---:|---:|
+| ed653bba, fca80e17, 37771760, 41ed2385 | 1,593 | 3,081.5 |
+| 1e866455 (an isolate reservation pins its parent scope) | 1,650 | 3,138.5 |
+| c61e7279 to bf7cf64f | 1,650 | 3,136.5 |
+| the cell's charge returns at its handover | 1,532 | 3,018.5 |
+
+1e866455 added +57 per call: the parent-scope pin (+13 in `isolate_enter`, the price of the rule that a reservation keeps its parent scope alive) and a refund that ran after the handover, so it went through `settle`'s slow path on a merged record (+101 in `settle`, −41 in `Cell::drop`, −16 in `end_id`). That order only chose the limit that receives the cell's 32 bytes. Now the handover itself returns them: the record is its own root until then and the cell is its only charge, so `end_id` hands them to the live limit with the unused bytes (MEM-20), and no `settle` runs. **Line: LLVM at or under 1,540 and Cranelift at or under 3,034 per call (+0.5%).** `python3 crates/hirsel-core-rt/measure-isolate-call.py --hirsel <hirsel> --runtime <archive>` measures both and exits 1 over a line.

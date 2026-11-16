@@ -5150,7 +5150,8 @@ fn disk_index_get[T: shareable + send](table_index: DiskIndex[T], key: u64) -> O
 }
 
 fn disk_index_put[T: shareable + send](mut table_index: DiskIndex[T], key: u64, take value: T) -> Result[(), Capacity] {
-    table_index.values = result.capacity_only(std.omap.insert(mut table_index.ids, table_index.values, key, take value))?
+    let (take values, _) = result.capacity_only(std.omap.insert(mut table_index.ids, table_index.values, key, take value))?
+    table_index.values = take values
     Ok(())
 }
 

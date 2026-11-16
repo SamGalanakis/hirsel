@@ -1,0 +1,1287 @@
+// Contract tests for `codec` (core/std/codec.hirsel). Expected bytes are written out by
+// hand from the format in the module header (little-endian, u64 counts and tags), never
+// taken from an encode. A decode error reads as kind * 1000 + offset: 1 Truncated,
+// 2 Invalid, 3 Utf8, 4 Duplicate, 5 Trailing, 6 Schema, 7 Value; 0 is success.
+
+fn nibble(x: u8) -> u8 {
+    if x >= 97 {
+        x - 87
+    } else {
+        x - 48
+    }
+}
+
+// Bytes from hex digits; spaces are ignored.
+fn unhex(s: String) -> Bytes {
+    let raw = string.as_bytes(s)
+    let mut b: Bytes = list.new()
+    let mut i: u64 = 0
+    while i < list.len(raw) {
+        if raw[i] == 32 {
+            i += 1
+        } else {
+            result.unwrap(list.push(mut b, nibble(raw[i]) * 16 + nibble(raw[i + 1])))
+            i += 2
+        }
+    }
+    take b
+}
+
+fn enc[T](c: codec.Codec[T], x: T) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(codec.encode(c, x, mut out))
+    take out
+}
+
+fn code(e: codec.DecodeError) -> u64 {
+    match e {
+        Truncated(i) => 1000 + i,
+        Invalid(i) => 2000 + i,
+        Utf8(i) => 3000 + i,
+        Duplicate(i) => 4000 + i,
+        Trailing(i) => 5000 + i,
+        Schema(i) => 6000 + i,
+        Value(i) => 7000 + i
+    }
+}
+
+fn outcome[T](c: codec.Codec[T], b: Bytes) -> u64 {
+    match codec.decode(c, b) {
+        Ok(Ok(_)) => 0,
+        Ok(Error(e)) => code(e),
+        Error(_) => 9999
+    }
+}
+
+// The same value back, by re-encoding it: equal bytes or not.
+fn again[T](c: codec.Codec[T], b: Bytes) -> bool {
+    match codec.decode(c, b) {
+        Ok(Ok(x)) => enc(c, x) == b,
+        _ => false
+    }
+}
+
+// Every proper prefix of b is Truncated at an offset inside the prefix, and b itself
+// decodes to bytes that encode back to b. Catches a take that reads past the end, or
+// reports truncation at a place the prefix does not reach.
+fn prefixes[T](c: codec.Codec[T], b: Bytes) -> bool {
+    let mut k: u64 = 0
+    while k < list.len(b) {
+        let mut cut: Bytes = list.new()
+        result.unwrap(list.append(mut cut, list.slice(b, 0, k)))
+        let o = outcome(c, cut)
+        if o < 1000 || o > 1000 + k {
+            return false
+        }
+        k += 1
+    }
+    again(c, b)
+}
+
+// The format: widths, little-endian, two's complement, IEEE bits, the scalar of a char,
+// bool's two bytes, () as nothing, String's u64 byte count. A wrong width or byte order
+// in any put, or a char written as UTF-8, fails it.
+// expect: run format_scalars() = true
+fn format_scalars() -> bool {
+    let u: u16 = 0x1234
+    let i: i64 = -2
+    let f: f32 = 1.0
+    let g: f64 = -0.5
+    let small: i8 = -1
+    let w: u32 = 7
+    enc(codec.of_u16(), u) == unhex("3412") &&
+        enc(codec.of_i64(), i) == unhex("feffffffffffffff") &&
+        enc(codec.of_f32(), f) == unhex("0000803f") &&
+        enc(codec.of_f64(), g) == unhex("000000000000e0bf") &&
+        enc(codec.of_char(), 'é') == unhex("e9000000") &&
+        enc(codec.of_bool(), true) == unhex("01") &&
+        enc(codec.of_unit(), ()) == unhex("") &&
+        enc(codec.of_string(), "hé") == unhex("0300000000000000 68c3a9") &&
+        enc(codec.of_i8(), small) == unhex("ff") &&
+        enc(codec.of_u32(), w) == unhex("07000000")
+}
+
+// The extremes of each width come back, and every prefix of them is Truncated.
+// expect: run scalars_round_trip() = true
+fn scalars_round_trip() -> bool {
+    prefixes(codec.of_u8(), unhex("ff")) &&
+        prefixes(codec.of_u16(), unhex("ffff")) &&
+        prefixes(codec.of_u32(), unhex("ffffffff")) &&
+        prefixes(codec.of_u64(), unhex("ffffffffffffffff")) &&
+        prefixes(codec.of_i8(), unhex("80")) &&
+        prefixes(codec.of_i16(), unhex("0080")) &&
+        prefixes(codec.of_i32(), unhex("00000080")) &&
+        prefixes(codec.of_i64(), unhex("0000000000000080")) &&
+        prefixes(codec.of_f32(), unhex("0000c07f")) &&
+        prefixes(codec.of_f64(), unhex("0000000000000080")) &&
+        prefixes(codec.of_f64(), unhex("000000000000f07f")) &&
+        prefixes(codec.of_f64(), unhex("000000000000f87f")) &&
+        prefixes(codec.of_char(), unhex("ffff1000")) &&
+        prefixes(codec.of_bool(), unhex("00")) &&
+        prefixes(codec.of_string(), unhex("0000000000000000")) &&
+        prefixes(codec.of_string(), unhex("0400000000000000 f09f9880"))
+}
+
+// Bytes no value encodes to are Invalid at the value: bool 2, a NaN other than SEM-2's
+// one, a surrogate and a scalar past U+10FFFF. A take that masks or canonicalises
+// instead of refusing fails it, which would break decode-accepts-exactly-encode's-image.
+// expect: run refuses_non_values() = 14000
+fn refuses_non_values() -> u64 {
+    let mut digits: u64 = 0
+    digits = digits + outcome(codec.of_bool(), unhex("02"))
+    digits = digits + outcome(codec.of_f32(), unhex("0100c07f"))
+    digits = digits + outcome(codec.of_f32(), unhex("0000c0ff"))
+    digits = digits + outcome(codec.of_f64(), unhex("010000000000f87f"))
+    digits = digits + outcome(codec.of_f64(), unhex("000000000000f8ff"))
+    digits = digits + outcome(codec.of_char(), unhex("00d80000"))
+    digits = digits + outcome(codec.of_char(), unhex("00001100"))
+    digits
+}
+
+// UTF-8 is checked at the byte that stops being UTF-8 (RFC 3629): a lone 0xff, an
+// overlong NUL, a surrogate, a cut four-byte scalar. A take that accepts any bytes, or
+// reports the string's start, fails it.
+// expect: run refuses_bad_utf8() = (3009, 3008, 3008, 3009)
+fn refuses_bad_utf8() -> (u64, u64, u64, u64) {
+    (outcome(codec.of_string(), unhex("0300000000000000 61ff62")), outcome(codec.of_string(), unhex("0200000000000000 c080")), outcome(codec.of_string(), unhex("0300000000000000 eda080")), outcome(codec.of_string(), unhex("0400000000000000 61f09f98")))
+}
+
+// A composite record: what a generated codec is for a record whose fields are an
+// Option, a Result, a Map, a List and a tuple (the tuple inline, field by field).
+type Mix {
+    tag: Option[String],
+    res: Result[u16, String],
+    m: Map[String, u8],
+    xs: List[i32],
+    pair: (u8, bool)
+}
+
+fn mix_encode(x: Mix, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_option(x.tag, codec.of_string(), mut out)?
+    codec.put_result(x.res, codec.of_u16(), codec.of_string(), mut out)?
+    codec.put_map(x.m, codec.of_string(), codec.of_u8(), mut out)?
+    codec.put_list(x.xs, codec.of_i32(), mut out)?
+    let (p0, p1) = x.pair
+    codec.put_u8(p0, mut out)?
+    codec.put_bool(p1, mut out)
+}
+
+fn mix_decode(b: Bytes, mut at: u64) -> Result[Mix, codec.Stop] {
+    let tag = codec.take_option(b, mut at, codec.of_string())?
+    let res = codec.take_result(b, mut at, codec.of_u16(), codec.of_string())?
+    let m = codec.take_map(b, mut at, codec.of_string(), codec.of_u8())?
+    let xs = codec.take_list(b, mut at, codec.of_i32())?
+    let p0 = codec.take_u8(b, mut at)?
+    let p1 = codec.take_bool(b, mut at)?
+    Ok(Mix(tag: take tag, res: take res, m: take m, xs: take xs, pair: (p0, p1)))
+}
+
+fn mix_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Mix", 0)?
+    if codec.record(mut s, 5)? {
+        return Ok(())
+    }
+    codec.field(mut s, "tag")?
+    codec.schema_option(mut s, codec.of_string())?
+    codec.field(mut s, "res")?
+    codec.schema_result(mut s, codec.of_u16(), codec.of_string())?
+    codec.field(mut s, "m")?
+    codec.schema_map(mut s, codec.of_string(), codec.of_u8())?
+    codec.field(mut s, "xs")?
+    codec.schema_list(mut s, codec.of_i32())?
+    codec.field(mut s, "pair")?
+    codec.schema_tuple(mut s, 2)?
+    codec.schema_u8(mut s)?
+    codec.schema_bool(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn mixes() -> codec.Codec[Mix] {
+    codec.make(mix_encode, mix_decode, mix_schema, 34)
+}
+
+// tag Some("a"), res Error("b"), m {"k": 5}, xs [-1], pair (9, true), by hand.
+fn mix_bytes() -> Bytes {
+    unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01")
+}
+
+// The composite format by hand, then every prefix Truncated inside it. A put that drops
+// a count or tag, or a take that reads past a cut, fails it.
+// expect: run mix_format() = true
+fn mix_format() -> bool {
+    let mut m: Map[String, u8] = map.new()
+    result.unwrap(map.insert(mut m, result.unwrap(string.from("k")), 5))
+    let mut xs: List[i32] = list.new()
+    result.unwrap(list.push(mut xs, -1))
+    let x = Mix(tag: Some(result.unwrap(string.from("a"))), res: Error(result.unwrap(string.from("b"))), m: take m, xs: take xs, pair: (9, true))
+    enc(mixes(), x) == mix_bytes() && prefixes(mixes(), mix_bytes())
+}
+
+// Decode accepts exactly encode's image: after any byte of a valid encoding is flipped
+// (three masks), either decode refuses it or the value encodes back to the flipped
+// bytes. A take that accepts a non-canonical byte (bool 2, tag 2, a duplicate key) or
+// admits a flipped count before checking it (Capacity) fails it.
+// expect: run flips_are_refused_or_exact() = true
+fn flips_are_refused_or_exact() -> bool {
+    let b = mix_bytes()
+    let mut i: u64 = 0
+    while i < list.len(b) {
+        let mut j: u64 = 0
+        while j < 3 {
+            let mask: u8 = if j == 0 {
+                1
+            } else if j == 1 {
+                128
+            } else {
+                255
+            }
+            let mut bad: Bytes = list.new()
+            result.unwrap(list.append(mut bad, b))
+            let _ = list.set(mut bad, i, b[i] ^ mask)
+            match codec.decode(mixes(), bad) {
+                Ok(Ok(x)) => {
+                    if enc(mixes(), x) != bad {
+                        return false
+                    }
+                }
+                Ok(Error(_)) => {}
+                Error(_) => return false
+            }
+            j += 1
+        }
+        i += 1
+    }
+    true
+}
+
+// Hand-made near misses of mix_bytes (tag at 0, res at 17, m at 34 with its key at 42,
+// xs at 52, the pair at 64): Option tag 2 at 0; Result tag 2 at 17; the key "k" again
+// in a two-entry map, at the second key (52); the bool 2 at 65; one byte past the end,
+// Trailing at 66; a list count no remaining bytes hold, Truncated at the count (52)
+// before anything is admitted.
+// expect: run mix_near_misses() = (2000, 2017, 4052, 2065, 5066, 1052)
+fn mix_near_misses() -> (u64, u64, u64, u64, u64, u64) {
+    let a = outcome(mixes(), unhex("0200000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01"))
+    let b = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0200000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01"))
+    let c = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0200000000000000 0100000000000000 6b 05 0100000000000000 6b 06 0100000000000000 ffffffff 09 01"))
+    let d = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 02"))
+    let e = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01 00"))
+    let f = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 ffffffffffffff7f ffffffff 09 01"))
+    (a, b, c, d, e, f)
+}
+
+// The expansions (EXPANSION.md): each block is the text the derive generates for its type.
+
+// (a) A record with a defaulted field: `type Row codec { id: u64, name: String,
+// score: i64 = 7 }`. The other row codecs below are earlier or later versions of the
+// same type, as writers: one Row type, several schemas.
+type Row {
+    id: u64,
+    name: String,
+    score: i64
+}
+
+fn row_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_u64(x.id, mut out)?
+    codec.put_string(x.name, mut out)?
+    codec.put_i64(x.score, mut out)
+}
+
+fn row_decode(b: Bytes, mut at: u64) -> Result[Row, codec.Stop] {
+    let id = codec.take_u64(b, mut at)?
+    let name = codec.take_string(b, mut at)?
+    let score = codec.take_i64(b, mut at)?
+    Ok(Row(id: id, name: take name, score: score))
+}
+
+fn row_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 3)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.field_default(mut s, "score", codec.of_i64(), 7)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn rows() -> codec.Codec[Row] {
+    codec.make(row_encode, row_decode, row_schema, 24)
+}
+
+// Version 1: `{ id: u64, name: String }`.
+fn v1_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_u64(x.id, mut out)?
+    codec.put_string(x.name, mut out)
+}
+
+fn v1_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn rows_v1() -> codec.Codec[Row] {
+    codec.make(v1_encode, row_decode, v1_schema, 16)
+}
+
+// `{ name: String, id: u64 }`: the same fields, reordered.
+fn swapped_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_string(x.name, mut out)?
+    codec.put_u64(x.id, mut out)
+}
+
+fn swapped_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn rows_swapped() -> codec.Codec[Row] {
+    codec.make(swapped_encode, row_decode, swapped_schema, 16)
+}
+
+// `{ id: u64, note: String, name: String }`: note is "n" in every value written.
+fn noted_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_u64(x.id, mut out)?
+    codec.put_string("n", mut out)?
+    codec.put_string(x.name, mut out)
+}
+
+fn noted_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 3)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "note")?
+    codec.schema_string(mut s)?
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn rows_noted() -> codec.Codec[Row] {
+    codec.make(noted_encode, row_decode, noted_schema, 24)
+}
+
+// A type with a tombstone: `type Row codec { id: u64, removed note: String,
+// name: String, score: i64 = 7 }`. The encode and decode are row's; only the schema
+// keeps the removed name.
+fn tomb_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 4)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.removed(mut s, "note")?
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.field_default(mut s, "score", codec.of_i64(), 7)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn rows_tomb() -> codec.Codec[Row] {
+    codec.make(row_encode, row_decode, tomb_schema, 24)
+}
+
+// Writers no evolution admits: id retyped to i64; a field `extra: bool` the reader
+// lacks; name missing with no default.
+fn retyped_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_i64(mut s)?
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn extra_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 3)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.field(mut s, "extra")?
+    codec.schema_bool(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn short_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 1)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn schema_bytes(w: fn(mut codec.Schema) -> Result[(), Capacity]) -> Bytes {
+    result.unwrap(codec.schema(codec.make(row_encode, row_decode, w, 24)))
+}
+
+fn row(id: u64, name: String) -> Row {
+    Row(id: id, name: result.unwrap(string.from(name)), score: 3)
+}
+
+// Reads b, written under the schema `writer`, as c's type; the value or the error code.
+fn through[T](c: codec.Codec[T], writer: Bytes, b: Bytes) -> Result[T, u64] {
+    match codec.resolve(c, writer) {
+        Ok(Ok(r)) => match codec.read(r, b) {
+            Ok(Ok(x)) => Ok(take x),
+            Ok(Error(e)) => Error(code(e)),
+            Error(_) => Error(9999)
+        },
+        Ok(Error(e)) => Error(code(e)),
+        Error(_) => Error(9999)
+    }
+}
+
+fn row_through(c: codec.Codec[Row], writer: Bytes, b: Bytes) -> (u64, u64, i64) {
+    match through(c, writer, b) {
+        Ok(x) => (x.id, string.byte_len(x.name), x.score),
+        Error(k) => (k, 0, 0)
+    }
+}
+
+fn refusal[T](c: codec.Codec[T], writer: Bytes, b: Bytes) -> u64 {
+    match through(c, writer, b) {
+        Ok(_) => 0,
+        Error(k) => k
+    }
+}
+
+// Version 1's schema by hand: version 1, one definition (the path "t.Row", no arguments,
+// a record of two fields: 0 "id" u64 (6), 0 "name" String (13)), the root a reference
+// to definition 0. A schema writer that drops a count, misnumbers an opcode or writes
+// the definition inline fails it.
+// expect: run schema_by_hand() = true
+fn schema_by_hand() -> bool {
+    schema_bytes(v1_schema) == unhex("01 0100000000000000 0500000000000000 742e526f77 0000000000000000 00 0200000000000000 00 0200000000000000 6964 06 00 0400000000000000 6e616d65 0d 13 0000000000000000")
+}
+
+// A tombstone is in the schema (1, then the name) where its field was; so it is in the
+// fingerprint, and a schema that forgot it would let the name be reused.
+// expect: run tombstone_in_schema() = true
+fn tombstone_in_schema() -> bool {
+    schema_bytes(tomb_schema) == unhex("01 0100000000000000 0500000000000000 742e526f77 0000000000000000 00 0400000000000000 00 0200000000000000 6964 06 01 0400000000000000 6e6f7465 00 0400000000000000 6e616d65 0d 00 0500000000000000 73636f7265 0a 13 0000000000000000")
+}
+
+// CRC-64-AVRO (the Avro specification's Rabin fingerprint; reference values from its
+// algorithm in Python over the same bytes): the u64 schema 01 0..0 06 is
+// 0xd1dc66ea57b6e92a, and no bytes are the empty value 0xc15d213aa4d7a795. A different
+// polynomial, seed or bit order fails it.
+// expect: run fingerprint_reference() = (0xd1dc66ea57b6e92a, 0xc15d213aa4d7a795, true)
+fn fingerprint_reference() -> (u64, u64, bool) {
+    let a = result.unwrap(codec.fingerprint(codec.of_u64()))
+    let e = codec.fingerprint_of(list.new())
+    let d = result.unwrap(codec.fingerprint(rows_tomb())) != result.unwrap(codec.fingerprint(rows()))
+    (a, e, d)
+}
+
+// Evolution that survives old data. A field added with a default: version 1's bytes read
+// as Row with score 7. Reordered fields: the writer's order is undone. A field the reader
+// removed by tombstone: skipped (the writer's note), the rest kept, score defaulted.
+// Equal schemas: read is decode. A resolver that ignores defaults, keeps the writer's
+// order or keeps the dropped field's bytes fails it.
+// expect: run evolution_reads_old_rows() = ((5, 2, 7), (6, 3, 7), (8, 1, 7), (9, 2, 3))
+fn evolution_reads_old_rows() -> ((u64, u64, i64), (u64, u64, i64), (u64, u64, i64), (u64, u64, i64)) {
+    let a = row_through(rows(), schema_bytes(v1_schema), enc(rows_v1(), row(5, "ab")))
+    let b = row_through(rows(), schema_bytes(swapped_schema), enc(rows_swapped(), row(6, "abc")))
+    let c = row_through(rows_tomb(), schema_bytes(noted_schema), enc(rows_noted(), row(8, "x")))
+    let d = row_through(rows(), schema_bytes(row_schema), enc(rows(), row(9, "yz")))
+    (a, b, c, d)
+}
+
+// Evolution no rule admits is Schema at the writer's schema: id retyped, at its type
+// (offset 50); a writer field the reader lacks, at its entry (65); a reader field with
+// no default the writer lacks, at the writer's definition (9); a tombstoned name live
+// again, at the writer's tombstone entry (51); bytes that are no schema, at the
+// definition count (1). Offsets by hand from schema_by_hand's layout.
+// expect: run evolution_refused() = (6050, 6065, 6009, 6051, 6001)
+fn evolution_refused() -> (u64, u64, u64, u64, u64) {
+    let none = unhex("")
+    let a = refusal(rows(), schema_bytes(retyped_schema), none)
+    let b = refusal(rows(), schema_bytes(extra_schema), none)
+    let c = refusal(rows(), schema_bytes(short_schema), none)
+    let d = refusal(rows_noted(), schema_bytes(tomb_schema), none)
+    let e = refusal(rows(), unhex("01 05"), none)
+    (a, b, c, d, e)
+}
+
+// Through resolution, the writer's bytes are checked as decode checks them, at offsets
+// in the writer's bytes: version 1's name cut short, Truncated at the name (8); a
+// trailing byte, Trailing at 18; the note's bad UTF-8 is still refused though the field
+// is dropped, at its byte (16).
+// expect: run resolution_checks_writer_bytes() = (1008, 5018, 3016)
+fn resolution_checks_writer_bytes() -> (u64, u64, u64) {
+    let a = refusal(rows(), schema_bytes(v1_schema), unhex("0500000000000000 0200000000000000 61"))
+    let b = refusal(rows(), schema_bytes(v1_schema), unhex("0500000000000000 0200000000000000 6162 00"))
+    let c = refusal(rows_tomb(), schema_bytes(noted_schema), unhex("0500000000000000 0100000000000000 ff 0100000000000000 61"))
+    (a, b, c)
+}
+
+// (b) A sum: `type Shape codec = Dot | Circle(f64) | Rect(u64, u64)`. Its earlier
+// version had Dot and Circle; a later one removed Rect by tombstone.
+type Shape = Dot | Circle(f64) | Rect(u64, u64)
+
+fn shape_encode(x: Shape, mut out: Bytes) -> Result[(), Capacity] {
+    match x {
+        Dot => codec.put_tag(0, mut out),
+        Circle(r) => {
+            codec.put_tag(1, mut out)?
+            codec.put_f64(r, mut out)
+        }
+        Rect(w, h) => {
+            codec.put_tag(2, mut out)?
+            codec.put_u64(w, mut out)?
+            codec.put_u64(h, mut out)
+        }
+    }
+}
+
+fn shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.Stop] {
+    let tag = codec.take_tag(b, mut at, 3)?
+    if tag == 0 {
+        Ok(Dot)
+    } else if tag == 1 {
+        let r = codec.take_f64(b, mut at)?
+        Ok(Circle(r))
+    } else {
+        let w = codec.take_u64(b, mut at)?
+        let h = codec.take_u64(b, mut at)?
+        Ok(Rect(w, h))
+    }
+}
+
+fn shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Shape", 0)?
+    if codec.sum(mut s, 3)? {
+        return Ok(())
+    }
+    codec.variant(mut s, "Dot", 0)?
+    codec.variant(mut s, "Circle", 1)?
+    codec.schema_f64(mut s)?
+    codec.variant(mut s, "Rect", 2)?
+    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn shapes() -> codec.Codec[Shape] {
+    codec.make(shape_encode, shape_decode, shape_schema, 8)
+}
+
+fn old_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Shape", 0)?
+    if codec.sum(mut s, 2)? {
+        return Ok(())
+    }
+    codec.variant(mut s, "Dot", 0)?
+    codec.variant(mut s, "Circle", 1)?
+    codec.schema_f64(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+// A removed variant's tag is no value of the reader's: its decode refuses it as it
+// refuses a tag past the end.
+fn cut_shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.Stop] {
+    let start = at
+    let tag = codec.take_tag(b, mut at, 3)?
+    if tag == 0 {
+        Ok(Dot)
+    } else if tag == 1 {
+        let r = codec.take_f64(b, mut at)?
+        Ok(Circle(r))
+    } else {
+        Error(Bad(Invalid(start)))
+    }
+}
+
+fn cut_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Shape", 0)?
+    if codec.sum(mut s, 3)? {
+        return Ok(())
+    }
+    codec.variant(mut s, "Dot", 0)?
+    codec.variant(mut s, "Circle", 1)?
+    codec.schema_f64(mut s)?
+    codec.removed(mut s, "Rect")?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn renamed_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Shape", 0)?
+    if codec.sum(mut s, 2)? {
+        return Ok(())
+    }
+    codec.variant(mut s, "Dot", 0)?
+    codec.variant(mut s, "Ring", 1)?
+    codec.schema_f64(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn shape_schema_bytes(w: fn(mut codec.Schema) -> Result[(), Capacity]) -> Bytes {
+    result.unwrap(codec.schema(codec.make(shape_encode, shape_decode, w, 8)))
+}
+
+fn shape_code(x: Shape) -> u64 {
+    match x {
+        Dot => 1,
+        Circle(_) => 2,
+        Rect(w, h) => 30 + w + h
+    }
+}
+
+fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema) -> Result[(), Capacity], b: Bytes) -> u64 {
+    match through(reader, shape_schema_bytes(w), b) {
+        Ok(x) => shape_code(x),
+        Error(k) => k
+    }
+}
+
+// Variant evolution. Appended at the end: the old writer's Circle reads unchanged (2).
+// Removed by tombstone: the writer's Circle reads (2), its Rect is Invalid at its tag
+// (2000). Refused, as Schema: a writer with more variants than the reader declares, at
+// the writer's kind byte (32); a renamed variant, at the writer's entry for it (61). A
+// resolver that matched variants by position only, or let a removed tag through,
+// fails it.
+// expect: run variant_evolution() = (2, 2, 2000, 6032, 6061)
+fn variant_evolution() -> (u64, u64, u64, u64, u64) {
+    let circle = unhex("0100000000000000 000000000000f03f")
+    let rect = unhex("0200000000000000 0100000000000000 0200000000000000")
+    let a = shape_through(shapes(), old_shape_schema, circle)
+    let cut = codec.make(shape_encode, cut_shape_decode, cut_shape_schema, 8)
+    let b = shape_through(cut, shape_schema, circle)
+    let c = shape_through(cut, shape_schema, rect)
+    let reader_old = codec.make(shape_encode, shape_decode, old_shape_schema, 8)
+    let d = shape_through(reader_old, shape_schema, circle)
+    let e = shape_through(shapes(), renamed_shape_schema, circle)
+    (a, b, c, d, e)
+}
+
+// (c) A generic type, a codec type when its parameter is: `type Pair[T] codec { left: T,
+// right: T }`. The body takes T's codec as an argument; with hook C the derive's
+// pair_encode[T: codec] passes `codec.of[T]()`. Here the u64 instance passes of_u64.
+type Pair[T] {
+    left: T,
+    right: T
+}
+
+fn pair_encode_with[T](x: Pair[T], c: codec.Codec[T], mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_with(x.left, c, mut out)?
+    codec.put_with(x.right, c, mut out)
+}
+
+fn pair_decode_with[T](b: Bytes, mut at: u64, c: codec.Codec[T]) -> Result[Pair[T], codec.Stop] {
+    let left = codec.take_with(b, mut at, c)?
+    let right = codec.take_with(b, mut at, c)?
+    Ok(Pair(left: take left, right: take right))
+}
+
+fn pair_schema_with[T](mut s: codec.Schema, c: codec.Codec[T]) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Pair", 1)?
+    codec.argument(mut s, c)?
+    if codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    codec.field(mut s, "left")?
+    codec.schema_of(mut s, c)?
+    codec.field(mut s, "right")?
+    codec.schema_of(mut s, c)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn pair_u64_encode(x: Pair[u64], mut out: Bytes) -> Result[(), Capacity] {
+    pair_encode_with(x, codec.of_u64(), mut out)
+}
+
+fn pair_u64_decode(b: Bytes, mut at: u64) -> Result[Pair[u64], codec.Stop] {
+    pair_decode_with(b, mut at, codec.of_u64())
+}
+
+fn pair_u64_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    pair_schema_with(mut s, codec.of_u64())
+}
+
+fn pairs_u64() -> codec.Codec[Pair[u64]] {
+    codec.make(pair_u64_encode, pair_u64_decode, pair_u64_schema, 16)
+}
+
+fn pair_string_encode(x: Pair[String], mut out: Bytes) -> Result[(), Capacity] {
+    pair_encode_with(x, codec.of_string(), mut out)
+}
+
+fn pair_string_decode(b: Bytes, mut at: u64) -> Result[Pair[String], codec.Stop] {
+    pair_decode_with(b, mut at, codec.of_string())
+}
+
+fn pair_string_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    pair_schema_with(mut s, codec.of_string())
+}
+
+fn pairs_string() -> codec.Codec[Pair[String]] {
+    codec.make(pair_string_encode, pair_string_decode, pair_string_schema, 16)
+}
+
+// Pair[u64]'s schema by hand: one definition "t.Pair" with one argument (u64), two u64
+// fields. Pair[String] is another definition (its argument differs); resolution goes by
+// the fields, so reading Pair[String] bytes as Pair[u64] is refused at the writer's
+// first field type (offset 54). The u64 pair round-trips.
+// expect: run generic_pair() = (true, true, 6054)
+fn generic_pair() -> (bool, bool, u64) {
+    let a = result.unwrap(codec.schema(pairs_u64())) == unhex("01 0100000000000000 0600000000000000 742e50616972 0100000000000000 06 00 0200000000000000 00 0400000000000000 6c656674 06 00 0500000000000000 7269676874 06 13 0000000000000000")
+    let b = again(pairs_u64(), unhex("0100000000000000 0200000000000000"))
+    let c = refusal(pairs_u64(), result.unwrap(codec.schema(pairs_string())), unhex(""))
+    (a, b, c)
+}
+
+// (d) A recursive type: `type Tree codec { label: u64, kids: List[Tree] }`. Encode
+// recurses (OWN-19: no List[View[Tree]] to walk with); decode is a frame loop, so any
+// depth the bytes hold decodes without growing the call stack.
+type Tree {
+    label: u64,
+    kids: List[Tree]
+}
+
+type TreeFrame {
+    label: u64,
+    kids: List[Tree],
+    left: u64
+}
+
+fn tree_encode(x: Tree, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_u64(x.label, mut out)?
+    codec.put_list(x.kids, trees(), mut out)
+}
+
+fn tree_decode(b: Bytes, mut at: u64) -> Result[Tree, codec.Stop] {
+    let mut stack: List[TreeFrame] = list.new()
+    loop {
+        let label = codec.take_u64(b, mut at)?
+        let n = codec.take_count(b, mut at, 16)?
+        if n > 0 {
+            let kids: List[Tree] = codec.room(n)?
+            codec.full(list.push(mut stack, TreeFrame(label: label, kids: take kids, left: n)))?
+            continue
+        }
+        let mut done = Tree(label: label, kids: list.new())
+        loop {
+            let mut f = match list.pop(mut stack) {
+                Some(top) => take top,
+                None => return Ok(take done)
+            }
+            codec.full(list.push(mut f.kids, take done))?
+            f.left -= 1
+            if f.left > 0 {
+                codec.full(list.push(mut stack, take f))?
+                break
+            }
+            done = Tree(label: f.label, kids: replace(mut f.kids, list.new()))
+        }
+    }
+}
+
+fn tree_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Tree", 0)?
+    if codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    codec.field(mut s, "label")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "kids")?
+    codec.schema_list(mut s, trees())?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn trees() -> codec.Codec[Tree] {
+    codec.make(tree_encode, tree_decode, tree_schema, 16)
+}
+
+// An earlier Tree with its fields the other way round, as a writer.
+fn swapped_tree_encode(x: Tree, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_list(x.kids, swapped_trees(), mut out)?
+    codec.put_u64(x.label, mut out)
+}
+
+fn swapped_tree_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Tree", 0)?
+    if codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    codec.field(mut s, "kids")?
+    codec.schema_list(mut s, swapped_trees())?
+    codec.field(mut s, "label")?
+    codec.schema_u64(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn swapped_trees() -> codec.Codec[Tree] {
+    codec.make(swapped_tree_encode, tree_decode, swapped_tree_schema, 16)
+}
+
+// Labels in preorder as digits, iteratively, taking the tree apart as it goes.
+fn preorder(take t: Tree) -> u64 {
+    let mut digits: u64 = 0
+    let mut todo: List[Tree] = list.new()
+    result.unwrap(list.push(mut todo, take t))
+    while let Some(top) = list.pop(mut todo) {
+        let mut x = take top
+        digits = digits * 10 + x.label
+        while let Some(k) = list.pop(mut x.kids) {
+            result.unwrap(list.push(mut todo, take k))
+        }
+    }
+    digits
+}
+
+fn tree_bytes() -> Bytes {
+    unhex("0100000000000000 0200000000000000 0200000000000000 0000000000000000 0300000000000000 0100000000000000 0400000000000000 0000000000000000")
+}
+
+// Tree 1 [2 [], 3 [4 []]] by hand: label, count, kids; its schema refers to itself (the
+// kids' element is reference 0, not the definition again). Every prefix is Truncated.
+// Written by the swapped version and read through resolution, the one record node
+// serves every level: preorder 1, 2, 3, 4 again. A schema writer that re-expands the
+// definition never terminates; a plan that compiled per level would too.
+// expect: run recursive_tree() = (true, true, 1234, 1234)
+fn recursive_tree() -> (bool, bool, u64, u64) {
+    let a = result.unwrap(codec.schema(trees())) == unhex("01 0100000000000000 0600000000000000 742e54726565 0000000000000000 00 0200000000000000 00 0500000000000000 6c6162656c 06 00 0400000000000000 6b696473 0e 13 0000000000000000 13 0000000000000000")
+    let b = prefixes(trees(), tree_bytes())
+    let c = match codec.decode(trees(), tree_bytes()) {
+        Ok(Ok(t)) => preorder(take t),
+        _ => 0
+    }
+    let swapped = match codec.decode(trees(), tree_bytes()) {
+        Ok(Ok(t)) => enc(swapped_trees(), t),
+        _ => list.new()
+    }
+    let d = match through(trees(), result.unwrap(codec.schema(swapped_trees())), swapped) {
+        Ok(t) => preorder(take t),
+        Error(k) => k
+    }
+    (a, b, c, d)
+}
+
+// A chain of depth d, label i and one kid down to a leaf, decoded directly and, written
+// by the swapped version, through resolution; each the depth counted iteratively (the
+// chain taken apart the same way) or a decode error's code, 9999 for Capacity.
+fn deep(depth: u64) -> (u64, u64) {
+    let a = deep_decode(depth)
+    let mut w: Bytes = result.unwrap(list.with_capacity(16 * depth + 16))
+    let mut i: u64 = 0
+    while i < depth {
+        result.unwrap(list.put_word_le(mut w, 1))
+        i += 1
+    }
+    result.unwrap(list.put_word_le(mut w, 0))
+    result.unwrap(list.put_word_le(mut w, depth))
+    while i > 0 {
+        i -= 1
+        result.unwrap(list.put_word_le(mut w, i))
+    }
+    let c = match through(trees(), result.unwrap(codec.schema(swapped_trees())), w) {
+        Ok(t) => chain(take t),
+        Error(k) => k
+    }
+    (a, c)
+}
+
+fn deep_decode(depth: u64) -> u64 {
+    let mut b: Bytes = result.unwrap(list.with_capacity(16 * depth + 16))
+    let mut i: u64 = 0
+    while i < depth {
+        result.unwrap(list.put_word_le(mut b, i))
+        result.unwrap(list.put_word_le(mut b, 1))
+        i += 1
+    }
+    result.unwrap(list.put_word_le(mut b, depth))
+    result.unwrap(list.put_word_le(mut b, 0))
+    match codec.decode(trees(), b) {
+        Ok(Ok(t)) => chain(take t),
+        Ok(Error(e)) => code(e),
+        Error(_) => 9999
+    }
+}
+
+// Depth 10^4 decodes exactly, both ways: the frame loops keep each level's place, and a
+// reordered record at every level relinks its own fields only (a rebuild that copied the
+// record's whole subtree was quadratic here).
+// expect: run deep_chain() = (10000, 10000)
+fn deep_chain() -> (u64, u64) {
+    deep(10000)
+}
+
+// Depth 10^6: SEM-10 sets no nesting limit, so each path decodes the whole chain or stops
+// at Capacity (under the engines' 64 MiB test limit it is Capacity), never a stack
+// overflow, which a decoder that recursed per level hits long before. It takes `out` so
+// it runs on the engines only: the evaluator holds about 30 KB a level (4 GB at 10^5).
+// expect: run deep_tree(out) = true
+fn deep_tree(out: Stdout) -> bool {
+    let (a, c) = deep(1000000)
+    (a == 1000000 || a == 9999) && (c == 1000000 || c == 9999)
+}
+
+fn chain(take t: Tree) -> u64 {
+    let mut x = take t
+    let mut d: u64 = 0
+    while let Some(k) = list.pop(mut x.kids) {
+        x = take k
+        d += 1
+    }
+    d
+}
+
+// (e) A field whose type is another package's codec type: the generated code calls that
+// package's codec (std's DecodeError here, std.codec.of_decode_error). `type Failure
+// codec { at: u64, why: codec.DecodeError }`.
+type Failure {
+    at: u64,
+    why: codec.DecodeError
+}
+
+fn failure_encode(x: Failure, mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_u64(x.at, mut out)?
+    codec.put_with(x.why, codec.of_decode_error(), mut out)
+}
+
+fn failure_decode(b: Bytes, mut at: u64) -> Result[Failure, codec.Stop] {
+    let offset = codec.take_u64(b, mut at)?
+    let why = codec.take_with(b, mut at, codec.of_decode_error())?
+    Ok(Failure(at: offset, why: take why))
+}
+
+fn failure_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Failure", 0)?
+    if codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    codec.field(mut s, "at")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "why")?
+    codec.schema_of(mut s, codec.of_decode_error())?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn failures() -> codec.Codec[Failure] {
+    codec.make(failure_encode, failure_decode, failure_schema, 24)
+}
+
+// Failure(at: 3, why: Utf8(9)) is 3, tag 2, 9; the schema holds both definitions, the
+// foreign one second (met second), its seven variants in declared order.
+// expect: run foreign_codec_type() = (true, true, true)
+fn foreign_codec_type() -> (bool, bool, bool) {
+    let x = Failure(at: 3, why: Utf8(9))
+    let a = enc(failures(), x) == unhex("0300000000000000 0200000000000000 0900000000000000")
+    let b = prefixes(failures(), unhex("0300000000000000 0600000000000000 0900000000000000"))
+    let c = result.unwrap(codec.schema(failures())) == unhex("01 0200000000000000 0900000000000000 742e4661696c757265 0000000000000000 00 0200000000000000 00 0200000000000000 6174 06 00 0300000000000000 776879 13 0100000000000000 1500000000000000 7374642e636f6465632e4465636f64654572726f72 0000000000000000 01 0700000000000000 00 0900000000000000 5472756e6361746564 0100000000000000 06 00 0700000000000000 496e76616c6964 0100000000000000 06 00 0400000000000000 55746638 0100000000000000 06 00 0900000000000000 4475706c6963617465 0100000000000000 06 00 0800000000000000 547261696c696e67 0100000000000000 06 00 0600000000000000 536368656d61 0100000000000000 06 00 0500000000000000 56616c7565 0100000000000000 06 13 0000000000000000")
+    (a, b, c)
+}
+
+// Keys. Big-endian, sign flipped, 0x00 escaped as 00 ff and 00 00 ending a run, by hand.
+// A little-endian or unflipped put, or an unescaped NUL, fails it.
+// expect: run key_format() = true
+fn key_format() -> bool {
+    let u: u16 = 0x1234
+    let small: i8 = -1
+    let big: i64 = -2
+    let zero: i32 = 0
+    let mut nul: Bytes = list.new()
+    result.unwrap(list.push(mut nul, 0x61))
+    result.unwrap(list.push(mut nul, 0))
+    result.unwrap(list.push(mut nul, 0x62))
+    key_enc(codec.key_u16(), u) == unhex("1234") &&
+        key_enc(codec.key_i8(), small) == unhex("7f") &&
+        key_enc(codec.key_i64(), big) == unhex("7ffffffffffffffe") &&
+        key_enc(codec.key_i32(), zero) == unhex("80000000") &&
+        key_enc(codec.key_bytes(), nul) == unhex("61 00ff 62 0000") &&
+        key_enc(codec.key_string(), "") == unhex("0000") &&
+        result.unwrap(codec.key_schema(codec.key_u64())) == unhex("02 0000000000000000 06")
+}
+
+fn key_enc[T](k: codec.Key[T], x: T) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(codec.encode_key(k, x, mut out))
+    take out
+}
+
+fn key_outcome[T](k: codec.Key[T], b: Bytes) -> u64 {
+    match codec.decode_key(k, b) {
+        Ok(Ok(_)) => 0,
+        Ok(Error(e)) => code(e),
+        Error(_) => 9999
+    }
+}
+
+// -1, 0, 1 as a bytewise comparison: the hand-written order of byte strings, shortest
+// first among equal prefixes.
+fn compare(x: Bytes, y: Bytes) -> i64 {
+    let mut i: u64 = 0
+    while i < list.len(x) && i < list.len(y) {
+        if x[i] != y[i] {
+            return if x[i] < y[i] {
+                -1
+            } else {
+                1
+            }
+        }
+        i += 1
+    }
+    if list.len(x) == list.len(y) {
+        0
+    } else if list.len(x) < list.len(y) {
+        -1
+    } else {
+        1
+    }
+}
+
+fn sign(x: i64, y: i64) -> i64 {
+    if x < y {
+        -1
+    } else if x == y {
+        0
+    } else {
+        1
+    }
+}
+
+// xorshift64: the pairs are random but the same on every engine.
+fn next_random(mut seed: u64) -> u64 {
+    seed = seed ^ (seed << 13)
+    seed = seed ^ (seed >> 7)
+    seed = seed ^ (seed << 17)
+    seed
+}
+
+// Up to four bytes from {00, 01, fe, ff}: the bytes an escape scheme gets wrong.
+fn random_bytes(mut seed: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    let n = next_random(mut seed) % 5
+    let mut i: u64 = 0
+    while i < n {
+        let r = next_random(mut seed) % 4
+        let byte: u8 = if r == 0 {
+            0
+        } else if r == 1 {
+            1
+        } else if r == 2 {
+            0xfe
+        } else {
+            0xff
+        }
+        result.unwrap(list.push(mut b, byte))
+        i += 1
+    }
+    take b
+}
+
+// A tuple key (Bytes, i32), as the derive generates one: the parts concatenated.
+fn tk_put(x: (Bytes, i32), mut out: Bytes) -> Result[(), Capacity] {
+    codec.put_key_with(x.0, codec.key_bytes(), mut out)?
+    codec.put_key_with(x.1, codec.key_i32(), mut out)
+}
+
+fn tk_take(b: Bytes, mut at: u64) -> Result[(Bytes, i32), codec.Stop] {
+    let a = codec.take_key_with(b, mut at, codec.key_bytes())?
+    let n = codec.take_key_with(b, mut at, codec.key_i32())?
+    Ok((take a, n))
+}
+
+fn tk_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+    codec.schema_tuple(mut s, 2)?
+    codec.schema_key(mut s, codec.key_bytes())?
+    codec.schema_key(mut s, codec.key_i32())
+}
+
+fn tuple_keys() -> codec.Key[(Bytes, i32)] {
+    codec.key_make(tk_put, tk_take, tk_schema)
+}
+
+// Key order is value order: on 3000 random pairs each of i64, u16, Bytes and the tuple
+// (Bytes, i32), the bytewise comparison of the keys equals the hand comparison of the
+// values (lexicographic for Bytes, by part for the tuple); each key decodes back. A
+// key that is little-endian, keeps the sign bit, or lets "a" 00 sort against "a" by its
+// terminator fails it.
+// expect: run key_order_is_value_order() = 0
+fn key_order_is_value_order() -> u64 {
+    let mut seed: u64 = 0x9e3779b97f4a7c15
+    let mut wrong: u64 = 0
+    let mut k: u64 = 0
+    while k < 3000 {
+        let x: i64 = int.truncate(next_random(mut seed))
+        let y: i64 = int.truncate(next_random(mut seed) >> (next_random(mut seed) % 64))
+        if compare(key_enc(codec.key_i64(), x), key_enc(codec.key_i64(), y)) != sign(x, y) {
+            wrong += 1
+        }
+        let u: u16 = int.truncate(next_random(mut seed))
+        let v: u16 = int.truncate(next_random(mut seed))
+        if compare(key_enc(codec.key_u16(), u), key_enc(codec.key_u16(), v)) != sign(int.widen(u), int.widen(v)) {
+            wrong += 1
+        }
+        let a = random_bytes(mut seed)
+        let b = random_bytes(mut seed)
+        let ka = key_enc(codec.key_bytes(), a)
+        if compare(ka, key_enc(codec.key_bytes(), b)) != compare(a, b) {
+            wrong += 1
+        }
+        match codec.decode_key(codec.key_bytes(), ka) {
+            Ok(Ok(back)) => {
+                if back != a {
+                    wrong += 1
+                }
+            }
+            _ => {
+                wrong += 1
+            }
+        }
+        let n: i32 = int.truncate(int.wrapping_sub(next_random(mut seed) % 5, 2))
+        let m: i32 = int.truncate(int.wrapping_sub(next_random(mut seed) % 5, 2))
+        let by_parts = if compare(a, b) != 0 {
+            compare(a, b)
+        } else {
+            sign(int.widen(n), int.widen(m))
+        }
+        let mut ta: Bytes = list.new()
+        result.unwrap(list.append(mut ta, a))
+        let mut tb: Bytes = list.new()
+        result.unwrap(list.append(mut tb, b))
+        if compare(key_enc(tuple_keys(), (take ta, n)), key_enc(tuple_keys(), (take tb, m))) != by_parts {
+            wrong += 1
+        }
+        k += 1
+    }
+    wrong
+}
+
+// Key near misses: every prefix of a tuple key Truncated; an escape byte other than ff
+// or 00 Invalid at it (2); a trailing byte (5); bool 2 Invalid (0); bad UTF-8 after an
+// escaped NUL, Utf8 at its encoded offset (2, not the unescaped 1).
+// expect: run key_near_misses() = (true, 2002, 5002, 2000, 3002)
+fn key_near_misses() -> (bool, u64, u64, u64, u64) {
+    let whole = unhex("61 00ff 0000 80000005")
+    let mut ok = again_key(tuple_keys(), whole)
+    let mut i: u64 = 0
+    while i < list.len(whole) {
+        let mut cut: Bytes = list.new()
+        result.unwrap(list.append(mut cut, list.slice(whole, 0, i)))
+        let o = key_outcome(tuple_keys(), cut)
+        if o < 1000 || o > 1000 + i {
+            ok = false
+        }
+        i += 1
+    }
+    (ok, key_outcome(codec.key_bytes(), unhex("61 0001 0000")), key_outcome(codec.key_bytes(), unhex("0000 00")), key_outcome(codec.key_bool(), unhex("02")), key_outcome(codec.key_string(), unhex("00ff c0 0000")))
+}
+
+fn again_key[T](k: codec.Key[T], b: Bytes) -> bool {
+    match codec.decode_key(k, b) {
+        Ok(Ok(x)) => key_enc(k, x) == b,
+        _ => false
+    }
+}
+
+// Nothing is left behind on an error: under a 16 KiB bound, 1000 decodes of a depth-20
+// chain cut one byte short (each fails Truncated after building 20 levels), directly
+// and through resolution, each the same refusal as unbounded (Truncated at the last
+// count, 312; through resolution, Truncated at the last label, 328, as the swapped
+// writer puts all 21 counts before the labels), then the whole chain both ways. Each
+// failure must give its levels back; a decoder that kept one 16-byte frame per failed
+// decode runs out after a few hundred and returns Capacity (9999) here.
+// expect: run errors_return_their_bytes() = (1000, 1000, 20, 20)
+fn errors_return_their_bytes() -> (u64, u64, u64, u64) {
+    let whole = chain_bytes(20)
+    let mut cut: Bytes = list.new()
+    result.unwrap(list.append(mut cut, list.slice(whole, 0, list.len(whole) - 1)))
+    let swapped = result.unwrap(codec.schema(swapped_trees()))
+    let mut written: Bytes = list.new()
+    match codec.decode(trees(), whole) {
+        Ok(Ok(t)) => {
+            written = enc(swapped_trees(), t)
+        }
+        _ => {}
+    }
+    let mut short: Bytes = list.new()
+    result.unwrap(list.append(mut short, list.slice(written, 0, list.len(written) - 1)))
+    let direct_refusal = outcome(trees(), cut)
+    let resolved_refusal = refusal(trees(), swapped, short)
+    if direct_refusal != 1000 + 312 || resolved_refusal != 1000 + 328 {
+        return (0, 0, 0, 0)
+    }
+    result.unwrap(bound bytes 16384 {
+        let mut direct: u64 = 0
+        let mut resolved: u64 = 0
+        let mut k: u64 = 0
+        while k < 1000 {
+            if outcome(trees(), cut) == direct_refusal {
+                direct += 1
+            }
+            if refusal(trees(), swapped, short) == resolved_refusal {
+                resolved += 1
+            }
+            k += 1
+        }
+        let a = match codec.decode(trees(), whole) {
+            Ok(Ok(t)) => chain(take t),
+            _ => 0
+        }
+        let b = match through(trees(), swapped, written) {
+            Ok(t) => chain(take t),
+            Error(c) => c
+        }
+        (direct, resolved, a, b)
+    })
+}
+
+fn chain_bytes(depth: u64) -> Bytes {
+    let mut b: Bytes = result.unwrap(list.with_capacity(16 * depth + 16))
+    let mut i: u64 = 0
+    while i < depth {
+        result.unwrap(list.put_word_le(mut b, i))
+        result.unwrap(list.put_word_le(mut b, 1))
+        i += 1
+    }
+    result.unwrap(list.put_word_le(mut b, depth))
+    result.unwrap(list.put_word_le(mut b, 0))
+    take b
+}

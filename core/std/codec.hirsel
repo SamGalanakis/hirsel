@@ -1,0 +1,2153 @@
+// Module `codec` (SEM-10): Codec[T], the protocol a generated codec calls, the byte format,
+// the built-in codecs of core.md's codec rows, schemas, writer/reader resolution and the
+// fingerprint. Field legend: API.md.
+//
+// Format. Integers at their width, a float as its IEEE bits, a `char` as its scalar in a
+// u32, all little-endian; `bool` one byte, 0 or 1; `()` nothing. String, List and Map: a
+// u64 count, then the UTF-8 bytes, the elements, or key and value per entry in insertion
+// order. Option, Result and every sum: the declared variant index as a u64, then the
+// variant's fields. A record or tuple: its fields in declaration order; a removed field
+// is not written. Nothing frames a value but its type, so a value is decoded against the
+// schema that wrote it.
+
+/// SEM-10's decode errors; each u64 is a byte offset, into the writer's schema for
+/// `Schema` and into the decoded bytes otherwise. `Value(i)`: the `from` of a `via` codec
+/// refused the value that starts at i.
+pub type DecodeError = Truncated(u64) | Invalid(u64) | Utf8(u64) | Duplicate(u64) | Trailing(u64) | Schema(u64) | Value(u64)
+
+/// How a protocol step stops: malformed bytes, or a refused admission. `?` carries it
+/// through a generated decode; `decode` and `read` split it into SEM-10's result.
+pub type Stop = Bad(DecodeError) | Full(Capacity)
+
+/// The codec of T: plain, so a store's shape holds it. Generated codecs and the built-in
+/// codecs below are the only makers; `least` is the fewest bytes any T encodes to.
+pub opaque type Codec[T] {
+    encoder: fn(T, mut Bytes) -> Result[(), Capacity],
+    decoder: fn(Bytes, mut u64) -> Result[T, Stop],
+    describer: fn(mut Schema) -> Result[(), Capacity],
+    smallest: u64
+}
+
+/// A codec from its parts; a generated codec calls this once per type.
+/// Ex: `codec.make(row_encode, row_decode, row_schema, 9)`
+pub fn make[T](e: fn(T, mut Bytes) -> Result[(), Capacity], d: fn(Bytes, mut u64) -> Result[T, Stop], w: fn(mut Schema) -> Result[(), Capacity], n: u64) -> Codec[T] {
+    Codec(encoder: e, decoder: d, describer: w, smallest: n)
+}
+
+/// The fewest bytes any value of the codec's type encodes to. Cost: O(1).
+pub fn least[T](c: Codec[T]) -> u64 {
+    c.smallest
+}
+
+// The whole-value entry points.
+
+/// Appends x's bytes to out. Fails: Capacity; out then holds a prefix of x's bytes.
+/// Ex: `codec.encode(rows, row, mut out)?`
+pub fn encode[T](c: Codec[T], x: T, mut out: Bytes) -> Result[(), Capacity] {
+    (c.encoder)(x, mut out)
+}
+
+/// Decodes all of b against c's own schema: exactly the bytes encode produces.
+/// Fails: Ok(Error(e)) for bytes no value encodes to; Error(c) when an admission is
+/// refused. Either way nothing it admitted remains. Ex: `codec.decode(rows, b)?`
+pub fn decode[T](c: Codec[T], b: Bytes) -> Result[Result[T, DecodeError], Capacity] {
+    let mut at: u64 = 0
+    match (c.decoder)(b, mut at) {
+        Ok(x) => {
+            if at != list.len(b) {
+                return Ok(Error(Trailing(at)))
+            }
+            Ok(Ok(take x))
+        }
+        Error(Bad(e)) => Ok(Error(e)),
+        Error(Full(f)) => Error(f)
+    }
+}
+
+// The protocol: one put and one take per format row. A generated encode calls the puts
+// in declaration order and a generated decode the takes; `at` is the read offset.
+
+/// Truncated at `at` unless n more bytes follow it.
+pub fn need(b: Bytes, at: u64, n: u64) -> Result[(), Stop] {
+    if list.len(b) - at < n {
+        return Error(Bad(Truncated(at)))
+    }
+    Ok(())
+}
+
+/// An admission refusal as a Stop. Ex: `codec.full(list.push(mut xs, take x))?`
+pub fn full[E](r: Result[(), (Capacity, E)]) -> Result[(), Stop] {
+    match r {
+        Ok(()) => Ok(()),
+        Error((f, _)) => Error(Full(f))
+    }
+}
+
+fn admit(r: Result[(), Capacity]) -> Result[(), Stop] {
+    match r {
+        Ok(()) => Ok(()),
+        Error(f) => Error(Full(f))
+    }
+}
+
+fn put_byte(mut out: Bytes, x: u8) -> Result[(), Capacity] {
+    match list.push(mut out, x) {
+        Ok(()) => Ok(()),
+        Error((f, _)) => Error(f)
+    }
+}
+
+fn put_le(mut out: Bytes, x: u64, width: u64) -> Result[(), Capacity] {
+    list.reserve(mut out, width)?
+    let mut i: u64 = 0
+    while i < width {
+        let byte: u8 = int.truncate(x >> int.truncate(i * 8))
+        put_byte(mut out, byte)?
+        i += 1
+    }
+    Ok(())
+}
+
+fn take_le(b: Bytes, mut at: u64, width: u64) -> Result[u64, Stop] {
+    need(b, at, width)?
+    let mut x: u64 = 0
+    let mut i: u64 = 0
+    while i < width {
+        let byte: u64 = int.widen(b[at + i])
+        x = x | byte << int.truncate(i * 8)
+        i += 1
+    }
+    at += width
+    Ok(x)
+}
+
+pub fn put_unit(x: (), mut out: Bytes) -> Result[(), Capacity] {
+    Ok(())
+}
+
+pub fn take_unit(b: Bytes, mut at: u64) -> Result[(), Stop] {
+    Ok(())
+}
+
+pub fn put_bool(x: bool, mut out: Bytes) -> Result[(), Capacity] {
+    put_byte(mut out, if x { 1 } else { 0 })
+}
+
+pub fn take_bool(b: Bytes, mut at: u64) -> Result[bool, Stop] {
+    need(b, at, 1)?
+    let x = b[at]
+    if x > 1 {
+        return Error(Bad(Invalid(at)))
+    }
+    at += 1
+    Ok(x == 1)
+}
+
+pub fn put_u8(x: u8, mut out: Bytes) -> Result[(), Capacity] {
+    put_byte(mut out, x)
+}
+
+pub fn take_u8(b: Bytes, mut at: u64) -> Result[u8, Stop] {
+    need(b, at, 1)?
+    let x = b[at]
+    at += 1
+    Ok(x)
+}
+
+pub fn put_u16(x: u16, mut out: Bytes) -> Result[(), Capacity] {
+    put_le(mut out, int.widen(x), 2)
+}
+
+pub fn take_u16(b: Bytes, mut at: u64) -> Result[u16, Stop] {
+    let x = take_le(b, mut at, 2)?
+    Ok(int.truncate(x))
+}
+
+pub fn put_u32(x: u32, mut out: Bytes) -> Result[(), Capacity] {
+    put_le(mut out, int.widen(x), 4)
+}
+
+pub fn take_u32(b: Bytes, mut at: u64) -> Result[u32, Stop] {
+    let x = take_le(b, mut at, 4)?
+    Ok(int.truncate(x))
+}
+
+pub fn put_u64(x: u64, mut out: Bytes) -> Result[(), Capacity] {
+    list.put_word_le(mut out, x)
+}
+
+pub fn take_u64(b: Bytes, mut at: u64) -> Result[u64, Stop] {
+    need(b, at, 8)?
+    let x = list.word_le(b, at)
+    at += 8
+    Ok(x)
+}
+
+pub fn put_i8(x: i8, mut out: Bytes) -> Result[(), Capacity] {
+    put_byte(mut out, int.truncate(x))
+}
+
+pub fn take_i8(b: Bytes, mut at: u64) -> Result[i8, Stop] {
+    let x = take_u8(b, mut at)?
+    Ok(int.truncate(x))
+}
+
+pub fn put_i16(x: i16, mut out: Bytes) -> Result[(), Capacity] {
+    let bits: u16 = int.truncate(x)
+    put_u16(bits, mut out)
+}
+
+pub fn take_i16(b: Bytes, mut at: u64) -> Result[i16, Stop] {
+    let x = take_u16(b, mut at)?
+    Ok(int.truncate(x))
+}
+
+pub fn put_i32(x: i32, mut out: Bytes) -> Result[(), Capacity] {
+    let bits: u32 = int.truncate(x)
+    put_u32(bits, mut out)
+}
+
+pub fn take_i32(b: Bytes, mut at: u64) -> Result[i32, Stop] {
+    let x = take_u32(b, mut at)?
+    Ok(int.truncate(x))
+}
+
+pub fn put_i64(x: i64, mut out: Bytes) -> Result[(), Capacity] {
+    list.put_word_le(mut out, int.truncate(x))
+}
+
+pub fn take_i64(b: Bytes, mut at: u64) -> Result[i64, Stop] {
+    let x = take_u64(b, mut at)?
+    Ok(int.truncate(x))
+}
+
+/// SEM-2's one NaN is 0x7fc00000; any other NaN pattern is no f32's bytes.
+pub fn put_f32(x: f32, mut out: Bytes) -> Result[(), Capacity] {
+    put_u32(float.to_bits32(x), mut out)
+}
+
+pub fn take_f32(b: Bytes, mut at: u64) -> Result[f32, Stop] {
+    let start = at
+    let x = take_u32(b, mut at)?
+    if x & 0x7f800000 == 0x7f800000 && x & 0x7fffff != 0 && x != 0x7fc00000 {
+        return Error(Bad(Invalid(start)))
+    }
+    Ok(float.from_bits32(x))
+}
+
+/// SEM-2's one NaN is 0x7ff8000000000000; any other NaN pattern is no f64's bytes.
+pub fn put_f64(x: f64, mut out: Bytes) -> Result[(), Capacity] {
+    list.put_word_le(mut out, float.to_bits64(x))
+}
+
+pub fn take_f64(b: Bytes, mut at: u64) -> Result[f64, Stop] {
+    need(b, at, 8)?
+    let x = list.word_le(b, at)
+    if x & 0x7ff0000000000000 == 0x7ff0000000000000 && x & 0xfffffffffffff != 0 && x != 0x7ff8000000000000 {
+        return Error(Bad(Invalid(at)))
+    }
+    at += 8
+    Ok(float.from_bits64(x))
+}
+
+pub fn put_char(x: char, mut out: Bytes) -> Result[(), Capacity] {
+    put_u32(char.to_u32(x), mut out)
+}
+
+pub fn take_char(b: Bytes, mut at: u64) -> Result[char, Stop] {
+    let start = at
+    let x = take_u32(b, mut at)?
+    match char.from_u32(x) {
+        Some(c) => Ok(c),
+        None => Error(Bad(Invalid(start)))
+    }
+}
+
+pub fn put_string(x: String, mut out: Bytes) -> Result[(), Capacity] {
+    let raw = string.as_bytes(x)
+    list.reserve(mut out, 8 + list.len(raw))?
+    list.put_word_le(mut out, list.len(raw))?
+    list.append(mut out, raw)
+}
+
+/// The count, then exactly that many bytes, copied into exact capacity and checked UTF-8.
+pub fn take_string(b: Bytes, mut at: u64) -> Result[String, Stop] {
+    let start = at
+    let n = take_u64(b, mut at)?
+    if list.len(b) - at < n {
+        return Error(Bad(Truncated(start)))
+    }
+    let made: Result[Bytes, Capacity] = list.with_capacity(n)
+    let mut buf: Bytes = match take made {
+        Ok(buf) => take buf,
+        Error(f) => return Error(Full(f))
+    }
+    let _ = list.append(mut buf, list.slice(b, at, at + n))
+    match string.from_utf8(take buf) {
+        Ok(s) => {
+            at += n
+            Ok(take s)
+        }
+        Error(_) => Error(Bad(Utf8(at + utf8_stop(b, at, at + n))))
+    }
+}
+
+// Where b[lo..hi] stops being UTF-8, relative to lo: the first byte that is not part of a
+// scalar (RFC 3629, section 4). Only a refused string reaches it.
+fn utf8_stop(b: Bytes, lo: u64, hi: u64) -> u64 {
+    let mut i = lo
+    while i < hi {
+        let x = b[i]
+        if x < 0x80 {
+            i += 1
+            continue
+        }
+        let mut width: u64 = 0
+        let mut low: u8 = 0x80
+        let mut high: u8 = 0xbf
+        if x >= 0xc2 && x <= 0xdf {
+            width = 2
+        } else if x >= 0xe0 && x <= 0xef {
+            width = 3
+            if x == 0xe0 {
+                low = 0xa0
+            } else if x == 0xed {
+                high = 0x9f
+            }
+        } else if x >= 0xf0 && x <= 0xf4 {
+            width = 4
+            if x == 0xf0 {
+                low = 0x90
+            } else if x == 0xf4 {
+                high = 0x8f
+            }
+        }
+        if width == 0 {
+            return i - lo
+        }
+        if hi - i < width {
+            return i - lo
+        }
+        let second = b[i + 1]
+        if second < low || second > high {
+            return i - lo
+        }
+        let mut j: u64 = 2
+        while j < width {
+            if b[i + j] & 0xc0 != 0x80 {
+                return i - lo
+            }
+            j += 1
+        }
+        i += width
+    }
+    hi - lo
+}
+
+/// A variant tag: the declared index of the variant, below `count`, else Invalid at it.
+pub fn put_tag(x: u64, mut out: Bytes) -> Result[(), Capacity] {
+    list.put_word_le(mut out, x)
+}
+
+pub fn take_tag(b: Bytes, mut at: u64, count: u64) -> Result[u64, Stop] {
+    need(b, at, 8)?
+    let x = list.word_le(b, at)
+    if x >= count {
+        return Error(Bad(Invalid(at)))
+    }
+    at += 8
+    Ok(x)
+}
+
+/// x with its codec: what a generated codec calls for a field of a non-scalar type.
+pub fn put_with[T](x: T, c: Codec[T], mut out: Bytes) -> Result[(), Capacity] {
+    (c.encoder)(x, mut out)
+}
+
+pub fn take_with[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[T, Stop] {
+    (c.decoder)(b, mut at)
+}
+
+pub fn put_list[T](xs: List[T], c: Codec[T], mut out: Bytes) -> Result[(), Capacity] {
+    list.put_word_le(mut out, list.len(xs))?
+    for x in xs {
+        (c.encoder)(x, mut out)?
+    }
+    Ok(())
+}
+
+/// A List's or Map's count, Truncated at the count when n items of at least `least`
+/// bytes each cannot fit in what remains. A frame loop calls it for a recursive field.
+pub fn take_count(b: Bytes, mut at: u64, size: u64) -> Result[u64, Stop] {
+    let start = at
+    let n = take_u64(b, mut at)?
+    if size != 0 && n > (list.len(b) - at) / size {
+        return Error(Bad(Truncated(start)))
+    }
+    Ok(n)
+}
+
+/// An empty list with room for exactly n elements.
+pub fn room[T](n: u64) -> Result[List[T], Stop] {
+    let made: Result[List[T], Capacity] = list.with_capacity(n)
+    match take made {
+        Ok(xs) => Ok(take xs),
+        Error(f) => Error(Full(f))
+    }
+}
+
+/// The count, then the elements. A count no remaining bytes could hold is Truncated at
+/// the list before anything is admitted, so the list's storage is admitted once, exactly.
+pub fn take_list[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[List[T], Stop] {
+    let n = take_count(b, mut at, c.smallest)?
+    let mut xs: List[T] = room(n)?
+    let mut i: u64 = 0
+    while i < n {
+        let x = (c.decoder)(b, mut at)?
+        full(list.push(mut xs, take x))?
+        i += 1
+    }
+    Ok(take xs)
+}
+
+pub fn put_map[K: key, V](m: Map[K, V], ck: Codec[K], cv: Codec[V], mut out: Bytes) -> Result[(), Capacity] {
+    list.put_word_le(mut out, map.len(m))?
+    for (k, v) in m {
+        (ck.encoder)(k, mut out)?
+        (cv.encoder)(v, mut out)?
+    }
+    Ok(())
+}
+
+/// The count, then key and value per entry in insertion order; a key equal to an earlier
+/// one is Duplicate at the key.
+pub fn take_map[K: key, V](b: Bytes, mut at: u64, ck: Codec[K], cv: Codec[V]) -> Result[Map[K, V], Stop] {
+    let n = take_count(b, mut at, ck.smallest + cv.smallest)?
+    let mut m: Map[K, V] = map.new()
+    admit(map.reserve(mut m, n))?
+    let mut i: u64 = 0
+    while i < n {
+        let key_at = at
+        let k = (ck.decoder)(b, mut at)?
+        if map.contains(m, k) {
+            return Error(Bad(Duplicate(key_at)))
+        }
+        let v = (cv.decoder)(b, mut at)?
+        full(map.insert(mut m, take k, take v))?
+        i += 1
+    }
+    Ok(take m)
+}
+
+pub fn put_option[T](x: Option[T], c: Codec[T], mut out: Bytes) -> Result[(), Capacity] {
+    match x {
+        None => list.put_word_le(mut out, 0),
+        Some(v) => {
+            list.put_word_le(mut out, 1)?
+            (c.encoder)(v, mut out)
+        }
+    }
+}
+
+pub fn take_option[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[Option[T], Stop] {
+    if take_tag(b, mut at, 2)? == 0 {
+        return Ok(None)
+    }
+    let v = (c.decoder)(b, mut at)?
+    Ok(Some(take v))
+}
+
+pub fn put_result[T, E](x: Result[T, E], ct: Codec[T], ce: Codec[E], mut out: Bytes) -> Result[(), Capacity] {
+    match x {
+        Ok(v) => {
+            list.put_word_le(mut out, 0)?
+            (ct.encoder)(v, mut out)
+        }
+        Error(e) => {
+            list.put_word_le(mut out, 1)?
+            (ce.encoder)(e, mut out)
+        }
+    }
+}
+
+pub fn take_result[T, E](b: Bytes, mut at: u64, ct: Codec[T], ce: Codec[E]) -> Result[Result[T, E], Stop] {
+    if take_tag(b, mut at, 2)? == 0 {
+        let v = (ct.decoder)(b, mut at)?
+        return Ok(Ok(take v))
+    }
+    let e = (ce.decoder)(b, mut at)?
+    Ok(Error(take e))
+}
+
+/// A `codec via R (to, from)` type: its bytes are R's bytes of to(x).
+pub fn put_via[T, R](x: T, to: fn(T) -> Result[R, Capacity], c: Codec[R], mut out: Bytes) -> Result[(), Capacity] {
+    let r = to(x)?
+    (c.encoder)(r, mut out)
+}
+
+/// R's value, then from; a refusal by from is Value at the value's first byte.
+pub fn take_via[T, R](b: Bytes, mut at: u64, c: Codec[R], from: fn(take R) -> Option[T]) -> Result[T, Stop] {
+    let start = at
+    let r = (c.decoder)(b, mut at)?
+    match from(take r) {
+        Some(x) => Ok(take x),
+        None => Error(Bad(Value(start)))
+    }
+}
+
+// The built-in codecs: core.md's codec rows. `of` resolves to these at scalar types.
+
+pub fn of_unit() -> Codec[()] {
+    Codec(encoder: put_unit, decoder: take_unit, describer: schema_unit, smallest: 0)
+}
+
+pub fn of_bool() -> Codec[bool] {
+    Codec(encoder: put_bool, decoder: take_bool, describer: schema_bool, smallest: 1)
+}
+
+pub fn of_char() -> Codec[char] {
+    Codec(encoder: put_char, decoder: take_char, describer: schema_char, smallest: 4)
+}
+
+pub fn of_u8() -> Codec[u8] {
+    Codec(encoder: put_u8, decoder: take_u8, describer: schema_u8, smallest: 1)
+}
+
+pub fn of_u16() -> Codec[u16] {
+    Codec(encoder: put_u16, decoder: take_u16, describer: schema_u16, smallest: 2)
+}
+
+pub fn of_u32() -> Codec[u32] {
+    Codec(encoder: put_u32, decoder: take_u32, describer: schema_u32, smallest: 4)
+}
+
+pub fn of_u64() -> Codec[u64] {
+    Codec(encoder: put_u64, decoder: take_u64, describer: schema_u64, smallest: 8)
+}
+
+pub fn of_i8() -> Codec[i8] {
+    Codec(encoder: put_i8, decoder: take_i8, describer: schema_i8, smallest: 1)
+}
+
+pub fn of_i16() -> Codec[i16] {
+    Codec(encoder: put_i16, decoder: take_i16, describer: schema_i16, smallest: 2)
+}
+
+pub fn of_i32() -> Codec[i32] {
+    Codec(encoder: put_i32, decoder: take_i32, describer: schema_i32, smallest: 4)
+}
+
+pub fn of_i64() -> Codec[i64] {
+    Codec(encoder: put_i64, decoder: take_i64, describer: schema_i64, smallest: 8)
+}
+
+pub fn of_f32() -> Codec[f32] {
+    Codec(encoder: put_f32, decoder: take_f32, describer: schema_f32, smallest: 4)
+}
+
+pub fn of_f64() -> Codec[f64] {
+    Codec(encoder: put_f64, decoder: take_f64, describer: schema_f64, smallest: 8)
+}
+
+pub fn of_string() -> Codec[String] {
+    Codec(encoder: put_string, decoder: take_string, describer: schema_string, smallest: 8)
+}
+
+/// DecodeError's codec, as the derive writes a sum's: a store can keep a refusal.
+pub fn of_decode_error() -> Codec[DecodeError] {
+    Codec(encoder: decode_error_encode, decoder: decode_error_decode, describer: decode_error_schema, smallest: 16)
+}
+
+fn decode_error_encode(x: DecodeError, mut out: Bytes) -> Result[(), Capacity] {
+    match x {
+        Truncated(i) => {
+            put_tag(0, mut out)?
+            put_u64(i, mut out)
+        }
+        Invalid(i) => {
+            put_tag(1, mut out)?
+            put_u64(i, mut out)
+        }
+        Utf8(i) => {
+            put_tag(2, mut out)?
+            put_u64(i, mut out)
+        }
+        Duplicate(i) => {
+            put_tag(3, mut out)?
+            put_u64(i, mut out)
+        }
+        Trailing(i) => {
+            put_tag(4, mut out)?
+            put_u64(i, mut out)
+        }
+        Schema(i) => {
+            put_tag(5, mut out)?
+            put_u64(i, mut out)
+        }
+        Value(i) => {
+            put_tag(6, mut out)?
+            put_u64(i, mut out)
+        }
+    }
+}
+
+fn decode_error_decode(b: Bytes, mut at: u64) -> Result[DecodeError, Stop] {
+    let tag = take_tag(b, mut at, 7)?
+    let i = take_u64(b, mut at)?
+    if tag == 0 {
+        Ok(Truncated(i))
+    } else if tag == 1 {
+        Ok(Invalid(i))
+    } else if tag == 2 {
+        Ok(Utf8(i))
+    } else if tag == 3 {
+        Ok(Duplicate(i))
+    } else if tag == 4 {
+        Ok(Trailing(i))
+    } else if tag == 5 {
+        Ok(Schema(i))
+    } else {
+        Ok(Value(i))
+    }
+}
+
+fn decode_error_schema(mut s: Schema) -> Result[(), Capacity] {
+    define(mut s, "std.codec.DecodeError", 0)?
+    if sum(mut s, 7)? {
+        return Ok(())
+    }
+    variant(mut s, "Truncated", 1)?
+    schema_u64(mut s)?
+    variant(mut s, "Invalid", 1)?
+    schema_u64(mut s)?
+    variant(mut s, "Utf8", 1)?
+    schema_u64(mut s)?
+    variant(mut s, "Duplicate", 1)?
+    schema_u64(mut s)?
+    variant(mut s, "Trailing", 1)?
+    schema_u64(mut s)?
+    variant(mut s, "Schema", 1)?
+    schema_u64(mut s)?
+    variant(mut s, "Value", 1)?
+    schema_u64(mut s)?
+    close(mut s)
+    Ok(())
+}
+
+// Schemas. A schema is bytes: a version byte (1), the definitions (a u64 count, then
+// each), then the root type. A type is an opcode byte: 0 (), 1 bool, 2 char, 3-6 u8-u64,
+// 7-10 i8-i64, 11 f32, 12 f64, 13 String, 14 List and its element, 15 Map, its key and
+// value, 16 Option and its type, 17 Result, its ok and error types, 18 a tuple (a u64
+// arity, then the components), 19 a definition (its u64 index). A definition is its
+// nominal path, its type arguments (a u64 count, then each), a kind byte and a body:
+// 0 record (a u64 entry count, then per entry 0, name, type for a field or 1, name for a
+// removed one), 1 sum (a u64 variant count, then per variant 0, name, a u64 field count
+// and the field types, or 1, name for a removed one), 2 via (the type it is written as).
+// A name is a u64 byte count and UTF-8. Definitions are numbered in the order a
+// depth-first walk from the root first meets them, so a type has one schema; defaults
+// are the reader's, never in the bytes.
+
+/// A schema being built: what a codec's schema function writes into.
+pub opaque type Schema {
+    cur: Bytes,
+    saved: List[Bytes],
+    open: List[u64],
+    keys: List[Bytes],
+    defs: List[Bytes],
+    defaults: List[Default]
+}
+
+type Default {
+    def: u64,
+    field: String,
+    value: Bytes
+}
+
+fn opcode(mut s: Schema, x: u8) -> Result[(), Capacity] {
+    put_byte(mut s.cur, x)
+}
+
+fn name(mut s: Schema, n: String) -> Result[(), Capacity] {
+    put_string(n, mut s.cur)
+}
+
+pub fn schema_unit(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 0)
+}
+
+pub fn schema_bool(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 1)
+}
+
+pub fn schema_char(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 2)
+}
+
+pub fn schema_u8(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 3)
+}
+
+pub fn schema_u16(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 4)
+}
+
+pub fn schema_u32(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 5)
+}
+
+pub fn schema_u64(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 6)
+}
+
+pub fn schema_i8(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 7)
+}
+
+pub fn schema_i16(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 8)
+}
+
+pub fn schema_i32(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 9)
+}
+
+pub fn schema_i64(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 10)
+}
+
+pub fn schema_f32(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 11)
+}
+
+pub fn schema_f64(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 12)
+}
+
+pub fn schema_string(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 13)
+}
+
+/// The type c writes, in place: a field's, an element's, a type argument's.
+pub fn schema_of[T](mut s: Schema, c: Codec[T]) -> Result[(), Capacity] {
+    (c.describer)(mut s)
+}
+
+pub fn schema_list[T](mut s: Schema, c: Codec[T]) -> Result[(), Capacity] {
+    opcode(mut s, 14)?
+    (c.describer)(mut s)
+}
+
+pub fn schema_map[K: key, V](mut s: Schema, ck: Codec[K], cv: Codec[V]) -> Result[(), Capacity] {
+    opcode(mut s, 15)?
+    (ck.describer)(mut s)?
+    (cv.describer)(mut s)
+}
+
+pub fn schema_option[T](mut s: Schema, c: Codec[T]) -> Result[(), Capacity] {
+    opcode(mut s, 16)?
+    (c.describer)(mut s)
+}
+
+pub fn schema_result[T, E](mut s: Schema, ct: Codec[T], ce: Codec[E]) -> Result[(), Capacity] {
+    opcode(mut s, 17)?
+    (ct.describer)(mut s)?
+    (ce.describer)(mut s)
+}
+
+/// A tuple of n components; schema_of each follows.
+pub fn schema_tuple(mut s: Schema, n: u64) -> Result[(), Capacity] {
+    opcode(mut s, 18)?
+    list.put_word_le(mut s.cur, n)
+}
+
+/// Starts the definition of a nominal type at its path; then its type arguments
+/// (`argument`), then `record`, `sum` or `via`, its entries and `close`.
+pub fn define(mut s: Schema, path: String, arguments: u64) -> Result[(), Capacity] {
+    let parent = replace(mut s.cur, list.new())
+    push_own(mut s.saved, take parent)?
+    name(mut s, path)?
+    list.put_word_le(mut s.cur, arguments)
+}
+
+/// One type argument of the definition begun by `define`.
+pub fn argument[T](mut s: Schema, c: Codec[T]) -> Result[(), Capacity] {
+    (c.describer)(mut s)
+}
+
+/// A record of n entries (fields and removed fields). Ok(true) when the definition is
+/// already written: its reference is, and the schema function returns at once.
+pub fn record(mut s: Schema, n: u64) -> Result[bool, Capacity] {
+    body(mut s, 0, n)
+}
+
+/// A sum of n variants, live and removed, in declared order; as `record`.
+pub fn sum(mut s: Schema, n: u64) -> Result[bool, Capacity] {
+    body(mut s, 1, n)
+}
+
+/// A `codec via R` type; schema_of R's codec follows, then `close`.
+pub fn via(mut s: Schema) -> Result[bool, Capacity] {
+    body(mut s, 2, 1)
+}
+
+// The definition's identity is its path and arguments, the bytes `define` began. A known
+// one is a reference in the enclosing type; a new one takes the next index, its
+// reference goes to the enclosing type and its body follows.
+fn body(mut s: Schema, kind: u8, n: u64) -> Result[bool, Capacity] {
+    let count = list.len(s.keys)
+    let mut index: u64 = 0
+    while index < count && s.keys[index] != s.cur {
+        index += 1
+    }
+    if index < count {
+        restore(mut s)
+        reference(mut s.cur, index)?
+        return Ok(true)
+    }
+    let mut key: Bytes = list.with_capacity(list.len(s.cur))?
+    let _ = list.append(mut key, s.cur)
+    push_own(mut s.keys, take key)?
+    push_own(mut s.defs, list.new())?
+    push_plain(mut s.open, index)?
+    let mut parent = replace(mut s.cur, list.new())
+    let referenced = match list.pop(mut s.saved) {
+        Some(p) => {
+            let mut q = take p
+            let wrote = reference(mut q, index)
+            let _ = list.push(mut s.saved, take q)
+            wrote
+        }
+        None => Ok(())
+    }
+    let _ = replace(mut s.cur, take parent)
+    referenced?
+    opcode(mut s, kind)?
+    if kind != 2 {
+        list.put_word_le(mut s.cur, n)?
+    }
+    Ok(false)
+}
+
+fn reference(mut b: Bytes, index: u64) -> Result[(), Capacity] {
+    put_byte(mut b, 19)?
+    list.put_word_le(mut b, index)
+}
+
+// The enclosing type's bytes become current again.
+fn restore(mut s: Schema) {
+    let parent = match list.pop(mut s.saved) {
+        Some(p) => take p,
+        None => list.new()
+    }
+    let _ = replace(mut s.cur, take parent)
+}
+
+/// Ends the definition begun by the latest `define` that `record`, `sum` or `via` left open.
+pub fn close(mut s: Schema) {
+    let index = match list.pop(mut s.open) {
+        Some(i) => i,
+        None => return
+    }
+    let parent = match list.pop(mut s.saved) {
+        Some(p) => take p,
+        None => list.new()
+    }
+    let done = replace(mut s.cur, take parent)
+    let _ = list.set(mut s.defs, index, take done)
+}
+
+/// A field of the record being defined, in declaration order; its type follows (a
+/// `schema_` call).
+pub fn field(mut s: Schema, path: String) -> Result[(), Capacity] {
+    opcode(mut s, 0)?
+    name(mut s, path)
+}
+
+/// A field of type F with a default: the reader's value when the writer's schema lacks
+/// the field. Writes the type too.
+pub fn field_default[F](mut s: Schema, path: String, c: Codec[F], v: F) -> Result[(), Capacity] {
+    field(mut s, path)?
+    (c.describer)(mut s)?
+    let def = s.open[list.len(s.open) - 1]
+    let mut value: Bytes = list.new()
+    (c.encoder)(v, mut value)?
+    let copied = string.from(path)?
+    match list.push(mut s.defaults, Default(def: def, field: take copied, value: take value)) {
+        Ok(()) => Ok(()),
+        Error((f, _)) => Error(f)
+    }
+}
+
+/// A removed field or variant: its name stays, so it cannot be reused.
+pub fn removed(mut s: Schema, path: String) -> Result[(), Capacity] {
+    opcode(mut s, 1)?
+    name(mut s, path)
+}
+
+/// A live variant of the sum being defined, with n fields; schema_of each follows.
+pub fn variant(mut s: Schema, path: String, n: u64) -> Result[(), Capacity] {
+    opcode(mut s, 0)?
+    name(mut s, path)?
+    list.put_word_le(mut s.cur, n)
+}
+
+fn push_own[T](mut xs: List[T], take x: T) -> Result[(), Capacity] {
+    match list.push(mut xs, take x) {
+        Ok(()) => Ok(()),
+        Error((f, _)) => Error(f)
+    }
+}
+
+fn push_plain(mut xs: List[u64], x: u64) -> Result[(), Capacity] {
+    match list.push(mut xs, x) {
+        Ok(()) => Ok(()),
+        Error((f, _)) => Error(f)
+    }
+}
+
+fn builder() -> Schema {
+    Schema(cur: list.new(), saved: list.new(), open: list.new(), keys: list.new(), defs: list.new(), defaults: list.new())
+}
+
+fn built[T](c: Codec[T]) -> Result[Schema, Capacity] {
+    let mut s = builder()
+    (c.describer)(mut s)?
+    Ok(take s)
+}
+
+fn finish(s: Schema) -> Result[Bytes, Capacity] {
+    let mut size: u64 = 9 + list.len(s.cur)
+    for d in s.defs {
+        size += list.len(d)
+    }
+    let mut out: Bytes = list.with_capacity(size)?
+    put_byte(mut out, 1)?
+    list.put_word_le(mut out, list.len(s.defs))?
+    for d in s.defs {
+        list.append(mut out, d)?
+    }
+    list.append(mut out, s.cur)?
+    Ok(take out)
+}
+
+/// The schema c writes: what a store keeps beside the bytes. Ex: `codec.schema(rows)?`
+pub fn schema[T](c: Codec[T]) -> Result[Bytes, Capacity] {
+    let s = built(c)?
+    finish(s)
+}
+
+/// The stable fingerprint of c's schema: CRC-64-AVRO (Rabin) of its bytes, so equal
+/// schemas, tombstones and variant order included, have equal fingerprints.
+pub fn fingerprint[T](c: Codec[T]) -> Result[u64, Capacity] {
+    let b = schema(c)?
+    Ok(fingerprint_of(b))
+}
+
+/// CRC-64-AVRO of schema bytes. Cost: O(n), no admission.
+pub fn fingerprint_of(b: Bytes) -> u64 {
+    let mut fp: u64 = 0xc15d213aa4d7a795
+    for x in b {
+        let byte: u64 = int.widen(x)
+        fp = fp ^ byte
+        let mut i: u64 = 0
+        while i < 8 {
+            fp = (fp >> 1) ^ (0xc15d213aa4d7a795 & int.wrapping_neg(fp & 1))
+            i += 1
+        }
+    }
+    fp
+}
+
+// Resolution. `resolve` checks the writer's schema, then compiles a plan from the pair of
+// schemas: per type pair a node of `ops`, per pair of definitions one node, shared, so a
+// recursive type compiles once. Reading runs the plan over the writer's bytes with an
+// explicit work stack: it checks every item as decoding does, offsets in the writer's
+// bytes, and writes the reader's layout (fields in the reader's order, removed fields
+// dropped, defaults added); the reader's own decode then builds the value. Equal schemas
+// skip all of it. Plan nodes: 0 leaf (opcode); 1 List (element); 2 Map (key, value);
+// 3 Option (inner); 4 Result (ok, error); 5 tuple (n, components); 6 record (identity,
+// writer fields w, w pairs of reader position and node, reader fields r, r sources:
+// writer field or 2^63 + default); 7 sum (variants v, v offsets of: live, n, nodes);
+// 8 via (inner).
+
+/// A codec ready to read bytes written under one writer's schema.
+pub opaque type Reader[T] {
+    c: Codec[T],
+    same: bool,
+    ops: List[u64],
+    defaults: List[Default]
+}
+
+type Plan {
+    all: Bytes,
+    wlen: u64,
+    wdefs: List[u64],
+    rdefs: List[u64],
+    ops: List[u64],
+    memo: Map[(u64, u64), u64],
+    tasks: List[(u64, u64, u64)],
+    defaults: List[Default]
+}
+
+const SKIP: u64 = 0xffffffffffffffff
+const DEFAULT: u64 = 0x8000000000000000
+
+
+// The end of the name at `at`, or None past `end`.
+fn name_end(b: Bytes, at: u64, end: u64) -> Option[u64] {
+    if end - at < 8 {
+        return None
+    }
+    let n = list.word_le(b, at)
+    if end - at - 8 < n {
+        return None
+    }
+    if utf8_stop(b, at + 8, at + 8 + n) != n {
+        return None
+    }
+    Some(at + 8 + n)
+}
+
+// The end of the type at `at`, below `end`, every reference below `defs`: a count of the
+// types still owed, so no nesting reaches the call stack. Error: the offset at fault.
+fn type_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
+    let mut i = at
+    let mut owed: u64 = 1
+    while owed > 0 {
+        if i >= end {
+            return Error(i)
+        }
+        let x = b[i]
+        owed -= 1
+        i += 1
+        if x == 14 || x == 16 {
+            owed += 1
+        } else if x == 15 || x == 17 {
+            owed += 2
+        } else if x == 18 || x == 19 {
+            if end - i < 8 {
+                return Error(i - 1)
+            }
+            let n = list.word_le(b, i)
+            if x == 19 && n >= defs {
+                return Error(i - 1)
+            }
+            if x == 18 {
+                if n > end - i {
+                    return Error(i - 1)
+                }
+                owed += n
+            }
+            i += 8
+        } else if x > 13 {
+            return Error(i - 1)
+        }
+    }
+    Ok(i)
+}
+
+// The end of the definition at `at`; Error: the offset at fault.
+fn def_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
+    let mut i = match name_end(b, at, end) {
+        Some(e) => e,
+        None => return Error(at)
+    }
+    if end - i < 9 {
+        return Error(i)
+    }
+    let args = list.word_le(b, i)
+    i += 8
+    let mut k: u64 = 0
+    while k < args {
+        i = type_end(b, i, end, defs)?
+        k += 1
+    }
+    if i >= end {
+        return Error(i)
+    }
+    let kind = b[i]
+    i += 1
+    if kind == 2 {
+        return type_end(b, i, end, defs)
+    }
+    if kind > 2 || end - i < 8 {
+        return Error(i - 1)
+    }
+    let n = list.word_le(b, i)
+    i += 8
+    k = 0
+    while k < n {
+        if i >= end || b[i] > 1 {
+            return Error(i)
+        }
+        let live = b[i] == 0
+        let Some(after) = name_end(b, i + 1, end) else {
+            return Error(i)
+        }
+        i = after
+        if live {
+            if kind == 0 {
+                i = type_end(b, i, end, defs)?
+            } else {
+                if end - i < 8 {
+                    return Error(i)
+                }
+                let fields = list.word_le(b, i)
+                i += 8
+                let mut f: u64 = 0
+                while f < fields {
+                    i = type_end(b, i, end, defs)?
+                    f += 1
+                }
+            }
+        }
+        k += 1
+    }
+    Ok(i)
+}
+
+// The definitions' offsets in `all` of the schema at `from`, checked; Error: the offset.
+fn scan(all: Bytes, from: u64, end: u64, mut defs: List[u64]) -> Result[Result[u64, u64], Capacity] {
+    if end == from || all[from] != 1 {
+        return Ok(Error(from))
+    }
+    if end - from < 9 {
+        return Ok(Error(from + 1))
+    }
+    let n = list.word_le(all, from + 1)
+    if n > end - from {
+        return Ok(Error(from + 1))
+    }
+    list.reserve(mut defs, n)?
+    let mut i = from + 9
+    let mut k: u64 = 0
+    while k < n {
+        push_plain(mut defs, i)?
+        i = match def_end(all, i, end, n) {
+            Ok(e) => e,
+            Error(e) => return Ok(Error(e))
+        }
+        k += 1
+    }
+    let root = i
+    match type_end(all, i, end, n) {
+        Ok(e) => if e != end {
+            return Ok(Error(e))
+        },
+        Error(e) => return Ok(Error(e))
+    }
+    Ok(Ok(root))
+}
+
+// The end of the type at `at` in a checked schema.
+fn skip(b: Bytes, at: u64) -> u64 {
+    match type_end(b, at, list.len(b), SKIP) {
+        Ok(e) => e,
+        Error(e) => e
+    }
+}
+
+// The offset of the kind byte of the definition at d.
+fn kind_at(b: Bytes, d: u64) -> u64 {
+    let mut i = d + 8 + list.word_le(b, d)
+    let args = list.word_le(b, i)
+    i += 8
+    let mut k: u64 = 0
+    while k < args {
+        i = skip(b, i)
+        k += 1
+    }
+    i
+}
+
+fn same_name(b: Bytes, x: u64, y: u64) -> bool {
+    let n = list.word_le(b, x)
+    n == list.word_le(b, y) && list.slice(b, x + 8, x + 8 + n) == list.slice(b, y + 8, y + 8 + n)
+}
+
+// The entries of the record or sum whose kind byte is at k: (live, name, type or fields).
+fn entries(b: Bytes, k: u64, mut out: List[(bool, u64, u64)]) -> Result[(), Capacity] {
+    let n = list.word_le(b, k + 1)
+    let mut i = k + 9
+    let mut e: u64 = 0
+    while e < n {
+        let live = b[i] == 0
+        let at_name = i + 1
+        i = at_name + 8 + list.word_le(b, at_name)
+        match list.push(mut out, (live, at_name, i)) {
+            Ok(()) => {}
+            Error((f, _)) => return Error(f)
+        }
+        if live {
+            if b[k] == 0 {
+                i = skip(b, i)
+            } else {
+                let fields = list.word_le(b, i)
+                i += 8
+                let mut f: u64 = 0
+                while f < fields {
+                    i = skip(b, i)
+                    f += 1
+                }
+            }
+        }
+        e += 1
+    }
+    Ok(())
+}
+
+fn find(b: Bytes, es: List[(bool, u64, u64)], name_at: u64) -> u64 {
+    let mut i: u64 = 0
+    for (_, n, _) in es {
+        if same_name(b, n, name_at) {
+            return i
+        }
+        i += 1
+    }
+    SKIP
+}
+
+fn emit(mut p: Plan, x: u64) -> Result[(), Capacity] {
+    push_plain(mut p.ops, x)
+}
+
+fn task(mut p: Plan, w: u64, r: u64, slot: u64) -> Result[(), Capacity] {
+    match list.push(mut p.tasks, (w, r, slot)) {
+        Ok(()) => Ok(()),
+        Error((f, _)) => Error(f)
+    }
+}
+
+fn def_at(p: Plan, at: u64) -> u64 {
+    let index = list.word_le(p.all, at + 1)
+    if at < p.wlen {
+        p.wdefs[index]
+    } else {
+        p.rdefs[index]
+    }
+}
+
+// The node of the type pair at w (the writer's) and r; Error: the writer offset at fault.
+fn type_node(mut p: Plan, w: u64, r: u64) -> Result[Result[u64, u64], Capacity] {
+    let x = p.all[w]
+    if x != p.all[r] {
+        return Ok(Error(w))
+    }
+    let index = list.len(p.ops)
+    if x <= 13 {
+        emit(mut p, 0)?
+        emit(mut p, int.widen(x))?
+    } else if x == 14 || x == 16 {
+        emit(mut p, if x == 14 { 1 } else { 3 })?
+        emit(mut p, 0)?
+        task(mut p, w + 1, r + 1, index + 1)?
+    } else if x == 15 || x == 17 {
+        emit(mut p, if x == 15 { 2 } else { 4 })?
+        emit(mut p, 0)?
+        emit(mut p, 0)?
+        task(mut p, w + 1, r + 1, index + 1)?
+        let w2 = skip(p.all, w + 1)
+        let r2 = skip(p.all, r + 1)
+        task(mut p, w2, r2, index + 2)?
+    } else if x == 18 {
+        let n = list.word_le(p.all, w + 1)
+        if n != list.word_le(p.all, r + 1) {
+            return Ok(Error(w))
+        }
+        emit(mut p, 5)?
+        emit(mut p, n)?
+        let mut cw = w + 9
+        let mut cr = r + 9
+        let mut k: u64 = 0
+        while k < n {
+            emit(mut p, 0)?
+            task(mut p, cw, cr, index + 2 + k)?
+            cw = skip(p.all, cw)
+            cr = skip(p.all, cr)
+            k += 1
+        }
+    } else {
+        let wd = def_at(p, w)
+        let rd = def_at(p, r)
+        match map.get(p.memo, (wd, rd)) {
+            Some(known) => return Ok(Ok(known)),
+            None => {}
+        }
+        return definition(mut p, wd, rd)
+    }
+    Ok(Ok(index))
+}
+
+// The node of a pair of definitions, entered in the memo before its fields, so a
+// recursive type reaches it again as a reference.
+fn definition(mut p: Plan, wd: u64, rd: u64) -> Result[Result[u64, u64], Capacity] {
+    if !same_name(p.all, wd, rd) {
+        return Ok(Error(wd))
+    }
+    let wk = kind_at(p.all, wd)
+    let rk = kind_at(p.all, rd)
+    let kind = p.all[wk]
+    if kind != p.all[rk] {
+        return Ok(Error(wk))
+    }
+    let index = list.len(p.ops)
+    full_map(map.insert(mut p.memo, (wd, rd), index))?
+    if kind == 2 {
+        emit(mut p, 8)?
+        emit(mut p, 0)?
+        task(mut p, wk + 1, rk + 1, index + 1)?
+        return Ok(Ok(index))
+    }
+    let mut ws: List[(bool, u64, u64)] = list.new()
+    let mut rs: List[(bool, u64, u64)] = list.new()
+    entries(p.all, wk, mut ws)?
+    entries(p.all, rk, mut rs)?
+    if kind == 0 {
+        record_node(mut p, wd, rd, ws, rs)
+    } else {
+        sum_node(mut p, wk, ws, rs)
+    }
+}
+
+fn full_map(r: Result[(), (Capacity, ((u64, u64), u64))]) -> Result[(), Capacity] {
+    match r {
+        Ok(()) => Ok(()),
+        Error((f, _)) => Error(f)
+    }
+}
+
+// Writer fields in the writer's order, each to a reader position or dropped (a field the
+// reader removed, still checked); then the reader's fields from the writer or a default.
+// Identity (1): the same fields in the same order, copied as they come; otherwise (0)
+// the record's fields are relinked in the reader's order when it ends.
+fn record_node(mut p: Plan, wd: u64, rd: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u64, u64)]) -> Result[Result[u64, u64], Capacity] {
+    let index = list.len(p.ops)
+    let mut wn: u64 = 0
+    for (live, _, _) in ws {
+        if live {
+            wn += 1
+        }
+    }
+    let mut rn: u64 = 0
+    for (live, _, _) in rs {
+        if live {
+            rn += 1
+        }
+    }
+    emit(mut p, 6)?
+    emit(mut p, 1)?
+    emit(mut p, wn)?
+    let mut identity = wn == rn
+    let mut j: u64 = 0
+    for (live, name_at, type_at) in ws {
+        let q = find(p.all, rs, name_at)
+        if !live {
+            if q != SKIP && rs[q].0 {
+                return Ok(Error(name_at - 1))
+            }
+            continue
+        }
+        if q == SKIP {
+            return Ok(Error(name_at - 1))
+        }
+        let slot = list.len(p.ops) + 1
+        if rs[q].0 {
+            let position = live_position(rs, q)
+            if position != j {
+                identity = false
+            }
+            emit(mut p, position)?
+            emit(mut p, 0)?
+            task(mut p, type_at, rs[q].2, slot)?
+        } else {
+            identity = false
+            emit(mut p, SKIP)?
+            emit(mut p, 0)?
+            task(mut p, type_at, type_at, slot)?
+        }
+        j += 1
+    }
+    emit(mut p, rn)?
+    let reader_def = def_index(p.rdefs, rd)
+    for (live, name_at, _) in rs {
+        if !live {
+            continue
+        }
+        let k = find(p.all, ws, name_at)
+        if k != SKIP {
+            emit(mut p, live_position(ws, k))?
+        } else {
+            identity = false
+            let d = default_of(p, reader_def, name_at)
+            if d == SKIP {
+                return Ok(Error(wd))
+            }
+            emit(mut p, DEFAULT + d)?
+        }
+    }
+    let _ = list.set(mut p.ops, index + 1, if identity { 1 } else { 0 })
+    Ok(Ok(index))
+}
+
+fn live_position(es: List[(bool, u64, u64)], k: u64) -> u64 {
+    let mut n: u64 = 0
+    let mut i: u64 = 0
+    while i < k {
+        if es[i].0 {
+            n += 1
+        }
+        i += 1
+    }
+    n
+}
+
+fn def_index(defs: List[u64], at: u64) -> u64 {
+    let mut i: u64 = 0
+    for d in defs {
+        if d == at {
+            return i
+        }
+        i += 1
+    }
+    SKIP
+}
+
+fn default_of(p: Plan, def: u64, name_at: u64) -> u64 {
+    let n = list.word_le(p.all, name_at)
+    let wanted = list.slice(p.all, name_at + 8, name_at + 8 + n)
+    let mut i: u64 = 0
+    for d in p.defaults {
+        if d.def == def && string.as_bytes(d.field) == wanted {
+            return i
+        }
+        i += 1
+    }
+    SKIP
+}
+
+// Variants keep their declared index, so tags pass through. A writer's variant the
+// reader removed is Invalid where a value uses it; the reader may append variants.
+fn sum_node(mut p: Plan, wk: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u64, u64)]) -> Result[Result[u64, u64], Capacity] {
+    let wn = list.len(ws)
+    if wn > list.len(rs) {
+        return Ok(Error(wk))
+    }
+    let index = list.len(p.ops)
+    emit(mut p, 7)?
+    emit(mut p, wn)?
+    let mut t: u64 = 0
+    while t < wn {
+        emit(mut p, 0)?
+        t += 1
+    }
+    t = 0
+    for (live, name_at, fields_at) in ws {
+        let (rlive, rname, rfields) = rs[t]
+        if !same_name(p.all, name_at, rname) || !live && rlive {
+            return Ok(Error(name_at - 1))
+        }
+        let here = list.len(p.ops)
+        let _ = list.set(mut p.ops, index + 2 + t, here)
+        if live && rlive {
+            let m = list.word_le(p.all, fields_at)
+            if m != list.word_le(p.all, rfields) {
+                return Ok(Error(name_at - 1))
+            }
+            emit(mut p, 0)?
+            emit(mut p, m)?
+            let base = list.len(p.ops)
+            let mut cw = fields_at + 8
+            let mut cr = rfields + 8
+            let mut k: u64 = 0
+            while k < m {
+                emit(mut p, 0)?
+                task(mut p, cw, cr, base + k)?
+                cw = skip(p.all, cw)
+                cr = skip(p.all, cr)
+                k += 1
+            }
+        } else {
+            emit(mut p, 1)?
+            emit(mut p, 0)?
+        }
+        t += 1
+    }
+    Ok(Ok(index))
+}
+
+// The plan: the root pair's node first (index 0), then every task until none is left.
+fn compile(mut p: Plan, w: u64, r: u64) -> Result[Result[(), u64], Capacity] {
+    let root = type_node(mut p, w, r)?
+    if let Error(e) = root {
+        return Ok(Error(e))
+    }
+    // In the order met, so the error reported is the writer's first, level by level.
+    let mut t: u64 = 0
+    while t < list.len(p.tasks) {
+        let (cw, cr, slot) = p.tasks[t]
+        match type_node(mut p, cw, cr)? {
+            Ok(n) => {
+                let _ = list.set(mut p.ops, slot, n)
+            }
+            Error(e) => return Ok(Error(e))
+        }
+        t += 1
+    }
+    Ok(Ok(()))
+}
+
+/// Resolves the writer's schema against c's: Ok(Error(Schema(i))) at the writer's part
+/// that does not resolve (SEM-10). Equal schemas read with c's own decode.
+/// Ex: `let r = codec.resolve(rows, stored)??`
+pub fn resolve[T](c: Codec[T], writer: Bytes) -> Result[Result[Reader[T], DecodeError], Capacity] {
+    let mut s = built(c)?
+    let mine = finish(s)?
+    if mine == writer {
+        return Ok(Ok(Reader(c: c, same: true, ops: list.new(), defaults: list.new())))
+    }
+    let wlen = list.len(writer)
+    let mut all: Bytes = list.with_capacity(wlen + list.len(mine))?
+    list.append(mut all, writer)?
+    list.append(mut all, mine)?
+    let mut wdefs: List[u64] = list.new()
+    let wroot = match scan(all, 0, wlen, mut wdefs)? {
+        Ok(root) => root,
+        Error(e) => return Ok(Error(Schema(e)))
+    }
+    let mut rdefs: List[u64] = list.new()
+    let rroot = match scan(all, wlen, list.len(all), mut rdefs)? {
+        Ok(root) => root,
+        Error(e) => return Ok(Error(Schema(e)))
+    }
+    let defaults = replace(mut s.defaults, list.new())
+    let mut p = Plan(all: take all, wlen: wlen, wdefs: take wdefs, rdefs: take rdefs, ops: list.new(), memo: map.new(), tasks: list.new(), defaults: take defaults)
+    if let Error(e) = compile(mut p, wroot, rroot)? {
+        return Ok(Error(Schema(e)))
+    }
+    let ops = replace(mut p.ops, list.new())
+    let kept = replace(mut p.defaults, list.new())
+    Ok(Ok(Reader(c: c, same: false, ops: take ops, defaults: take kept)))
+}
+
+// A compound item being read: a List's or Map's entries, a tuple's or variant's fields,
+// a record's fields (segs: where each writer field starts in out, then the end), a Map's
+// keys so far, in the reader's layout.
+// The transcoder's output: bytes in the order it checks them (the writer's), and a list
+// of chunks of them, (lo, hi, next), linked in the reader's order. A reordered record
+// relinks its fields' chunk runs when it ends, so no byte moves twice and nesting costs
+// nothing; the reader's bytes are the chunks walked once from chunk 0.
+type Out {
+    raw: Bytes,
+    chunks: List[(u64, u64, u64)],
+    last: u64
+}
+
+// raw[lo..] was just written: the last chunk grows over it, or a new chunk follows it.
+fn grow(mut o: Out, lo: u64) -> Result[(), Stop] {
+    let last = o.last
+    let (clo, chi, next) = o.chunks[last]
+    if chi == lo {
+        let hi = list.len(o.raw)
+        let _ = list.set(mut o.chunks, last, (clo, hi, next))
+        return Ok(())
+    }
+    let c = chunk(mut o, lo)?
+    Ok(())
+}
+
+// A new chunk from raw[lo..] to the end of raw, linked after the last; it becomes last.
+fn chunk(mut o: Out, lo: u64) -> Result[u64, Stop] {
+    let c = list.len(o.chunks)
+    let hi = list.len(o.raw)
+    full(list.push(mut o.chunks, (lo, hi, SKIP)))?
+    let prev = o.last
+    link(mut o, prev, c)
+    o.last = c
+    Ok(c)
+}
+
+fn link(mut o: Out, from: u64, to: u64) {
+    let (lo, hi, _) = o.chunks[from]
+    let _ = list.set(mut o.chunks, from, (lo, hi, to))
+}
+
+// The reader's bytes of the run of chunks from `first` through `last`, appended to out.
+fn run_bytes(o: Out, first: u64, last: u64, mut out: Bytes) -> Result[(), Stop] {
+    let mut c = first
+    loop {
+        let (lo, hi, next) = o.chunks[c]
+        admit(list.append(mut out, list.slice(o.raw, lo, hi)))?
+        if c == last {
+            return Ok(())
+        }
+        c = next
+    }
+}
+
+type Frame {
+    kind: u64,
+    node: u64,
+    i: u64,
+    n: u64,
+    before: u64,
+    key_at: u64,
+    keyed: bool,
+    runs: List[u64],
+    keys: Map[Bytes, ()]
+}
+
+fn frame(kind: u64, node: u64, n: u64, before: u64) -> Frame {
+    Frame(kind: kind, node: node, i: 0, n: n, before: before, key_at: 0, keyed: false, runs: list.new(), keys: map.new())
+}
+
+fn push_frame(mut stack: List[Frame], take f: Frame) -> Result[(), Stop] {
+    full(list.push(mut stack, take f))
+}
+
+// One scalar or String at `at`, checked as its take does, copied to out.
+fn leaf(code: u64, b: Bytes, mut at: u64, mut out: Bytes) -> Result[(), Stop] {
+    let start = at
+    if code == 0 {
+        return Ok(())
+    } else if code == 1 {
+        let _ = take_bool(b, mut at)?
+    } else if code == 2 {
+        let _ = take_char(b, mut at)?
+    } else if code == 11 {
+        let _ = take_f32(b, mut at)?
+    } else if code == 12 {
+        let _ = take_f64(b, mut at)?
+    } else if code == 13 {
+        let n = take_u64(b, mut at)?
+        if list.len(b) - at < n {
+            return Error(Bad(Truncated(start)))
+        }
+        let stop = utf8_stop(b, at, at + n)
+        if stop != n {
+            return Error(Bad(Utf8(at + stop)))
+        }
+        at += n
+    } else {
+        let width: u64 = if code == 3 || code == 7 {
+            1
+        } else if code == 4 || code == 8 {
+            2
+        } else if code == 5 || code == 9 {
+            4
+        } else {
+            8
+        }
+        need(b, at, width)?
+        at += width
+    }
+    admit(list.append(mut out, list.slice(b, start, at)))
+}
+
+fn word(mut o: Out, x: u64) -> Result[(), Stop] {
+    let lo = list.len(o.raw)
+    admit(list.put_word_le(mut o.raw, x))?
+    grow(mut o, lo)
+}
+
+// Checks the writer's bytes by the plan and writes the reader's layout into o; the
+// offset where the value ends. marks: (offset in o.raw, offset in b) of each via value.
+fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, mut o: Out, mut marks: List[(u64, u64)]) -> Result[u64, Stop] {
+    let mut stack: List[Frame] = list.new()
+    let mut at: u64 = 0
+    let mut next: u64 = 0
+    let mut starting = true
+    loop {
+        if starting {
+            starting = false
+            let k = ops[next]
+            if k == 0 {
+                let lo = list.len(o.raw)
+                leaf(ops[next + 1], b, mut at, mut o.raw)?
+                grow(mut o, lo)?
+            } else if k == 1 || k == 2 {
+                let n = take_u64(b, mut at)?
+                word(mut o, n)?
+                if n > 0 {
+                    push_frame(mut stack, frame(k, next, n, 0))?
+                }
+            } else if k == 3 || k == 4 {
+                let tag = take_tag(b, mut at, 2)?
+                word(mut o, tag)?
+                if k == 4 || tag == 1 {
+                    next = ops[next + 1 + if k == 4 { tag } else { 0 }]
+                    starting = true
+                }
+            } else if k == 5 {
+                if ops[next + 1] > 0 {
+                    push_frame(mut stack, frame(5, next + 2, ops[next + 1], 0))?
+                }
+            } else if k == 6 {
+                if ops[next + 2] > 0 || ops[next + 1] != 1 {
+                    push_frame(mut stack, frame(6, next, ops[next + 2], o.last))?
+                }
+            } else if k == 7 {
+                let tag_at = at
+                let tag = take_u64(b, mut at)?
+                if tag >= ops[next + 1] || ops[ops[next + 2 + tag]] != 0 {
+                    return Error(Bad(Invalid(tag_at)))
+                }
+                word(mut o, tag)?
+                let v = ops[next + 2 + tag]
+                if ops[v + 1] > 0 {
+                    push_frame(mut stack, frame(5, v + 2, ops[v + 1], 0))?
+                }
+            } else {
+                full(list.push(mut marks, (list.len(o.raw), at)))?
+                next = ops[next + 1]
+                starting = true
+            }
+            continue
+        }
+        let mut f = match list.pop(mut stack) {
+            Some(top) => take top,
+            None => return Ok(at)
+        }
+        if f.kind == 1 {
+            if f.i < f.n {
+                f.i += 1
+                next = ops[f.node + 1]
+                starting = true
+                push_frame(mut stack, take f)?
+            }
+        } else if f.kind == 2 {
+            if f.keyed {
+                // The key's reader bytes, from its first chunk to the last.
+                let mut key: Bytes = list.new()
+                run_bytes(o, f.before, o.last, mut key)?
+                if map.contains(f.keys, key) {
+                    return Error(Bad(Duplicate(f.key_at)))
+                }
+                full(map.insert(mut f.keys, take key, ()))?
+                f.keyed = false
+                next = ops[f.node + 2]
+                starting = true
+                push_frame(mut stack, take f)?
+            } else if f.i < f.n {
+                f.i += 1
+                f.keyed = true
+                f.key_at = at
+                let here = list.len(o.raw)
+                f.before = chunk(mut o, here)?
+                next = ops[f.node + 1]
+                starting = true
+                push_frame(mut stack, take f)?
+            }
+        } else if f.kind == 5 {
+            if f.i < f.n {
+                next = ops[f.node + f.i]
+                f.i += 1
+                starting = true
+                push_frame(mut stack, take f)?
+            }
+        } else if ops[f.node + 1] == 1 {
+            if f.i < f.n {
+                next = ops[f.node + 4 + 2 * f.i]
+                f.i += 1
+                starting = true
+                push_frame(mut stack, take f)?
+            }
+        } else {
+            // A reordered record: each writer field is a run of its own chunks.
+            if f.i > 0 {
+                full(list.push(mut f.runs, o.last))?
+            }
+            if f.i < f.n {
+                let here = list.len(o.raw)
+                let first = chunk(mut o, here)?
+                full(list.push(mut f.runs, first))?
+                next = ops[f.node + 4 + 2 * f.i]
+                f.i += 1
+                starting = true
+                push_frame(mut stack, take f)?
+            } else {
+                relink(ops, f.node, f.before, f.runs, defaults, mut o)?
+            }
+        }
+    }
+}
+
+// The record's runs in the reader's order after `before`, each reader field the writer's
+// run or a default's new chunk; a removed field's run is left out.
+fn relink(ops: List[u64], node: u64, before: u64, runs: List[u64], defaults: List[Default], mut o: Out) -> Result[(), Stop] {
+    let wn = ops[node + 2]
+    let rn = ops[node + 3 + 2 * wn]
+    o.last = before
+    let mut q: u64 = 0
+    while q < rn {
+        let source = ops[node + 4 + 2 * wn + q]
+        if source >= DEFAULT {
+            let lo = list.len(o.raw)
+            admit(list.append(mut o.raw, defaults[source - DEFAULT].value))?
+            let _ = chunk(mut o, lo)?
+        } else {
+            let prev = o.last
+            link(mut o, prev, runs[2 * source])
+            o.last = runs[2 * source + 1]
+        }
+        q += 1
+    }
+    let end = o.last
+    link(mut o, end, SKIP)
+    Ok(())
+}
+
+// The offset in o.raw of the reader's byte i, walking the chunks; SKIP past the end.
+fn raw_at(o: Out, i: u64) -> u64 {
+    let mut c: u64 = 0
+    let mut pos: u64 = 0
+    while c != SKIP {
+        let (lo, hi, next) = o.chunks[c]
+        if i < pos + (hi - lo) {
+            return lo + (i - pos)
+        }
+        pos += hi - lo
+        c = next
+    }
+    SKIP
+}
+
+/// Decodes all of b, written under the schema r was resolved against, as decode does;
+/// offsets are into b. Ex: `codec.read(r, stored)?`
+pub fn read[T](r: Reader[T], b: Bytes) -> Result[Result[T, DecodeError], Capacity] {
+    if r.same {
+        return decode(r.c, b)
+    }
+    let mut o = Out(raw: list.new(), chunks: list.new(), last: 0)
+    let mut marks: List[(u64, u64)] = list.new()
+    let mut out: Bytes = list.new()
+    let walked: Result[(), Stop] = match list.push(mut o.chunks, (0, 0, SKIP)) {
+        Ok(()) => match transcode(r.ops, r.defaults, b, mut o, mut marks) {
+            Ok(end) => if end != list.len(b) {
+                Error(Bad(Trailing(end)))
+            } else {
+                run_bytes(o, 0, o.last, mut out)
+            },
+            Error(e) => Error(e)
+        },
+        Error((f, _)) => Error(Full(f))
+    }
+    match walked {
+        Ok(()) => {}
+        Error(Bad(e)) => return Ok(Error(e)),
+        Error(Full(f)) => return Error(f)
+    }
+    let mut at: u64 = 0
+    match (r.c.decoder)(out, mut at) {
+        Ok(x) => Ok(Ok(take x)),
+        Error(Bad(Value(i))) => {
+            let raw = raw_at(o, i)
+            for (mo, w) in marks {
+                if mo == raw {
+                    return Ok(Error(Value(w)))
+                }
+            }
+            Ok(Error(Value(i)))
+        }
+        Error(Bad(e)) => Ok(Error(e)),
+        Error(Full(f)) => Error(f)
+    }
+}
+
+// Keys. A key's bytes sort, compared bytewise, as its values do, and no key's bytes are
+// a proper prefix of another's, so a tuple key is its components' bytes concatenated.
+// Unsigned integers big-endian at their width; signed ones the same with the sign bit
+// flipped; bool one byte, 0 or 1; String and Bytes their bytes with each 0x00 written
+// 0x00 0xff, then 0x00 0x00. A key schema is a schema whose version byte is 2.
+
+/// The key codec of T. Generated key codecs and the built-in ones below are the makers.
+pub opaque type Key[T] {
+    encoder: fn(T, mut Bytes) -> Result[(), Capacity],
+    decoder: fn(Bytes, mut u64) -> Result[T, Stop],
+    describer: fn(mut Schema) -> Result[(), Capacity]
+}
+
+/// A key codec from its parts. Ex: `codec.key_make(id_put, id_take, id_schema)`
+pub fn key_make[T](e: fn(T, mut Bytes) -> Result[(), Capacity], d: fn(Bytes, mut u64) -> Result[T, Stop], w: fn(mut Schema) -> Result[(), Capacity]) -> Key[T] {
+    Key(encoder: e, decoder: d, describer: w)
+}
+
+/// Appends x's key bytes to out. Fails: Capacity; out then holds a prefix of them.
+pub fn encode_key[T](k: Key[T], x: T, mut out: Bytes) -> Result[(), Capacity] {
+    (k.encoder)(x, mut out)
+}
+
+/// Decodes all of b as one key: exactly the bytes encode_key produces, as decode.
+pub fn decode_key[T](k: Key[T], b: Bytes) -> Result[Result[T, DecodeError], Capacity] {
+    let mut at: u64 = 0
+    match (k.decoder)(b, mut at) {
+        Ok(x) => {
+            if at != list.len(b) {
+                return Ok(Error(Trailing(at)))
+            }
+            Ok(Ok(take x))
+        }
+        Error(Bad(e)) => Ok(Error(e)),
+        Error(Full(f)) => Error(f)
+    }
+}
+
+/// The key's schema: version 2, then the definitions and the type as `schema` writes them.
+pub fn key_schema[T](k: Key[T]) -> Result[Bytes, Capacity] {
+    let mut s = builder()
+    (k.describer)(mut s)?
+    let mut b = finish(s)?
+    let _ = list.set(mut b, 0, 2)
+    Ok(take b)
+}
+
+/// A key component's type in a key schema: a tuple key's schema_tuple, then one per part.
+pub fn schema_key[T](mut s: Schema, k: Key[T]) -> Result[(), Capacity] {
+    (k.describer)(mut s)
+}
+
+/// A key component: what a generated tuple key calls per part.
+pub fn put_key_with[T](x: T, k: Key[T], mut out: Bytes) -> Result[(), Capacity] {
+    (k.encoder)(x, mut out)
+}
+
+pub fn take_key_with[T](b: Bytes, mut at: u64, k: Key[T]) -> Result[T, Stop] {
+    (k.decoder)(b, mut at)
+}
+
+fn put_be(mut out: Bytes, x: u64, width: u64) -> Result[(), Capacity] {
+    list.reserve(mut out, width)?
+    let mut i = width
+    while i > 0 {
+        i -= 1
+        let byte: u8 = int.truncate((x >> (8 * i)) & 0xff)
+        let _ = list.push(mut out, byte)
+    }
+    Ok(())
+}
+
+fn take_be(b: Bytes, mut at: u64, width: u64) -> Result[u64, Stop] {
+    need(b, at, width)?
+    let mut x: u64 = 0
+    let mut i: u64 = 0
+    while i < width {
+        let byte: u64 = int.widen(b[at + i])
+        x = (x << 8) | byte
+        i += 1
+    }
+    at += width
+    Ok(x)
+}
+
+pub fn put_key_u8(x: u8, mut out: Bytes) -> Result[(), Capacity] {
+    put_byte(mut out, x)
+}
+
+pub fn take_key_u8(b: Bytes, mut at: u64) -> Result[u8, Stop] {
+    take_u8(b, mut at)
+}
+
+pub fn put_key_u16(x: u16, mut out: Bytes) -> Result[(), Capacity] {
+    put_be(mut out, int.widen(x), 2)
+}
+
+pub fn take_key_u16(b: Bytes, mut at: u64) -> Result[u16, Stop] {
+    let x = take_be(b, mut at, 2)?
+    Ok(int.truncate(x))
+}
+
+pub fn put_key_u32(x: u32, mut out: Bytes) -> Result[(), Capacity] {
+    put_be(mut out, int.widen(x), 4)
+}
+
+pub fn take_key_u32(b: Bytes, mut at: u64) -> Result[u32, Stop] {
+    let x = take_be(b, mut at, 4)?
+    Ok(int.truncate(x))
+}
+
+pub fn put_key_u64(x: u64, mut out: Bytes) -> Result[(), Capacity] {
+    put_be(mut out, x, 8)
+}
+
+pub fn take_key_u64(b: Bytes, mut at: u64) -> Result[u64, Stop] {
+    take_be(b, mut at, 8)
+}
+
+pub fn put_key_i8(x: i8, mut out: Bytes) -> Result[(), Capacity] {
+    let bits: u8 = int.truncate(x)
+    put_byte(mut out, bits ^ 0x80)
+}
+
+pub fn take_key_i8(b: Bytes, mut at: u64) -> Result[i8, Stop] {
+    let x = take_u8(b, mut at)?
+    Ok(int.truncate(x ^ 0x80))
+}
+
+pub fn put_key_i16(x: i16, mut out: Bytes) -> Result[(), Capacity] {
+    let bits: u16 = int.truncate(x)
+    put_be(mut out, int.widen(bits ^ 0x8000), 2)
+}
+
+pub fn take_key_i16(b: Bytes, mut at: u64) -> Result[i16, Stop] {
+    let x = take_be(b, mut at, 2)?
+    let bits: u16 = int.truncate(x ^ 0x8000)
+    Ok(int.truncate(bits))
+}
+
+pub fn put_key_i32(x: i32, mut out: Bytes) -> Result[(), Capacity] {
+    let bits: u32 = int.truncate(x)
+    put_be(mut out, int.widen(bits ^ 0x80000000), 4)
+}
+
+pub fn take_key_i32(b: Bytes, mut at: u64) -> Result[i32, Stop] {
+    let x = take_be(b, mut at, 4)?
+    let bits: u32 = int.truncate(x ^ 0x80000000)
+    Ok(int.truncate(bits))
+}
+
+pub fn put_key_i64(x: i64, mut out: Bytes) -> Result[(), Capacity] {
+    let bits: u64 = int.truncate(x)
+    put_be(mut out, bits ^ 0x8000000000000000, 8)
+}
+
+pub fn take_key_i64(b: Bytes, mut at: u64) -> Result[i64, Stop] {
+    let x = take_be(b, mut at, 8)?
+    Ok(int.truncate(x ^ 0x8000000000000000))
+}
+
+pub fn put_key_bool(x: bool, mut out: Bytes) -> Result[(), Capacity] {
+    put_bool(x, mut out)
+}
+
+pub fn take_key_bool(b: Bytes, mut at: u64) -> Result[bool, Stop] {
+    take_bool(b, mut at)
+}
+
+pub fn put_key_bytes(x: Bytes, mut out: Bytes) -> Result[(), Capacity] {
+    list.reserve(mut out, list.len(x) + 2)?
+    for byte in x {
+        put_byte(mut out, byte)?
+        if byte == 0 {
+            put_byte(mut out, 0xff)?
+        }
+    }
+    put_byte(mut out, 0)?
+    put_byte(mut out, 0)
+}
+
+// The escaped run at `at`: how many bytes it unescapes to, and where its terminator ends.
+fn key_run(b: Bytes, at: u64) -> Result[(u64, u64), Stop] {
+    let mut i = at
+    let mut n: u64 = 0
+    loop {
+        if i >= list.len(b) {
+            return Error(Bad(Truncated(at)))
+        }
+        if b[i] == 0 {
+            if i + 1 >= list.len(b) {
+                return Error(Bad(Truncated(at)))
+            }
+            if b[i + 1] == 0 {
+                return Ok((n, i + 2))
+            }
+            if b[i + 1] != 0xff {
+                return Error(Bad(Invalid(i + 1)))
+            }
+            i += 2
+        } else {
+            i += 1
+        }
+        n += 1
+    }
+}
+
+pub fn take_key_bytes(b: Bytes, mut at: u64) -> Result[Bytes, Stop] {
+    let (n, end) = key_run(b, at)?
+    let mut raw: Bytes = room(n)?
+    let mut i = at
+    while i < end - 2 {
+        let _ = list.push(mut raw, b[i])
+        i += if b[i] == 0 {
+            2
+        } else {
+            1
+        }
+    }
+    at = end
+    Ok(take raw)
+}
+
+pub fn put_key_string(x: String, mut out: Bytes) -> Result[(), Capacity] {
+    put_key_bytes(string.as_bytes(x), mut out)
+}
+
+/// As take_key_bytes, then UTF-8; Utf8 at the encoded byte that stops being UTF-8.
+pub fn take_key_string(b: Bytes, mut at: u64) -> Result[String, Stop] {
+    let start = at
+    let raw = take_key_bytes(b, mut at)?
+    let n = list.len(raw)
+    let stop = utf8_stop(raw, 0, n)
+    if stop != n {
+        let mut zeros: u64 = 0
+        let mut i: u64 = 0
+        while i < stop {
+            if raw[i] == 0 {
+                zeros += 1
+            }
+            i += 1
+        }
+        return Error(Bad(Utf8(start + stop + zeros)))
+    }
+    match string.from_utf8(take raw) {
+        Ok(s) => Ok(take s),
+        Error(_) => Error(Bad(Utf8(start)))
+    }
+}
+
+fn schema_bytes_type(mut s: Schema) -> Result[(), Capacity] {
+    opcode(mut s, 14)?
+    opcode(mut s, 3)
+}
+
+pub fn key_u8() -> Key[u8] {
+    Key(encoder: put_key_u8, decoder: take_key_u8, describer: schema_u8)
+}
+
+pub fn key_u16() -> Key[u16] {
+    Key(encoder: put_key_u16, decoder: take_key_u16, describer: schema_u16)
+}
+
+pub fn key_u32() -> Key[u32] {
+    Key(encoder: put_key_u32, decoder: take_key_u32, describer: schema_u32)
+}
+
+pub fn key_u64() -> Key[u64] {
+    Key(encoder: put_key_u64, decoder: take_key_u64, describer: schema_u64)
+}
+
+pub fn key_i8() -> Key[i8] {
+    Key(encoder: put_key_i8, decoder: take_key_i8, describer: schema_i8)
+}
+
+pub fn key_i16() -> Key[i16] {
+    Key(encoder: put_key_i16, decoder: take_key_i16, describer: schema_i16)
+}
+
+pub fn key_i32() -> Key[i32] {
+    Key(encoder: put_key_i32, decoder: take_key_i32, describer: schema_i32)
+}
+
+pub fn key_i64() -> Key[i64] {
+    Key(encoder: put_key_i64, decoder: take_key_i64, describer: schema_i64)
+}
+
+pub fn key_bool() -> Key[bool] {
+    Key(encoder: put_key_bool, decoder: take_key_bool, describer: schema_bool)
+}
+
+pub fn key_bytes() -> Key[Bytes] {
+    Key(encoder: put_key_bytes, decoder: take_key_bytes, describer: schema_bytes_type)
+}
+
+pub fn key_string() -> Key[String] {
+    Key(encoder: put_key_string, decoder: take_key_string, describer: schema_string)
+}

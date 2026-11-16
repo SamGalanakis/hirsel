@@ -65,7 +65,7 @@ The store library's frame will be larger. The ratio is published with its frame 
 
 The fault library's ratio is its isolate of the same body (an owned buffer, then an out-of-range index), compared with this figure.
 
-## Store rows: which twin is each row's baseline (STORE-SPEC v2.12 §6, Q3)
+## Store rows: which twin is each row's baseline (STORE-SPEC v2.13 §6, Q3)
 
 A row's baseline does the work the spec requires of the store on that row. A twin that skips required work is published beside the fair twin as a bound, never as the target.
 
@@ -76,13 +76,14 @@ A row's baseline does the work the spec requires of the store on that row. A twi
 | R1 bound | `store_mem.rs R1` (`BTreeMap` updated in place, no old version) | bound, never the target |
 | R2 | `store_mem.rs R2` (`BTreeMap::range`, a decode per row) | fair: a read keeps no old version, and the store's one Span and one I3 check are per range, not per row |
 | R3 | `store_mem.rs R3` (`Arc<BTreeMap>` on a spawned thread) | fair: one lookup of the table's catalog key in the snapshot's catalog map per `get` (I3) |
-| R4 | `durable_commit.rs` | bound until S3 is on main; requirement below |
-| R5 | none (`group_commit.rs`) | waits for S3; requirement below |
+| R1 indexed overwrite (ticket 5052) | `store_pcopy.rs` (`m4-store-pcopy 0\|1\|3 <gate>`) | fair: R1's put work plus the replaced row's decode and each index's key compare (J1) |
+| R4 | `store_journal.rs` (`m4-store-journal R4 <gate> <dir>`) | fair: the work listed below; `durable_commit.rs` (56-byte CRC-32 frame) is a bound |
+| R5 | `store_journal.rs` (`m4-store-journal R5 <gate> <dir>`) | fair: the work listed below; `group_commit.rs` is a bound |
 | R6 | none | waits for S2; requirement below |
 | R7 | none (`open.rs`) | waits for S2; requirement below |
 | R8 | none | waits for S2 (the pin waits for S4); requirement below |
 
-**`store_pcopy.rs`, R1's target.**
+**`store_pcopy.rs`, R1's target.** The tree, the commit and the put live in `store_tree.rs`, which `store_pcopy.rs` and `store_journal.rs` share through `#[path]`.
 - Node layout:
   - A leaf is a `Vec<Arc<Entry>>` of 16 to 32 rows in key order. A row is one `Arc<Entry>`, and an `Entry` owns its key and value bytes. This matches std.omap's one canonical entry per row.
   - A branch is a `Vec<Child>` of 16 to 32 children. A child is its subtree's minimum row (the same `Arc` the leaf holds) and an `Arc<Node>`.
@@ -96,7 +97,8 @@ A row's baseline does the work the spec requires of the store on that row. A twi
   - the body under `catch_unwind`;
   - the resident check;
   - publish at version + 1;
-  - no COMMIT encode (a memory store, Q2).
+  - no COMMIT encode (a memory store, Q2), but the COMMIT's size is kept by arithmetic per op and checked against `Limit(Transaction)`;
+  - a fresh node id per copied node; the key and value limits; I3's write check compares the table's id and schema epoch.
 - Work per put:
   - I3's catalog check;
   - encode;
@@ -115,15 +117,17 @@ A row's baseline does the work the spec requires of the store on that row. A twi
 - Build it as `store_mem.rs` is built (std only, the S4 flags).
 
 **What each twin must do once its slice is on main.**
-- **R4** (S3):
-  - Write the store's exact 97-byte COMMIT frame (§2.4) with its xxh3-64 check, so the file bytes match.
-  - Do R1's per-commit work.
-  - Then one write and one `fdatasync` per commit.
-  - Today's `durable_commit.rs` writes a 56-byte CRC-32 frame, updates a `BTreeMap` in place, and reads no clock.
-- **R5** (S3):
-  - R4's per-commit work.
-  - A writer thread and a journal thread that drains up to 64 frames or 4 MiB per `fdatasync`.
-  - §3.1's END policy: an END write and sync when the queue is idle, or every 64th group.
+- **R4** and **R5** (S3), done in `store_journal.rs`:
+  - R1's per-commit work through `store_tree.rs`, then the store's exact COMMIT frame (§2.4): 97 bytes for one put, its xxh3-64 check over the 33-byte binding (identity, role 2, segment seq, offset), head[0..8] and payload. At start the frame code is checked against store-build-1010's libxxhash vectors.
+  - The resident check counts the frames sent and not yet acked. Then `send` on a channel of capacity 2 × `group_commits` (128).
+  - A journal thread per §3.3: a group of up to 64 frames or 4 MiB, one write, one `fdatasync`, the ack, then an END (the END file rewritten whole with truncation, 96 bytes, `fdatasync`) when the queue was idle, after every 64th group, on rotate and on close.
+  - Segment creation per §3.2 (HEADER, sync, END at 72, sync, `sync_dir`), and rotation once a segment passes `checkpoint_bytes` (64 MiB). The checkpoint the store starts at that point (pack, manifest) is R6's work and is not in the twin.
+  - Build it as `store_pcopy.rs` is built, with xxhash-rust 0.8.15 (`feature="xxh3"`) as its one crate (`--extern xxhash_rust=`), as `core/tools/store_crc_bench.py` builds it. Cargo does not build the twins.
+  - After the gate: close, print `IO writes syncs ends groups frames rotates`, then replay every segment (HEADER bytes, each check, the version chain, length = 72 + 97 × frames, the END's d = that length) and compare the rows with the tree's.
+- Workload (store-build-1010, 2026-11-16; Hirsel's bench must match it): one table "accounts" in a fresh empty directory on disk, not tmpfs. Commit c (from 0) puts Account {id c % 16, balance c, owner "owner000"} at key c % 16 and returns c. Before READY, 64 commits, each made durable.
+  - **R4**: 10,000 commits, each `run` then `durable`. `DONE 50635000 <ns>`. Per commit the queue is idle, so each commit costs one group's write and sync plus the idle END's write and sync.
+  - **R5**: commits back to back for 10 s, `durable` after every 64th, the clock read after each `durable`. `DONE <commits> <ns>`; the row compares commits per second. At about 140k commits/s the twin rotates twice in 10 s.
+  - STORE-SPEC's R4 row says "16 tables"; the twin and 1010's workload use 16 keys of one table.
 - **R6** (S2):
   - Walk the cut's new nodes and encode each NODE frame with its xxh3-64 check.
   - Update a persistent node table's counts.

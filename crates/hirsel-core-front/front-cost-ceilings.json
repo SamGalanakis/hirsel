@@ -216,10 +216,10 @@
         "image index": 203.79778742473042
       },
       "image_per_token": {
-        "records_opened": 0.002492648088503011,
-        "bytes_read": 10.209802548662653,
-        "digests": 0.002492648088503011,
-        "digest_bytes": 10.110096625122532,
+        "records_opened": 0.002571068477804229,
+        "bytes_read": 10.533638986136395,
+        "digests": 0.002571068477804229,
+        "digest_bytes": 10.430796247024226,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.03113849600896233,
@@ -939,6 +939,50 @@
       },
       "evidence": [
         "std-codec-1008/evidence/front-cost-structural.log"
+      ]
+    },
+    {
+      "reason": "The replaced-value cutover completes replaced_value, one new body in both source corpora, and adds its opaque result declarations to insertion signatures. The candidate image opens 90 records and reads their larger type/function records. Only the four red suite-edit image growth cells receive their observation with the existing 2 percent / one-event margin. Same-binary baseline source checking proves 445->446 m1 and 267->268 std completion. Full image baseline comparison is unavailable because bundled_std_selection requires source equality with the compiler embedded candidate std; no inherited-red claim is made. Every instruction-stage ceiling and fixed language budget is unchanged.",
+      "changes": {
+        "suite-edit": {
+          "records_opened": {
+            "before": 0.002492648088503011,
+            "after": 0.002571068477804229
+          },
+          "bytes_read": {
+            "before": 10.209802548662653,
+            "after": 10.533638986136395
+          },
+          "digests": {
+            "before": 0.002492648088503011,
+            "after": 0.002571068477804229
+          },
+          "digest_bytes": {
+            "before": 10.110096625122532,
+            "after": 10.430796247024226
+          }
+        }
+      },
+      "observation": {
+        "local": {
+          "records_opened": 90,
+          "bytes_read": 368729,
+          "digests": 90,
+          "digest_bytes": 365129,
+          "tokens": 35705
+        }
+      },
+      "completed_bodies_before": {
+        "m1": 445,
+        "std": 267
+      },
+      "completed_bodies_after": {
+        "m1": 446,
+        "std": 268
+      },
+      "commit_range": "1a423e99..omap-replaced-value",
+      "evidence": [
+        "std-ordered-map-998/store-copy/COST.md"
       ]
     }
   ],

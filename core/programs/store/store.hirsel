@@ -481,7 +481,7 @@ fn put_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error]
     let updated = std.omap.insert(mut ids, tx.roots.data, take p, take shared_value)
     match take updated {
         Error((c, _)) => Error(refused(mut tx, c)),
-        Ok(take data) => {
+        Ok((take data, _)) => {
             record_op(mut tx, take saved_key, Some(take saved_value))?
             tx.roots.data = take data
             // Main without a retained durable root subtracts the replaced entry (I4).
@@ -1677,7 +1677,7 @@ fn catalog_put(mut db: Db, roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Er
     let shared_value = capacity(result.capacity_only(arc.new(copied(v)?)))?
     let inserted = std.omap.insert(mut db.next_node, roots.catalog, copied(k)?, take shared_value)
     let catalog = match take inserted {
-        Ok(take tree) => take tree,
+        Ok((take tree, _)) => take tree,
         Error((c, _)) => return Error(Full(c))
     }
     Ok(Roots(data: std.omap.snapshot(roots.data), streams: std.omap.snapshot(roots.streams), catalog: take catalog))
@@ -1812,7 +1812,8 @@ pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
         let empty: Bytes = list.new()
         live = int.saturating_add(live, entry(physical_key, empty))
         let shared_empty = capacity(result.capacity_only(arc.new(take empty)))?
-        roots.data = capacity(result.capacity_only(std.omap.insert(mut db.next_node, roots.data, take physical_key, take shared_empty)))?
+        let (take data, _) = capacity(result.capacity_only(std.omap.insert(mut db.next_node, roots.data, take physical_key, take shared_empty)))?
+        roots.data = take data
     }
     roots = catalog_put(mut db, roots, k, raw)?
     meta.epoch += 1
@@ -2032,7 +2033,7 @@ fn test_typed_indexes(c: Clock) -> Result[(), ()] waits {
 fn record_op(mut tx: Tx, take key: Bytes, take value: Option[Bytes]) -> Result[(), Error] {
     let updated = std.omap.insert(mut tx.op_ids, tx.ops, take key, take value)
     match take updated {
-        Ok(take ops) => {
+        Ok((take ops, _)) => {
             tx.ops = take ops;
             Ok(())
         },
@@ -3316,7 +3317,10 @@ fn frame_boundary_points() -> bool {
     for i in 0u64 .. 32 {
         result.unwrap(list.push(mut value, int.truncate(i)))
     }
-    ops = result.unwrap(std.omap.insert(mut ids, ops, take key, Some(take value)))
+    ops = {
+        let (take next_map, _) = result.unwrap(std.omap.insert(mut ids, ops, take key, Some(take value)))
+        take next_map
+    }
     for i in 0u64 .. 5 {
         let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
         let raw = result.unwrap(encode_commit(ci, ops, segments[i], offsets[i]))

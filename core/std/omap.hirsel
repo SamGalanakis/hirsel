@@ -14,6 +14,21 @@ pub opaque type OMap[K: ordered + shareable + send, V: shareable + send]: sharea
     head: Option[Arc[Node[K, V]]]
 }
 
+type Replacement[K: ordered + shareable + send, V: shareable + send]: send = Moved(V) | Held(Arc[Node[K, V]], u64)
+
+/// The replaced value, moved from a unique leaf or retained in a shared leaf.
+pub opaque type Replaced[K: ordered + shareable + send, V: shareable + send]: send {
+    value: Replacement[K, V]
+}
+
+/// The stored value before replacement, without copying its payload.
+pub fn replaced_value[K: ordered + shareable + send, V: shareable + send](old: Replaced[K, V]) -> View[V] in old {
+    match old.value {
+        Moved(v) => view v,
+        Held(n, at) => view n.values[at]
+    }
+}
+
 pub type Bound[K: ordered + shareable + send]: shareable + send = Unbounded | Included(K) | Excluded(K)
 
 type Frame[K: ordered + shareable + send, V: shareable + send]: shareable + send {
@@ -279,7 +294,7 @@ fn child_index[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K
 /// Insert/replace by path copying. ids is the last issued id shared by every
 /// writer branch. New children are stamped before parents. Failed allocations
 /// may consume ids but never publish a partial version; key and value return.
-pub fn insert[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m: OMap[K, V], take k: K, take v: V) -> Result[OMap[K, V], (Capacity, (K, V))] {
+pub fn insert[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m: OMap[K, V], take k: K, take v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), (Capacity, (K, V))] {
     match inserted(mut ids, m, k, v) {
         Ok(take next_map) => Ok(take next_map),
         Error(c) => Error((c, (take k, take v))),
@@ -289,16 +304,17 @@ pub fn insert[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
 /// Consuming input with recovery: Capacity returns the original map and k/v.
 /// The input root stays alive until publication, so this uses path copying
 /// even when its caller owns the only version. No rollback allocation occurs.
-pub fn insert_recover[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], take k: K, take v: V) -> Result[OMap[K, V], (Capacity, (OMap[K, V], (K, V)))] {
+pub fn insert_recover[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], take k: K, take v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), (Capacity, (OMap[K, V], (K, V)))] {
     match inserted(mut ids, m, k, v) {
         Ok(take next_map) => Ok(take next_map),
         Error(c) => Error((c, (take m, (take k, take v))))
     }
 }
 
-fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m: OMap[K, V], k: K, v: V) -> Result[OMap[K, V], Capacity] {
+fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m: OMap[K, V], k: K, v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), Capacity] {
+    let mut replaced: Option[Replaced[K, V]] = None
     let pieces = match m.head {
-        Some(n) => insert_node(mut ids, n, k, v)?,
+        Some(n) => insert_node(mut ids, mut replaced, n, k, v)?,
         None => {
             let mut ks: List[K] = list.with_capacity(1)?
             let mut vs: List[V] = list.with_capacity(1)?
@@ -315,12 +331,15 @@ fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m:
     } else {
         fresh_branch(mut ids, take pieces)?
     }
-    Ok(OMap(head: Some(take h)))
+    Ok((OMap(head: Some(take h)), take replaced))
 }
 
-fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64, n: Arc[Node[K, V]], k: K, v: V) -> Result[List[Arc[Node[K, V]]], Capacity] {
+fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], n: Arc[Node[K, V]], k: K, v: V) -> Result[List[Arc[Node[K, V]]], Capacity] {
     let i = lower(n.keys, k)
     let hit = i < list.len(n.keys) && key_order(n.keys, i, k) == Equal
+    if hit {
+        replaced = Some(Replaced(value: Held(arc.share(n), i)))
+    }
     let total = list.len(n.keys) + if hit {
         0u64
     } else {
@@ -373,12 +392,12 @@ fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
     Ok(take out)
 }
 
-fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, n: Arc[Node[K, V]], k: K, v: V) -> Result[List[Arc[Node[K, V]]], Capacity] {
+fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], n: Arc[Node[K, V]], k: K, v: V) -> Result[List[Arc[Node[K, V]]], Capacity] {
     if n.depth == 0 {
-        insert_leaf(mut ids, n, k, v)
+        insert_leaf(mut ids, mut replaced, n, k, v)
     } else {
         let at = child_index(n, k)
-        let changed = insert_node(mut ids, n.kids[at], k, v)?
+        let changed = insert_node(mut ids, mut replaced, n.kids[at], k, v)?
         let mut cs: List[Arc[Node[K, V]]] = list.with_capacity(list.len(n.kids) - 1 + list.len(changed))?
         for j in 0 .. list.len(n.kids) {
             if j == at {
@@ -495,21 +514,22 @@ fn as_pieces[K: ordered + shareable + send, V: shareable + send](take nodes: Lis
 /// shared nodes use the ordinary path-copy. Each visited unique node is freed
 /// and reallocated by unwrap/new. Capacity consumes m; k/v are returned, and
 /// independently held versions remain valid. Keep a snapshot for rollback.
-pub fn insert_owned[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], take k: K, take v: V) -> Result[OMap[K, V], (Capacity, (K, V))] {
+pub fn insert_owned[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], take k: K, take v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), (Capacity, (K, V))] {
     match owned_map(mut ids, take m, k, v) {
         Ok(take next_map) => Ok(take next_map),
         Error(c) => Error((c, (take k, take v)))
     }
 }
 
-fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], k: K, v: V) -> Result[OMap[K, V], Capacity] {
+fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take m: OMap[K, V], k: K, v: V) -> Result[(OMap[K, V], Option[Replaced[K, V]]), Capacity] {
+    let mut replaced: Option[Replaced[K, V]] = None
     let OMap(head: old) = take m
     let changed = match take old {
         None => {
             let empty: Node[K, V] = Node(stamp: 0, depth: 0, size: 0, keys: list.new(), values: list.new(), kids: list.new())
-            owned_node(mut ids, take empty, k, v)?
+            owned_node(mut ids, mut replaced, take empty, k, v)?
         },
-        Some(take h) => owned_arc(mut ids, take h, k, v)?
+        Some(take h) => owned_arc(mut ids, mut replaced, take h, k, v)?
     }
     let Pieces(first: left, second: right) = take changed
     let new_head = match take right {
@@ -521,13 +541,13 @@ fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, t
             fresh_branch(mut ids, take cs)?
         }
     }
-    Ok(OMap(head: Some(take new_head)))
+    Ok((OMap(head: Some(take new_head)), take replaced))
 }
 
-fn owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take h: Arc[Node[K, V]], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
+fn owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], take h: Arc[Node[K, V]], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
     match arc.try_unwrap(take h) {
-        Ok(take n) => owned_node(mut ids, take n, k, v),
-        Error(take shared) => Ok(as_pieces(insert_node(mut ids, shared, k, v)?))
+        Ok(take n) => owned_node(mut ids, mut replaced, take n, k, v),
+        Error(take shared) => Ok(as_pieces(insert_node(mut ids, mut replaced, shared, k, v)?))
     }
 }
 
@@ -541,7 +561,7 @@ fn push_at[T](mut xs: List[T], at: u64, take value: T) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take n: Node[K, V], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
+fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, mut replaced: Option[Replaced[K, V]], take n: Node[K, V], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
     let mut node = take n
     if node.depth == 0 {
         let at = lower(node.keys, k)
@@ -550,7 +570,8 @@ fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
         let nv = copied(v)?
         if hit {
             let _ = list.set(mut node.keys, at, take nk)
-            let _ = list.set(mut node.values, at, take nv)
+            let old = list.set(mut node.values, at, take nv)
+            replaced = Some(Replaced(value: Moved(take old)))
         } else {
             let capacity = if list.len(node.keys) < 32 {
                 32u64
@@ -575,7 +596,7 @@ fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
         let old_size = node.kids[at].size
         list.swap(mut node.kids, at, total - 1)
         let selected = option.unwrap(list.pop(mut node.kids))
-        let changed = owned_arc(mut ids, take selected, k, v)?
+        let changed = owned_arc(mut ids, mut replaced, take selected, k, v)?
         let Pieces(first: left, second: right) = take changed
         let minimum = copied(left.keys[0])?
         let mut size = left.size

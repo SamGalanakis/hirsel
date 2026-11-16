@@ -3,7 +3,10 @@
 fn populated(mut ids: u64) -> std.omap.OMap[u64, u64] {
     let mut m: std.omap.OMap[u64, u64] = std.omap.new()
     for i in 0u64 .. 100000 {
-        m = result.unwrap(std.omap.insert(mut ids, m, i, i + 1))
+        m = {
+            let (take next_map, _) = result.unwrap(std.omap.insert(mut ids, m, i, i + 1))
+            take next_map
+        }
     }
     m
 }
@@ -20,9 +23,15 @@ fn unique_inserts(mut ids: u64, recover: bool) -> std.omap.OMap[u64, u64] {
     for i in 0u64 .. 100000 {
         let previous = take m
         let replacement = if recover {
-            result.unwrap(std.omap.insert_recover(mut ids, take previous, i, i + 1))
+            {
+                let (take next_map, _) = result.unwrap(std.omap.insert_recover(mut ids, take previous, i, i + 1))
+                take next_map
+            }
         } else {
-            result.unwrap(std.omap.insert_owned(mut ids, take previous, i, i + 1))
+            {
+                let (take next_map, _) = result.unwrap(std.omap.insert_owned(mut ids, take previous, i, i + 1))
+                take next_map
+            }
         }
         m = take replacement
     }
@@ -66,6 +75,14 @@ fn work(mut ids: u64, mut m: std.omap.OMap[u64, u64], mut held: List[std.omap.OM
         m = unique_inserts(mut ids, mode == "recover");
         return std.omap.len(m)
     }
+    if mode == "overwrite" {
+        for i in 0u64 .. 100000 {
+            let previous = replace(mut m, std.omap.new())
+            let (take changed, _) = result.unwrap(std.omap.insert_owned(mut ids, take previous, i, i + 2))
+            m = take changed
+        }
+        return std.omap.len(m)
+    }
     if mode == "unwrap" {
         return unwrap_edits(mut edits)
     }
@@ -75,7 +92,10 @@ fn work(mut ids: u64, mut m: std.omap.OMap[u64, u64], mut held: List[std.omap.OM
     }
     if mode == "insert" {
         for i in 0u64 .. 100000 {
-            m = result.unwrap(std.omap.insert(mut ids, m, i, i + 1))
+            m = {
+                let (take next_map, _) = result.unwrap(std.omap.insert(mut ids, m, i, i + 1))
+                take next_map
+            }
         }
         return std.omap.len(m)
     }
@@ -97,7 +117,10 @@ fn work(mut ids: u64, mut m: std.omap.OMap[u64, u64], mut held: List[std.omap.OM
     if mode == "snapshots" {
         for i in 0u64 .. 1000 {
             result.unwrap(list.push(mut held, std.omap.snapshot(m)))
-            m = result.unwrap(std.omap.insert(mut ids, m, i, 100000 + i))
+            m = {
+                let (take next_map, _) = result.unwrap(std.omap.insert(mut ids, m, i, 100000 + i))
+                take next_map
+            }
         }
         let mut sum: u64 = 0
         for i in 0u64 .. 1000 {
@@ -141,7 +164,7 @@ pub fn main(argv: Args, out: Stdout, dir: Dir, clock: Clock) -> Result[(), Exit]
     let start = host.mono_ns(clock)
     let sum = work(mut ids, mut m, mut held, mut edits, keys, values, mode)
     let elapsed = host.mono_ns(clock) - start
-    let expected = if mode == "insert" || mode == "unique" || mode == "recover" || mode == "bulk" || mode == "unwrap" {
+    let expected = if mode == "overwrite" || mode == "insert" || mode == "unique" || mode == "recover" || mode == "bulk" || mode == "unwrap" {
         100000u64
     } else if mode == "lookup" {
         5000050000u64

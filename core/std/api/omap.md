@@ -32,12 +32,32 @@ Capacity consumes the draft m and returns k/v; keep an independent snapshot
 for rollback. Every held version and its node ids stay unchanged.
 
 `insert_recover(mut ids,take m,take k,take v)` returns
-`Result[OMap[K,V],(Capacity,(OMap[K,V],(K,V)))]`. On refusal it returns the
+`Result[(OMap[K,V],Option[Replaced[K,V]]),(Capacity,(OMap[K,V],(K,V)))]`. On refusal it returns the
 original map with unchanged contents and node ids, plus its key and value.
 The original root stays alive until publication, so the implementation uses
 path copying even when the caller owns the only version. No fallible rollback
 allocation is needed. This is the transaction-friendly recovery contract;
 `insert_owned` remains the explicit discard-on-Capacity alternative.
+
+All insert forms return `Ok((map, Option[Replaced[K,V]]))`. New keys return
+`None`. Replacements return the value that was stored before the update, from
+the insertion descent without a second lookup or payload clone. Read it with
+`replaced_value(old) -> View[V] in old`. The opaque, sendable result moves the
+old value out of a unique leaf; for a shared leaf it owns an Arc and slot.
+Consequently it can retain the whole old leaf until dropped. It allocates no
+extra box. Snapshots keep their previous values. Error results have no replaced
+entry. A caller uninterested in the entry binds and drops the second tuple field.
+
+| form | map input | success | Capacity | reason today |
+|---|---|---|---|---|
+| insert | borrowed | new map, optional old value holder | key/value; input remains valid | persistent update while retaining a version |
+| insert_owned | taken | new map, optional old value holder | key/value; draft consumed | unique-node transfer through try_unwrap/new |
+| insert_recover | taken | new map, optional old value holder | original map and key/value | strong recovery without fallible rollback |
+
+The two consuming forms differ because checked mutation of a unique Arc payload
+is unavailable. With that operation and a failure-atomic update algorithm,
+`insert_recover` can take the unique path and `insert_owned` can disappear.
+Borrowed `insert` continues to express a persistent update of a retained version.
 
 `range(m,take lower,take upper)` accepts `Unbounded`, `Included(k)` or
 `Excluded(k)` endpoints and returns an owned, sendable `Cursor`. It reserves one

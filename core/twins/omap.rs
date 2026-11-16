@@ -20,6 +20,7 @@ fn btree(mode: &str, gate: &mut std::fs::File) {
     let input: Vec<_> = if mode == "bulk" { (0..100_000u64).map(|i| (i, i + 1)).collect() } else { Vec::new() };
     phase(|| match mode {
         "bulk" => { m = input.iter().copied().collect(); m.len() as u64 },
+        "overwrite" => { for i in 0..100_000u64 { black_box(m.insert(i, i + 2)); } m.len() as u64 },
         "insert" | "unique" | "recover" => { for i in 0..100_000u64 { m.insert(i, i + 1); } m.len() as u64 },
         "lookup" => (0..100_000).map(|i| black_box(&m)[&((i * 65537) % 100_000)]).sum(),
         "range" => m.range(25_000..75_000).map(|(k, v)| k + v).sum(),
@@ -39,6 +40,7 @@ fn persistent(mode: &str, unique: bool, gate: &mut std::fs::File) {
     let input: Vec<_> = if mode == "bulk" { (0..100_000u64).map(|i| (i, i + 1)).collect() } else { Vec::new() };
     phase(|| match mode {
         "bulk" => { m = input.iter().copied().collect(); m.len() as u64 },
+        "overwrite" => { for i in 0..100_000u64 { black_box(m.insert(i, i + 2)); } m.len() as u64 },
         "insert" | "unique" | "recover" => {
             for i in 0..100_000u64 {
                 if unique || mode == "unique" || mode == "recover" { m.insert(i, i + 1); }

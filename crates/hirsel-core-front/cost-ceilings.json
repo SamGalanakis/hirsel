@@ -3,13 +3,13 @@
   "basis": "Qualified frozen/source-growth audit43d46518..4fcdeb12. Fixed-manifest population7082/3691->7263/3872lines,351/173->365/187complete bodies. Deque9+1, split cursors2, Mapclone2 new bodies each corpus; changed JSON source adds20lines. All named body-free increments are excluded from growth. Retain all concurrent growth/census histories. Fixed named anchor residual reduced for542fd0f2; raw60000andproduct rules unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 8757,
-      "check_lower_per_line": 17900,
+      "code_lines": 8835,
+      "check_lower_per_line": 18400,
       "whole_request_per_line": 33515.74,
       "whole_process_per_line": 33614.33
     },
     "std": {
-      "code_lines": 5367,
+      "code_lines": 5445,
       "check_lower_per_line": 14800,
       "whole_request_per_line": 28200,
       "whole_process_per_line": 28400
@@ -96,19 +96,19 @@
   },
   "margin": "M1 growth observation+2%, std+5%, rounded up to100. Growth baseline is pre-anchor frozen work plus current compiler own-source minus frozen-source work. Named anchor residual is a fixed absolute instruction count, never part of the60000budget. Other body-free regressions remain red.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "8b5681d6b10b; omap 40->49 completed source bodies; m1 426->435, std 253->262; 8757/5367 code lines",
+  "forecast_revision": "1a423e99..omap-replaced-value",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 435,
-      "bodies": 435,
+      "complete_bodies": 446,
+      "bodies": 446,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 32475.26,
       "finished_process_per_line": 32475.26
     },
     "std": {
-      "complete_bodies": 262,
-      "bodies": 262,
+      "complete_bodies": 268,
+      "bodies": 268,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 27987.4,
@@ -6289,6 +6289,45 @@
         "whole_process_per_line": 27800
       },
       "evidence": "std-ordered-map-998/optimise-cost-formatted.log"
+    },
+    {
+      "from_revision": "1a423e99",
+      "to_revision": "omap-replaced-value",
+      "reason": "replaced_value adds one completed source body, and Replaced/Replacement make every insert return its old stored value without a payload clone. Same-binary all-source control is accepted: m1 445 to 446, std 267 to 268. Only the red m1 check/lower cell receives observation plus 2 percent rounded up to 100. The same-binary full product control cannot select baseline std because bundled_std_selection requires equality with the embedded candidate sources; it is not used to attribute image cells. All other instruction ceilings, named anchor residuals and fixed 60000 budget stay unchanged.",
+      "completed_bodies_before": {
+        "m1": [
+          445,
+          445
+        ],
+        "std": [
+          267,
+          267
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          446,
+          446
+        ],
+        "std": [
+          268,
+          268
+        ]
+      },
+      "measured_lines": {
+        "m1": 8835,
+        "std": 5445
+      },
+      "observations": {
+        "m1_check_lower_adjusted_per_line": 17969.37,
+        "base_m1_check_lower_adjusted_per_line": 17858.33,
+        "whole_process_forecast": {
+          "m1": 32863.74,
+          "std": 28532.18
+        }
+      },
+      "previous_m1_check_lower_per_line": 17900,
+      "evidence": "std-ordered-map-998/store-copy/COST.md"
     }
   ],
   "denominator_policy": "Fixed M1/core-std manifest closure, deterministic actual code lines. Print baseline and current counts when different. Source-line movement alone is expected source development, not a regression; empty corpus, missing counters, every numeric ceiling and the fixed finished-process budget still fail. Refresh recorded reference and forecast when supported work changes.",

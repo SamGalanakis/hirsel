@@ -60,3 +60,7 @@ im's stable build.rs selects `threadsafe`, with no specialization or optional
 features; bitmaps and sized-chunks enable their default std feature. These are
 benchmark dependencies only, outside the shipped compiler/runtime link graph.
 No third-party source is copied into the Hirsel library.
+
+`overwrite` builds 100,000 entries outside the measured region, then replaces
+each value through the owned path and drops the returned old-value holder.
+It measures the success-result overhead against the old Map-only signature.

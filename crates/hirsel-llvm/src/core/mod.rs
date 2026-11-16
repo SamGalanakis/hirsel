@@ -23,6 +23,7 @@ mod growth;
 mod scalar;
 mod sink;
 mod sites;
+mod steps;
 mod storage;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod target_tests;
@@ -510,6 +511,8 @@ fn emit_module(
             value_slots: values::slots(body, &flow),
             literals: Vec::new(),
             address_slots: values::address_slots(body, &flow),
+            step_labels: Default::default(),
+            unchecked_steps: false,
             aliases,
             module,
             body,
@@ -572,6 +575,13 @@ fn emit_module(
         let signature = e.abi.signature(params);
         e.sink
             .begin_function(&body_name, &signature, &locals, &attrs);
+        let step_loops = steps::loops(module, body, e.constants);
+        if !step_loops.is_empty() {
+            // Both loop copies define the same source values and addresses.
+            // Entry allocas give mem2reg their joins before ordinary O3 runs.
+            e.value_slots.fill(true);
+            e.address_slots.fill(true);
+        }
         for (i, t) in body.values.iter().enumerate() {
             if e.value_slots[i] {
                 e.sink.alloca(Local::Value(i), &ty(*t), 0);
@@ -587,6 +597,14 @@ fn emit_module(
                 e.sink.alloca(Local::Address(i), &Type::Ptr, 0);
             }
         }
+        let step_ends = step_loops
+            .iter()
+            .map(|_| {
+                let slot = e.fresh();
+                e.sink.alloca(slot, &Type::I64, 8);
+                slot
+            })
+            .collect::<Vec<_>>();
         // A constant is a literal at each use: it has no effects or operands, and
         // a value defined once for the whole function would be live, and spilled,
         // across all of it.
@@ -619,6 +637,11 @@ fn emit_module(
             e.block(Label::block(i));
             let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
             let mut returned = false;
+            let merged = steps::merged(module, body, e.constants, b.insts);
+            let skipped = merged
+                .values()
+                .flat_map(|sites| sites.iter().copied())
+                .collect::<BTreeSet<_>>();
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
                 e.debug_location = function_debug
                     .map(|d| d.location(body.inst_anchors[b.insts.start as usize + offset]));
@@ -632,15 +655,30 @@ fn emit_module(
                     returned = true;
                     break;
                 }
-                if !matches!(inst, Inst::Const { .. }) {
-                    e.inst(inst, b.insts.start as usize + offset)?;
+                let index = b.insts.start as usize + offset;
+                if let Some(sites) = merged.get(&index) {
+                    e.step_group(sites);
+                }
+                if !matches!(inst, Inst::Const { .. }) && !skipped.contains(&index) {
+                    e.inst(inst, index)?;
                 }
             }
             if !returned {
                 e.anchor = b.anchor;
                 e.debug_location = function_debug.map(|d| d.location(b.anchor));
-                e.term(&body.terminators[i])?;
+                if let Some((number, plan)) =
+                    step_loops.iter().enumerate().find(|(_, p)| p.header == i)
+                {
+                    e.step_dispatch(plan, step_ends[number], number);
+                } else {
+                    e.term(&body.terminators[i])?;
+                }
             }
+        }
+        for (number, plan) in step_loops.iter().enumerate() {
+            e.step_versions(plan, step_ends[number], number, |anchor| {
+                function_debug.map(|d| d.location(anchor))
+            })?;
         }
         e.sink.end_function();
         if !has_status {
@@ -1026,6 +1064,8 @@ struct FunctionEmitter<'a> {
     /// Each constant's literal, used in place of the value.
     literals: Vec<Option<Value>>,
     address_slots: Vec<bool>,
+    step_labels: std::collections::BTreeMap<usize, Label>,
+    unchecked_steps: bool,
     sink: &'a mut dyn Sink,
     items: &'a mut Items,
     next: usize,
@@ -1526,7 +1566,7 @@ impl FunctionEmitter<'_> {
         {
             self.put(*v, &x);
         }
-        Label::block(e.target.0)
+        self.step_label(e.target.index())
     }
     /// Whether the front marked `edge` cold (core-ir Edge::cold), or it enters a
     /// block that makes a call the front marked cold (core-ir CallSite::cold: the
@@ -1547,7 +1587,7 @@ impl FunctionEmitter<'_> {
     fn edge_label(&mut self, edge: EdgeId) -> Label {
         let e = &self.body.edges[edge.index()];
         if e.args.len == 0 {
-            return Label::block(e.target.0);
+            return self.step_label(e.target.index());
         }
         // Value transfers need separate blocks, including distinct switch arms
         // to the same target. Empty edges already name their final destination.

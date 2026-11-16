@@ -421,6 +421,36 @@ impl FunctionEmitter<'_> {
         self.br(success);
         self.block(success);
     }
+    pub(super) fn step(&mut self, fail: Option<BlockId>) {
+        if self.unchecked_steps {
+            return;
+        }
+        let counter = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
+        let before = self.load(&Type::I64, &counter, 8);
+        let after = self.bin(Binary::Sub, &Type::I64, &before, &int(1));
+        self.store(&Type::I64, &after, &counter, 8);
+        let positive = self.cmp(Predicate::Sgt, &Type::I64, &after, &int(0));
+        let n = self.counter();
+        let ready = Label::new("step_ready", n);
+        let slow = Label::new("step_out", n);
+        self.likely(&positive, ready, slow);
+        self.block(slow);
+        let site = self.site_word();
+        let status = self.call_declared(
+            "hirsel_core_step_out",
+            Type::I8,
+            &[ptr(CONTEXT), word(site)],
+            FnAttrs::default(),
+            &CallAttrs {
+                cold: true,
+                ..CallAttrs::default()
+            },
+        );
+        let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
+        self.branch_failure(&failed, fail, None);
+        self.br(ready);
+        self.block(ready);
+    }
     pub(super) fn storage(&mut self, inst: &Inst, index: usize) -> Result<()> {
         match *inst {
             Inst::Alloc {
@@ -568,7 +598,7 @@ impl FunctionEmitter<'_> {
                 self.put(admitted, &yes);
                 self.put(available, &room);
             }
-            Inst::Step { .. } => {}
+            Inst::Step { fail } => self.step(fail),
             Inst::LimitExit => {
                 if !self.empty_bounds.exits.contains(&index) {
                     self.runtime_void("hirsel_core_limit_exit", &[ptr(CONTEXT)]);

@@ -68,6 +68,7 @@ def main():
                         if 'LLVM_SYS_231_PREFIX' in os.environ else Path('clang'))
     parser.add_argument('--only', nargs='+')
     parser.add_argument('--backend', nargs='+', choices=['cranelift', 'llvm'])
+    parser.add_argument('--release', action='store_true')
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = parser.parse_args()
     work = Path(tempfile.mkdtemp(prefix='event-order-'))
@@ -141,6 +142,8 @@ def main():
             command = [str(args.compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', 'app@1/main/main',
                        '--backend', backend, '--runtime', str(args.runtime), '--store', str(work / 'store'),
                        '--cc', str(fixture_linker), '--json', '-o', str(folder / backend)]
+            if args.release:
+                command += ['--release']
             for grant in ('Tasks', 'Clock', 'Stdout'):
                 if re.search(rf':\s*{grant}\b', header):
                     command += ['--grant', grant]

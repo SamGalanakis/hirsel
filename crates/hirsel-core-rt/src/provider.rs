@@ -97,40 +97,6 @@ unsafe extern "C" fn wait_ready(_: *mut u8, _: *mut Request, _: u64) -> Wait {
         deadline_ns: 0,
     }
 }
-fn outside_wait(
-    f: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait,
-    state: *mut u8,
-    request: *mut Request,
-    token: u64,
-) -> Wait {
-    let (state, request) = (state as usize, request as usize);
-    std::thread::spawn(move || unsafe { f(state as *mut u8, request as *mut Request, token) })
-        .join()
-        .unwrap()
-}
-fn outside_resume(
-    f: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step,
-    state: *mut u8,
-    request: *mut Request,
-    token: u64,
-) -> Step {
-    let (state, request) = (state as usize, request as usize);
-    std::thread::spawn(move || unsafe { f(state as *mut u8, request as *mut Request, token) })
-        .join()
-        .unwrap()
-}
-fn outside_abort(
-    f: unsafe extern "C" fn(*mut u8, *mut Request, u64, u8) -> Outcome,
-    state: *mut u8,
-    request: *mut Request,
-    token: u64,
-    why: u8,
-) -> Outcome {
-    let (state, request) = (state as usize, request as usize);
-    std::thread::spawn(move || unsafe { f(state as *mut u8, request as *mut Request, token, why) })
-        .join()
-        .unwrap()
-}
 
 /// Four-state provider ABI: C (cancelled), W (waiting), I (issued), D (delivered).
 #[repr(C)]
@@ -185,7 +151,7 @@ pub unsafe extern "C" fn hirsel_core_host(
         let token = crate::tasks::current_id();
         let wait = provider.wait.unwrap_or(wait_ready);
         loop {
-            let w = outside_wait(wait, provider.state, request, token);
+            let w = wait(provider.state, request, token);
             match w.kind {
                 WAIT_READY => break,
                 WAIT_UNTIL => {
@@ -216,7 +182,7 @@ pub unsafe extern "C" fn hirsel_core_host(
                         status: 1,
                         ..Outcome::default()
                     },
-                    |abort| outside_abort(abort, provider.state, request, token, 1),
+                    |abort| abort(provider.state, request, token, 1),
                 );
                 break;
             }
@@ -224,7 +190,7 @@ pub unsafe extern "C" fn hirsel_core_host(
                 let now = crate::os::monotonic_ns();
                 if now >= step.deadline_ns {
                     if let Some(abort) = provider.abort {
-                        step.outcome = outside_abort(abort, provider.state, request, token, 2);
+                        step.outcome = abort(provider.state, request, token, 2);
                     }
                     break;
                 }
@@ -240,7 +206,7 @@ pub unsafe extern "C" fn hirsel_core_host(
                     kind: STEP_DONE,
                     ..step
                 },
-                |resume| outside_resume(resume, provider.state, request, token),
+                |resume| resume(provider.state, request, token),
             );
         }
         let outcome = (provider.deliver)(provider.state, request, step.outcome);

@@ -505,6 +505,27 @@ impl Substitution<'_> {
             self.types.insert(old, ty);
             return ty;
         }
+        #[cfg(any(test, feature = "test-assembly"))]
+        {
+            // A later materialization round can rebuild the `Names` view after a
+            // source body was restored. Reuse the module's canonical row as well;
+            // shape names are the identity of closed layouts (FORM #109), so making
+            // a second row here would give an equivalent signature a different
+            // TypeId and leave its call arguments out of sync with the callee.
+            let canonical = shape.name.clone();
+            if let Some((i, _)) = self
+                .module
+                .types
+                .iter()
+                .enumerate()
+                .find(|(_, shape)| shape.name == canonical)
+            {
+                let ty = TypeId(i as u32);
+                self.types.insert(old, ty);
+                self.rows.add(canonical, ty);
+                return ty;
+            }
+        }
         let row = TypeId(self.module.types.len() as u32);
         self.types.insert(old, row);
         self.rows.add(shape.name.clone(), row);
@@ -590,7 +611,54 @@ impl Substitution<'_> {
         let abi = self.signature_abis.get(&old).cloned().unwrap_or_default();
         let plan = scalar_abi::Plan::signature(self.module, &mut sig, &abi);
         self.plans.insert(old, plan);
-        if let Some(row) = self.module.signatures.iter().position(|old| *old == sig) {
+        #[cfg(any(test, feature = "test-assembly"))]
+        let same_type = |a: TypeId, b: TypeId, module: &Module| {
+            a == b
+                || module.types.get(a.index()).map(|x| &x.name)
+                    == module.types.get(b.index()).map(|x| &x.name)
+        };
+        #[cfg(any(test, feature = "test-assembly"))]
+        let same_param = |a: &Param, b: &Param, module: &Module| match (a, b) {
+            (Param::Value(x), Param::Value(y)) => x == y,
+            (Param::Address { place: x, loan: lx }, Param::Address { place: y, loan: ly }) => {
+                lx == ly
+                    && match (x, y) {
+                        (PlaceTy::Declared(x), PlaceTy::Declared(y)) => same_type(*x, *y, module),
+                        _ => x == y,
+                    }
+            }
+            _ => false,
+        };
+        #[cfg(any(test, feature = "test-assembly"))]
+        let same_signature = |other: &Signature, module: &Module| {
+            other.params.len() == sig.params.len()
+                && other
+                    .params
+                    .iter()
+                    .zip(&sig.params)
+                    .all(|(a, b)| same_param(a, b, module))
+                && match (other.dest, sig.dest) {
+                    (Some(a), Some(b)) => same_type(a, b, module),
+                    (None, None) => true,
+                    _ => false,
+                }
+                && other.results == sig.results
+                && other.never == sig.never
+        };
+        let row = {
+            #[cfg(any(test, feature = "test-assembly"))]
+            {
+                self.module
+                    .signatures
+                    .iter()
+                    .position(|old| same_signature(old, self.module))
+            }
+            #[cfg(not(any(test, feature = "test-assembly")))]
+            {
+                self.module.signatures.iter().position(|old| *old == sig)
+            }
+        };
+        if let Some(row) = row {
             let id = SigId(row as u32);
             self.signatures.insert(old, id);
             return id;
@@ -775,6 +843,39 @@ fn fill(
         };
         call.signature = s.signature(call.signature);
     }
+    #[cfg(any(test, feature = "test-assembly"))]
+    {
+        // A substituted call's destination/address is part of the same closed
+        // signature as its callee. Keep the address row on that canonical TypeId;
+        // otherwise two equivalent layout rows can survive in one assembled module
+        // and the well-formedness check quite correctly rejects the call.
+        for call in &body.calls {
+            let signature = &s.module.signatures[call.signature.index()];
+            let params = signature
+                .dest
+                .map(|ty| Param::Address {
+                    place: PlaceTy::Declared(ty),
+                    loan: Loan::Mut,
+                })
+                .into_iter()
+                .chain(signature.params.iter().copied());
+            let Some(args) = call.args.get(&body.pools.args) else {
+                continue;
+            };
+            for (arg, param) in args.iter().zip(params) {
+                if let (
+                    Arg::Address(address),
+                    Param::Address {
+                        place: PlaceTy::Declared(ty),
+                        ..
+                    },
+                ) = (arg, param)
+                {
+                    body.addresses[address.index()].ty = PlaceTy::Declared(ty);
+                }
+            }
+        }
+    }
     for inst in &mut body.insts {
         match inst {
             Inst::FunctionRef { function, .. } => *function = s.function(*function),
@@ -881,6 +982,9 @@ impl Emitter {
     /// product at a time, using the same `materialize` transformation.
     pub fn materialize_instances(&mut self) -> Result<(), String> {
         use std::collections::HashSet;
+        for (&source, body) in &self.template_bodies {
+            self.module.functions[source.index()].body = Some(body.clone());
+        }
         self.seal();
         // A row may carry a clone hook even when this program never clones it.
         // Only a derived clone's call demands that hook's instance. In particular,
@@ -951,6 +1055,9 @@ impl Emitter {
             }
         }
         for (source, _) in self.templates.values() {
+            if let Some(body) = &self.module.functions[source.index()].body {
+                self.template_bodies.insert(*source, body.clone());
+            }
             self.module.functions[source.index()].body = None;
         }
         // Substitution adds rows to the module alone; a later check of one of their

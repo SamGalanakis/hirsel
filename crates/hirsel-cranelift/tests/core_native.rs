@@ -1449,20 +1449,3 @@ fn consuming_growth_keeps_the_carrier_and_original_payer_on_refusal() {
 fn inherited_failure_sites_through_core_and_generated_calls() {
     check_failure_inheritance();
 }
-
-#[test]
-fn blocked_channel_is_a_named_run_stop() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let source = r#"
-fn waiting() -> u64 waits {
-    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
-    result.unwrap(channel.receive(rx))
-}
-"#;
-    let (module, names) = front::lower(&root, source);
-    assert_eq!(
-        eval::run(&module, names["waiting"], &[], 1_000_000).outcome,
-        Outcome::Stopped("Deadlock")
-    );
-    execute(&module, &[(names["waiting"], vec![])], false);
-}

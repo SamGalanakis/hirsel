@@ -1748,6 +1748,28 @@ impl FunctionEmitter<'_> {
     }
 }
 
+/// Source-law diagnostic control with exactly the requested producer facts.
+#[doc(hidden)]
+pub fn emit_ir_for_test_with_facts(
+    module: &Module,
+    target: Target,
+    observe_charge: bool,
+    debug_lines: bool,
+    facts: bool,
+) -> Result<String> {
+    emit_ir_target_with_role_facts(
+        module,
+        target,
+        observe_charge,
+        facts,
+        SourceEmission {
+            test_hooks: true,
+            relocatable_sites: true,
+            debug_lines,
+        },
+        None,
+    )
+}
 /// Native law fixture: admission injection and cleanup traces are explicit,
 /// independent of which crate owns the source law.
 #[doc(hidden)]

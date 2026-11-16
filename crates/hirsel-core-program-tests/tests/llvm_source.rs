@@ -712,3 +712,55 @@ fn aarch64_carrier_twins_match_the_evaluator_in_program_builds() {
     cancelled_cold_word_call(Target::Aarch64Linux, false);
     cancelled_cold_word_call(Target::Aarch64Linux, true);
 }
+
+#[test]
+fn step_counter_survives_inlined_mutations_and_exact_exhaustion() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let source = r#"
+fn append(mut xs: List[u64], n: u64) {
+    result.unwrap(list.push(mut xs, n))
+}
+fn probe(s: u64) -> u64 {
+    match (bound steps s {
+        let mut xs: List[u64] = result.unwrap(list.with_capacity(8))
+        for i in 0u64 .. 8u64 { append(mut xs, i) }
+        list.len(xs)
+    }) {
+        Ok(n) => 1000 + n,
+        Error(e) => e.steps
+    }
+}
+"#;
+    let (module, names) =
+        hirsel_core_program_tests::SourceProgram::lower_with_core(source, None, &root);
+    let cases: Vec<_> = (0..=48)
+        .map(|s| Case {
+            function: names["probe"],
+            args: vec![s],
+            limit: 1_000_000,
+            injection: None,
+        })
+        .collect();
+    assert_eq!(
+        eval::run(&module, names["probe"], &[48], 1_000_000).outcome,
+        eval::Outcome::Returned(vec![1008])
+    );
+    for facts in [false, true] {
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for opt in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(opt, Optimization::Speed)).unwrap();
+            let got = execute_object(&module, &cases, "", "", opt, Some(object));
+            for (case, actual) in cases.iter().zip(got) {
+                assert_eq!(
+                    actual.outcome,
+                    eval::run(&module, case.function, &case.args, case.limit).outcome,
+                    "facts={facts}, s={}",
+                    case.args[0]
+                );
+            }
+        }
+    }
+}

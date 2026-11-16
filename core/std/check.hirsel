@@ -1,54 +1,182 @@
-// CRC-32C (Castagnoli), reflected polynomial 0x82f63b78.
-// The byte recurrence is the portable crc32c 0.6.8 sw.rs:35-40 form.
-// One 1-KiB table replaces its 8-KiB slicing table; no hardware core operation.
-const CRC: Inline[u32, 256] = [
-    0x00000000u32, 0xf26b8303u32, 0xe13b70f7u32, 0x1350f3f4u32, 0xc79a971fu32, 0x35f1141cu32, 0x26a1e7e8u32, 0xd4ca64ebu32,
-    0x8ad958cfu32, 0x78b2dbccu32, 0x6be22838u32, 0x9989ab3bu32, 0x4d43cfd0u32, 0xbf284cd3u32, 0xac78bf27u32, 0x5e133c24u32,
-    0x105ec76fu32, 0xe235446cu32, 0xf165b798u32, 0x030e349bu32, 0xd7c45070u32, 0x25afd373u32, 0x36ff2087u32, 0xc494a384u32,
-    0x9a879fa0u32, 0x68ec1ca3u32, 0x7bbcef57u32, 0x89d76c54u32, 0x5d1d08bfu32, 0xaf768bbcu32, 0xbc267848u32, 0x4e4dfb4bu32,
-    0x20bd8edeu32, 0xd2d60dddu32, 0xc186fe29u32, 0x33ed7d2au32, 0xe72719c1u32, 0x154c9ac2u32, 0x061c6936u32, 0xf477ea35u32,
-    0xaa64d611u32, 0x580f5512u32, 0x4b5fa6e6u32, 0xb93425e5u32, 0x6dfe410eu32, 0x9f95c20du32, 0x8cc531f9u32, 0x7eaeb2fau32,
-    0x30e349b1u32, 0xc288cab2u32, 0xd1d83946u32, 0x23b3ba45u32, 0xf779deaeu32, 0x05125dadu32, 0x1642ae59u32, 0xe4292d5au32,
-    0xba3a117eu32, 0x4851927du32, 0x5b016189u32, 0xa96ae28au32, 0x7da08661u32, 0x8fcb0562u32, 0x9c9bf696u32, 0x6ef07595u32,
-    0x417b1dbcu32, 0xb3109ebfu32, 0xa0406d4bu32, 0x522bee48u32, 0x86e18aa3u32, 0x748a09a0u32, 0x67dafa54u32, 0x95b17957u32,
-    0xcba24573u32, 0x39c9c670u32, 0x2a993584u32, 0xd8f2b687u32, 0x0c38d26cu32, 0xfe53516fu32, 0xed03a29bu32, 0x1f682198u32,
-    0x5125dad3u32, 0xa34e59d0u32, 0xb01eaa24u32, 0x42752927u32, 0x96bf4dccu32, 0x64d4cecfu32, 0x77843d3bu32, 0x85efbe38u32,
-    0xdbfc821cu32, 0x2997011fu32, 0x3ac7f2ebu32, 0xc8ac71e8u32, 0x1c661503u32, 0xee0d9600u32, 0xfd5d65f4u32, 0x0f36e6f7u32,
-    0x61c69362u32, 0x93ad1061u32, 0x80fde395u32, 0x72966096u32, 0xa65c047du32, 0x5437877eu32, 0x4767748au32, 0xb50cf789u32,
-    0xeb1fcbadu32, 0x197448aeu32, 0x0a24bb5au32, 0xf84f3859u32, 0x2c855cb2u32, 0xdeeedfb1u32, 0xcdbe2c45u32, 0x3fd5af46u32,
-    0x7198540du32, 0x83f3d70eu32, 0x90a324fau32, 0x62c8a7f9u32, 0xb602c312u32, 0x44694011u32, 0x5739b3e5u32, 0xa55230e6u32,
-    0xfb410cc2u32, 0x092a8fc1u32, 0x1a7a7c35u32, 0xe811ff36u32, 0x3cdb9bddu32, 0xceb018deu32, 0xdde0eb2au32, 0x2f8b6829u32,
-    0x82f63b78u32, 0x709db87bu32, 0x63cd4b8fu32, 0x91a6c88cu32, 0x456cac67u32, 0xb7072f64u32, 0xa457dc90u32, 0x563c5f93u32,
-    0x082f63b7u32, 0xfa44e0b4u32, 0xe9141340u32, 0x1b7f9043u32, 0xcfb5f4a8u32, 0x3dde77abu32, 0x2e8e845fu32, 0xdce5075cu32,
-    0x92a8fc17u32, 0x60c37f14u32, 0x73938ce0u32, 0x81f80fe3u32, 0x55326b08u32, 0xa759e80bu32, 0xb4091bffu32, 0x466298fcu32,
-    0x1871a4d8u32, 0xea1a27dbu32, 0xf94ad42fu32, 0x0b21572cu32, 0xdfeb33c7u32, 0x2d80b0c4u32, 0x3ed04330u32, 0xccbbc033u32,
-    0xa24bb5a6u32, 0x502036a5u32, 0x4370c551u32, 0xb11b4652u32, 0x65d122b9u32, 0x97baa1bau32, 0x84ea524eu32, 0x7681d14du32,
-    0x2892ed69u32, 0xdaf96e6au32, 0xc9a99d9eu32, 0x3bc21e9du32, 0xef087a76u32, 0x1d63f975u32, 0x0e330a81u32, 0xfc588982u32,
-    0xb21572c9u32, 0x407ef1cau32, 0x532e023eu32, 0xa145813du32, 0x758fe5d6u32, 0x87e466d5u32, 0x94b49521u32, 0x66df1622u32,
-    0x38cc2a06u32, 0xcaa7a905u32, 0xd9f75af1u32, 0x2b9cd9f2u32, 0xff56bd19u32, 0x0d3d3e1au32, 0x1e6dcdeeu32, 0xec064eedu32,
-    0xc38d26c4u32, 0x31e6a5c7u32, 0x22b65633u32, 0xd0ddd530u32, 0x0417b1dbu32, 0xf67c32d8u32, 0xe52cc12cu32, 0x1747422fu32,
-    0x49547e0bu32, 0xbb3ffd08u32, 0xa86f0efcu32, 0x5a048dffu32, 0x8ecee914u32, 0x7ca56a17u32, 0x6ff599e3u32, 0x9d9e1ae0u32,
-    0xd3d3e1abu32, 0x21b862a8u32, 0x32e8915cu32, 0xc083125fu32, 0x144976b4u32, 0xe622f5b7u32, 0xf5720643u32, 0x07198540u32,
-    0x590ab964u32, 0xab613a67u32, 0xb831c993u32, 0x4a5a4a90u32, 0x9e902e7bu32, 0x6cfbad78u32, 0x7fab5e8cu32, 0x8dc0dd8fu32,
-    0xe330a81au32, 0x115b2b19u32, 0x020bd8edu32, 0xf0605beeu32, 0x24aa3f05u32, 0xd6c1bc06u32, 0xc5914ff2u32, 0x37faccf1u32,
-    0x69e9f0d5u32, 0x9b8273d6u32, 0x88d28022u32, 0x7ab90321u32, 0xae7367cau32, 0x5c18e4c9u32, 0x4f48173du32, 0xbd23943eu32,
-    0xf36e6f75u32, 0x0105ec76u32, 0x12551f82u32, 0xe03e9c81u32, 0x34f4f86au32, 0xc69f7b69u32, 0xd5cf889du32, 0x27a40b9eu32,
-    0x79b737bau32, 0x8bdcb4b9u32, 0x988c474du32, 0x6ae7c44eu32, 0xbe2da0a5u32, 0x4c4623a6u32, 0x5f16d052u32, 0xad7d5351u32
-]
+// XXH3-64, seed zero and the default secret. Scalar recurrence adapted from
+// xxhash-rust 0.8.15 const_xxh3.rs and xxh3_common.rs; the streaming state keeps
+// the final stripe separately so add never needs to retain its input.
+const SECRET: Inline[u64,24] = [0xbe4ba423396cfeb8u64,0x1cad21f72c81017cu64,0xdb979083e96dd4deu64,0x1f67b3b7a4a44072u64,0x78e5c0cc4ee679cbu64,0x2172ffcc7dd05a82u64,0x8e2443f7744608b8u64,0x4c263a81e69035e0u64,0xcb00c391bb52283cu64,0xa32e531b8b65d088u64,0x4ef90da297486471u64,0xd8acdea946ef1938u64,0x3f349ce33f76faa8u64,0x1d4f0bc7c7bbdcf9u64,0x3159b4cd4be0518au64,0x647378d9c97e9fc8u64,0xc3ebd33483acc5eau64,0xeb6313faffa081c5u64,0x49daf0b751dd0d17u64,0x9e68d429265516d3u64,0xfca1477d58be162bu64,0xce31d07ad1b8f88fu64,0x280416958f3acb45u64,0x7e404bbbcafbd7afu64]
 
-/// CRC-32C of b, with initial/final complement. Empty is zero; "123456789"
-/// is 0xe3069283. Allocates nothing. Cost: O(len(b)).
-pub fn crc32c(b: Bytes) -> u32 {
-    crc32c_append(0, b)
+pub opaque type Xxh3 {
+    total: u64,
+    stripes: u64,
+    pending_len: u64,
+    tail_len: u64,
+    short: Inline[u8,256],
+    pending: Inline[u8,64],
+    tail: Inline[u8,64],
+    acc: Inline[u64,8]
 }
-
-/// CRC-32C of prefix followed by b, where prefix is the CRC of the prefix bytes.
-/// Allocates nothing; accepts arbitrary byte chunks, including an empty chunk.
-pub fn crc32c_append(prefix: u32, b: Bytes) -> u32 {
-    let mut crc = prefix ^ 0xffffffffu32
-    for byte in b {
-        let i: u8 = int.truncate(crc ^ int.widen(byte))
-        crc = CRC[int.widen(i)] ^ (crc >> 8)
+pub fn start() -> Xxh3 {
+    Xxh3(total: 0, stripes: 0, pending_len: 0, tail_len: 0,
+        short: [0;256], pending: [0;64], tail: [0;64],
+        acc: [0xC2B2AE3Du64,0x9E3779B185EBCA87u64,0xC2B2AE3D27D4EB4Fu64,
+            0x165667B19E3779F9u64,0x85EBCA77C2B2AE63u64,0x85EBCA77u64,
+            0x27D4EB2F165667C5u64,0x9E3779B1u64])
+}
+fn secret(at: u64) -> u64 {
+    let shift = (at % 8) * 8
+    let low = SECRET[at / 8] >> shift
+    if shift == 0 { low } else { low | (SECRET[at / 8 + 1] << (64 - shift)) }
+}
+fn word64(b: Inline[u8,64], at: u64) -> u64 {
+    let mut n: u64 = 0
+    for i in 0u64 .. 8 { let byte: u64 = int.widen(b[at + i]); n = n | (byte << (i * 8)) }
+    n
+}
+fn small_word(b: Inline[u8,256], at: u64, width: u64) -> u64 {
+    let mut n: u64 = 0
+    for i in 0u64 .. width { let byte: u64 = int.widen(b[at + i]); n = n | (byte << (i * 8)) }
+    n
+}
+fn lane(mut acc: Inline[u64,8], i: u64, data: u64, sec: u64) {
+    let keyed = data ^ secret(sec + i * 8)
+    acc[i ^ 1] = int.wrapping_add(acc[i ^ 1], data)
+    acc[i] = int.wrapping_add(acc[i], (keyed & 0xffffffffu64) * (keyed >> 32))
+}
+fn scramble(mut s: Xxh3) {
+    s.stripes += 1
+    if s.stripes == 16 {
+        for i in 0u64 .. 8 {
+            let x = s.acc[i] ^ (s.acc[i] >> 47) ^ secret(128 + i * 8)
+            s.acc[i] = int.wrapping_mul(x, 0x9E3779B1u64)
+        }
+        s.stripes = 0
     }
-    crc ^ 0xffffffffu32
+}
+fn buffered_stripe(mut s: Xxh3) {
+    let sec = s.stripes * 8
+    for i in 0u64 .. 8 { lane(mut s.acc, i, word64(s.pending, i * 8), sec) }
+    scramble(mut s)
+    s.pending_len = 0
+}
+/// Append b[lo,hi); bounds have the same checked semantics as list.slice.
+/// No allocation; retains no view of b. Empty ranges do nothing.
+pub fn add(mut s: Xxh3, b: Bytes, lo: u64, hi: u64) {
+    let chunk = list.slice(b, lo, hi)
+    let n = list.len(chunk)
+    if n == 0 { return }
+    if s.total < 240 {
+        let count = if n < 240 - s.total { n } else { 240 - s.total }
+        for i in 0u64 .. count { s.short[s.total + i] = chunk[i] }
+    }
+    if n >= 64 {
+        for i in 0u64 .. 64 { s.tail[i] = chunk[n - 64 + i] }
+        s.tail_len = 64
+    } else {
+        let keep = if s.tail_len < 64 - n { s.tail_len } else { 64 - n }
+        for i in 0u64 .. keep { s.tail[i] = s.tail[s.tail_len - keep + i] }
+        for i in 0u64 .. n { s.tail[keep + i] = chunk[i] }
+        s.tail_len = keep + n
+    }
+    s.total = int.wrapping_add(s.total, n)
+    let mut at: u64 = 0
+    if s.pending_len > 0 {
+        let room = 64 - s.pending_len
+        let count = if n < room { n } else { room }
+        for i in 0u64 .. count { s.pending[s.pending_len + i] = chunk[i] }
+        s.pending_len += count
+        at = count
+        if at == n { return }
+        buffered_stripe(mut s)
+    }
+    while n - at > 64 {
+        let sec = s.stripes * 8
+        for i in 0u64 .. 8 { lane(mut s.acc, i, list.word_le(chunk, at + i * 8), sec) }
+        scramble(mut s)
+        at += 64
+    }
+    s.pending_len = n - at
+    for i in 0u64 .. s.pending_len { s.pending[i] = chunk[at + i] }
+}
+fn fold(a: u64, b: u64) -> u64 {
+    let (hi, lo) = int.mul_wide(a, b)
+    hi ^ lo
+}
+fn avalanche(x: u64) -> u64 {
+    let z = int.wrapping_mul(x ^ (x >> 37), 0x165667919E3779F9u64)
+    z ^ (z >> 32)
+}
+fn avalanche64(x: u64) -> u64 {
+    let a = int.wrapping_mul(x ^ (x >> 33), 0xC2B2AE3D27D4EB4Fu64)
+    let b = int.wrapping_mul(a ^ (a >> 29), 0x165667B19E3779F9u64)
+    b ^ (b >> 32)
+}
+fn reverse(x: u64) -> u64 {
+    let a = ((x & 0x00ff00ff00ff00ffu64) << 8) | ((x >> 8) & 0x00ff00ff00ff00ffu64)
+    let b = ((a & 0x0000ffff0000ffffu64) << 16) | ((a >> 16) & 0x0000ffff0000ffffu64)
+    (b << 32) | (b >> 32)
+}
+fn mix(b: Inline[u8,256], at: u64, sec: u64) -> u64 {
+    fold(small_word(b, at, 8) ^ secret(sec), small_word(b, at + 8, 8) ^ secret(sec + 8))
+}
+fn short_hash(b: Inline[u8,256], n: u64) -> u64 {
+    if n == 0 { return avalanche64(secret(56) ^ secret(64)) }
+    if n < 4 {
+        let first: u64 = int.widen(b[0])
+        let middle: u64 = int.widen(b[n / 2])
+        let last: u64 = int.widen(b[n - 1])
+        let combined = (first << 16) | (middle << 24) | last | (n << 8)
+        let flip = (secret(0) ^ (secret(0) >> 32)) & 0xffffffffu64
+        return avalanche64(combined ^ flip)
+    }
+    if n <= 8 {
+        let input = small_word(b, n - 4, 4) | (small_word(b, 0, 4) << 32)
+        let keyed = input ^ secret(8) ^ secret(16)
+        let rotated = keyed ^ ((keyed << 49) | (keyed >> 15)) ^ ((keyed << 24) | (keyed >> 40))
+        let a = int.wrapping_mul(rotated, 0x9FB21C651E98DF25u64)
+        let c = int.wrapping_mul(a ^ int.wrapping_add(a >> 35, n), 0x9FB21C651E98DF25u64)
+        return c ^ (c >> 28)
+    }
+    if n <= 16 {
+        let low = small_word(b, 0, 8) ^ secret(24) ^ secret(32)
+        let high = small_word(b, n - 8, 8) ^ secret(40) ^ secret(48)
+        return avalanche(int.wrapping_add(int.wrapping_add(int.wrapping_add(n, reverse(low)), high), fold(low, high)))
+    }
+    let mut acc = int.wrapping_mul(n, 0x9E3779B185EBCA87u64)
+    if n <= 128 {
+        if n > 32 {
+            if n > 64 {
+                if n > 96 {
+                    acc = int.wrapping_add(acc, mix(b, 48, 96))
+                    acc = int.wrapping_add(acc, mix(b, n - 64, 112))
+                }
+                acc = int.wrapping_add(acc, mix(b, 32, 64))
+                acc = int.wrapping_add(acc, mix(b, n - 48, 80))
+            }
+            acc = int.wrapping_add(acc, mix(b, 16, 32))
+            acc = int.wrapping_add(acc, mix(b, n - 32, 48))
+        }
+        acc = int.wrapping_add(acc, mix(b, 0, 0))
+        acc = int.wrapping_add(acc, mix(b, n - 16, 16))
+        return avalanche(acc)
+    }
+    for i in 0u64 .. 8 { acc = int.wrapping_add(acc, mix(b, i * 16, i * 16)) }
+    acc = avalanche(acc)
+    for i in 8u64 .. (n / 16) { acc = int.wrapping_add(acc, mix(b, i * 16, (i - 8) * 16 + 3)) }
+    avalanche(int.wrapping_add(acc, mix(b, n - 16, 119)))
+}
+/// Digest of all ranges added so far. Leaves s usable for further add calls.
+/// No allocation and no state change.
+pub fn finish(s: Xxh3) -> u64 {
+    if s.total <= 240 { return short_hash(s.short, s.total) }
+    let mut acc = s.acc
+    for i in 0u64 .. 8 { lane(mut acc, i, word64(s.tail, i * 8), 121) }
+    let mut sum = int.wrapping_mul(s.total, 0x9E3779B185EBCA87u64)
+    for i in 0u64 .. 4 {
+        sum = int.wrapping_add(sum, fold(acc[i * 2] ^ secret(11 + i * 16), acc[i * 2 + 1] ^ secret(19 + i * 16)))
+    }
+    avalanche(sum)
+}
+/// XXH3-64 with seed zero and the default secret over b[lo,hi). No allocation.
+pub fn xxh3(b: Bytes, lo: u64, hi: u64) -> u64 {
+    let mut s = start()
+    add(mut s, b, lo, hi)
+    finish(s)
 }

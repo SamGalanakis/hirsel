@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 
 const SCHEMA: u32 = 1;
 /// The prelink's flags, part of the key.
@@ -77,7 +76,7 @@ pub(crate) fn prelink(
     let scratch = store.scratch()?;
     let output = scratch.path().join("unit.o");
     let pid = std::process::id();
-    let mut process = Command::new(linker);
+    let mut process = crate::tool_inputs::tool_command(linker);
     process.args(FLAGS);
     for object in objects {
         process.arg(PathBuf::from(format!(

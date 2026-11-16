@@ -126,3 +126,164 @@ fn a_damaged_or_misplaced_image_unit_is_prelinked_again() {
     assert!(again == other, "the misplaced unit's program links its first executable");
     assert_eq!((ran.status.code(), ran.stdout.as_slice()), (Some(0), &b"right"[..]), "{ran:?}");
 }
+
+/// One build of the strings program through the C driver `TOOL_ENV_DRIVER`,
+/// in `TOOL_ENV_DIR`, under this process's environment: its executable to
+/// `<step>.exe`, and the unit the link read with whether it prelinked it to
+/// `<step>.unit` (empty when the link was reused).
+#[test]
+#[ignore = "explicit native integration target"]
+fn tool_environment_child() {
+    let Some(dir) = std::env::var_os("TOOL_ENV_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let step = std::env::var("TOOL_ENV_STEP").unwrap();
+    let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let project = dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("main.hirsel"), UNIT_PROGRAMS[2].1).unwrap();
+    let request = CheckRequest::program(&project, &libraries, &project.join("store")).unwrap();
+    let product = Driver::default()
+        .check_reachable_with_product(request, &dir.join("cache"), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let mut options = native_options(Backend::Cranelift, &project);
+    options.link = Link::Driver(PathBuf::from(std::env::var_os("TOOL_ENV_DRIVER").unwrap()));
+    options.grant_mask = 1 << 4;
+    UNIT.set(None);
+    let built = product
+        .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
+        .unwrap();
+    std::fs::copy(&built.executable, dir.join(format!("{step}.exe"))).unwrap();
+    // A reused executable reads no unit: an empty file.
+    let read = UNIT.take().map_or_else(Vec::new, |(_, unit, prelinked)| {
+        let mut read = std::fs::read(unit).unwrap();
+        read.push(u8::from(prelinked));
+        read
+    });
+    std::fs::write(dir.join(format!("{step}.unit")), read).unwrap();
+}
+
+/// Law: a child tool observes only its argv, the files it reads and the
+/// environment the compiler gives it, and that environment is in the key
+/// of the capture it makes. Oracle: a fresh store, image cache and recipe
+/// directory under the second request's environment.
+///
+/// The C driver is the review's wrapper (step-c-review-1029 recipe_env.py):
+/// it passes `--defsym=review_marker=${REVIEW_MARK:-1}` to the link, and
+/// names a link editor that logs its environment, as the driver does.
+/// 1. Primed under REVIEW_MARK=1, rebuilt under REVIEW_MARK=2: the
+///    executable equals a fresh build's under REVIEW_MARK=2 (finding 1 of
+///    the review: reuse gave 1 and fresh 2).
+/// 2. REVIEW_MARK is on no list: the rebuild runs no driver, and no tool
+///    ever sees a variable off its list.
+/// 3. The image unit (`ld -r`) prelinked fresh under REVIEW_MARK=2 equals
+///    the one primed under REVIEW_MARK=1.
+/// 4. A request that differs only in `PATH`, a listed variable, captures
+///    again, its driver sees that PATH, and it links a fresh build's
+///    executable.
+///
+/// Mutant: a child that inherits this process's environment, red at 1.
+#[test]
+#[ignore = "explicit native integration target"]
+fn a_child_tool_sees_only_its_listed_environment() {
+    let work = tempfile::tempdir().unwrap();
+    let dir = work.path();
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let bin = dir.join("tree/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let (driver, editor) = (bin.join("clang"), bin.join("ld.lld"));
+    let (driver_log, editor_log) = (dir.join("driver-env"), dir.join("editor-env"));
+    let script = |path: &Path, body: String| {
+        crate::executable::write(path, format!("#!/bin/sh\n/usr/bin/env >> '{body}").as_bytes(), 0o755)
+            .unwrap()
+    };
+    script(
+        &driver,
+        format!(
+            "{}'\necho >> '{}'\nexec '{}' --ld-path='{}' \"$@\" \"-Wl,--defsym=review_marker=${{REVIEW_MARK:-1}}\"\n",
+            driver_log.display(),
+            driver_log.display(),
+            llvm.join("bin/clang").display(),
+            editor.display()
+        ),
+    );
+    script(
+        &editor,
+        format!(
+            "{}'\necho >> '{}'\nexec '{}' \"$@\"\n",
+            editor_log.display(),
+            editor_log.display(),
+            llvm.join("bin/ld.lld").display()
+        ),
+    );
+    let path = std::env::var_os("PATH").unwrap();
+    let build = |step: &str, mark: &str, path: &std::ffi::OsStr| {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "native::tests::tool_environment_child"])
+            .env("TOOL_ENV_DIR", dir)
+            .env("TOOL_ENV_STEP", step)
+            .env("TOOL_ENV_DRIVER", &driver)
+            .env("REVIEW_MARK", mark)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{step}: {}", String::from_utf8_lossy(&output.stdout));
+        let read = |suffix| std::fs::read(dir.join(format!("{step}.{suffix}"))).unwrap();
+        let mut unit = read("unit");
+        let prelinked = unit.pop() == Some(1);
+        (read("exe"), unit, prelinked)
+    };
+    // Each environment block a tool logged, as its variable names.
+    let blocks = |log: &Path| -> Vec<BTreeSet<String>> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .split("\n\n")
+            .filter(|block| !block.trim().is_empty())
+            .map(|block| block.lines().filter_map(|l| l.split_once('=')).map(|(n, _)| n.to_owned()).collect())
+            .collect()
+    };
+    let fresh = || {
+        for stale in ["project", "cache", "tree/.hirsel-link-recipes"] {
+            std::fs::remove_dir_all(dir.join(stale)).unwrap();
+        }
+    };
+
+    let (primed, primed_unit, _) = build("primed", "1", &path);
+    let driver_runs = blocks(&driver_log).len();
+    let (rebuilt, _, _) = build("rebuilt", "2", &path);
+    assert_eq!(blocks(&driver_log).len(), driver_runs, "2: a variable off the list captures nothing again");
+    fresh();
+    let (oracle, oracle_unit, prelinked) = build("fresh", "2", &path);
+    assert!(rebuilt == oracle, "1: the rebuilt executable is a fresh build's");
+    assert!(rebuilt == primed, "1: REVIEW_MARK reaches no tool");
+    assert!(prelinked, "3: the fresh build prelinks its unit");
+    assert!(primed_unit == oracle_unit, "3: the unit prelinked under another variable is the primed one");
+    let shell = BTreeSet::from(["PWD".to_owned()]);
+    let listed: BTreeSet<String> =
+        ["PATH", "LD_LIBRARY_PATH", "PWD"].into_iter().map(str::to_owned).collect();
+    let (drivers, editors) = (blocks(&driver_log), blocks(&editor_log));
+    assert!(!drivers.is_empty() && editors.len() >= 2, "every capture, prelink and link logged");
+    for names in &drivers {
+        assert!(names.is_subset(&listed), "2: a driver saw {names:?}");
+    }
+    for names in &editors {
+        assert!(names.is_subset(&shell), "2: a link editor saw {names:?}");
+    }
+
+    let other = std::env::join_paths(
+        std::iter::once(dir.join("empty")).chain(std::env::split_paths(&path)),
+    )
+    .unwrap();
+    std::fs::create_dir(dir.join("empty")).unwrap();
+    let (moved, _, _) = build("moved", "2", &other);
+    let runs = std::fs::read_to_string(&driver_log).unwrap();
+    let last = runs.trim_end().rsplit("\n\n").next().unwrap();
+    assert!(blocks(&driver_log).len() > drivers.len(), "4: another PATH captures again");
+    assert!(
+        last.lines().any(|line| line.strip_prefix("PATH=").map(std::ffi::OsStr::new) == Some(other.as_os_str())),
+        "4: the driver runs under the request's PATH"
+    );
+    assert!(moved == oracle, "4: the executable is a fresh build's");
+}

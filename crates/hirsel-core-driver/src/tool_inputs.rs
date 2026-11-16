@@ -10,7 +10,7 @@ use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
 const LINK_RECIPE_SCHEMA: u32 = 5;
@@ -503,18 +503,121 @@ fn capture_keyed_link_recipe(
 ) -> io::Result<(LinkRecipe, String)> {
     let driver = cc.to_owned();
     let driver_key = driver_file_key(&driver)?;
-    capture_link_recipe_with(cc, target, force, search, &driver_key).map(|r| (r, driver_key))
+    let environment = CaptureEnvironment::new(search)?;
+    let file_key = environment.key(&driver_key)?;
+    capture_link_recipe_with(cc, target, force, &environment, &file_key, &driver_key)
+        .map(|r| (r, file_key))
+}
+
+/// The variables a capture's child tools run under; nothing else is
+/// inherited. `PATH`: a driver finds the tools it runs by it (clang looks
+/// beside itself and then on `PATH` for ld.lld, gcc's collect2 runs its
+/// editor by name, a wrapper runs `clang`), and only the link editor is a
+/// name this compiler resolves itself, so the resolved paths in the key
+/// cannot stand for it. `LD_LIBRARY_PATH`: the loader finds a driver's own
+/// libraries by it (this repository's LLVM clang does not start without
+/// it). No `TMPDIR`: `-###` only names temporaries, and every file a
+/// capture writes has an explicit path. No locale: a child runs in the C
+/// locale, which changes no argv.
+const CAPTURE_VARIABLES: [&str; 2] = ["PATH", "LD_LIBRARY_PATH"];
+
+/// What a capture's child tools observe besides their argv and the files
+/// they read: the listed variables (`PATH` is the request's search path),
+/// the working directory (a wrapper's relative path, clang's
+/// `-fdebug-compilation-dir`) and the umask they inherit. It is in the key
+/// of the recipe, the editor name and the toolchain manifest a capture
+/// writes, so a request under another environment never reads a capture
+/// made under this one, and a recipe's relative paths name what they named
+/// at its capture.
+struct CaptureEnvironment {
+    variables: Vec<(&'static str, std::ffi::OsString)>,
+    directory: PathBuf,
+    umask: u32,
+}
+
+impl CaptureEnvironment {
+    fn new(search: &OsStr) -> io::Result<Self> {
+        let variables = CAPTURE_VARIABLES
+            .into_iter()
+            .filter_map(|name| {
+                // An unset PATH stays unset: a shell then searches its
+                // own default, where an empty one would find nothing.
+                let value = match name {
+                    "PATH" => Some(search.to_owned()).filter(|search| !search.is_empty()),
+                    _ => std::env::var_os(name),
+                };
+                value.map(|value| (name, value))
+            })
+            .collect();
+        Ok(Self {
+            variables,
+            directory: std::env::current_dir()?,
+            umask: umask()?,
+        })
+    }
+
+    fn key(&self, driver_key: &str) -> io::Result<String> {
+        use std::os::unix::ffi::OsStrExt;
+        let variables = self
+            .variables
+            .iter()
+            .map(|(name, value)| (*name, value.as_bytes()))
+            .collect::<Vec<_>>();
+        let hash = ContentHash::of_parts(
+            "hirsel.link-driver-environment.v1",
+            [
+                driver_key.as_bytes(),
+                crate::encode(&(variables, &self.directory, self.umask))?.as_slice(),
+            ],
+        );
+        Ok(hash.0.iter().map(|b| format!("{b:02x}")).collect())
+    }
+
+    fn command(&self, program: impl AsRef<OsStr>) -> Command {
+        let mut command = tool_command(program);
+        command.envs(self.variables.iter().map(|(name, value)| (name, value)));
+        command
+    }
+}
+
+/// This process's umask, as the kernel reports it; a child inherits it.
+fn umask() -> io::Result<u32> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:"))
+        .and_then(|value| u32::from_str_radix(value.trim(), 8).ok())
+        .ok_or_else(|| io::Error::other("/proc/self/status names no umask"))
+}
+
+/// A child tool: no standard input, an empty environment. A link editor
+/// gets nothing more: it reads no variable that changes its output; it runs
+/// in the request's working directory, which is in the key of the recipe
+/// whose relative paths it resolves; and the files it writes are read back
+/// as bytes, so its umask reaches no output. A capture adds
+/// [`CAPTURE_VARIABLES`]. Descriptors past stderr are close-on-exec in this
+/// process (main), so a child inherits none.
+pub(crate) fn tool_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command.env_clear().stdin(Stdio::null());
+    command
 }
 
 fn capture_link_recipe_with(
     cc: &Path,
     target: &str,
     force: bool,
-    search: &OsStr,
+    environment: &CaptureEnvironment,
     file_key: &str,
+    driver_identity: &str,
 ) -> io::Result<LinkRecipe> {
+    let search = environment
+        .variables
+        .iter()
+        .find(|(name, _)| *name == "PATH")
+        .map_or(OsStr::new(""), |(_, value)| value.as_os_str());
     let driver = cc.to_owned();
-    let directory = recipe_directory(&driver)?;
+    let directory = std::path::absolute(recipe_directory(&driver)?)?;
     let installed_linker = installed_linker();
     if !force
         && let Some(linker) = selected_editor(
@@ -545,7 +648,8 @@ fn capture_link_recipe_with(
     }
     // A driver that names a link editor which does not exist must not be
     // captured: clang would silently fall back to some other ld.lld.
-    let selection = Command::new(&driver)
+    let selection = environment
+        .command(&driver)
         .arg("-print-prog-name=ld.lld")
         .output()?;
     if selection.status.success() {
@@ -561,7 +665,7 @@ fn capture_link_recipe_with(
     let synthetic_source = capture_dir.path().join("recipe.c");
     std::fs::write(&synthetic_source, "int main(void) { return 0; }\n")?;
     let capture = |driver: &Path, source: &Path, output: &Path| {
-        let mut command = Command::new(driver);
+        let mut command = environment.command(driver);
         command.args(["-###", "-fuse-ld=lld", "-pie"]);
         if driver
             .file_name()
@@ -660,16 +764,17 @@ fn capture_link_recipe_with(
             continue;
         }
         let stable = directory.join(format!("extra-{driver_key}-{index}.o"));
-        let mut command = Command::new(&words[0]);
+        let mut command = environment.command(&words[0]);
         let mut args = words[1..].to_vec();
         if let Some(output) = args.iter_mut().position(|word| word == "-o") {
             args[output + 1] = stable.display().to_string();
         }
-        let status = command.args(&args).status()?;
-        if !status.success() {
+        let compiled = command.args(&args).output()?;
+        if !compiled.status.success() {
             return Err(io::Error::other(format!(
-                "compiling link source {} failed",
-                source
+                "compiling link source {} failed: {}",
+                source,
+                String::from_utf8_lossy(&compiled.stderr)
             )));
         }
         compiled_objects.insert(transient_output, stable.clone());
@@ -744,7 +849,14 @@ fn capture_link_recipe_with(
         args.insert(at, INPUT_MARKER.into());
     }
     let files = recipe_files(&linker, &args)?;
-    let identity = recipe_identity(target, &driver_key, &linker, &args, &files, &source_files)?;
+    let identity = recipe_identity(
+        target,
+        driver_identity,
+        &linker,
+        &args,
+        &files,
+        &source_files,
+    )?;
     let recipe = LinkRecipe {
         schema: LINK_RECIPE_SCHEMA,
         target: target.into(),
@@ -1211,7 +1323,7 @@ mod tests {
             |mode| std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(mode));
         read_only(0o555).unwrap();
         let target = "x86_64-unknown-linux-gnu";
-        let key = driver_file_key(&cc).unwrap();
+        let key = capture_key(&cc);
         let identity = driver_toolchain(&cc, target, &runtime);
         let recipe = capture_link_recipe(&cc, target, false, &search());
         read_only(0o755).unwrap();
@@ -1270,7 +1382,7 @@ mod tests {
         CLOCK.set(Some(1 + WINDOW));
         assert_eq!(driver_toolchain(&cc, target, &runtime).unwrap().0, identity);
         let directory = recipe_directory(&cc).unwrap();
-        let key = driver_file_key(&cc).unwrap();
+        let key = capture_key(&cc);
         let manifest_path = directory.join(format!("toolchain-{target}-{key}.json"));
         let written = std::fs::metadata(&manifest_path).unwrap().ino();
         READS.set(0);
@@ -1409,6 +1521,13 @@ mod tests {
             before,
             "each selection keeps its own recipe; neither request captures again"
         );
+    }
+
+    /// The key a capture through `cc` under this process's environment
+    /// names its records with.
+    fn capture_key(cc: &Path) -> String {
+        let environment = CaptureEnvironment::new(&search()).unwrap();
+        environment.key(&driver_file_key(cc).unwrap()).unwrap()
     }
 
     fn recipe(input: &Path) -> LinkRecipe {
@@ -1721,7 +1840,7 @@ mod tests {
         std::fs::write(&runtime, b"runtime").unwrap();
         let target = "x86_64-unknown-linux-gnu";
         let directory = recipe_directory(&cc).unwrap();
-        let key = driver_file_key(&cc).unwrap();
+        let key = capture_key(&cc);
         let stale = |path: &Path| {
             serde_json::json!({
                 "path": path,

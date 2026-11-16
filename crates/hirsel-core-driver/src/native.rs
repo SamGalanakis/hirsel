@@ -1165,7 +1165,8 @@ fn direct_link(
     output: &Path,
     optimize: bool,
 ) -> Result<(), NativeStop> {
-    let mut process = Command::new(&recipe.linker);
+    // The editor runs under an empty environment.
+    let mut process = crate::tool_inputs::tool_command(&recipe.linker);
     let mut inserted = false;
     for argument in &recipe.args {
         if argument == crate::tool_inputs::INPUT_MARKER {

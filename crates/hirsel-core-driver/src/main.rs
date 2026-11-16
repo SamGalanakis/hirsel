@@ -691,6 +691,19 @@ fn main() {
     // default action.
     // SAFETY: no other thread exists yet, and SIG_DFL installs no handler.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    // A descriptor this process inherited open across exec (a shell's `3>`)
+    // would pass on to every tool it starts. Mark them all close-on-exec, so
+    // a child tool inherits stdin, stdout and stderr only. A kernel without
+    // close_range (before 5.11) leaves them as they are.
+    // SAFETY: close_range only changes descriptor flags; it touches no memory.
+    unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
     match run() {
         Ok(never) => match never {},
         Err(e) => {

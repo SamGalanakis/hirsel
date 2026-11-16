@@ -1816,7 +1816,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let cap = self.t.mk(TyKind::Adt(cap, vec![]));
         let reserve = self.prelude("Result", n)?;
         let reserve = self.t.mk(TyKind::Adt(reserve, vec![UNIT, cap]));
-        let reserved = self.list_reserve(item, node, one, reserve, n)?;
+        let reserved = self.list_reserve(item, node, one, true, reserve, n)?;
         let reserve_id =
             self.place_row(reserve, "a log reserve without a place is not built", n)?;
         let tag = self.value(Ty::Scalar(Scalar::U32));

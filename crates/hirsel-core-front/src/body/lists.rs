@@ -48,6 +48,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
     }
+    /// Some(true) when the element is known, without emitting code, to occupy
+    /// storage; None when the representation is unknown.
+    fn list_storage_static(&mut self, item: TyId) -> Option<bool> {
+        match self.rep(item) {
+            Ok(Rep::None) => Some(false),
+            Ok(Rep::Scalar(_)) => Some(true),
+            Ok(Rep::Place(id)) if !self.e.generic_names.contains_key(&id) => {
+                Some(self.e.size(id) != 0)
+            }
+            _ => None,
+        }
+    }
     fn list_choose(
         &mut self,
         on: ValueId,
@@ -199,7 +211,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.place_row(result, "put_word_le without a Result place is not built", n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let width = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
-        let reserved = self.list_reserve(scalar(Scalar::U8), header, width, result, n)?;
+        let reserved = self.list_reserve(scalar(Scalar::U8), header, width, true, result, n)?;
         let at = self.address(
             AddressBase::Value(reserved),
             &[],
@@ -563,10 +575,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: TyId,
         header: ValueId,
         additional: ValueId,
+        bounded: bool,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
         let carrier = self.list_carrier(item, n)?;
+        // A stored element has a nonzero size, so len <= isize::MAX; a bounded
+        // `additional` (a small constant or another list's length) is too, and
+        // len + additional cannot wrap: the room test is one compare.
+        let unwrappable = bounded && matches!(self.list_storage_static(item), Some(true));
         let id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
@@ -583,8 +600,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let old_cap = self.carrier_word(header, carrier, SeqWord::Cap, n);
         let (needed, len_over) =
             self.list_arith(ArithOp::Add, ArithMode::Checked, len, additional, n);
+        let len_over = len_over?;
         let lacks_room = self.list_compare(CompareOp::Gt, needed, old_cap, n);
-        let grow = self.list_bool(BinaryOp::BitOr, lacks_room, len_over?, n);
+        let grow = if unwrappable {
+            lacks_room
+        } else {
+            self.list_bool(BinaryOp::BitOr, lacks_room, len_over, n)
+        };
         let growth = self.new_block(&[]);
         let success = self.new_block(&[]);
         let done = self.new_block(&[]);
@@ -623,7 +645,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let two = self.konst(Ty::Scalar(Scalar::U64), 2, n)?;
         let four = self.konst(Ty::Scalar(Scalar::U64), 4, n)?;
         let (double, cap_over) = self.list_arith(ArithOp::Mul, ArithMode::Checked, old_cap, two, n);
-        let count_over = self.list_bool(BinaryOp::BitOr, len_over?, cap_over?, n);
+        let count_over = self.list_bool(BinaryOp::BitOr, len_over, cap_over?, n);
         let new_cap = self.list_max(needed, four, n);
         let new_cap = self.list_max(new_cap, double, n);
         let plan = self.list_plan(item, new_cap, Some(count_over), n)?;
@@ -926,7 +948,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let count = self.carrier_word(source, carrier, SeqWord::Len, n);
-        let reserved = self.list_reserve(item, header, count, result, n)?;
+        let reserved = self.list_reserve(item, header, count, true, result, n)?;
         let result_id = self.place_row(result, "a list result without a place is not built", n)?;
         let at = self.address(
             AddressBase::Value(reserved),
@@ -986,7 +1008,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let reserved = self.list_reserve(item, header, count, result, n)?;
+        let reserved = self.list_reserve(item, header, count, false, result, n)?;
         let result_id = self.place_row(result, "a list result without a place is not built", n)?;
         let at = self.address(
             AddressBase::Value(reserved),

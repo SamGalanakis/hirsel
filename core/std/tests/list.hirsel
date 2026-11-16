@@ -485,6 +485,20 @@ fn swap_zero_sized() -> u64 {
     list.len(xs)
 }
 
+// A zero-sized element has no storage to bound a length, so appending two lists of
+// 2^63 units overflows the count: Error(Capacity), and xs keeps its length.
+// expect: run append_zero_sized_count_overflows() = 9223372036854775808
+fn append_zero_sized_count_overflows() -> u64 {
+    let mut xs: List[()] = list.new()
+    let mut ys: List[()] = list.new()
+    result.unwrap(list.fill(mut xs, 9223372036854775808, ()))
+    result.unwrap(list.fill(mut ys, 9223372036854775808, ()))
+    match list.append(mut xs, ys) {
+        Ok(()) => 0,
+        Error(_) => list.len(xs)
+    }
+}
+
 // Search only the tens key, not the whole value, retaining the first equal index.
 // expect: run search_by_key() = 1
 fn search_by_key() -> u64 {

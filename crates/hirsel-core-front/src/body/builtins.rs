@@ -65,7 +65,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             "push" => return Some(self.list_push(item, vals[0]?, vals[1], result, n)),
             "fill" => return Some(self.list_fill(item, vals[0]?, vals[1]?, vals[2], result, n)),
             "append" => return Some(self.list_append(item, vals[0]?, vals[1]?, result, n)),
-            "reserve" => return Some(self.list_reserve(item, vals[0]?, vals[1]?, result, n)),
+            "reserve" => {
+                return Some(self.list_reserve(item, vals[0]?, vals[1]?, false, result, n));
+            }
             "get" => return Some(self.list_get(item, vals[0]?, vals[1]?, result, n)),
             "set" => return Some(self.list_set(item, vals[0]?, vals[1]?, vals[2], n)),
             "swap" => {

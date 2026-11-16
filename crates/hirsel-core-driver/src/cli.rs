@@ -36,6 +36,9 @@ pub enum OptionId {
     FmtCheck,
     Signatures,
     ListRules,
+    SdkOut,
+    PlaceTimeout,
+    NPlace,
 }
 struct OptionSpec {
     id: OptionId,
@@ -68,6 +71,7 @@ commands! {
     "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
     "fmt", "fmt [--check] <package-dir>", "Format all new source files; refuse malformed input without partial edits.";
     "explain", "explain RULE|debug-lines | explain --list [--json]", "Explain current specification rules or the debug-lines build option.";
+    "sdk", "sdk ts <program> --out DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
 }
 macro_rules! option {
     ($id:ident, [$($name:literal),+], $value:expr, [$($command:literal),*], $description:literal) => {
@@ -75,6 +79,27 @@ macro_rules! option {
     }
 }
 static OPTIONS: &[OptionSpec] = &[
+    option!(
+        SdkOut,
+        ["--out"],
+        Some("DIR"),
+        ["sdk"],
+        "Write the generated SDK to this directory."
+    ),
+    option!(
+        PlaceTimeout,
+        ["--place-timeout"],
+        Some("SECONDS"),
+        ["sdk"],
+        "Describe wall-clock deadline; default 10 seconds."
+    ),
+    option!(
+        NPlace,
+        ["--n-place"],
+        Some("BYTES"),
+        ["sdk"],
+        "Place registration allowance; default 16777216 bytes."
+    ),
     option!(
         FmtCheck,
         ["--check"],
@@ -125,14 +150,14 @@ static OPTIONS: &[OptionSpec] = &[
         SourceCore,
         ["--source-core"],
         None,
-        ["check", "build", "run", "test"],
+        ["check", "build", "run", "test", "sdk"],
         "Check supplied core and std sources."
     ),
     option!(
         SourceStd,
         ["--source-std"],
         None,
-        ["check", "build", "run", "test"],
+        ["check", "build", "run", "test", "sdk"],
         "Check std from source instead of its product."
     ),
     option!(
@@ -146,7 +171,7 @@ static OPTIONS: &[OptionSpec] = &[
         CoreProduct,
         ["--core-product"],
         Some("CACHE"),
-        ["check", "build", "run", "test", "env"],
+        ["check", "build", "run", "test", "env", "sdk"],
         "Select the published package cache; enables products for check."
     ),
     option!(
@@ -181,28 +206,36 @@ static OPTIONS: &[OptionSpec] = &[
         Release,
         ["--release"],
         None,
-        ["build", "run", "test"],
+        ["build", "run", "test", "sdk"],
         "Optimize native code; defaults to LLVM."
     ),
     option!(
         DebugLines,
         ["--debug-lines"],
         Some("on|off"),
-        ["build", "run", "test"],
+        ["build", "run", "test", "sdk"],
         "Emit native line tables; default off on every profile. Failure positions stay enabled."
     ),
     option!(
         Backend,
         ["--backend"],
         Some("cranelift|llvm"),
-        ["build", "run", "test"],
+        ["build", "run", "test", "sdk"],
         "Select the native engine; dev defaults to Cranelift."
     ),
     option!(
         Runtime,
         ["--runtime"],
         Some("ARCHIVE"),
-        ["build", "run", "test", "env", "core-product", "std-product"],
+        [
+            "build",
+            "run",
+            "test",
+            "env",
+            "core-product",
+            "std-product",
+            "sdk"
+        ],
         "Select the core runtime archive."
     ),
     option!(
@@ -216,14 +249,22 @@ static OPTIONS: &[OptionSpec] = &[
         Cc,
         ["--cc"],
         Some("PROGRAM"),
-        ["build", "run", "test", "core-product", "std-product"],
+        ["build", "run", "test", "core-product", "std-product", "sdk"],
         "Select the C linker driver; an install records it for its requests."
     ),
     option!(
         Target,
         ["--target"],
         Some("TRIPLE"),
-        ["build", "run", "test", "env", "core-product", "std-product"],
+        [
+            "build",
+            "run",
+            "test",
+            "env",
+            "core-product",
+            "std-product",
+            "sdk"
+        ],
         "Select the full native target triple."
     ),
     option!(
@@ -244,7 +285,7 @@ static OPTIONS: &[OptionSpec] = &[
         Limit,
         ["--limit"],
         Some("BYTES"),
-        ["build", "run", "test"],
+        ["build", "run", "test", "sdk"],
         "Set the root limit; mandatory for test."
     ),
     option!(
@@ -258,14 +299,14 @@ static OPTIONS: &[OptionSpec] = &[
         Entry,
         ["--entry"],
         Some("DEFINITION"),
-        ["check", "build", "run"],
+        ["check", "build", "run", "sdk"],
         "Select an entry by its full definition path."
     ),
     option!(
         Libraries,
         ["--libraries"],
         Some("ROOT"),
-        ["check", "image", "build", "run", "test"],
+        ["check", "image", "build", "run", "test", "sdk"],
         "Select a root containing core/ and std/."
     ),
     option!(
@@ -279,7 +320,8 @@ static OPTIONS: &[OptionSpec] = &[
             "run",
             "test",
             "core-product",
-            "std-product"
+            "std-product",
+            "sdk"
         ],
         "Select the request or product store."
     ),
@@ -287,7 +329,7 @@ static OPTIONS: &[OptionSpec] = &[
         Inputs,
         ["--inputs"],
         Some("MANIFEST"),
-        ["check", "image", "build", "run", "test"],
+        ["check", "image", "build", "run", "test", "sdk"],
         "Read an explicit CorpusManifest JSON file."
     ),
     option!(
@@ -392,6 +434,13 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         return Ok(Action::Help(help(None)));
     }
     let command = named(&name)?;
+    if name == "sdk" {
+        match arguments.next().as_deref() {
+            Some("ts") => {}
+            Some("--help" | "-h") | None => return Ok(Action::Help(help(Some(command)))),
+            _ => return Err("sdk requires the ts generator".into()),
+        }
+    }
     if name == "help" {
         let target = arguments
             .next()

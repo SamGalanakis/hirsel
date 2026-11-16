@@ -139,7 +139,7 @@ impl Schema {
     pub fn declarations(&self, name: &str) -> String {
         let mut out = String::new();
         for (i, d) in self.definitions.iter().enumerate() {
-            let ty = match d["kind"].as_u64().unwrap() {
+            let mut ty = match d["kind"].as_u64().unwrap() {
                 0 => format!(
                     "{{ {} }}",
                     d["body"]
@@ -176,6 +176,9 @@ impl Schema {
                     .join(" | "),
                 _ => Self::typescript(&d["body"], name),
             };
+            if ty.is_empty() {
+                ty = "never".into();
+            }
             out.push_str(&format!("export type {name}Def{i} = {ty};\n"));
         }
         out.push_str(&format!(
@@ -268,6 +271,21 @@ impl Describe {
     }
 }
 
+pub fn place_error(bytes: &[u8]) -> Result<String, Error> {
+    let mut r = Reader { bytes, at: 0 };
+    let message = match r.count()? {
+        0 => format!(
+            "PlaceCapacity(Room {{ requested: {}, available: {} }})",
+            r.word()?,
+            r.word()?
+        ),
+        1 => format!("AlreadyRegistered({:?})", r.bytes()?),
+        _ => return Err("Malformed: describe error tag".into()),
+    };
+    r.done()?;
+    Ok(message)
+}
+
 fn stub_name(identity: &[u8]) -> Result<String, Error> {
     // PROG-9: version 01 followed by UTF-8 D S, with S beginning at '('.
     if identity.first() != Some(&1) {
@@ -353,6 +371,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         subscriptions.join("; ")
     );
     Ok(BTreeMap::from([
+        ("package.json".into(), "{\"type\":\"module\"}\n".into()),
         ("codec.js".into(), js),
         ("codec.d.ts".into(), dts),
         ("entries.js".into(), entries),
@@ -361,6 +380,44 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
 }
 pub fn write(describe: &Describe, out: &Path) -> Result<(), Error> {
     let files = generate(describe)?;
+    write_files(files, out)
+}
+
+pub fn write_with_frame(describe: &Describe, frame_schema: &[u8], out: &Path) -> Result<(), Error> {
+    let mut files = generate(describe)?;
+    let schema = Schema::read(frame_schema)?;
+    files
+        .get_mut("codec.js")
+        .unwrap()
+        .push_str(&schema.javascript("Frame"));
+    files
+        .get_mut("codec.d.ts")
+        .unwrap()
+        .push_str(&schema.declarations("Frame"));
+    for name in ["Outcome", "Fault", "Refusal"] {
+        let index = schema
+            .definitions
+            .iter()
+            .position(|d| {
+                d["name"]
+                    .as_str()
+                    .is_some_and(|path| path.rsplit(['.', '/']).next() == Some(name))
+            })
+            .ok_or_else(|| format!("Frame schema has no {name}"))?;
+        files.get_mut("codec.js").unwrap().push_str(&format!(
+            "export const {name} = makeCodec([19,{index}],{});\n",
+            json!(schema.definitions)
+        ));
+        files.get_mut("codec.d.ts").unwrap().push_str(&format!(
+            "export type {name} = FrameDef{index};\nexport const {name}: Codec<{name}>;\n"
+        ));
+    }
+    files.insert("frame.js".into(),"export {Frame,Outcome,Fault,Refusal} from './codec.js';\nexport const subprotocol = 'hirsel.1';\nexport const Raised = Object.freeze({Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8,Tape:9});\nexport const BadKind = Object.freeze({Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6});\n".into());
+    files.insert("frame.d.ts".into(),"export {Frame,Outcome,Fault,Refusal} from './codec.js';\nexport const subprotocol: 'hirsel.1';\nexport const Raised: Readonly<{Overflow:1; Bounds:2; Division:3; Unwrap:4; Fail:5; Cancelled:6; Capacity:7; OutOfTime:8; Tape:9}>;\nexport const BadKind: Readonly<{Truncated:0; Invalid:1; Utf8:2; Duplicate:3; Trailing:4; Schema:5; Value:6}>;\n".into());
+    write_files(files, out)
+}
+
+fn write_files(files: BTreeMap<String, String>, out: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(out)?;
     for (name, content) in files {
         std::fs::write(out.join(name), content)?;
@@ -416,6 +473,16 @@ mod tests {
         assert!(d.contains("{ tag: \"A\" }"));
         assert!(d.contains("{ tag: \"B\"; value: bigint }"));
         assert!(d.contains("{ tag: \"C\"; values: [bigint, string] }"));
+        let empty = Schema {
+            root: json!([19, 0]),
+            definitions: vec![json!({"name":"Empty","kind":1,"body":[]})],
+            key: false,
+        };
+        assert!(
+            empty
+                .declarations("Empty")
+                .contains("export type EmptyDef0 = never;")
+        );
     }
     #[test]
     fn sdk_duplicate_stub_name_writes_nothing() {
@@ -466,6 +533,10 @@ mod tests {
         assert!(files["codec.d.ts"].contains("export type Args0 = bigint"));
         assert!(files["codec.d.ts"].contains("export type Error1 = string"));
         assert!(!files["codec.js"].contains("require("));
+        assert_eq!(
+            serde_json::from_str::<Value>(&files["package.json"]).unwrap()["type"],
+            "module"
+        );
     }
     #[test]
     fn sdk_describe_and_nominal_schemas() {
@@ -501,5 +572,20 @@ mod tests {
                 .declarations("V")
                 .contains("export type VDef0 = bigint;")
         );
+    }
+    #[test]
+    fn sdk_place_errors_retain_tiny_allowance_capacity_and_duplicate_identity() {
+        let capacity = [0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            place_error(&capacity).unwrap(),
+            "PlaceCapacity(Room { requested: 9, available: 1 })"
+        );
+        let duplicate = [1, 0, 0, 0, 2, 0, 0, 0, 1, 2];
+        assert_eq!(
+            place_error(&duplicate).unwrap(),
+            "AlreadyRegistered([1, 2])"
+        );
+        assert!(place_error(&capacity[..19]).is_err());
+        assert!(place_error(&[2, 0, 0, 0]).is_err());
     }
 }

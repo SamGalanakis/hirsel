@@ -210,7 +210,14 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Metrics => metrics = Some(PathBuf::from(value)),
             Opt::ProfileFront => profile_front = true,
             Opt::Image => image_path = Some(PathBuf::from(value)),
-            Opt::Help | Opt::Lib | Opt::FmtCheck | Opt::Signatures | Opt::ListRules => {
+            Opt::Help
+            | Opt::Lib
+            | Opt::FmtCheck
+            | Opt::Signatures
+            | Opt::ListRules
+            | Opt::SdkOut
+            | Opt::PlaceTimeout
+            | Opt::NPlace => {
                 unreachable!("CLI early command option")
             }
         }

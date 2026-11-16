@@ -3,6 +3,8 @@
 `hirsel sdk ts <program> --out <dir>` builds the program and runs its describe
 launch mode. The generated ES modules and `.d.ts` declarations use the same
 code in Node and browsers, without a build step.
+The output directory has `package.json` with `"type": "module"`, so Node loads
+the same `.js` files even inside a CommonJS project.
 
 ## 4. Generated code
 
@@ -32,3 +34,15 @@ after Reset and reconnect.
 
 The launch identity contains digest bytes, target and `n_place`. Fingerprints
 come from the described program; the generator does not implement fingerprinting.
+
+`frame.js` exports the Frame, Outcome, Fault and Refusal codecs, the fixed Raised
+and BadKind number tables, and `subprotocol = "hirsel.1"`. Frame is a protocol
+type shared by every executable. The generator computes
+`std.codec.schema(of[runner.Frame]())` from the compiler's bundled runner and
+std sources. Describe contains only per-program data. A Frame change requires
+a subprotocol change; the client checks the negotiated subprotocol.
+
+`--place-timeout` is a positive number of seconds, default 10. `--n-place` fixes
+the registration allowance, default 16 MiB. Ordinary native build options select
+the runtime, engine and target. A built executable can also be supplied as the
+program. Describe and generation errors leave the output destination untouched.

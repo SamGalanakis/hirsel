@@ -12,6 +12,31 @@ from std_native import Contract, discover, first_stop, observation, owner, wrapp
 
 
 class Walker(unittest.TestCase):
+    def test_typescript_partner_runs_without_a_flag_and_missing_node_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / 'core/std/tests'
+            tests.mkdir(parents=True)
+            (root / 'core/core').mkdir()
+            (tests / 'codec.hirsel').write_text('// expect: run ts_codec_vectors() = true\nfn ts_codec_vectors()->bool { true }')
+            cases = discover(root, ['codec:ts_codec_vectors'])
+            def missing_node(argv, **kwargs):
+                self.assertEqual(argv[0], 'node')
+                raise FileNotFoundError('node')
+            with patch('std_native.subprocess.run', side_effect=missing_node), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(FileNotFoundError):
+                    run(root, root / 'compiler', root / 'runtime', cases, ['cranelift'], None, [])
+            failure = subprocess.CompletedProcess(['node'], 1, '', 'codec assertion failed')
+            with patch('std_native.subprocess.run', return_value=failure), contextlib.redirect_stdout(io.StringIO()):
+                rows = run(root, root / 'compiler', root / 'runtime', cases, ['cranelift'], None, [])
+            self.assertEqual(len(rows), 1)
+            self.assertFalse(rows[0]['passed'])
+            self.assertIn('codec assertion failed', rows[0]['cause'])
+            empty = subprocess.CompletedProcess(['node'], 0, '{"cases":0}', '')
+            with patch('std_native.subprocess.run', return_value=empty), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError, 'zero cases'):
+                    run(root, root / 'compiler', root / 'runtime', cases, ['cranelift'], None, [])
+
     def test_task_law_gets_grant_and_runs_on_three_engines(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

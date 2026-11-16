@@ -75,11 +75,8 @@ function writeBytes(bytes, w, key) {
   for (const b of bytes) { w.byte(b); if (b === 0) w.byte(255); } w.byte(0); w.byte(0);
 }
 function decodeString(bytes) { try { return utf8.decode(bytes); } catch { throw new Malformed('invalid UTF-8'); } }
-function same(a,b) {
-  if (Object.is(a,b) || a === b) return true;
-  if (a instanceof Uint8Array && b instanceof Uint8Array) return a.length === b.length && a.every((v,i) => v === b[i]);
-  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v,i) => same(v,b[i]));
-  return false;
+function keyString(bytes) {
+  let key = ''; for (const byte of bytes) key += byte.toString(16).padStart(2,'0'); return key;
 }
 function read(t, defs, r, key) {
   const op = t[0];
@@ -98,10 +95,10 @@ function read(t, defs, r, key) {
     const n = r.count(), out = []; for (let i=0;i<n;i++) out.push(read(t[1],defs,r,key)); return out;
   }
   if (op === 15) {
-    const n = r.count(), out = new Map();
+    const n = r.count(), out = new Map(), seen = new Set();
     for (let i=0;i<n;i++) {
-      const k = read(t[1],defs,r,key);
-      for (const old of out.keys()) if (same(old,k)) throw new Malformed('duplicate map key');
+      const start = r.at, k = read(t[1],defs,r,key), identity = keyString(r.bytes.subarray(start,r.at));
+      if (seen.has(identity)) throw new Malformed('duplicate map key'); seen.add(identity);
       out.set(k,read(t[2],defs,r,key));
     } return out;
   }
@@ -143,8 +140,12 @@ function write(t, defs, value, w, key) {
   }
   if (op === 15) {
     if (!(value instanceof Map)) throw new TypeError('expected Map');
-    const keys = []; w.count(value.size);
-    for (const [k,v] of value) { if (keys.some(old => same(old,k))) throw new TypeError('duplicate map key'); keys.push(k); write(t[1],defs,k,w,key); write(t[2],defs,v,w,key); } return;
+    const seen = new Set(); w.count(value.size);
+    for (const [k,v] of value) {
+      const kw = new Writer(); write(t[1],defs,k,kw,key); const encoded = kw.finish(), identity = keyString(encoded);
+      if (seen.has(identity)) throw new TypeError('duplicate map key'); seen.add(identity);
+      w.put(encoded); write(t[2],defs,v,w,key);
+    } return;
   }
   if (op === 16 || op === 17) {
     const names = op === 16 ? ['None','Some'] : ['Ok','Error'], tag = names.indexOf(value?.tag);

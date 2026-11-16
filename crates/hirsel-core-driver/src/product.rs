@@ -3,7 +3,7 @@
 use super::*;
 use hirsel_core_resolve::ModuleSource;
 
-mod bundled {
+pub(crate) mod bundled {
     include!(concat!(env!("OUT_DIR"), "/core_sources.rs"));
 }
 

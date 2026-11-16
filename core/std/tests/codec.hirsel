@@ -10,13 +10,21 @@ fn nibble(x: u8) -> u8 {
     }
 }
 
-// Shared with codec.mjs through std_native.py --typescript <generated codec.js>.
+// Shared with codec.mjs through std_native.py's default TypeScript partner.
 // The default law still tests the Hirsel encoder against hand-derived bytes.
 // expect: run ts_codec_vectors() = true
 pub fn ts_codec_vectors() -> bool {
     let nested: codec.Codec[Option[Option[u32]]] = codec.of()
     let unit: codec.Codec[Option[()]] = codec.of()
-    enc(codec.of_u64(), 9007199254740993u64) == unhex("0100000000002000") && enc(codec.of_u64(), 18446744073709551615u64) == unhex("ffffffffffffffff") && enc(codec.of_i64(), -9223372036854775808i64) == unhex("0000000000000080") && enc(nested, None) == unhex("00000000") && enc(nested, Some(None)) == unhex("0100000000000000") && enc(nested, Some(Some(7u32))) == unhex("010000000100000007000000") && enc(unit, Some(())) == unhex("01000000")
+    let keyed: codec.Codec[Map[TsKey, u8]] = codec.of()
+    let mut keys: Map[TsKey, u8] = map.new()
+    result.unwrap(map.insert(mut keys, TsKey(id: 1), 7u8))
+    result.unwrap(map.insert(mut keys, TsKey(id: 2), 8u8))
+    enc(codec.of_u64(), 9007199254740993u64) == unhex("0100000000002000") && enc(codec.of_u64(), 18446744073709551615u64) == unhex("ffffffffffffffff") && enc(codec.of_i64(), -9223372036854775808i64) == unhex("0000000000000080") && enc(nested, None) == unhex("00000000") && enc(nested, Some(None)) == unhex("0100000000000000") && enc(nested, Some(Some(7u32))) == unhex("010000000100000007000000") && enc(unit, Some(())) == unhex("01000000") && enc(keyed, keys) == unhex("0200000001000000070200000008") && outcome(keyed, unhex("0200000001000000070100000008")) == 4009
+}
+
+type TsKey: codec + key {
+    id: u32
 }
 
 type TsRow: codec {
@@ -32,6 +40,9 @@ fn ts_differential_bytes() -> String {
 // expect: run ts_hirsel_differential() = true
 pub fn ts_hirsel_differential() -> bool {
     let ts_input = ts_differential_bytes()
+    if ts_input == "" {
+        return false
+    }
     let supplied = unhex(ts_input)
     let c: codec.Codec[TsRow] = codec.of()
     let mut at = 0u64
@@ -55,27 +66,21 @@ pub fn ts_hirsel_differential() -> bool {
         }
         let ts_sample = TsRow(n: (state << 32) | i, label: result.unwrap(string.from(label)), nested: nested)
         let encoded = enc(c, ts_sample)
-        if ts_input != "" {
-            let start = at
-            match codec.take_with(supplied, mut at, c) {
-                Ok(take decoded) => {
-                    if enc(c, decoded) != encoded {
-                        return false
-                    }
+        let start = at
+        match codec.take_with(supplied, mut at, c) {
+            Ok(take decoded) => {
+                if enc(c, decoded) != encoded {
+                    return false
                 }
-                Error(_) => return false
             }
-            if at - start != list.len(encoded) {
-                return false
-            }
-        } else {
-            if !again(c, encoded) {
-                return false
-            }
+            Error(_) => return false
+        }
+        if at - start != list.len(encoded) {
+            return false
         }
         i += 1
     }
-    ts_input == "" || at == list.len(supplied)
+    at == list.len(supplied)
 }
 
 // Bytes from hex digits; spaces are ignored.

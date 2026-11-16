@@ -747,11 +747,13 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="land-core-evaluator", script="core/tools/gate_evaluator.py", full=False,
                             production=True, native_tools=True,
                             bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",
-                                      "hirsel": "//:hirsel-core-driver-bin-hirsel"},
+                                      "hirsel": "//:hirsel-core-driver-bin-hirsel",
+                                      "node": "//tools/buck2:sdk-node[bin/node]"},
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel-core-contract-eval",
-                                  "--compiler", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel"],
+                                  "--compiler", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel",
+                                  "--node", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/node"],
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/tools/std_native.py", "core/tools/std_native_owners.json"])')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "core/tools/std_native.py", "core/tools/std_native_owners.json"]) + ["crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel"]')))
     # CONC-10 event order: the evaluator against native cranelift under the poll recorder's FIFO choice.
     out.append("\n" + call("hirsel_script_test", name="core-event-order", script="crates/hirsel-core-rt/test-event-order.py", full=False,
                             host=True,

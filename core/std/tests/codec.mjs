@@ -38,6 +38,14 @@ export function vectors(c) {
   vector(c.makeCodec([19,1],defs),{tag:'B',value:5n},'010000000500000000000000');
   vector(c.makeCodec([19,1],defs),{tag:'C',values:[7,'a']},'02000000070100000061');
   vector(c.makeCodec([19,2],defs),[3n],'010000000300000000000000');
+  const keyDefs = [{kind:0,body:[{name:'id',type:[5]}]}];
+  const keyed = c.makeCodec([15,[19,0],[3]],keyDefs);
+  vector(keyed,new Map([[{id:1},7],[{id:2},8]]),'0200000001000000070200000008');
+  assert.throws(() => keyed.decode(from('0200000001000000070100000008')),c.Malformed);
+  assert.throws(() => keyed.encode(new Map([[{id:1},7],[{id:1},8]])),TypeError);
+  assert.throws(() => keyed.encode(new Map([[{id:1,extra:2},7],[{id:1},8]])),TypeError);
+  assert.throws(() => c.makeCodec([15,[16,[0]],[0]]).encode(new Map([[{tag:'Some'},undefined],[{tag:'Some',value:undefined},undefined]])),TypeError);
+  assert.throws(() => c.makeCodec([15,[16,[3]],[0]]).decode(from('020000000000000000000000')),c.Malformed);
   assert.throws(() => c.makeCodec([19,1],defs).decode(from('03000000')),c.Malformed);
   for (const bytes of ['01000000ff','02000000c080','03000000eda080']) assert.throws(() => c.values.string.decode(from(bytes)),c.Malformed);
   assert.throws(() => c.values.string.encode('\ud800'),TypeError);

@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--filter', action='append', default=[])
+    parser.add_argument('--node', default='node')
     # The combined core gate asks all harnesses for serial bodies. This harness
     # has one unittest body; accept exactly that same serial setting.
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
@@ -30,7 +31,7 @@ def main():
             owners = json.loads(Path(__file__).with_name('std_native_owners.json').read_text())
             rows = run(root, args.compiler.resolve() if args.compiler else None,
                        args.runtime.resolve() if args.runtime else None, contracts, ['evaluator'], None, owners,
-                       evaluator=args.evaluator.resolve(), compare_revisions=args.compiler is not None)
+                       evaluator=args.evaluator.resolve(), compare_revisions=args.compiler is not None, node=args.node)
             eligible = [row for row in rows if row['applicable']]
             self.assertTrue(eligible, 'zero evaluator-eligible laws selected')
             findings = [f"{row['file']}:{row['line']} {row['test']}: {row['cause']} "

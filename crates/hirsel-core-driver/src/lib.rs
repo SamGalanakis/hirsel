@@ -10,6 +10,7 @@ mod image_unit;
 pub mod installation;
 mod product;
 pub mod sdk;
+pub mod sdk_command;
 pub use product::PackageProduct;
 mod callable_variants;
 #[cfg(test)]

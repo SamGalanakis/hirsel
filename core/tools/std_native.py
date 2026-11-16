@@ -45,7 +45,7 @@ class Contract:
 
     @property
     def name(self):
-        prefix = 'core.' if self.package == 'core' else ''
+        prefix = self.package + '.' if self.package != 'std' else ''
         return prefix + self.file.stem + ':' + self.call.split('(')[0]
 
 
@@ -106,6 +106,7 @@ def test_module(root, file, source):
 def discover(root, filters):
     contracts = []
     files = [p for package in ['core', 'std'] for p in (root / 'core' / package / 'tests').glob('*.hirsel')]
+    files += list((root / 'core/programs/store/tests').glob('*.hirsel'))
     for file in sorted(files):
         source = file.read_text()
         test_of = test_module(root, file, source)
@@ -156,7 +157,8 @@ def discover(root, filters):
             header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, file.relative_to(root).parts[1], evaluator_only, engine_fact, schedule)
+            package = 'store' if file.parent == root / 'core/programs/store/tests' else file.relative_to(root).parts[1]
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule)
             schedule = None
             stdout = stderr = b""
             first_write = None
@@ -233,6 +235,10 @@ def manifest(root, case, adapted):
     packages = [
         {'package': core, 'sources': sources(root / 'core/core', True), 'dependencies': []},
         {'package': std, 'sources': sources(root / 'core/std', False), 'dependencies': [core]}]
+    if case.package == 'store':
+        packages.append({'package': {'name': 'store', 'version': '1'}, 'dependencies': [core, std],
+                         'sources': [{'file': str(root / 'core/programs/store' / (name + '.hirsel')),
+                                      'modules': [name], 'signatures': False} for name in ['runner', 'store']]})
     files = next(p['sources'] for p in packages if p['package']['name'] == case.package)
     if case.test_of:
         original = next(f for f in files if f['modules'] == [case.test_of])
@@ -342,10 +348,12 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node'):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
+    typescript_override = typescript
+    typescript = typescript or root / 'crates/hirsel-core-driver/src/sdk_codec.js'
     if any(c.evaluator_only for c in contracts) and 'evaluator' not in engines:
         engines.insert(0, 'evaluator')
     if 'evaluator' in engines and evaluator is None:
@@ -354,6 +362,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
     # Each case's host state is fresh and its executable is removed after observation.
     with tempfile.TemporaryDirectory(prefix='hirsel-std-native-') as temporary, contextlib.ExitStack() as processes:
         work = Path(temporary)
+        protocol_codec = None
         resident = processes.enter_context(Evaluator(evaluator)) if 'evaluator' in engines else None
         for engine in engines:
             started = time.monotonic()
@@ -385,20 +394,56 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
                 source = original + case.file.read_text()
-                if typescript and case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(')):
-                    law = 'vectors' if case.call.startswith('ts_codec_vectors(') else 'differential'
-                    program = (f'import * as c from {json.dumps(typescript.resolve().as_uri())};'
-                               f'import {{{law}}} from {json.dumps((root / "core/std/tests/codec.mjs").as_uri())};'
-                               f'console.log(JSON.stringify({law}(c)));')
-                    partner = subprocess.run(['node', '--input-type=module', '--eval', program], capture_output=True, text=True)
+                if case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(', 'ts_frame_vectors(', 'ts_frame_differential(')):
+                    frame = case.package == 'store'
+                    if frame and protocol_codec is None and typescript_override is None:
+                        if compiler is None or runtime is None:
+                            raise ValueError('Frame codec laws require --compiler and --runtime to generate the SDK')
+                        server = work / 'description-fixture'
+                        def count(n):
+                            return n.to_bytes(4, 'little')
+                        def blob(b):
+                            return count(len(b)) + b
+                        def exported(kind, identity, args, result, args_fp, result_fp):
+                            return (count(kind) + blob(identity) + blob(bytes([3, 0, 0, 0, 0]) + args)
+                                    + blob(bytes([3, 0, 0, 0, 0]) + result) + blob(b'')
+                                    + args_fp.to_bytes(8, 'little') + result_fp.to_bytes(8, 'little'))
+                        # Scripted per-program entries exercise the real CLI and
+                        # generated stubs. Frame itself always comes from runner.
+                        description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + count(2)
+                                       + exported(0, b'\x01fixture@1/main/toggle(u64)->u64', b'\x06', b'\x06', 9007199254740993, 7)
+                                       + exported(2, b'\x01fixture@1/main/rows(u32)->Bytes', b'\x05', b'\x0e\x03', 2, 3))
+                        server.write_text('#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(' + repr(description) + ')\n')
+                        server.chmod(0o700)
+                        generated = work / 'sdk'
+                        built = subprocess.run([str(compiler), 'sdk', 'ts', str(server), '--out', str(generated), '--runtime', str(runtime)], capture_output=True, text=True)
+                        if built.returncode:
+                            raise ValueError('Frame SDK generation failed: ' + built.stdout + built.stderr)
+                        protocol_codec = generated / 'codec.js'
+                    module = (typescript_override or protocol_codec) if frame else typescript
+                    law = 'vectors' if case.call.startswith(('ts_codec_vectors(', 'ts_frame_vectors(')) else 'differential'
+                    partner_module = root / ('core/programs/store/tests/codec_frames.mjs' if frame else 'core/std/tests/codec.mjs')
+                    program = (f'import * as c from {json.dumps(module.resolve().as_uri())};'
+                               f'import {{{law}}} from {json.dumps(partner_module.as_uri())};')
+                    if frame:
+                        program += f'import * as frame from {json.dumps(module.with_name("frame.js").resolve().as_uri())};'
+                        program += f'import * as entries from {json.dumps(module.with_name("entries.js").resolve().as_uri())};'
+                    arguments = 'c,frame,entries' if frame else 'c'
+                    program += f'console.log(JSON.stringify(await {law}({arguments})));'
+                    partner = subprocess.run([str(node), '--input-type=module', '--eval', program], capture_output=True, text=True)
                     if partner.returncode:
-                        row.update(ran=True, passed=False, cause='TypeScript codec: ' + partner.stderr)
+                        row.update(ran=True, passed=False, cause='TypeScript codec: ' + partner.stderr, seconds=0, instruction_budget=0)
                         save_row(rows, row, output)
                         continue
                     values = json.loads(partner.stdout)
+                    if values.get('cases', 0) <= 0:
+                        raise ValueError('TypeScript codec partner executed zero cases')
+                    if law == 'differential' and (values['cases'] != 10000 or not values.get('hex')):
+                        raise ValueError('TypeScript differential requires 10,000 encoded cases')
                     row['typescript_cases'] = values['cases']
                     if law == 'differential':
-                        source, count = re.subn(r'(fn ts_differential_bytes\(\) -> String\s*\{\s*)""(\s*\})',
+                        function = 'ts_frame_bytes' if frame else 'ts_differential_bytes'
+                        source, count = re.subn(r'(fn ' + function + r'\(\) -> String\s*\{\s*)""(\s*\})',
                                                 lambda m: m[1] + json.dumps(values['hex']) + m[2], source)
                         if count != 1:
                             raise ValueError('TypeScript differential must supply exactly one corpus')
@@ -521,6 +566,7 @@ def main():
     parser.add_argument('--filter', action='append', default=[])
     parser.add_argument('--report', type=Path)
     parser.add_argument('--typescript', type=Path, help='generated codec.js ES module; run its codec corpus partner')
+    parser.add_argument('--node', default='node', help='Node >=22 executable, required by the codec corpus')
     parser.add_argument('--cc', type=Path)
     parser.add_argument('--target')
     parser.add_argument('--emulator', type=Path)
@@ -538,7 +584,7 @@ def main():
     rows = run(root, args.compiler.resolve() if args.compiler else None, args.runtime.resolve() if args.runtime else None, contracts, engines,
                args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None, args.target,
                args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
-               typescript=args.typescript)
+               typescript=args.typescript, node=args.node)
     return int(any(r['applicable'] and not r['passed'] for r in rows))
 
 

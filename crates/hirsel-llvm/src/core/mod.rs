@@ -429,6 +429,7 @@ fn emit_module(
             anchor: None,
             relocatable_sites: source.relocatable_sites,
             value_slots: values::slots(body, &flow),
+            literals: Vec::new(),
             address_slots: values::address_slots(body, &flow),
             aliases,
             module,
@@ -507,14 +508,13 @@ fn emit_module(
                 e.sink.alloca(Local::Address(i), &Type::Ptr, 0);
             }
         }
-        // Cleanup continuations may mention a branch-local constant even when
-        // that branch is inactive. Constants have no effects or operands, so
-        // define them in the entry rather than imposing LLVM dominance on the
-        // producer's cleanup CFG.
-        for (index, inst) in body.insts.iter().enumerate() {
-            if matches!(inst, Inst::Const { .. }) {
-                e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
-                e.inst(inst, index)?;
+        // A constant is a literal at each use: it has no effects or operands, and
+        // a value defined once for the whole function would be live, and spilled,
+        // across all of it.
+        e.literals = vec![None; body.values.len()];
+        for inst in &body.insts {
+            if let Inst::Const { result, bits } = *inst {
+                e.literals[result.index()] = Some(e.literal(result, bits));
             }
         }
         for (i, v) in body.blocks[0]
@@ -940,6 +940,8 @@ struct FunctionEmitter<'a> {
     anchor: Option<Anchor>,
     relocatable_sites: bool,
     value_slots: Vec<bool>,
+    /// Each constant's literal, used in place of the value.
+    literals: Vec<Option<Value>>,
     address_slots: Vec<bool>,
     sink: &'a mut dyn Sink,
     items: &'a mut Items,
@@ -1077,10 +1079,27 @@ impl FunctionEmitter<'_> {
     // Moves and numerical operations preserve arbitrary NaN representations.
     // Reinterpret from a float is the sole bit observer (FORM #97).
     fn numeric(&mut self, v: ValueId) -> Value {
+        if let Some(Some(x)) = self.literals.get(v.index()) {
+            return x.clone();
+        }
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
             self.load(&ty(self.vty(v)), &Local::Value(v.index()).into(), 0)
         } else {
             Local::Value(v.index()).into()
+        }
+    }
+    fn literal(&self, v: ValueId, bits: u64) -> Value {
+        let t = self.vty(v);
+        if t.is_float() {
+            Value::Bitcast {
+                from: bits_ty(t),
+                bits,
+                to: ty(t),
+            }
+        } else if t == Ty::Ptr {
+            Value::IntToPtr(bits)
+        } else {
+            int(bits)
         }
     }
     fn put(&mut self, v: ValueId, x: &Value) {
@@ -1226,21 +1245,8 @@ impl FunctionEmitter<'_> {
     fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
         self.anchor = self.body.inst_anchors[index];
         match *inst {
-            Inst::Const { result, bits } => {
-                let t = self.vty(result);
-                let x = if t.is_float() {
-                    Value::Bitcast {
-                        from: bits_ty(t),
-                        bits,
-                        to: ty(t),
-                    }
-                } else if t == Ty::Ptr {
-                    Value::IntToPtr(bits)
-                } else {
-                    int(bits)
-                };
-                self.put(result, &x);
-            }
+            // Its literal stands at each use.
+            Inst::Const { .. } => {}
             Inst::ReadStatic { result, data } => {
                 self.put(result, &Value::global(format!("s{}", data.0)))
             }

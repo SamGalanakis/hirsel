@@ -41,7 +41,7 @@ fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
     let done = result.unwrap(store.run(mut db, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
         let a = Account(id: i, owner: result.unwrap(string.from("owner000")), balance: int.narrow(i))
         store.put(mut tx, t, i, a)?
-        let back = option.unwrap(store.fetch(tx, t, i)?)
+        let back = option.unwrap(store.fetch(tx, store.shape(t), i)?)
         if back.id != i || back.balance != int.narrow(i) || back.owner != "owner000" {
             fail("store R1 wrong row")
         }

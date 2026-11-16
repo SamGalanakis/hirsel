@@ -99,7 +99,12 @@ pub type Ticket {
 
 pub type Read = Point(u32, Bytes) | Span(u32, Bytes, Bytes)
 
-pub type Outcome[R, A] = Committed(Done[R]) | Aborted(A) | Failed(Causes) | Refused(Capacity)
+pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(Causes) | Refused(Capacity)
+
+pub type Undone[A] {
+    value: A,
+    ticket: Option[Ticket]
+}
 
 pub type Done[R] {
     value: R,
@@ -217,7 +222,7 @@ fn publish(db: Db) {
     }
 }
 
-pub fn info(tx: Tx) -> CallInfo {
+pub fn info(mut tx: Tx) -> CallInfo {
     tx.info
 }
 
@@ -289,7 +294,7 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
                 return Ok(Refused(c))
             }
             match take result {
-                Error(take a) => Ok(Aborted(take a)),
+                Error(take a) => Ok(Aborted(Undone(value: take a, ticket: None))),
                 Ok(take value) => {
                     if wrote && live > db.ceiling {
                         return Ok(Refused(Capacity(requested: live, available: db.ceiling)))
@@ -729,7 +734,7 @@ pub fn law_call_info(c: Clock) -> bool {
     let mut db = test_db(c, 1073741824)
     for wall in 0u64 .. 4 {
         let outcome = execute(mut db, 30 - wall, fn(mut tx: Tx) -> Result[u64, ()] {
-            Ok(info(tx).at)
+            Ok(info(mut tx).at)
         })
         match take outcome {
             Ok(Committed(done)) => if done.value != 30 || done.info.at != 30 {
@@ -788,7 +793,7 @@ pub fn law_foreign(c: Clock) -> bool waits {
 fn model_step(mut db: Db, wall: u64) -> bool {
     let outer_choice = (sm(wall) >> 8) % 5
     let outcome = execute(mut db, wall, fn(mut tx: Tx) -> Result[u64, Error] {
-        let at = info(tx).at
+        let at = info(mut tx).at
         let state = sm(at)
         let choice = (state >> 8) % 5
         let k = state % 24
@@ -812,7 +817,7 @@ fn model_step(mut db: Db, wall: u64) -> bool {
     })
     match take outcome {
         Ok(Committed(_)) => outer_choice < 3,
-        Ok(Aborted(Foreign)) => outer_choice == 3,
+        Ok(Aborted(Undone(value: Foreign, ticket: None))) => outer_choice == 3,
         Ok(Failed(_)) => outer_choice == 4,
         _ => false
     }
@@ -952,7 +957,7 @@ pub fn law_frames(c: Clock) -> bool {
         if tx.frame_bytes != 88 || std.omap.len(tx.ops) != 2 {
             return Error(Foreign)
         }
-        capacity(encode_commit(info(tx), tx.ops, 1, 72))
+        capacity(encode_commit(info(mut tx), tx.ops, 1, 72))
     })
     match take outcome {
         Ok(Committed(done)) => {
@@ -1290,7 +1295,7 @@ fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
     }
 }
 
-pub fn fetch[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[V], Error] {
+pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
@@ -1344,7 +1349,7 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
     delete_bytes(mut tx, t.id, key)
 }
 
-pub fn range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
+pub fn range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
@@ -1878,7 +1883,7 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         put(mut tx, t, 1, 99)
     })
     match take stale {
-        Ok(Aborted(Stale(_))) => {},
+        Ok(Aborted(Undone(value: Stale(_), ticket: None))) => {},
         _ => return false
     }
     let ix = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
@@ -1888,7 +1893,7 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         put(mut tx, t, 1, 99)
     })
     match take incomplete {
-        Ok(Aborted(Stale(_))) => {},
+        Ok(Aborted(Undone(value: Stale(_), ticket: None))) => {},
         _ => return false
     }
     let _ = result.unwrap(index(db, mut t, "quotient", code.describe(quotient), std.codec.key_u64()))
@@ -1913,7 +1918,7 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         return false
     }
     let reads = run(mut db, fn(mut tx: Tx) -> Result[u64, Error] {
-        let own = option.unwrap(fetch(tx, t, 1)?)
+        let own = option.unwrap(fetch(tx, shape(t), 1)?)
         let mut cursor = lookup(tx, ix, Included(2), Included(2))?
         let mut total = own
         while let Some((_, v)) = next(mut cursor)? {
@@ -2201,7 +2206,7 @@ pub fn law_index_refusal(c: Clock) -> bool waits {
             Error(Full(_)) => {},
             _ => return Error(Foreign)
         }
-        Ok(std.omap.len(tx.ops) == 0 && option.unwrap(fetch(tx, t, 1)?) == 99)
+        Ok(std.omap.len(tx.ops) == 0 && option.unwrap(fetch(tx, shape(t), 1)?) == 99)
     })
     match take out {
         Ok(Committed(done)) => if !done.value {
@@ -2261,11 +2266,11 @@ pub fn law_typed_foreign(c: Clock) -> bool waits {
         return false
     }
     let out = run(mut b, fn(mut tx: Tx) -> Result[(), bool] {
-        let ok = is_foreign(fetch(tx, t, 1)) && is_foreign(put(mut tx, t, 1, 2)) && is_foreign(delete(mut tx, t, 1)) && is_foreign(range(tx, t, Unbounded, Unbounded)) && is_foreign(lookup(tx, ix, Unbounded, Unbounded))
+        let ok = is_foreign(fetch(tx, shape(t), 1)) && is_foreign(put(mut tx, t, 1, 2)) && is_foreign(delete(mut tx, t, 1)) && is_foreign(range(tx, shape(t), Unbounded, Unbounded)) && is_foreign(lookup(tx, ix, Unbounded, Unbounded))
         Error(ok)
     })
     match take out {
-        Ok(Aborted(true)) => b.head == 0 && b.resident == 0,
+        Ok(Aborted(Undone(value: true, ticket: None))) => b.head == 0 && b.resident == 0,
         _ => false
     }
 }
@@ -2302,7 +2307,7 @@ pub fn law_drop_recreate(c: Clock) -> bool waits {
         put(mut tx, saved, 1, 99)
     })
     match take stale {
-        Ok(Aborted(Stale(1))) => {},
+        Ok(Aborted(Undone(value: Stale(1), ticket: None))) => {},
         _ => return false
     }
     typed_value(snapshot(db), shape(fresh), 1) == 0 && typed_value(held, sh, 1) == 10
@@ -2376,7 +2381,7 @@ pub fn law_typed_model(c: Clock) -> bool waits {
             let k = model_state % 24
             let choice = (model_state >> 8) % 5
             let out = execute(mut db, wall, fn(mut tx: Tx) -> Result[(u64, u64), Error] {
-                let at = info(tx).at
+                let at = info(mut tx).at
                 let state = sm(at)
                 let key = state % 24
                 let action = (state >> 8) % 5
@@ -2384,11 +2389,11 @@ pub fn law_typed_model(c: Clock) -> bool waits {
                     let _ = delete(mut tx, t, key)?
                 } else {
                     put(mut tx, t, key, at + 1)?
-                    if option.unwrap(fetch(tx, t, key)?) != at + 1 {
+                    if option.unwrap(fetch(tx, shape(t), key)?) != at + 1 {
                         return Error(OutOfScope)
                     }
                 }
-                let mut rows = range(tx, t, Excluded(4), Included(17))?
+                let mut rows = range(tx, shape(t), Excluded(4), Included(17))?
                 let mut a: u64 = 0
                 while let Some((_, v)) = next(mut rows)? {
                     a += v
@@ -2430,7 +2435,7 @@ pub fn law_typed_model(c: Clock) -> bool waits {
                         return false
                     }
                 },
-                Ok(Aborted(Foreign)) => if choice != 3 {
+                Ok(Aborted(Undone(value: Foreign, ticket: None))) => if choice != 3 {
                     return false
                 },
                 Ok(Failed(_)) => if choice != 4 {
@@ -2528,12 +2533,12 @@ pub fn law_abort_budget(c: Clock) -> bool {
     let mut db = test_db(c, 1073741824)
     let outcome = result.unwrap(bound bytes 80 {
         execute(mut db, 1, fn(mut tx: Tx) -> Result[(), u64] {
-            let _ = info(tx)
+            let _ = info(mut tx)
             Error(7)
         })
     })
     match take outcome {
-        Ok(Aborted(7)) => db.head == 0 && db.resident == 0,
+        Ok(Aborted(Undone(value: 7, ticket: None))) => db.head == 0 && db.resident == 0,
         _ => false
     }
 }
@@ -2541,6 +2546,553 @@ pub fn law_abort_budget(c: Clock) -> bool {
 @test
 fn test_abort_budget(c: Clock) -> Result[(), ()] {
     if law_abort_budget(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+pub type Looked[R] = Seen(Seen[R]) | Failed(Causes) | Refused(Capacity)
+
+pub type Seen[R] {
+    value: R,
+    version: u64,
+    reads: List[Read]
+}
+
+pub fn look[R](s: Snapshot, body: scoped[view] fn(Tx) -> R) -> Result[Looked[R], Error] {
+    let read_log: Result[Log[Read], Capacity] = log.new()
+    let reads = match take read_log {
+        Ok(take x) => take x,
+        Error(c) => return Ok(Refused(c))
+    }
+    let issue_log: Result[Log[u64], Capacity] = log.new()
+    let issued = match take issue_log {
+        Ok(take x) => take x,
+        Error(c) => return Ok(Refused(c))
+    }
+    let caught = isolate(fn() -> R {
+        let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, resident: 0, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
+        body(tx)
+    })
+    let seen = log.finish(take reads)
+    match take caught {
+        Error(c) => Ok(Refused(c)),
+        Ok(Error(take cs)) => Ok(Failed(take cs)),
+        Ok(Ok(take value)) => Ok(Seen(Seen(value: take value, version: s.head, reads: take seen)))
+    }
+}
+
+pub type Change {
+    tree_key: Bytes,
+    value: Option[Bytes]
+}
+
+type DiffPart {
+    node: Arc[std.omap.Node[Bytes, Bytes]],
+    at: u64
+}
+
+fn diff_top(parts: List[DiffPart]) -> DiffPart {
+    let p = parts[list.len(parts) - 1]
+    DiffPart(node: arc.share(p.node), at: p.at)
+}
+
+fn diff_expand(mut parts: List[DiffPart], p: DiffPart) -> Result[(), Error] {
+    let _ = list.pop(mut parts)
+    let mut i = std.omap.node_count(p.node)
+    while i > 0 {
+        i -= 1
+        let child = option.unwrap(std.omap.node_child(p.node, i))
+        capacity(result.capacity_only(list.push(mut parts, DiffPart(node: take child, at: 0))))?
+    }
+    Ok(())
+}
+
+fn diff_advance(mut parts: List[DiffPart], p: DiffPart) {
+    if p.at + 1 == std.omap.node_count(p.node) {
+        let _ = list.pop(mut parts)
+    } else {
+        let i = list.len(parts) - 1
+        parts[i].at += 1
+    }
+}
+
+fn diff_emit(mut out: List[Change], p: DiffPart, present: bool) -> Result[(), Error] {
+    let k = option.unwrap(std.omap.node_key(p.node, p.at))
+    let value = if present {
+        let source = option.unwrap(std.omap.node_value(p.node, p.at))
+        Some(copied(source)?)
+    } else {
+        None
+    }
+    capacity(result.capacity_only(list.push(mut out, Change(tree_key: copied(k)?, value: take value))))
+}
+
+pub fn changes(a: Snapshot, b: Snapshot) -> Result[List[Change], Error] {
+    if !same(a.store, b.store) || a.open != b.open {
+        return Error(Foreign)
+    }
+    let left_root = std.omap.root(a.roots.data)
+    let right_root = std.omap.root(b.roots.data)
+    if let Some(x) = left_root {
+        if let Some(y) = right_root {
+            if std.omap.node_id(x) == std.omap.node_id(y) {
+                return Ok(list.new())
+            }
+        }
+    } else if let None = right_root {
+        return Ok(list.new())
+    }
+    let mut left: List[DiffPart] = list.new()
+    let mut right: List[DiffPart] = list.new()
+    if let Some(take n) = take left_root {
+        capacity(result.capacity_only(list.push(mut left, DiffPart(node: take n, at: 0))))?
+    }
+    if let Some(take n) = take right_root {
+        capacity(result.capacity_only(list.push(mut right, DiffPart(node: take n, at: 0))))?
+    }
+    let mut out: List[Change] = list.new()
+    while list.len(left) > 0 || list.len(right) > 0 {
+        if list.len(left) == 0 {
+            let y = diff_top(right)
+            if std.omap.node_level(y.node) > 0 {
+                diff_expand(mut right, y)?
+            } else {
+                diff_emit(mut out, y, true)?
+                diff_advance(mut right, y)
+            }
+        } else if list.len(right) == 0 {
+            let x = diff_top(left)
+            if std.omap.node_level(x.node) > 0 {
+                diff_expand(mut left, x)?
+            } else {
+                diff_emit(mut out, x, false)?
+                diff_advance(mut left, x)
+            }
+        } else {
+            let x = diff_top(left)
+            let y = diff_top(right)
+            if x.at == y.at && std.omap.node_id(x.node) == std.omap.node_id(y.node) {
+                let _ = list.pop(mut left)
+                let _ = list.pop(mut right)
+            } else {
+                let kx = option.unwrap(std.omap.node_key(x.node, x.at))
+                let ky = option.unwrap(std.omap.node_key(y.node, y.at))
+                if std.omap.node_level(x.node) > 0 && kx <= ky {
+                    diff_expand(mut left, x)?
+                } else if std.omap.node_level(y.node) > 0 && ky <= kx {
+                    diff_expand(mut right, y)?
+                } else if kx < ky {
+                    diff_emit(mut out, x, false)?
+                    diff_advance(mut left, x)
+                } else if ky < kx {
+                    diff_emit(mut out, y, true)?
+                    diff_advance(mut right, y)
+                } else {
+                    let vx = option.unwrap(std.omap.node_value(x.node, x.at))
+                    let vy = option.unwrap(std.omap.node_value(y.node, y.at))
+                    if vx != vy {
+                        diff_emit(mut out, y, true)?
+                    }
+                    diff_advance(mut left, x)
+                    diff_advance(mut right, y)
+                }
+            }
+        }
+    }
+    Ok(take out)
+}
+
+fn look_query(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64]) -> Result[u64, Error] {
+    let a = option.unwrap(fetch(tx, sh, 1)?)
+    let absent = fetch(tx, sh, 9)?
+    if let Some(_) = absent {
+        return Error(OutOfScope)
+    }
+    let mut rows = range(tx, sh, Excluded(1), Included(3))?
+    let mut sum = a
+    while let Some((_, v)) = next(mut rows)? {
+        sum += v
+    }
+    let mut matches = lookup(tx, ix, Included(2), Included(2))?
+    while let Some((_, v)) = next(mut matches)? {
+        sum += v
+    }
+    Ok(sum)
+}
+
+fn equal_reads(a: List[Read], b: List[Read]) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for i in 0u64 .. list.len(a) {
+        let equal = match (a[i], b[i]) {
+            (Point(x, k), Point(y, j)) => x == y && k == j,
+            (Span(x, l, h), Span(y, low, high)) => x == y && l == low && h == high,
+            _ => false
+        }
+        if !equal {
+            return false
+        }
+    }
+    true
+}
+
+// L22: 10 + (20+30) + (10+30) = 100; two points and two spans.
+// Wrong implementations: look publishes, omits reads or reports another version.
+pub fn law_look(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, "look", std.codec.key_u64(), std.codec.of_u64()))
+    let mut t = result.unwrap(table(mut db, "look", std.codec.key_u64(), std.codec.of_u64()))
+    for k in 1u64 .. 4 {
+        if !typed_put(mut db, t, k, k * 10) {
+            return false
+        }
+    }
+    result.unwrap(create_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let ix = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let sh = shape(t)
+    let s = snapshot(db)
+    let head = db.head
+    let live = db.resident
+    let high_water = db.next_node
+    let end = db.file_end
+    let observed = result.unwrap(look(s, fn(tx: Tx) -> Result[u64, Error] {
+        look_query(tx, sh, ix)
+    }))
+    let got = match take observed {
+        Seen(take x) => take x,
+        _ => return false
+    }
+    match got.value {
+        Ok(100) => {},
+        _ => return false
+    }
+    if got.version != head || list.len(got.reads) != 4 || db.head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
+        return false
+    }
+    let p1 = match got.reads[0] {
+        Point(id, k) => id == t.id && k == key_word(1),
+        _ => false
+    }
+    let p2 = match got.reads[1] {
+        Point(id, k) => id == t.id && k == key_word(9),
+        _ => false
+    }
+    // [table1 || key1 || 00, table1 || key3 || 00) includes precisely 2 and 3.
+    let mut low = result.unwrap(physical(t.id, key_word(1)))
+    result.unwrap(list.push(mut low, 0u8))
+    let mut high = result.unwrap(physical(t.id, key_word(3)))
+    result.unwrap(list.push(mut high, 0u8))
+    let span = match got.reads[2] {
+        Span(id, l, h) => id == t.id && l == low && h == high,
+        _ => false
+    }
+    let ix_low = result.unwrap(physical(ix.id, key_word(2)))
+    let ix_high = result.unwrap(physical(ix.id, key_word(3)))
+    let index_span = match got.reads[3] {
+        Span(id, l, h) => id == ix.id && l == ix_low && h == ix_high,
+        _ => false
+    }
+    if !p1 || !p2 || !span || !index_span {
+        return false
+    }
+    let run_result = run(mut db, fn(mut tx: Tx) -> Result[u64, Error] {
+        look_query(tx, sh, ix)
+    })
+    match take run_result {
+        Ok(Committed(done)) => done.value == 100 && equal_reads(done.reads, got.reads),
+        _ => false
+    }
+}
+
+fn has_failure(cs: Causes, message: String) -> bool {
+    for cause in cs {
+        if let Fail(text) = cause.kind {
+            if text == message {
+                return true
+            }
+        }
+    }
+    false
+}
+
+// L22: faults and Capacity are contained. info requires mut Tx (v2.4 G2).
+pub fn law_look_faults(c: Clock) -> bool {
+    let db = test_db(c, 1073741824)
+    let s = snapshot(db)
+    let failed = result.unwrap(look(s, fn(tx: Tx) -> u64 {
+        fail("look body fault")
+    }))
+    match take failed {
+        Failed(take cs) => if !has_failure(cs, "look body fault") {
+            return false
+        },
+        _ => return false
+    }
+    let refused_query = result.unwrap(bound bytes 0 {
+        look(s, fn(tx: Tx) -> u64 {
+            7u64
+        })
+    })
+    match take refused_query {
+        Ok(Refused(_)) => db.head == 0 && db.resident == 0,
+        _ => false
+    }
+}
+
+fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) -> bool {
+    let delta = result.unwrap(changes(a, b))
+    let mut at: u64 = 0
+    for k in 0u64 .. list.len(before) {
+        if before[k] != after[k] {
+            if at == list.len(delta) {
+                return false
+            }
+            if delta[at].tree_key != result.unwrap(physical(1, key_word(k))) {
+                return false
+            }
+            let good = match delta[at].value {
+                None => after[k] == 0,
+                Some(raw) => raw == key_word(after[k]) && after[k] != 0
+            }
+            if !good {
+                return false
+            }
+            at += 1
+        }
+    }
+    at == list.len(delta)
+}
+
+// L23: independent 160-slot model, split/merged leaves, added and deleted roots,
+// reverse comparison, branch/open boundaries and unchanged roots under bound0.
+// Wrong implementations: scan equal roots, omit None, confuse branch with open.
+pub fn law_changes(c: Clock) -> bool {
+    let mut db = test_db(c, 1073741824)
+    let empty = snapshot(db)
+    let mut zeros: List[u64] = result.unwrap(list.with_capacity(160))
+    result.unwrap(list.fill(mut zeros, 160, 0u64))
+    let mut before: List[u64] = result.unwrap(list.with_capacity(160))
+    result.unwrap(list.fill(mut before, 160, 0u64))
+    for k in 0u64 .. 96 {
+        if !put_one(mut db, k, k + 1) {
+            return false
+        }
+        let _ = list.set(mut before, k, k + 1)
+    }
+    let a = snapshot(db)
+    let after_copy: Result[List[u64], Capacity] = clone(before)
+    let mut after = result.unwrap(take after_copy)
+    for step in 0u64 .. 48 {
+        let k = (step * 37) % 160
+        let v = if step % 2 == 0 {
+            0u64
+        } else {
+            step + 1000
+        }
+        let outcome = execute(mut db, step, fn(mut tx: Tx) -> Result[(), Error] {
+            if v == 0 {
+                let _ = delete_bytes(mut tx, 1, key_word(k))?
+            } else {
+                put_bytes(mut tx, 1, key_word(k), key_word(v))?
+            }
+            Ok(())
+        })
+        match take outcome {
+            Ok(Committed(_)) => {},
+            _ => return false
+        }
+        let _ = list.set(mut after, k, v)
+    }
+    let b = snapshot(db)
+    if !check_delta(empty, a, zeros, before) || !check_delta(a, empty, before, zeros) || !check_delta(a, b, before, after) || !check_delta(b, a, after, before) {
+        return false
+    }
+    let same_root = result.unwrap(bound bytes 0 {
+        changes(b, b)
+    })
+    match take same_root {
+        Ok(rows) => if list.len(rows) != 0 {
+            return false
+        },
+        _ => return false
+    }
+    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: share_roots(b.roots))
+    if !check_delta(a, other_branch, before, after) {
+        return false
+    }
+    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: share_roots(b.roots))
+    if !is_foreign(changes(a, other_open)) {
+        return false
+    }
+    let foreign = test_db(c, 1073741824)
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.head, roots: share_roots(foreign.roots))
+    if !is_foreign(changes(a, other_store)) {
+        return false
+    }
+    let no_room = result.unwrap(bound bytes 0 {
+        changes(a, b)
+    })
+    match take no_room {
+        Error(Full(_)) => true,
+        _ => false
+    }
+}
+
+@test
+fn test_look(c: Clock) -> Result[(), ()] waits {
+    if law_look(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_look_faults(c: Clock) -> Result[(), ()] {
+    if law_look_faults(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_changes(c: Clock) -> Result[(), ()] {
+    if law_changes(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_look_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, "look_task", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "look_task", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 41) {
+        return Error(())
+    }
+    let payload = TypedReader(held: snapshot(db), sh: shape(t))
+    let reader = result.unwrap(task.spawn(tasks, bytes 1048576, take payload, fn(take p: TypedReader) -> bool {
+        let seen = result.unwrap(look(p.held, fn(tx: Tx) -> Result[Option[u64], Error] {
+            fetch(tx, p.sh, 1)
+        }))
+        match take seen {
+            Seen(x) => match x.value {
+                Ok(Some(41)) => list.len(x.reads) == 1 && x.version == version(p.held),
+                _ => false
+            },
+            _ => false
+        }
+    }))
+    if !typed_put(mut db, t, 1, 42) {
+        return Error(())
+    }
+    result.unwrap(close(take db))
+    if result.unwrap(task.join(take reader)) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L23: identity checks precede the equal-empty-root shortcut. Different branches
+// of one open are allowed; stores and opens are not interchangeable.
+pub fn law_changes_identity(c: Clock) -> bool {
+    let db = test_db(c, 1073741824)
+    let a = snapshot(db)
+    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots())
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots())
+    let branch = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots())
+    if !is_foreign(changes(a, other_open)) || !is_foreign(changes(a, other_store)) {
+        return false
+    }
+    list.len(result.unwrap(changes(a, branch))) == 0
+}
+
+@test
+fn test_changes_identity(c: Clock) -> Result[(), ()] {
+    if law_changes_identity(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn info_helper(mut tx: Tx) -> u64 {
+    info(mut tx).id.version
+}
+
+// G2 positive control: run and a mut-Tx helper both have honest CallInfo.
+pub fn law_info_mut(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    let expected = db.head + 1
+    let outcome = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[bool, ()] {
+        let direct = info(mut tx).id.version
+        let indirect = info_helper(mut tx)
+        Ok(direct == expected && indirect == expected)
+    }))
+    match take outcome {
+        Committed(done) => done.value,
+        _ => false
+    }
+}
+
+@test
+fn test_info_mut(c: Clock) -> Result[(), ()] waits {
+    if law_info_mut(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn same_value_pair(c: Clock) -> (Snapshot, Snapshot) {
+    let mut db = test_db(c, 1073741824)
+    for k in 0u64 .. 96 {
+        if !put_one(mut db, k, k + 1) {
+            fail("same-value fixture refused")
+        }
+    }
+    let a = snapshot(db)
+    for k in 0u64 .. 96 {
+        if !put_one(mut db, k, k + 1) {
+            fail("same-value rewrite refused")
+        }
+    }
+    (take a, snapshot(db))
+}
+
+// L23: k=96 writes, w=0 returned differences. Both full scans contain keys
+// 0..95 and values 1..96, whose hand-derived sum is 96*97/2 = 4656.
+pub fn law_changes_rewritten_equal(c: Clock) -> bool {
+    let pair = same_value_pair(c)
+    let (take a, take b) = take pair
+    let delta = result.unwrap(changes(a, b))
+    if list.len(delta) != 0 {
+        return false
+    }
+    let mut left = result.unwrap(scan_bytes(a, 1, Unbounded, Unbounded))
+    let mut right = result.unwrap(scan_bytes(b, 1, Unbounded, Unbounded))
+    let mut sum: u64 = 0
+    for k in 0u64 .. 96 {
+        let x = option.unwrap(result.unwrap(next_bytes(mut left)))
+        let y = option.unwrap(result.unwrap(next_bytes(mut right)))
+        if x.0 != result.unwrap(physical(1, key_word(k))) || x.1 != key_word(k + 1) || x != y {
+            return false
+        }
+        sum += decode_word(x.1)
+    }
+    sum == 4656 && result.unwrap(next_bytes(mut left)) == None && result.unwrap(next_bytes(mut right)) == None
+}
+
+@test
+fn test_changes_rewritten_equal(c: Clock) -> Result[(), ()] {
+    if law_changes_rewritten_equal(c) {
         Ok(())
     } else {
         Error(())

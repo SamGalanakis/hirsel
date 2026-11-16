@@ -1,0 +1,7 @@
+// G2: CallInfo is available only through mut Tx, never in a look.
+pub fn rejected(s: store.Snapshot) -> bool {
+    let answer = store.look(s, fn(tx: store.Tx) -> store.CallInfo {
+        store.info(mut tx)
+    })
+    false
+}

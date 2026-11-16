@@ -1,8 +1,11 @@
+mod admission;
+use admission::{Admission, Calls, HeldRefusal, Rates};
+
 use crate::codec::{self, Bad, Done, Entry, Frame, Outcome, Refusal, Row, Want};
 use crate::{BITS, CHUNKS, IMAGE_BYTES, MAX_FRAME, Result, flip};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -215,7 +218,6 @@ impl Wal {
 #[derive(Clone, Debug)]
 enum Output {
     Frame(Frame),
-    Refused(Done),
     Close(u16),
     Flush,
 }
@@ -336,8 +338,6 @@ struct Head {
     peers: HashMap<u64, Peer>,
     board_runs: u64,
     groups: u64,
-    limits: Limits,
-    rates: HashMap<Principal, Bucket>,
 }
 impl Head {
     fn execute(&mut self, commands: Vec<Command>) -> Result<()> {
@@ -375,33 +375,13 @@ impl Head {
                         continue;
                     };
                     match f {
-                        Frame::Call(stream, p, slot, _, arg) => {
-                            let bucket =
-                                self.rates.entry(peer.principal).or_insert_with(|| Bucket {
-                                    tokens: f64::from(self.limits.principal_burst),
-                                    at: std::time::Instant::now(),
-                                });
-                            let (outcome, written) = if !bucket
-                                .take(self.limits.principal_rate, self.limits.principal_burst)
-                            {
-                                (Outcome::Refused(Refusal::Overloaded), false)
-                            } else if peer.slots.get(slot as usize) != Some(&Some(0)) {
-                                (Outcome::Refused(Refusal::NoEntry), false)
-                            } else if arg.len() != 4
-                                || u32::from_le_bytes(arg[..4].try_into()?) >= BITS
-                            {
-                                (
-                                    Outcome::Refused(Refusal::Malformed(Bad { kind: 6, at: 0 })),
-                                    false,
-                                )
-                            } else {
-                                self.wal.toggle(
-                                    peer.principal,
-                                    stream,
-                                    p,
-                                    u32::from_le_bytes(arg[..4].try_into()?),
-                                )?
-                            };
+                        Frame::Call(stream, p, _, _, arg) => {
+                            let (outcome, written) = self.wal.toggle(
+                                peer.principal,
+                                stream,
+                                p,
+                                u32::from_le_bytes(arg.try_into().unwrap()),
+                            )?;
                             if written {
                                 changed
                                     .insert(self.wal.streams[&(peer.principal, stream)].bit >> 9);
@@ -545,8 +525,6 @@ pub async fn serve(
         peers: HashMap::new(),
         board_runs: 0,
         groups: 0,
-        limits,
-        rates: HashMap::new(),
     };
     let actor = tokio::spawn(async move {
         loop {
@@ -584,6 +562,7 @@ pub async fn serve(
     let mut ip_slots: HashMap<std::net::IpAddr, Arc<Semaphore>> = HashMap::new();
     let principals = Arc::new(Mutex::new(HashMap::new()));
     let pending = Arc::new(Semaphore::new(1024));
+    let rates: Rates = Arc::new(Mutex::new(HashMap::new()));
     tokio::pin!(stop);
     let result: Result<()> = loop {
         tokio::select! {
@@ -599,10 +578,10 @@ pub async fn serve(
                     }); continue;
                 };
                 next += 1; let id = next; let tx = tx.clone(); let digest = digest.clone(); let wants = wants.clone();
-                let principals = principals.clone(); let launch = launch.clone();
+                let principals = principals.clone(); let launch = launch.clone(); let rates = rates.clone();
                 sessions.spawn(async move {
                     let _ip = ip_permit;
-                    let ingress = Ingress { ip: addr.ip(), principals, pending: pending_permit, limits };
+                    let ingress = Ingress { ip: addr.ip(), principals, pending: pending_permit, limits, rates };
                     let r = session(socket, id, tx.clone(), digest, wants, ingress, launch).await;
                     let _ = tx.send(Command::Leave(id)).await; r
                 });
@@ -633,6 +612,7 @@ struct Ingress {
     principals: Arc<Mutex<HashMap<std::net::IpAddr, PrincipalWindow>>>,
     pending: OwnedSemaphorePermit,
     limits: Limits,
+    rates: Rates,
 }
 
 #[allow(
@@ -763,16 +743,13 @@ async fn session(
     tx.send(Command::Join {
         id,
         principal,
-        slots,
+        slots: slots.clone(),
         tx: out.clone(),
     })
     .await?;
     let (mut writer, mut reader) = ws.split();
-    let call_slots = Arc::new(Semaphore::new(1 + crate::Q));
-    let owed = Mutex::new(HashMap::<
-        (u32, u64),
-        VecDeque<(OwnedSemaphorePermit, tokio::time::Instant)>,
-    >::new());
+    let calls = Calls::new(principal, slots, ingress.limits, ingress.rates);
+    let (refused, mut refusals) = mpsc::channel::<HeldRefusal>(1 + crate::Q);
     let read = async {
         while let Some(message) = reader.next().await {
             let f = match message? {
@@ -803,32 +780,17 @@ async fn session(
             if matches!(f, Frame::Hello(..)) {
                 return Ok(1008);
             }
-            if let Frame::Call(stream, p, _, deadline, _) = &f {
-                let refusal = if *deadline == 0 {
-                    Some(Refusal::Deadline)
-                } else {
-                    None
-                };
-                let permit = call_slots.clone().try_acquire_owned();
-                if let Some(refusal) =
-                    refusal.or_else(|| permit.as_ref().err().map(|_| Refusal::Overloaded))
-                {
-                    out.send(Output::Refused(Done {
-                        stream: *stream,
-                        p: *p,
-                        outcome: Outcome::Refused(refusal),
-                    }))
-                    .await?;
-                    continue;
+            if let Frame::Call(stream, p, slot, deadline, arg) = &f {
+                match calls.admit(*stream, *p, *slot, *deadline, arg) {
+                    Admission::Forward => (),
+                    Admission::Refused(row) => {
+                        refused
+                            .try_send(row)
+                            .unwrap_or_else(|_| unreachable!("refusal permits bound the queue"));
+                        continue;
+                    }
+                    Admission::Close => return Ok(1008),
                 }
-                owed.lock()
-                    .unwrap()
-                    .entry((*stream, *p))
-                    .or_default()
-                    .push_back((
-                        permit.unwrap(),
-                        tokio::time::Instant::now() + Duration::from_millis(u64::from(*deadline)),
-                    ));
             }
             tx.send(Command::Frame(id, f)).await?;
         }
@@ -836,49 +798,30 @@ async fn session(
     };
     let write = async {
         let mut last_version = 0;
-        while let Some(output) = outgoing.recv().await {
+        loop {
+            let output = tokio::select! {
+                output = outgoing.recv() => match output { Some(output) => output, None => return Ok(1008) },
+                row = refusals.recv() => {
+                    let Some(HeldRefusal { done, unit }) = row else { return Ok(1008); };
+                    drop(unit);
+                    writer.send(Message::Binary(codec::encode(&Frame::Batch(last_version, vec![], vec![], vec![done])).into())).await?;
+                    continue;
+                }
+            };
             match output {
                 Output::Frame(mut f) => {
-                    let mut permits = Vec::new();
-                    let (version, done) = match &mut f {
-                        Frame::Batch(v, _, _, d) | Frame::Reset(v, d) => (Some(v), Some(d)),
-                        _ => (None, None),
-                    };
-                    if let Some(v) = version {
+                    if let Frame::Batch(v, _, _, _) | Frame::Reset(v, _) = &f {
                         last_version = *v;
                     }
-                    if let Some(done) = done {
-                        let mut book = owed.lock().unwrap();
-                        for d in done {
-                            let sends = book.get_mut(&(d.stream, d.p)).unwrap();
-                            let (permit, until) = sends.pop_front().unwrap();
-                            if tokio::time::Instant::now() >= until {
-                                d.outcome = Outcome::Abandoned;
-                            }
-                            permits.push(permit);
-                            if sends.is_empty() {
-                                book.remove(&(d.stream, d.p));
-                            }
-                        }
-                    }
+                    calls.hand_to_writer(&mut f);
                     writer
                         .send(Message::Binary(codec::encode(&f).into()))
                         .await?;
-                    drop(permits);
-                }
-                Output::Refused(done) => {
-                    writer
-                        .send(Message::Binary(
-                            codec::encode(&Frame::Batch(last_version, vec![], vec![], vec![done]))
-                                .into(),
-                        ))
-                        .await?
                 }
                 Output::Close(code) => return Ok::<_, crate::Error>(code),
                 Output::Flush => writer.flush().await?,
             }
         }
-        Ok(1008)
     };
     let code = tokio::select! { r = read => r?, r = write => r? };
     let close = CloseFrame {
@@ -896,6 +839,42 @@ async fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rows_allowance_keeps_the_v211_refusal_reserve() {
+        fn send(count: u32) -> Output {
+            let (tx, mut rx) = mpsc::channel(1);
+            let mut peer = Peer {
+                principal: [0; 16],
+                slots: vec![],
+                subs: HashSet::from([1, 2]),
+                tx,
+                pending: None,
+                overrun: false,
+            };
+            let image = vec![0; IMAGE_BYTES];
+            let rows = (0..count)
+                .map(|i| codec::chunk_row(1 + i / CHUNKS, i % CHUNKS, &image))
+                .collect();
+            let done = vec![Done {
+                stream: 0,
+                p: 0,
+                outcome: Outcome::Returned(vec![0, 0, 0, 0, 1]),
+            }];
+            assert!(peer.send(Frame::Batch(1, vec![1], rows, done)));
+            rx.try_recv().unwrap()
+        }
+        // At 92 B per Row, 2,401 fit in 220,976 B; 2,402 exceed it by eight bytes.
+        assert!(matches!(
+            send(2401),
+            Output::Frame(Frame::Batch(1, _, _, _))
+        ));
+        let Output::Frame(Frame::Reset(1, done)) = send(2402) else {
+            panic!("must retain the V1 refusal reserve");
+        };
+        assert_eq!(done[0].outcome, Outcome::Returned(vec![0, 0, 0, 0, 1]));
+        assert_eq!(crate::DONE_MAX, 8192);
+        assert_eq!(crate::REPLY_MAX, 8172);
+    }
     #[test]
     fn failed_group_sync_publishes_neither_rows_nor_outcomes() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -917,8 +896,6 @@ mod tests {
             )]),
             board_runs: 1,
             groups: 0,
-            limits: Limits::benchmark(),
-            rates: HashMap::new(),
         };
         assert!(
             head.execute(vec![Command::Frame(

@@ -33,10 +33,10 @@ cargo run --locked --release --manifest-path bench/wire/Cargo.toml --bin wire-lo
 with the generated checkbox identities and fingerprints. The benchmark's default
 identities are for its own reference. In particular, its default erased Cover
 fingerprint is zero. Supply the real generated Hello to exercise Hirsel with
-the same driver. The hand codec follows WIRE-SPEC v2. Its vectors remain provisional until
-compared with corrected W3a. The Rust convergence driver is a smoke test until
-the W4c/W6 SDK harness is available. A local Rust smoke
-pass is not the Node/browser `converge` acceptance.
+the same driver. The hand codec follows WIRE-SPEC v2, with tests reading W3a's
+canonical `core/programs/store/frame-vectors.json`. The Rust convergence driver
+is a smoke test until the W4c/W6 SDK harness is available. A local Rust smoke
+pass does not qualify the Node/browser `converge` acceptance.
 
 Welcome includes the launch target and `n_place`. `--n-place` is required;
 `--target` defaults to the host architecture with `unknown-linux-gnu`. These
@@ -56,8 +56,12 @@ Each connection has a bounded four-frame mpsc outbox and one coalesced pending
 Batch. Coalescing keeps the latest row for each subscription/key and all owed
 outcomes. An oversized pending Batch drops subscriptions and sends Reset; a
 second overflow closes the connection. Cover subscriptions keep only their ids,
-not private row copies. At most five calls are owed per connection, with an 8 KiB Done limit and a
-40 KiB outcome reserve. Toggle returns the five-byte value codec of `Ok(bool)`.
+not private row copies. Each send holds one of five call units until its outcome
+row reaches the writer. Up to five unsent V1 refusals are held separately; the
+next refusal closes with 1008. `DONE_MAX` is the constant 8,192 B, with an 8,172 B
+Returned payload bound. The outcome reserve is 41,140 B at q=4, leaving 220,976 B
+for rows in a Batch completing one subscription. Toggle's sole application
+reply is the five-byte value codec of `Ok(bool)`, within that bound by construction.
 Server and load sockets use 4 KiB read buffers, zero
 write-buffer thresholds, and 256 KiB frame/message caps. Kernel socket buffers
 are unchanged. The defaults are 32 sessions per IP, 10 new principals per IP per minute, and

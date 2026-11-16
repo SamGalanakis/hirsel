@@ -131,6 +131,8 @@ registers; the server runs it to serve and the SDK generator runs it, bounded, t
 `runner.describe`; no other export list exists. Every task that runs entries runs `place`
 itself, because an owning closure is never shareable. Requests resolve only to registered
 entries; an ID grants no code execution authority and serializes no closure captures.
+The [runner launch contract](launch.md) fixes describe mode and the immutable
+SHA-256 executable digest, target and `n_place`, privately supplied by the runtime.
 *v1:* PROG-5, PROG-6, PROG-9, SEM-8: closed named functions without type parameters have
 identity bytes; the runner is a library over v1, not a language form; the code revision
 is `code.revision` (PROG-9).

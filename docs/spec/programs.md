@@ -110,6 +110,10 @@ fn named(argv: Args) -> Result[(), ()] { Ok(()) }             // refused: PROG-4
 
 ### PROG-5: Code identity
 
+Executable identity is separate immutable [launch metadata](launch.md), with
+native, evaluator, embedded and unavailable cases. It is diagnostic metadata;
+it does not participate in function identity or dispatch.
+
 Each top-level function has a **code identity**: its definition identity (PROG-1) and its
 signature. A call through a function value keeps the callee's identity; a closure has
 none of its own. An instance of a generic function is identified by its definition, its

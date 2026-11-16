@@ -28,7 +28,9 @@ refuses the push and prints its first error.
 Land builds the installed toolchain bundle before pushing. The lane runs
 the other tests its change can break, and tools/sweep runs every suite on
 current main when requested by hand; it has no automatic schedule. Each push
-is appended to `hirsel-landings.jsonl` in the common git directory.
+is appended to `hirsel-landings.jsonl` in the common git directory, per ticket
+with its submission, first train check, push time and train check count. Every
+`land:` line carries the UTC time and the seconds since the ticket was submitted.
 """
 
 from contextlib import contextmanager
@@ -118,8 +120,24 @@ BATCH = 16
 SELF = Path(__file__).read_bytes()
 
 
+# The ticket's submission time: every land line carries the wall clock and the seconds since it.
+STARTED = float(os.environ.get('HIRSEL_LAND_STARTED') or time.time())
+
+
+def stamp(at):
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(at)) if at else None
+
+
 def say(message):
-    print(f'land: {message}', flush=True)
+    now = time.time()
+    print(f'land: {stamp(now)} +{now - STARTED:.0f}s {message}', flush=True)
+
+
+def started(at):
+    """Count this ticket's seconds from its submission, in re-executed tools/land and check workers too."""
+    global STARTED
+    STARTED = at
+    os.environ['HIRSEL_LAND_STARTED'] = repr(at)
 
 
 class Member:
@@ -277,6 +295,7 @@ class LandQueue:
                     self.ticket = self.directory / inherited
                     if not self.refresh():
                         raise ValueError('inherited queue ticket is no longer owned by this process')
+                    started(self.record['started'])
                     outcome(lane=self.lane, ticket=self.ticket.name, submitted=self.record['head'])
                 else:
                     if self.identity is None:
@@ -292,6 +311,7 @@ class LandQueue:
                     self.write(counter, sequence)
                     self.ticket = self.directory / f'{sequence:020d}'
                     now = time.time()
+                    started(now)
                     # `head` is the commit a batch head lands for this ticket.
                     self.write(self.ticket, dict(pid=os.getpid(), process_start=self.identity,
                                                 started=now, heartbeat=now, lane=self.lane,
@@ -460,6 +480,33 @@ class LandQueue:
         parent = git('rev-parse', '--verify', '-q', commit + '^1^{commit}').stdout.strip()
         return bool(parent) and tree_id(parent) in trees and bool(
             changed := changed_paths(parent, commit)) and changed <= set(generated.COST_CEILINGS)
+
+    def note_check(self, tickets):
+        """Count a train check of a tree holding these tickets, and stamp each one's first."""
+        with self.locked():
+            for name in tickets:
+                path = self.directory / name
+                try:
+                    record = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    continue
+                record.setdefault('first_batch_check', time.time())
+                record['train_checks'] = record.get('train_checks', 0) + 1
+                self.write(path, record)
+
+    def timings(self, tickets):
+        """Each ticket's submission, first batch check and train check count, for its landing row."""
+        found = {}
+        with self.locked():
+            for name in tickets:
+                try:
+                    record = json.loads((self.directory / name).read_text())
+                except (OSError, ValueError):
+                    record = {}
+                found[name] = dict(submitted=stamp(record.get('started')),
+                                   first_batch_check=stamp(record.get('first_batch_check')),
+                                   train_checks=record.get('train_checks', 0))
+        return found
 
     def notify_red(self, message):
         """One diagnosis for the whole cohort, without blaming its changes."""
@@ -1094,11 +1141,13 @@ class Batch:
         else:
             raise Refusal('git push failed after 2 attempts\n' + pushed.stderr)
         common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip())
-        at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        at = stamp(time.time())
+        timings = self.queue.timings([member.ticket for member, _ in fresh])
         with open(common / LANDINGS, 'a') as log:
             for member, commits in fresh:
                 log.write(json.dumps(dict(landed=commits[-1], pushed=tip, base=self.pushed, branch=member.lane,
-                                          unchecked_rebase=False, at=at), sort_keys=True) + '\n')
+                                          unchecked_rebase=False, at=at, **timings[member.ticket]),
+                                     sort_keys=True) + '\n')
         self.landed += fresh
         # The pushed tree is green by construction; its ceilings commit is part of it (green_tree).
         self.queue.record_green(tree_id(checked), checked)
@@ -1129,6 +1178,7 @@ class Batch:
         else:
             tickets = f' with {len(applied)} tickets: ' + ', '.join(str(member) for member, _ in applied)
         say(f'attempt {self.attempt}: checking {tree[:12]} on origin/main {base[:12]}' + tickets)
+        self.queue.note_check([member.ticket for member, _ in applied])
         tree_id = git('rev-parse', tree + '^{tree}')
         report = candidate_check('full', tree, base,
                                  tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)

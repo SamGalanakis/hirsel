@@ -9,6 +9,7 @@ import fcntl
 import io
 import json
 import os
+import re
 import runpy
 import signal
 from types import SimpleNamespace
@@ -906,7 +907,9 @@ if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists
     @staticmethod
     def landed(output):
         """The commits a waiting lane says a batch landed for it."""
-        [line] = [line for line in output.splitlines() if line.startswith('land: landed ') and ' led by ' in line]
+        lines = [re.sub(r'^land: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \+\d+s ', 'land: ', line)
+                 for line in output.splitlines()]
+        [line] = [line for line in lines if line.startswith('land: landed ') and ' led by ' in line]
         return line.rsplit(': ', 1)[1].split()
 
     def batch_lanes(self, count, edits=None, old=(), red=None, hold_build=False, prepare=None, arguments=None):
@@ -1294,6 +1297,16 @@ if not (root / 'release-build').exists():
         self.assertEqual(self.subjects(self.landed(outputs[1])), ['lane 1'])
         self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 1', 'lane 0', 'red build'])
         self.assertEqual(self.queued(), [])
+        # Train checks per landed ticket: lanes 0-1 in the batch of four and its first half;
+        # lane 3 in the batch, the red half [2, 3] and alone.
+        rows = [json.loads(line) for line in (self.lane / '.git/hirsel-landings.jsonl').read_text().splitlines()]
+        self.assertEqual({row['branch']: row['train_checks'] for row in rows},
+                         {'my-lane': 2, 'lane1': 2, 'lane3': 3})
+        for row in rows:
+            self.assertLessEqual(row['submitted'], row['first_batch_check'])
+            self.assertLessEqual(row['first_batch_check'], row['at'])
+        for line in outputs[0].splitlines():
+            self.assertRegex(line, r'^(?!land: )|^land: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \+\d+s ')
 
     def test_a_ticket_withdrawn_during_a_red_check_is_not_built_again_in_the_bisect(self):
         # Ticket 3505 was withdrawn mid-bisect, yet its group was built and failed again.

@@ -167,7 +167,12 @@ regenerated build files, build, package and example manifests, Clippy and fmt)
 run once on the combined tree, in the land-owned checkout, and one push carries
 every commit. Each lane's commits stay separate,
 with their authors; nothing is squashed. Each landed ticket gets its own row
-in `hirsel-landings.jsonl`.
+in `hirsel-landings.jsonl`: its commit, the pushed tip and base, and when it was
+submitted, when a train check first included it and when it was pushed (`at`),
+with the number of train checks whose tree held it (`train_checks`).
+
+Every `land:` line starts with the UTC wall-clock time and the seconds since the
+ticket was submitted, so a log shows where each ticket's wait went.
 
 The head writes each waiting ticket's outcome into its ticket file. The
 waiting `tools/land` prints it and exits with its code: 0 with its own

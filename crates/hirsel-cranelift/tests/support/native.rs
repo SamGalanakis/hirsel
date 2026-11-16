@@ -24,8 +24,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-#[path = "providers.rs"]
-mod providers;
 
 #[allow(dead_code)] // The shared fixture also exposes the pre-site ABI for LLVM's cutover.
 #[path = "../../../hirsel-core-rt/testdata/host_memory.rs"]

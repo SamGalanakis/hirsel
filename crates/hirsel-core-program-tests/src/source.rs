@@ -188,6 +188,26 @@ impl SourceProgram {
         composed: bool,
         observe: bool,
     ) -> Vec<u8> {
+        self.llvm_object_exported(target, speed, debug, composed, observe, None)
+    }
+    pub fn llvm_program(
+        &self,
+        target: Target,
+        debug: bool,
+        observe: bool,
+        exports: &[FuncId],
+    ) -> Vec<u8> {
+        self.llvm_object_exported(target, true, debug, true, observe, Some(exports))
+    }
+    fn llvm_object_exported(
+        &self,
+        target: Target,
+        speed: bool,
+        debug: bool,
+        composed: bool,
+        observe: bool,
+        exports: Option<&[FuncId]>,
+    ) -> Vec<u8> {
         let texts = if composed {
             let refs = self.modules.iter().collect::<Vec<_>>();
             let facts = hirsel_core_ir::roles::Facts::program(&refs, &[]);
@@ -207,13 +227,20 @@ impl SourceProgram {
                 .iter()
                 .map(|s| hirsel_llvm_lazy::Unit::Text(s))
                 .collect::<Vec<_>>();
-            let exports = self
-                .joined
-                .functions
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| f.body.is_some())
-                .map(|(i, _)| hirsel_llvm::core::symbol(&self.joined, FuncId(i as u32)))
+            let exports = exports
+                .map(|functions| functions.to_vec())
+                .unwrap_or_else(|| {
+                    self.joined
+                        .functions
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, f)| f.body.is_some())
+                        .map(|(i, _)| FuncId(i as u32))
+                        .collect()
+                });
+            let exports = exports
+                .into_iter()
+                .map(|f| hirsel_llvm::core::symbol(&self.joined, f))
                 .collect::<Vec<_>>();
             hirsel_llvm_lazy::emit_program_for_target(&units, &exports, target).unwrap()
         } else {

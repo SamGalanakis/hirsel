@@ -56,8 +56,9 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
     let mut source = String::from("#include <unistd.h>\n#include <sys/wait.h>\n");
     source.push_str(include_str!("providers.c"));
     declare_functions(&mut source, module);
-    let mut main =
-        String::from("int main(void) { HirselCoreProvider provider={&world,world_wait,issue,world_resume,world_abort,deliver};\n");
+    let mut main = String::from(
+        "int main(void) { HirselCoreProvider provider={&world,world_wait,issue,world_resume,world_abort,deliver};\n",
+    );
     let mut want = Vec::new();
     for (i, run) in runs.iter().enumerate() {
         expected(run, &mut want);

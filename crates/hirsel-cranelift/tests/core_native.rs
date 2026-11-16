@@ -2,6 +2,8 @@
 const NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
 hirsel_guard::install!();
 include!("support/native.rs");
+#[path = "support/providers.rs"]
+mod providers;
 
 #[test]
 fn native_allocator_refusals_are_reported_run_stops() {

@@ -221,7 +221,12 @@ fn carrier_program_cases(target: Target) {
                 }
             })
             .collect::<Vec<_>>();
-        let object = module.llvm_object(target, true, false, true, false);
+        let object = module.llvm_program(
+            target,
+            false,
+            false,
+            &cases.iter().map(|c| c.function).collect::<Vec<_>>(),
+        );
         for callee in source
             .lines()
             .filter_map(|line| line.trim().strip_prefix("// words: "))
@@ -301,7 +306,7 @@ fn cancelled(tasks: Tasks) -> u64 waits {
         Some("main"),
     ))
     .unwrap();
-    let object = module.llvm_object(target, true, false, true, false);
+    let object = module.llvm_program(target, false, false, &[names["cancelled"]]);
     let twin = format!("{}.words", symbol(&module, names["grow_then_check"]));
     assert!(
         object.windows(twin.len()).any(|w| w == twin.as_bytes()),
@@ -381,7 +386,12 @@ fn site_fixture(target: Target) {
         (Optimization::Speed, false, false),
     ] {
         let bytes = if composed {
-            module.llvm_object(target, true, debug_lines, true, false)
+            module.llvm_program(
+                target,
+                debug_lines,
+                false,
+                &cases.iter().map(|c| c.function).collect::<Vec<_>>(),
+            )
         } else {
             module.llvm_eager_object(target, opt, debug_lines)
         };

@@ -247,6 +247,5 @@ need every capture `shareable` and OWN-4 to admit the closure, its calls already
 viewing the environment (LANG-14), and would add a second calling mode, from several tasks; code generic over the numeric types: the bounds `integer` and
 `float` are written only by core declarations ([OWN-4](ownership.md#own-4-bounds)), and a
 library writes one function per width; generics over an `Inline` length; persistent mutable views; derivation other than a codec's (SEM-10); contracts and
-facts; `@varint` (R25); documents in segments (R26); the store, runners and places; recording formats. A later opt-in execution-budget
-scope may stop code at a loop back edge or a call while such a scope is present; no v1
-rule assumes that code cannot be stopped there.
+facts; `@varint` (R25); documents in segments (R26); the store, runners and places; recording formats; a step grant for
+finalizers, which would let cleanup under an exhausted step bound take steps ([MEM-30](budgets.md#mem-30-step-bounds)).

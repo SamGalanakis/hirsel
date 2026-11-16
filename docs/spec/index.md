@@ -49,7 +49,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Language](language.md) | LANG-6 to LANG-21 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
 | [Memory](memory.md) | MEM-1 to MEM-18, MEM-29 |
-| [Budgets](budgets.md) | MEM-19 to MEM-28 |
+| [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30 |
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
 | [Tasks](tasks.md) | CONC-1 to CONC-13 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
@@ -101,6 +101,7 @@ built `hirsel` does not implement yet; the mark is removed when it does.
 | replay point | [CAP-8](capabilities.md#cap-8-the-replay-point) |
 | reservation | [OWN-11](ownership.md#own-11-call-arguments) |
 | scoped | [OWN-19](ownership.md#own-19-scoped-values) |
+| slice end, step, step bound | [MEM-30](budgets.md#mem-30-step-bounds) |
 | shield | [CONC-7](tasks.md#conc-7-cancellation-points) |
 | sub-view | [OWN-8](ownership.md#own-8-views) |
 | tape, substitute | [CAP-9](capabilities.md#cap-9-tapes) |

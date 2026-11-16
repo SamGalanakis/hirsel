@@ -36,7 +36,8 @@ that runs `f(take x)`, where `x: X`, `X` and `R` are `send`, and `f: fn(take X) 
 is a plain callable, which captures nothing ([LANG-13](language.md#lang-13-callables)).
 Everything the child owns arrives as `x`. Spawn admits the task charge
 ([MEM-24](budgets.md#mem-24-logical-charges)), which includes `n`, against the spawner's
-current limit, and the child's root limit is `n` ([MEM-19](budgets.md#mem-19-limits)). Admission is the
+current limit, and the child's root limit is `n` ([MEM-19](budgets.md#mem-19-limits)). A child spawned while a step bound is current draws its
+steps from that bound ([MEM-30](budgets.md#mem-30-step-bounds)). Admission is the
 commit point; on `Capacity` the error owns `x`
 ([T7.1](ownership.md#own-26-the-transition-table)).
 
@@ -130,7 +131,8 @@ cancellation point. An operation that does not wait after issue is reached only 
 and no host operation of v1 waits after issue.
 A user function declared `waits` is not itself a cancellation point. Observing it is a failure with cause `Cancelled`
 ([FAIL-2](failure.md#fail-2-causes)), which runs the task's cleanup. Pure code is never
-interrupted, and no engine inserts a yield or a check. A **shield**, a finalizer
+cancelled. A step bound may stop it, and the scheduler may run another task at its slice
+ends ([MEM-30](budgets.md#mem-30-step-bounds)); neither is a cancellation point. A **shield**, a finalizer
 ([FAIL-11](failure.md#fail-11-resources)) or the wait of CONC-8, holds a cancellation: inside
 it no cancellation point observes a request and no operation it waits in, issued or not, is
 ended by one; a request made before or during it stays pending and takes effect at the
@@ -161,7 +163,7 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 A run has one total order of **events**: spawn, task end, cancellation requests and their
 observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every `try_receive` decision, every
 change of a channel's sender count, `join`, channel close, every `latest.publish` and
-`latest.read` and every change of a `Latest` root's handle count (CONC-13), every charge or refund that
+`latest.read` and every change of a `Latest` root's handle count (CONC-13), every slice end ([MEM-30](budgets.md#mem-30-step-bounds)), every charge or refund that
 crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), every `Arc`
 creation, share, release and `try_unwrap`, and every admission that returns `Capacity`
 ([MEM-21](budgets.md#mem-21-admission)). Each operation observes the state that the order gives.
@@ -190,7 +192,9 @@ at a moment it would wait (CONC-7); a polling task is not waiting, so the tasks 
 for reach their events. Fairness limits which orders the scheduler may choose; a replay
 follows the recorded order. A task that runs forever with neither a poll nor a wait waits
 for nobody and may keep every other task from running; it is a program error: the run
-does not end, and which events other tasks perform meanwhile is not specified. Each `Full`
+does not end, and which events other tasks perform meanwhile is not specified. Under a step
+bound neither happens: its slice ends let other tasks run, and the bound stops the code
+([MEM-30](budgets.md#mem-30-step-bounds)). Each `Full`
 below is a poll, so the parent that drains the gate runs while the child polls:
 
 ```hirsel

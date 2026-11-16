@@ -4,10 +4,11 @@
 
 An **error** is an `Error(e)` value; it is handled by ordinary code. A **failure** is the
 abandonment of a task's computation with a cause (FAIL-2); it runs cleanup (FAIL-8) and is
-observed only by the task's joiner (FAIL-14) or by an enclosing `isolate` (FAIL-16). A **run stop** ends the whole run without
+observed only by the task's joiner (FAIL-14), by an enclosing `isolate` (FAIL-16) or, for
+`OutOfTime`, by the step bound's scope ([MEM-30](budgets.md#mem-30-step-bounds)). A **run stop** ends the whole run without
 cleanup (FAIL-15). No construct converts one into another, except that `join` delivers a
-child's failure to its parent as an error value, and `isolate` delivers a failure in its
-body as a value (FAIL-16).
+child's failure to its parent as an error value, `isolate` delivers a failure in its
+body as a value (FAIL-16), and a step bound's scope delivers its own `OutOfTime` as a value.
 
 ### FAIL-2: Causes
 
@@ -23,6 +24,7 @@ raised it:
 | `Fail(text)` | `fail(msg)`, which has type `Never` |
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
 | `Capacity` | an allocation beyond a finalizer's grant ([MEM-27](budgets.md#mem-27-finalizer-grants)) |
+| `OutOfTime` | a step past the current step bound ([MEM-30](budgets.md#mem-30-step-bounds)) |
 | `Tape` | a provider operation whose tape refuses it before issue ([CAP-9](capabilities.md#cap-9-tapes)); provisional |
 
 `Capacity` outside a finalizer is an error, never a failure.
@@ -209,7 +211,8 @@ finalizers and never fail.
 A failure that no `isolate` catches (FAIL-16) ends the task in which it happens, after the task's cleanup. Its joiner
 receives `Failed(causes)`, or `Cancelled(causes)` when the primary cause is `Cancelled`, as
 an error value of `join` ([CONC-6](tasks.md#conc-6-join)). A failure in `main` ends the run
-with the failure as its outcome. No construct other than `isolate` catches a failure.
+with the failure as its outcome. No construct other than `isolate` catches a failure,
+except that a step bound's scope catches its own `OutOfTime` ([MEM-30](budgets.md#mem-30-step-bounds)).
 
 ### FAIL-15: Run stops
 
@@ -264,8 +267,8 @@ recovery boundary and undoes nothing:
   failure is caught whatever its primary cause other than `Cancelled`: `Overflow`,
   `Bounds`, `Division`, `Unwrap`, `Fail`, `Tape` or a finalizer's `Capacity`
   ([MEM-27](budgets.md#mem-27-finalizer-grants)).
-- A failure whose primary cause is `Cancelled` is not caught: after the same cleanup the
-  reserved cell is refunded, the chain set aside is restored with the failure's causes
+- A failure whose primary cause is `Cancelled` or `OutOfTime` is not caught: after the
+  same cleanup the reserved cell is refunded, the chain set aside is restored with the failure's causes
   after it, and the failure goes on past `isolate`. A run stop (FAIL-15)
   is not caught, and nothing resumes at the operation that failed. `Capacity` outside a
   finalizer is an error that `body` handles as a value (FAIL-2), never a failure.

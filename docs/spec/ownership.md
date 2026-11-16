@@ -1027,6 +1027,9 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | T5.5 | bound exit, any edge | views end; owners drop; the unused part `ref`; surviving blocks handed to the parent ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)) | cannot fail | |
 | T5.6 | admission of n | used + n ≤ size: used += n | `Capacity` | per the operation's row |
 | T5.7 | refund of n | used −= n at the block's limit | cannot fail | |
+| T5.8 | `bound steps n { .. }` enter | n reserved from the current step bound, if any; a new step bound of n is current ([MEM-30](budgets.md#mem-30-step-bounds)) | n exceeds what is left: the body does not run | `Error(OutOfTime)`; nothing moved |
+| T5.9 | a step | one step of the current step bound used | past the bound: failure `OutOfTime` at the step | per FAIL-7 |
+| T5.10 | step-bound exit, any edge | views end; owners drop; the unused steps return to the enclosing bound, once no task spawned under the bound runs; a failure whose causes are all this bound's `OutOfTime` becomes `Error(OutOfTime)` | cannot fail | |
 
 **T6 Resources and cleanup**
 

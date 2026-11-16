@@ -37,7 +37,7 @@ pub opaque const where true false bytes
 A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
 are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key`, `ordered`, `integer`, `float`, `packed`,
 `streamable` and `codec` in a bound list; `via` after a bound list, and `to` and `from` in
-its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header. Library types and functions, including `Region`,
+its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header; `steps` after `bound`. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
 
 ```hirsel
@@ -222,7 +222,7 @@ primary     = literal | type-path | "(", ")" | "(", expression, ")"
             | "(", expression, ",", list(expression), ")"
             | "[", list(expression), "]" | "[", expression, ";", integer, "]"
             | [ label ], ( block | loop-expr ) | if-expr | match-expr | closure
-            | "region", name, block | "bound", "bytes", expression, block
+            | "region", name, block | "bound", ( "bytes" | "steps" ), expression, block
             | "return", [ expression ] | "break", [ "'", name ], [ expression ]
             | "continue", [ "'", name ] ;
 loop-expr   = "loop", block | "while", cond, block

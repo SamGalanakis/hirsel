@@ -203,7 +203,8 @@ Given the same program, the same values at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)), the same root limit and the same charge
 policy, every run that no run stop ends ([FAIL-15](failure.md#fail-15-run-stops)) behaves
 identically on every engine, build and optimisation level: the same values, outputs,
-`Capacity` results, failure causes and sites, cleanup order and run outcome. Nothing
+`Capacity` and `OutOfTime` results, failure causes and sites, steps and slice ends
+([MEM-30](budgets.md#mem-30-step-bounds)), cleanup order and run outcome. Nothing
 observable depends on addresses (of blocks or of functions), on the order of declarations
 in a source, on timing, on the host or on unrecorded scheduling.
 

@@ -88,7 +88,7 @@ cells, which were charged when each cause was raised
 ([FAIL-10](failure.md#fail-10-cause-chain)); dropping it refunds them. It is iterated by `for`
 ([SEM-6](semantics.md#sem-6-iteration)), primary cause first, binding a view of each cause as
 a `Cause`, whose `kind` is a `CauseKind`. The core declarations
-that have bodies (`Option`, `Result`, `Capacity`, the error types) have the summaries OWN-2
+that have bodies (`Option`, `Result`, `Capacity`, `OutOfTime`, the error types) have the summaries OWN-2
 computes, with `Option` and `Result` taking bounds as tuples do. `Task[R]` is never `send`
 ([CONC-2](tasks.md#conc-2-the-send-bound)); its parameter's `R: send` constrains the
 result, not the handle. `Log[E]` is a handle to a separately admitted node that owns its

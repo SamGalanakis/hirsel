@@ -9,7 +9,8 @@ entered (MEM-25), a task's from its spawner's current limit at spawn
 ([CONC-3](tasks.md#conc-3-spawn)), a finalizer grant's with its resource (MEM-27). At each
 point of a program exactly one limit is **current**: the innermost enclosing bound scope's
 or running finalizer's grant, or else the task's. Nothing can name a limit, and there is no
-other budget object in v1.
+other budget object in v1 but
+the step bound of MEM-30, which counts steps, not bytes.
 
 Charges cover every block, node, region allocation, queue, task record, cause cell and
 grant a program makes. They do not cover the call stack, host memory behind provider
@@ -168,8 +169,8 @@ the body: own, counted, region and task storage. In the body, `?` applied to an 
 whose type is exactly `Capacity` exits the bound scope with `Error(c)`; `?` on any other
 error type exits the function as usual. No exit crosses a closure body. On exit by any
 edge, the body's views end and its owners are cleaned, the unused part of `n` is refunded
-to the parent, and the record is handed over (MEM-20). `bound` is the only bounding form;
-a region is not one.
+to the parent, and the record is handed over (MEM-20). `bound bytes` is the only form that
+bounds bytes; a region is not one, and `bound steps` (MEM-30) bounds steps.
 
 ```hirsel
 fn copy_bounded(src: String) -> Result[Result[String, Capacity], Capacity] {
@@ -217,3 +218,89 @@ resource type Log grant bytes 256 { sink: Sender[String] }
 No optimisation changes which operations admit, how much they charge, when they refund or
 which of them fail with `Capacity`. An engine that allocates less still charges the
 logical amount; an engine that elides a copy still charges for it.
+
+### MEM-30: Step bounds
+
+A **step** is taken at each call, each loop back edge and each other entry of user code,
+and nowhere else; a **step
+bound** of `n` allows `n` steps, and the step after them stops the code with the failure
+`OutOfTime` (FAIL-2), which only the scope whose bound ran out catches. `bound steps n
+{ body }` evaluates to `Result[T, OutOfTime]`, where `T` is the body's type and `OutOfTime`
+is core's plain record `{ steps: u64 }`.
+
+- **Steps.** A call expression takes one step when its call is entered, after its arguments
+  are evaluated: a call of a function, of a callable value or of a core function. A loop
+  takes one step each time control returns to its head: at the end of a `loop`, `while` or
+  `for` body, the last time included, and at `continue`. Entering a loop, and leaving it by
+  `break`, `return` or failure, takes none, so `while i < n { i += 1 }` from 0 takes n steps.
+  User code entered without a call expression takes one step on entry: a finalizer when
+  cleanup runs it, and a callable a core function calls back (a callable argument, a codec's
+  `via`). Iteration (SEM-6), operators, field and index access, literals and constructors,
+  `?`, patterns and `match` run no user code and take none. A core function's call is one
+  step whatever it does; nothing inside it is counted but the user code it enters. Code an
+  engine adds of its own, such as drop, clone and growth code, takes none. So the steps a run
+  takes follow from its source and its values alone.
+- **The current bound.** At each point exactly one step bound is current, or none: the
+  innermost enclosing `bound steps` scope's, else the task's root step bound, else none.
+  Every step taken while a bound is current uses one of it. Entering `bound steps n`
+  reserves `n` from the current bound, if there is one; when `n` exceeds what it has left,
+  the body does not run and the result is `Error(OutOfTime(steps: n))`. Otherwise a new
+  bound of `n` is current for the body. On every exit edge the unused part returns to the
+  bound current at entry, so an inner scope's steps count against every enclosing bound.
+  Nothing can name a bound.
+- **Exhaustion.** When a step would use more than the current bound allows, it does not
+  happen: a failure with primary cause `OutOfTime` is raised there, its site the call or
+  the loop. It propagates as every failure does, cleaning each scope it leaves (FAIL-8), and
+  `isolate` does not catch it ([FAIL-16](failure.md#fail-16-isolation)). The bound stays
+  current and exhausted during that cleanup, so a finalizer it would run fails on entry
+  with `OutOfTime` ([FAIL-12](failure.md#fail-12-finalizer-failure)): it is abandoned, its
+  resource's fields are still cleaned mechanically, and cleanup goes on, so it ends. When the failure reaches the scope
+  whose bound ran out and every cause in its chain is that bound's `OutOfTime`, the scope
+  catches it: their cells are refunded and it returns `Error(OutOfTime(steps: n))`. If
+  cleanup added any other cause, the failure goes on past the scope, as a failure in its
+  place would.
+- **Places outside.** The body is checked as `isolate`'s argument is (FAIL-16): it is
+  refused when it assigns, replaces or lends `mut` a place declared outside it, or invokes a
+  scoped callback whose descriptor it cannot see. A place it moves from is maybe moved after
+  the scope. So a stop leaves every place outside the scope as it was at entry, except
+  effects that do not install into a place (FAIL-16's list).
+- **Waits, bytes and tasks.** Waiting takes no steps: a step bound limits computation, not
+  time, and a body that waits forever is ended by a deadline or a cancellation
+  ([CONC-7](tasks.md#conc-7-cancellation-points)), not by its bound. Step bounds and limits
+  are independent and nest in either order; a step bound admits nothing and charges
+  nothing. Because a core call is one step, a step bound bounds time only together with the
+  limits that bound the sizes core calls work on. A task spawned while a bound is current
+  draws its steps from that bound, shared with its spawner and with every other task spawned
+  under it, so the steps all of them take never exceed `n`; which task takes the step that
+  exhausts it follows the event order ([CONC-10](tasks.md#conc-10-event-order)). The
+  exhausting step fails its own task with `OutOfTime`; a child's failure reaches its joiner
+  ([CONC-6](tasks.md#conc-6-join)), and each other task under the bound fails at its next
+  step. A bound outlives its scope while a task spawned under it still runs, and returns its
+  unused steps to the bound it was reserved from when the scope has exited and the last such
+  task has ended. `main` and a task spawned with no bound current take steps under none.
+- **Slices.** While a step bound is current, every 65,536th step a task takes under it is a
+  **slice end**: an event ([CONC-10](tasks.md#conc-10-event-order)) at which the scheduler may
+  run another task. It is not a cancellation point and changes nothing else, so code under a
+  bound that computes for long does not keep the tasks it does not wait for from running.
+- **Determinism.** Which steps a run takes, where a bound stops it and where its slices end
+  depend only on its source and the values at its replay point
+  ([SEM-8](semantics.md#sem-8-determinism)): every engine, build and optimisation level
+  stops at the same step, and a replay stops where the recorded run stopped. No
+  optimisation adds, removes, merges or moves a step; an engine may count several steps at
+  once only where it then stops at the same step as counting one at a time would.
+
+```hirsel unbuilt
+fn spin(n: u64) -> Result[u64, OutOfTime] {
+  bound steps 1000 { let mut i: u64 = 0; while i < n { i += 1 }; i }   // Error(OutOfTime(steps: 1000)) when n > 1000
+}
+```
+```hirsel unbuilt
+fn first(xs: List[u64]) -> Result[Option[u64], OutOfTime] {
+  bound steps 1 { list.get(xs, 0) }    // one call: one step
+}
+```
+```hirsel unbuilt
+fn bump(mut n: u64) -> Result[(), OutOfTime] {
+  bound steps 10 { n = n + 1 }         // refused: MEM-30, n is declared outside the scope
+}
+```

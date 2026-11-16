@@ -120,7 +120,11 @@ def suite_edit(compiler, runtime, out, tools, profile_front=False, prepare=True)
     # Capped summaries use stderr and the compiler emits one JSON line.
     if not result.get('accepted') or result['rechecked'] != 1:
         raise ValueError(f'suite edit must check exactly one body: {result}')
-    return front(json.loads((out / 'edit.metrics.json').read_text()))
+    metrics = json.loads((out / 'edit.metrics.json').read_text())
+    # B2: an unchanged body keeps its recorded key; only the edited body's is derived.
+    if metrics['counters']['body_keys'] != 1:
+        raise ValueError(f"suite edit must derive exactly one body key: {metrics['counters']['body_keys']}")
+    return front(metrics)
 
 
 def run(compiler, runtime, out, ceilings=None, tools=None, image_profiler=None):

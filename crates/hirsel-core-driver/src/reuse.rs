@@ -227,6 +227,10 @@ pub(crate) struct Keys {
     // (`hirsel_core_front::PRELUDE`), and their closures' hash once per request.
     prelude: Vec<usize>,
     prelude_closure: std::cell::OnceCell<ContentHash>,
+    /// Every module of the request in order, with its items' header digests in
+    /// order: with the environment, entry and image, what a body's key reads
+    /// outside its own item (see `lib.rs`, the key shape).
+    pub(crate) items: ContentHash,
 }
 impl Keys {
     pub fn new(
@@ -253,8 +257,12 @@ impl Keys {
             [&encode(&(compiler, &inputs.core, namespaces))?[..]],
         );
         let mut hooks = vec![];
+        let mut items = vec![];
         for (m, rows) in modules.iter().zip(resolutions) {
+            items.push((0u8, keys.module_identity(index, m.id)?));
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
+                let digest = header_identity(item);
+                items.push((1u8, digest));
                 let Some(definition) = index.item_definition(m.id, ordinal as u32, item) else {
                     let root = item.tree.node(item.root);
                     if root.token.is_none()
@@ -283,7 +291,6 @@ impl Keys {
                 };
                 let path = index.definition_path(definition);
                 let end = header_end(item);
-                let digest = header_identity(item);
                 let mut reads = BTreeSet::new();
                 let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
@@ -344,6 +351,12 @@ impl Keys {
         keys.headers = headers;
         keys.anchors = anchors;
         keys.environment = environment;
+        keys.items = ContentHash::of_parts_stream("hirsel.key-items.v1", |parts| {
+            for (tag, hash) in &items {
+                parts.part_byte_slice(*tag, &hash.0);
+            }
+            Ok(())
+        })?;
         Ok(keys)
     }
     fn bare(index: &NameIndex, headers: Headers) -> Self {
@@ -359,6 +372,7 @@ impl Keys {
             texts: Default::default(),
             prelude: vec![],
             prelude_closure: Default::default(),
+            items: ContentHash::default(),
         }
     }
 
@@ -613,6 +627,38 @@ impl Keys {
             closures.iter().map(|c| &c.0[..]),
         );
         Ok(*self.prelude_closure.get_or_init(|| hash))
+    }
+    /// The key shape: the environment, every module's item headers in order,
+    /// and `request` (entry, image identity, library mode and parse modes).
+    /// Two requests with one shape resolve every unchanged item alike and
+    /// derive every closure alike, so an unchanged body keeps its key: its
+    /// candidate sets, negative, ambiguous and shadowed probes, prelude, and
+    /// generic, glue, clone-hook and drop edges all read headers, manifests or
+    /// the image, never another item's body.
+    pub fn shape(&self, request: &[u8]) -> ContentHash {
+        ContentHash::of_parts(
+            "hirsel.key-shape.v1",
+            [&self.environment.0[..], &self.items.0[..], request],
+        )
+    }
+    /// A body's own item source digest (`body_identity`): the one input of
+    /// its key that a recorded key under the same shape is checked against.
+    pub fn body_source(
+        &self,
+        index: &NameIndex,
+        path: &DefPath,
+        module: ModuleId,
+        ordinal: u32,
+        item: Item<'_>,
+    ) -> io::Result<ContentHash> {
+        let own = index
+            .item_definition(module, ordinal, item)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "internal error: core reuse body `{path}` has no indexed definition"
+                ))
+            })?;
+        Ok(self.dependency(index, own.0 as usize)?.source)
     }
     pub fn for_body(
         &self,

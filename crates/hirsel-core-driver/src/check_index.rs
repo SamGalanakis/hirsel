@@ -7,8 +7,9 @@
 //!   marks a path that left a file of the request. No row holds IR.
 //! - A **file record** holds a module's source hash, its namespace map
 //!   (name → DefPath) and its anchor map (item ordinal → DefPath, line base).
-//! - The **root node** is the trie's top node plus the file records. One
-//!   selection rename publishes root, rows, tombstones and maps together.
+//! - The **root node** is the trie's top node plus the file records and the
+//!   key shape its live rows' keys were derived under. One selection rename
+//!   publishes root, rows, tombstones and maps together.
 //!
 //! Lookup by DefPath treats a tombstone as not found.
 //! A record that fails its digest or decode is a miss, never a hit.
@@ -65,6 +66,8 @@ enum Node {
 }
 #[derive(Serialize, Deserialize)]
 struct RootNode {
+    /// Every live row's body record holds its key under this shape.
+    shape: ContentHash,
     files: Vec<(ModuleKey, ContentHash)>,
     children: Vec<(u8, ContentHash)>,
 }
@@ -87,6 +90,8 @@ fn nibble(hash: &[u8; 32], depth: usize) -> u8 {
 #[derive(Default)]
 pub(crate) struct ProgramIndex {
     pub root: Option<ContentHash>,
+    /// The key shape of the selected root.
+    pub shape: Option<ContentHash>,
     rows: FxHashMap<DefPath, Row>,
     files: BTreeMap<ModuleKey, ContentHash>,
     /// Nodes and file records this publication already holds, verified or referenced.
@@ -104,6 +109,7 @@ impl ProgramIndex {
             return Ok(index);
         };
         index.root = Some(root);
+        index.shape = Some(node.shape);
         index.published.insert(root);
         for (module, file) in node.files {
             index.published.insert(file);
@@ -139,6 +145,8 @@ impl ProgramIndex {
 
 /// Records of one request, written before its single selection rename.
 pub(crate) struct Publication {
+    /// The key shape every row's key was derived under.
+    pub shape: ContentHash,
     /// Body records framed when their body was checked.
     pub bodies: Vec<(ContentHash, Vec<u8>)>,
     pub rows: BTreeMap<DefPath, Row>,
@@ -147,6 +155,7 @@ pub(crate) struct Publication {
 impl Publication {
     pub fn new() -> Self {
         Self {
+            shape: ContentHash::default(),
             bodies: vec![],
             rows: BTreeMap::new(),
             files: BTreeMap::new(),
@@ -191,7 +200,11 @@ impl Publication {
         }
         hashed.sort_unstable_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
         let children = children(&hashed, 0, &mut writes, prior)?;
-        let (root, bytes) = Store::frame(&encode(&RootNode { files, children })?);
+        let (root, bytes) = Store::frame(&encode(&RootNode {
+            shape: self.shape,
+            files,
+            children,
+        })?);
         // Rechecked bodies are always written: a recheck after a damaged read
         // yields the same address, and the damaged bytes must be replaced.
         let changed = prior.root != Some(root);

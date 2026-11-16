@@ -814,6 +814,16 @@ impl Driver {
                 image_directory.as_ref().map(|i| &i.anchors),
             )?
         };
+        // A body whose own source is unchanged under the prior shape keeps the
+        // key its record holds: no closure walk and no lookup rows.
+        publication.shape = keys.shape(&encode(&(
+            &request.entry,
+            image.as_ref().map(|i| i.identity),
+            produce,
+            reachable_only,
+            sources.iter().map(|s| s.1).collect::<Vec<bool>>(),
+        ))?);
+        let same_shape = prior.shape == Some(publication.shape);
         {
             let mut p = Program::declare_with_library(
                 &index,
@@ -856,37 +866,44 @@ impl Driver {
                 let item = modules[fd.at.module as usize]
                     .syntax
                     .item(fd.at.item as usize);
-                let mut key = if MEASURE {
-                    meter.measure("body keys/for_body", || {
-                        keys.for_body(
-                            &index,
-                            &fd.path,
-                            modules[fd.at.module as usize].id,
-                            fd.at.item,
-                            item,
-                            &resolution,
-                        )
-                    })?
+                let module = modules[fd.at.module as usize].id;
+                let recorded = if same_shape && !duplicated.contains(&fd.path) {
+                    let source = keys.body_source(&index, &fd.path, module, fd.at.item, item)?;
+                    recorded_definition(&store, &prior, &fd.path)?
+                        .filter(|product| product.key.body == source)
                 } else {
-                    keys.for_body(
-                        &index,
-                        &fd.path,
-                        modules[fd.at.module as usize].id,
-                        fd.at.item,
-                        item,
-                        &resolution,
-                    )?
+                    None
                 };
-                // Entry policy is a read of the selected body only. Keep it
-                // out of the shared environment key so another program does
-                // not recheck the library closure, while separating the
-                // entry body when its waits rule changes.
-                if request.entry.as_ref() == Some(&fd.path) {
-                    key.environment = ContentHash::of_parts(
-                        "hirsel.entry-policy.v1",
-                        [&encode(&request.entry)?[..], &key.environment.0],
-                    );
-                }
+                let key = match &recorded {
+                    Some(product) => product.key.clone(),
+                    None => {
+                        let mut key = if MEASURE {
+                            meter.measure("body keys/for_body", || {
+                                keys.for_body(
+                                    &index,
+                                    &fd.path,
+                                    module,
+                                    fd.at.item,
+                                    item,
+                                    &resolution,
+                                )
+                            })?
+                        } else {
+                            keys.for_body(&index, &fd.path, module, fd.at.item, item, &resolution)?
+                        };
+                        // Entry policy is a read of the selected body only. Keep it
+                        // out of the shared environment key so another program does
+                        // not recheck the library closure, while separating the
+                        // entry body when its waits rule changes.
+                        if request.entry.as_ref() == Some(&fd.path) {
+                            key.environment = ContentHash::of_parts(
+                                "hirsel.entry-policy.v1",
+                                [&encode(&request.entry)?[..], &key.environment.0],
+                            );
+                        }
+                        key
+                    }
+                };
                 let key_hash = check_index::key_hash(&key)?;
                 // A resident product's record lives in the store it was published to.
                 let resident = self
@@ -903,6 +920,8 @@ impl Driver {
                     None
                 } else if resident.is_some() {
                     resident
+                } else if let Some(product) = recorded {
+                    Some(Arc::new(product))
                 } else {
                     prior_definition(&store, &prior, &fd.path, &key, key_hash)?.map(Arc::new)
                 };
@@ -1093,13 +1112,25 @@ fn prior_definition(
     key: &DefinitionKey,
     key_hash: ContentHash,
 ) -> io::Result<Option<DefinitionProduct>> {
-    hirsel_core_front::cost_scope!("non-check", "prior body record read");
-    let Some((row_key, record)) = prior.live(path) else {
-        return Ok(None);
-    };
-    if row_key != key_hash {
+    if prior
+        .live(path)
+        .is_none_or(|(row_key, _)| row_key != key_hash)
+    {
         return Ok(None);
     }
+    Ok(recorded_definition(store, prior, path)?.filter(|product| product.key == *key))
+}
+/// The body record a live row of the prior publication names, when it is
+/// the record of `path`. Its key is the key under the prior shape.
+fn recorded_definition(
+    store: &Store,
+    prior: &check_index::ProgramIndex,
+    path: &DefPath,
+) -> io::Result<Option<DefinitionProduct>> {
+    hirsel_core_front::cost_scope!("non-check", "prior body record read");
+    let Some((_, record)) = prior.live(path) else {
+        return Ok(None);
+    };
     let Some(head) = store.get_body_head(record)? else {
         return Ok(None);
     };
@@ -1108,7 +1139,7 @@ fn prior_definition(
         reader: None,
     };
     Ok(DefinitionProduct::from_head(&head, record, decode, source)
-        .filter(|product| product.definition == *path && product.key == *key))
+        .filter(|product| product.definition == *path))
 }
 /// The file record: namespace map and anchor map (item ordinal, line base).
 fn file_record(

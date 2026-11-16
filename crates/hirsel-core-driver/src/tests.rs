@@ -2581,9 +2581,23 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
 /// covered its item's parse failure: a callee whose body fails to parse has an
 /// unresolved header, so its caller halts, and that halted record was reused
 /// once the body parsed (979 H1), or the caller's whole record once it stopped.
+/// Red on a body key reused from its record when only the body's own source
+/// and the resolved targets are compared (B2): a variant added to a file the
+/// body does not name takes over its construction, a new candidate.
 #[test]
 fn resolution_edges_rebuild_like_fresh() {
-    let cases: [(&str, &[(&str, &str)], &[(&str, &str)]); 6] = [
+    let cases: [(&str, &[(&str, &str)], &[(&str, &str)]); 7] = [
+        (
+            "a variant added to another file takes over a record construction",
+            &[
+                ("a", "type R { x: u64 }\nfn make() -> R { R(x: 1u64) }\n"),
+                ("b", "fn other() -> u64 { 0 }\n"),
+            ],
+            &[
+                ("a", "type R { x: u64 }\nfn make() -> R { R(x: 1u64) }\n"),
+                ("b", "fn other() -> u64 { 0 }\npub type V = R(u64)\n"),
+            ],
+        ),
         (
             "a variant added elsewhere takes over a record construction",
             &[(

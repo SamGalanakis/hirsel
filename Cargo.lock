@@ -488,6 +488,7 @@ dependencies = [
  "libc",
  "libmimalloc-sys",
  "mimalloc",
+ "twox-hash",
 ]
 
 [[package]]

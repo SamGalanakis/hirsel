@@ -1,0 +1,981 @@
+//! Tape laws (REPLAY-SPEC v2.2 S1). Expected bytes come from
+//! testdata/vectors.py (hand encoding plus system libxxhash, no project code)
+//! and from 1004's model-v21-tape.bin; expected results from sections 5 and 8.
+use super::*;
+use crate::os::OsProvider;
+use std::cell::Cell as Shared;
+
+/// The test binary is the "executable": its key is BUILD.
+#[unsafe(no_mangle)]
+static hirsel_build_identity: [u8; 32] = BUILD;
+const BUILD: [u8; 32] = {
+    let mut b = [0; 32];
+    let mut i = 0;
+    while i < 32 {
+        b[i] = 0x20 + i as u8;
+        i += 1;
+    }
+    b
+};
+const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
+const MODEL: &[u8] = include_bytes!("testdata/model-v21-tape.bin");
+const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
+
+// ---------- providers ----------
+
+/// Counts every callback that reaches it. `inner: None` refuses everything:
+/// the refuse-all host of the bypass law.
+struct Counted {
+    inner: Option<Provider>,
+    calls: Shared<usize>,
+}
+impl Counted {
+    fn new(inner: Option<Provider>) -> Box<Self> {
+        Box::new(Self {
+            inner,
+            calls: Shared::new(0),
+        })
+    }
+    fn provider(&self) -> Provider {
+        unsafe extern "C" fn wait(s: *mut u8, r: *mut Request, t: u64) -> Wait {
+            let c = unsafe { &*s.cast::<Counted>() };
+            c.calls.set(c.calls.get() + 1);
+            match c.inner {
+                Some(p) => unsafe { (p.wait)(p.state, r, t) },
+                None => Wait::default(),
+            }
+        }
+        unsafe extern "C" fn issue(s: *mut u8, r: *mut Request, t: u64) -> Step {
+            let c = unsafe { &*s.cast::<Counted>() };
+            c.calls.set(c.calls.get() + 1);
+            match c.inner {
+                Some(p) => unsafe { (p.issue)(p.state, r, t) },
+                None => Step {
+                    kind: STEP_DONE,
+                    outcome: Outcome {
+                        error: IoError { tag: 2, code: 0 },
+                        ..Outcome::default()
+                    },
+                    deadline_ns: 0,
+                },
+            }
+        }
+        unsafe extern "C" fn deliver(s: *mut u8, r: *mut Request, o: Outcome) -> Outcome {
+            let c = unsafe { &*s.cast::<Counted>() };
+            c.calls.set(c.calls.get() + 1);
+            match c.inner {
+                Some(p) => unsafe { (p.deliver)(p.state, r, o) },
+                None => o,
+            }
+        }
+        Provider {
+            state: (self as *const Self).cast_mut().cast(),
+            wait,
+            issue,
+            resume: crate::provider::immediate::resume,
+            abort: crate::provider::immediate::abort,
+            deliver,
+        }
+    }
+}
+
+/// The scripted host of `scripted_run`: every answer is fixed, as vectors.py
+/// encodes it.
+struct World {
+    walls: VecDeque<u64>,
+    monos: VecDeque<u64>,
+    data: Vec<u8>,
+    at: usize,
+}
+impl World {
+    fn new(read: usize) -> Box<Self> {
+        Box::new(Self {
+            walls: [1_700_000_000_000, 1_700_000_000_250].into(),
+            monos: [5_000, 4_000].into(),
+            data: (0..read).map(|i| (i * 7 + 1) as u8).collect(),
+            at: 0,
+        })
+    }
+    fn provider(&mut self) -> Provider {
+        unsafe extern "C" fn issue(s: *mut u8, r: *mut Request, _: u64) -> Step {
+            let w = unsafe { &mut *s.cast::<World>() };
+            let r = unsafe { &mut *r };
+            let path = unsafe { std::slice::from_raw_parts(r.path, r.path_len) };
+            let mut o = Outcome::default();
+            match r.operation {
+                WALL_MS => o.value = w.walls.pop_front().unwrap(),
+                MONO_NS => o.value = w.monos.pop_front().unwrap(),
+                STDOUT => o.written = r.buffer.len as u64,
+                OPEN if path == b"missing" => o.error = IoError { tag: 1, code: 0 },
+                OPEN => o.value = 77,
+                READ => {
+                    let n = (r.buffer.capacity - r.buffer.len).min(w.data.len() - w.at);
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            w.data[w.at..].as_ptr(),
+                            r.buffer.data.add(r.buffer.len),
+                            n,
+                        )
+                    };
+                    r.buffer.len += n;
+                    w.at += n;
+                    o.value = n as u64;
+                }
+                MKDTEMP => {
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            b"abc123".as_ptr(),
+                            r.buffer.data.add(r.buffer.len),
+                            6,
+                        )
+                    };
+                    r.buffer.len += 6;
+                    o.value = 78;
+                }
+                CLOSE | SLEEP_UNTIL | RENAME | SYNC_DIR => {}
+                op => panic!("the scripted world has no op {op}"),
+            }
+            Step {
+                kind: STEP_DONE,
+                outcome: o,
+                deadline_ns: 0,
+            }
+        }
+        Provider {
+            state: (self as *mut Self).cast(),
+            wait: crate::provider::immediate::wait,
+            issue,
+            resume: crate::provider::immediate::resume,
+            abort: crate::provider::immediate::abort,
+            deliver: crate::provider::deliver,
+        }
+    }
+}
+
+/// An in-memory Dir (handle 1) holding tape files, for the campaigns.
+#[derive(Default)]
+struct Store {
+    files: BTreeMap<Vec<u8>, Vec<u8>>,
+    open: BTreeMap<u64, (Vec<u8>, usize)>,
+    next: u64,
+}
+impl Store {
+    fn with(bytes: &[u8]) -> Box<Self> {
+        let mut s = Box::<Self>::default();
+        s.files.insert(b"t".to_vec(), bytes.to_vec());
+        s
+    }
+    fn file(&self) -> &[u8] {
+        &self.files[&b"t".to_vec()]
+    }
+    fn dir(&mut self) -> (Provider, u64) {
+        unsafe extern "C" fn issue(s: *mut u8, r: *mut Request, _: u64) -> Step {
+            let st = unsafe { &mut *s.cast::<Store>() };
+            let r = unsafe { &mut *r };
+            let mut o = Outcome::default();
+            match r.operation {
+                OPEN => {
+                    let path = unsafe { std::slice::from_raw_parts(r.path, r.path_len) }.to_vec();
+                    match (r.mode, st.files.contains_key(&path)) {
+                        (3, true) => o.error = IoError { tag: 3, code: 0 },
+                        (0, false) => o.error = IoError { tag: 1, code: 0 },
+                        _ => {
+                            st.files.entry(path.clone()).or_default();
+                            st.next += 1;
+                            st.open.insert(100 + st.next, (path, 0));
+                            o.value = 100 + st.next;
+                        }
+                    }
+                }
+                WRITE => {
+                    let (name, _) = &st.open[&r.handle];
+                    let bytes = unsafe { std::slice::from_raw_parts(r.buffer.data, r.buffer.len) };
+                    st.files.get_mut(name).unwrap().extend_from_slice(bytes);
+                    o.written = bytes.len() as u64;
+                }
+                READ => {
+                    let (name, at) = st.open.get_mut(&r.handle).unwrap();
+                    let f = &st.files[name];
+                    let n = (r.buffer.capacity - r.buffer.len).min(f.len() - *at);
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            f[*at..].as_ptr(),
+                            r.buffer.data.add(r.buffer.len),
+                            n,
+                        )
+                    };
+                    *at += n;
+                    o.value = n as u64;
+                }
+                CLOSE => {
+                    st.open.remove(&r.handle).unwrap();
+                }
+                op => panic!("the store has no op {op}"),
+            }
+            Step {
+                kind: STEP_DONE,
+                outcome: o,
+                deadline_ns: 0,
+            }
+        }
+        let p = Provider {
+            state: (self as *mut Self).cast(),
+            wait: crate::provider::immediate::wait,
+            issue,
+            resume: crate::provider::immediate::resume,
+            abort: crate::provider::immediate::abort,
+            deliver: crate::provider::deliver,
+        };
+        (p, 1)
+    }
+}
+
+// ---------- driving operations ----------
+
+/// One observation: the delivered outcome and the carrier's bytes after it.
+/// A handle a delivery creates is compared by its ordinal (low 32 bits): the
+/// generation differs between a recording and its replay.
+#[derive(Debug, PartialEq, Eq)]
+struct Ob {
+    op: u8,
+    value: u64,
+    error: IoError,
+    written: u64,
+    status: u8,
+    bytes: Vec<u8>,
+}
+
+/// Run one operation as the scheduler would for a Ready, Done provider.
+fn call(
+    sub: (Provider, u64),
+    op: u8,
+    mode: u8,
+    path: &[u8],
+    carrier: &mut Vec<u8>,
+    input: bool,
+) -> Ob {
+    let buffer = if input {
+        Buffer {
+            data: carrier.as_mut_ptr(),
+            len: carrier.len(),
+            capacity: 0,
+        }
+    } else {
+        Buffer {
+            data: carrier.as_mut_ptr(),
+            len: carrier.len(),
+            capacity: carrier.capacity(),
+        }
+    };
+    let mut r = Request {
+        operation: op,
+        mode,
+        handle: sub.1,
+        path: path.as_ptr(),
+        path_len: path.len(),
+        buffer,
+        site: 0,
+    };
+    let p = sub.0;
+    // SAFETY: the request and its carrier are pinned for the operation.
+    let o = unsafe {
+        let _ = (p.wait)(p.state, &mut r, 0);
+        let step = (p.issue)(p.state, &mut r, 0);
+        assert_eq!(step.kind, STEP_DONE);
+        (p.deliver)(p.state, &mut r, step.outcome)
+    };
+    if !input {
+        // SAFETY: the provider initialised the carrier up to the request's len.
+        unsafe { carrier.set_len(r.buffer.len) };
+    }
+    let created = o.status == 0 && o.error == IoError::OK && matches!(op, OPEN | MKDTEMP);
+    Ob {
+        op,
+        value: if created {
+            o.value & 0xffff_ffff
+        } else {
+            o.value
+        },
+        error: o.error,
+        written: o.written,
+        status: o.status,
+        bytes: carrier.clone(),
+    }
+}
+fn input(sub: (Provider, u64), op: u8, bytes: &[u8]) -> Ob {
+    call(sub, op, 0, &[], &mut bytes.to_vec(), true)
+}
+fn plain(sub: (Provider, u64), op: u8, mode: u8, path: &[u8]) -> Ob {
+    call(sub, op, mode, path, &mut Vec::new(), true)
+}
+fn spare(sub: (Provider, u64), op: u8, prefix: &[u8], capacity: usize) -> Ob {
+    let mut c = Vec::with_capacity(capacity);
+    c.extend_from_slice(prefix);
+    call(sub, op, 0, &[], &mut c, false)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Variant {
+    Same,
+    /// The first stdout write sends other bytes: an issue the tape never saw.
+    OtherWrite,
+}
+
+/// The run vectors.py encodes. Stops at the first refused on_tape (there is
+/// then no substitute to operate on); keeps going through refused operations.
+fn scripted_run(
+    tape: &Tape,
+    world: Provider,
+    read: usize,
+    variant: Variant,
+) -> (Vec<Ob>, Option<Fault>) {
+    let mut obs = Vec::new();
+    let mut subs = Vec::new();
+    for kind in [crate::entry::CLOCK, crate::entry::STDOUT, crate::entry::DIR] {
+        match tape.on_tape(kind, (world, 0)) {
+            Ok(s) => subs.push(s),
+            Err(f) => return (obs, Some(f)),
+        }
+    }
+    match tape.on_tape_args(&[b"a".as_slice(), b"bc"]) {
+        Ok(v) => assert_eq!(v, [b"a".to_vec(), b"bc".to_vec()]),
+        Err(f) => return (obs, Some(f)),
+    }
+    let (clock, out, dir) = (subs[0], subs[1], subs[2]);
+    obs.push(plain(clock, WALL_MS, 0, &[]));
+    obs.push(plain(clock, MONO_NS, 0, &[]));
+    obs.push(plain(clock, MONO_NS, 0, &[]));
+    obs.push(plain(clock, WALL_MS, 0, &[]));
+    let hello: &[u8] = if variant == Variant::OtherWrite {
+        b"hellO"
+    } else {
+        b"hello"
+    };
+    obs.push(input(out, STDOUT, hello));
+    obs.push(input(out, STDOUT, b"0123456789abcdefXYZ"));
+    obs.push(plain(dir, OPEN, 0, b"missing"));
+    let opened = plain(dir, OPEN, 0, b"data");
+    let file = (
+        dir.0,
+        (opened.value != 0)
+            .then(|| handle_like(dir.1, opened.value))
+            .unwrap_or(0),
+    );
+    obs.push(opened);
+    obs.push(spare(file, READ, &[], read));
+    obs.push(spare(file, READ, &[], 10));
+    obs.push(plain(file, CLOSE, 0, &[]));
+    obs.push(input(clock, SLEEP_UNTIL, &9_000u64.to_le_bytes()));
+    obs.push(plain(dir, RENAME, 0, b"a\0b"));
+    let made = spare(dir, MKDTEMP, b"t.", 64);
+    let temp = (
+        dir.0,
+        (made.value != 0)
+            .then(|| handle_like(dir.1, made.value))
+            .unwrap_or(0),
+    );
+    obs.push(made);
+    obs.push(plain(temp, SYNC_DIR, 0, &[]));
+    (obs, None)
+}
+/// The substitute handle for `ordinal` on the tape that made `like`.
+fn handle_like(like: u64, ordinal: u64) -> u64 {
+    (like & !0xffff_ffff) | ordinal
+}
+
+fn header(build: [u8; 32]) -> Header {
+    Header {
+        kind: KIND_CALL,
+        mode: MODE_RECORD,
+        tape_id: std::array::from_fn(|i| 0x10 + i as u8),
+        identity: b"app@1/main/run".to_vec(),
+        build,
+        charge_policy: 0,
+        limit: 1000,
+        bound: 0,
+        chooser: CHOOSER_FIFO,
+        arg: b"arg".to_vec(),
+        grants: vec![],
+    }
+}
+fn expect() -> Expect<'static> {
+    Expect {
+        identity: b"app@1/main/run",
+        limit: 1000,
+        arg: None,
+    }
+}
+
+/// Record the scripted run into a fresh store; the store, observations and
+/// the world's call count.
+fn record(read: usize) -> (Box<Store>, Vec<Ob>) {
+    let mut store = Box::<Store>::default();
+    let mut world = World::new(read);
+    let (tape, arg) =
+        unsafe { Tape::open(store.dir(), b"t", Mode::Record, &header(BUILD), &expect()) }.unwrap();
+    assert_eq!(arg, b"arg");
+    let (obs, fault) = scripted_run(&tape, world.provider(), read, Variant::Same);
+    assert_eq!(fault, None);
+    tape.end().unwrap();
+    (store, obs)
+}
+
+/// Replay `bytes` against the refuse-all host: the open's result, or the
+/// observations, the first fault and the verdict of `end`. Asserts that
+/// nothing reached the host.
+fn replay(
+    bytes: &[u8],
+    read: usize,
+    variant: Variant,
+) -> Result<(Vec<Ob>, Option<Fault>, Result<(), Fault>), OpenError> {
+    let mut store = Store::with(bytes);
+    let host = Counted::new(None);
+    let (tape, _) =
+        unsafe { Tape::open(store.dir(), b"t", Mode::Replay, &header(BUILD), &expect()) }?;
+    let (obs, fault) = scripted_run(&tape, host.provider(), read, variant);
+    let verdict = tape.end();
+    assert_eq!(
+        host.calls.get(),
+        0,
+        "an operation reached the host under Replay"
+    );
+    Ok((obs, fault, verdict))
+}
+
+/// Block boundaries by the length fields alone (section 5.2's layout).
+fn boundaries(t: &[u8]) -> Vec<usize> {
+    let mut at = vec![0];
+    let mut p = 0;
+    while p < t.len() {
+        let len = u32::from_le_bytes(t[p + 12..p + 16].try_into().unwrap()) as usize;
+        p += BLOCK_HEAD + len + BLOCK_CHECK;
+        at.push(p);
+    }
+    at
+}
+
+// ---------- laws ----------
+
+/// Wrong implementation caught: a block check that differs from libxxhash
+/// (wrong seed, secret, a streaming state reset between parts).
+#[test]
+fn xxh3_is_libxxhash_whole_and_in_two_parts() {
+    let image: Vec<u8> = std::iter::repeat_n(77, 11)
+        .chain((0..4096u32).map(|i| (i * 17 + 3) as u8))
+        .chain(std::iter::repeat_n(99, 13))
+        .collect();
+    let rows: Vec<(usize, u64)> = XXH3
+        .chunks(16)
+        .map(|r| {
+            (
+                u64::from_le_bytes(r[..8].try_into().unwrap()) as usize,
+                u64::from_le_bytes(r[8..].try_into().unwrap()),
+            )
+        })
+        .collect();
+    for &(n, h) in &rows {
+        assert_eq!(xxh3(&[&image[11..11 + n]]), h, "length {n}");
+    }
+    let (n, h) = rows[257];
+    for cut in 0..=n {
+        assert_eq!(
+            xxh3(&[&image[11..11 + cut], &image[11 + cut..11 + n]]),
+            h,
+            "cut {cut}"
+        );
+    }
+}
+
+/// Wrong implementation caught: any byte of the encoder off the spec (field
+/// order, varint, zig-zag delta, T at a block's first frame, check input).
+/// The oracle is 1004's model (libxxhash), not this code.
+#[test]
+fn the_encoder_writes_model_v21_tape_byte_for_byte() {
+    let h = Header {
+        kind: KIND_CALL,
+        mode: MODE_DURABLE,
+        tape_id: std::array::from_fn(|i| i as u8),
+        identity: b"pkg/charge#0001".to_vec(),
+        build: std::array::from_fn(|i| i as u8),
+        charge_policy: 1,
+        limit: 1024,
+        bound: 0,
+        chooser: CHOOSER_FIFO,
+        arg: b"arg-7".to_vec(),
+        grants: vec![],
+    };
+    let mono = |v: u64| Frame::Op {
+        task: 0,
+        op: MONO_NS,
+        object: 1,
+        args: Args::of(&[]),
+        out: Out {
+            value: zz(v as i64),
+            ..Out::default()
+        },
+    };
+    let mut e = Encoder::default();
+    let payload = |frames: &[Frame], e: &mut Encoder| {
+        e.new_block();
+        frames
+            .iter()
+            .flat_map(|f| e.frame(f).0)
+            .collect::<Vec<u8>>()
+    };
+    let b1 = payload(
+        &[
+            Frame::Grant {
+                kind: crate::entry::CLOCK,
+                args: None,
+            },
+            mono(1_000_000_123),
+        ],
+        &mut e,
+    );
+    let b2 = payload(&[mono(5_000)], &mut e);
+    let b3 = payload(&[Frame::End(END_COMPLETE)], &mut e);
+    let tape = [
+        block(&h.tape_id, 0, 0, &h.encode()),
+        block(&h.tape_id, 0, 1, &b1),
+        block(&h.tape_id, 0, 2, &b2),
+        block(&h.tape_id, END, 3, &b3),
+    ]
+    .concat();
+    assert_eq!(tape, MODEL);
+    let (mut blocks, read) = Blocks::open(MODEL).unwrap();
+    assert_eq!(read, h);
+    let mut d = Decoder::default();
+    let mut frames = Vec::new();
+    while let Some((flags, p)) = blocks.next(MODEL).unwrap() {
+        frames.extend(d.block(p, flags & END != 0).unwrap());
+    }
+    assert_eq!(frames[1], mono(1_000_000_123));
+    assert_eq!(frames[2], mono(5_000));
+}
+
+/// Wrong implementation caught: Record writing anything other than the
+/// spec's frames for these operations (ordinals, clock deltas, the args
+/// digest, DATA continuation at 64 KiB, an error's tag, block closing).
+#[test]
+fn record_writes_the_hand_encoded_tape() {
+    let (store, obs) = record(70_000);
+    assert_eq!(store.file(), HAND);
+    assert_eq!(obs[0].value, 1_700_000_000_000);
+    assert_eq!(obs[7].value, 5, "the opened file is ordinal 5");
+    assert_eq!(obs[8].bytes.len(), 70_000);
+}
+
+/// The bypass law. Wrong implementation caught: a Replay that forwards any
+/// operation to a source, or answers one differently from the recording.
+#[test]
+fn replay_answers_every_operation_from_the_tape_and_none_reaches_the_host() {
+    let (_, recorded) = record(70_000);
+    let (obs, fault, verdict) = replay(HAND, 70_000, Variant::Same).unwrap();
+    assert_eq!(fault, None);
+    assert_eq!(verdict, Ok(()));
+    assert_eq!(obs, recorded);
+}
+
+/// Wrong implementation caught: a reader that hands on frames from a cut
+/// block, or calls a cut at a block boundary anything but Missing.
+#[test]
+fn a_cut_at_every_byte_is_truncated_or_missing() {
+    let (store, full) = record(100);
+    let t = store.file().to_vec();
+    let at = boundaries(&t);
+    assert_eq!(*at.last().unwrap(), t.len());
+    for cut in 0..t.len() {
+        let want = if at.contains(&cut) {
+            Fault::Diverged(Divergence::Missing)
+        } else {
+            Fault::Truncated
+        };
+        match replay(&t[..cut], 100, Variant::Same) {
+            Err(OpenError::Unreadable(f)) => assert_eq!(f, want, "cut {cut}"),
+            Err(e) => panic!("cut {cut}: {e:?}"),
+            Ok((obs, _, verdict)) => {
+                assert_eq!(verdict, Err(want), "cut {cut}");
+                let answered = obs.iter().take_while(|o| o.status == 0).count();
+                assert_eq!(obs[..answered], full[..answered], "cut {cut}");
+                assert!(obs[answered..].iter().all(|o| o.status == 1), "cut {cut}");
+            }
+        }
+    }
+}
+
+/// Wrong implementation caught: a check that skips any byte of a block (the
+/// head, the payload, the check itself) or the tape id.
+#[test]
+fn every_one_byte_change_is_damaged_or_truncated() {
+    let (store, _) = record(100);
+    let t = store.file().to_vec();
+    let at = boundaries(&t);
+    for i in 0..t.len() {
+        let k = at.iter().rposition(|&b| b <= i).unwrap();
+        let in_len = (at[k] + 12..at[k] + 16).contains(&i);
+        for x in [0x01u8, 0x80, 0xff] {
+            let mut m = t.clone();
+            m[i] ^= x;
+            let r = match replay(&m, 100, Variant::Same) {
+                Err(OpenError::Refused(Refusal::Damaged(0))) => Fault::Damaged(0),
+                Err(OpenError::Unreadable(f)) => f,
+                Err(e) => panic!("byte {i}: {e:?}"),
+                Ok((_, _, verdict)) => verdict.unwrap_err(),
+            };
+            let ok = r == Fault::Damaged(k as u64) || (in_len && r == Fault::Truncated);
+            assert!(ok, "byte {i} ^ {x:#x}: {r:?}");
+        }
+    }
+}
+
+/// Cuts inside the hand tape's last block: what was answered before the cut
+/// block stays answered identically, then the cut is reported.
+#[test]
+fn a_cut_in_a_later_block_keeps_earlier_answers() {
+    let (_, full) = record(70_000);
+    let at = boundaries(HAND);
+    for cut in [at[2], at[2] + 1, at[2] + BLOCK_HEAD + 3, at[3] - 1] {
+        let want = if cut == at[2] {
+            Fault::Diverged(Divergence::Missing)
+        } else {
+            Fault::Truncated
+        };
+        let (obs, _, verdict) = replay(&HAND[..cut], 70_000, Variant::Same).unwrap();
+        assert_eq!(verdict, Err(want), "cut {cut}");
+        let answered = obs.iter().take_while(|o| o.status == 0).count();
+        assert!(answered >= 8, "block 1 holds the first eight operations");
+        assert_eq!(obs[..answered], full[..answered]);
+    }
+}
+
+/// Wrong implementation caught: a reader that orders blocks by position
+/// rather than by their sequence numbers.
+#[test]
+fn swapped_blocks_are_damaged() {
+    let at = boundaries(HAND);
+    assert_eq!(at.len(), 4, "three blocks");
+    let swapped = [&HAND[..at[1]], &HAND[at[2]..at[3]], &HAND[at[1]..at[2]]].concat();
+    let (obs, fault, verdict) = replay(&swapped, 70_000, Variant::Same).unwrap();
+    assert!(obs.is_empty());
+    assert_eq!(fault, Some(Fault::Damaged(1)));
+    assert_eq!(verdict, Err(Fault::Damaged(1)));
+}
+
+/// Wrong implementation caught: a Replay that answers by op and object
+/// lookup instead of in recorded order.
+#[test]
+fn swapped_frames_diverge() {
+    let (store, _) = record(100);
+    let t = store.file().to_vec();
+    let at = boundaries(&t);
+    let h = header(BUILD);
+    let mut d = Decoder::default();
+    let p = &t[at[1] + BLOCK_HEAD..at[2] - BLOCK_CHECK];
+    let flags = t[at[1]];
+    let mut frames = d.block(p, flags & END != 0).unwrap();
+    // Frames 4 and 5 are the run's first wall read and first mono read.
+    frames.swap(4, 5);
+    let mut e = Encoder::default();
+    let payload: Vec<u8> = frames.iter().flat_map(|f| e.frame(f).0).collect();
+    let m = [
+        &t[..at[1]],
+        &block(&h.tape_id, flags, 1, &payload),
+        &t[at[2]..],
+    ]
+    .concat();
+    let (obs, _, verdict) = replay(&m, 100, Variant::Same).unwrap();
+    assert_eq!(verdict, Err(Fault::Diverged(Divergence::Op)));
+    assert_eq!(obs[0].status, 1, "the first read fails before any answer");
+    assert!(obs.iter().all(|o| o.status == 1), "a fault is sticky");
+}
+
+/// Wrong implementation caught: a Replay that compares op and object but
+/// not arguments.
+#[test]
+fn a_changed_argument_diverges() {
+    let (obs, _, verdict) = replay(HAND, 70_000, Variant::OtherWrite).unwrap();
+    assert_eq!(verdict, Err(Fault::Diverged(Divergence::Arg)));
+    assert!(obs[..4].iter().all(|o| o.status == 0));
+    assert!(obs[4..].iter().all(|o| o.status == 1));
+}
+
+/// Section 5.3's refusals, in order. Wrong implementation caught: an open
+/// that skips one comparison or checks them in another order.
+#[test]
+fn open_refuses_a_changed_code_build_arg_or_limit() {
+    let open = |build: [u8; 32], e: &Expect| {
+        let mut store = Store::with(HAND);
+        unsafe { Tape::open_built(build, store.dir(), b"t", Mode::Replay, &header(BUILD), e) }.map(
+            |(t, arg)| {
+                drop(t);
+                arg
+            },
+        )
+    };
+    let mut other = BUILD;
+    other[31] ^= 1;
+    let e = expect();
+    assert_eq!(open(BUILD, &e), Ok(b"arg".to_vec()));
+    assert_eq!(
+        open(
+            BUILD,
+            &Expect {
+                arg: Some(b"arg"),
+                ..expect()
+            }
+        ),
+        Ok(b"arg".to_vec())
+    );
+    let refused = |r| Err(OpenError::Refused(r));
+    assert_eq!(
+        open(
+            BUILD,
+            &Expect {
+                identity: b"app@1/main/ran",
+                ..expect()
+            }
+        ),
+        refused(Refusal::Code)
+    );
+    assert_eq!(open(other, &e), refused(Refusal::Build));
+    assert_eq!(
+        open(
+            other,
+            &Expect {
+                identity: b"x",
+                ..expect()
+            }
+        ),
+        refused(Refusal::Code)
+    );
+    assert_eq!(
+        open(
+            BUILD,
+            &Expect {
+                arg: Some(b"arh"),
+                ..expect()
+            }
+        ),
+        refused(Refusal::Arg)
+    );
+    assert_eq!(
+        open(
+            BUILD,
+            &Expect {
+                limit: 999,
+                ..expect()
+            }
+        ),
+        refused(Refusal::Limit)
+    );
+    assert_eq!(
+        open(
+            other,
+            &Expect {
+                arg: Some(b"arh"),
+                limit: 999,
+                ..expect()
+            }
+        ),
+        refused(Refusal::Build)
+    );
+}
+
+/// Section 8. Wrong implementation caught: an end that leaves its handles
+/// live (a Record substitute still writing through, a Replay one turning into
+/// live I/O), or a cleanup that leaks the inner file.
+#[test]
+fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_file() {
+    let mut store = Box::<Store>::default();
+    let mut world = World::new(100);
+    let host = Counted::new(Some(world.provider()));
+    let (tape, _) =
+        unsafe { Tape::open(store.dir(), b"t", Mode::Record, &header(BUILD), &expect()) }.unwrap();
+    let clock = tape
+        .on_tape(crate::entry::CLOCK, (host.provider(), 0))
+        .unwrap();
+    let dir = tape
+        .on_tape(crate::entry::DIR, (host.provider(), 0))
+        .unwrap();
+    let opened = plain(dir, OPEN, 0, b"data");
+    let file = (dir.0, handle_like(dir.1, opened.value));
+    let tape_cell = tape.cell;
+    tape.end().unwrap();
+    let sealed = store.file().to_vec();
+    let before = host.calls.get();
+    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, 1);
+    assert_eq!(plain(dir, OPEN, 0, b"data").status, 1);
+    assert_eq!(spare(file, READ, &[], 10).status, 1);
+    assert_eq!(host.calls.get(), before, "an ended tape reached its source");
+    assert_eq!(plain(file, CLOSE, 0, &[]).status, 1);
+    assert_eq!(
+        host.calls.get(),
+        before + 3,
+        "cleanup closes the inner file once"
+    );
+    assert_eq!(plain(file, CLOSE, 0, &[]).status, 1);
+    assert_eq!(host.calls.get(), before + 3);
+    assert_eq!(store.file(), sealed, "nothing is written after end");
+
+    // The slot is reused by the next tape; the old handles still fail and
+    // never reach the new tape's sources or its file.
+    let mut next_store = Box::<Store>::default();
+    let next_host = Counted::new(Some(world.provider()));
+    let (next, _) = unsafe {
+        Tape::open(
+            next_store.dir(),
+            b"t",
+            Mode::Record,
+            &header(BUILD),
+            &expect(),
+        )
+    }
+    .unwrap();
+    assert!(ptr::eq(next.cell, tape_cell), "the ended slot is reused");
+    let _ = next
+        .on_tape(crate::entry::CLOCK, (next_host.provider(), 0))
+        .unwrap();
+    let written = next_store.file().to_vec();
+    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, 1);
+    assert_eq!(next_host.calls.get(), 0);
+    assert_eq!(next_store.file(), written);
+    drop(next);
+
+    // Replay of that tape: the same, and cleanup has nothing to close.
+    let mut store = Store::with(&sealed);
+    let refuse = Counted::new(None);
+    let (tape, _) =
+        unsafe { Tape::open(store.dir(), b"t", Mode::Replay, &header(BUILD), &expect()) }.unwrap();
+    let clock = tape
+        .on_tape(crate::entry::CLOCK, (refuse.provider(), 0))
+        .unwrap();
+    let dir = tape
+        .on_tape(crate::entry::DIR, (refuse.provider(), 0))
+        .unwrap();
+    let opened = plain(dir, OPEN, 0, b"data");
+    assert_eq!(opened.value, 3);
+    let file = (dir.0, handle_like(dir.1, opened.value));
+    tape.end().unwrap();
+    assert_eq!(plain(clock, WALL_MS, 0, &[]).status, 1);
+    assert_eq!(spare(file, READ, &[], 10).status, 1);
+    assert_eq!(plain(file, CLOSE, 0, &[]).status, 1);
+    assert_eq!(refuse.calls.get(), 0);
+}
+
+/// Section 8, drop. Wrong implementation caught: a drop that loses the
+/// buffered frames, or one that writes END (a crash must not look complete).
+#[test]
+fn a_dropped_tape_keeps_its_frames_and_has_no_end() {
+    let mut store = Box::<Store>::default();
+    let mut world = World::new(100);
+    let (tape, _) =
+        unsafe { Tape::open(store.dir(), b"t", Mode::Record, &header(BUILD), &expect()) }.unwrap();
+    let (recorded, _) = scripted_run(&tape, world.provider(), 100, Variant::Same);
+    drop(tape);
+    let (obs, fault, verdict) = replay(store.file(), 100, Variant::Same).unwrap();
+    assert_eq!((obs, fault), (recorded, None));
+    assert_eq!(verdict, Err(Fault::Diverged(Divergence::Missing)));
+}
+
+/// The bypass law on the real host, every S1 operation kind. Wrong
+/// implementation caught: one op kind whose Replay reaches the host, or whose
+/// recorded answer (value, error, written, carrier bytes) is lost.
+#[test]
+fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
+    let root = std::env::temp_dir().join(format!("hirsel-tape-{}", std::process::id()));
+    let (world_dir, store_dir) = (root.join("world"), root.join("store"));
+    std::fs::create_dir_all(&world_dir).unwrap();
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let stdout = std::fs::File::create(root.join("stdout")).unwrap();
+    let stderr = std::fs::File::create(root.join("stderr")).unwrap();
+    let mut os = Box::new(OsProvider::new(stdout.into(), stderr.into()));
+    let (wd, sd) = (os.grant(&world_dir).unwrap(), os.grant(&store_dir).unwrap());
+    let host = Counted::new(Some(os.provider()));
+
+    let run = |tape: &Tape, h: Provider, wd: u64| -> Vec<Ob> {
+        let dir = tape.on_tape(crate::entry::DIR, (h, wd)).unwrap();
+        let clock = tape.on_tape(crate::entry::CLOCK, (h, 0)).unwrap();
+        let out = tape.on_tape(crate::entry::STDOUT, (h, 0)).unwrap();
+        let err = tape.on_tape(crate::entry::STDERR, (h, 0)).unwrap();
+        let sub = |o: &Ob| (dir.0, handle_like(dir.1, o.value));
+        let mut obs = vec![plain(dir, MKDIR, 0, b"a")];
+        let f = plain(dir, OPEN, 3, b"a/f");
+        let file = sub(&f);
+        obs.push(f);
+        let big: Vec<u8> = (0..100_000u32).map(|i| (i * 13) as u8).collect();
+        obs.push(input(file, WRITE, &big));
+        obs.push(plain(file, SYNC, 0, &[]));
+        obs.push(plain(file, TRY_LOCK, 0, &[]));
+        obs.push(plain(file, UNLOCK, 0, &[]));
+        obs.push(plain(file, CLOSE, 0, &[]));
+        let g = plain(dir, OPEN, 0, b"a/f");
+        let read = sub(&g);
+        obs.push(g);
+        obs.push(spare(read, READ, &[], 150_000));
+        obs.push(spare(read, READ, &[], 16));
+        obs.push(plain(read, CLOSE, 0, &[]));
+        obs.push(plain(dir, OPEN, 0, b"absent"));
+        obs.push(plain(dir, RENAME, 0, b"a/f\0a/g"));
+        let t = spare(dir, MKDTEMP, b"t.", 64);
+        let temp = sub(&t);
+        obs.push(t);
+        obs.push(plain(temp, SYNC_DIR, 0, &[]));
+        obs.push(plain(dir, REMOVE, 0, b"a/g"));
+        obs.push(plain(dir, REMOVE_TREE, 0, b"a"));
+        obs.push(plain(dir, SYNC_DIR, 0, &[]));
+        obs.push(plain(clock, WALL_MS, 0, &[]));
+        let mono = plain(clock, MONO_NS, 0, &[]);
+        let deadline = mono.value + 1_000;
+        obs.push(mono);
+        obs.push(plain(clock, MONO_NS, 0, &[]));
+        obs.push(input(clock, SLEEP_UNTIL, &deadline.to_le_bytes()));
+        obs.push(input(out, STDOUT, b"out"));
+        obs.push(input(err, STDERR, b"err"));
+        obs
+    };
+    let (tape, _) = unsafe {
+        Tape::open(
+            (os.provider(), sd),
+            b"t",
+            Mode::Record,
+            &header(BUILD),
+            &expect(),
+        )
+    }
+    .unwrap();
+    let recorded = run(&tape, host.provider(), wd);
+    tape.end().unwrap();
+    let kinds: std::collections::BTreeSet<u8> = recorded.iter().map(|o| o.op).collect();
+    assert_eq!(kinds, (OPEN..=SYNC_DIR).collect(), "every S1 op kind");
+    assert_eq!(
+        recorded[11].error.tag, 1,
+        "the absent open recorded its error"
+    );
+    assert!(recorded.iter().all(|o| o.status == 0));
+    let failed: Vec<usize> = (0..recorded.len())
+        .filter(|&i| recorded[i].error != IoError::OK)
+        .collect();
+    assert_eq!(failed, [11]);
+
+    let refuse = Counted::new(None);
+    let (tape, _) = unsafe {
+        Tape::open(
+            (os.provider(), sd),
+            b"t",
+            Mode::Replay,
+            &header(BUILD),
+            &expect(),
+        )
+    }
+    .unwrap();
+    let replayed = run(&tape, refuse.provider(), 0);
+    tape.end().unwrap();
+    assert_eq!(
+        refuse.calls.get(),
+        0,
+        "an operation reached the host under Replay"
+    );
+    assert_eq!(replayed, recorded);
+    drop(os);
+    std::fs::remove_dir_all(&root).unwrap();
+}

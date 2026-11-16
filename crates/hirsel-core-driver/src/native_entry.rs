@@ -110,7 +110,16 @@ impl<'a> Plan<'a> {
         })
     }
 
-    pub(crate) fn emit(&self, target: &str, sources: &SourceMap) -> Result<Vec<u8>> {
+    /// The entry object of the executable whose key is `build`. It also
+    /// defines `hirsel_build_identity`, the 32 key bytes a tape's header
+    /// carries (REPLAY-SPEC v2.1 R1). The object is made after the key and is
+    /// not an input to it.
+    pub(crate) fn emit(
+        &self,
+        target: &str,
+        sources: &SourceMap,
+        build: &[u8; 32],
+    ) -> Result<Vec<u8>> {
         let mut flags = settings::builder();
         for (name, value) in [
             ("is_pic", "true"),
@@ -136,6 +145,12 @@ impl<'a> Plan<'a> {
             .map_err(error)?,
         );
         let data = data::write(&mut object, self, sources)?;
+        data::bytes(
+            &mut object,
+            Some("hirsel_build_identity"),
+            build.to_vec(),
+            8,
+        )?;
         let signature = signature(&object, &[I64, I64, I64], Some(I8));
         let entry = object
             .declare_function("__hirsel_entry", Linkage::Local, &signature)

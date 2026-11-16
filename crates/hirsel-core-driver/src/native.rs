@@ -1356,7 +1356,7 @@ fn link_objects(
         let temp = store.scratch()?;
         let entry = temp.path().join("entry.o");
         let bytes = entry_plan
-            .emit(&options.target, &sources)
+            .emit(&options.target, &sources, &link_key.0)
             .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
@@ -1565,6 +1565,7 @@ mod tests {
     include!("prebuild_native.rs");
     include!("image_unit_native.rs");
     include!("reach_native.rs");
+    include!("tape_build_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

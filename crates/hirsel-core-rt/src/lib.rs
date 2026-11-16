@@ -30,6 +30,7 @@ pub mod provider;
 pub mod region;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
+pub mod tape;
 pub mod tasks;
 #[cfg(feature = "testing")]
 pub mod test_provider;

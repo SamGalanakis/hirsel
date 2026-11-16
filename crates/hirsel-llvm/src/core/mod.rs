@@ -455,7 +455,7 @@ fn emit_module(
     }
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let mut items = Items::default();
-    let mut next_scope = 2;
+    let mut next_scope = alias::private_steps(sink);
     let failures = failure::Failures::new(module);
     let debug = if source.debug_lines {
         sites::debug_plan(module, &failures, &mut next_scope, sink)
@@ -1164,16 +1164,18 @@ impl FunctionEmitter<'_> {
         self.emit(Operation::Select(t, c, yes, no))
     }
     fn load(&mut self, t: &Type, p: &Value, align: u32) -> Value {
-        self.emit(Operation::Load(t, p, &Memory::aligned(align)))
+        self.load_with(t, p, &Memory::aligned(align))
     }
     fn load_with(&mut self, t: &Type, p: &Value, m: &Memory) -> Value {
-        self.emit(Operation::Load(t, p, m))
+        let m = alias::program_memory(m, self.facts);
+        self.emit(Operation::Load(t, p, &m))
     }
     fn store(&mut self, t: &Type, v: &Value, p: &Value, align: u32) {
-        self.effect(Operation::Store(t, v, p, &Memory::aligned(align)));
+        self.store_with(t, v, p, &Memory::aligned(align));
     }
     fn store_with(&mut self, t: &Type, v: &Value, p: &Value, m: &Memory) {
-        self.effect(Operation::Store(t, v, p, m));
+        let m = alias::program_memory(m, self.facts);
+        self.effect(Operation::Store(t, v, p, &m));
     }
     fn gep(&mut self, t: &Type, p: &Value, index: &Value, inbounds: bool) -> Value {
         self.emit(Operation::Gep {

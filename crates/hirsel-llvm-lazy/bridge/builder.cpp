@@ -284,7 +284,7 @@ static void named_metadata(HirselLlvmBuilder *u, const char *name, size_t len, L
     for (size_t i = 0; i < n; ++i) named->addOperand(cast<MDNode>(unwrap(values[i])));
 }
 static void attach(HirselLlvmBuilder *, LLVMValueRef v, unsigned kind, LLVMMetadataRef md) {
-    const unsigned kinds[] = {LLVMContext::MD_alias_scope, LLVMContext::MD_noalias, LLVMContext::MD_invariant_load, LLVMContext::MD_prof, LLVMContext::MD_range};
+    const unsigned kinds[] = {LLVMContext::MD_alias_scope, LLVMContext::MD_noalias, LLVMContext::MD_invariant_load, LLVMContext::MD_prof, LLVMContext::MD_range, LLVMContext::MD_tbaa};
     cast<Instruction>(unwrap(v))->setMetadata(kinds[kind], cast<MDNode>(unwrap(md)));
 }
 static void location(HirselLlvmBuilder *, LLVMValueRef v, LLVMMetadataRef md) { cast<Instruction>(unwrap(v))->setDebugLoc(DebugLoc(cast<DILocation>(unwrap(md)))); }

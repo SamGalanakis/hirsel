@@ -162,3 +162,80 @@ impl FunctionEmitter<'_> {
         }
     }
 }
+
+// These types partition accesses, not pointers. The language cannot expose the
+// Context step word to program storage. Runtime calls retain their ordinary
+// memory effects; no claim is made about a runtime call's access to Context.
+const STEP_ACCESS: usize = 5;
+const PROGRAM_ACCESS: usize = 6;
+pub(super) fn private_steps(sink: &mut dyn Sink) -> usize {
+    for (id, items) in [
+        (
+            2,
+            vec![MdItem::String("Hirsel private runtime fields".into())],
+        ),
+        (
+            3,
+            vec![
+                MdItem::String("steps".into()),
+                MdItem::Node(2),
+                MdItem::I64(0),
+            ],
+        ),
+        (
+            4,
+            vec![
+                MdItem::String("program storage".into()),
+                MdItem::Node(2),
+                MdItem::I64(0),
+            ],
+        ),
+        (
+            STEP_ACCESS,
+            vec![MdItem::Node(3), MdItem::Node(3), MdItem::I64(0)],
+        ),
+        (
+            PROGRAM_ACCESS,
+            vec![MdItem::Node(4), MdItem::Node(4), MdItem::I64(0)],
+        ),
+    ] {
+        sink.metadata(
+            id,
+            &Metadata::Tuple {
+                distinct: false,
+                items,
+            },
+        );
+    }
+    7
+}
+pub(super) fn program_memory(memory: &Memory, facts: bool) -> Memory {
+    let mut memory = memory.clone();
+    if facts && memory.tbaa.is_none() {
+        memory.tbaa = Some(PROGRAM_ACCESS);
+    }
+    memory
+}
+impl FunctionEmitter<'_> {
+    pub(super) fn load_steps(&mut self, pointer: &Value) -> Value {
+        self.load_with(
+            &Type::I64,
+            pointer,
+            &Memory {
+                tbaa: self.facts.then_some(STEP_ACCESS),
+                ..Memory::aligned(8)
+            },
+        )
+    }
+    pub(super) fn store_steps(&mut self, value: &Value, pointer: &Value) {
+        self.store_with(
+            &Type::I64,
+            value,
+            pointer,
+            &Memory {
+                tbaa: self.facts.then_some(STEP_ACCESS),
+                ..Memory::aligned(8)
+            },
+        );
+    }
+}

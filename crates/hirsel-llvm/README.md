@@ -34,6 +34,11 @@ Invariants:
   let LLVM clone those domains when it inlines. `HIRSEL_LLVM_NO_FACTS` suppresses every
   emitter-supplied optimization fact while keeping ABI attributes and stack probes, and
   drivers key native objects on that choice (`core::facts_enabled`).
+- The private Context step word has a separate memory-access type from program
+  storage. After inlining, the LLVM pipeline promotes that word through the CFG
+  and synchronizes it at remaining calls and returns. Runtime calls may access
+  Context through the current task, so the Context argument itself is not
+  `noalias`.
 - Objects install 4 KiB stack probes, so native stack exhaustion is a run stop at a probed
   guard.
 - Variant tags are read and written only through `hirsel-core-layout`'s `read_case` and

@@ -462,6 +462,7 @@ pub(super) struct Memory {
     pub range: Option<u64>,
     pub ordering: Option<Ordering>,
     pub scopes: Option<Scoped>,
+    pub tbaa: Option<usize>,
 }
 impl Memory {
     pub fn aligned(align: u32) -> Self {
@@ -635,6 +636,7 @@ pub(super) enum MdItem {
     Node(usize),
     String(String),
     I32(u32),
+    I64(u64),
 }
 #[derive(Clone, Debug)]
 pub(super) enum Metadata {
@@ -822,6 +824,9 @@ fn memory(out: &mut String, m: &Memory) {
     if let Some(n) = m.range {
         write!(out, ", !range !{{i64 0, i64 {n}}}").unwrap();
     }
+    if let Some(tag) = m.tbaa {
+        write!(out, ", !tbaa !{tag}").unwrap();
+    }
     scopes(out, &m.scopes);
 }
 /// `code` with every `%name` bound to another local spelled as that local.
@@ -914,6 +919,7 @@ impl Sink for TextSink {
                         MdItem::Node(id) => write!(out, "!{id}").unwrap(),
                         MdItem::String(s) => md_string(out, s),
                         MdItem::I32(n) => write!(out, "i32 {n}").unwrap(),
+                        MdItem::I64(n) => write!(out, "i64 {n}").unwrap(),
                     }
                 }
                 out.push('}');

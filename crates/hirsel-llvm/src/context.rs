@@ -223,12 +223,14 @@ impl<'context> Module<'context> {
                     );
                 }
                 unsafe extern "C" {
+                    fn hirsel_llvm_promote_step_window(module: LLVMModuleRef);
                     fn hirsel_llvm_guard_copy_loops(
                         module: LLVMModuleRef,
                         machine: LLVMTargetMachineRef,
                     );
                 }
                 hirsel_llvm_guard_copy_loops(self.raw, machine.raw);
+                hirsel_llvm_promote_step_window(self.raw);
                 hirsel_llvm_scalarize_aggregate_phis(self.raw, self.context.raw);
                 let cleanup = c_string(
                     "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,simplifycfg,dse)",

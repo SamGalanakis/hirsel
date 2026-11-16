@@ -426,9 +426,9 @@ impl FunctionEmitter<'_> {
             return;
         }
         let counter = self.step_counter();
-        let before = self.load(&Type::I64, &counter, 8);
+        let before = self.load_steps(&counter);
         let after = self.bin(Binary::Sub, &Type::I64, &before, &int(1));
-        self.store(&Type::I64, &after, &counter, 8);
+        self.store_steps(&after, &counter);
         let positive = self.cmp(Predicate::Sgt, &Type::I64, &after, &int(0));
         let n = self.counter();
         let ready = Label::new("step_ready", n);

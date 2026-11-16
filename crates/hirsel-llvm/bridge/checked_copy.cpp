@@ -8,6 +8,8 @@
 #endif
 #include "loop_version.h"
 #include <llvm/Analysis/AliasAnalysis.h>
+#include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Transforms/Utils/PromoteMemToReg.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/ScalarEvolutionExpressions.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
@@ -176,4 +178,61 @@ extern "C" void hirsel_llvm_guard_copy_loops(void *Raw, void *Machine) noexcept 
   FunctionPassManager PM;
   PM.addPass(CheckedCopyPass(PB));
   for (Function &F : M) if (!F.isDeclaration()) PM.run(F, FAM);
+}
+
+// The step word is private runtime storage. Once calls have been inlined,
+// carry it through the resulting CFG and materialize it only where the
+// remaining call ABI or an exit can observe it. Program pointers never name it.
+static bool stepWord(Instruction &I, Value *Context, const DataLayout &DL) {
+  auto *Tag = I.getMetadata(LLVMContext::MD_tbaa);
+  auto *Type = Tag && Tag->getNumOperands() ? dyn_cast<MDNode>(Tag->getOperand(0)) : nullptr;
+  auto *Name = Type && Type->getNumOperands() ? dyn_cast<MDString>(Type->getOperand(0)) : nullptr;
+  if (!Name || Name->getString() != "steps") return false;
+  Value *P = nullptr;
+  if (auto *L = dyn_cast<LoadInst>(&I)) P = L->getPointerOperand();
+  if (auto *S = dyn_cast<StoreInst>(&I)) P = S->getPointerOperand();
+  if (!P) return false;
+  int64_t Offset = 0;
+  return GetPointerBaseWithConstantOffset(P, Offset, DL) == Context && Offset == 16;
+}
+extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
+  auto &M = *unwrap(static_cast<LLVMModuleRef>(ModuleRef));
+  for (Function &F : M) {
+    if (F.isDeclaration() || F.arg_empty() || !F.getArg(0)->getType()->isPointerTy()) continue;
+    SmallVector<Instruction *, 16> Accesses;
+    SmallVector<CallInst *, 16> Calls;
+    SmallVector<ReturnInst *, 8> Returns;
+    bool Supported = true;
+    for (BasicBlock &BB : F) for (Instruction &I : BB) {
+      if (stepWord(I, F.getArg(0), M.getDataLayout())) Accesses.push_back(&I);
+      if (auto *C = dyn_cast<CallBase>(&I)) {
+        if (auto *CI = dyn_cast<CallInst>(C)) {
+          if (CI->isMustTailCall()) Supported = false;
+          else if (!isa<IntrinsicInst>(CI)) Calls.push_back(CI);
+        } else Supported = false;
+      }
+      if (auto *R = dyn_cast<ReturnInst>(&I)) Returns.push_back(R);
+    }
+    if (Accesses.empty() || !Supported) continue;
+    auto *Tag = Accesses.front()->getMetadata(LLVMContext::MD_tbaa);
+    IRBuilder<> B(&*F.getEntryBlock().getFirstInsertionPt());
+    auto *Word = B.getInt64Ty();
+    auto *Counter = B.CreateAlloca(Word, nullptr, "step.window");
+    auto *Field = B.CreateConstGEP1_64(B.getInt8Ty(), F.getArg(0), 16, "step.field");
+    auto Read = [&]() { auto *V = B.CreateLoad(Word, Field); V->setMetadata(LLVMContext::MD_tbaa, Tag); return V; };
+    auto Write = [&]() { auto *S = B.CreateStore(B.CreateLoad(Word, Counter), Field); S->setMetadata(LLVMContext::MD_tbaa, Tag); };
+    B.CreateStore(Read(), Counter);
+    for (Instruction *I : Accesses) {
+      if (auto *L = dyn_cast<LoadInst>(I)) L->setOperand(0, Counter);
+      else cast<StoreInst>(I)->setOperand(1, Counter);
+      I->setMetadata(LLVMContext::MD_tbaa, nullptr);
+    }
+    for (CallInst *C : Calls) {
+      B.SetInsertPoint(C); Write();
+      B.SetInsertPoint(C->getNextNode()); B.CreateStore(Read(), Counter);
+    }
+    for (ReturnInst *R : Returns) { B.SetInsertPoint(R); Write(); }
+    DominatorTree DT(F);
+    PromoteMemToReg({Counter}, DT);
+  }
 }

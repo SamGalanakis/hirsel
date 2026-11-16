@@ -322,16 +322,16 @@ impl FunctionEmitter<'_> {
     }
     pub(super) fn flush_steps(&mut self) {
         if let Some(counter) = self.step_counter.clone() {
-            let value = self.load(&Type::I64, &counter, 8);
+            let value = self.load_steps(&counter);
             let context = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
-            self.store(&Type::I64, &value, &context, 8);
+            self.store_steps(&value, &context);
         }
     }
     pub(super) fn reload_steps(&mut self) {
         if let Some(counter) = self.step_counter.clone() {
             let context = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
-            let value = self.load(&Type::I64, &context, 8);
-            self.store(&Type::I64, &value, &counter, 8);
+            let value = self.load_steps(&context);
+            self.store_steps(&value, &counter);
         }
     }
 }
@@ -368,7 +368,7 @@ impl FunctionEmitter<'_> {
         let limit = self.step_word(plan.limit);
         let trips = self.bin(Binary::Sub, &Type::I64, &limit, &index);
         let counter = self.step_counter();
-        let before = self.load(&Type::I64, &counter, 8);
+        let before = self.load_steps(&counter);
         let quota = self.bin(Binary::UDiv, &Type::I64, &before, &int(plan.cost));
         let full = if let Some((start, count)) = plan.constant {
             let first = self.cmp(Predicate::Eq, &Type::I64, &index, &int(start));
@@ -396,7 +396,7 @@ impl FunctionEmitter<'_> {
             self.bin(Binary::Mul, &Type::I64, &trips, &int(plan.cost))
         };
         let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
-        self.store(&Type::I64, &after, &counter, 8);
+        self.store_steps(&after, &counter);
         self.br(version_label(
             number,
             self.body.blocks.len(),
@@ -416,7 +416,7 @@ impl FunctionEmitter<'_> {
         self.store(&Type::I64, &stop, &Value::Local(end), 8);
         let charge = self.bin(Binary::Mul, &Type::I64, &quota, &int(plan.cost));
         let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
-        self.store(&Type::I64, &after, &counter, 8);
+        self.store_steps(&after, &counter);
         self.br(version_label(
             number,
             self.body.blocks.len(),
@@ -487,7 +487,7 @@ impl FunctionEmitter<'_> {
     }
     fn step_settle_chunk(&mut self) {
         let counter = self.step_counter();
-        let remaining = self.load(&Type::I64, &counter, 8);
+        let remaining = self.load_steps(&counter);
         let positive = self.cmp(Predicate::Sgt, &Type::I64, &remaining, &int(0));
         let n = self.counter();
         let ready = Label::new("step_chunk_ready", n);
@@ -555,7 +555,7 @@ pub(super) fn merged(
 impl FunctionEmitter<'_> {
     pub(super) fn step_group(&mut self, sites: &[usize]) {
         let counter = self.step_counter();
-        let before = self.load(&Type::I64, &counter, 8);
+        let before = self.load_steps(&counter);
         let enough = self.cmp(
             Predicate::Sge,
             &Type::I64,
@@ -569,7 +569,7 @@ impl FunctionEmitter<'_> {
         self.likely(&enough, fast, checked);
         self.block(fast);
         let after = self.bin(Binary::Sub, &Type::I64, &before, &int(sites.len() as u64));
-        self.store(&Type::I64, &after, &counter, 8);
+        self.store_steps(&after, &counter);
         self.anchor = self.body.inst_anchors[*sites.last().unwrap()];
         self.step_settle_chunk();
         self.br(ready);

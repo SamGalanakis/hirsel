@@ -26,6 +26,7 @@ const NOALIAS_SCOPE: u32 = 1;
 const INVARIANT: u32 = 2;
 const PROF: u32 = 3;
 const RANGE: u32 = 4;
+const TBAA: u32 = 5;
 
 pub(crate) struct NativeSink {
     context: Rc<llvm::Context>,
@@ -318,6 +319,11 @@ impl NativeSink {
                 (self.api.attach)(self.unit, instruction, RANGE, range)
             }
         }
+        if let Some(tag) = m.tbaa {
+            let tag = self.md(tag);
+            // SAFETY: an access tag of this unit on its memory instruction.
+            unsafe { (self.api.attach)(self.unit, instruction, TBAA, tag) };
+        }
         self.scopes(instruction, &m.scopes);
     }
     fn scopes(&mut self, instruction: Raw, scopes: &Option<Scoped>) {
@@ -379,6 +385,7 @@ impl Sink for NativeSink {
                                 (api.metadata_string)(u, s.as_ptr().cast(), s.len())
                             }
                             MdItem::I32(n) => (api.metadata_integer)(u, 32, u64::from(*n)),
+                            MdItem::I64(n) => (api.metadata_integer)(u, 64, *n),
                         })
                         .collect();
                     (api.metadata_tuple)(u, items.as_ptr(), items.len(), u8::from(*distinct))

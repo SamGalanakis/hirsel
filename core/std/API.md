@@ -73,11 +73,7 @@ the seed's, read through one name. No extension declares a core member's name.
 | set |  | 6 | new, len, contains, insert, remove, entries |
 | string | yes | 15 | with_capacity, is_boundary, push_i64, push_uint, repeat, clear, find, starts_with, ends_with, split_once, next_split, next_line, strip_prefix, strip_suffix, trim_ascii |
 | tally |  | 7 | new, handle, index, update, flush, read, finish |
-| **total** | **7 of 19** | **276** | |
-=======
-| tally |  | 7 | new, handle, index, add, flush, read, finish |
-| **total** | **7 of 19** | **277** | |
->>>>>>> b89bce13 (std.codec: Reader is shareable + send, and decode_at and read_at read a value in place after a header)
+| **total** | **7 of 19** | **278** | |
 
 **Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
 and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that

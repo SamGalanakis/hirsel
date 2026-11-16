@@ -210,8 +210,11 @@ A failing candidate does not establish that the candidate caused the failure.
 Before bisecting a full failure, land checks bare main once. A named target that
 also fails there establishes a red base; unnamed checks must reproduce the same
 error. An unrelated base failure stops attribution without blaming a ticket.
-Green candidate checks can prove a subsequently published base green, without
-running that base again.
+A tree the train pushed is green by construction: every green check it pushes
+is recorded by its Git tree in the queue's `green-trees.json`, and a base whose
+tree is recorded is never checked again. The train's own cost-ceilings commit on
+top of a checked tree counts as that tree, because cost is report-only; a commit
+that changes any other path is checked as usual.
 
 Land records a reproduced failure in the queue's `red-main.json`, keyed by the
 exact base commit, and reports `main is red at <target>, first seen at <commit>`

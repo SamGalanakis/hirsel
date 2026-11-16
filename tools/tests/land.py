@@ -243,6 +243,41 @@ class Land(unittest.TestCase):
         self.assertEqual(source['corpora']['m1']['instructions_per_token'], dict(parse=100, index=80))
 
 
+    def red_ticket_after_a_ceilings_push(self, extra=None):
+        """Land a cost-relevant change (the train adds its ceilings commit), then queue a red ticket.
+
+        `extra` replaces the train's ceilings commit with one that also touches that path.
+        Returns the red ticket's output.
+        """
+        self.cost_change()
+        self.assertEqual(self.land().returncode, 0)
+        self.assertEqual(self.main_log()[0], 'land: ratchet measured cost ceilings')
+        self.git(self.lane, 'fetch', '-q', 'origin')
+        self.git(self.lane, 'checkout', '-q', '-B', 'my-lane', 'origin/main')
+        if extra:
+            (self.lane / extra).write_text('also changed\n')
+            self.git(self.lane, 'add', '-A')
+            self.git(self.lane, 'commit', '-q', '--amend', '--no-edit')
+            self.git(self.lane, 'push', '-qf', 'origin', 'HEAD:main')
+        (self.lane / 'broken-core-suite').write_text('red\n')
+        self.git(self.lane, 'add', 'broken-core-suite')
+        self.git(self.lane, 'commit', '-qm', 'red ticket')
+        red = self.land()
+        self.assertEqual(red.returncode, 1, red.stdout + red.stderr)
+        self.assertIn('core evaluator body failed', red.stdout)
+        return red.stdout
+
+    def test_a_tip_the_train_pushed_with_its_ceilings_commit_is_not_checked_again(self):
+        # The red ticket's own check is the only build: its base is the train's tip.
+        output = self.red_ticket_after_a_ceilings_push()
+        self.assertEqual(output.count('pass  workspace build'), 1, output)
+        self.assertIn('is a tree the train checked green', output)
+
+    def test_a_ceilings_commit_touching_another_path_is_checked_as_a_base(self):
+        output = self.red_ticket_after_a_ceilings_push(extra='other-path.txt')
+        self.assertEqual(output.count('pass  workspace build'), 2, output)
+        self.assertNotIn('is a tree the train checked green', output)
+
     def test_cost_tool_crash_refuses_the_push(self):
         self.cost_change()
         refused = self.land(FAKE_COST_CRASH='1')
@@ -1838,6 +1873,7 @@ class Units(unittest.TestCase):
         land = runpy.run_path(str(ROOT / 'tools/land'))
         verify = land['Batch'].verify_base
         batch = SimpleNamespace(base_checks={}, queue=SimpleNamespace(
+            green_tree=lambda base: False,
             record_red=lambda *args: self.fail('an unrelated base failure is not the same target')))
         candidate = ['FAIL  Core suites', 'failing targets: root//:candidate-target']
         bare_main = ['FAIL  Core suites', 'failing targets: root//:different-target']

@@ -109,6 +109,9 @@ CORE_ACCEPTANCE = (
 NAMED = re.compile(r'''['"](?:root)?//:([A-Za-z0-9_.+-]+)['"]''')
 REJECTED = ('[rejected]', 'fetch first', 'non-fast-forward', 'failed to update ref', 'cannot lock ref')
 LANDINGS = 'hirsel-landings.jsonl'
+# Trees the train checked green (land-queue/), so verify_base never checks a tip it pushed again.
+GREEN = 'green-trees.json'
+GREEN_KEPT = 256
 # Tickets per batch, the head's own included (bors-ng's max_batch_size).
 BATCH = 16
 # This process's own code, read before any rebase rewrites the file it was started from.
@@ -433,6 +436,31 @@ class LandQueue:
                     record.pop('notice')
                     self.write(ticket, record)
 
+    def record_green(self, tree, commit):
+        """Remember a tree the train checked green, keyed on its Git tree, not on a commit SHA."""
+        with self.locked():
+            path = self.directory / GREEN
+            trees = json.loads(path.read_text()) if path.exists() else {}
+            trees.pop(tree, None)
+            trees[tree] = dict(commit=commit, at=time.time())
+            self.write(path, dict(list(trees.items())[-GREEN_KEPT:]))
+
+    def green_tree(self, commit):
+        """True when `commit` is a tree the train checked green, or that tree plus only cost ceilings.
+
+        Cost is report-only, so the train's own ceilings commit on top of a
+        checked tree is part of that checked tree. A commit touching any other
+        path is not.
+        """
+        path = self.directory / GREEN
+        with self.locked():
+            trees = json.loads(path.read_text()) if path.exists() else {}
+        if (tree := tree_id(commit)) in trees:
+            return True
+        parent = git('rev-parse', '--verify', '-q', commit + '^1^{commit}').stdout.strip()
+        return bool(parent) and tree_id(parent) in trees and bool(
+            changed := changed_paths(parent, commit)) and changed <= set(generated.COST_CEILINGS)
+
     def notify_red(self, message):
         """One diagnosis for the whole cohort, without blaming its changes."""
         with self.locked():
@@ -512,6 +540,10 @@ def revision(name):
     if result.returncode or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value):
         raise ValueError(f'cannot resolve commit {name}: {result.stderr.strip()}')
     return value
+
+
+def tree_id(commit):
+    return git('rev-parse', '--verify', '-q', commit + '^{tree}').stdout.strip()
 
 
 def first_error(text, count=40):
@@ -1026,6 +1058,7 @@ class Batch:
 
     def publish(self, tip, landed):
         """Push a green tip at once, and hand each ticket it newly lands its commits."""
+        checked = tip
         tip = self.ratchet(tip, landed)
         done = {member for member, _ in self.landed}
         fresh = [(member, commits) for member, commits in landed if member not in done]
@@ -1067,6 +1100,8 @@ class Batch:
                 log.write(json.dumps(dict(landed=commits[-1], pushed=tip, base=self.pushed, branch=member.lane,
                                           unchecked_rebase=False, at=at), sort_keys=True) + '\n')
         self.landed += fresh
+        # The pushed tree is green by construction; its ceilings commit is part of it (green_tree).
+        self.queue.record_green(tree_id(checked), checked)
         self.queue.clear_red(self.pushed)
         self.pushed = tip
         done |= {member for member, _ in fresh}
@@ -1231,8 +1266,13 @@ class Batch:
         return self.pushed
 
     def verify_base(self, base, candidate_report):
+        if (base, 'full') not in self.base_checks and self.queue.green_tree(base):
+            say(f'origin/main {base[:12]} is a tree the train checked green; not checking it again')
+            self.base_checks[base, 'full'] = None
         if (base, 'full') not in self.base_checks:
             self.base_checks[base, 'full'] = candidate_check('full', base, base)
+            if self.base_checks[base, 'full'] is None:
+                self.queue.record_green(tree_id(base), base)
         if report := self.base_checks[base, 'full']:
             if targets := matching_checks(candidate_report, report):
                 raise MainRed(self.queue.record_red(base, report, targets))

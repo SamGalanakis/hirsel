@@ -426,7 +426,8 @@ impl Meter {
                 return;
             };
             *tare = [
-                (after - before - loop_tare) / N,
+                // A noisy sample can read under the loop tare: count it as no cost.
+                (after - before).saturating_sub(loop_tare) / N,
                 (image.result.borrow().index_instructions - inner) / N,
             ];
         }
@@ -440,7 +441,8 @@ impl Meter {
             return;
         };
         tares[2] = [
-            (after - before - loop_tare) / N,
+            // A noisy sample can read under the loop tare: count it as no cost.
+            (after - before).saturating_sub(loop_tare) / N,
             self.result.substages[0].instructions.unwrap_or(0) / N,
         ];
         self.result.substages.clear();

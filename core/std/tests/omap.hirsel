@@ -934,3 +934,37 @@ fn replaced_capacity() -> bool {
     }
     refused > 0 && succeeded > 0
 }
+
+fn separator_key(i: u64) -> Bytes {
+    let mut out: Bytes = result.unwrap(list.with_capacity(128))
+    result.unwrap(list.push(mut out, int.narrow(i / 256)))
+    result.unwrap(list.push(mut out, int.narrow(i % 256)))
+    for _ in 0u64 .. 126 {
+        result.unwrap(list.push(mut out, 0u8))
+    }
+    out
+}
+
+// A retained tree with 128-byte keys needs room for one copied leaf, not
+// another payload copy of every separator in both branch levels.
+// expect: run separator_payload_budget() = true
+fn separator_payload_budget() -> bool {
+    let mut ids: u64 = 0
+    let mut keys: List[Bytes] = result.unwrap(list.with_capacity(1100))
+    let mut values: List[u64] = result.unwrap(list.with_capacity(1100))
+    for i in 0u64 .. 1100 {
+        result.unwrap(list.push(mut keys, separator_key(i)))
+        result.unwrap(list.push(mut values, i))
+    }
+    let m = result.unwrap(omap.from_sorted(mut ids, keys, values))
+    let k = separator_key(500)
+    let answer = result.unwrap(bound bytes 7500 {
+        omap.insert(mut ids, m, take k, 9000)
+    })
+    match take answer {
+        Error(_) => false,
+        Ok((take changed, take old)) => {
+            omap.replaced_value(option.unwrap(take old)) == 500 && option.unwrap(omap.get(changed, separator_key(500))) == 9000 && option.unwrap(omap.get(m, separator_key(500))) == 500 && omap.len(changed) == 1100 && omap.len(m) == 1100
+        }
+    }
+}

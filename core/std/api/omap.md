@@ -7,9 +7,11 @@ persistent B+ tree with maximum fan-out 32 and minimum non-root occupancy 16.
 `new` allocates nothing, `snapshot` shares the root in O(1) without allocation,
 and `len` reads its entry count. `get`, `first` and `last` borrow one version.
 An update returns a new version while every held version retains its contents.
-Keys and values occupy contiguous node lists. Sharing is the client's choice
+Leaf keys and values occupy contiguous node lists. Branch separators are Arc[K]
+holders shared alongside their child holders. Sharing is the client's choice
 of payload type, for example `Arc[Bytes]`; scalar entries stay inline. Path copies clone their payloads
-and share untouched child subtrees. Branch search uses an upper bound with
+and share untouched child subtrees. An unchanged separator is shared rather than
+cloned; only a changed minimum or a new split boundary creates its holder. Branch search uses an upper bound with
 one comparison per step; leaf search uses a direct less-than comparison. Shared leaf insertion copies each entry
 once directly into its final leaf, including both halves of a split. Splitting
 a temporary owned leaf moves its entries without cloning their payloads. Resources fail the ordinary `shareable` bound.
@@ -74,9 +76,12 @@ nodes. Node level is zero at leaves. Leaf count is the number of key/value
 pairs; branch count is the number of children and their minimum keys. Keys,
 values and children outside their count return None. Branches have no values;
 leaves have no children. Node fields are stamp:u64, depth:u64, size:u64 and
-three 24-byte List headers. Logical node charge is 104 bytes plus the list
-capacities times their element sizes: K/V at leaves, K/Arc at branches, plus
-owned payload allocations. Full u64/u64 leaves charge 616 bytes. Consuming
+four 24-byte List headers. The additional list holds branch-only Arc[K]
+separators; leaf keys stay inline and branch keys are exposed by node_key through
+those holders. Logical node charge is 128 bytes plus the list
+capacities times their element sizes: K/V at leaves, Arc[K]/Arc[Node] at branches, plus
+owned payload allocations. Full u64/u64 leaves charge 640 bytes. Each distinct separator holder charges
+8 bytes plus K and its owned payload allocations; unchanged path copies share it. Consuming
 updates reserve spare leaf slots explicitly; fan-out by count stays 32.
 
 A checkpoint cutoff can skip a whole subtree whose id is already persisted.

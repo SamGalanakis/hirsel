@@ -1,0 +1,21 @@
+// One task, one root: test-polls.py checks the exact CONC-13 event sequence.
+// Scopes fix every drop: r1 and k die before the publish ends their block,
+// r2 before h, and h last, so its cleanup releases the root's last share.
+fn number(x:u64)->u64 { x }
+pub fn main(tasks:Tasks)->Result[(),Exit] waits {
+ let h=result.unwrap(latest.new(result.unwrap(arc.new(1u64))))
+ let first={
+  let r1=latest.read(h)
+  latest.publish(h,result.unwrap(arc.new(2u64)))
+  number(r1)
+ }
+ let second={
+  let r2=latest.read(h)
+  number(r2)
+ }
+ let third={
+  let k=latest.handle(h)
+  number(latest.read(k))
+ }
+ if first==1u64 && second==2u64 && third==2u64 { Ok(()) } else { Error(Exit(status:1u8)) }
+}

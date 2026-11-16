@@ -1,5 +1,6 @@
 // Latest[T] (CONC-13). Arc[u64] admits 16 bytes (counted(8)) and a root admits
-// LATEST_ROOT = 32. Each law repeats under a bound with no room for a leaked
+// 32, the figure CONC-13 states; every bound below is derived from that 32, so
+// a change to either the spec or the runtime's charge turns a law red. Each law repeats under a bound with no room for a leaked
 // root or share, so a missing refund or release fails a later iteration, and a
 // refusal checks that a bound is still exactly full.
 fn number(x: u64) -> u64 {
@@ -51,7 +52,7 @@ fn publish_releases_old_root() -> bool {
     }
 }
 
-// `new` under 47 bytes: the Arc takes 16, the root asks 32 of the 31 left and
+// `new` under 47 bytes: the Arc takes 16, the root asks CONC-13's 32 of the 31 left and
 // the error hands the same Arc back. The last cleanup refunds everything.
 // expect: run new_refused_hands_back() = true
 fn new_refused_hands_back() -> bool {

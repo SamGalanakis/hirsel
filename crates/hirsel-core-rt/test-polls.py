@@ -23,7 +23,7 @@ def main():
     parser.add_argument('--runtime', required=True, type=Path)
     parser.add_argument('--before', type=Path)
     parser.add_argument('--out', required=True, type=Path)
-    parser.add_argument('--only', nargs='+', default=['full', 'check', 'arc', 'capacity', 'latest'])
+    parser.add_argument('--only', nargs='+', default=['full', 'check', 'arc', 'capacity', 'latest', 'latest-order'])
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     wrapper = args.out / 'cc'
@@ -88,6 +88,28 @@ def main():
                 assert (record.returncode, replay.returncode) == (0, 0), (kind, engine, record, replay)
                 assert first.read_text() != trace.read_text(), 'the two schedules coincide'
                 row['schedules'] = 2
+            if kind == 'latest-order':
+                # CONC-13 by hand, kinds as the published ABI names them
+                # (hirsel_core_rt.h, hirsel_core_rt_tasks.h): every read and
+                # publish is its own kind; the read's share and the publish's
+                # release of the replaced Arc come right after it; new, handle
+                # and each handle's cleanup move the handle count; the last
+                # handle's cleanup releases the root's last share. Values: Arc
+                # share = count after, release = 1 if last, handle count after.
+                SENDERS, ARC_NEW, ARC_SHARE, ARC_RELEASE, PUBLISH, READ, END = 8, 10, 11, 12, 18, 19, 1
+                arc, root = '0', events[1][3]
+                expected = [(ARC_NEW, arc, 1), (SENDERS, root, 1),                   # arc.new(1), latest.new
+                            (READ, root, 0), (ARC_SHARE, arc, 2),                    # r1 = read
+                            (ARC_NEW, arc, 1), (PUBLISH, root, 0), (ARC_RELEASE, arc, 0),  # publish(arc.new(2)); r1 keeps 1
+                            (ARC_RELEASE, arc, 1),                                   # r1 dropped: last share of 1
+                            (READ, root, 0), (ARC_SHARE, arc, 2), (ARC_RELEASE, arc, 0),  # r2 = read, dropped
+                            (SENDERS, root, 2),                                      # k = handle
+                            (READ, root, 0), (ARC_SHARE, arc, 2), (ARC_RELEASE, arc, 0),  # read(k), dropped
+                            (SENDERS, root, 1), (SENDERS, root, 0), (ARC_RELEASE, arc, 1),  # k, h cleaned: root's share
+                            (END, '0', 0)]
+                got = [(int(e[1]), e[3], int(e[4])) for e in events]
+                assert root != arc and all(e[2] == '0' for e in events), events
+                assert got == expected, (engine, got)
             # A separately built runtime mutant omits the central poll switch.
             # Its source is never shipped; only the native test applies a timeout.
             if args.before:

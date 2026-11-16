@@ -100,8 +100,14 @@ struct Entry<'a> {
 }
 struct Variant<'a> {
     name: &'a str,
-    payload: Vec<(Option<&'a str>, Ty<'a>)>,
+    payload: Vec<Payload<'a>>,
     removed: bool,
+}
+struct Payload<'a> {
+    label: Option<&'a str>,
+    /// The type as written, for a frame's.
+    text: &'a str,
+    ty: Ty<'a>,
 }
 /// A field type as section 0's table reads it.
 enum Ty<'a> {
@@ -225,10 +231,11 @@ impl<'a> File<'a> {
                             .map(|&p| {
                                 let t = self.children(p)[0];
                                 self.mentions(item, t, &mut mentions);
-                                (
-                                    self.syntax.tree.node(p).token.map(|_| self.name(p)),
-                                    self.ty(item, t),
-                                )
+                                Payload {
+                                    label: self.syntax.tree.node(p).token.map(|_| self.name(p)),
+                                    text: self.text(item, t),
+                                    ty: self.ty(item, t),
+                                }
                             })
                             .collect(),
                         removed: self.kind(v) == NodeKind::RemovedVariant,
@@ -250,17 +257,40 @@ impl<'a> File<'a> {
     }
 }
 
-/// The generated text for every type of `syntax` that declares `codec`, outside a
-/// recursive group: a decode of one is a frame loop (SEM-10), not yet generated, so `of`
-/// at it is refused as a gap.
+/// The generated text for every type of `syntax` that declares `codec`. A member of a
+/// recursive group decodes by a frame loop (SEM-10); a group the loop cannot take (see
+/// [`Group::new`]) is not derived, so `of` at its members is refused as a gap.
 fn generate(syntax: &SyntaxFile, d: &Derive) -> String {
     let file = File { syntax };
     let decls: Vec<_> = syntax.items().filter_map(|item| file.decl(&item)).collect();
     let names: BTreeMap<_, _> = decls.iter().enumerate().map(|(i, d)| (d.name, i)).collect();
+    let reach = |a: usize, b: usize| reaches(&decls, &names, a, b, &mut BTreeSet::new());
+    // Per declaration: None outside a recursive group, else its group, if derived.
+    let mut group_of: Vec<Option<Option<(usize, usize)>>> = vec![None; decls.len()];
+    let mut groups = vec![];
+    for i in 0..decls.len() {
+        if group_of[i].is_some() || !reach(i, i) {
+            continue;
+        }
+        let members: Vec<_> = (0..decls.len())
+            .filter(|&j| j == i || (reach(i, j) && reach(j, i)))
+            .collect();
+        let group = Group::new(members.iter().map(|&j| &decls[j]).collect());
+        for (at, &j) in members.iter().enumerate() {
+            group_of[j] = Some(group.as_ref().map(|_| (groups.len(), at)));
+        }
+        groups.extend(group);
+    }
     let mut out = String::new();
     for (i, decl) in decls.iter().enumerate() {
-        if !reaches(&decls, &names, i, i, &mut BTreeSet::new()) {
-            Gen::new(d, decl).items(&mut out);
+        match group_of[i] {
+            None => Gen::new(d, decl).items(&mut out),
+            Some(Some((g, at))) => {
+                let mut w = Gen::new(d, decl);
+                w.group = Some((&groups[g], at));
+                w.items(&mut out)
+            }
+            Some(None) => {}
         }
     }
     out
@@ -281,6 +311,547 @@ fn reaches(
         .any(|&n| n == to || (seen.insert(n) && reaches(decls, names, n, to, seen)))
 }
 
+/// A recursive group whose decode the frame loop writes: its members reach each other
+/// only through a field or payload that is a member itself, or a List, Option or Map
+/// value of one, at the member's own parameters. A generic member is the group's only
+/// member. Anything else (a member inside a tuple, Result, a map key or another generic
+/// type, a List of Lists, or reached at other arguments: the polymorphic recursion the
+/// checker refuses) leaves the group underived.
+struct Group<'a> {
+    /// Each member and its type text, `D` or `D[P1, ..]`.
+    members: Vec<(&'a Decl<'a>, String)>,
+    /// Per member, per variant (a record is one), the live steps a decode reads.
+    shapes: Vec<Vec<Shape<'a>>>,
+}
+struct Shape<'a> {
+    /// The constructor: the record's name or the variant's.
+    name: &'a str,
+    removed: bool,
+    steps: Vec<Step<'a>>,
+}
+struct Step<'a> {
+    /// The record field's name or the payload's label.
+    label: Option<&'a str>,
+    /// The type as written.
+    text: &'a str,
+    ty: &'a Ty<'a>,
+    /// The member it decodes, and how.
+    edge: Option<(Edge<'a>, usize)>,
+}
+#[derive(Clone, Copy)]
+enum Edge<'a> {
+    Direct,
+    Option,
+    List,
+    /// A map's value, keyed by this type.
+    Map(&'a str),
+}
+impl<'a> Group<'a> {
+    fn new(members: Vec<&'a Decl<'a>>) -> Option<Self> {
+        if members.len() > 1 && members.iter().any(|m| !m.generics.is_empty()) {
+            return None;
+        }
+        let members: Vec<_> = members
+            .into_iter()
+            .map(|m| {
+                let ty = if m.generics.is_empty() {
+                    m.name.to_owned()
+                } else {
+                    let params: Vec<_> = m.generics.iter().map(|(n, _)| *n).collect();
+                    format!("{}[{}]", m.name, params.join(", "))
+                };
+                (m, ty)
+            })
+            .collect();
+        let bare = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let named = |t: &str| {
+            t.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| members.iter().any(|(m, _)| m.name == w))
+        };
+        // The member `t` is at its own parameters; Err when `t` names a member otherwise.
+        let member = |t: &str| -> Result<Option<usize>, ()> {
+            let t = bare(t);
+            match members
+                .iter()
+                .position(|(m, _)| t.split('[').next() == Some(m.name))
+            {
+                None => Ok(None),
+                Some(i) if t == bare(&members[i].1) => Ok(Some(i)),
+                Some(_) => Err(()),
+            }
+        };
+        let step = |label, text: &'a str, ty: &'a Ty<'a>| -> Option<Step<'a>> {
+            let edge = if !named(text) {
+                None
+            } else {
+                Some(match *ty {
+                    Ty::With(t) => (Edge::Direct, member(t).ok()??),
+                    Ty::List(e) => (Edge::List, member(e).ok()??),
+                    Ty::Option(e) => (Edge::Option, member(e).ok()??),
+                    Ty::Map(k, e) if !named(k) => (Edge::Map(k), member(e).ok()??),
+                    _ => return None,
+                })
+            };
+            Some(Step {
+                label,
+                text,
+                ty,
+                edge,
+            })
+        };
+        let mut shapes = vec![];
+        for (m, _) in &members {
+            shapes.push(match &m.body {
+                Body::Record(entries) => vec![Shape {
+                    name: m.name,
+                    removed: false,
+                    steps: entries
+                        .iter()
+                        .filter(|e| !e.removed)
+                        .map(|e| step(Some(e.name), e.text, &e.ty))
+                        .collect::<Option<_>>()?,
+                }],
+                Body::Sum(variants) => variants
+                    .iter()
+                    .map(|v| {
+                        let steps = if v.removed {
+                            vec![]
+                        } else {
+                            v.payload
+                                .iter()
+                                .map(|p| step(p.label, p.text, &p.ty))
+                                .collect::<Option<_>>()?
+                        };
+                        Some(Shape {
+                            name: v.name,
+                            removed: v.removed,
+                            steps,
+                        })
+                    })
+                    .collect::<Option<_>>()?,
+            });
+        }
+        Some(Group { members, shapes })
+    }
+    fn sum(&self, m: usize) -> bool {
+        matches!(self.members[m].0.body, Body::Sum(_))
+    }
+    /// Member `m`'s LEAST when it is a constant: every step's is (OWN-2 keeps the
+    /// members a member holds inline acyclic).
+    fn least(&self, m: usize, depth: usize) -> Option<u64> {
+        if depth > self.members.len() {
+            return None;
+        }
+        let step = |s: &Step| match (s.edge, s.ty) {
+            (Some((Edge::Direct, n)), _) => self.least(n, depth + 1),
+            (Some((Edge::Option, _)), _) => Some(4),
+            (Some(_), _) => Some(8),
+            (None, Ty::Scalar(_, n)) => Some(*n),
+            (None, Ty::List(_) | Ty::Map(..)) => Some(8),
+            (None, Ty::Option(_) | Ty::Result(..)) => Some(4),
+            (None, Ty::With(_)) => None,
+        };
+        let shape = |s: &Shape| s.steps.iter().map(step).sum::<Option<u64>>();
+        let live = self.shapes[m].iter().filter(|s| !s.removed).map(shape);
+        if !self.sum(m) {
+            return live.sum();
+        }
+        let mut least: Option<u64> = None;
+        for l in live {
+            let l = l?;
+            least = Some(least.map_or(l, |m| m.min(l)));
+        }
+        Some(4 + least.unwrap_or(0))
+    }
+}
+
+/// Each line of `text` indented four more.
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            if l.is_empty() {
+                "\n".to_owned()
+            } else {
+                format!("    {l}\n")
+            }
+        })
+        .collect()
+}
+
+/// A tuple of `xs`, or the one element itself.
+fn tuple(xs: &[String]) -> String {
+    match xs {
+        [x] => x.clone(),
+        _ => format!("({})", xs.join(", ")),
+    }
+}
+
+/// A recursive group member's decode, never on the call stack (SEM-10): one loop that
+/// starts a member's value (`next$` says which, in a group of several), and on finishing
+/// one, pops the frame waiting for it and resumes there. Each resume point (a step of a
+/// member's variant that decodes a member) has a stack of frames: tuples of the steps
+/// read before it and the edge's state (the list or map being filled, the count left, the
+/// next key). With several resume points a stack of their numbers says whose frame is on
+/// top, and a frame with nothing to hold is not stored. The value finished last is
+/// `done$`, or the slot `d{m}$` of its member in a group of several. No type is generated:
+/// the checker reads a `$` in a type's name as a template parameter.
+struct Machine<'a> {
+    g: &'a Group<'a>,
+    entry: usize,
+    /// Each resume point: member, variant, step.
+    resumes: Vec<(usize, usize, usize)>,
+}
+impl<'a> Machine<'a> {
+    fn new(g: &'a Group<'a>, entry: usize) -> Self {
+        let mut resumes = vec![];
+        for (m, shapes) in g.shapes.iter().enumerate() {
+            for (v, shape) in shapes.iter().enumerate() {
+                for (k, step) in shape.steps.iter().enumerate() {
+                    if step.edge.is_some() {
+                        resumes.push((m, v, k));
+                    }
+                }
+            }
+        }
+        Machine { g, entry, resumes }
+    }
+    fn tagged(&self) -> bool {
+        self.resumes.len() > 1
+    }
+    fn multi(&self) -> bool {
+        self.g.members.len() > 1
+    }
+    fn step(&self, r: usize) -> &'a Step<'a> {
+        let (m, v, k) = self.resumes[r];
+        &self.g.shapes[m][v].steps[k]
+    }
+    fn resume_at(&self, m: usize, v: usize, k: usize) -> usize {
+        self.resumes.iter().position(|&x| x == (m, v, k)).unwrap()
+    }
+    /// The types a frame of resume point `r` holds.
+    fn frame(&self, r: usize) -> Vec<String> {
+        let (m, v, k) = self.resumes[r];
+        let steps = &self.g.shapes[m][v].steps;
+        let mut types: Vec<_> = steps[..k].iter().map(|s| s.text.to_owned()).collect();
+        match steps[k].edge {
+            Some((Edge::List, _)) => types.extend([steps[k].text.to_owned(), "u64".into()]),
+            Some((Edge::Map(key), _)) => {
+                types.extend([steps[k].text.to_owned(), "u64".into(), key.to_owned()])
+            }
+            _ => {}
+        }
+        types
+    }
+    fn decode(&self, w: &mut Gen<'a>) -> String {
+        let mut s = String::new();
+        if self.tagged() {
+            s += "let mut ts$: List[u64] = list.new()\n";
+        }
+        for r in 0..self.resumes.len() {
+            let types = self.frame(r);
+            if !types.is_empty() {
+                let _ = writeln!(s, "let mut r{r}$: List[{}] = list.new()", tuple(&types));
+            }
+        }
+        let mut body = String::new();
+        let finish = if self.multi() {
+            for (i, (_, ty)) in self.g.members.iter().enumerate() {
+                let _ = writeln!(s, "let mut d{i}$: Option[{ty}] = None");
+            }
+            let _ = writeln!(s, "let mut next$: u64 = {}", self.entry);
+            let last = self.g.members.len() - 1;
+            for m in 0..=last {
+                let _ = match m {
+                    0 => writeln!(body, "if next$ == 0 {{"),
+                    _ if m == last => writeln!(body, "}} else {{"),
+                    _ => writeln!(body, "}} else if next$ == {m} {{"),
+                };
+                body += &indent(&self.start(w, m));
+            }
+            body += "}\n";
+            format!(
+                "return match replace(mut d{}$, None) {{ Some(y$) => Ok(take y$), None => Error(Bad(Invalid(at$))) }}",
+                self.entry
+            )
+        } else {
+            body += &self.start(w, 0);
+            "return Ok(take done$)".to_owned()
+        };
+        let mut unwind = String::new();
+        if self.tagged() {
+            let _ = writeln!(
+                unwind,
+                "let t$ = match list.pop(mut ts$) {{\n    Some(y$) => y$,\n    None => {finish}\n}}"
+            );
+            let last = self.resumes.len() - 1;
+            for r in 0..=last {
+                let _ = match r {
+                    0 => writeln!(unwind, "if t$ == 0 {{"),
+                    _ if r == last => writeln!(unwind, "}} else {{"),
+                    _ => writeln!(unwind, "}} else if t$ == {r} {{"),
+                };
+                unwind += &indent(&self.resume(w, r, &finish));
+            }
+            unwind += "}\n";
+        } else {
+            unwind += &self.resume(w, 0, &finish);
+        }
+        let _ = write!(body, "loop {{\n{}}}\n", indent(&unwind));
+        let _ = write!(s, "loop {{\n{}}}\n", indent(&body));
+        indent(&s)
+    }
+    /// Member `m`'s value from its first byte, finished into `done$` or its slot.
+    fn start(&self, w: &mut Gen<'a>, m: usize) -> String {
+        let shapes = &self.g.shapes[m];
+        if !self.g.sum(m) {
+            let (s, value) = self.seg(w, m, 0, 0, "a", "continue");
+            return s + &self.finished(m, value, true);
+        }
+        let c = w.c;
+        let mut s = String::new();
+        if shapes.iter().any(|v| v.removed) {
+            s += "let start$ = at$\n";
+        }
+        let _ = writeln!(s, "let tag$ = {c}.take_tag(b$, mut at$, {})?", shapes.len());
+        let mut branches = vec![];
+        for v in 0..shapes.len() {
+            branches.push(if shapes[v].removed {
+                "return Error(Bad(Invalid(start$)))\n".to_owned()
+            } else {
+                let (b, value) = self.seg(w, m, v, 0, "a", "continue");
+                match (self.multi(), value) {
+                    (false, Some(value)) => format!("{b}{value}\n"),
+                    (_, value) => b + &self.finished(m, value, false),
+                }
+            });
+        }
+        let single = !self.multi();
+        if branches.len() == 1 {
+            let b = branches.pop().unwrap();
+            if single {
+                // The one variant's statements, then its value as `done$`.
+                let (b, value) = b.trim_end().rsplit_once('\n').unwrap_or(("", b.trim_end()));
+                let _ = write!(s, "{b}\nlet mut done$ = {value}\n");
+            } else {
+                s += &b;
+            }
+            return s;
+        }
+        let last = branches.len() - 1;
+        s += if single { "let mut done$ = " } else { "" };
+        for (v, b) in branches.iter().enumerate() {
+            let _ = match v {
+                0 => writeln!(s, "if tag$ == 0 {{"),
+                _ if v == last => writeln!(s, "}} else {{"),
+                _ => writeln!(s, "}} else if tag$ == {v} {{"),
+            };
+            s += &indent(b);
+        }
+        s += "}\n";
+        s
+    }
+    /// The finished value of member `m`: into `done$`, declared at the start, or its slot.
+    fn finished(&self, m: usize, value: Option<String>, start: bool) -> String {
+        match value {
+            None => String::new(),
+            Some(v) if self.multi() => format!("d{m}$ = Some({v})\n"),
+            Some(v) if start => format!("let mut done$ = {v}\n"),
+            Some(v) => format!("done$ = {v}\n"),
+        }
+    }
+    /// Push a frame of resume point `r` holding `values`, and start its member.
+    fn push(&self, w: &Gen<'a>, r: usize, values: Vec<String>, jump: &str) -> String {
+        let c = w.c;
+        let mut s = String::new();
+        if !self.frame(r).is_empty() {
+            let _ = writeln!(s, "{c}.full(list.push(mut r{r}$, {}))?", tuple(&values));
+        }
+        if self.tagged() {
+            let _ = writeln!(s, "{c}.full(list.push(mut ts$, {r}u64))?");
+        }
+        if self.multi() {
+            let _ = writeln!(s, "next$ = {}", self.step(r).edge.unwrap().1);
+        }
+        let _ = writeln!(s, "{jump}");
+        s
+    }
+    /// The fewest bytes member `m` encodes to, for a count's check.
+    fn least(&self, w: &mut Gen<'a>, m: usize) -> String {
+        match self.g.least(m, 0) {
+            Some(n) => n.to_string(),
+            None => {
+                let g: &'a Group<'a> = self.g;
+                let o = w.of(&g.members[m].1);
+                format!("{}.least({o})", w.c)
+            }
+        }
+    }
+    /// The steps of member `m`'s variant `v` from `from`, values in `{pre}{k}$`, and the
+    /// value they make; None when a step started another member unconditionally.
+    fn seg(
+        &self,
+        w: &mut Gen<'a>,
+        m: usize,
+        v: usize,
+        from: usize,
+        pre: &str,
+        jump: &str,
+    ) -> (String, Option<String>) {
+        let c = w.c;
+        let shape = &self.g.shapes[m][v];
+        let saved = |k: usize| {
+            (0..k)
+                .map(|j| format!("take {pre}{j}$"))
+                .collect::<Vec<_>>()
+        };
+        let mut s = String::new();
+        for (k, step) in shape.steps.iter().enumerate().skip(from) {
+            let text = step.text;
+            let Some((edge, child)) = step.edge else {
+                let _ = writeln!(s, "let {pre}{k}$ = {}", w.take(step.ty));
+                continue;
+            };
+            let r = self.resume_at(m, v, k);
+            match edge {
+                Edge::Direct => {
+                    s += &self.push(w, r, saved(k), jump);
+                    return (s, None);
+                }
+                Edge::Option => {
+                    let push = self.push(w, r, saved(k), jump);
+                    let _ = write!(
+                        s,
+                        "if {c}.take_tag(b$, mut at$, 2)? != 0 {{\n{}}}\nlet {pre}{k}$: {text} = None\n",
+                        indent(&push)
+                    );
+                }
+                Edge::List => {
+                    let least = self.least(w, child);
+                    let mut values = saved(k);
+                    values.extend([format!("take {pre}k{k}$"), format!("{pre}n{k}$")]);
+                    let push = format!(
+                        "let {pre}k{k}$: {text} = {c}.room({pre}n{k}$)?\n{}",
+                        self.push(w, r, values, jump)
+                    );
+                    let _ = write!(
+                        s,
+                        "let {pre}n{k}$ = {c}.take_count(b$, mut at$, {least})?\nif {pre}n{k}$ > 0 {{\n{}}}\nlet {pre}{k}$: {text} = list.new()\n",
+                        indent(&push)
+                    );
+                }
+                Edge::Map(key) => {
+                    let least = self.least(w, child);
+                    let ck = w.of(key);
+                    let mut values = saved(k);
+                    values.extend([
+                        format!("take {pre}m{k}$"),
+                        format!("{pre}n{k}$"),
+                        format!("take {pre}q{k}$"),
+                    ]);
+                    let push = format!(
+                        "let {pre}q{k}$ = {c}.take_with(b$, mut at$, {ck})?\n{}",
+                        self.push(w, r, values, jump)
+                    );
+                    let _ = write!(
+                        s,
+                        "let {pre}n{k}$ = {c}.take_count(b$, mut at$, {c}.least({ck}) + {least})?\n\
+                         let mut {pre}m{k}$: {text} = map.new()\n\
+                         if let Error(f$) = map.reserve(mut {pre}m{k}$, {pre}n{k}$) {{\n    return Error(Full(f$))\n}}\n\
+                         if {pre}n{k}$ > 0 {{\n{}}}\nlet {pre}{k}$ = take {pre}m{k}$\n",
+                        indent(&push)
+                    );
+                }
+            }
+        }
+        let args: Vec<_> = shape
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(k, step)| match step.label {
+                Some(l) => format!("{l}: take {pre}{k}$"),
+                None => format!("take {pre}{k}$"),
+            })
+            .collect();
+        let value = if !self.g.sum(m) || !args.is_empty() {
+            format!("{}({})", shape.name, args.join(", "))
+        } else {
+            shape.name.to_owned()
+        };
+        (s, Some(value))
+    }
+    /// Resume point `r` with the value just finished: add it to the frame's list or map,
+    /// or take it as the step's value; then the steps after it.
+    fn resume(&self, w: &mut Gen<'a>, r: usize, finish: &str) -> String {
+        let c = w.c;
+        let (m, v, k) = self.resumes[r];
+        let step = self.step(r);
+        let (edge, child) = step.edge.unwrap();
+        let mut s = String::new();
+        let mut names: Vec<_> = (0..k).map(|j| format!("b{j}$")).collect();
+        match edge {
+            Edge::List => names.extend(["bk$".to_owned(), "bl$".to_owned()]),
+            Edge::Map(_) => names.extend(["bm$".into(), "bl$".into(), "bq$".into()]),
+            _ => {}
+        }
+        if !names.is_empty() {
+            let none = if self.tagged() {
+                "return Error(Bad(Invalid(at$)))"
+            } else {
+                finish
+            };
+            let _ = writeln!(
+                s,
+                "let {} = match list.pop(mut r{r}$) {{\n    Some(f$) => take f$,\n    None => {none}\n}}",
+                tuple(&names)
+            );
+        }
+        if self.multi() {
+            let _ = writeln!(
+                s,
+                "let x$ = match replace(mut d{child}$, None) {{\n    Some(y$) => take y$,\n    None => return Error(Bad(Invalid(at$)))\n}}"
+            );
+        } else {
+            s += "let x$ = take done$\n";
+        }
+        let saved = || (0..k).map(|j| format!("take b{j}$")).collect::<Vec<_>>();
+        match edge {
+            Edge::Direct => {
+                let _ = writeln!(s, "let b{k}$ = take x$");
+            }
+            Edge::Option => {
+                let _ = writeln!(s, "let b{k}$: {} = Some(take x$)", step.text);
+            }
+            Edge::List => {
+                let mut values = saved();
+                values.extend(["take bx$".to_owned(), "bl$ - 1".to_owned()]);
+                let push = self.push(w, r, values, "break");
+                let _ = write!(
+                    s,
+                    "let mut bx$ = take bk$\n{c}.full(list.push(mut bx$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
+                    indent(&push)
+                );
+            }
+            Edge::Map(key) => {
+                let ck = w.of(key);
+                let mut values = saved();
+                values.extend(["take bx$".into(), "bl$ - 1".into(), "take bn$".into()]);
+                let push = format!(
+                    "let key_at$ = at$\nlet bn$ = {c}.take_with(b$, mut at$, {ck})?\n\
+                     if map.contains(bx$, bn$) {{\n    return Error(Bad(Duplicate(key_at$)))\n}}\n{}",
+                    self.push(w, r, values, "break")
+                );
+                let _ = write!(
+                    s,
+                    "let mut bx$ = take bm$\n{c}.full(map.insert(mut bx$, take bq$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
+                    indent(&push)
+                );
+            }
+        }
+        let (rest, value) = self.seg(w, m, v, k + 1, "b", "break");
+        s + &rest + &self.finished(m, value, false)
+    }
+}
+
 struct Gen<'a> {
     c: &'a str,
     path: String,
@@ -291,6 +862,8 @@ struct Gen<'a> {
     /// The codec lets of the function being written, by type text.
     lets: BTreeMap<&'a str, String>,
     let_text: String,
+    /// The recursive group the type is a member of, and which member.
+    group: Option<(&'a Group<'a>, usize)>,
 }
 impl<'a> Gen<'a> {
     fn new(d: &'a Derive, decl: &'a Decl<'a>) -> Self {
@@ -320,6 +893,7 @@ impl<'a> Gen<'a> {
             generics,
             lets: BTreeMap::new(),
             let_text: String::new(),
+            group: None,
         }
     }
     /// The local holding `of[t]()`, let at the top of the current function.
@@ -433,9 +1007,10 @@ impl<'a> Gen<'a> {
             "fn {name}$encode{generics}(x$: {ty}, mut out$: Bytes) -> Result[(), Capacity]"
         );
         self.function(out, &header, &body);
-        let body = match &decl.body {
-            Body::Record(entries) => self.record_decode(entries),
-            Body::Sum(variants) => self.sum_decode(variants),
+        let body = match (self.group, &decl.body) {
+            (Some((g, at)), _) => Machine::new(g, at).decode(&mut self),
+            (None, Body::Record(entries)) => self.record_decode(entries),
+            (None, Body::Sum(variants)) => self.sum_decode(variants),
         };
         let header = format!(
             "fn {name}$decode{generics}(b$: Bytes, mut at$: u64) -> Result[{ty}, {c}.Stop]"
@@ -478,9 +1053,9 @@ impl<'a> Gen<'a> {
                 .payload
                 .iter()
                 .enumerate()
-                .map(|(i, (label, ty))| {
-                    steps.push(self.put(ty, &format!("p${i}")));
-                    label.map_or(format!("p${i}"), |l| format!("{l}: p${i}"))
+                .map(|(i, p)| {
+                    steps.push(self.put(&p.ty, &format!("p${i}")));
+                    p.label.map_or(format!("p${i}"), |l| format!("{l}: p${i}"))
                 })
                 .collect();
             let pattern = if binds.is_empty() {
@@ -524,9 +1099,9 @@ impl<'a> Gen<'a> {
                 let args: Vec<_> = v
                     .payload
                     .iter()
-                    .map(|(label, ty)| {
-                        let take = self.take(ty);
-                        label.map_or(take.clone(), |l| format!("{l}: {take}"))
+                    .map(|p| {
+                        let take = self.take(&p.ty);
+                        p.label.map_or(take.clone(), |l| format!("{l}: {take}"))
                     })
                     .collect();
                 format!("Ok({}({}))", v.name, args.join(", "))
@@ -597,8 +1172,8 @@ impl<'a> Gen<'a> {
                         v.name,
                         v.payload.len()
                     );
-                    for (_, ty) in &v.payload {
-                        s += &self.schema(ty);
+                    for p in &v.payload {
+                        s += &self.schema(&p.ty);
                     }
                 }
             }
@@ -625,7 +1200,7 @@ impl<'a> Gen<'a> {
                     let l = v
                         .payload
                         .iter()
-                        .fold(Least::fixed(0), |l, (_, ty)| l.plus(self.least(ty)));
+                        .fold(Least::fixed(0), |l, p| l.plus(self.least(&p.ty)));
                     if l.calls.is_empty() {
                         fixed = Some(fixed.map_or(l.fixed, |f| f.min(l.fixed)));
                     } else {

@@ -1687,3 +1687,154 @@ fn derived_generic() -> (bool, bool, u64, u64, (u64, bool, bool, bool, bool), (b
     let strung = (enc(ns, v) == strings, again(ns, strings))
     (written, schema, codec.least(c), held, nested, strung)
 }
+
+// A recursive type (EXPANSION 5), derived: its decode is the frame loop.
+type DTree: codec {
+    label: u64,
+    kids: List[DTree]
+}
+
+fn dpreorder(take t: DTree) -> u64 {
+    let mut digits: u64 = 0
+    let mut todo: List[DTree] = list.new()
+    result.unwrap(list.push(mut todo, take t))
+    while let Some(top) = list.pop(mut todo) {
+        let mut x = take top
+        digits = digits * 10 + x.label
+        while let Some(k) = list.pop(mut x.kids) {
+            result.unwrap(list.push(mut todo, take k))
+        }
+    }
+    digits
+}
+
+// A DTree chain of depth d (label i, one kid) decoded: its depth counted iteratively, a
+// decode error's code, or 9999 for Capacity.
+fn dchain(depth: u64) -> u64 {
+    let mut b: Bytes = result.unwrap(list.with_capacity(16 * depth + 16))
+    let mut i: u64 = 0
+    while i < depth {
+        result.unwrap(list.put_word_le(mut b, i))
+        result.unwrap(list.put_word_le(mut b, 1))
+        i += 1
+    }
+    result.unwrap(list.put_word_le(mut b, depth))
+    result.unwrap(list.put_word_le(mut b, 0))
+    let c: codec.Codec[DTree] = codec.of()
+    match codec.decode(c, b) {
+        Ok(Ok(t)) => {
+            let mut x = take t
+            let mut d: u64 = 0
+            while let Some(k) = list.pop(mut x.kids) {
+                x = take k
+                d += 1
+            }
+            d
+        }
+        Ok(Error(e)) => code(e),
+        Error(_) => 9999
+    }
+}
+
+// DTree against the twin trees(): the twin's schema at the derived path (the kids'
+// element a reference to the open definition), least 16, every prefix of Tree 1 [2 [], 3
+// [4 []]] Truncated and the whole read back in preorder; the swapped writer's bytes read
+// through resolution; a count no remaining bytes could hold Truncated at the count
+// (1008); and a chain 10^4 deep.
+// expect: run derived_tree() = (true, 16, true, 1234, 1234, 1008, 10000)
+fn derived_tree() -> (bool, u64, bool, u64, u64, u64, u64) {
+    let c: codec.Codec[DTree] = codec.of()
+    let schema = same_schema(c, result.unwrap(codec.schema(trees())), "std.tests.codec.DTree")
+    let read = match codec.decode(c, tree_bytes()) {
+        Ok(Ok(t)) => dpreorder(take t),
+        _ => 0
+    }
+    let swapped = match codec.decode(trees(), tree_bytes()) {
+        Ok(Ok(t)) => enc(swapped_trees(), t),
+        _ => list.new()
+    }
+    let old = match through(c, at_path(result.unwrap(codec.schema(swapped_trees())), "std.tests.codec.DTree"), swapped) {
+        Ok(t) => dpreorder(take t),
+        Error(k) => k
+    }
+    let lying = outcome(c, unhex("0100000000000000 ffffffffffffffff"))
+    (schema, codec.least(c), prefixes(c, tree_bytes()), read, old, lying, dchain(10000))
+}
+
+// A chain 10^6 deep decodes whole or stops at Capacity, never overflowing the stack as a
+// decoder that recursed per level would; engines only, as deep_tree.
+// expect: run derived_deep_tree(out) = true
+fn derived_deep_tree(out: Stdout) -> bool {
+    let d = dchain(1000000)
+    d == 1000000 || d == 9999
+}
+
+// A recursive group of two (EXPANSION 5's general rule): DExpr reaches DArg through a
+// List, DArg reaches DExpr directly and through an Option, and DExpr reaches itself
+// through a Map's values; a removed variant keeps its tag.
+type DExpr: codec = Num(u64) | Call(String, List[DArg]) | removed Old(u64) | Env(Map[u64, DExpr])
+
+type DArg: codec {
+    name: u8,
+    value: DExpr,
+    default: Option[DExpr]
+}
+
+// Numbers, plus 100 per call name's byte, 1000 per argument name, 10000 per map key.
+fn dsum(e: DExpr) -> u64 {
+    match e {
+        Num(n) => n,
+        Call(f, args) => {
+            let mut s = 100 * string.byte_len(f)
+            for a in args {
+                let n: u64 = int.widen(a.name)
+                s += 1000 * n + dsum(a.value)
+                if let Some(d) = a.default {
+                    s += dsum(d)
+                }
+            }
+            s
+        }
+        Env(m) => {
+            let mut s: u64 = 0
+            for (k, v) in m {
+                s += 10000 * k + dsum(v)
+            }
+            s
+        }
+    }
+}
+
+fn dexpr_sum(b: Bytes) -> u64 {
+    let c: codec.Codec[DExpr] = codec.of()
+    match codec.decode(c, b) {
+        Ok(Ok(e)) => dsum(e),
+        Ok(Error(e)) => code(e),
+        Error(_) => 9999
+    }
+}
+
+// A generic member reached at its own parameter.
+type DGTree[T]: codec {
+    label: T,
+    kids: List[DGTree[T]]
+}
+
+// Call("f", [DArg(1, Num(7), Some(Env({5: Num(6)}))), DArg(2, Call("g", []), None)]),
+// written by hand (tags u32: Num 0, Call 1, Old 2, Env 3; Option 0/1), reads back to its
+// sum 53213 and every prefix is Truncated; the second argument alone reads through DArg's
+// own decode. Least by hand: DExpr 4 + min(8, 16, 8) = 12, DArg 1 + 12 + 4 = 17. Refused
+// at their offsets: the removed Old's tag (2000), an Option tag 2 (2034), a map key
+// repeated (4032), a call's count no bytes could hold (1012). DGTree[String] "a" ["b"]
+// round-trips, its count checked against least(of[String]) + 8 = 16.
+// expect: run derived_group() = (53213, true, true, (12, 17), (2000, 2034, 4032, 1012), (true, 16))
+fn derived_group() -> (u64, bool, bool, (u64, u64), (u64, u64, u64, u64), (bool, u64)) {
+    let c: codec.Codec[DExpr] = codec.of()
+    let a: codec.Codec[DArg] = codec.of()
+    let call = unhex("01000000 0100000000000000 66 0200000000000000 01 00000000 0700000000000000 01000000 03000000 0100000000000000 0500000000000000 00000000 0600000000000000 02 01000000 0100000000000000 67 0000000000000000 00000000")
+    let arg = unhex("02 01000000 0100000000000000 67 0000000000000000 00000000")
+    let refused = (outcome(c, unhex("02000000 0700000000000000")), outcome(c, unhex("01000000 0100000000000000 66 0100000000000000 01 00000000 0700000000000000 02000000")), outcome(c, unhex("03000000 0200000000000000 0500000000000000 00000000 0600000000000000 0500000000000000 00000000 0700000000000000")), outcome(c, unhex("01000000 0000000000000000 ffffffffffffffff")))
+    let g: codec.Codec[DGTree[String]] = codec.of()
+    let generic = (again(g, unhex("0100000000000000 61 0100000000000000 0100000000000000 62 0000000000000000")), codec.least(g))
+    (dexpr_sum(call), prefixes(c, call), again(a, arg), (codec.least(c), codec.least(a)), refused, generic)
+}

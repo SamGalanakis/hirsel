@@ -1,0 +1,30 @@
+type Nest[T]: codec = Leaf(T) | Deeper(List[Nest[(T, T)]])
+
+type Tree[T]: codec {
+    label: T,
+    kids: List[Tree[T]]
+}
+
+type Swap[A, B]: codec {
+    kids: List[Swap[B, A]]
+}
+
+type Even[T]: codec {
+    odd: List[Odd[T]]
+}
+
+type Odd[T]: codec {
+    even: Option[Even[(T, u64)]]
+}
+
+type Forest: codec {
+    trees: List[Tree[u64]]
+}
+
+type Plain: codec {
+    kids: List[Plain]
+}
+// expect: refuse SEM-10 at 1:40
+// expect: refuse SEM-10 at 9:5
+// expect: refuse SEM-10 at 13:5
+// expect: refuse SEM-10 at 17:5

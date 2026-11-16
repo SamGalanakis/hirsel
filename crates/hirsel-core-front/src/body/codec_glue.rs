@@ -247,25 +247,18 @@ pub fn derive(
     let mut sig = d.module.signatures[old.index()].clone();
     let plan = scalar_abi::Plan::signature(d.module, &mut sig, &op.abi());
     let signature = signature_id(d.module, sig);
-    let old_calls = c.body.calls.iter().map(|c| c.signature).collect::<Vec<_>>();
-    let mut plans = HashMap::default();
-    for &id in &old_calls {
-        let n = d.module.signatures[id.index()].params.len();
-        plans.insert(
-            id,
-            scalar_abi::Plan {
-                params: vec![scalar_abi::Change::Keep; n],
-                result: scalar_abi::Change::Keep,
-            },
-        );
-    }
-    plans.insert(old, plan);
+    let old_calls = c
+        .body
+        .calls
+        .iter()
+        .map(|call| scalar_abi::CallPlan::fixed(d.module, call.signature))
+        .collect::<Vec<_>>();
     scalar_abi::rewrite(
         d.module,
         &d.recipes,
         &mut c.body,
         old,
-        &plans,
+        &plan,
         &old_calls,
         &[],
     );

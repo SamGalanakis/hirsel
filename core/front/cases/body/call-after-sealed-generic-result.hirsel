@@ -195,3 +195,27 @@ pub fn check_try_receive() -> u64 {
         None => 0
     }
 }
+
+// Scalar runtime outputs retain the fixed operation ABI too.
+// expect: run check_try_receive_scalar() = 37
+pub fn check_try_receive_scalar() -> u64 {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    result.unwrap(channel.try_send(tx, 37u64))
+    match poll(rx) {
+        Some(take n) => n,
+        None => 0
+    }
+}
+
+// Waiting receive uses the same fixed output ABI; its source caller still
+// specializes the generic argument and return convention.
+fn transfer_item[T: send](tx: Sender[T], rx: Receiver[T], take x: T) -> T waits {
+    result.unwrap(channel.send(tx, take x))
+    result.unwrap(channel.receive(rx))
+}
+
+// expect: run check_receive_scalar() = 41
+pub fn check_receive_scalar() -> u64 waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    transfer_item(tx, rx, 41u64)
+}

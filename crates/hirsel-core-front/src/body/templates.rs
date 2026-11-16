@@ -770,7 +770,6 @@ fn fill(
         plans: HashMap::default(),
     };
     let old_signature = s.module.functions[source.index()].signature;
-    let old_calls = body.calls.iter().map(|c| c.signature).collect::<Vec<_>>();
     let signature = s.signature(old_signature);
     s.module.functions[target.index()].signature = signature;
     for ty in &mut body.slots {
@@ -779,13 +778,33 @@ fn fill(
     for address in &mut body.addresses {
         s.place(&mut address.ty);
     }
+    let mut old_calls = Vec::with_capacity(body.calls.len());
     for call in &mut body.calls {
-        call.callee = match call.callee {
-            Callee::Direct(f) => Callee::Direct(s.function(f)),
-            Callee::Runtime(op) => Callee::Runtime(s.runtime(op)),
-            callee => callee,
-        };
-        call.signature = s.signature(call.signature);
+        if let Callee::Runtime(op) = call.callee {
+            let op = s.runtime(op);
+            let signature = op.signature();
+            let id = match s.module.signatures.iter().position(|old| *old == signature) {
+                Some(row) => SigId(row as u32),
+                None => {
+                    let row = SigId(s.module.signatures.len() as u32);
+                    s.module.signatures.push(signature);
+                    row
+                }
+            };
+            call.callee = Callee::Runtime(op);
+            call.signature = id;
+            old_calls.push(scalar_abi::CallPlan::fixed(s.module, id));
+        } else {
+            let old = call.signature;
+            if let Callee::Direct(f) = call.callee {
+                call.callee = Callee::Direct(s.function(f));
+            }
+            call.signature = s.signature(old);
+            old_calls.push(scalar_abi::CallPlan {
+                signature: old,
+                conversion: s.plans[&old].clone(),
+            });
+        }
     }
     for inst in &mut body.insts {
         match inst {
@@ -881,7 +900,7 @@ fn fill(
         &recipes,
         &mut body,
         old_signature,
-        &s.plans,
+        &s.plans[&old_signature],
         &old_calls,
         &template.numeric_sites,
     );

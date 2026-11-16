@@ -751,25 +751,18 @@ impl Derive<'_> {
         let plan = scalar_abi::Plan::signature(self.module, &mut sig, &op.abi());
         debug_assert_eq!(sig, sealed);
         let signature = signature_id(self.module, sig);
-        let old_calls = c.body.calls.iter().map(|c| c.signature).collect::<Vec<_>>();
-        let mut plans = HashMap::default();
-        for &id in &old_calls {
-            let sig = &self.module.signatures[id.index()];
-            plans.insert(
-                id,
-                scalar_abi::Plan {
-                    params: vec![scalar_abi::Change::Keep; sig.params.len()],
-                    result: scalar_abi::Change::Keep,
-                },
-            );
-        }
-        plans.insert(old, plan);
+        let old_calls = c
+            .body
+            .calls
+            .iter()
+            .map(|call| scalar_abi::CallPlan::fixed(self.module, call.signature))
+            .collect::<Vec<_>>();
         scalar_abi::rewrite(
             self.module,
             &self.recipes,
             &mut c.body,
             old,
-            &plans,
+            &plan,
             &old_calls,
             &[],
         );

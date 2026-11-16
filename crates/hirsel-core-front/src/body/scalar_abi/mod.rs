@@ -154,18 +154,32 @@ impl Code<'_> {
     }
 }
 
+/// Conversion belongs to a call site: a fixed runtime ABI can share a signature
+/// shape with a source function whose declared places follow scalar carriage.
+pub(super) struct CallPlan {
+    pub(super) signature: SigId,
+    pub(super) conversion: Plan,
+}
+impl CallPlan {
+    pub(super) fn fixed(module: &Module, signature: SigId) -> Self {
+        Self {
+            signature,
+            conversion: Plan::keep(&module.signatures[signature.index()]),
+        }
+    }
+}
+
 pub(super) fn rewrite(
     module: &Module,
     recipes: &[Recipe],
     body: &mut Body,
     old_signature: SigId,
-    plans: &HashMap<SigId, Plan>,
-    old_calls: &[SigId],
+    own: &Plan,
+    old_calls: &[CallPlan],
     numeric_sites: &[NumericSite],
 ) {
-    let unchanged =
-        !plans[&old_signature].changed() && old_calls.iter().all(|s| !plans[s].changed());
-    let dest = convert(module, body, old_signature, plans, old_calls);
+    let unchanged = !own.changed() && old_calls.iter().all(|call| !call.conversion.changed());
+    let dest = convert(module, body, old_signature, own, old_calls);
     numeric::inline(module, body, numeric_sites);
     key_glue::inline_ordered(module, body);
     // A carrier-only body, such as Map's index installation, has no rigid scalar
@@ -273,23 +287,32 @@ pub(super) fn seal<T>(
         }
         let own = module.functions[f].signature;
         if let Some(mut body) = module.functions[f].body.take() {
-            let old_calls = body.calls.iter().map(|c| c.signature).collect::<Vec<_>>();
-            if plans.contains_key(&own) || old_calls.iter().any(|s| plans.contains_key(s)) {
-                // This body's signatures: the sealed ones by their plans, the rest kept.
-                let local = old_calls
-                    .iter()
-                    .chain([&own])
-                    .map(|&id| {
-                        let plan = plans.get(&id).cloned();
-                        (
-                            id,
-                            plan.unwrap_or_else(|| Plan::keep(&module.signatures[id.index()])),
-                        )
-                    })
-                    .collect();
-                convert(module, &mut body, own, &local, &old_calls);
+            let old_calls = body
+                .calls
+                .iter()
+                .map(|call| {
+                    if matches!(call.callee, Callee::Runtime(_)) {
+                        CallPlan::fixed(module, call.signature)
+                    } else {
+                        CallPlan {
+                            signature: call.signature,
+                            conversion: plans.get(&call.signature).cloned().unwrap_or_else(|| {
+                                Plan::keep(&module.signatures[call.signature.index()])
+                            }),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>();
+            let own_plan = plans
+                .get(&own)
+                .cloned()
+                .unwrap_or_else(|| Plan::keep(&module.signatures[own.index()]));
+            if own_plan.changed() || old_calls.iter().any(|call| call.conversion.changed()) {
+                convert(module, &mut body, own, &own_plan, &old_calls);
                 for call in &mut body.calls {
-                    if let Some(&id) = renamed.get(&call.signature) {
+                    if !matches!(call.callee, Callee::Runtime(_))
+                        && let Some(&id) = renamed.get(&call.signature)
+                    {
                         call.signature = id;
                     }
                 }
@@ -308,11 +331,10 @@ fn convert(
     module: &Module,
     body: &mut Body,
     old_signature: SigId,
-    plans: &HashMap<SigId, Plan>,
-    old_calls: &[SigId],
+    own: &Plan,
+    old_calls: &[CallPlan],
 ) -> Option<SlotId> {
-    let own = &plans[&old_signature];
-    if !own.changed() && old_calls.iter().all(|s| !plans[s].changed()) {
+    if !own.changed() && old_calls.iter().all(|call| !call.conversion.changed()) {
         return None;
     }
     let old = std::mem::take(&mut body.insts);
@@ -372,10 +394,10 @@ fn convert(
         for i in range.start as usize..(range.start + range.len) as usize {
             c.anchor = old_anchors[i];
             if let Inst::Call { call } = old[i] {
-                let plan = &plans[&old_calls[call.index()]];
+                let plan = &old_calls[call.index()].conversion;
                 let site = c.body.calls[call.index()].clone();
                 let args = site.args.get(&c.body.pools.args).unwrap().to_vec();
-                let old_sig = &module.signatures[old_calls[call.index()].index()];
+                let old_sig = &module.signatures[old_calls[call.index()].signature.index()];
                 let mut k = usize::from(old_sig.dest.is_some());
                 let mut passed = Vec::with_capacity(args.len());
                 let output = match plan.result {

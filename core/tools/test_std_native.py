@@ -12,7 +12,7 @@ from std_native import Contract, discover, first_stop, observation, owner, wrapp
 
 
 class Walker(unittest.TestCase):
-    def test_task_law_gets_grant_on_both_engines_and_is_native_only(self):
+    def test_task_law_gets_grant_and_runs_on_three_engines(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             tests = root / 'core/std/tests'
@@ -27,6 +27,11 @@ class Walker(unittest.TestCase):
             calls = []
             def compiler(argv, **kwargs):
                 calls.append(argv)
+                if argv[0] == str(root / 'evaluator'):
+                    self.assertEqual(argv[-1], 'std@1/tests/task_law/native_contract')
+                    observed = dict(outcome=dict(kind='returned', values=[1]),
+                                    stdout=[], stderr=[], used=0)
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(observed).encode(), b'')
                 self.assertIn(['--grant', 'Tasks'], [argv[i:i+2] for i in range(len(argv)-1)])
                 test = dict(definition='std@1/tests/task_law/native_contract', passed=True,
                             status=0, stdout='', stderr='')
@@ -34,11 +39,9 @@ class Walker(unittest.TestCase):
             with patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
                 rows = run(root, root / 'compiler', root / 'runtime', cases,
                            ['evaluator', 'cranelift', 'llvm'], None, [], evaluator=root / 'evaluator')
-            self.assertEqual(len(calls), 2)
-            self.assertFalse(rows[0]['applicable'])
-            self.assertTrue(rows[0]['native_only'])
-            self.assertIsNone(rows[0]['passed'])
-            self.assertTrue(all(r['ran'] and r['passed'] for r in rows[1:]))
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(all(r['applicable'] and not r['native_only'] for r in rows))
+            self.assertTrue(all(r['ran'] and r['passed'] for r in rows))
 
     def test_selection_never_turns_an_empty_filter_green(self):
         with tempfile.TemporaryDirectory() as temp:

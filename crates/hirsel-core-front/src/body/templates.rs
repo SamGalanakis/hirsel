@@ -728,6 +728,9 @@ impl Substitution<'_> {
             RtOp::Receive { item } => RtOp::Receive {
                 item: self.ty(item),
             },
+            RtOp::TryReceive { item } => RtOp::TryReceive {
+                item: self.ty(item),
+            },
             op => op,
         }
     }

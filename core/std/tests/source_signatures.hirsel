@@ -166,3 +166,24 @@ fn template_adapter[T](unused: T) -> u64 {
         Greater => 3
     }
 }
+
+// Runtime rows inside a generic body substitute the same item as its signature.
+fn poll[T: send](rx: Receiver[T]) -> Option[T] {
+    match channel.try_receive(rx) {
+        Ok(take x) => Some(take x),
+        Error(_) => None
+    }
+}
+
+// expect: run check_try_receive() = 37
+pub fn check_try_receive() -> u64 {
+    let (tx, rx): (Sender[(u64, u64)], Receiver[(u64, u64)]) = result.unwrap(channel.new(1))
+    result.unwrap(channel.try_send(tx, (19u64, 18u64)))
+    match poll(rx) {
+        Some(take pair) => {
+            let (a, b) = take pair;
+            a + b
+        },
+        None => 0
+    }
+}

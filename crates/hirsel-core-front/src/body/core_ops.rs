@@ -1976,10 +1976,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     && (!open_static
                         || (!fd.path.package_is("core", "1") && !fd.path.package_is("std", "1")))
                     && (!open_static
-                        || fd
-                            .params
-                            .iter()
-                            .all(|param| matches!(param.mode, Mode::View | Mode::Bytes)))
+                        || fd.params.iter().all(|param| {
+                            matches!(param.mode, Mode::View | Mode::Take | Mode::Bytes)
+                        }))
                     && (open_static || fd.callable == callable))
                     .then_some(i)
             })

@@ -1177,7 +1177,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             && source
                 .params
                 .iter()
-                .all(|param| matches!(param.mode, Mode::View | Mode::Bytes))
+                .all(|param| matches!(param.mode, Mode::View | Mode::Take | Mode::Bytes))
     }
 
     /// MEM-17: why `clone` or `clone_in` of an `x: T` expecting `U` is refused, if it is.

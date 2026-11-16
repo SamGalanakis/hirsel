@@ -30,3 +30,14 @@ pub fn mute(b: Bytes) -> Result[Bytes, Capacity] {
 pub fn echo_code() -> StaticFn[fn(Bytes) -> Result[Bytes, Capacity]] {
     code.describe(echo)
 }
+
+// Hook D: a generic registration adapter may take an owned typed argument.
+pub fn typed_call[A: codec, R: codec](f: StaticFn[fn(take A) -> Result[R, Capacity]], take a: A) -> Result[R, Capacity] {
+    let _ = code.identity(f)
+    let invoke = code.callable(f)
+    invoke(take a)
+}
+
+pub fn typed_sum[A: codec, R: codec](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> u64 {
+    sum_of(f)
+}

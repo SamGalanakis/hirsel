@@ -75,13 +75,7 @@ impl Program<'_> {
                         _ => None,
                     };
                     let valid = fd.is_some_and(|f| {
-                        if part == "from" { return self.codec_from_shape(f, d, via.ty, &params); }
-                        let TyKind::Adt(owner, args) = self.types.kind(f.params.first().map_or(ERROR, |p| p.ty)) else { return false };
-                        f.at.module == at.module && !f.waits && f.generics.len() == decl.generics.len()
-                            && f.generics.iter().zip(&params).all(|(g, &bounds)| g.bounds & !bounds == 0)
-                            && f.params.len() == 1 && f.params[0].mode == Mode::View && !f.params[0].bytes
-                            && owner.index() == d && args.iter().enumerate().all(|(i, &a)| matches!(self.types.kind(a), TyKind::Param(p) if *p as usize == i))
-                            && f.anchors == [0] && matches!(self.types.kind(f.result), TyKind::View(r) if *r == via.ty)
+                        self.codec_owner_shape(f, d, via.ty, &params, part == "to")
                     });
                     if !valid {
                         out.push(refusal("SEM-10", self.site(at, node), if part == "to" {
@@ -141,31 +135,80 @@ impl Program<'_> {
             self.refusals.extend(out);
         }
     }
-    fn codec_from_shape(&self, f: &FnDecl, d: usize, r: TyId, params: &[u16]) -> bool {
+    fn codec_owner_shape(&self, f: &FnDecl, d: usize, r: TyId, params: &[u16], to: bool) -> bool {
         if f.at.module != self.decls[d].at.module
             || f.waits
-            || f.generics.len() != params.len()
-            || !f
-                .generics
-                .iter()
-                .zip(params)
-                .all(|(g, &bounds)| g.bounds & !bounds == 0)
             || f.params.len() != 1
-            || f.params[0].mode != Mode::Take
+            || f.params[0].mode != if to { Mode::View } else { Mode::Take }
             || f.params[0].bytes
-            || f.params[0].ty != r
+            || f.outlives.iter().any(|(a, b)| a != b)
         {
             return false;
         }
-        let TyKind::Adt(result, args) = self.types.kind(f.result) else {
+        let owner = if to {
+            f.params[0].ty
+        } else {
+            let TyKind::Adt(result, args) = self.types.kind(f.result) else {
+                return false;
+            };
+            if !self.decls[result.index()].structural
+                || self.decls[result.index()].path.0.name != "Result"
+                || args.len() != 2
+            {
+                return false;
+            }
+            args[0]
+        };
+        let TyKind::Adt(owner, xs) = self.types.kind(owner) else {
             return false;
         };
-        if self.decls[result.index()].path.0.name != "Result"
-            || !self.decls[result.index()].structural
-            || args.len() != 2
-        {
+        if owner.index() != d || xs.len() != params.len() {
             return false;
         }
-        matches!(self.types.kind(args[0]), TyKind::Adt(owner, xs) if owner.index() == d && xs.iter().enumerate().all(|(i, &a)| matches!(self.types.kind(a), TyKind::Param(p) if *p as usize == i)))
+        // Match the function's binders to the declaration through Self. A spelling
+        // or binder order has no meaning; an extra bound or repeated binder does.
+        let mut t = Local::new(&self.types);
+        let mut arguments = vec![ERROR; f.generics.len()];
+        for (i, &x) in xs.iter().enumerate() {
+            let (p, region) = match t.kind(x) {
+                TyKind::Param(p) => (*p as usize, false),
+                TyKind::Region(Root::Generic(p)) => (*p as usize, true),
+                _ => return false,
+            };
+            let Some(generic) = f.generics.get(p) else {
+                return false;
+            };
+            if arguments[p] != ERROR
+                || generic.region != region
+                || region != self.decls[d].generics[i].region
+                || generic.bounds & !params[i] != 0
+            {
+                return false;
+            }
+            arguments[p] = t.mk(if region {
+                TyKind::Region(Root::Generic(i as u32))
+            } else {
+                TyKind::Param(i as u32)
+            });
+        }
+        for (i, argument) in arguments.iter_mut().enumerate() {
+            if *argument == ERROR {
+                // An unused region binder is erased and needs no inference;
+                // an unused type binder cannot be chosen by a codec call.
+                if !f.generics[i].region {
+                    return false;
+                }
+                *argument = t.mk(TyKind::Region(Root::Generic((params.len() + i) as u32)));
+            }
+        }
+        if to {
+            if f.anchors != [0] {
+                return false;
+            }
+            let result = subst(&mut t, f.result, &arguments);
+            matches!(t.kind(result), TyKind::View(referent) if *referent == r)
+        } else {
+            subst(&mut t, f.params[0].ty, &arguments) == r
+        }
     }
 }

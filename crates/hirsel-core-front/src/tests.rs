@@ -1228,9 +1228,24 @@ fn inferred_callable_kind_fits_emit_their_carriers() {
 }
 
 #[test]
+fn codec_typed_static_registration() {
+    let mut failures = run_case(&root().join("cases/body/callable-codec-register.hirsel"));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-codec-register-refused.hirsel"),
+    ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn codec_overrides_and_tombstones() {
     let mut report = vec![];
-    for name in ["schema-accepted", "schema-refused", "via-refused"] {
+    for name in [
+        "schema-accepted",
+        "schema-refused",
+        "via-refused",
+        "via-generic-owners",
+        "via-generic-owner-refused",
+    ] {
         report.extend(
             run_case(&root().join(format!("cases/body/codec-{name}.hirsel")))
                 .into_iter()

@@ -3,5 +3,8 @@
   {"name": "cross_same", "value": 1, "used": 0},
   {"name": "cross_sum", "value": 488096, "used": 0},
   {"name": "cross_eq_same", "value": 1, "used": 0},
-  {"name": "cross_eq_other", "value": 0, "used": 0}
+  {"name": "cross_eq_other", "value": 0, "used": 0},
+  {"name": "cross_owned_number", "value": 41, "used": 0},
+  {"name": "cross_owned_text", "value": 2, "used": 0},
+  {"name": "cross_owned_identity", "value": 835002, "used": 0}
 ]

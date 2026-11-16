@@ -1,0 +1,34 @@
+// A via owner signature is invariant under renaming/reordering its binders.
+type Pair[T, U]: codec via(T, U) (to: pair_view, from: pair_from) {
+    value: (T, U)
+}
+
+fn pair_view[U, T](x: Pair[T, U]) -> View[(T, U)] in x {
+    view x.value
+}
+
+fn pair_from[U, T](take value: (T, U)) -> Result[Pair[T, U], ()] {
+    Ok(Pair(value: value))
+}
+
+type InRegion[in r]: codec via u64(to: region_view, from: region_from) {
+    n: u64
+}
+
+fn region_view[in spare, in r](x: InRegion[in r]) -> View[u64] in x {
+    view x.n
+}
+
+fn region_from[in spare, in r](take n: u64) -> Result[InRegion[in r], ()] {
+    Ok(InRegion(n: n))
+}
+
+fn require[T: codec](x: T) -> u64 {
+    1u64
+}
+
+pub fn generic_owner() -> u64 {
+    let p = Pair(value: (2u64, true))
+    require(p)
+}
+// expect: run generic_owner() = 1

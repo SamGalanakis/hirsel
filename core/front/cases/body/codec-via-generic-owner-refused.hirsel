@@ -1,0 +1,11 @@
+type Strong[T]: codec via T (to: strong_view, from: strong_from) { value: T }
+fn strong_view[T: key](x: Strong[T]) -> View[T] in x { view x.value }
+fn strong_from[T: key](take value: T) -> Result[Strong[T], ()] { Ok(Strong(value: value)) }
+// expect: refuse SEM-10 at 1:34
+// expect: refuse SEM-10 at 1:53
+
+type Ordered[in a, in b]: codec via u64 (to: ordered_view, from: ordered_from) { n: u64 }
+fn ordered_view[in a, in b](x: Ordered[in a, in b]) -> View[u64] in x where a: b { view x.n }
+fn ordered_from[in a, in b](take n: u64) -> Result[Ordered[in a, in b], ()] where a: b { Ok(Ordered(n: n)) }
+// expect: refuse SEM-10 at 7:46
+// expect: refuse SEM-10 at 7:66

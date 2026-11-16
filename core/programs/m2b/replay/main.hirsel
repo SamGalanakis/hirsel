@@ -402,3 +402,32 @@ pub fn case_cross_eq_other() -> u64 {
         0
     }
 }
+
+fn owned_number(take n: u64) -> Result[u64, Capacity] {
+    Ok(n + 1u64)
+}
+
+fn owned_text(take s: String) -> Result[String, Capacity] {
+    Ok(s)
+}
+
+pub fn case_cross_owned_number() -> u64 {
+    let n = 40u64
+    match lib.lib.typed_call(code.describe(owned_number), take n) {
+        Ok(delivered_value) => delivered_value,
+        Error(_) => 0u64
+    }
+}
+
+pub fn case_cross_owned_text() -> u64 {
+    let s = "ok"
+    let delivered_text = match lib.lib.typed_call(code.describe(owned_text), take s) {
+        Ok(delivered_value) => delivered_value,
+        Error(_) => return 0u64
+    }
+    list.len(string.as_bytes(delivered_text))
+}
+
+pub fn case_cross_owned_identity() -> u64 {
+    lib.lib.typed_sum(code.describe(owned_number)) + lib.lib.typed_sum(code.describe(owned_text))
+}

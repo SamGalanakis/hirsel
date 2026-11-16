@@ -25,3 +25,16 @@ function: equal identity bytes (PROG-9), whichever unit made the value.
 
 A `StaticFn` of `lib.mute` made in `app` is not equal to `lib`'s `StaticFn` of `echo`, though both have the same body: a
 name is part of the identity bytes and a body is not.
+
+## Hook D typed registration
+
+`cross_owned_number = 41`: package lib's generic codec-bounded adapter calls the
+app's owned u64 handler on 40, giving 41. `cross_owned_text = 2`: its other
+instance takes and returns the owned String "ok", whose two UTF-8 bytes survive.
+Both refund all admissions.
+
+`cross_owned_identity = 835002`: lib's generic typed descriptor delegates to
+its generic identity checksum. Apply sum(byte[i] * (i + 1)) independently to
+0x01 followed by `app@1/main/owned_number(take u64)->core@1/core/Result[u64,core@1/core/Capacity]`
+and to 0x01 followed by `app@1/main/owned_text(take core@1/core/String)->core@1/core/Result[core@1/core/String,core@1/core/Capacity]`, then add the two sums.
+These are PROG-9's definition paths and full signatures, written by hand; no engine output is an oracle.

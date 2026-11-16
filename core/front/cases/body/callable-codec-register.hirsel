@@ -1,0 +1,97 @@
+// Hook D: a typed StaticFn passes through one generic registration body.
+type Registry {
+    count: u64,
+    same: bool
+}
+
+type Entry[A, R] {
+    f: StaticFn[fn(take A) -> Result[R, Capacity]]
+}
+
+fn register[A: codec, R: codec](mut registry: Registry, f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Entry[A, R] {
+    registry.count += 1u64
+    registry.same = code.identity(f) == code.identity(f)
+    Entry(f: f)
+}
+
+fn call[A: codec, R: codec](entry: Entry[A, R], take a: A) -> Result[R, Capacity] {
+    let invoke = code.callable(entry.f)
+    invoke(take a)
+}
+
+fn identity[A: codec, R: codec](entry: Entry[A, R], candidate: StaticFn[fn(take A) -> Result[R, Capacity]]) -> bool {
+    code.identity(entry.f) == code.identity(candidate) && entry.f == candidate
+}
+
+fn repeat(take s: String) -> Result[String, Capacity] {
+    Ok(s)
+}
+
+fn number(take n: u64) -> Result[u64, Capacity] {
+    Ok(n + 1u64)
+}
+
+fn alternate(take n: u64) -> Result[u64, Capacity] {
+    Ok(n + 2u64)
+}
+
+pub fn registration() -> u64 {
+    let mut registry = Registry(count: 0u64, same: false)
+    let text_entry = register(mut registry, code.describe(repeat))
+    let number_entry = register(mut registry, code.describe(number))
+    let input = "ok"
+    let text = match call(text_entry, take input) {
+        Ok(s) => s,
+        Error(_) => return 0u64
+    }
+    let forty = 40u64
+    let n = match call(number_entry, take forty) {
+        Ok(n) => n,
+        Error(_) => return 0u64
+    }
+    if registry.same && registry.count == 2u64 && list.len(string.as_bytes(text)) == 2u64 {
+        n
+    } else {
+        0u64
+    }
+}
+
+pub fn identities() -> u64 {
+    let mut registry = Registry(count: 0u64, same: false)
+    let a = register(mut registry, code.describe(number))
+    let b = register(mut registry, code.describe(alternate))
+    let c = register(mut registry, code.describe(repeat))
+    if identity(a, code.describe(number)) && !identity(b, code.describe(number)) && identity(c, code.describe(repeat)) && code.identity(a.f) != code.identity(c.f) {
+        1u64
+    } else {
+        0u64
+    }
+}
+
+// expect: run registration() = 41
+// expect: run identities() = 1
+fn identity_sum[A: codec, R: codec](entry: Entry[A, R]) -> u64 {
+    let data = code.identity(entry.f)
+    let mut sum = 0u64
+    let mut i = 0u64
+    while i < list.len(data) {
+        let octet: u64 = int.widen(data[i])
+        sum += octet * (i + 1u64)
+        i += 1u64
+    }
+    sum
+}
+
+pub fn number_identity() -> u64 {
+    let mut registry = Registry(count: 0u64, same: false)
+    let entry = register(mut registry, code.describe(number))
+    identity_sum(entry)
+}
+
+pub fn string_identity() -> u64 {
+    let mut registry = Registry(count: 0u64, same: false)
+    let entry = register(mut registry, code.describe(repeat))
+    identity_sum(entry)
+}
+// expect: run number_identity() = 249054
+// expect: run string_identity() = 502577

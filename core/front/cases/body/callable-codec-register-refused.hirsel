@@ -1,0 +1,20 @@
+fn register[A: codec, R: codec](f: StaticFn[fn(take A) -> Result[R, Capacity]]) { }
+fn mutate(mut n: u64) -> Result[u64, Capacity] { n += 1u64; Ok(n) }
+fn rejects_mut() { register(code.describe(mutate)) }
+fn view_result(n: u64) -> View[u64] in n { view n }
+fn rejects_view() { register(code.describe(view_result)) }
+fn owner(take f: HostFile) -> Result[u64, Capacity] { Ok(1u64) }
+fn rejects_noncodec() { register(code.describe(owner)) }
+fn captures() {
+    let outside = 2u64
+    register(code.describe(scoped fn(take x: u64) -> Result[u64, Capacity] { Ok(x + outside) }))
+}
+// expect: refuse LANG-11 at 3:29
+// expect: refuse LANG-13 at 5:44
+// expect: refuse LANG-12 at 7:34
+// expect: refuse OWN-19 at 10:28
+// expect: refuse LANG-11 at 10:14
+// expect: compared LANG-11 at 10:14 | core@1/core/StaticFn[scoped fn(take u64) -> core@1/core/Result[u64, core@1/core/Capacity]] | core@1/core/StaticFn[fn(take _) -> core@1/core/Result[_, core@1/core/Capacity]]
+// expect: compared LANG-11 at 3:29 | core@1/core/StaticFn[fn(mut u64) -> core@1/core/Result[u64, core@1/core/Capacity]] | core@1/core/StaticFn[fn(take _) -> core@1/core/Result[_, core@1/core/Capacity]]
+// expect: compared LANG-12 at 7:34 | core@1/core/HostFile | codec
+// expect: compared OWN-19 at 10:28 | scoped fn(take u64) -> core@1/core/Result[u64, core@1/core/Capacity] | not scoped

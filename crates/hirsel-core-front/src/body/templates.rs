@@ -610,6 +610,9 @@ impl Substitution<'_> {
             RtOp::ChannelNew { item } => RtOp::ChannelNew {
                 item: self.ty(item),
             },
+            RtOp::LatestNew { item } => RtOp::LatestNew {
+                item: self.ty(item),
+            },
             RtOp::Send { item } => RtOp::Send {
                 item: self.ty(item),
             },

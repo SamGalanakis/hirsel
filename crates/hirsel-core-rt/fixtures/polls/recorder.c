@@ -1,5 +1,6 @@
 /* Test-only link wrapper. Records exact semantic events and runnable choices.
-   Replay checks every candidate count, choice and event in sequence. */
+   Replay checks every candidate count, choice and event in sequence.
+   HIRSEL_POLL_FIRST records the schedule that always runs the first candidate. */
 #include "hirsel_core_rt.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +19,7 @@ static size_t choose(void *s,size_t n) {
     size_t count,c;
     if(replay) {
         if(fscanf(trace," C %zu %zu",&count,&c)!=2 || count!=n || c>=n) abort();
-    } else { c=n-1; fprintf(trace,"C %zu %zu\n",n,c); }
+    } else { c=getenv("HIRSEL_POLL_FIRST") ? 0 : n-1; fprintf(trace,"C %zu %zu\n",n,c); }
     return c;
 }
 uint8_t __real_hirsel_core_run(const HirselCoreProcessConfig*,HirselCoreEntry);

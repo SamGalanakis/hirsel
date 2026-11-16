@@ -710,6 +710,15 @@ pub enum RtOp {
     TryReceive {
         item: TypeId,
     },
+    /// `latest.new`: `item` is `Arc[T]`, whose drop the root keeps for its last handle.
+    LatestNew {
+        item: TypeId,
+    },
+    LatestHandle,
+    /// Installs a node and returns the old root's node, which the caller releases.
+    LatestPublish,
+    /// The root's node, which the caller shares before any other event.
+    LatestRead,
     DestId,
     /// Bytewise order of two byte ranges (SEM-7): `String`, `Text` and `Bytes`.
     CompareBytes,
@@ -911,6 +920,9 @@ impl RtOp {
             RtOp::TrySend { item } => (vec![V(p), take(item)], vec![u8_]),
             RtOp::Receive { item } => (vec![V(p), out(item)], vec![bool_]),
             RtOp::TryReceive { item } => (vec![V(p), out(item)], vec![u8_]),
+            RtOp::LatestNew { .. } => (vec![V(p)], vec![p, u64_]),
+            RtOp::LatestHandle | RtOp::LatestRead => (vec![V(p)], vec![p]),
+            RtOp::LatestPublish => (vec![V(p), V(p)], vec![p]),
             RtOp::DestId => (vec![], vec![u64_]),
             RtOp::CompareBytes => (
                 vec![V(p), V(u64_), V(p), V(u64_)],
@@ -970,10 +982,14 @@ impl RtOp {
             | RtOp::Send { item }
             | RtOp::TrySend { item }
             | RtOp::Receive { item }
-            | RtOp::TryReceive { item } => vec![item],
+            | RtOp::TryReceive { item }
+            | RtOp::LatestNew { item } => vec![item],
             RtOp::Cancel
             | RtOp::CheckCancel
             | RtOp::ChannelSender
+            | RtOp::LatestHandle
+            | RtOp::LatestPublish
+            | RtOp::LatestRead
             | RtOp::DestId
             | RtOp::CompareBytes
             | RtOp::HashBytes

@@ -945,9 +945,9 @@ fn measure<'r>(
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
-        | FieldTy::Handle(Handle::Task | Handle::Capability | Handle::Causes | Handle::HostFile) => {
-            (POINTER, POINTER, 8)
-        }
+        | FieldTy::Handle(
+            Handle::Task | Handle::Capability | Handle::Causes | Handle::HostFile | Handle::Latest,
+        ) => (POINTER, POINTER, 8),
         FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
         FieldTy::Seq(_) | FieldTy::Map(..) => (SEQ_CARRIER, POINTER, 24),
         FieldTy::OwnFn => (CLOSURE_CARRIER, POINTER, 16),
@@ -966,9 +966,9 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
         FieldTy::Array(e, _) => array_element(shapes, e),
         FieldTy::Borrow
         | FieldTy::View(_)
-        | FieldTy::Handle(Handle::Task | Handle::Sender | Handle::Receiver | Handle::HostFile) => {
-            false
-        }
+        | FieldTy::Handle(
+            Handle::Task | Handle::Sender | Handle::Receiver | Handle::Latest | Handle::HostFile,
+        ) => false,
         _ => true,
     }
 }
@@ -1105,7 +1105,12 @@ fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool
         | FieldTy::Map(..)
         | FieldTy::OwnFn
         | FieldTy::Handle(
-            Handle::Task | Handle::Sender | Handle::Receiver | Handle::Causes | Handle::HostFile,
+            Handle::Task
+            | Handle::Sender
+            | Handle::Receiver
+            | Handle::Latest
+            | Handle::Causes
+            | Handle::HostFile,
         ) => true,
         FieldTy::Array(e, n) => *n > 0 && drops(shapes, e, drop),
         _ => false,

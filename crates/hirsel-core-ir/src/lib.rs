@@ -22,7 +22,8 @@
 //! `unreachable`, which also follows a read of a binder of type `Never`; logical admission and refund with bound scopes (`limit_enter`,
 //! `limit_exit`); task custody through runtime calls (`rt.spawn`, `rt.join`,
 //! `rt.cancel`, `rt.check_cancel`, `rt.channel_new`, `rt.channel_sender`,
-//! `rt.send`, `rt.try_send`, `rt.receive`). Rule texts: failure.md, budgets.md and
+//! `rt.send`, `rt.try_send`, `rt.receive`, and `Latest`'s `rt.latest_new`,
+//! `rt.latest_handle`, `rt.latest_publish`, `rt.latest_read`, CONC-13). Rule texts: failure.md, budgets.md and
 //! tasks.md (FAIL-2..14, MEM-14..16, MEM-19..28, CONC-3..9).
 //!
 //! **FORM v1b (frozen at spec revision 4):**

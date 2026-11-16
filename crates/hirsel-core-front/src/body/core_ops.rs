@@ -23,6 +23,10 @@ pub(crate) enum Kernel {
     Cancel,
     Join,
     ChannelNew,
+    LatestNew,
+    LatestHandle,
+    LatestPublish,
+    LatestRead,
     ChannelSender,
     Send,
     TrySend,
@@ -64,6 +68,10 @@ macro_rules! operations {
 operations! {
     ("int", "parse", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("core", "isolate", Lane::PendingCode, "A", "core-check-callables-913", false),
+    ("latest", "new", Lane::Runtime(Kernel::LatestNew), "A", "core-ops-914", false),
+    ("latest", "handle", Lane::Runtime(Kernel::LatestHandle), "A", "core-ops-914", false),
+    ("latest", "publish", Lane::Runtime(Kernel::LatestPublish), "A", "core-ops-914", false),
+    ("latest", "read", Lane::Runtime(Kernel::LatestRead), "A", "core-ops-914", false),
     ("log", "new", Lane::Runtime(Kernel::LogNew), "B", "core-ops-914", false),
     ("log", "append", Lane::Runtime(Kernel::LogAppend), "B", "core-ops-914", false),
     ("log", "finish", Lane::Runtime(Kernel::LogFinish), "B", "core-ops-914", false),
@@ -621,6 +629,47 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.runtime_carrier(result, handle, n)
             }
             Kernel::ChannelNew => self.runtime_channel(types[0], vals[0]?, result, n),
+            Kernel::LatestNew => self.runtime_latest_new(vals[0], result, n),
+            Kernel::LatestHandle => {
+                let handle = self.runtime_handle(vals[0]?, n);
+                let [handle, ..] =
+                    self.runtime_row(RtOp::LatestHandle, &[Arg::Value(handle)], n)?;
+                self.runtime_carrier(result, handle, n)
+            }
+            Kernel::LatestPublish => {
+                let id = self.runtime_type(types[0], n)?;
+                let handle = self.runtime_handle(vals[0]?, n);
+                let node = self.runtime_handle(vals[1]?, n);
+                let [old, ..] = self.runtime_row(
+                    RtOp::LatestPublish,
+                    &[Arg::Value(handle), Arg::Value(node)],
+                    n,
+                )?;
+                // The root now owns the published Arc; the caller owns the old one.
+                self.consume(vals[1], n);
+                self.inst(
+                    Inst::Release {
+                        node: old,
+                        kind: Counted::Arc,
+                        ty: id,
+                    },
+                    n,
+                );
+                None
+            }
+            Kernel::LatestRead => {
+                let handle = self.runtime_handle(vals[0]?, n);
+                let [node, ..] = self.runtime_row(RtOp::LatestRead, &[Arg::Value(handle)], n)?;
+                // The read's share is the next event after its read event.
+                self.inst(
+                    Inst::Share {
+                        node,
+                        kind: Counted::Arc,
+                    },
+                    n,
+                );
+                self.runtime_carrier(result, node, n)
+            }
             Kernel::Send | Kernel::TrySend => {
                 self.runtime_send(kernel, types[0], vals[0]?, vals[1], result, n)
             }
@@ -847,6 +896,66 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let value = self.pointer(to, n);
         self.temp(ty, Some(value));
         Some(value)
+    }
+
+    /// `latest.new`: the root admits `LATEST_ROOT` from the current limit; a
+    /// refusal hands the taken `Arc[T]` back in the error (CONC-13).
+    fn runtime_latest_new(
+        &mut self,
+        arc: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        // The refusal pair `(Capacity, Arc[T])` names the root's item type.
+        let TyKind::Adt(_, outcome) = self.t.kind(result).clone() else {
+            self.gap(n, "a latest.new result that is not a Result is not built");
+            return None;
+        };
+        let TyKind::Tuple(pair) = self.t.kind(outcome[1]).clone() else {
+            self.gap(n, "a latest.new refusal that is not a pair is not built");
+            return None;
+        };
+        let item = pair[1];
+        let id = self.runtime_type(item, n)?;
+        let rep = self.rep_at(item, n)?;
+        let node = self.runtime_handle(arc?, n);
+        let requested = self.konst(
+            Ty::Scalar(Scalar::U64),
+            hirsel_core_layout::charge::LATEST_ROOT,
+            n,
+        )?;
+        let [latest, available, ..] =
+            self.runtime_row(RtOp::LatestNew { item: id }, &[Arg::Value(node)], n)?;
+        // The root owns the Arc on success; the error owns it on refusal.
+        self.consume(arc, n);
+        let ok = self.runtime_nonzero(Ty::Ptr, latest, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                {
+                    cx.runtime_store(at, &[Step::Field(0)], Ty::Ptr, latest, n);
+                }
+            },
+            |cx, to, pair| {
+                let TyKind::Tuple(parts) = cx.t.kind(pair).clone() else {
+                    return;
+                };
+                if let Some(to) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], pair, n)
+                {
+                    if let Some(at) = cx.runtime_field(to, &[Step::Field(0)], parts[0], n) {
+                        cx.runtime_capacity(at, requested, available, n);
+                    }
+                    if let Some(at) = cx.runtime_field(to, &[Step::Field(1)], item, n) {
+                        cx.install(at, rep, arc, n);
+                    }
+                }
+            },
+        )
     }
 
     fn runtime_channel(
@@ -1272,6 +1381,10 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::Cancel
             | Kernel::Join
             | Kernel::ChannelNew
+            | Kernel::LatestNew
+            | Kernel::LatestHandle
+            | Kernel::LatestPublish
+            | Kernel::LatestRead
             | Kernel::ChannelSender
             | Kernel::Send
             | Kernel::TrySend

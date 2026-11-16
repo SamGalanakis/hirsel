@@ -23,16 +23,18 @@ def main():
     parser.add_argument('--runtime', required=True, type=Path)
     parser.add_argument('--before', type=Path)
     parser.add_argument('--out', required=True, type=Path)
-    parser.add_argument('--only', nargs='+', default=['full', 'check', 'arc', 'capacity'])
+    parser.add_argument('--only', nargs='+', default=['full', 'check', 'arc', 'capacity', 'latest'])
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     wrapper = args.out / 'cc'
     # This is a test-only link observer; neither emitted code nor runtime has a
     # timeout, mutation flag, or file recorder. Compiler objects remain unchanged.
+    # It runs clang (the pinned one first on PATH): the driver replays only a
+    # clang `-cc1` compile of the recorder it adds to the link.
     wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\na=sys.argv[1:]\n'
                        'if "--version" not in a:\n a += ' + repr([
                            str(FIXTURES / 'recorder.c'), '-I', str(ROOT / 'crates/hirsel-core-rt/include'),
-                           '-Wl,--wrap=hirsel_core_run']) + '\nos.execvp("cc",["cc",*a])\n')
+                           '-Wl,--wrap=hirsel_core_run']) + '\nos.execvp("clang",["clang",*a])\n')
     wrapper.chmod(0o755)
     core = dict(name='core', version='1')
     template = dict(core=core, packages=[
@@ -74,6 +76,18 @@ def main():
             assert bool(cancels) == (kind in ('full', 'check')), (kind, cancels)
             row = dict(kind=kind, engine=engine, recorded=True, replayed=True, unrecorded=True,
                        events=len(events), cancelled=cancels)
+            if kind == 'latest':
+                # CONC-13: publish (18) and read (19) are ordered events that
+                # record no value, and replay holds under a second schedule.
+                latest = [e for e in events if e[1] in ('18', '19')]
+                assert latest and all(e[-1] == '0' for e in latest), latest
+                first = folder / 'trace-first'
+                env = dict(os.environ, HIRSEL_POLL_TRACE=str(first), HIRSEL_POLL_FIRST='1')
+                record = subprocess.run([str(binary)], capture_output=True, env=env, timeout=5)
+                replay = subprocess.run([str(binary)], capture_output=True, env=dict(env, HIRSEL_POLL_REPLAY='1'), timeout=5)
+                assert (record.returncode, replay.returncode) == (0, 0), (kind, engine, record, replay)
+                assert first.read_text() != trace.read_text(), 'the two schedules coincide'
+                row['schedules'] = 2
             # A separately built runtime mutant omits the central poll switch.
             # Its source is never shipped; only the native test applies a timeout.
             if args.before:

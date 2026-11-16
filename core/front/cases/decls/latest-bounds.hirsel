@@ -1,0 +1,23 @@
+// CONC-13: Latest[T] is send and a cleaned resource, never shareable, key,
+// ordered or codec, and it gives no view of its payload (only read's Arc).
+type Shares: shareable { l: Latest[u64] }
+type Keyed: key { l: Latest[u64] }
+type Ordered: ordered { l: Latest[u64] }
+type Coded: codec { l: Latest[u64] }
+type Sent: send { l: Latest[u64] }
+fn number(x: u64) -> u64 { x }
+fn peek(h: Latest[u64]) -> u64 { number(h) }
+fn shared[T: shareable + send](x: T) -> u64 { 1 }
+fn root(h: Latest[u64]) -> u64 { shared(h) }
+// expect: refuse OWN-4 at 3:26
+// expect: refuse OWN-4 at 4:19
+// expect: refuse OWN-4 at 5:25
+// expect: refuse OWN-4 at 6:21
+// expect: refuse LANG-11 at 9:41
+// expect: refuse LANG-12 at 11:41
+// expect: compared OWN-4 at 3:26 | core@1/core/Latest[u64] | shareable
+// expect: compared OWN-4 at 4:19 | core@1/core/Latest[u64] | key
+// expect: compared OWN-4 at 5:25 | core@1/core/Latest[u64] | ordered
+// expect: compared OWN-4 at 6:21 | core@1/core/Latest[u64] | codec
+// expect: compared LANG-11 at 9:41 | core@1/core/Latest[u64] | u64
+// expect: compared LANG-12 at 11:41 | core@1/core/Latest[u64] | shareable

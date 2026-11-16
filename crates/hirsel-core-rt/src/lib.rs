@@ -20,6 +20,7 @@ mod growth;
 pub mod host_file;
 pub mod host_ops;
 pub mod isolate;
+pub mod latest;
 pub mod limit;
 pub mod os;
 #[cfg(any(test, feature = "charge-observation"))]

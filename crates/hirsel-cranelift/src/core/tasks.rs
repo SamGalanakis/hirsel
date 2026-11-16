@@ -302,6 +302,41 @@ impl Function<'_, '_, '_> {
                     self.c_call("hirsel_core_try_send", &[P, P], &[K], &[args[0], args[1]])?[0];
                 1
             }
+            RtOp::LatestNew { item } => {
+                let drop = self.calls.reference(
+                    self.object,
+                    &mut self.b,
+                    self.glues.callbacks[item.index()].unwrap(),
+                );
+                let drop = self.b.ins().func_addr(types::I64, drop);
+                let values = self.c_call(
+                    "hirsel_core_latest_new",
+                    &[P, P, P],
+                    &[P, U],
+                    &[self.context, args[0], drop],
+                )?;
+                outputs[0] = values[0];
+                outputs[1] = values[1];
+                2
+            }
+            RtOp::LatestHandle | RtOp::LatestRead => {
+                let name = if op == RtOp::LatestHandle {
+                    "hirsel_core_latest_handle"
+                } else {
+                    "hirsel_core_latest_read"
+                };
+                outputs[0] = self.c_call(name, &[P], &[P], &[args[0]])?[0];
+                1
+            }
+            RtOp::LatestPublish => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_latest_publish",
+                    &[P, P],
+                    &[P],
+                    &[args[0], args[1]],
+                )?[0];
+                1
+            }
             RtOp::TryReceive { .. } => {
                 outputs[0] = self.c_call(
                     "hirsel_core_try_receive",

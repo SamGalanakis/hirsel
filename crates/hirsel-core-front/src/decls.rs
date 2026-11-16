@@ -152,6 +152,7 @@ pub enum Role {
     Box,
     Rc,
     Arc,
+    Latest,
     List,
     String,
     Text,
@@ -189,6 +190,7 @@ impl Role {
             "Box" => Role::Box,
             "Rc" => Role::Rc,
             "Arc" => Role::Arc,
+            "Latest" => Role::Latest,
             "List" => Role::List,
             "String" => Role::String,
             "Text" => Role::Text,
@@ -242,7 +244,9 @@ impl Role {
             | Role::Child
             | Role::Link
             | Role::StaticFn => Kind::Plain,
-            Role::Task | Role::Sender | Role::Receiver | Role::HostFile => Kind::Resource,
+            Role::Task | Role::Sender | Role::Receiver | Role::HostFile | Role::Latest => {
+                Kind::Resource
+            }
         }
     }
 }
@@ -2031,7 +2035,9 @@ impl Program<'_> {
             let mut params = 0u64;
             let mut h = match decl.role {
                 Some(Role::Capability) => H_CAPABILITY,
-                Some(Role::Task | Role::Sender | Role::Receiver | Role::HostFile) => H_RESOURCE,
+                Some(
+                    Role::Task | Role::Sender | Role::Receiver | Role::HostFile | Role::Latest,
+                ) => H_RESOURCE,
                 Some(Role::View | Role::Region | Role::Dest | Role::Writer) => H_SCOPED,
                 Some(
                     Role::Text
@@ -2715,7 +2721,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     Some(Role::Rc) => SHAREABLE | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),
-                    Some(Role::Sender | Role::Receiver | Role::HostFile) => SEND,
+                    Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest) => SEND,
                     Some(Role::Map) => meet(args) & (SHAREABLE | SEND | CODEC),
                     Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
                     Some(_) => 0,

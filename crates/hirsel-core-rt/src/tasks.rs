@@ -91,6 +91,9 @@ pub const ARC_UNWRAP: u8 = crate::abi_layout::ARC_EVENT_UNWRAP;
 pub const REFUND: u8 = 14;
 pub const CHECK_CANCEL: u8 = 16;
 pub const CAPACITY: u8 = 17;
+/// CONC-13: a `Latest` root replaced, or read. Neither records a value.
+pub const LATEST_PUBLISH: u8 = 18;
+pub const LATEST_READ: u8 = 19;
 /// Only no-effect polls count; effectful operations never consume this allowance.
 pub(crate) const POLLS_PER_TURN: u32 = 64;
 pub const CHARGE: u8 = 15;

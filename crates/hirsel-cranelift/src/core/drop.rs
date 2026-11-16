@@ -54,7 +54,7 @@ impl Glues {
                             descriptors.extend([x.index(), r.index()]);
                             needed.extend([x.index(), r.index()]);
                         }
-                        Callee::Runtime(RtOp::ChannelNew { item }) => {
+                        Callee::Runtime(RtOp::ChannelNew { item } | RtOp::LatestNew { item }) => {
                             descriptors.insert(item.index());
                             needed.insert(item.index());
                         }
@@ -662,6 +662,10 @@ impl Glue<'_, '_, '_> {
             FieldTy::Handle(hirsel_core_layout::Handle::Sender) => {
                 let handle = self.load(at, 0);
                 self.call("hirsel_core_sender_drop", &[P], &[], &[handle])?;
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Latest) => {
+                let handle = self.load(at, 0);
+                self.call("hirsel_core_latest_drop", &[P, P], &[], &[self.ctx, handle])?;
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Receiver) => {
                 let handle = self.load(at, 0);

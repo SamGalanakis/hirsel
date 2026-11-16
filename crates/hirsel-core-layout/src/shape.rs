@@ -163,6 +163,7 @@ pub enum Handle {
     Task,
     Sender,
     Receiver,
+    Latest,
     /// A capability (`Dir`, `Tasks`, ...).
     Capability,
     /// A delivered cause chain (`Causes`, CONC-6): cleaning it refunds its used cells.

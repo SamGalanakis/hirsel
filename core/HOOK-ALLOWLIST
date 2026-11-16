@@ -331,3 +331,9 @@ core@1/writer/completed
 core@1/writer/last_completed
 core@1/writer/push
 core@1/writer/scalar
+# DECISIONS.md 2026-11-16 00:52, Latest[T] in core.
+core@1/core/Latest
+core@1/latest/new
+core@1/latest/handle
+core@1/latest/publish
+core@1/latest/read

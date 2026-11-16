@@ -55,6 +55,10 @@ pub use crate::channel::{
     hirsel_core_receiver_drop, hirsel_core_send, hirsel_core_sender_drop, hirsel_core_try_receive,
     hirsel_core_try_send,
 };
+pub use crate::latest::{
+    hirsel_core_latest_drop, hirsel_core_latest_handle, hirsel_core_latest_new,
+    hirsel_core_latest_publish, hirsel_core_latest_read,
+};
 pub use crate::tasks::{
     hirsel_core_cancel, hirsel_core_check_cancel, hirsel_core_join, hirsel_core_spawn,
     hirsel_core_task_drop,

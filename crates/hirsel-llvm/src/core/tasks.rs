@@ -223,6 +223,24 @@ impl FunctionEmitter<'_> {
             RtOp::TrySend { .. } => {
                 self.native_call("hirsel_core_try_send", &[K], &[p(&args[0]), p(&args[1])])
             }
+            RtOp::LatestNew { item } => self.native_call(
+                "hirsel_core_latest_new",
+                &[P, U],
+                &[
+                    ptr(CONTEXT),
+                    p(&args[0]),
+                    ptr(Value::global(format!("core_drop_c_{}", item.0))),
+                ],
+            ),
+            RtOp::LatestHandle => {
+                self.native_call("hirsel_core_latest_handle", &[P], &[p(&args[0])])
+            }
+            RtOp::LatestRead => self.native_call("hirsel_core_latest_read", &[P], &[p(&args[0])]),
+            RtOp::LatestPublish => self.native_call(
+                "hirsel_core_latest_publish",
+                &[P],
+                &[p(&args[0]), p(&args[1])],
+            ),
             RtOp::TryReceive { .. } => {
                 self.native_call("hirsel_core_try_receive", &[K], &[p(&args[0]), p(&args[1])])
             }

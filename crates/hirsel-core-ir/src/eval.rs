@@ -101,6 +101,8 @@ const REGION_BASE: u64 = 0x10_0000;
 const TASK_BASE: u64 = 0x20_0000;
 /// Sender of channel `i` is `CHAN_BASE + 2i`, its receiver `CHAN_BASE + 2i + 1`.
 const CHAN_BASE: u64 = 0x30_0000;
+/// Handle of `Latest` root `i` (CONC-13).
+const LATEST_BASE: u64 = 0x40_0000;
 
 /// One cause of a chain: its `CauseKind` case and, for `Fail`, the message's
 /// `String` carrier `{data, length, capacity}`, which the cause owns (FAIL-10).
@@ -230,6 +232,14 @@ struct Chan {
     charge: u64,
     limit: usize,
 }
+/// A `Latest[T]` root: the current `Arc[T]` node, admitted at `LATEST_ROOT`.
+struct Latest {
+    /// `Arc[T]`, whose drop releases the root's share at the last handle.
+    item: TypeRef,
+    root: u64,
+    handles: u64,
+    limit: usize,
+}
 
 #[derive(Clone, Copy)]
 enum At {
@@ -255,6 +265,7 @@ struct Machine<'m> {
     regions: Vec<Vec<usize>>,
     children: Vec<Child>,
     chans: Vec<Chan>,
+    latests: Vec<Latest>,
     /// Each live delivered `Causes`, by its head cell: the charged cells it owns.
     causes: HashMap<u64, Vec<(usize, u64)>>,
     /// Every inline array field type of the module: element and length.
@@ -355,6 +366,7 @@ fn run_world(
         regions: Vec::new(),
         children: Vec::new(),
         chans: Vec::new(),
+        latests: Vec::new(),
         causes: HashMap::new(),
         arrays: Vec::new(),
         trace: Vec::new(),
@@ -1166,6 +1178,22 @@ impl Machine<'_> {
                 self.chan_freed(i);
                 false
             }
+            FieldTy::Handle(Handle::Latest) => {
+                let i = (self.load(at, 8) - LATEST_BASE) as usize;
+                self.latests[i].handles -= 1;
+                if self.latests[i].handles != 0 {
+                    return false;
+                }
+                let Latest {
+                    item, root, limit, ..
+                } = self.latests[i];
+                let tmp = self.block(8, None, 0, None);
+                self.put(tmp, &root.to_le_bytes());
+                let failed = self.drop_value(t, tmp, item);
+                assert!(!failed, "a shareable root's release failed");
+                self.refund(limit, charge::LATEST_ROOT);
+                false
+            }
             FieldTy::Handle(Handle::Receiver) => {
                 let i = ((self.load(at, 8) - CHAN_BASE) / 2) as usize;
                 self.chans[i].receiver = false;
@@ -1539,6 +1567,27 @@ impl Machine<'_> {
                     None => panic!("receive would wait"),
                 }
             }
+            RtOp::LatestNew { item } => match self.admit(cur, charge::LATEST_ROOT) {
+                Err(room) => vec![0, room],
+                Ok(()) => {
+                    self.latests.push(Latest {
+                        item: TypeRef(item.0),
+                        root: a[0],
+                        handles: 1,
+                        limit: cur,
+                    });
+                    vec![LATEST_BASE + self.latests.len() as u64 - 1, 0]
+                }
+            },
+            RtOp::LatestHandle => {
+                self.latests[(a[0] - LATEST_BASE) as usize].handles += 1;
+                vec![a[0]]
+            }
+            RtOp::LatestPublish => {
+                let root = &mut self.latests[(a[0] - LATEST_BASE) as usize].root;
+                vec![std::mem::replace(root, a[1])]
+            }
+            RtOp::LatestRead => vec![self.latests[(a[0] - LATEST_BASE) as usize].root],
             RtOp::TryReceive { .. } => {
                 let i = ((a[0] - CHAN_BASE) / 2) as usize;
                 match self.chans[i].queue.pop_front() {

@@ -16,6 +16,9 @@ pub const TASK_RECORD: u64 = 256;
 pub const CAUSE_CELL: u64 = 32;
 /// Charge of a channel's bookkeeping, besides its items.
 pub const CHANNEL_BASE: u64 = 64;
+/// A `Latest` root's bookkeeping: its `Arc` holder, handle count, identity and
+/// the holder's drop (CONC-13), exactly the record the engine keeps.
+pub const LATEST_ROOT: u64 = 32;
 /// Logical size of a Map entry's bookkeeping beside its key and value.
 pub const MAP_ENTRY_EXTRA: u64 = 16;
 /// Growth that doubles capacity starts from this many elements.

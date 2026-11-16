@@ -107,7 +107,7 @@ pub(super) fn drop_glue(
                         pending.push((x.index(), false));
                         pending.push((r.index(), false));
                     }
-                    Callee::Runtime(RtOp::ChannelNew { item }) => {
+                    Callee::Runtime(RtOp::ChannelNew { item } | RtOp::LatestNew { item }) => {
                         callbacks.insert(item.index());
                         pending.push((item.index(), false))
                     }
@@ -410,6 +410,11 @@ impl FunctionEmitter<'_> {
             FieldTy::Handle(hirsel_core_layout::Handle::Sender) => {
                 let handle = self.load(&Type::Ptr, p, 1);
                 self.runtime_void("hirsel_core_sender_drop", &[ptr(handle)]);
+                None
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Latest) => {
+                let handle = self.load(&Type::Ptr, p, 1);
+                self.runtime_void("hirsel_core_latest_drop", &[ptr(CONTEXT), ptr(handle)]);
                 None
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Capability) => None,

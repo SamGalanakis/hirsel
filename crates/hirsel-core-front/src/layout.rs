@@ -240,12 +240,14 @@ impl<T: TyRead> Shapes<'_, T> {
                         | Role::Receiver
                         | Role::Task
                         | Role::HostFile
+                        | Role::Latest
                         | Role::Causes),
                     ) => {
                         let handle = match role {
                             Role::Sender => Handle::Sender,
                             Role::Receiver => Handle::Receiver,
                             Role::Task => Handle::Task,
+                            Role::Latest => Handle::Latest,
                             Role::HostFile => Handle::HostFile,
                             _ => Handle::Causes,
                         };
@@ -495,6 +497,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),
                 Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),
+                Some(Role::Latest) => FieldTy::Handle(Handle::Latest),
                 Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
                 Some(Role::Causes) => FieldTy::Handle(Handle::Causes),
                 Some(Role::Text) => {

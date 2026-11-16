@@ -34,8 +34,17 @@ pub struct Reachable<'a> {
     pub(crate) reach: Option<crate::reach::Use>,
 }
 impl Reachable<'_> {
-    /// `entry`'s code revision over this walk's instances.
+    /// `entry`'s code revision over this walk's instances. A hit's instances
+    /// are its record's, so the record's head holds it.
     pub(crate) fn revision(&self, entry: &DefPath) -> Result<ContentHash, NativeStop> {
+        if let Some(crate::reach::Use {
+            hit: true,
+            prior: Some(prior),
+            ..
+        }) = &self.reach
+        {
+            return Ok(prior.head.revision);
+        }
         let prior = self.reach.as_ref().and_then(|r| r.prior.as_ref());
         self.materialized
             .revision(&Identity::plain(entry.clone()), prior)

@@ -34,7 +34,7 @@ use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-pub(crate) const REACH_SCHEMA: u32 = 6;
+pub(crate) const REACH_SCHEMA: u32 = 7;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -155,7 +155,7 @@ const SECTIONS: usize = 8;
 const HEAD: usize = HEAD_SECTIONS + SECTIONS * 8;
 /// Where the head's section table starts.
 pub(crate) const HEAD_SECTIONS: usize = 4 + HEAD_HASHES * 32 + 8;
-const HEAD_HASHES: usize = 10;
+const HEAD_HASHES: usize = 11;
 
 /// What a record was built from and what it built, readable without its
 /// sections. Its build acceptance is its existence: only an accepted,
@@ -187,6 +187,9 @@ pub(crate) struct Head {
     pub tools: ContentHash,
     /// The entry policy's digest.
     pub policy: ContentHash,
+    /// The entry's code revision over the record's instances, so that a hit
+    /// reports it without decoding them.
+    pub revision: ContentHash,
     pub instance_limit: u64,
 }
 impl Head {
@@ -202,6 +205,7 @@ impl Head {
             self.recipe,
             self.tools,
             self.policy,
+            self.revision,
         ]
     }
     fn encode(&self, out: &mut Vec<u8>) {
@@ -225,6 +229,7 @@ impl Head {
             recipe: hash(7),
             tools: hash(8),
             policy: hash(9),
+            revision: hash(10),
             instance_limit: u64::from_le_bytes(bytes[limit..limit + 8].try_into().unwrap()),
         }
     }
@@ -703,7 +708,7 @@ pub(crate) fn patched(product: &CheckProduct, prior: &Reach, changed: &[bool]) -
     }
 }
 
-/// The selection: `hirsel.core-reach.v4` over the environment digest, the
+/// The selection: `hirsel.core-reach.v5` over the environment digest, the
 /// image, the entry and its declaration part, whether it is a test, the
 /// entry policy and the instance limit.
 pub(crate) fn selection(
@@ -722,7 +727,7 @@ pub(crate) fn selection(
         return Ok(None);
     };
     crate::native::key(
-        "hirsel.core-reach.v4",
+        "hirsel.core-reach.v5",
         &(
             records.digest,
             product.image.as_ref().map(|i| i.identity),

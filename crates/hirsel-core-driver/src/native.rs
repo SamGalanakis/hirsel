@@ -790,6 +790,7 @@ impl CheckProduct {
         };
         objects.extend(cleanup);
         let counters = reached.counters;
+        let revision = reached.revision(entry)?;
         // The record is published once the executable is stored: a walk's
         // draft with its table, or a hit's sections under its current head.
         let record = |executable: ContentHash| -> io::Result<u64> {
@@ -834,6 +835,7 @@ impl CheckProduct {
                     "hirsel.core-entry-policy.v1",
                     &crate::native_entry::policy(options),
                 )?,
+                revision,
                 instance_limit: options.instance_limit as u64,
             };
             Ok(crate::reach::publish(&store, reach.selection, prior, &head, content)? as u64)
@@ -863,7 +865,7 @@ impl CheckProduct {
             inputs.recipe.clone(),
             counters,
             record,
-            reached.revision(entry)?,
+            revision,
         )
     }
     /// The entry's declaration part, bound by check.

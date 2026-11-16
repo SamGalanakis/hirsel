@@ -1,0 +1,219 @@
+// RFC 6455. ADAPTED from tungstenite 89576c6 handshake/{server,client}.rs
+// and protocol/{mod,frame/mod,frame/frame}.rs. Pure machines over Bytes.
+// Deadlines, entropy, idle timers and serialized writes belong to wsock.
+pub type Role: key = Server | Client
+
+pub type Upgrade = Waiting | Upgraded(u64, Bytes) | Refused(u16)
+
+pub type Checked = Pending | Ready(u64) | Failed(u16)
+
+fn part(b: Bytes, s: http1.Span) -> View[Bytes] in b {
+    list.slice(b, s.start, s.end)
+}
+
+fn field(b: Bytes, h: http1.Head, name: String) -> Result[Option[http1.Span], u16] {
+    let mut found: Option[http1.Span] = None
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        if http1.equal_ascii(part(b, f.name), string.as_bytes(name)) {
+            if found != None {
+                return Error(400)
+            }
+            found = Some(f.value)
+        }
+    }
+    Ok(found)
+}
+
+fn is_field(b: Bytes, h: http1.Head, name: String, value: String) -> bool {
+    match field(b, h, name) {
+        Ok(Some(s)) => http1.equal_ascii(part(b, s), string.as_bytes(value)),
+        _ => false
+    }
+}
+
+fn connection(b: Bytes, h: http1.Head) -> bool {
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        if http1.equal_ascii(part(b, f.name), string.as_bytes("connection")) && http1.contains(part(b, f.value), string.as_bytes("upgrade")) {
+            return true
+        }
+    }
+    false
+}
+
+fn protocol(b: Bytes) -> bool {
+    let n = list.len(b)
+    let mut at: u64 = 0
+    while at < n {
+        while at < n && (b[at] == 44 || b[at] == 32 || b[at] == 9) {
+            at += 1
+        }
+        let start = at
+        while at < n && b[at] != 44 && b[at] != 32 && b[at] != 9 {
+            at += 1
+        }
+        if list.slice(b, start, at) == string.as_bytes("hirsel.1") {
+            return true
+        }
+    }
+    false
+}
+
+/// RFC 6455 section 1.3 accept value. O(key bytes), Capacity on allocation.
+/// Ex: `websocket.accept(string.as_bytes("dGhlIHNhbXBsZSBub25jZQ=="))?`.
+pub fn accept(key: Bytes) -> Result[Bytes, Capacity] {
+    let mut input: Bytes = list.new()
+    list.append(mut input, key)?
+    list.append(mut input, string.as_bytes("258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))?
+    let digest = sha1.hash(input)?
+    let mut out: Bytes = list.new()
+    base64.encode(digest, mut out)?
+    Ok(take out)
+}
+
+fn server_checks(b: Bytes, h: http1.Head) -> Result[http1.Span, u16] {
+    if part(b, h.method) != string.as_bytes("GET") || h.version != 1 {
+        return Error(400)
+    }
+    if !connection(b, h) || !is_field(b, h, "upgrade", "websocket") {
+        return Error(400)
+    }
+    if !is_field(b, h, "sec-websocket-version", "13") {
+        return Error(426)
+    }
+    let key = match field(b, h, "sec-websocket-key")? {
+        Some(s) => s,
+        None => return Error(400)
+    }
+    Ok(key)
+}
+
+fn route_checks(b: Bytes, h: http1.Head) -> Result[bool, u16] {
+    if part(b, h.target) != string.as_bytes("/hirsel") {
+        return Error(404)
+    }
+    let offered = match field(b, h, "sec-websocket-protocol")? {
+        Some(s) => {
+            if !protocol(part(b, s)) {
+                return Error(400)
+            }
+            true
+        },
+        None => false
+    }
+    // No HTTP body is consumed by an upgrade, so its framing cannot create
+    // a second interpretation of the read-ahead as body bytes.
+    if field(b, h, "transfer-encoding")? != None {
+        return Error(400)
+    }
+    match field(b, h, "content-length")? {
+        Some(s) => if part(b, s) != string.as_bytes("0") {
+            return Error(400)
+        },
+        None => {}
+    }
+    Ok(offered)
+}
+
+/// Server upgrade. Returns the consumed head offset and the 101 response;
+/// b[end..] is initial frame input. Refused(status) is terminal; 426 requires
+/// `Sec-WebSocket-Version: 13`. O(head), at most 8192 bytes and 64 fields.
+/// Ex: `websocket.server(input)?`.
+pub fn server(b: Bytes) -> Result[Upgrade, Capacity] {
+    let mut h = http1.head()
+    match http1.request(b, mut h) {
+        Partial => return Ok(Waiting),
+        Bad => return Ok(Refused(400)),
+        TooLarge => return Ok(Refused(431)),
+        Complete => {}
+    }
+    let key = match server_checks(b, h) {
+        Ok(x) => x,
+        Error(status) => return Ok(Refused(status))
+    }
+    match base64.decode(part(b, key))? {
+        Some(decoded) => if list.len(decoded) != 16 {
+            return Ok(Refused(400))
+        },
+        None => return Ok(Refused(400))
+    }
+    let offered = match route_checks(b, h) {
+        Ok(value) => value,
+        Error(code) => return Ok(Refused(code))
+    }
+    let accepted = accept(part(b, key))?
+    let mut out: Bytes = list.new()
+    list.append(mut out, string.as_bytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "))?
+    list.append(mut out, accepted)?
+    list.append(mut out, string.as_bytes("\r\n"))?
+    if offered {
+        list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.1\r\n"))?
+    }
+    list.append(mut out, string.as_bytes("\r\n"))?
+    Ok(Upgraded(h.end, take out))
+}
+
+/// Validates the client's bounded 101 response against its sent key. The
+/// only supported offer is hirsel.1; no extensions are offered. O(head).
+/// Ex: `websocket.client(input, key, true)?`.
+pub fn client(b: Bytes, key: Bytes, offered_protocol: bool) -> Result[Checked, Capacity] {
+    let mut h = http1.head()
+    match http1.response(b, mut h) {
+        Partial => return Ok(Pending),
+        Bad => return Ok(Failed(400)),
+        TooLarge => return Ok(Failed(431)),
+        Complete => {}
+    }
+    if h.status != 101 || h.version != 1 || !connection(b, h) || !is_field(b, h, "upgrade", "websocket") {
+        return Ok(Failed(400))
+    }
+    let s = match field(b, h, "sec-websocket-accept") {
+        Ok(Some(s)) => s,
+        _ => return Ok(Failed(400))
+    }
+    if part(b, s) != accept(key)? {
+        return Ok(Failed(400))
+    }
+    if field(b, h, "sec-websocket-extensions") != Ok(None) {
+        return Ok(Failed(400))
+    }
+    match field(b, h, "sec-websocket-protocol") {
+        Ok(None) => if offered_protocol {
+            return Ok(Failed(400))
+        },
+        Ok(Some(p)) => if !offered_protocol || part(b, p) != string.as_bytes("hirsel.1") {
+            return Ok(Failed(400))
+        },
+        Error(_) => return Ok(Failed(400))
+    }
+    Ok(Ready(h.end))
+}
+
+/// Builds a client request from exactly sixteen caller-supplied random bytes.
+/// The host is ASCII without whitespace. Error(400) is invalid input; the
+/// outer Error is Capacity. O(host bytes). Ex: `websocket.request(host, nonce, true)?`.
+pub fn request(host: Bytes, nonce: Bytes, offer_protocol: bool) -> Result[Result[Bytes, u16], Capacity] {
+    if list.len(nonce) != 16 || list.len(host) == 0 {
+        return Ok(Error(400))
+    }
+    for x in host {
+        if x < 33 || x > 126 {
+            return Ok(Error(400))
+        }
+    }
+    let mut out: Bytes = list.new()
+    list.append(mut out, string.as_bytes("GET /hirsel HTTP/1.1\r\nHost: "))?
+    list.append(mut out, host)?
+    list.append(mut out, string.as_bytes("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: "))?
+    base64.encode(nonce, mut out)?
+    list.append(mut out, string.as_bytes("\r\n"))?
+    if offer_protocol {
+        list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.1\r\n"))?
+    }
+    list.append(mut out, string.as_bytes("\r\n"))?
+    if list.len(out) > 8192 {
+        return Ok(Error(431))
+    }
+    Ok(Ok(take out))
+}

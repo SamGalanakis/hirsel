@@ -1,0 +1,172 @@
+fn challenge() -> Bytes {
+    result.unwrap(b"dGhlIHNhbXBsZSBub25jZQ==")
+}
+
+fn request_bytes() -> Bytes {
+    result.unwrap(b"GET /hirsel HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+}
+
+fn response_bytes() -> Bytes {
+    result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
+}
+
+fn status(b: Bytes) -> u16 {
+    match result.unwrap(websocket.server(b)) {
+        Waiting => 0,
+        Upgraded(_, _) => 101,
+        Refused(s) => s
+    }
+}
+
+fn client_status(b: Bytes, offered: bool) -> u16 {
+    match result.unwrap(websocket.client(b, challenge(), offered)) {
+        Pending => 0,
+        Ready(_) => 101,
+        Failed(s) => s
+    }
+}
+
+fn request_with(method: String, path: String, connection: String, upgrade: String, version: String, key: String, extra: String) -> Bytes {
+    let mut b: Bytes = list.new()
+    result.unwrap(list.append(mut b, string.as_bytes(method)))
+    result.unwrap(list.append(mut b, string.as_bytes(" ")))
+    result.unwrap(list.append(mut b, string.as_bytes(path)))
+    result.unwrap(list.append(mut b, string.as_bytes(" HTTP/1.1\r\nHost: example.com\r\nConnection: ")))
+    result.unwrap(list.append(mut b, string.as_bytes(connection)))
+    result.unwrap(list.append(mut b, string.as_bytes("\r\nUpgrade: ")))
+    result.unwrap(list.append(mut b, string.as_bytes(upgrade)))
+    result.unwrap(list.append(mut b, string.as_bytes("\r\nSec-WebSocket-Version: ")))
+    result.unwrap(list.append(mut b, string.as_bytes(version)))
+    result.unwrap(list.append(mut b, string.as_bytes("\r\nSec-WebSocket-Key: ")))
+    result.unwrap(list.append(mut b, string.as_bytes(key)))
+    result.unwrap(list.append(mut b, string.as_bytes("\r\n")))
+    result.unwrap(list.append(mut b, string.as_bytes(extra)))
+    result.unwrap(list.append(mut b, string.as_bytes("\r\n")))
+    take b
+}
+
+// RFC 6455 section 1.3 and tungstenite handshake/mod.rs:143.
+// Mutant: guid_typo.
+// expect: run rfc6455_accept() = true
+fn rfc6455_accept() -> bool {
+    result.unwrap(websocket.accept(challenge())) == result.unwrap(b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+}
+
+// The response bytes are derived from RFC 6455, not from another encode.
+// Mutant: drop_accept_header.
+// expect: run server_response() = true
+fn server_response() -> bool {
+    let b = request_bytes()
+    match result.unwrap(websocket.server(b)) {
+        Upgraded(end, out) => end == list.len(b) && out == response_bytes(),
+        _ => false
+    }
+}
+
+// Mutants: skip_method, skip_upgrade, accept_wrong_version, accept_bad_key.
+// expect: run upgrade_checks() = true
+fn upgrade_checks() -> bool {
+    status(request_with("POST", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "")) == 400 && status(request_with("GET", "/else", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "")) == 404 && status(request_with("GET", "/hirsel", "notupgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "")) == 400 && status(request_with("GET", "/hirsel", "Upgrade", "wrong", "13", "dGhlIHNhbXBsZSBub25jZQ==", "")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "12", "dGhlIHNhbXBsZSBub25jZQ==", "")) == 426 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "Zg==", "")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZR==", "")) == 400
+}
+
+// Mutant: protocol_case_fold, accept_duplicate_key, interpret_body_as_frames.
+// expect: run protocol_and_ambiguity() = true
+fn protocol_and_ambiguity() -> bool {
+    status(request_with("GET", "/hirsel", "UpGrAdE", "WeBsOcKeT", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: other, hirsel.1\r\n")) == 101 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: HIRSEL.1\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Content-Length: 3\r\n")) == 400
+}
+
+// Mutant: drop_tail. The masked binary frame is hand-derived with zero mask.
+// expect: run upgrade_tail_kept() = true
+fn upgrade_tail_kept() -> bool {
+    let mut b = request_bytes()
+    let end = list.len(b)
+    let tail = result.unwrap(b"\x82\x83\x00\x00\x00\x00abc")
+    result.unwrap(list.append(mut b, tail))
+    match result.unwrap(websocket.server(b)) {
+        Upgraded(at, _) => at == end && list.slice(b, at, list.len(b)) == tail,
+        _ => false
+    }
+}
+
+// httparse a0fa552e src/lib.rs:1705, the response 101 vector's tab reason.
+// RFC 6455 client checks, F18. Mutants: status_only, skip_accept, unsolicited_protocol.
+// expect: run client_checks() = true
+fn client_checks() -> bool {
+    client_status(response_bytes(), false) == 101 && client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\t\r\nUpgrade: WebSocket\r\nConnection: keep-alive, upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"), false) == 101 && client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"), false) == 400 && client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n"), false) == 400 && client_status(result.unwrap(b"HTTP/1.1 200 OK\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"), false) == 400
+}
+
+// Mutant: allow_unsolicited_extension.
+// expect: run client_negotiation_tail() = true
+fn client_negotiation_tail() -> bool {
+    let mut b = response_bytes()
+    let end = list.len(b)
+    result.unwrap(list.append(mut b, result.unwrap(b"\x82\x00")))
+    let tail = match result.unwrap(websocket.client(b, challenge(), false)) {
+        Ready(at) => at == end && list.len(b) - at == 2,
+        _ => false
+    }
+    let mut protocol_response: Bytes = list.new()
+    let response = response_bytes()
+    result.unwrap(list.append(mut protocol_response, list.slice(response, 0, list.len(response) - 2)))
+    result.unwrap(list.append(mut protocol_response, result.unwrap(b"Sec-WebSocket-Protocol: hirsel.1\r\n\r\n")))
+    let offered = client_status(protocol_response, true) == 101 && client_status(protocol_response, false) == 400
+    let mut extension: Bytes = list.new()
+    result.unwrap(list.append(mut extension, list.slice(response, 0, list.len(response) - 2)))
+    result.unwrap(list.append(mut extension, result.unwrap(b"Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n")))
+    tail && offered && client_status(response_bytes(), true) == 400 && client_status(extension, true) == 400
+}
+
+// Mutant: wrong_client_nonce, inject_host.
+// expect: run client_request_vector() = true
+fn client_request_vector() -> bool {
+    let r = result.unwrap(websocket.request(result.unwrap(b"server.example.com"), result.unwrap(b"the sample nonce"), false))
+    let expected = result.unwrap(b"GET /hirsel HTTP/1.1\r\nHost: server.example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
+    match r {
+        Ok(b) => b == expected,
+        _ => false
+    }
+}
+
+// Exact limit and one byte over, with arbitrary read-ahead excluded.
+// Mutants: head_limit_off_by_one, ignore_field_limit.
+// expect: run head_bounds() = true
+fn head_bounds() -> bool {
+    let mut b: Bytes = list.new()
+    result.unwrap(list.append(mut b, result.unwrap(b"GET /hirsel HTTP/1.1\r\nX: ")))
+    let count = 8192 - list.len(b) - 4
+    result.unwrap(list.fill(mut b, count, b'a'))
+    result.unwrap(list.append(mut b, result.unwrap(b"\r\n\r\n")))
+    let mut h = http1.head()
+    let exact = http1.request(b, mut h) == Complete && h.end == 8192
+    let mut over: Bytes = list.new()
+    result.unwrap(list.append(mut over, list.slice(b, 0, 8188)))
+    result.unwrap(list.append(mut over, result.unwrap(b"a\r\n\r\n")))
+    let long = http1.request(over, mut h) == TooLarge
+    let mut fields = result.unwrap(b"GET / HTTP/1.1\r\n")
+    for i in 0u64 .. 64u64 {
+        result.unwrap(list.append(mut fields, result.unwrap(b"X: a\r\n")))
+    }
+    result.unwrap(list.append(mut fields, result.unwrap(b"\r\n")))
+    let sixty_four = http1.request(fields, mut h) == Complete && h.count == 64
+    let at = list.len(fields) - 2
+    let _ = list.set(mut fields, at, b'X')
+    exact && long && sixty_four && http1.request(fields, mut h) == TooLarge
+}
+
+// Mutant: status_only_check.
+// expect: run client_missing_connection() = 400
+fn client_missing_connection() -> u16 {
+    client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"), false)
+}
+
+// Mutant: status_only_check.
+// expect: run client_wrong_accept() = 400
+fn client_wrong_accept() -> u16 {
+    client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n"), false)
+}
+
+// Mutant: status_only_check.
+// expect: run client_unrequested_protocol() = 400
+fn client_unrequested_protocol() -> u16 {
+    client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.1\r\n\r\n"), false)
+}

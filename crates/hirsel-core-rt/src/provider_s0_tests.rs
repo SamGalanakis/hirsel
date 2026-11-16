@@ -306,6 +306,8 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
 /// Run `body` as the root task with `rec` as provider and event sink.
 fn run(rec: &mut Rec, lifo_choice: bool, body: unsafe fn(*mut Context, *mut Rec)) {
     let mut context = Context::new(1 << 20);
+    let mut files = crate::host_file::Files::default();
+    context.host_files = &mut files;
     causes::task_start(&mut context).unwrap();
     let state: *mut Rec = rec;
     let mut input = Root { rec: state, body };
@@ -328,6 +330,10 @@ fn run(rec: &mut Rec, lifo_choice: bool, body: unsafe fn(*mut Context, *mut Rec)
     };
     assert_eq!(failed, 0);
     rec.assert_contexts();
+    // Run teardown closes every file still live, outside any task, as
+    // hirsel_core_run does after main.
+    // SAFETY: the run has ended; the registry's files are sole-owned.
+    unsafe { files.close_all(&mut context) };
 }
 const READ: u8 = crate::provider::READ;
 
@@ -776,4 +782,181 @@ fn s0_pending_cancel_then_deadline_is_one_abort() {
     let aborts = rec.count(1, Cb::Abort(ABORT_CANCEL)) + rec.count(1, Cb::Abort(ABORT_DEADLINE));
     assert_eq!(aborts, 1);
     assert_eq!(rec.count(1, Cb::Deliver), 1);
+}
+
+// ---- cancellation against a later ready ----
+
+/// A ready takes effect at the scheduler turn that takes it (section 3 step
+/// 3: the wake's moment); a cancellation request at its CANCEL event, which a
+/// task emits before that turn. So a request made before the turn precedes
+/// every ready taken at it, wherever the ready came from, and the order is a
+/// function of the recorded events. A cancel then a ready of a job parked in
+/// W: Cancelled, never issued.
+#[test]
+fn s0_cancel_precedes_a_later_ready_in_w() {
+    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let task = spawn(context, rec, 1, READ);
+            yield_turn(context);
+            assert_eq!((*rec).count(1, Cb::Wait), 1);
+            hirsel_core_cancel(context, task);
+            hirsel_core_ready((*rec).token(1));
+            assert!(join(context, task));
+        }
+    }
+    let mut rec = Rec::new(park_first, done0, never);
+    run(&mut rec, false, body);
+    assert_eq!(rec.count(1, Cb::Issue), 0, "a cancelled W never issues");
+    assert_eq!(rec.count(1, Cb::Deliver), 0);
+    assert_eq!(rec.result(1).0.status, 1, "Cancelled");
+}
+/// The same in I: abort(Cancel) decides the outcome, resume never runs.
+#[test]
+fn s0_cancel_precedes_a_later_ready_in_i() {
+    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let task = spawn(context, rec, 1, READ);
+            yield_turn(context);
+            assert_eq!((*rec).count(1, Cb::Issue), 1);
+            hirsel_core_cancel(context, task);
+            hirsel_core_ready((*rec).token(1));
+            assert!(join(context, task));
+        }
+    }
+    let mut rec = Rec::new(ready, pending_forever, done0);
+    run(&mut rec, false, body);
+    assert_eq!(rec.count(1, Cb::Abort(ABORT_CANCEL)), 1);
+    assert_eq!(rec.count(1, Cb::Resume), 0);
+    assert_eq!(rec.result(1).0.value, ABORTED);
+}
+
+// ---- what a cancelled operation consumed ----
+
+const FILE_SITE: u64 = 77;
+fn park_file_op(_: &mut Rec, site: u64, _: u64, nth: usize) -> Wait {
+    if site == FILE_SITE && nth == 0 {
+        Wait {
+            kind: WAIT_PARK,
+            deadline_ns: 0,
+        }
+    } else {
+        Wait::default()
+    }
+}
+fn pend_file_op(_: &mut Rec, site: u64, _: u64, _: usize) -> Step {
+    if site == FILE_SITE {
+        pending(0)
+    } else {
+        done(42)
+    }
+}
+#[derive(Clone, Copy)]
+struct FileJob {
+    rec: *mut Rec,
+    operation: u8,
+}
+/// Open a file through the recording provider, then run one file operation on
+/// it (site 77). Returns the operation's status.
+unsafe extern "C" fn file_job(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: as job.
+    unsafe {
+        let job = input.cast::<FileJob>().read();
+        let provider = (*job.rec).provider();
+        let mut open = request(crate::provider::OPEN, 1);
+        let opened = crate::host_file::hirsel_core_host_file_open(context, &provider, &mut open);
+        assert_eq!(opened.status, 0);
+        let mut op = request(job.operation, FILE_SITE);
+        let outcome = crate::host_file::hirsel_core_host_file(context, opened.value, &mut op);
+        (*job.rec).results.push((FILE_SITE, outcome, 0));
+        1
+    }
+}
+/// Every closes of the opened file: the cleanup and teardown closes are site 0,
+/// the program's own close is site 77.
+fn closes(rec: &Rec) -> usize {
+    rec.calls
+        .iter()
+        .filter(|c| c.cb == Cb::Issue && c.site != 1 && (c.site == 0 || c.site == FILE_SITE))
+        .count()
+}
+/// Run `operation` on an opened file in a child, cancel the child while the
+/// operation waits (W) or is issued (I), and join it.
+fn cancelled_file_op(operation: u8, issued: bool) -> Rec {
+    unsafe fn body(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let job = FileJob {
+                rec,
+                operation: OPERATION.get(),
+            };
+            let mut input = job;
+            let task = hirsel_core_spawn(
+                context,
+                64,
+                (&mut input as *mut FileJob).cast(),
+                file_job,
+                TaskLayout {
+                    input: ValueLayout {
+                        bytes: size_of::<FileJob>(),
+                        align: 8,
+                        logical: 0,
+                        drop: inert,
+                    },
+                    result: ValueLayout {
+                        bytes: 0,
+                        align: 8,
+                        logical: 0,
+                        drop: inert,
+                    },
+                },
+            )
+            .task;
+            yield_turn(context);
+            assert_eq!(
+                (*rec).count(FILE_SITE, Cb::Wait),
+                1,
+                "the operation is parked"
+            );
+            hirsel_core_cancel(context, task);
+            join(context, task);
+        }
+    }
+    OPERATION.set(operation);
+    let mut rec = if issued {
+        Rec::new(ready, pend_file_op, never)
+    } else {
+        Rec::new(park_file_op, done0, never)
+    };
+    run(&mut rec, false, body);
+    rec
+}
+thread_local! { static OPERATION: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+/// A cancelled W never issues the operation, and never loses what it
+/// consumed: the file is closed exactly once, by the consuming close's
+/// shielded cleanup or by teardown (core.md: close consumes the file and
+/// always ends its lock). Counting provider, every file operation kind.
+#[test]
+fn s0_cancelled_w_file_operations_close_the_file_once() {
+    use crate::provider::{CLOSE, SYNC, TRY_LOCK, UNLOCK, WRITE};
+    for operation in [READ, WRITE, CLOSE, TRY_LOCK, UNLOCK, SYNC] {
+        let rec = cancelled_file_op(operation, false);
+        assert_eq!(
+            rec.count(FILE_SITE, Cb::Issue),
+            0,
+            "kind {operation}: not issued"
+        );
+        assert_eq!(
+            rec.result(FILE_SITE).0.status,
+            1,
+            "kind {operation}: Cancelled"
+        );
+        assert_eq!(closes(&rec), 1, "kind {operation}: closed once");
+    }
+}
+/// An issued close aborted by cancellation belongs to its provider: abort
+/// decides it, and the runtime closes nothing more (no second close).
+#[test]
+fn s0_aborted_close_is_not_closed_again() {
+    let rec = cancelled_file_op(crate::provider::CLOSE, true);
+    assert_eq!(rec.count(FILE_SITE, Cb::Abort(ABORT_CANCEL)), 1);
+    assert_eq!(closes(&rec), 1, "only the program's own close was issued");
 }

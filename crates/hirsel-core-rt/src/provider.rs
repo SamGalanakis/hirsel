@@ -136,32 +136,35 @@ pub unsafe extern "C" fn hirsel_core_host(
     request: *mut Request,
 ) -> Outcome {
     // SAFETY: forwarded caller contract.
-    unsafe { drive(context, provider, request).1 }
+    unsafe { drive(context, provider, request).map_or(CANCELLED, |(_, delivered)| delivered) }
 }
 
+/// The failure of an operation that ended before issue.
+pub(crate) const CANCELLED: Outcome = Outcome {
+    value: 0,
+    error: IoError::OK,
+    written: 0,
+    status: 1,
+};
 /// Run one operation through C, W, I and D. Returns the outcome the provider
-/// produced (issue, resume or abort) and the one `deliver` returned; both are
-/// the Cancelled failure when the operation ends in C or is cancelled in W.
+/// produced (issue, resume or abort) and the one `deliver` returned, or None
+/// when the operation ended before issue: in C, cancelled in W, or refused
+/// for bounds. None means the provider never saw the operation issued, so
+/// whatever it would have consumed is still the caller's (host_file CLOSE).
 /// # Safety
 /// Same contract as `hirsel_core_host`.
 pub(crate) unsafe fn drive(
     context: *mut Context,
     provider: *const Provider,
     request: *mut Request,
-) -> (Outcome, Outcome) {
-    const CANCELLED: Outcome = Outcome {
-        value: 0,
-        error: IoError::OK,
-        written: 0,
-        status: 1,
-    };
+) -> Option<(Outcome, Outcome)> {
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
         let site = (*request).site;
         let operation = (*request).operation;
         if operation != WALL_MS && operation != MONO_NS {
             if crate::tasks::check_cancel(context, site) != 0 {
-                return (CANCELLED, CANCELLED);
+                return None;
             }
             if operation == MKDTEMP
                 && (*request)
@@ -171,7 +174,7 @@ pub(crate) unsafe fn drive(
                     .is_none_or(|n| n > (*request).buffer.capacity)
             {
                 causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
-                return (CANCELLED, CANCELLED);
+                return None;
             }
         }
         let provider = *provider;
@@ -180,10 +183,10 @@ pub(crate) unsafe fn drive(
             // pending and unshielded; observing it records the cause.
             let observed = crate::tasks::check_cancel(context, site);
             debug_assert_eq!(observed, 1);
-            return (CANCELLED, CANCELLED);
+            return None;
         };
         let delivered = (provider.deliver)(provider.state, request, produced);
-        (produced, delivered)
+        Some((produced, delivered))
     }
 }
 

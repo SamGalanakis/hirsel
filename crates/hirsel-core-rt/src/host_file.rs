@@ -88,7 +88,9 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
 ) -> Outcome {
     // SAFETY: exclusive operation borrows; no registry borrow spans a callback.
     unsafe {
-        let (issued, mut result) = drive(context, provider, request);
+        let Some((issued, mut result)) = drive(context, provider, request) else {
+            return crate::provider::CANCELLED;
+        };
         let provider = *provider;
         if result.status == 0 && result.error == IoError::OK {
             result.value = (*(*context).host_files).insert(File {
@@ -110,7 +112,12 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
 }
 
 /// Read/write/lock/unlock or explicitly close a HostFile through its provider.
-/// CLOSE consumes the carrier even when cancelled before issue or close fails.
+/// CLOSE consumes the carrier even when cancelled before issue or close fails:
+/// when it ends before issue (in C or cancelled in W) the provider never had
+/// it, so it is closed here under a shield, once. An issued close belongs to
+/// its provider, which completes it in issue, resume or abort; it is never
+/// closed again. Every other operation borrows the file, which stays live
+/// for its owner's close, drop or run teardown.
 /// # Safety
 /// File is a live sole-owned run-local key; request and its buffers are borrowed
 /// through delivery. Source typing supplies a file operation (not OPEN).
@@ -129,17 +136,14 @@ pub unsafe extern "C" fn hirsel_core_host_file(
             (&(*registry).live)[&file]
         };
         (*request).handle = owned.handle;
-        if (*request).operation == CLOSE {
-            if crate::tasks::check_cancel(context, (*request).site) != 0 {
-                close(context, owned);
-                return Outcome {
-                    status: 1,
-                    ..Outcome::default()
-                };
+        match drive(context, &owned.provider, request) {
+            Some((_, delivered)) => delivered,
+            None => {
+                if (*request).operation == CLOSE {
+                    close(context, owned);
+                }
+                crate::provider::CANCELLED
             }
-            hirsel_core_host(context, &owned.provider, request)
-        } else {
-            hirsel_core_host(context, &owned.provider, request)
         }
     }
 }

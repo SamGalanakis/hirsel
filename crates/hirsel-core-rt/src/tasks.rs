@@ -286,12 +286,31 @@ impl Scheduler {
         }
     }
 
-    /// One scheduler turn's wakes, before any pop: readiness, then cancellation
-    /// requests, then expired timers. Readiness first is the network rule that
-    /// readiness wins a tie with a deadline (net-proposal-999 D3).
+    /// One scheduler turn's wakes, before any pop: cancellation requests, then
+    /// readiness, then expired timers.
+    ///
+    /// A cancellation request takes effect at its CANCEL event, which the
+    /// requesting task emitted before this turn. A ready takes effect at the
+    /// turn that takes it: that is the wake's moment (REPLAY-SPEC section 3,
+    /// step 3), wherever and whenever `hirsel_core_ready` was called. So every
+    /// request recorded before the turn precedes every ready taken at it, and a
+    /// cancel and a ready pending together (with or without events between
+    /// them) resolve to the cancellation: W fails Cancelled with no issue, I
+    /// aborts with Cancel. The order is a function of the recorded events and
+    /// the turn, so replay reproduces it. A ready taken at an earlier turn has
+    /// already woken the operation, and a later request applies at the task's
+    /// next cancellation point (CONC-7). Readiness before timers is the network
+    /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
     unsafe fn take_wakes(&mut self) {
         // SAFETY: no task is running; every parked operation's frame is pinned.
         unsafe {
+            if !self.cancels.is_empty() {
+                for task in std::mem::take(&mut self.cancels) {
+                    if (*task).state == State::Provider {
+                        self.wake_operation(task, Wake::Cancel);
+                    }
+                }
+            }
             if self.readies.pending.swap(false, Ordering::Acquire) {
                 let mut tokens = std::mem::take(&mut *self.readies.lock());
                 // Readies of one token in one turn are one wake, at its first
@@ -313,13 +332,6 @@ impl Scheduler {
                             break;
                         }
                         task = (*task).all;
-                    }
-                }
-            }
-            if !self.cancels.is_empty() {
-                for task in std::mem::take(&mut self.cancels) {
-                    if (*task).state == State::Provider {
-                        self.wake_operation(task, Wake::Cancel);
                     }
                 }
             }
@@ -615,8 +627,8 @@ thread_local! { static ALONE: Registered = Registered::new(); }
 
 /// A provider readies the Park or Pending operation `token`. It may be called on
 /// any thread, from inside a callback or a task: it only records the token, and
-/// the operation's scheduler takes it at its next turn, before any task is
-/// popped. Taken in W it calls `wait`; in I it calls `resume`. Readies of one
+/// the operation's scheduler takes it at its next turn, after that turn's
+/// cancellation requests and before any task is popped. Taken in W it calls `wait`; in I it calls `resume`. Readies of one
 /// token in one turn are one wake. A token that is unknown, whose operation has
 /// delivered, or whose operation is queued or running (between parks) is
 /// dropped; a ready given while `issue` runs is taken after the operation parks

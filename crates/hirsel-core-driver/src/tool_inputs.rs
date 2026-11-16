@@ -313,21 +313,33 @@ fn installed_toolchain(
         .map(|path| recorded(path, &store))
         .collect::<io::Result<Vec<_>>>()?;
     let archive = recorded(runtime, &store)?;
+    // The installation's own files are named by their place in it, so a
+    // relocated installation keeps its identity and its prebuilt objects;
+    // the system files its argv names are named as the argv names them.
+    let placed = files
+        .iter()
+        .map(|file| {
+            (
+                file.path.strip_prefix(root).unwrap_or(&file.path),
+                &file.content,
+            )
+        })
+        .collect::<Vec<_>>();
     let identity = ContentHash::of_parts(
-        "hirsel.installed-link-recipe.v1",
+        "hirsel.installed-link-recipe.v2",
         [crate::encode(&(
             INSTALLED_RECIPE_SCHEMA,
             target,
-            &linker,
+            Path::new(INSTALLED_LINKER),
             &installed.args,
-            image(&files),
+            placed,
         ))?
         .as_slice()],
     );
     let toolchain = Toolchain {
         image: ContentHash::of_parts(
-            "hirsel.installed-toolchain-image.v1",
-            [crate::encode(&(identity, &archive.path, &archive.content))?.as_slice()],
+            "hirsel.installed-toolchain-image.v2",
+            [crate::encode(&(identity, &archive.content))?.as_slice()],
         ),
         runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.content.0.as_slice()]),
     };
@@ -373,15 +385,22 @@ fn driver_toolchain(
             .and_then(|manifest| manifest.files.iter().find(|entry| entry.path == file));
         files.push(observe(&file, previous)?);
     }
-    let identity = ContentHash::of_parts(
-        "hirsel.toolchain-image.v2",
-        [crate::encode(&(TOOLCHAIN_SCHEMA, target, image(&files)))?.as_slice()],
-    );
     let archive = files
         .iter()
         .find(|file| file.path == runtime)
         .expect("the runtime archive is a recorded toolchain input")
         .content;
+    // The runtime archive is this request's input, wherever its build put it:
+    // its bytes are its identity. The driver's tools are named by path.
+    let tools = files
+        .iter()
+        .filter(|file| file.path != runtime)
+        .map(|file| (file.path.as_path(), &file.content))
+        .collect::<Vec<_>>();
+    let identity = ContentHash::of_parts(
+        "hirsel.toolchain-image.v3",
+        [crate::encode(&(TOOLCHAIN_SCHEMA, target, tools, archive))?.as_slice()],
+    );
     let toolchain = Toolchain {
         image: identity,
         runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.0.as_slice()]),
@@ -1439,6 +1458,53 @@ mod tests {
             driver_toolchain(&cc, target, &first).unwrap().0,
             first_identity
         );
+        // The archive's bytes are its identity, not the place its build left it.
+        let moved = work.path().join("elsewhere/first.a");
+        std::fs::create_dir(moved.parent().unwrap()).unwrap();
+        std::fs::copy(&first, &moved).unwrap();
+        assert_eq!(
+            driver_toolchain(&cc, target, &moved).unwrap().0,
+            first_identity,
+            "one runtime archive at another path"
+        );
+    }
+
+    /// Law: an installation's toolchain is a function of its files' bytes and
+    /// its system argv, not of where it is installed: one installation copied
+    /// to another root keys the same recipe and toolchain, so its prebuilt
+    /// objects are hits there. Oracle: the two roots hold byte-equal files.
+    #[test]
+    fn a_relocated_installation_keys_the_same_toolchain() {
+        let work = tempfile::tempdir().unwrap();
+        let crt = work.path().join("system/crt1.o");
+        std::fs::create_dir(crt.parent().unwrap()).unwrap();
+        std::fs::write(&crt, b"crt").unwrap();
+        let target = "x86_64-unknown-linux-gnu";
+        let keyed = |root: &str| {
+            let root = work.path().join(root);
+            let recipe = root.join("recipes/link.json");
+            let linker = root.join(INSTALLED_LINKER);
+            let runtime = root.join("lib/libhirsel_core_rt.a");
+            for dir in [&recipe, &linker, &runtime] {
+                std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+            }
+            std::fs::write(&linker, b"linker").unwrap();
+            std::fs::write(&runtime, b"runtime").unwrap();
+            let installed = InstalledRecipe {
+                schema: INSTALLED_RECIPE_SCHEMA,
+                target: target.into(),
+                args: vec![
+                    "-o".into(),
+                    "out".into(),
+                    crt.display().to_string(),
+                    INPUT_MARKER.into(),
+                ],
+            };
+            std::fs::write(&recipe, serde_json::to_vec(&installed).unwrap()).unwrap();
+            let (toolchain, recipe) = installed_toolchain(&recipe, target, &runtime).unwrap();
+            (toolchain, recipe.identity)
+        };
+        assert_eq!(keyed("first"), keyed("second/deeper"));
     }
 
     #[test]

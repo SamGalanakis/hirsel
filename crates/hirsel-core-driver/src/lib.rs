@@ -12,6 +12,7 @@ mod callable_variants;
 #[cfg(test)]
 mod carried_law;
 mod check_index;
+mod executable;
 mod instances;
 mod native;
 mod native_debug;

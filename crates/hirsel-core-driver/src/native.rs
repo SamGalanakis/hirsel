@@ -6,7 +6,6 @@ use hirsel_core_layout::{Layout, Recipe};
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt;
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[path = "entry_cleanup.rs"]
@@ -1460,18 +1459,7 @@ fn link_objects(
     }
     // Copy from integrity-checked bytes even on a hit; a damaged materialized file
     // is never trusted as the executable cache product.
-    let parent = options
-        .output
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    // Close the original writable descriptor before publishing. Keeping the
-    // NamedTempFile open across parallel child launches can leave a forked
-    // child holding a writable descriptor until exec (ETXTBSY at our exec).
-    let temp = tempfile::NamedTempFile::new_in(parent)?.into_temp_path();
-    std::fs::write(&temp, &bytes)?;
-    std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
-    temp.persist(&options.output).map_err(|e| e.error)?;
+    crate::executable::write(&options.output, &bytes, 0o755)?;
     Ok(Linked::Built(BuildProduct {
         private_variants: objects.iter().map(|o| o.private_variants).sum(),
         executable: options.output.clone(),

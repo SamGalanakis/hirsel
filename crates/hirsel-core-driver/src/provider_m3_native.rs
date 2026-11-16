@@ -41,12 +41,11 @@ mod provider_m3 {
         let c = dir.path().join("provider.c");
         std::fs::write(&c, include_str!("provider_m3.c")).unwrap();
         let linker = dir.path().join("cc");
-        let mut script = std::fs::File::create(&linker).unwrap();
+        let mut script = Vec::new();
         // Paths are our generated scratch/toolchain paths, with POSIX single-quote escaping.
         let quote = |p: &Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
         writeln!(script, "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_os_run_with_sources -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_send -Wl,--wrap=hirsel_core_cancel -Wl,--wrap=hirsel_core_host_op", quote(&cc), quote(&c), quote(&root.join("crates/hirsel-core-rt/include"))).unwrap();
-        drop(script);
-        std::fs::set_permissions(&linker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::executable::write(&linker, &script, 0o755).unwrap();
         let mut options = native_options(backend, dir.path());
         options.link = crate::native::Link::Driver(linker);
         options.root_limit = 1 << 20;

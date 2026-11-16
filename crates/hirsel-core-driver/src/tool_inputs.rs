@@ -1194,16 +1194,17 @@ mod tests {
         std::fs::write(&linker, b"linker").unwrap();
         std::fs::write(&crt, b"crt").unwrap();
         let cc = bin.join("cc");
-        std::fs::write(
+        crate::executable::write(
             &cc,
             format!(
                 "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"-lc\"' >&2\n",
                 linker.display(),
                 crt.display()
-            ),
+            )
+            .as_bytes(),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
         let runtime = work.path().join("runtime.a");
         std::fs::write(&runtime, b"runtime").unwrap();
         let read_only =
@@ -1238,16 +1239,17 @@ mod tests {
         std::fs::write(&linker, b"linker").unwrap();
         std::fs::write(&crt, b"crt").unwrap();
         let cc = bin.join("cc");
-        std::fs::write(
+        crate::executable::write(
             &cc,
             format!(
                 "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"-lc\"' >&2\n",
                 linker.display(),
                 crt.display()
-            ),
+            )
+            .as_bytes(),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
         let runtime = work.path().join("runtime.a");
         std::fs::write(&runtime, b"runtime").unwrap();
         let target = "x86_64-unknown-linux-gnu";
@@ -1294,16 +1296,17 @@ mod tests {
         std::fs::write(&linker, b"linker").unwrap();
         std::fs::write(&crt, b"crt").unwrap();
         let cc = bin.join("cc");
-        std::fs::write(
+        crate::executable::write(
             &cc,
             format!(
                 "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"-lc\"' >&2\n",
                 linker.display(),
                 crt.display()
-            ),
+            )
+            .as_bytes(),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
         let target = "x86_64-unknown-linux-gnu";
         let (first, second) = (work.path().join("first.a"), work.path().join("second.a"));
         std::fs::write(&first, b"first runtime").unwrap();
@@ -1339,17 +1342,12 @@ mod tests {
         std::fs::write(&linker, b"linker").unwrap();
         let cc = bin.join("cc");
         let (own, added) = (work.path().join("cc1.o"), work.path().join("cc2.o"));
-        std::fs::write(
-            &cc,
-            format!(
+        crate::executable::write(&cc, format!(
                 "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"{}\" \"--wrap=f\" \"-lc\"' >&2\n",
                 linker.display(),
                 own.display(),
                 added.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+            ).as_bytes(), 0o755).unwrap();
         let refused =
             capture_link_recipe(&cc, "x86_64-unknown-linux-gnu", false, &search()).unwrap_err();
         assert!(refused.to_string().contains("cannot replay"), "{refused}");
@@ -1378,17 +1376,18 @@ mod tests {
         std::fs::write(&crt, b"crt").unwrap();
         let runs = work.path().join("driver-runs");
         let cc = bin.join("cc");
-        std::fs::write(
+        crate::executable::write(
             &cc,
             format!(
                 "#!/bin/sh\necho run >> '{}'\ncase \"$1\" in -print-prog-name=*) echo ld.lld; exit 0;; esac\necho '\"/gcc/collect2\" \"-pie\" \"-o\" \"out\" \"{}\" \"{}\" \"-lc\"' >&2\n",
                 runs.display(),
                 crt.display(),
                 work.path().join("transient.o").display()
-            ),
+            )
+            .as_bytes(),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
         let target = "x86_64-unknown-linux-gnu";
         let linker = |search: &[&PathBuf]| {
             capture_link_recipe(&cc, target, false, &std::env::join_paths(search).unwrap())
@@ -1684,16 +1683,17 @@ mod tests {
         std::fs::write(&linker, b"linker").unwrap();
         std::fs::write(&crt, b"crt").unwrap();
         let cc = bin.join("cc");
-        std::fs::write(
+        crate::executable::write(
             &cc,
             format!(
                 "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"-lc\"' >&2\n",
                 linker.display(),
                 crt.display()
-            ),
+            )
+            .as_bytes(),
+            0o755,
         )
         .unwrap();
-        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
         let runtime = work.path().join("runtime.a");
         std::fs::write(&runtime, b"runtime").unwrap();
         let target = "x86_64-unknown-linux-gnu";

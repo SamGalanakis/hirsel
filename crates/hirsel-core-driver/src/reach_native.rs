@@ -368,3 +368,50 @@ fn reach_object_swapped_before_the_link_opens_it_links_the_checked_bytes() {
         assert!(again == fresh.1, "{how}: the next request's executable is a fresh store's");
     }
 }
+
+/// Review 1012: builds on parallel threads of one process, each executed at
+/// once, are launched on every engine and mode. A writable descriptor of one
+/// thread's executable copied into another thread's fork made the launch fail
+/// with ETXTBSY (45 of 128 on Cranelift before the fix). Oracle: PROG-3, exit
+/// 19 for `Error(Exit(status: 19))`.
+#[test]
+#[ignore = "explicit native integration target"]
+fn parallel_builds_launch_at_once() {
+    const APP: &str = "fn leaf()->u8{19u8}\npub fn main()->Result[(),Exit]{Error(Exit(status:leaf()))}\n";
+    let core = core_sources();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for (backend, optimize) in [(Backend::Cranelift, false), (Backend::Llvm, false), (Backend::Llvm, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let refused: usize = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|thread| {
+                    let (dir, core, entry, barrier) = (dir.path(), &core, &entry, &barrier);
+                    scope.spawn(move || {
+                        let here = dir.join(format!("thread-{thread}"));
+                        std::fs::create_dir_all(&here).unwrap();
+                        let product = record_check(APP, core, &here, "check");
+                        let mut options = NativeOptions {
+                            store: dir.join("shared-native"),
+                            optimize,
+                            ..native_options(backend, &here)
+                        };
+                        barrier.wait();
+                        let mut refused = 0;
+                        for n in 0..16 {
+                            options.output = here.join(format!("program-{n}"));
+                            let built = product.build(entry, &options).unwrap();
+                            match Command::new(&built.executable).status() {
+                                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => refused += 1,
+                                status => assert_eq!(status.unwrap().code(), Some(19)),
+                            }
+                        }
+                        refused
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).sum()
+        });
+        assert_eq!(refused, 0, "{backend:?} release={optimize}: launches refused with ETXTBSY");
+    }
+}

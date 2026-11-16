@@ -450,7 +450,6 @@ fn install_dependencies_from(source: &Path, installed: &Path, directory: &Path) 
 
 /// Write `bytes` at `path` atomically, unless the file already holds them.
 fn install_file(bytes: &[u8], path: &Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if std::fs::read(path).is_ok_and(|existing| existing == bytes) {
         return Ok(());
     }
@@ -458,12 +457,7 @@ fn install_file(bytes: &[u8], path: &Path, mode: u32) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other(format!("{} has no directory", path.display())))?;
     std::fs::create_dir_all(parent)?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(bytes)?;
-    file.as_file()
-        .set_permissions(std::fs::Permissions::from_mode(mode))?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    crate::executable::write(path, bytes, mode)
 }
 
 /// One string-valued entry of an ELF object's dynamic section.

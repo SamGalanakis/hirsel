@@ -37,8 +37,8 @@ use std::fmt::{self, Write};
 
 use sink::{
     Binary, CONTEXT, CallAttrs, Cast, Extension, FnAttrs, FnSig, Global, Inline, Label, Linkage,
-    Local, MdItem, Memory, Metadata, Operation, Ordering, Parameter, Predicate, Scoped, Sink, Type,
-    Value,
+    Local, MdItem, Memory, Metadata, Operation, Ordering, Parameter, Predicate, Rmw, Scoped, Sink,
+    Type, Value,
 };
 
 use hirsel_core_ir::failure;
@@ -254,6 +254,9 @@ enum Item {
     Declare(String, FnSig, FnAttrs),
     CompareBytes(bool),
     Asm(String),
+    /// A counted type's out-of-line last release, defined after every body
+    /// that may call it (cleanup::release_lasts).
+    ReleaseLast(u32, bool),
 }
 impl Items {
     fn insert(&mut self, key: String, item: Item) {
@@ -279,6 +282,26 @@ impl Items {
             Item::CompareBytes(facts),
         );
     }
+    /// Request `t`'s last-release body and return its name.
+    pub fn release_last(&mut self, t: u32, atomic: bool) -> String {
+        let name = release_last_name(t, atomic);
+        self.insert(
+            format!("define private void @{name}("),
+            Item::ReleaseLast(t, atomic),
+        );
+        name
+    }
+    fn take_release_lasts(&mut self) -> Vec<(u32, bool)> {
+        let mut lasts = Vec::new();
+        self.0.retain(|_, item| match item {
+            Item::ReleaseLast(t, atomic) => {
+                lasts.push((*t, *atomic));
+                false
+            }
+            _ => true,
+        });
+        lasts
+    }
     pub fn asm(&mut self, text: String) {
         self.insert(format!("module asm \"{text}\""), Item::Asm(text));
     }
@@ -289,9 +312,17 @@ impl Items {
                 Item::Declare(name, sig, attrs) => sink.declare(&name, &sig, &attrs),
                 Item::CompareBytes(facts) => bytes::define_compare_bytes(sink, facts),
                 Item::Asm(text) => sink.module_asm(&text),
+                Item::ReleaseLast(..) => unreachable!("last releases are defined before items"),
             }
         }
     }
+}
+
+fn release_last_name(t: u32, atomic: bool) -> String {
+    format!(
+        "core_release_last_{t}_{}",
+        if atomic { "arc" } else { "rc" }
+    )
 }
 
 /// Lower one CoreIR module, item by item in module order, into `sink`.
@@ -618,6 +649,10 @@ fn emit_module(
     }
     cleanup::drop_glue(module, target, &recipes, &failures, facts, sink, &mut items)?;
     task_entry::emit(module, target, &recipes, &failures, facts, sink, &mut items)?;
+    let lasts = items.take_release_lasts();
+    cleanup::release_lasts(
+        module, target, &recipes, &failures, facts, &lasts, sink, &mut items,
+    )?;
     items.emit(sink);
     Ok(())
 }

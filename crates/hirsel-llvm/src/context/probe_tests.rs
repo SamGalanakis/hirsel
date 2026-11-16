@@ -119,10 +119,11 @@ b0(v0: ptr):
     )
     .unwrap();
     // Optimisation may inline and drop private helpers, but a carried body is
-    // weak_odr and stays for the units that call it.
+    // weak_odr and stays for the units that call it, and a last release is
+    // never inlined.
     for (opt, definitions) in [
-        (crate::core::Optimization::None, 8),
-        (crate::core::Optimization::Speed, 6),
+        (crate::core::Optimization::None, 9),
+        (crate::core::Optimization::Speed, 7),
     ] {
         let text = crate::core::emitted_ir(&core_ir, opt).unwrap();
         assert_probes(&text, "CoreIR x86_64", definitions);

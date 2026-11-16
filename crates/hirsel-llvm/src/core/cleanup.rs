@@ -436,18 +436,69 @@ impl FunctionEmitter<'_> {
         Ok(())
     }
     pub(super) fn release_node(&mut self, node: &Value, t: TypeRef, atomic: bool) -> Result<()> {
-        let logical = self.recipes[t.index()].logical_size.unwrap();
+        let last = self.items.release_last(t.0, atomic);
+        self.release_fast(node, &last, atomic);
+        Ok(())
+    }
+}
+
+/// Define each requested counted type's last release (fast.rs
+/// `release_last_body`), private and never inlined.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn release_lasts(
+    module: &Module,
+    target: Target,
+    recipes: &[hirsel_core_layout::Recipe],
+    failures: &failure::Failures,
+    facts: bool,
+    lasts: &[(u32, bool)],
+    sink: &mut dyn Sink,
+    items: &mut Items,
+) -> Result<()> {
+    let empty = Body::default();
+    for &(t, atomic) in lasts {
+        let name = release_last_name(t, atomic);
+        sink.begin_function(
+            &name,
+            &super::fast::release_last_signature(),
+            &[Local::CONTEXT, Local::PAYLOAD],
+            &FnAttrs {
+                inline: Inline::Never,
+                ..FnAttrs::private()
+            },
+        );
+        let mut e = glue_emitter(
+            module,
+            recipes,
+            failures,
+            facts,
+            &empty,
+            abi::Return::internal_on_target(target, &[]),
+            true,
+            int(0),
+            &mut *sink,
+            &mut *items,
+        );
+        let t = TypeRef(t);
+        let logical = recipes[t.index()].logical_size.unwrap();
         let charge = hirsel_core_layout::charge::counted(logical).unwrap();
         let edge = if atomic {
             FieldTy::Arc(t)
         } else {
             FieldTy::Rc(t)
         };
-        let recipe = (!hirsel_core_layout::terminal(&self.module.types, self.recipes, &edge))
+        let recipe = (!hirsel_core_layout::terminal(&module.types, recipes, &edge))
             .then(|| Value::global(format!("core_static_counted_{}", t.0)));
-        self.release_fast(node, charge, recipe.as_ref(), atomic);
-        Ok(())
+        e.release_last_body(
+            &Value::Local(Local::PAYLOAD),
+            charge,
+            recipe.as_ref(),
+            atomic,
+        );
+        e.effect(Operation::Return(None));
+        e.sink.end_function();
     }
+    Ok(())
 }
 
 pub(super) fn mechanical_count(

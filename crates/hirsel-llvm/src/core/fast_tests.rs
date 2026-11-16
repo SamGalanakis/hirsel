@@ -204,7 +204,7 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     let module = text::parse(include_str!("../../../hirsel-core-ir/samples/counted.core")).unwrap();
     let ir = emit_ir(&module).unwrap();
     assert!(!ir.contains("@hirsel_core_release("));
-    assert!(ir.contains("cmpxchg weak ptr"));
+    assert!(ir.contains("atomicrmw add ptr"));
     assert!(ir.contains("atomicrmw sub ptr"));
     assert!(!ir.contains("@hirsel_core_counted_init"));
     assert!(ir.contains("store atomic i64 1"));
@@ -307,4 +307,57 @@ fn arc_initialization_share_release_and_unwrap_preserve_provider_events() {
         eval::Outcome::Returned(vec![1, 0, 1, 5])
     );
     assert_eq!(reports[0].used, 0);
+}
+
+/// FAIL-15 (docs/spec/failure.md): sharing a node whose holder count is
+/// `2^64 - 1` stops the run with CountOverflow. The inline share adds before it
+/// tests, so this is the wrapped-word case the runtime's own share never sees.
+#[test]
+fn inlined_count_increment_overflow_is_the_runtime_stop() {
+    let dir = std::env::temp_dir().join(format!("hirsel-llvm-count-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let prefix =
+        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").expect("pinned LLVM prefix"));
+    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(
+            std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("CoreIR native runtime test input"),
+        );
+    for kind in ["rc", "arc"] {
+        let module = text::parse(&format!("core v1\nsig g0 = (ptr) -> ()\ninst n0 = test@0/count/overflow [] []\nfn f0 = n0 g0 {{\nb0(v0: ptr):\n  share v0 {kind}\n  return\n}}\n")).unwrap();
+        wf::module(&module).unwrap();
+        fs::write(
+            dir.join("core.o"),
+            emit_object(&module, Optimization::Speed).unwrap(),
+        )
+        .unwrap();
+        let name = symbol(&module, FuncId(0));
+        fs::write(
+            dir.join("test.c"),
+            format!("#include <stdint.h>\nextern uint8_t {name}(void*,void*,uint64_t);\nint main(void) {{ uint64_t node[2]={{UINT64_MAX,7}}; {name}(0,node,0);return 0; }}\n"),
+        )
+        .unwrap();
+        output(
+            Command::new(prefix.join("bin/clang"))
+                .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
+                .args(["-std=c11", "-O0", "-fPIC", "-pie"])
+                .arg(dir.join("test.c"))
+                .arg(dir.join("core.o"))
+                .arg(&runtime)
+                .args([
+                    "-lgcc_s",
+                    "-lpthread",
+                    "-ldl",
+                    "-lm",
+                    "-lrt",
+                    "-lutil",
+                    "-o",
+                ])
+                .arg(dir.join("test")),
+        );
+        let run = Command::new(dir.join("test")).output().unwrap();
+        assert_eq!(run.status.code(), Some(102), "{kind}: {:?}", run.status);
+        assert_eq!(run.stderr, b"run stop: CountOverflow\n", "{kind}");
+    }
+    fs::remove_dir_all(&dir).unwrap();
 }

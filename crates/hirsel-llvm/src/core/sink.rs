@@ -421,12 +421,29 @@ impl Predicate {
 pub(super) enum Ordering {
     Monotonic = 2,
     Acquire = 4,
+    Release = 5,
 }
 impl Ordering {
     fn name(self) -> &'static str {
         match self {
             Self::Monotonic => "monotonic",
             Self::Acquire => "acquire",
+            Self::Release => "release",
+        }
+    }
+}
+/// An `atomicrmw` operation; the discriminant is LLVM's `AtomicRMWInst::BinOp`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub(super) enum Rmw {
+    Add = 1,
+    Sub = 2,
+}
+impl Rmw {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Sub => "sub",
         }
     }
 }
@@ -672,10 +689,8 @@ pub(super) enum Operation<'a> {
     Insert(&'a Type, &'a Value, &'a Type, &'a Value, u32),
     Phi(&'a Type, &'a [(Value, Label)]),
     Call(&'a FnSig, &'a Value, &'a [Value], &'a CallAttrs),
-    /// `cmpxchg weak` with monotonic success and failure orderings.
-    CompareExchange(&'a Value, &'a Type, &'a Value, &'a Value),
-    /// `atomicrmw sub ... release, align 8`.
-    AtomicSub(&'a Value, &'a Type, &'a Value),
+    /// `atomicrmw <op> ptr, <ty> <value> <ordering>, align 8`; yields the old value.
+    AtomicRmw(Rmw, &'a Value, &'a Type, &'a Value, Ordering),
     Fence(Ordering),
     Branch(Label),
     Conditional(&'a Value, Label, Label, bool),
@@ -1097,14 +1112,13 @@ impl Sink for TextSink {
                 }
                 scopes(out, &attrs.scopes);
             }
-            Operation::CompareExchange(p, ty, expected, new) => write!(
+            Operation::AtomicRmw(op, p, ty, value, o) => write!(
                 out,
-                "cmpxchg weak ptr {p}, {ty} {expected}, {ty} {new} monotonic monotonic"
+                "atomicrmw {} ptr {p}, {ty} {value} {}, align 8",
+                op.name(),
+                o.name()
             )
             .unwrap(),
-            Operation::AtomicSub(p, ty, value) => {
-                write!(out, "atomicrmw sub ptr {p}, {ty} {value} release, align 8").unwrap()
-            }
             Operation::Fence(o) => write!(out, "fence {}", o.name()).unwrap(),
             Operation::Branch(target) => write!(out, "br label %{target}").unwrap(),
             Operation::Conditional(test, yes, no, likely) => {

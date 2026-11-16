@@ -66,8 +66,7 @@ typedef struct {
     LLVMValueRef (*phi)(HirselLlvmBuilder *, LLVMTypeRef, LLVMValueRef const *, LLVMBasicBlockRef const *, size_t);
     LLVMValueRef (*call)(HirselLlvmBuilder *, LLVMTypeRef, LLVMTypeRef const *, size_t,
                          LLVMValueRef, LLVMValueRef const *, size_t, uint8_t);
-    LLVMValueRef (*compare_exchange)(HirselLlvmBuilder *, LLVMValueRef, LLVMValueRef, LLVMValueRef);
-    LLVMValueRef (*atomic_sub)(HirselLlvmBuilder *, LLVMValueRef, LLVMValueRef);
+    LLVMValueRef (*atomic_rmw)(HirselLlvmBuilder *, unsigned, LLVMValueRef, LLVMValueRef, unsigned);
     LLVMValueRef (*fence)(HirselLlvmBuilder *, unsigned);
     LLVMValueRef (*branch)(HirselLlvmBuilder *, LLVMBasicBlockRef);
     LLVMValueRef (*conditional)(HirselLlvmBuilder *, LLVMValueRef, LLVMBasicBlockRef, LLVMBasicBlockRef);

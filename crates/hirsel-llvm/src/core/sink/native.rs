@@ -599,15 +599,10 @@ impl Sink for NativeSink {
                     self.scopes(call, &attrs.scopes);
                     call
                 }
-                Operation::CompareExchange(p, ty, expected, new) => {
-                    let p = self.value(p, &Type::Ptr);
-                    let (expected, new) = (self.value(expected, ty), self.value(new, ty));
-                    (api.compare_exchange)(u, p, expected, new)
-                }
-                Operation::AtomicSub(p, ty, v) => {
+                Operation::AtomicRmw(op, p, ty, v, o) => {
                     let p = self.value(p, &Type::Ptr);
                     let v = self.value(v, ty);
-                    (api.atomic_sub)(u, p, v)
+                    (api.atomic_rmw)(u, op as u32, p, v, o as u32)
                 }
                 Operation::Fence(o) => (api.fence)(u, o as u32),
                 Operation::Branch(target) => {

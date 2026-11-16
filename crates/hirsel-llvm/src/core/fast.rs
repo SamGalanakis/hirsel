@@ -8,6 +8,11 @@ use super::memory_layout::*;
 use super::storage::{Payer, zeroext};
 use super::*;
 
+/// `void core_release_last_N_{rc,arc}(ptr context, ptr node)`.
+pub(super) fn release_last_signature() -> FnSig {
+    FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr])
+}
+
 /// The negated byte offset of a prefix field behind a payload.
 fn back(bytes: usize) -> i64 {
     -(bytes as i64)
@@ -453,38 +458,34 @@ impl FunctionEmitter<'_> {
         self.br(freed);
         self.block(freed);
     }
+    /// Share adds one holder in a single read-modify-write; a count that wraps
+    /// past `2^64 - 1` stops the run (FAIL-15 CountOverflow) before any holder
+    /// observes it, so the wrapped word is never read.
     pub(super) fn share_node(&mut self, node: &Value, atomic: bool) {
         let i64 = Type::I64;
         let n = self.counter();
-        let retain = Label::new("retain", n);
-        let store = Label::new("retain_store", n);
         let stop = Label::new("count_stop", n);
         let retained = Label::new("retained", n);
-        self.br(retain);
-        self.block(retain);
-        let memory = Memory {
-            ordering: atomic.then_some(Ordering::Monotonic),
-            ..Memory::aligned(8)
-        };
-        let count = self.load_with(&i64, node, &memory);
-        let fits = self.cmp(Predicate::Ne, &i64, &count, &int(-1));
-        self.likely(&fits, store, stop);
-        self.block(stop);
-        self.cold_void(
-            "hirsel_core_share",
-            &[ptr(node.clone()), zeroext(Type::I1, atomic)],
-        );
-        self.effect(Operation::Unreachable);
-        self.block(store);
-        let next = self.bin(Binary::Add, &i64, &count, &int(1));
-        if atomic {
-            let exchange = self.emit(Operation::CompareExchange(node, &i64, &count, &next));
-            let changed = self.extract(&Type::structure([Type::I64, Type::I1]), &exchange, 1);
-            self.likely(&changed, retained, retain);
+        let next = if atomic {
+            let old = self.emit(Operation::AtomicRmw(
+                Rmw::Add,
+                node,
+                &i64,
+                &int(1),
+                Ordering::Monotonic,
+            ));
+            self.bin(Binary::Add, &i64, &old, &int(1))
         } else {
+            let count = self.load(&i64, node, 8);
+            let next = self.bin(Binary::Add, &i64, &count, &int(1));
             self.store(&i64, &next, node, 8);
-            self.br(retained);
-        }
+            next
+        };
+        let fits = self.cmp(Predicate::Ne, &i64, &next, &int(0));
+        self.likely(&fits, retained, stop);
+        self.block(stop);
+        self.cold_void("hirsel_core_count_overflow", &[]);
+        self.effect(Operation::Unreachable);
         self.block(retained);
         if atomic {
             self.arc_event("hirsel_core_arc_shared", &[ptr(node.clone())]);
@@ -508,7 +509,13 @@ impl FunctionEmitter<'_> {
     pub(super) fn decrement_node(&mut self, node: &Value, atomic: bool) -> Value {
         let i64 = Type::I64;
         if atomic {
-            let old = self.emit(Operation::AtomicSub(node, &i64, &int(1)));
+            let old = self.emit(Operation::AtomicRmw(
+                Rmw::Sub,
+                node,
+                &i64,
+                &int(1),
+                Ordering::Release,
+            ));
             self.cmp(Predicate::Eq, &i64, &old, &int(1))
         } else {
             let old = self.load_native(node, NODE_COUNT, Type::I64);
@@ -517,16 +524,13 @@ impl FunctionEmitter<'_> {
             self.cmp(Predicate::Eq, &i64, &next, &int(0))
         }
     }
-    pub(super) fn release_fast(
-        &mut self,
-        node: &Value,
-        charge: u64,
-        recipe: Option<&Value>,
-        atomic: bool,
-    ) {
+    /// Every release site keeps only the decrement, its branch and the
+    /// non-last event guard. The last holder's cleanup is one cold call to the
+    /// type's out-of-line `last` body, as Rust's `Arc::drop_slow` is.
+    pub(super) fn release_fast(&mut self, node: &Value, last: &str, atomic: bool) {
         let n = self.counter();
-        let last = self.decrement_node(node, atomic);
-        let retained = self.bin(Binary::Xor, &Type::I1, &last, &true.into());
+        let is_last = self.decrement_node(node, atomic);
+        let retained = self.bin(Binary::Xor, &Type::I1, &is_last, &true.into());
         let nonlast = Label::new("release_nonlast", n);
         let last_label = Label::new("release_last", n);
         let released = Label::new("released", n);
@@ -537,6 +541,27 @@ impl FunctionEmitter<'_> {
         }
         self.br(released);
         self.block(last_label);
+        self.call(
+            &release_last_signature(),
+            &Value::global(last.to_owned()),
+            &[CONTEXT, node.clone()],
+            &CallAttrs {
+                cold: true,
+                ..CallAttrs::default()
+            },
+        );
+        self.br(released);
+        self.block(released);
+    }
+    /// The body of a last release: the holder that took the count to zero
+    /// observes every other holder's writes, reports the event, then frees.
+    pub(super) fn release_last_body(
+        &mut self,
+        node: &Value,
+        charge: u64,
+        recipe: Option<&Value>,
+        atomic: bool,
+    ) {
         if atomic {
             self.effect(Operation::Fence(Ordering::Acquire));
             self.arc_event("hirsel_core_arc_released", &[zeroext(Type::I1, true)]);
@@ -549,7 +574,5 @@ impl FunctionEmitter<'_> {
         } else {
             self.free_block(node, &int(charge));
         }
-        self.br(released);
-        self.block(released);
     }
 }

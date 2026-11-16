@@ -38,19 +38,16 @@ pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
     // SAFETY: a live holder keeps the initialized count word alive.
     unsafe {
         if atomic {
-            if node
+            // One add, as native code shares: a wrap stops the run before any
+            // holder reads the wrapped word.
+            let old = node
                 .cast::<AtomicU64>()
                 .as_ref()
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                .is_err()
-            {
+                .fetch_add(1, Ordering::Relaxed);
+            if old == u64::MAX {
                 crate::process::stop(b"CountOverflow");
             }
-            crate::tasks::event(
-                crate::tasks::ARC_SHARE,
-                0,
-                node.cast::<AtomicU64>().as_ref().load(Ordering::Relaxed),
-            );
+            crate::tasks::event(crate::tasks::ARC_SHARE, 0, old + 1);
         } else {
             let count = &mut *node.cast::<u64>().as_ptr();
             *count = count

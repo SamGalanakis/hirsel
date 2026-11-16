@@ -114,6 +114,7 @@ void hirsel_core_arc_released(const HirselCoreContext *, bool last);
 void hirsel_core_arc_unwrapped(const HirselCoreContext *, bool unique);
 void hirsel_core_counted_init(void *node, bool atomic);
 void hirsel_core_share(void *node, bool atomic);
+_Noreturn void hirsel_core_count_overflow(void);
 bool hirsel_core_try_unwrap(void *node, bool atomic);
 void hirsel_core_release(HirselCoreContext *, void *node, bool atomic,
     uint64_t charge, HirselCoreDropRecipe);

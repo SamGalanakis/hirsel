@@ -249,16 +249,8 @@ static LLVMValueRef call(HirselLlvmBuilder *u, LLVMTypeRef result, LLVMTypeRef c
     if (tail) c->setTailCallKind(CallInst::TCK_Tail);
     return wrap(u->builder.Insert(c));
 }
-static LLVMValueRef compare_exchange(HirselLlvmBuilder *u, LLVMValueRef p, LLVMValueRef expected, LLVMValueRef desired) {
-    auto *type = unwrap(expected)->getType();
-    auto *x = new AtomicCmpXchgInst(unwrap(p), unwrap(expected), unwrap(desired),
-                                    Align(u->module->getDataLayout().getTypeStoreSize(type)),
-                                    AtomicOrdering::Monotonic, AtomicOrdering::Monotonic, SyncScope::System);
-    x->setWeak(true);
-    return wrap(u->builder.Insert(x));
-}
-static LLVMValueRef atomic_sub(HirselLlvmBuilder *u, LLVMValueRef p, LLVMValueRef v) {
-    return wrap(u->builder.Insert(new AtomicRMWInst(AtomicRMWInst::Sub, unwrap(p), unwrap(v), Align(8), AtomicOrdering::Release, SyncScope::System)));
+static LLVMValueRef atomic_rmw(HirselLlvmBuilder *u, unsigned op, LLVMValueRef p, LLVMValueRef v, unsigned ordering) {
+    return wrap(u->builder.Insert(new AtomicRMWInst(AtomicRMWInst::BinOp(op), unwrap(p), unwrap(v), Align(8), AtomicOrdering(ordering), SyncScope::System)));
 }
 static LLVMValueRef fence(HirselLlvmBuilder *u, unsigned ordering) { return wrap(u->builder.Insert(new FenceInst(u->context, AtomicOrdering(ordering)))); }
 static LLVMValueRef branch(HirselLlvmBuilder *u, LLVMBasicBlockRef b) { return wrap(u->builder.Insert(BranchInst::Create(unwrap(b)))); }
@@ -334,7 +326,7 @@ extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
         global_ref, global, function, attribute, string_attribute, finish_declaration, subprogram,
         begin_body, parameter, set_name, block, begin_block, block_placed, placeholder, replace, alloca_value,
         binary, cast_value, compare, select, fneg, load, store, gep, extract, insert, phi, call,
-        compare_exchange, atomic_sub, fence, branch, conditional, switch_value, return_value, unreachable,
+        atomic_rmw, fence, branch, conditional, switch_value, return_value, unreachable,
         module_asm, metadata_ref, metadata_string, metadata_integer, metadata_tuple, metadata_bind, named_metadata,
         attach, location, metadata_value, di_file, di_compile_unit, di_subroutine_type, di_subprogram, di_location,
         di_lexical_block_file};

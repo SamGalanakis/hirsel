@@ -318,30 +318,16 @@ pub fn law_calls_two_streams(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     served(c, r, tasks, drive_two_streams)
 }
 
-// L6+L7's count form (v2.5): a frame reporting commit v is in its session's first Batch
-// at a version >= v. A Batch's frames share its version, so no earlier frame to the
-// session is at a version >= v unless it is at this frame's own.
-fn first_batch(mut seen: List[u64], f: runner.Frame) {
-    if let Some(v) = ok_value(f.outcome) {
-        for i in 0u64 .. list.len(seen) {
-            want(seen[i] < v || seen[i] == f.version, "first_batch: an earlier Batch at or above the commit")
-        }
-    }
-    result.unwrap(list.push(mut seen, f.version))
-}
-
 // V4 (release_at_commit_version): A and B, sent together, commit in one group (A at 4,
 // B at 6); both answers arrive in frames at the group's durable version, 6. Then C, sent
-// alone, commits at 8. Each answer is in the first Batch at or above its commit.
+// alone, commits at 8. These pins carry L6+L7: an answer held past its first Batch
+// at or above its commit moves a version off its pin.
 fn drive_group(take d: Drive) -> () waits {
     let s0 = conn(d.tasks, d.head, d.clock, 1u64)
-    let mut seen: List[u64] = list.new()
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(1u64), LATER)
     ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(2u64), LATER)
     let x = frame(s0)
-    first_batch(mut seen, x)
     let y = frame(s0)
-    first_batch(mut seen, y)
     let (fa, fb) = if x.stream == sid(0u64) {
         (x, y)
     } else {
@@ -351,7 +337,6 @@ fn drive_group(take d: Drive) -> () waits {
     want(fa.version == 6u64 && fb.version == 6u64, "group: both frames at the group's durable version")
     ask(s0, d.clock, 2u64, 0u64, k_write(), u64_arg(3u64), LATER)
     let z = frame(s0)
-    first_batch(mut seen, z)
     want(ok_value(z.outcome) == Some(8u64) && z.version == 8u64, "group: C alone at 8")
     hang(take s0)
 }

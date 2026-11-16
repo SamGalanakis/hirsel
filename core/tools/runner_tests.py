@@ -12,6 +12,7 @@ ru_maxrss of its two modes.
 """
 import argparse
 import json
+import shlex
 import os
 from pathlib import Path
 import shutil
@@ -35,10 +36,12 @@ N_PLACE = 16 * 1024 * 1024
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_held_head', 'l14_handles')
 
-# Execution counts read from the evaluator's event log: (event kind, count). L3's tally
-# handler is the only caller of try_send (TRY_SEND is kind 7 in
-# crates/hirsel-core-layout/src/event.rs), and calls_runs_once runs it for one position: exactly once, however often
-# that position is re-sent.
+# L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
+# L3's tally handler is the only caller of try_send (TRY_SEND is kind 7 in
+# crates/hirsel-core-layout/src/event.rs), and calls_runs_once runs it for one position:
+# exactly once, however often that position is re-sent. The evaluator's count comes from
+# its event log; natively, core/tools/runner_count.c is linked into the case's test
+# executable as its event sink and fails the run on any other count.
 COUNTS = {'calls_runs_once': (7, 1)}
 
 
@@ -49,16 +52,6 @@ def counted(name, report):
     return sum(1 for e in report.get('events', []) if e[0] == kind) == want
 
 
-# Spec laws (RUNNER-SPEC v2.5 §8) whose named observation this harness does not make, so
-# no row reports them green. Each names what is missing.
-PARTIAL = (
-    ('L3/sender_in_h',
-     'calls_runs_once counts the handler\'s runs by TRY_SEND events in the evaluator\'s event '
-     'log (one per run, outside the transaction), so the count is evaluator-only. The spec\'s '
-     'form, a harness Sender[u64] carried in H, is not built: handles is a StaticFn over the '
-     'Db and has no way to receive a harness value (followups 2026-11-16 09:50).'),
-)
-
 # L4 (RUNNER-SPEC v2.5 §8): runner_rss.hirsel's program, built per native backend and run
 # in two modes, one valid call (0) and 10,000 malformed frames before it (1). Both exit 0
 # and mode 1's ru_maxrss is at most mode 0's plus one page: an allocation outside any
@@ -67,10 +60,19 @@ PARTIAL = (
 PAGE_KB = 4
 
 
+# ru_maxrss of one run jitters upward by one 256 KB step in either mode (about 4 runs in
+# 10 on LLVM, flood or not), so each mode's figure is its smallest of RSS_RUNS runs and
+# its status the worst. A flood that keeps bytes is red by tens of MB, every run.
+RSS_RUNS = 9
+
+
 def maxrss(launcher, binary, mode):
-    out = subprocess.run([str(launcher), str(binary), mode], capture_output=True, text=True, check=True)
-    status, kb = out.stdout.split()
-    return int(status), int(kb)
+    runs = []
+    for _ in range(RSS_RUNS):
+        out = subprocess.run([str(launcher), str(binary), mode], capture_output=True, text=True, check=True)
+        status, kb = out.stdout.split()
+        runs.append((int(status), int(kb)))
+    return max(s for s, _ in runs), min(k for _, k in runs)
 
 
 def l4_rss(args, root, work, engine):
@@ -88,8 +90,7 @@ def l4_rss(args, root, work, engine):
         return False, {'build': built.stderr[-2000:]}
     # runner_maxrss.c measures from a small parent (a child inherits its parent's
     # high-water at fork, and this harness's is above the program's).
-    cc = args.cc or (Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
-                     if 'LLVM_SYS_231_PREFIX' in os.environ else Path(shutil.which('cc')))
+    cc = c_compiler(args)
     launcher = work / 'runner_maxrss'
     if not launcher.exists():
         subprocess.run([str(cc), '-O1', str(root / 'core/tools/runner_maxrss.c'), '-o', str(launcher)], check=True)
@@ -311,13 +312,34 @@ def l12_holds(values):
             and all(values[v[0]] not in (None, 0, base) for v in L12[1:]))
 
 
-def native_run(args, engine, inputs_path, store, prefix):
+def c_compiler(args):
+    return args.cc or (Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
+                       if 'LLVM_SYS_231_PREFIX' in os.environ else Path(shutil.which('cc')))
+
+
+def counting_cc(args, root, work, name):
+    """A --cc wrapper that links core/tools/runner_count.c as the program's event sink."""
+    kind, want = COUNTS[name]
+    assert kind == 7, 'runner_count.c counts TRY_SEND'
+    cc = c_compiler(args)
+    support = work / f'count_{name}.o'
+    subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
+                    '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
+                    '-o', str(support)], check=True)
+    wrapper = work / f'count_{name}-cc'
+    wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
+                       + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def native_run(args, engine, inputs_path, store, prefix, cc=None):
     command = [str(args.compiler.resolve()), 'test', '--inputs', str(inputs_path), '--source-core',
                '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
                '--store', str(store), '--json', '--filter', prefix,
                '--limit', str(64 * 1024 * 1024), '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random']
-    if args.cc:
-        command += ['--cc', str(args.cc.resolve())]
+    if cc or args.cc:
+        command += ['--cc', str(cc or args.cc.resolve())]
     wait_load()
     result = subprocess.run(command, capture_output=True, text=True)
     try:
@@ -351,8 +373,6 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
         base = manifest(root, work, 'inputs')
-        for law, missing in PARTIAL:
-            row(law=law, status='PARTIAL', passed=None, missing=missing)
         values = l12_values(evaluator, root, work, 'tree')
         row(engine='evaluator', law='l12', passed=l12_holds(values), result=values)
         p19 = work / 'runner_p19.hirsel'
@@ -428,11 +448,20 @@ def main():
                     row(engine=engine, group=group, selection=f'{len(selected & want)}/{len(want)}',
                         passed=code == 0 and selected == want,
                         result=sorted(want ^ selected) or report.get('stderr', ''))
+                for name in COUNTS:
+                    definition = f'store@1/runner_calls/test_{name}'
+                    code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition,
+                                              counting_cc(args, root, work, name))
+                    tests = report.get('tests', [])
+                    row(engine=engine, law=name + '_count',
+                        passed=code == 0 and [t['definition'] for t in tests] == [definition]
+                        and all(t.get('passed') for t in tests),
+                        result=tests or report)
                 held, figures = l4_rss(args, root, work, engine)
                 row(engine=engine, law='l4_ru_maxrss', passed=held, result=figures)
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
-    failures = [r for r in rows if r.get('status') != 'PARTIAL' and not r['passed']]
+    failures = [r for r in rows if not r['passed']]
     for r in failures:
         print('FAIL', json.dumps(r)[:2000])
     return int(bool(failures))

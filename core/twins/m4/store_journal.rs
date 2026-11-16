@@ -20,7 +20,7 @@
 //!
 //! Workload (store-build-1010, 2026-11-16): one table "accounts" in a fresh directory; commit c
 //! (from 0) puts Account {id: c % 16, balance: c, owner "owner000"} at key c % 16 and returns c, so
-//! every COMMIT is 97 bytes (§2.4). Before READY: 64 commits, each made durable (the history).
+//! every COMMIT is 93 bytes (§2.4). Before READY: 64 commits, each made durable (the history).
 //! - `m4-store-journal R4 <gate> <dir>`: 10,000 commits, each `run` then `durable`. Prints
 //!   `DONE 50635000 <ns>` (the sum of c over 64..10064).
 //! - `m4-store-journal R5 <gate> <dir>`: commits back to back for 10 s, a `durable` after every 64th.
@@ -30,7 +30,7 @@
 //! ends), then `IO writes <n> syncs <n> ends <n> groups <n> frames <n> rotates <n>` (the journal
 //! thread's segment writes, its syncs including END's, END writes, groups and frames; the writer's
 //! rotations). Then every segment is read back and replayed: each HEADER's bytes, each frame's
-//! check, the version chain from 1, each segment's length equal to its frames' 97 bytes plus 72,
+//! check, the version chain from 1, each segment's length equal to its frames' 93 bytes plus 72,
 //! its END's d equal to that length, and the replayed rows equal to the tree's and the workload's.
 //! At start, the frame code is checked against store-build-1010's libxxhash 0.8.2 vectors.
 #[path = "store_tree.rs"]
@@ -467,7 +467,7 @@ fn replay(dir: &Path, id: &[u8; 16], last: u64, commits: u64) -> BTreeMap<Vec<u8
             f[8..16].fill(0);
             seal(&mut f, id, 2, seq, at as u64);
             assert_eq!(f[..], raw[at..at + 16 + len], "j-{seq} frame at {at}");
-            assert_eq!((f[0], f[1], len), (0x11, 0, 81), "a one-key COMMIT");
+            assert_eq!((f[0], f[1], len), (0x11, 0, 77), "a one-key COMMIT");
             let p = &f[16..];
             version += 1;
             assert_eq!(
@@ -485,7 +485,7 @@ fn replay(dir: &Path, id: &[u8; 16], last: u64, commits: u64) -> BTreeMap<Vec<u8
                 (1, 0, 1, 1)
             );
             let key = p[31..43].to_vec();
-            let value = p[47..81].to_vec();
+            let value = p[47..77].to_vec();
             rows.insert(key, value);
             at += 16 + len;
         }

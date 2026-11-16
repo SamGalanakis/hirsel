@@ -1,7 +1,7 @@
 //! store-r1-cost-1030 local fairness twin: store_mem.rs with im::OrdMap (persistent, path-copying).
 //! R1 keeps the base version alive across each put, as a transaction's rollback point does;
 //! R1U inserts with no other holder (in place).
-//! Account is id u64, balance i64, owner length u64 and "owner000": 32 bytes.
+//! Account is id u64, balance i64, owner length u32 and "owner000": 28 bytes (main's codec since 07c3aa57: String counts are u32).
 //! Values carry schema number 0 (u16 LE), keys table id 1 (u32 BE) then u64 BE.
 use std::{
     io::{Read, Write},
@@ -21,11 +21,11 @@ fn key(i: u64) -> Vec<u8> {
     b
 }
 fn encode(a: &Account) -> Vec<u8> {
-    let mut b = Vec::with_capacity(34);
+    let mut b = Vec::with_capacity(30);
     b.extend_from_slice(&0u16.to_le_bytes());
     b.extend_from_slice(&a.id.to_le_bytes());
     b.extend_from_slice(&a.balance.to_le_bytes());
-    b.extend_from_slice(&u64::try_from(a.owner.len()).unwrap().to_le_bytes());
+    b.extend_from_slice(&u32::try_from(a.owner.len()).unwrap().to_le_bytes());
     b.extend_from_slice(a.owner.as_bytes());
     b
 }
@@ -33,9 +33,9 @@ fn decode(b: &[u8]) -> Account {
     assert_eq!(u16::from_le_bytes(b[0..2].try_into().unwrap()), 0);
     let id = u64::from_le_bytes(b[2..10].try_into().unwrap());
     let balance = i64::from_le_bytes(b[10..18].try_into().unwrap());
-    let n = usize::try_from(u64::from_le_bytes(b[18..26].try_into().unwrap())).unwrap();
-    let owner = String::from_utf8(b[26..26 + n].to_vec()).unwrap();
-    assert_eq!(26 + n, b.len());
+    let n = usize::try_from(u32::from_le_bytes(b[18..22].try_into().unwrap())).unwrap();
+    let owner = String::from_utf8(b[22..22 + n].to_vec()).unwrap();
+    assert_eq!(22 + n, b.len());
     Account { id, owner, balance }
 }
 fn observed(a: Account, k: u64) -> u64 {

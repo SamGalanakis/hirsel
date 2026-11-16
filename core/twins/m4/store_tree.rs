@@ -439,13 +439,13 @@ pub struct Account {
     pub owner: String,
     pub balance: i64,
 }
-/// Schema number 0 (u16 LE), then id u64, balance i64, owner length u64 and the owner's bytes.
+/// Schema number 0 (u16 LE), then id u64, balance i64, owner length u32 (main's codec since 07c3aa57) and the owner's bytes: 30 bytes.
 pub fn encode(a: &Account) -> Vec<u8> {
-    let mut b = Vec::with_capacity(34);
+    let mut b = Vec::with_capacity(30);
     b.extend_from_slice(&0u16.to_le_bytes());
     b.extend_from_slice(&a.id.to_le_bytes());
     b.extend_from_slice(&a.balance.to_le_bytes());
-    b.extend_from_slice(&u64::try_from(a.owner.len()).unwrap().to_le_bytes());
+    b.extend_from_slice(&u32::try_from(a.owner.len()).unwrap().to_le_bytes());
     b.extend_from_slice(a.owner.as_bytes());
     b
 }
@@ -453,9 +453,9 @@ pub fn decode(b: &[u8]) -> Account {
     assert_eq!(u16::from_le_bytes(b[0..2].try_into().unwrap()), 0);
     let id = u64::from_le_bytes(b[2..10].try_into().unwrap());
     let balance = i64::from_le_bytes(b[10..18].try_into().unwrap());
-    let n = usize::try_from(u64::from_le_bytes(b[18..26].try_into().unwrap())).unwrap();
-    let owner = String::from_utf8(b[26..26 + n].to_vec()).unwrap();
-    assert_eq!(26 + n, b.len());
+    let n = usize::try_from(u32::from_le_bytes(b[18..22].try_into().unwrap())).unwrap();
+    let owner = String::from_utf8(b[22..22 + n].to_vec()).unwrap();
+    assert_eq!(22 + n, b.len());
     Account { id, owner, balance }
 }
 

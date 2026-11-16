@@ -4,7 +4,7 @@
 //!
 //! `m4-store-pcopy R1 <gate>`: R1. 100,000 commits, each putting Account k = i and fetching it back.
 //! Prints `DONE 5000750000 <ns>`. After the gate: version 100,000, 100,000 rows, and the account at
-//! 118 B per row (§1.11).
+//! 110 B per row (§1.11: 62 + key 12 → 16 + value 30 → 32).
 //!
 //! `m4-store-pcopy 0|1|3 <gate>`: the indexed overwrite (store-build-1010's `index_bench.hirsel`,
 //! ticket 5052). Table "accounts" with 0, 1 or 3 indexes on `id % 4`; 100,000 Accounts populated
@@ -12,9 +12,9 @@
 //! k + 100,000 and returning the balance, no fetch. Each overwrite decodes the replaced row and
 //! compares each index's old and new key (equal here, so no index entry is written, J1). Prints
 //! `DONE 1049995000 <ns>`. After the gate: every overwritten row read back, 100,000 × (1 + indexes)
-//! tree rows, version 110,000, and the account at 118 + 86 × indexes B per row.
+//! tree rows, version 110,000, and the account at 110 + 86 × indexes B per row.
 //!
-//! Account is id u64, balance i64, owner length u64 and "owner000": 32 bytes. Values carry schema
+//! Account is id u64, balance i64, owner length u32 and "owner000": 28 bytes (main's codec since 07c3aa57: String counts are u32). Values carry schema
 //! number 0 (u16 LE), keys table id 1 (u32 BE) then u64 BE, as store_mem.rs.
 #[path = "store_tree.rs"]
 #[allow(
@@ -103,7 +103,7 @@ fn main() {
     let n = indexes.len() as u64;
     let rows = tree::rows(&db);
     assert_eq!(rows.len() as u64, 100000 * (1 + n));
-    assert_eq!(db.resident, catalog + 100000 * (118 + 86 * n));
+    assert_eq!(db.resident, catalog + 100000 * (110 + 86 * n));
     if mode == "R1" {
         assert_eq!(db.version, 100000);
     } else {

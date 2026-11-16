@@ -113,17 +113,17 @@ A row's baseline does the work the spec requires of the store on that row. A twi
 - Checks after the gate:
   - fan-out on every node, and key order;
   - 100,000 rows at version 100,000;
-  - the account at 118 B per row (§1.11).
+  - the account at 110 B per row (§1.11; a 30-byte value).
 - Build it as `store_mem.rs` is built (std only, the S4 flags).
 
 **What each twin must do once its slice is on main.**
 - **R4** and **R5** (S3), done in `store_journal.rs`:
-  - R1's per-commit work through `store_tree.rs`, then the store's exact COMMIT frame (§2.4): 97 bytes for one put, its xxh3-64 check over the 33-byte binding (identity, role 2, segment seq, offset), head[0..8] and payload. At start the frame code is checked against store-build-1010's libxxhash vectors.
+  - R1's per-commit work through `store_tree.rs`, then the store's exact COMMIT frame (§2.4): 93 bytes for one put (a 30-byte value: main's codec writes String counts as u32 since 07c3aa57), its xxh3-64 check over the 33-byte binding (identity, role 2, segment seq, offset), head[0..8] and payload. At start the frame code is checked against store-build-1010's libxxhash vectors.
   - The resident check counts the frames sent and not yet acked. Then `send` on a channel of capacity 2 × `group_commits` (128).
   - A journal thread per §3.3: a group of up to 64 frames or 4 MiB, one write, one `fdatasync`, the ack, then an END (the END file rewritten whole with truncation, 96 bytes, `fdatasync`) when the queue was idle, after every 64th group, on rotate and on close.
   - Segment creation per §3.2 (HEADER, sync, END at 72, sync, `sync_dir`), and rotation once a segment passes `checkpoint_bytes` (64 MiB). The checkpoint the store starts at that point (pack, manifest) is R6's work and is not in the twin.
   - Build it as `store_pcopy.rs` is built, with xxhash-rust 0.8.15 (`feature="xxh3"`) as its one crate (`--extern xxhash_rust=`), as `core/tools/store_crc_bench.py` builds it. Cargo does not build the twins.
-  - After the gate: close, print `IO writes syncs ends groups frames rotates`, then replay every segment (HEADER bytes, each check, the version chain, length = 72 + 97 × frames, the END's d = that length) and compare the rows with the tree's.
+  - After the gate: close, print `IO writes syncs ends groups frames rotates`, then replay every segment (HEADER bytes, each check, the version chain, length = 72 + 93 × frames, the END's d = that length) and compare the rows with the tree's.
 - Workload (store-build-1010, 2026-11-16; Hirsel's bench must match it): one table "accounts" in a fresh empty directory on disk, not tmpfs. Commit c (from 0) puts Account {id c % 16, balance c, owner "owner000"} at key c % 16 and returns c. Before READY, 64 commits, each made durable.
   - **R4**: 10,000 commits, each `run` then `durable`. `DONE 50635000 <ns>`. Per commit the queue is idle, so each commit costs one group's write and sync plus the idle END's write and sync.
   - **R5**: commits back to back for 10 s, `durable` after every 64th, the clock read after each `durable`. `DONE <commits> <ns>`; the row compares commits per second. At about 140k commits/s the twin rotates twice in 10 s.

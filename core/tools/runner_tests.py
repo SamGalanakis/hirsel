@@ -13,8 +13,9 @@ the runtime's exact peak of live backing bytes across its two modes.
 
 --part r1 runs R1's calls (transactions at durable versions, runs-once, store refusal)
 and their native twins: the land gate's part. --part r0 runs the rest, which runs after
-the push: R0's laws, p19, l12, L4, R1b's L1, and every mutant (a mutant qualifies a law, not the
-runner a change lands). Without --part both run.
+the push: R0's laws, p19, l12, L4, R1b's L1, the wire frame vectors, and every mutant
+(a mutant qualifies a law, not the runner a change lands). --part wire selects only
+frame_vectors and its two evaluator mutants. Without --part both R0 and R1 run.
 
 R1b's L1 builds core/programs/store/runner_crash.hirsel per native backend under the
 store's W2 crash adapter (core/tools/store_crash_tests.py): every cut of each scenario,
@@ -343,6 +344,69 @@ def evaluate(evaluator, inputs_path, definition):
     return value, report
 
 
+def frame_module(root, path, omit_complete=False):
+    """Construct values beside the shared, hand-derived byte oracle, never from it."""
+    vectors = json.loads((root / 'core/programs/store/frame-vectors.json').read_text())['vectors']
+    helpers = (root / 'core/programs/store/frame-vector-helpers.hirsel').read_text()
+    if omit_complete:
+        # A deleted field changes construction arity too. Only the value constructors
+        # follow that API change; the expected byte strings remain unchanged.
+        helpers = helpers.replace('Batch(0x0102030405060708u64, list.new(), ',
+                                  'Batch(0x0102030405060708u64, ')
+        helpers = helpers.replace('Batch(0x0102030405060708u64, one(7u32), ',
+                                  'Batch(0x0102030405060708u64, ')
+    lines = [helpers, '', 'pub fn law_frame_vectors() -> bool {']
+    for v in vectors:
+        payload = bytes.fromhex(v['hex'])
+        if 'wire_bytes' in v:
+            header = 2 if len(payload) <= 125 else 4 if len(payload) <= 65535 else 10
+            assert len(payload) + header == v['wire_bytes'], v['name']
+        lines += [f'    // {v["name"]}: {v["derivation"]}',
+                  f'    let c_{v["name"]}: std.codec.Codec[runner.{v["type"]}] = std.codec.of()',
+                  f'    if !vector(c_{v["name"]}, {v["value"]}, b("{v["hex"]}")) {{ return false }}']
+    lines += ['    true', '}', '', '@test', 'fn test_frame_vectors() -> Result[(), ()] {',
+              '    if law_frame_vectors() { Ok(()) } else { Error(()) }', '}', '']
+    path.write_text('\n'.join(lines))
+    return len(vectors)
+
+
+def frame_vectors(args, root, work, engines, row):
+    module = work / 'runner_wire.hirsel'
+    count = frame_module(root, module)
+    selected = manifest(root, work, 'wire', extra=[(module, 'runner_wire')])
+    definition = 'store@1/runner_wire/law_frame_vectors'
+    if 'evaluator' in engines:
+        value, report = evaluate(args.evaluator.resolve(), selected, definition)
+        row(engine='evaluator', law='frame_vectors', vectors=count, passed=value == 1, result=report)
+        if not args.no_mutants:
+            text = (root / 'core/programs/store/runner.hirsel').read_text()
+            for name, old, new in (
+                    ('tag_order', 'Hello(Option[Bytes], List[Want]) | Call(u32, u64, u32, u32, Bytes)',
+                     'Call(u32, u64, u32, u32, Bytes) | Hello(Option[Bytes], List[Want])'),
+                    ('complete_omitted', 'Batch(u64, List[u32], List[Row], List[Done])',
+                     'Batch(u64, List[Row], List[Done])')):
+                if text.count(old) != 1:
+                    row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
+                    continue
+                mutated = work / f'wire_{name}' / 'runner.hirsel'
+                mutated.parent.mkdir()
+                mutated.write_text(text.replace(old, new))
+                altered_module = work / f'wire_{name}.hirsel'
+                frame_module(root, altered_module, omit_complete=name == 'complete_omitted')
+                altered = manifest(root, work, f'wire_{name}', mutated, [(altered_module, 'runner_wire')])
+                value, report = evaluate(args.evaluator.resolve(), altered, definition)
+                row(engine='evaluator', mutant=name, law='frame_vectors', passed=value == 0, result=report)
+    for engine in (e for e in engines if e != 'evaluator'):
+        if args.compiler is None or args.runtime is None:
+            raise ValueError('native frame vectors require --compiler and --runtime')
+        definition = 'store@1/runner_wire/test_frame_vectors'
+        code, report = native_run(args, engine, selected, work / f'wire-store-{engine}', definition)
+        tests = report.get('tests', [])
+        row(engine=engine, law='frame_vectors', vectors=count,
+            passed=code == 0 and [t['definition'] for t in tests] == [definition]
+            and all(t.get('passed') for t in tests), result=report)
+
+
 def l12_values(evaluator, root, work, tag, runner=None):
     """The fingerprint per variant (base twice), or None where a run did not return."""
     values = {}
@@ -428,9 +492,9 @@ def main():
     p.add_argument('--no-mutants', action='store_true')
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
-    p.add_argument('--part', choices=['r0', 'r1'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire'])
     args = p.parse_args()
-    r0, r1 = args.part != 'r1', args.part != 'r0'
+    r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1')
     root = args.root.resolve()
     evaluator = args.evaluator.resolve()
     engines = args.backend or ['evaluator', 'cranelift', 'llvm']
@@ -442,6 +506,15 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
+        if r0 or args.part == 'wire':
+            frame_vectors(args, root, work, engines, row)
+        if args.part == 'wire':
+            if args.report:
+                args.report.write_text(json.dumps(rows, indent=2) + '\n')
+            for r in rows:
+                if not r['passed']:
+                    print('FAIL', json.dumps(r)[:2000])
+            return int(any(not r['passed'] for r in rows))
         base = manifest(root, work, 'inputs')
         if r0:
             values = l12_values(evaluator, root, work, 'tree')

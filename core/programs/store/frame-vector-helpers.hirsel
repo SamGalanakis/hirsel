@@ -1,0 +1,80 @@
+// Value construction for frame-vectors.json; expected bytes never use std.codec.
+fn digit(x: u8) -> u8 {
+    if x <= b'9' { x - b'0' } else { x - b'a' + 10u8 }
+}
+
+fn b(s: String) -> Bytes {
+    let raw = string.as_bytes(s)
+    let mut out: Bytes = result.unwrap(list.with_capacity(list.len(raw) / 2u64))
+    let mut i = 0u64
+    while i < list.len(raw) {
+        result.unwrap(list.push(mut out, digit(raw[i]) * 16u8 + digit(raw[i + 1u64])))
+        i += 2u64
+    }
+    out
+}
+
+fn one[T](take x: T) -> List[T] {
+    let mut xs: List[T] = list.new()
+    result.unwrap(list.push(mut xs, take x))
+    xs
+}
+
+fn row(chunk: u32) -> runner.Row {
+    let mut key: Bytes = list.new()
+    result.unwrap(std.codec.encode_key(std.codec.key_u32(), 0x01020304u32, mut key))
+    result.unwrap(std.codec.encode_key(std.codec.key_u32(), chunk, mut key))
+    let mut value: Bytes = list.new()
+    let mut payload: Bytes = list.new()
+    for i in 0u64 .. 64u64 {
+        let x: u8 = if chunk == 1953u32 && i >= 8u64 { 0u8 } else { int.narrow(i) }
+        result.unwrap(list.push(mut payload, x))
+    }
+    let c: std.codec.Codec[Bytes] = std.codec.of()
+    result.unwrap(std.codec.encode(c, payload, mut value))
+    runner.Row(sub: 7u32, key: take key, value: Some(take value))
+}
+
+fn done() -> runner.Done {
+    runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b("0000000001")))
+}
+
+fn batch_empty() -> runner.Frame {
+    Batch(0x0102030405060708u64, list.new(), list.new(), list.new())
+}
+
+fn batch_initial() -> runner.Frame {
+    Batch(0x0102030405060708u64, one(7u32), list.new(), list.new())
+}
+
+fn batch_viewer() -> runner.Frame {
+    Batch(0x0102030405060708u64, list.new(), one(row(0x05060708u32)), list.new())
+}
+
+fn batch_caller() -> runner.Frame {
+    Batch(0x0102030405060708u64, list.new(), one(row(0x05060708u32)), one(done()))
+}
+
+fn batch_board() -> runner.Frame {
+    let mut rows: List[runner.Row] = list.new()
+    for i in 0u32 .. 1954u32 {
+        result.unwrap(list.push(mut rows, row(i)))
+    }
+    Batch(0x0102030405060708u64, one(7u32), take rows, list.new())
+}
+
+fn vector[T](c: std.codec.Codec[T], x: T, expected: Bytes) -> bool {
+    let mut actual: Bytes = list.new()
+    result.unwrap(std.codec.encode(c, x, mut actual))
+    if actual != expected {
+        return false
+    }
+    match std.codec.decode(c, expected) {
+        Ok(Ok(take y)) => {
+            let mut again: Bytes = list.new()
+            result.unwrap(std.codec.encode(c, y, mut again))
+            again == expected
+        },
+        _ => false,
+    }
+}

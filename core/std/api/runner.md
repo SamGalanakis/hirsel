@@ -77,6 +77,15 @@ position, the larger of 1 and its unanswered sends, at most 1 + q in all: a join
 send takes a slot, and a re-send of an Abandoned position whose slot is still held
 reuses it. `hang_up()` closes the session.
 
+`Frame` is the dormant WIRE-SPEC v2 wire envelope. Its declared variants fix tags
+0 through 8: Hello, Call, Subscribe, Unsubscribe, Welcome, Placed, Batch, Ended,
+Reset. `Want`, `Entry`, `Done` and `Row` are its codec payload types. Welcome carries
+the principal, q, budget, executable digest, target and n_place. Batch carries the
+version, completing subscription ids, rows and outcomes, in that order. A Row key
+is the physical data-tree key, with big-endian table and integer key components;
+its optional value contains the current value codec's bytes without a stored
+schema prefix. The session still uses `Told`; wire serving is a later slice.
+
 S5 (admit and reply) is not on main. A table `runner.streams`, which the head creates
 at open, stands in for it with STORE-SPEC §1.8's rules. An Error reply is kept in a
 reply-only commit, where S5 keeps it in the aborted run's frame. The gate waits on
@@ -95,3 +104,7 @@ Laws and cases: `core/programs/store/runner_laws.hirsel` (R0),
 `core/programs/store/runner_crash.hirsel` (R1b, native only), run by
 `core/tools/runner_tests.py` on the evaluator, Cranelift and LLVM: R1 in the land gate
 (`//:core-runner-r1`), and R0 and R1b after the push (`//:core-runner-r0`).
+The hand-derived `frame_vectors` law and its `tag_order` and `complete_omitted`
+mutants run with R0 after the push, or alone with `//:core-runner-wire`. The byte
+fixtures in `core/programs/store/frame-vectors.json` are frozen against
+RUNNER-SPEC v2.11's R2 contract, including F9-F12.

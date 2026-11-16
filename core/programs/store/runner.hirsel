@@ -14,6 +14,19 @@ pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refus
 
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes, error: Bytes }
 
+// WIRE-SPEC v2 §3. Declared variant order fixes the u32 wire tags, Hello 0 to Reset 8.
+pub type Want: codec + send { identity: Bytes, args_fp: u64, result_fp: u64 }
+
+pub type Entry: codec + send = Ready(u32) | Resolve(u32, Bytes) | Gone
+
+pub type Done: codec + send { stream: u32, p: u64, outcome: Outcome }
+
+// key is the data-tree key (table id and key-codec integers big-endian). value is
+// the current value codec's bytes, without a stored schema prefix; None removes it.
+pub type Row: codec + send { sub: u32, key: Bytes, value: Option[Bytes] }
+
+pub type Frame: codec + send = Hello(Option[Bytes], List[Want]) | Call(u32, u64, u32, u32, Bytes) | Subscribe(u32, u32, Bytes, Option[Bytes]) | Unsubscribe(u32) | Welcome(Bytes, u32, u64, Bytes, String, u64) | Placed(Entry) | Batch(u64, List[u32], List[Row], List[Done]) | Ended(u32, Outcome) | Reset(u64, List[Done])
+
 pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes)
 
 pub const DEFAULT_STEPS: u64 = 1 << 30
@@ -342,24 +355,24 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
 // - an Admission carries no ticket, because the head never waits on one (H2);
 // - S1's abort drops a reply written by a body that returns Error, so the head keeps that
 //   reply in a reply-only commit, where S5 keeps it in the aborted run's one frame (F2).
-type Row: codec { p: u64, replied: bool, reply: Bytes }
+type StreamReply: codec { p: u64, replied: bool, reply: Bytes }
 
 type Admission = Admitted | Duplicate(Bytes) | Rejected(u64) | Abandoned
 
-fn streams_table(mut db: store.Db) -> Result[store.Table[Bytes, Row], store.Error] waits {
-    let cu: std.codec.Codec[Row] = std.codec.of()
+fn streams_table(mut db: store.Db) -> Result[store.Table[Bytes, StreamReply], store.Error] waits {
+    let cu: std.codec.Codec[StreamReply] = std.codec.of()
     match store.table(mut db, "runner.streams", std.codec.key_bytes(), cu) {
         Error(Missing(_)) => {
-            let cv: std.codec.Codec[Row] = std.codec.of()
+            let cv: std.codec.Codec[StreamReply] = std.codec.of()
             let _ = store.create_table(mut db, store.spec("runner.streams", std.codec.key_bytes(), cv))?
-            let cw: std.codec.Codec[Row] = std.codec.of()
+            let cw: std.codec.Codec[StreamReply] = std.codec.of()
             store.table(mut db, "runner.streams", std.codec.key_bytes(), cw)
         },
         take other => take other,
     }
 }
 
-fn admit(mut db: store.Db, t: store.Table[Bytes, Row], stream: Bytes, p: u64) -> Result[Admission, store.Error] waits {
+fn admit(mut db: store.Db, t: store.Table[Bytes, StreamReply], stream: Bytes, p: u64) -> Result[Admission, store.Error] waits {
     let shape = store.shape(t)
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Result[Admission, store.Error]] {
         let row = match store.fetch(tx, shape, stream) {
@@ -388,7 +401,7 @@ fn admit(mut db: store.Db, t: store.Table[Bytes, Row], stream: Bytes, p: u64) ->
                 },
             }))
         }
-        match store.put(mut tx, t, stream, Row(p: p, replied: false, reply: list.new())) {
+        match store.put(mut tx, t, stream, StreamReply(p: p, replied: false, reply: list.new())) {
             Ok(()) => Ok(()),
             Error(e) => Error(Error(e)),
         }
@@ -405,14 +418,14 @@ fn admit(mut db: store.Db, t: store.Table[Bytes, Row], stream: Bytes, p: u64) ->
     }
 }
 
-fn reply(mut tx: store.Tx, t: store.Table[Bytes, Row], stream: Bytes, p: u64, o: Outcome) -> Result[(), store.Error] {
+fn reply(mut tx: store.Tx, t: store.Table[Bytes, StreamReply], stream: Bytes, p: u64, o: Outcome) -> Result[(), store.Error] {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let mut b: Bytes = list.new()
     match std.codec.encode(co, o, mut b) {
         Ok(()) => (),
         Error(c) => return Error(Full(c)),
     }
-    store.put(mut tx, t, stream, Row(p: p, replied: true, reply: take b))
+    store.put(mut tx, t, stream, StreamReply(p: p, replied: true, reply: take b))
 }
 
 // ---- P2: the head (H1-H4) and its gate (V3, V4).
@@ -446,7 +459,7 @@ type Waiting: send { req: Req, parked: bool }
 
 type Head[G: send, H: send] {
     db: store.Db,
-    streams: store.Table[Bytes, Row],
+    streams: store.Table[Bytes, StreamReply],
     r: Registry[G, H],
     h: H,
     out: Sender[Release],
@@ -658,7 +671,7 @@ type Kept = Alone(Outcome) | Nothing(Refusal)
 
 // The effect run: the slot's body and its reply in one commit. It takes the head's parts
 // as separate places, so the body can view the registry and handles while db is lent.
-fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, streams: store.Table[Bytes, Row], q: Req) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
+fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, streams: store.Table[Bytes, StreamReply], q: Req) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
     match map.get(r.slots, q.key) {
         Some(Transact(s, _, go)) => Some(store.run(mut db, Some(s), scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
             match go(mut tx, h, q.arg) {
@@ -704,7 +717,7 @@ fn execute[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), stor
     }
 }
 
-fn reply_alone(mut db: store.Db, streams: store.Table[Bytes, Row], q: Req, o: Outcome) -> Result[store.Outcome[(), store.Error], store.Error] waits {
+fn reply_alone(mut db: store.Db, streams: store.Table[Bytes, StreamReply], q: Req, o: Outcome) -> Result[store.Outcome[(), store.Error], store.Error] waits {
     store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         reply(mut tx, streams, q.stream, q.p, o)
     })

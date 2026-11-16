@@ -5,3 +5,4 @@
 # meets a red it did not cause adds a row itself and pushes it straight to main; the lane that fixes a
 # red removes its row.
 hirsel-core-driver-unittest::native::tests::scalar_core_instances_match_closed_bodies	Census904: sum materialized slots7 vs closed3 after implied-dictionary fixture repair; RED-CENSUS.md	core-check-calls-910	2026-11-13
+land-core-evaluator	Joined source/materialized units disagree on canonical structural codec hooks, producing duplicate closed type rows in 246 laws	core-ops-914	2026-11-16

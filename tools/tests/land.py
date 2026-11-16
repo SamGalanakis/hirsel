@@ -499,6 +499,8 @@ class Land(unittest.TestCase):
         helper = ROOT / 'buck-out/tmp/cargo-bin-exe/test-land/hirsel-core-contract-eval'
         self.assertTrue(helper.is_file(), 'release evaluator is required test data')
         (self.lane / 'core/std/example.hirsel').write_text('pub fn present()->u64 {7}\n')
+        (self.lane / 'core/core').mkdir(parents=True, exist_ok=True)
+        (self.lane / 'core/core/core.hirsel').write_text('pub type Result[T, E] = Ok(T) | Error(E)\n')
         directory = self.lane / 'core/std/tests'
         directory.mkdir()
         oracle = '' if expected is None else f'// expect: run answer() = {expected}\n'
@@ -515,7 +517,7 @@ class Land(unittest.TestCase):
         self.assertIn("'values': [0]", refused.stdout)
         self.assertIn('oracle:answer', refused.stdout)
         # The surviving land log alone must tell a slow red from a wrong one.
-        self.assertRegex(refused.stdout, r'oracle:answer: .*\(\d+\.\d{3}s of the 30s bound\)')
+        self.assertRegex(refused.stdout, r'oracle:answer: .*\(\d+\.\d{3}s, 1000000000 instructions\)')
         self.assertEqual(self.main_log(), ['base'])
         law =self.lane / 'core/std/tests/oracle.hirsel'
         law.write_text(law.read_text().replace('answer() = 8', 'answer() = 7'))

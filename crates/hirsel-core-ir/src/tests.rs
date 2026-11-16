@@ -35,6 +35,44 @@ fn load(name: &str, text: &str) -> Module {
     parse(text).unwrap_or_else(|e| panic!("{name}: line {}: {}", e.line, e.message))
 }
 
+/// A host destination receives the returned bytes without admission. A loop
+/// with no instructions still spends its explicit allowance on terminators.
+#[test]
+fn host_return_place_and_instruction_allowance() {
+    let module = load(
+        "host destination",
+        "core v1\ntype t0 = own \"Out\" { word: u64 }\nsig g0 = () -> () dest t0\ninst n0 = app@1/main/result [] []\nfn f0 = n0 g0 {\n addr a0 = v0 : t0\n addr a1 = a0 field 0 : u64\nb0(v0: ptr):\n address a0\n address a1\n v1: u64 = const 73\n store a1, v1\n return\n}\n",
+    );
+    wf::module(&module).unwrap();
+    let mut destination = [0; 8];
+    let (report, _) = eval::run_nans_into(
+        &module,
+        FuncId(0),
+        &[],
+        0,
+        eval::Nans::Scrambled,
+        Some(&mut destination),
+        100,
+    );
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![]));
+    assert_eq!(u64::from_le_bytes(destination), 73);
+    assert_eq!(report.used, 0);
+    let looping = load(
+        "budget",
+        "core v1\nsig g0 = () -> ()\ninst n0 = app@1/main/looping [] []\nfn f0 = n0 g0 {\nb0:\n jump b0\n}\n",
+    );
+    wf::module(&looping).unwrap();
+    let fault = std::panic::catch_unwind(|| {
+        eval::run_nans_into(&looping, FuncId(0), &[], 0, eval::Nans::Canonical, None, 3)
+    })
+    .err()
+    .expect("the explicit allowance stops an empty loop");
+    assert_eq!(
+        fault.downcast_ref::<&str>().copied(),
+        Some("evaluator instruction budget exhausted")
+    );
+}
+
 #[test]
 fn closed_type_identity_has_one_row_and_keeps_its_package() {
     let mut m = load(

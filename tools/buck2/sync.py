@@ -737,8 +737,12 @@ def first_party(meta: dict) -> str:
                                   "tools/tests/core_store_no_sync.py", "tools/tests/core_memory_report.py", "tools/tests/distribution_notices.py"],
                             files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
     out.append("\n" + call("hirsel_script_test", name="land-core-evaluator", script="core/tools/gate_evaluator.py", full=False,
-                            production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            args=["--evaluator", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel-core-contract-eval"],
+                            production=True, native_tools=True,
+                            bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",
+                                      "hirsel": "//:hirsel-core-driver-bin-hirsel"},
+                            args=["--evaluator", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel-core-contract-eval",
+                                  "--compiler", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel"],
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/tools/std_native.py", "core/tools/std_native_owners.json"])')))
     # CONC-10 event order: the evaluator against native cranelift under the poll recorder's FIFO choice.
     out.append("\n" + call("hirsel_script_test", name="core-event-order", script="crates/hirsel-core-rt/test-event-order.py", full=False,
@@ -748,7 +752,7 @@ def first_party(meta: dict) -> str:
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "crates/hirsel-core-rt/fixtures/order/**", "crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-rt/fixtures/polls/recorder.c"]')))
+                            data=Raw('glob(["core/core/**", "crates/hirsel-core-rt/fixtures/order/**", "crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-rt/fixtures/polls/recorder.c", "core/tools/std_native.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-store-s1", script="core/tools/store_tests.py", full=False,
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-store-s1/hirsel",

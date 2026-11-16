@@ -481,6 +481,7 @@ struct Machine<'m> {
     /// The last destination identity handed out (`rt.dest_id`).
     dests: u64,
     admissions: usize,
+    instructions: u64,
     injection: Option<(usize, bool)>,
     world: World,
     /// The `view` places of the calls running now, as (block, offset, size).
@@ -658,21 +659,47 @@ pub enum Nans {
 }
 /// A run whose NaNs follow `nans`, with what its oracle checks covered.
 pub fn run_nans(m: &Module, f: FuncId, args: &[u64], limit: u64, nans: Nans) -> (Report, Checked) {
-    run_world(m, f, args, limit, None, &[], nans, &Revisions::new())
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            nans,
+            ..WorldInput::default()
+        },
+    )
 }
-/// Each described instance's code revision (PROG-9), by its identity digest:
-/// what a link that knows the program's reach gives its revision carriers.
+/// Each described instance's code revision, supplied by the program's reach.
 pub type Revisions = std::collections::BTreeMap<ContentHash, ContentHash>;
-/// A run whose descriptors' revision carriers hold `revisions`; an instance
-/// it does not name has none.
-pub fn run_revisions(
+/// A run whose descriptors' revision carriers hold the supplied revisions.
+pub fn run_revisions(m: &Module, f: FuncId, args: &[u64], limit: u64, revisions: &Revisions) -> Report {
+    run_world(m, f, args, limit, WorldInput { revisions: Some(revisions), ..WorldInput::default() }).0
+}
+/// A host caller's return place and explicit instruction allowance. The place is
+/// frame memory outside logical admission, just as a native caller's stack place.
+/// Its pointer is supplied before `args`; its bytes are copied back after the run.
+pub fn run_nans_into(
     m: &Module,
     f: FuncId,
     args: &[u64],
     limit: u64,
-    revisions: &Revisions,
-) -> Report {
-    run_world(m, f, args, limit, None, &[], Nans::Canonical, revisions).0
+    nans: Nans,
+    destination: Option<&mut [u8]>,
+    instructions: u64,
+) -> (Report, Checked) {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            nans,
+            destination,
+            instructions,
+            ..WorldInput::default()
+        },
+    )
 }
 /// A run whose `Args` table holds `argv`.
 pub fn run_args(m: &Module, f: FuncId, args: &[u64], limit: u64, argv: &[&str]) -> Report {
@@ -681,10 +708,10 @@ pub fn run_args(m: &Module, f: FuncId, args: &[u64], limit: u64, argv: &[&str]) 
         f,
         args,
         limit,
-        None,
-        argv,
-        Nans::Canonical,
-        &Revisions::new(),
+        WorldInput {
+            argv,
+            ..WorldInput::default()
+        },
     )
     .0
 }
@@ -701,22 +728,39 @@ pub fn run_injected(
         f,
         args,
         limit,
-        injection,
-        &[],
-        Nans::Canonical,
-        &Revisions::new(),
+        WorldInput {
+            injection,
+            ..WorldInput::default()
+        },
     )
     .0
+}
+struct WorldInput<'a> {
+    revisions: Option<&'a Revisions>,
+    injection: Option<(usize, bool)>,
+    argv: &'a [&'a str],
+    nans: Nans,
+    destination: Option<&'a mut [u8]>,
+    instructions: u64,
+}
+impl Default for WorldInput<'_> {
+    fn default() -> Self {
+        Self {
+            revisions: None,
+            injection: None,
+            argv: &[],
+            nans: Nans::Canonical,
+            destination: None,
+            instructions: u64::MAX,
+        }
+    }
 }
 fn run_world(
     m: &Module,
     f: FuncId,
     args: &[u64],
     limit: u64,
-    injection: Option<(usize, bool)>,
-    argv: &[&str],
-    nans: Nans,
-    revisions: &Revisions,
+    mut input: WorldInput<'_>,
 ) -> (Report, Checked) {
     let mut mach = Machine {
         step_bounds: Vec::new(),
@@ -741,7 +785,8 @@ fn run_world(
         trace: Vec::new(),
         dests: 0,
         admissions: 0,
-        injection,
+        instructions: input.instructions,
+        injection: input.injection,
         world: World::default(),
         frozen: Vec::new(),
         loans: 0,
@@ -754,7 +799,7 @@ fn run_world(
             .iter()
             .map(|f| crate::source::inherits_site(&m.instances[f.instance.index()]))
             .collect(),
-        scrambled: (nans == Nans::Scrambled).then_some(0),
+        scrambled: (input.nans == Nans::Scrambled).then_some(0),
         sched: Sched {
             next: 1,
             ..Sched::default()
@@ -767,7 +812,7 @@ fn run_world(
         mach.mem[split(p).0].bytes.clone_from(&s.bytes);
         mach.mem[split(p).0].fixed = true;
     }
-    for a in argv {
+    for a in input.argv {
         let data = mach.block(a.len() as u64, None, 0, None);
         mach.mem[split(data).0].bytes = a.as_bytes().to_vec();
         let carrier = mach.block(24, None, 0, None);
@@ -803,7 +848,7 @@ fn run_world(
                 let carrier = *carriers.entry(root.identity().digest()).or_insert_with(|| {
                     let at = mach.block(24, None, 0, None);
                     let revision = match &root {
-                        RevisionRoot::Item(identity) => revisions.get(&identity.digest()).copied(),
+                        RevisionRoot::Item(identity) => input.revisions.and_then(|r| r.get(&identity.digest())).copied(),
                         RevisionRoot::Intrinsic(identity) => Some(intrinsic_revision(identity)),
                     };
                     if let Some(revision) = revision {
@@ -858,6 +903,15 @@ fn run_world(
         k: 0,
         shield: 0,
     };
+    let destination = input.destination.as_ref().map(|bytes| {
+        let p = mach.block(bytes.len() as u64, None, 0, None);
+        mach.mem[split(p).0].bytes.copy_from_slice(bytes);
+        p
+    });
+    let arguments = destination
+        .into_iter()
+        .chain(args.iter().copied())
+        .collect();
     mach.sched.tasks.push(Rec {
         id: 0,
         state: State::Ready,
@@ -865,11 +919,14 @@ fn run_world(
         polls: POLLS_PER_TURN,
         cancellable: false,
         cancelled: false,
-        start: Some((task, f, args.to_vec())),
+        start: Some((task, f, arguments)),
         refunds: Vec::new(),
     });
     mach.sched.ready.push_back(0);
     let (mut mach, outcome, chain) = drive(mach);
+    if let Some(bytes) = input.destination.as_mut() {
+        bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
+    }
     // Refunds still pending when the run ends count toward its final use.
     for k in 0..mach.sched.tasks.len() {
         for (l, n) in std::mem::take(&mut mach.sched.tasks[k].refunds) {
@@ -1059,6 +1116,7 @@ impl<'m> Machine<'m> {
             trace: Vec::new(),
             dests: 0,
             admissions: 0,
+            instructions: 0,
             injection: None,
             world: World::default(),
             frozen: Vec::new(),
@@ -2782,12 +2840,22 @@ impl Machine<'_> {
         let mut block = BlockId(0);
         let mut incoming = args.to_vec();
         'blocks: loop {
+            assert!(
+                self.instructions != 0,
+                "evaluator instruction budget exhausted"
+            );
+            self.instructions -= 1;
             let blk = &b.blocks[block.index()];
             for (p, a) in pool(blk.params).into_iter().zip(&incoming) {
                 vals[p.index()] = *a;
             }
             let first = blk.insts.start as usize;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
+                assert!(
+                    self.instructions != 0,
+                    "evaluator instruction budget exhausted"
+                );
+                self.instructions -= 1;
                 t.at.last_mut().unwrap().0 = b.inst_anchors[first + k];
                 let r = self.inst(t, b, slots, &mut vals, &mut places, inst);
                 if let Err(stop) = r {

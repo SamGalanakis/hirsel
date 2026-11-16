@@ -5,6 +5,7 @@ Example: std_native.py --compiler PATH --runtime PATH --filter file --backend bo
 Confined filesystem cases run on the host, which needs openat2 (Linux >= 5.6).
 """
 import argparse
+import contextlib
 import dataclasses
 import json
 import os
@@ -176,20 +177,49 @@ def host_parameter(case):
     return '', ''
 
 
-def wrapper(case, evaluator=False):
+class Evaluator:
+    """One checked-product store per gate, one fresh evaluator world per request."""
+    def __init__(self, binary):
+        self.binary = binary
+        self.errors = tempfile.TemporaryFile()
+        self.process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=self.errors)
+
+    def __enter__(self):
+        return self
+
+    def evaluate(self, manifest, entry, program_entry=False):
+        request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
+        try:
+            self.process.stdin.write(json.dumps(request).encode() + b'\n')
+            self.process.stdin.flush()
+            line = self.process.stdout.readline()
+        except BrokenPipeError:
+            line = b''
+        if not line:
+            status = self.process.wait()
+            self.errors.seek(0)
+            return subprocess.CompletedProcess([str(self.binary)], status or 1, b'', self.errors.read())
+        return subprocess.CompletedProcess([str(self.binary)], 0, line, b'')
+
+    def __exit__(self, *exc):
+        with contextlib.suppress(BrokenPipeError):
+            self.process.stdin.close()
+        self.process.stdout.close()
+        self.process.wait()
+        self.errors.close()
+
+
+def wrapper(case):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
-    success = '1u64' if evaluator else 'Ok(())'
-    failure = '0u64' if evaluator else 'Error(())'
-    result = 'u64' if evaluator else 'Result[(),()]'
     if case.expected.startswith(('fail ', 'fault ')):
-        body = f'let _ = {call}\n{success}'
+        body = f'let _ = {call}\nOk(())'
     else:
-        body = f'if {call} == {case.expected} {{{success}}} else {{{failure}}}'
-    marker = '' if evaluator else '@test\n'
-    return f'\n{marker}pub fn native_contract({parameters})->{result}{effect} {{\n{body}\n}}\n'
+        body = f'if {call} == {case.expected} {{Ok(())}} else {{Error(())}}'
+    return f'\n@test\npub fn native_contract({parameters})->Result[(),()]{effect} {{\n{body}\n}}\n'
 
 
 def manifest(root, case, adapted):
@@ -303,13 +333,14 @@ def save_row(rows, row, output):
     rows.append(row)
     status = 'NOT APPLICABLE' if not row['applicable'] else 'PASS' if row['passed'] else 'FAIL' if row['ran'] else 'NOT RUN'
     print(f"{row['engine']} {row['test']}: {status}" + (f" {row['cause']}" if row['cause'] else '') +
-          (f" ({row['seconds']:.3f}s of {row['bound']}s)" if 'seconds' in row else '') +
+          (f" ({row['seconds']:.3f}s, {row['instruction_budget']} instructions)" if 'instruction_budget' in row else
+           f" ({row['seconds']:.3f}s of {row['bound']}s)" if 'seconds' in row else '') +
           (f" [owner {row['owner']}]" if row['owner'] else ''), flush=True)
     if output:
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -319,8 +350,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
         raise ValueError('evaluator laws require --evaluator <hirsel-core-contract-eval>')
     # Private stores are shared across cases only for immutable checked/native products.
     # Each case's host state is fresh and its executable is removed after observation.
-    with tempfile.TemporaryDirectory(prefix='hirsel-std-native-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='hirsel-std-native-') as temporary, contextlib.ExitStack() as processes:
         work = Path(temporary)
+        resident = processes.enter_context(Evaluator(evaluator)) if 'evaluator' in engines else None
         for engine in engines:
             started = time.monotonic()
             for index, case in enumerate(contracts):
@@ -350,7 +382,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
-                adapted.write_text(original + case.file.read_text() + wrapper(case, evaluator=evaluating))
+                adapted.write_text(original + case.file.read_text() + wrapper(case))
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
@@ -358,24 +390,43 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(64 * 1024 * 1024),
                            '--test-timeout', str(timeout), '--dir', str(host), '-o', str(scratch / 'programs')]
                 if evaluating:
-                    # No load admission here: an evaluator law starts no build, and
-                    # the gate's pool reservation already admitted this process. The
-                    # timed interval is the law's own evaluator process alone.
                     law_started = time.monotonic()
+                    result = resident.evaluate(inputs, entry)
+                    row['ran'], row['cause'] = evaluator_observation(case, result)
                     try:
-                        result = subprocess.run([str(evaluator), str(inputs), entry],
-                                                capture_output=True, timeout=timeout)
-                        row['ran'], row['cause'] = evaluator_observation(case, result)
-                    except subprocess.TimeoutExpired:
-                        row['ran'] = True
-                        row['cause'] = f'evaluator execution timed out after {timeout}s'
+                        row['revision'] = json.loads(result.stdout).get('revision')
+                    except ValueError:
+                        row['revision'] = None
                     row['seconds'] = round(time.monotonic() - law_started, 3)
-                    row['bound'] = timeout
+                    if compare_revisions:
+                        reference = [str(compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', entry,
+                                     '--backend', 'cranelift', '--runtime', str(runtime), '--store', str(work / 'revision-store'),
+                                     '--json', '--limit', str(64 * 1024 * 1024), '-o', str(scratch / 'revision-program')]
+                        for capability in ('Tasks', 'Clock'):
+                            if host_parameter(case)[0].endswith(':' + capability):
+                                reference.extend(['--grant', capability])
+                        if cc:
+                            reference.extend(['--cc', str(cc)])
+                        built = subprocess.run(reference, capture_output=True, cwd=host)
+                        try:
+                            product = json.loads(built.stdout)
+                        except ValueError:
+                            product = {}
+                        native_revision = (product.get('native') or {}).get('revision')
+                        row['build_revision'] = native_revision
+                        row['build_status'] = built.returncode
+                        row['revision_matches'] = row['revision'] is not None and row['revision'] == native_revision
+                        if not row['revision_matches']:
+                            row['revision_cause'] = (f"entry revisions differ: evaluator {row['revision']}, build {native_revision}"
+                                                     if native_revision is not None else first_stop(product) if product else
+                                                     f'build exited {built.returncode}: {built.stdout!r} {built.stderr!r}')
+                            row['cause'] = (row['cause'] + '; L1: ' + row['revision_cause']) if row['cause'] else row['revision_cause']
+                        (scratch / 'revision-program').unlink(missing_ok=True)
+                    row['instruction_budget'] = 1_000_000_000
                     row['passed'] = row['cause'] is None
                     if row['cause']:
-                        row['owner'] = ('core-check-895' if not row['ran'] else
-                                        'core-ops-914' if 'external functions do not run here' in row['cause'] else
-                                        'core-form-883')
+                        row['owner'] = ('core-ops-914' if any(message in row['cause'] for message in ('external functions do not run here', 'duplicate closed type rows')) else
+                                        'core-check-895' if not row['ran'] else 'core-form-883')
                     save_row(rows, row, output)
                     continue
                 if target:
@@ -384,10 +435,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--emulator', str(emulator), '--sysroot', str(sysroot)])
                 if engine == 'llvm':
                     command.append('--release')
-                if case.package == 'core':
-                    # A temporary core @test belongs to this source request;
-                    # published dependencies deliberately omit test bodies.
-                    command.append('--source-core')
+                # All engines read this manifest's checkout sources, as the
+                # resident evaluator does, including temporary @test bodies.
+                command.append('--source-core')
                 if '(out)' in case.call:
                     command.extend(['--grant', 'Stdout'])
                 if '(err)' in case.call:
@@ -434,6 +484,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 save_row(rows, row, output)
                 shutil.rmtree(scratch / 'programs', ignore_errors=True)
             selected = [r for r in rows if r['engine'] == engine]
+            if compare_revisions and engine == 'evaluator':
+                applicable = [r for r in selected if r['applicable']]
+                print(f"revision law: {sum(r.get('revision_matches', False) for r in applicable)}/{len(applicable)} match", flush=True)
             print(f"{engine}: {len(selected)} selected, {sum(r['ran'] for r in selected)} ran, {sum(bool(r['passed']) for r in selected)} passed, {sum(r['applicable'] and not r['ran'] for r in selected)} not run, {sum(not r['applicable'] for r in selected)} not applicable, {sum(r['native_only'] for r in selected)} native-only; {time.monotonic() - started:.3f}s", flush=True)
     return rows
 

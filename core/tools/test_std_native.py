@@ -25,23 +25,43 @@ class Walker(unittest.TestCase):
             self.assertIn('native_tasks:Tasks', wrapper(cases[0]))
             self.assertIn('reader(native_tasks)', wrapper(cases[0]))
             calls = []
+            build_revision = [7]
             def compiler(argv, **kwargs):
                 calls.append(argv)
                 if argv[0] == str(root / 'evaluator'):
                     self.assertEqual(argv[-1], 'std@1/tests/task_law/native_contract')
                     observed = dict(outcome=dict(kind='returned', values=[1]),
-                                    stdout=[], stderr=[], used=0)
+                                    stdout=[], stderr=[], used=0, revision=[7])
                     return subprocess.CompletedProcess(argv, 0, json.dumps(observed).encode(), b'')
                 self.assertIn(['--grant', 'Tasks'], [argv[i:i+2] for i in range(len(argv)-1)])
+                if argv[1] == 'build':
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(dict(native=dict(revision=build_revision))).encode(), b'')
                 test = dict(definition='std@1/tests/task_law/native_contract', passed=True,
                             status=0, stdout='', stderr='')
                 return subprocess.CompletedProcess(argv, 0, json.dumps(dict(tests=[test])).encode(), b'')
-            with patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
+            class Resident:
+                def __init__(self, binary):
+                    self.binary = binary
+                def __enter__(self):
+                    return self
+                def evaluate(self, inputs, entry):
+                    return compiler([str(self.binary), str(inputs), entry])
+                def __exit__(self, *exc):
+                    pass
+            with patch('std_native.Evaluator', Resident), patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
                 rows = run(root, root / 'compiler', root / 'runtime', cases,
-                           ['evaluator', 'cranelift', 'llvm'], None, [], evaluator=root / 'evaluator')
-            self.assertEqual(len(calls), 3)
+                           ['evaluator', 'cranelift', 'llvm'], None, [], evaluator=root / 'evaluator', compare_revisions=True)
+            self.assertEqual(len(calls), 4)
             self.assertTrue(all(r['applicable'] and not r['native_only'] for r in rows))
             self.assertTrue(all(r['ran'] and r['passed'] for r in rows))
+            self.assertTrue(rows[0]['revision_matches'])
+            build_revision = [8]
+            with patch('std_native.Evaluator', Resident), patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
+                mismatch = run(root, root / 'compiler', root / 'runtime', cases,
+                               ['evaluator'], None, [], evaluator=root / 'evaluator', compare_revisions=True)
+            self.assertFalse(mismatch[0]['passed'])
+            self.assertFalse(mismatch[0]['revision_matches'])
+            self.assertIn('entry revisions differ', mismatch[0]['cause'])
 
     def test_selection_never_turns_an_empty_filter_green(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -186,7 +206,7 @@ class Walker(unittest.TestCase):
             file.write_text('// test-backend: evaluator\n// test-reason: native slot operations deliberately have no misuse guards\n// expect: run bad() = fault "take of the empty slot at +0"\nfn bad()->u64 {7}')
             cases = discover(root, ['core.misuse'])
             evaluator = root / 'eval'
-            evaluator.write_text('#!/usr/bin/env python3\nprint(\'{"outcome":{"kind":"fault","message":"take of the empty slot at +0"}}\')\n')
+            evaluator.write_text('#!/usr/bin/env python3\nimport sys\nfor line in sys.stdin:\n print(\'{"outcome":{"kind":"fault","message":"take of the empty slot at +0"}}\', flush=True)\n')
             evaluator.chmod(0o755)
             output = root / 'rows.json'
             with contextlib.redirect_stdout(io.StringIO()) as printed:
@@ -221,7 +241,7 @@ class Walker(unittest.TestCase):
             (root / 'core/core').mkdir()
             (tests / 'plain.hirsel').write_text('// expect: run good() = true\nfn good()->bool {true}\n// expect: run host(out) = true\nfn host(out:Stdout)->bool {true}')
             evaluator = root / 'eval'
-            evaluator.write_text('#!/usr/bin/env python3\nprint(\'{"outcome":{"kind":"returned","values":[1]},"used":0}\')\n')
+            evaluator.write_text('#!/usr/bin/env python3\nimport sys\nfor line in sys.stdin:\n print(\'{"outcome":{"kind":"returned","values":[1]},"used":0}\', flush=True)\n')
             evaluator.chmod(0o755)
             cases = discover(root, [])
             with contextlib.redirect_stdout(io.StringIO()) as printed:
@@ -230,11 +250,10 @@ class Walker(unittest.TestCase):
                              [(True, True, False), (False, None, True)])
             self.assertIn('2 selected, 1 ran, 1 passed', printed.getvalue())
             self.assertIn('1 native-only', printed.getvalue())
-            self.assertIn('->u64', wrapper(cases[0], evaluator=True))
             self.assertEqual(len(manifest(root, cases[0], root / 'adapted')['packages']), 2)
             self.assertIn('@test\npub fn native_contract', wrapper(cases[0]))
             self.assertIn('Result[(),()]', wrapper(cases[0]))
-            self.assertNotIn('@test', wrapper(cases[0], evaluator=True))
+            self.assertNotIn('->u64', wrapper(cases[0]))
 
     def test_evaluator_disagreement_is_a_finding_not_an_inapplicable_law(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -247,7 +266,7 @@ class Walker(unittest.TestCase):
             for message, expected_owner in [('write to lent place', 'core-form-883'),
                                             ('external functions do not run here', 'core-ops-914')]:
                 report = json.dumps(dict(outcome=dict(kind='fault', message=message)))
-                evaluator.write_text('#!/usr/bin/env python3\nprint(' + repr(report) + ')\n')
+                evaluator.write_text('#!/usr/bin/env python3\nimport sys\nfor line in sys.stdin:\n print(' + repr(report) + ', flush=True)\n')
                 evaluator.chmod(0o755)
                 with contextlib.redirect_stdout(io.StringIO()):
                     rows = run(root, None, None, discover(root, []), ['evaluator'], None, [], evaluator=evaluator)

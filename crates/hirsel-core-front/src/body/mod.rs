@@ -1340,7 +1340,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             joins: vec![],
             synth: vec![0; (item.range.nodes.end - item.range.nodes.start) as usize],
             waited: false,
-            entry: p.entry.as_ref() == Some(&fd.path),
+            entry: fd.is_test || p.entry.as_ref() == Some(&fd.path),
             dest: None,
             clone_to: None,
             reps: HashMap::default(),

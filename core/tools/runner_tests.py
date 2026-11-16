@@ -12,8 +12,13 @@ the runtime's exact peak of live backing bytes across its two modes.
 
 --part r1 runs R1's calls (transactions at durable versions, runs-once, store refusal)
 and their native twins: the land gate's part. --part r0 runs the rest, which runs after
-the push: R0's laws, p19, l12, L4, and every mutant (a mutant qualifies a law, not the
+the push: R0's laws, p19, l12, L4, R1b's L1, and every mutant (a mutant qualifies a law, not the
 runner a change lands). Without --part both run.
+
+R1b's L1 builds core/programs/store/runner_crash.hirsel per native backend under the
+store's W2 crash adapter (core/tools/store_crash_tests.py): every cut of each scenario,
+and one failed journal sync. Its two mutants need that adapter, so they run natively, on
+Cranelift only, and are red when the L1 floor check fails them.
 """
 import argparse
 import json
@@ -26,6 +31,7 @@ import tempfile
 
 from std_native import ROOT, wait_load
 from store_tests import inputs
+from store_crash_tests import checked, run_crashes
 
 
 LAWS = ('p01_call', 'p02_start_finish', 'p09_describe', 'p13_duplicate_refused', 'p15_types_roundtrip',
@@ -256,6 +262,35 @@ def l12_module(path, variant, expect=None):
     path.write_text('\n'.join(lines))
 
 
+# R1b (RUNNER-SPEC v2.10 L1): runner_crash's scenarios, each run at every W2 cut, and
+# its poison scenario, whose one failed journal sync the adapter checks in count mode.
+CRASHES = ('runner-cross', 'runner-order')
+POISON = 'poison-segment'
+# - answer_before_durable: the gate releases a group without waiting for it to be durable,
+#   so a cut after the commit loses a version a client saw (run at the cuts).
+# - poison_answers: the gate releases a group whose durable failed, so a client sees a
+#   version the store never kept (run under the poisoned sync alone).
+CRASH_MUTANTS = (
+    ('answer_before_durable', '        store.durable(mut hd.db, t)?\n', '        let _ = t\n', CRASHES),
+    ('poison_answers', '        store.durable(mut hd.db, t)?\n', '        let _ = store.durable(mut hd.db, t)\n', ()),
+)
+
+
+def crashes(args, root, work, engine, name, runner=None, scenarios=CRASHES):
+    """L1 at every cut of each scenario, then POISON once; raises on the first failure."""
+    inputs_path = manifest(root, work, 'crash_' + name, runner,
+                           [(root / 'core/programs/store/runner_crash.hirsel', 'runner_crash')])
+    env = dict(os.environ)
+    env['LD_LIBRARY_PATH'] = ':'.join([str(args.bridge.resolve().parent),
+                                       str(root / 'tools/buck2/toolchains/llvm-files/lib'),
+                                       env.get('LD_LIBRARY_PATH', '')])
+    build = work / f'crash_{name}'
+    build.mkdir()
+    rows = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
+                       entry='store@1/runner_crash/main', scenarios=scenarios, environment=env)
+    checked([str(build / (engine + '-crash') / 'store'), POISON, 'count'], env)
+    return rows
+
 def manifest(root, work, name, runner=None, extra=()):
     m = inputs(root)
     sources = m['packages'][-1]['sources']
@@ -345,6 +380,7 @@ def main():
     p.add_argument('--observed', type=Path,
                    default=Path(os.environ['HIRSEL_CORE_RT_OBSERVED_ARCHIVES']) / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
                    if 'HIRSEL_CORE_RT_OBSERVED_ARCHIVES' in os.environ else None)
+    p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--cc', type=Path)
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm'])
     p.add_argument('--no-mutants', action='store_true')
@@ -409,8 +445,8 @@ def main():
                 row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
         natives = [e for e in engines if e != 'evaluator']
         if natives:
-            if args.compiler is None or args.runtime is None or args.observed is None:
-                p.error('native backends require --compiler, --runtime and --observed')
+            if args.compiler is None or args.runtime is None or args.observed is None or (r0 and args.bridge is None):
+                p.error('native backends require --compiler, --runtime, --observed and --bridge')
             l12 = work / 'runner_l12.hirsel'
             if r0:
                 l12_module(l12, L12[0], values['base'])
@@ -460,6 +496,28 @@ def main():
                 if r0:
                     held, figures = l4_retained(args, root, work, engine)
                     row(engine=engine, law='l4_peak_retained', passed=held, result=figures)
+                    try:
+                        row(engine=engine, law='l1_crash', passed=True,
+                            result=crashes(args, root, work, engine, engine))
+                    except RuntimeError as error:
+                        row(engine=engine, law='l1_crash', passed=False, result=str(error)[-2000:])
+            # A crash mutant is red only when it builds and the L1 floor check fails it.
+            if r0 and not args.no_mutants and 'cranelift' in natives:
+                text = (root / 'core/programs/store/runner.hirsel').read_text()
+                for name, old, new, scenarios in CRASH_MUTANTS:
+                    if text.count(old) != 1:
+                        row(engine='cranelift', mutant=name, passed=False, result='mutation site not found once')
+                        continue
+                    mutated = work / f'crash_runner_{name}' / 'runner.hirsel'
+                    mutated.parent.mkdir()
+                    mutated.write_text(text.replace(old, new))
+                    try:
+                        crashes(args, root, work, 'cranelift', 'mutant_' + name, mutated, scenarios)
+                        red, why = False, 'green'
+                    except RuntimeError as error:
+                        why = str(error)
+                        red = '(L1)' in why
+                    row(engine='cranelift', mutant=name, law='l1_crash', passed=red, result=why[-2000:])
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
     failures = [r for r in rows if not r['passed']]

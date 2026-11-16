@@ -90,6 +90,9 @@ static size_t schedule_choose(void *state,size_t runnable) {
 static struct { int enabled; uint64_t token[64], calls[64]; } hold;
 static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t token) {
     (void)state;
+    /* SleepUntil (the runner's deadline timers) waits on host time and never reaches the
+     * W2 filesystem; its deadlines are far, so a timer ends only by being dropped. */
+    if(request->operation==15) return (HirselCoreWait){1,UINT64_MAX};
     if(hold.enabled && request->operation==16) {
         /* Tokens are unique per operation; concurrent syncs keep separate counts. */
         uint64_t *calls=&hold.calls[token%64];
@@ -103,6 +106,7 @@ static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t 
 }
 static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) {
     (void)token;
+    if(r->operation==15) return (HirselCoreStep){0};
     HirselCoreHostOutcome out=store_crash_op(state,r->operation,r->mode,r->handle,
         r->path,r->path_len,r->buffer.data,r->buffer.len,r->buffer.capacity);
     if(!out.error.tag) {

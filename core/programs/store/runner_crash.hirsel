@@ -1,0 +1,403 @@
+// R1b (RUNNER-SPEC v2.10 §8, L1 and calls25's crash scenarios) on a disk store, under the
+// store's W2 crash adapter (core/tools/store_crash.c). The adapter runs `main` three times,
+// argv: phase (init, write, read), scenario, expected (new or prefix), floor. In write it
+// cuts the filesystem at one mutation, or fails one named sync (poison-segment); its floor
+// is the largest version this program reported with `ACK v`.
+//
+// Expected values come from the spec, not from the runner:
+// - each body's reply is std.codec.put_result of its Result[u64, u32], or Failed(Raised(2))
+//   for an index fault (RUNNER-SPEC §1.1), and does not depend on the version, so a reply
+//   kept before a crash and one made after it are byte-equal (C3);
+// - `bump` adds 1 to the counter row 0, so after every position is answered the counter
+//   is the number of positions whose body committed: each effect once (C1);
+// - a frame reporting a commit (Returned or Failed) comes from a durable Release (V4), so
+//   the store recovered after any cut holds at least every version a client saw (L1);
+// - a poisoned journal answers nothing (§2.1 Poison), so its floor holds too.
+//
+// Scenarios (calls25_model.py):
+// - runner-cross (cross_session_crash): stream 0 p0 from two sessions, stream 1 p0 a typed
+//   error from the second, then stream 0 p1 from the first;
+// - runner-order (out_of_order_two_sessions): stream 0 p1 from one session before p0, a
+//   fault, from the other;
+// - poison-segment (poison): the cross calls with the first journal sync failing.
+// The adapter gives one cut per run, so runner-order has one crash where the model has two.
+type Hd: send { t: store.Table[u64, u64] }
+
+type Calls = runner.Registry[(), Hd]
+
+fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
+    Ok(Hd(t: t))
+}
+
+fn counted(tx: store.Tx, h: Hd) -> Result[u64, u32] {
+    match store.fetch(tx, store.shape(h.t), 0u64) {
+        Ok(Some(n)) => Ok(n),
+        Ok(None) => Ok(0u64),
+        Error(_) => Error(1u32),
+    }
+}
+
+// Adds 1 to the counter and returns k.
+fn bump(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    let n = counted(tx, h)?
+    match store.put(mut tx, h.t, 0u64, n + 1u64) {
+        Ok(()) => Ok(k),
+        Error(_) => Error(1u32),
+    }
+}
+
+// Adds 1 to the counter, then returns a typed error, so the effect is aborted.
+fn deny(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    let n = counted(tx, h)?
+    let _ = store.put(mut tx, h.t, 0u64, n + 1u64)
+    Error(7u32)
+}
+
+// Adds 1 to the counter, then faults (Bounds, Raised(2)).
+fn trip(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    let n = counted(tx, h)?
+    let _ = store.put(mut tx, h.t, 0u64, n + 1u64)
+    let xs: List[u64] = list.new()
+    Ok(xs[k])
+}
+
+fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(bump), 65536u64)?
+    runner.transact(mut r, code.describe(deny), 65536u64)?
+    runner.transact(mut r, code.describe(trip), 65536u64)
+}
+
+const N_PLACE: u64 = 1048576u64
+
+fn key_of(id: View[Bytes]) -> Bytes {
+    let mut key: Bytes = list.new()
+    result.unwrap(list.append(mut key, id))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
+    key
+}
+
+fn u64_bytes(x: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(x, mut b))
+    b
+}
+
+fn want(ok: bool, take what: String) {
+    if !ok {
+        fail(take what)
+    }
+}
+
+// A client verdict: empty when every call was answered as expected.
+fn clean(take verdict: String) {
+    if verdict != "" {
+        fail(take verdict)
+    }
+}
+
+fn same(a: runner.Outcome, b: runner.Outcome) -> bool {
+    let co: std.codec.Codec[runner.Outcome] = std.codec.of()
+    let mut x: Bytes = list.new()
+    let mut y: Bytes = list.new()
+    result.unwrap(std.codec.encode(co, a, mut x))
+    result.unwrap(std.codec.encode(co, b, mut y))
+    x == y
+}
+
+fn returned(r: Result[u64, u32]) -> runner.Outcome {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_result(r, std.codec.of_u64(), std.codec.of_u32(), mut b))
+    Returned(take b)
+}
+
+// One position of a scenario: who sends it (session 0 or 1), its stream and p, its body
+// (0 bump, 1 deny, 2 trip), its argument, and whether its body commits an effect.
+type Pos: send { from: u64, stream: u64, p: u64, body: u64, k: u64 }
+
+fn body_key(body: u64) -> Bytes {
+    if body == 0u64 {
+        key_of(code.identity(code.describe(bump)))
+    } else if body == 1u64 {
+        key_of(code.identity(code.describe(deny)))
+    } else {
+        key_of(code.identity(code.describe(trip)))
+    }
+}
+
+fn expected(x: Pos) -> runner.Outcome {
+    if x.body == 0u64 {
+        returned(Ok(x.k))
+    } else if x.body == 1u64 {
+        returned(Error(7u32))
+    } else {
+        Failed(Raised(2u32))
+    }
+}
+
+// Sends in this order; re-sends after a crash go in (stream, p) order.
+fn positions(scenario: View[String]) -> List[Pos] {
+    let mut xs: List[Pos] = list.new()
+    if scenario == "runner-order" {
+        result.unwrap(list.push(mut xs, Pos(from: 1u64, stream: 0u64, p: 1u64, body: 0u64, k: 5u64)))
+        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 2u64, k: 0u64)))
+    } else {
+        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64)))
+        result.unwrap(list.push(mut xs, Pos(from: 1u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64)))
+        result.unwrap(list.push(mut xs, Pos(from: 1u64, stream: 1u64, p: 0u64, body: 1u64, k: 2u64)))
+        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 3u64)))
+    }
+    xs
+}
+
+// The positions once each, in (stream, p) order, and the counter they leave.
+fn resends(scenario: View[String]) -> (List[Pos], u64) {
+    let mut xs: List[Pos] = list.new()
+    if scenario == "runner-order" {
+        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 2u64, k: 0u64)))
+        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 5u64)))
+        (take xs, 1u64)
+    } else {
+        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 0u64, body: 0u64, k: 1u64)))
+        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 0u64, p: 1u64, body: 0u64, k: 3u64)))
+        result.unwrap(list.push(mut xs, Pos(from: 0u64, stream: 1u64, p: 0u64, body: 1u64, k: 2u64)))
+        (take xs, 2u64)
+    }
+}
+
+const FAR: u64 = 18000000000000000000u64
+
+fn call(x: Pos) -> runner.Event {
+    runner.ask(runner.Call(stream: u64_bytes(x.stream), p: x.p, key: body_key(x.body), arg: u64_bytes(x.k), deadline: FAR))
+}
+
+fn options() -> store.Options {
+    let mut o = store.defaults()
+    o.checkpoint_task_bytes = 1048576u64
+    o.resident_limit = 1048576u64
+    o.pack_bytes = 512u64
+    o.group_commits = 2u32
+    o.group_bytes = 1048576u32
+    o
+}
+
+fn ack(out: Stdout, v: u64) waits {
+    let mut line = result.unwrap(string.with_capacity(32u64))
+    result.unwrap(string.push(mut line, "ACK "))
+    result.unwrap(string.push_u64(mut line, v))
+    result.unwrap(stdout.write(out, line))
+}
+
+// The client: each session's answers, each checked against its expected Outcome by
+// (stream, p). A frame that reports a commit raises the floor it reports. Superseded is
+// a valid answer only to a position with a later one on its stream: the later one is
+// admitted only once this one is replied. The client never fails: a failed task would
+// leave its sessions open and the head waiting, so it hangs up every session, drains
+// each channel to its close, and returns its verdict (empty when every call was answered
+// as expected) for the caller to fail on.
+type Client: send { from: List[Receiver[runner.Frame]], to: List[Sender[runner.Event]], calls: List[Pos], out: Stdout }
+
+fn later(calls: List[Pos], x: Pos) -> bool {
+    for y in calls {
+        if y.stream == x.stream && y.p > x.p {
+            return true
+        }
+    }
+    false
+}
+
+fn client(take c: Client) -> String waits {
+    let Client(from: take from, to: take to, calls: take calls, out: out) = take c
+    let mut floor = 0u64
+    let mut answered = 0u64
+    let mut bad = ""
+    for i in 0u64 .. list.len(from) {
+        let mut owed = 0u64
+        for x in calls {
+            if x.from == i {
+                owed += 1u64
+            }
+        }
+        while owed > 0u64 && bad == "" {
+            let f = match channel.receive(from[i]) {
+                Ok(take f) => take f,
+                Error(_) => break,
+            }
+            owed -= 1u64
+            answered += 1u64
+            let mut matched = false
+            for x in calls {
+                if x.from == i && u64_bytes(x.stream) == f.stream && x.p == f.p {
+                    let superseded = match f.outcome {
+                        Superseded => later(calls, x),
+                        _ => false,
+                    }
+                    if superseded || same(f.outcome, expected(x)) {
+                        matched = true
+                    }
+                }
+            }
+            if !matched {
+                bad = "runner_crash: an answer is not its call's expected Outcome"
+            }
+            let reports = match f.outcome {
+                Returned(_) => true,
+                Failed(_) => true,
+                _ => false,
+            }
+            if reports && f.version > floor {
+                floor = f.version
+                ack(out, floor)
+            }
+        }
+    }
+    for s in to {
+        let _ = channel.send(s, runner.hang_up())
+    }
+    for r in from {
+        loop {
+            match channel.receive(r) {
+                Ok(_) => if bad == "" {
+                    bad = "runner_crash: an answer after the last"
+                },
+                Error(_) => break,
+            }
+        }
+    }
+    if bad == "" && answered != list.len(calls) {
+        bad = "unanswered"
+    }
+    bad
+}
+
+// One place over db: `sessions` sessions, the client as a task, the head on this task.
+// When the head stops (a cut or a poisoned journal), every session is hung up, so the
+// client reads what each had already sent and stops. Returns the head's result and
+// the client's verdict.
+fn served(take db: store.Db, c: Clock, tasks: Tasks, out: Stdout, sessions: u64, take calls: List[Pos]) -> (Result[(), runner.OpenError], String) waits {
+    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
+    let (head, inbox) = result.unwrap(take made)
+    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
+    let (_, joins) = result.unwrap(take joined)
+    let mut from: List[Receiver[runner.Frame]] = list.new()
+    let mut to: List[Sender[runner.Event]] = list.new()
+    let mut mine: List[Sender[runner.Event]] = list.new()
+    let mut running: List[Task[Result[(), runner.RegisterError]]] = list.new()
+    for _ in 0u64 .. sessions {
+        let pair: Result[(Sender[runner.Frame], Receiver[runner.Frame]), Capacity] = channel.new(64u64)
+        let (tx, rx) = result.unwrap(take pair)
+        let (s, t) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, take tx, c, 4u64, 2097152u64))
+        result.unwrap(list.push(mut mine, channel.sender(s)))
+        result.unwrap(list.push(mut to, take s))
+        result.unwrap(list.push(mut from, take rx))
+        result.unwrap(list.push(mut running, take t))
+    }
+    let _ = take head
+    for x in calls {
+        let _ = channel.send(mine[x.from], call(x))
+    }
+    let cl = Client(from: take from, to: take to, calls: take calls, out: out)
+    let reading = result.unwrap(task.spawn(tasks, bytes 4194304u64, take cl, client))
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), take inbox, take joins, tasks, 1048576u64)
+    for s in mine {
+        let _ = channel.send(s, runner.hang_up())
+    }
+    for take t in running {
+        let _ = task.join(take t)
+    }
+    let verdict = match task.join(take reading) {
+        Ok(take v) => take v,
+        Error(_) => fail("runner_crash: the client failed"),
+    }
+    (take opened, take verdict)
+}
+
+fn arg_u64(text: View[String]) -> u64 {
+    let mut n = 0u64
+    for digit in string.as_bytes(text) {
+        n = n * 10u64 + int.widen(digit - b'0')
+    }
+    n
+}
+
+fn count(d: Dir, c: Clock, r: Random, tasks: Tasks) -> (u64, u64) waits {
+    let mut o = options()
+    o.create = false
+    let mut db = result.unwrap(store.open(tasks, d, c, r, o))
+    let h = result.unwrap(handles(mut db))
+    let v = store.version(store.snapshot(db))
+    let n = match result.unwrap(store.get(store.snapshot(db), store.shape(h.t), 0u64)) {
+        Some(n) => n,
+        None => 0u64,
+    }
+    result.unwrap(store.close(take db))
+    (v, n)
+}
+
+pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0u64))
+    let scenario = option.unwrap(args.get(argv, 1u64))
+    if phase == "init" {
+        let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+        let cv: std.codec.Codec[u64] = std.codec.of()
+        result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
+        // A first head with no calls makes the runner's own table, so a failed sync in
+        // write lands on a call's commit rather than on that table's creation.
+        let (opened, verdict) = served(take db, c, tasks, out, 1u64, list.new())
+        want(match opened { Ok(()) => true, Error(_) => false }, "runner_crash: the first head failed")
+        clean(take verdict)
+        return Ok(())
+    }
+    if phase == "write" {
+        let db = match store.open(tasks, d, c, r, options()) {
+            Ok(take x) => take x,
+            Error(_) => return Ok(()),
+        }
+        if scenario == "poison-segment" {
+            result.unwrap(stdout.write(out, "ARM"))
+        }
+        let (opened, verdict) = served(take db, c, tasks, out, 2u64, positions(scenario))
+        match opened {
+            Ok(()) => {
+                want(scenario != "poison-segment", "runner_crash: a failed journal sync did not stop the head")
+                clean(take verdict)
+                let _ = stdout.write(out, "DONE")
+            },
+            Error(_) => {
+                // A stopped head leaves calls unanswered; every answer it gave is checked.
+                if verdict != "unanswered" {
+                    clean(take verdict)
+                }
+                if scenario == "poison-segment" {
+                    // The poisoned run ends here; the adapter wants DONE from an uncut run.
+                    let _ = stdout.write(out, "DONE")
+                }
+            },
+        }
+        return Ok(())
+    }
+    // read: L1's floor before any re-send, then every position once more, in order.
+    let done = option.unwrap(args.get(argv, 2u64)) == "new"
+    let floor = arg_u64(option.unwrap(args.get(argv, 3u64)))
+    let (before, _) = count(d, c, r, tasks)
+    want(before >= floor, "runner_crash: a client saw a commit the store lost (L1)")
+    let mut o = options()
+    o.create = false
+    let db = result.unwrap(store.open(tasks, d, c, r, o))
+    let (again, total) = resends(scenario)
+    let (opened, verdict) = served(take db, c, tasks, out, 1u64, take again)
+    let ok = match opened {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+    want(ok, "runner_crash: the re-send head failed")
+    clean(take verdict)
+    let (after, n) = count(d, c, r, tasks)
+    want(n == total, "runner_crash: an effect ran other than once (C1)")
+    if done && scenario != "poison-segment" {
+        want(after == before, "runner_crash: a re-send after a complete run committed")
+    }
+    Ok(())
+}

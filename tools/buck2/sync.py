@@ -782,7 +782,7 @@ def first_party(meta: dict) -> str:
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"]')))
     # RUNNER-SPEC v2.2: R1's calls (transactions at durable versions, runs-once, store refusal)
     # on the evaluator and their native twins are the land gate's part (core-runner-r1); R0's laws,
-    # p19, l12, L4 and every mutant run after the push (core-runner-r0).
+    # p19, l12, L4, R1b's L1 crash cuts and every mutant run after the push (core-runner-r0).
     out.append("\n" + call("hirsel_script_test", name="core-runner-r1", script="core/tools/runner_tests.py", full=False,
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-runner-r1/hirsel",
@@ -799,8 +799,9 @@ def first_party(meta: dict) -> str:
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
-                                       "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c"]')))
+                                       "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives",
+                                       "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"]')))
     # The laws whose entry takes a host capability (land-core-evaluator runs the
     # Clock and Tasks ones too, and reports the Dir, Stdout and Stderr ones
     # native-only), on both engines; on the invoking host for the Dir laws' openat2.

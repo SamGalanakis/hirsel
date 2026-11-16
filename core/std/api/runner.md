@@ -81,11 +81,17 @@ S5 (admit and reply) is not on main. A table `runner.streams`, which the head cr
 at open, stands in for it with STORE-SPEC §1.8's rules. An Error reply is kept in a
 reply-only commit, where S5 keeps it in the aborted run's frame. The gate waits on
 `store.durable` for the group's last ticket. R1's laws run on memory stores, where
-that returns at once; crash, poison and gone cases are not built yet.
+that returns at once. L1 (R1b) runs on a disk store under the store's W2 crash
+adapter, natively only: at every filesystem cut of two scenarios, the recovered store
+holds every version a client saw in a frame reporting a commit, and a re-send of each
+position gets its reply byte-equal with the effect once; one failed journal sync
+stops the head, and no client saw a version the store lost. The adapter cuts once per
+run, so a scenario's second crash is not covered. The gone case is not built yet.
 
 `place(mut r)` is the user's function that registers every entry. An owning
 closure is never shareable, so every task that runs entries runs `place` itself.
-Laws and cases: `core/programs/store/runner_laws.hirsel` (R0) and
-`core/programs/store/runner_calls.hirsel` (R1), run by `core/tools/runner_tests.py`
-on the evaluator, Cranelift and LLVM: R1 in the land gate (`//:core-runner-r1`), and R0
-after the push (`//:core-runner-r0`).
+Laws and cases: `core/programs/store/runner_laws.hirsel` (R0),
+`core/programs/store/runner_calls.hirsel` (R1) and
+`core/programs/store/runner_crash.hirsel` (R1b, native only), run by
+`core/tools/runner_tests.py` on the evaluator, Cranelift and LLVM: R1 in the land gate
+(`//:core-runner-r1`), and R0 and R1b after the push (`//:core-runner-r0`).

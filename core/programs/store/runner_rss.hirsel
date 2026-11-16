@@ -1,9 +1,9 @@
 // L4's native case (RUNNER-SPEC v2.5 §8): one program, two modes, compared by
-// core/tools/runner_tests.py on the process's ru_maxrss. argv: mode. Mode 0: one valid
-// call through a session and the head. Mode 1: 10,000 malformed calls (a 4,096-byte
-// String plus one byte, so each decode reads the whole String before it is refused),
-// then the same valid call. Refused frames leave nothing behind, so mode 1's high-water
-// is at most mode 0's plus one page.
+// core/tools/runner_tests.py on the charge-observation runtime's peak_retained_bytes.
+// argv: mode. Mode 0: one valid call through a session and the head. Mode 1: 10,000
+// malformed calls (a 4,096-byte String plus one byte, so each decode reads the whole
+// String before it is refused), then the same valid call. Refused frames leave nothing
+// behind, so the two modes' peaks are equal.
 type Hd: send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]

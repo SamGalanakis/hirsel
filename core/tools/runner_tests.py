@@ -8,7 +8,7 @@ core/programs/store/runner_calls.hirsel, and two generated modules, runner_p19 (
 registrations, an added A field and a changed R). Each mutant applies its text changes
 to a copy of runner.hirsel and must turn its law red on the evaluator. L4's high-water
 case builds core/programs/store/runner_rss.hirsel per native backend and compares
-ru_maxrss of its two modes.
+the runtime's exact peak of live backing bytes across its two modes.
 """
 import argparse
 import json
@@ -52,51 +52,33 @@ def counted(name, report):
     return sum(1 for e in report.get('events', []) if e[0] == kind) == want
 
 
-# L4 (RUNNER-SPEC v2.5 §8): runner_rss.hirsel's program, built per native backend and run
-# in two modes, one valid call (0) and 10,000 malformed frames before it (1). Both exit 0
-# and mode 1's ru_maxrss is at most mode 0's plus one page: an allocation outside any
-# charge (R20) that a refused frame leaves behind raises the process high-water. Measured
-# without the launcher, both modes read the harness's own 30 MB.
-PAGE_KB = 4
-
-
-# ru_maxrss of one run jitters upward by one 256 KB step in either mode (about 4 runs in
-# 10 on LLVM, flood or not), so each mode's figure is its smallest of RSS_RUNS runs and
-# its status the worst. A flood that keeps bytes is red by tens of MB, every run.
-RSS_RUNS = 9
-
-
-def maxrss(launcher, binary, mode):
-    runs = []
-    for _ in range(RSS_RUNS):
-        out = subprocess.run([str(launcher), str(binary), mode], capture_output=True, text=True, check=True)
-        status, kb = out.stdout.split()
-        runs.append((int(status), int(kb)))
-    return max(s for s, _ in runs), min(k for _, k in runs)
-
-
-def l4_rss(args, root, work, engine):
+# L4 (RUNNER-SPEC v2.5 §8): runner_rss.hirsel's program, built per native backend against
+# the charge-observation runtime and run in two modes, one valid call (0) and 10,000
+# malformed frames before it (1). Both exit 0 and their --logical-charge-report
+# peak_retained_bytes (the runtime's exact peak of live backing requests) are equal: a
+# refused frame that leaves any bytes behind raises mode 1's peak. ru_maxrss, the
+# earlier figure, moves by 256 KB steps from run to run and cannot see a small leak.
+def l4_retained(args, root, work, engine):
     inputs_path = manifest(root, work, 'rss', None, [(root / 'core/programs/store/runner_rss.hirsel', 'runner_rss')])
     binary = work / f'runner_rss_{engine}'
+    charges = work / f'runner_rss_{engine}.json'
     command = [str(args.compiler.resolve()), 'build', '--inputs', str(inputs_path), '--source-core',
-               '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
+               '--source-std', '--backend', engine, '--runtime', str(args.observed.resolve()),
                '--store', str(work / f'store-rss-{engine}'), '--grant', 'Clock', '--grant', 'Tasks',
-               '--grant', 'Random', '--entry', 'store@1/runner_rss/main', '-o', str(binary)]
+               '--grant', 'Random', '--entry', 'store@1/runner_rss/main',
+               '--logical-charge-report', str(charges), '-o', str(binary)]
     if args.cc:
         command += ['--cc', str(args.cc.resolve())]
     wait_load()
     built = subprocess.run(command, capture_output=True, text=True)
     if built.returncode != 0:
         return False, {'build': built.stderr[-2000:]}
-    # runner_maxrss.c measures from a small parent (a child inherits its parent's
-    # high-water at fork, and this harness's is above the program's).
-    cc = c_compiler(args)
-    launcher = work / 'runner_maxrss'
-    if not launcher.exists():
-        subprocess.run([str(cc), '-O1', str(root / 'core/tools/runner_maxrss.c'), '-o', str(launcher)], check=True)
-    valid, flood = maxrss(launcher, binary, '0'), maxrss(launcher, binary, '1')
-    figures = {'valid': valid, 'flood': flood, 'limit_kb': valid[1] + PAGE_KB}
-    return valid[0] == 0 and flood[0] == 0 and flood[1] <= valid[1] + PAGE_KB, figures
+    figures = {}
+    for mode, name in (('0', 'valid'), ('1', 'flood')):
+        run = subprocess.run([str(binary), mode], capture_output=True)
+        figures[name] = (run.returncode, json.loads(charges.read_text())['peak_retained_bytes'])
+    held = figures['valid'][0] == 0 and figures['flood'][0] == 0 and figures['flood'][1] == figures['valid'][1]
+    return held, figures
 
 
 # (name, [(old text, new text)], module, the law that must turn red). Each is a wrong
@@ -355,6 +337,9 @@ def main():
     p.add_argument('--compiler', type=Path)
     p.add_argument('--evaluator', type=Path, required=True)
     p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
+    p.add_argument('--observed', type=Path,
+                   default=Path(os.environ['HIRSEL_CORE_RT_OBSERVED_ARCHIVES']) / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
+                   if 'HIRSEL_CORE_RT_OBSERVED_ARCHIVES' in os.environ else None)
     p.add_argument('--cc', type=Path)
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm'])
     p.add_argument('--no-mutants', action='store_true')
@@ -368,7 +353,7 @@ def main():
 
     def row(**r):
         rows.append(r)
-        print(' '.join(f'{k}={v}' for k, v in r.items() if k != 'result' or r.get('law') == 'l4_ru_maxrss'), flush=True)
+        print(' '.join(f'{k}={v}' for k, v in r.items() if k != 'result' or r.get('law') == 'l4_peak_retained'), flush=True)
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
@@ -415,8 +400,8 @@ def main():
                 row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
         natives = [e for e in engines if e != 'evaluator']
         if natives:
-            if args.compiler is None or args.runtime is None:
-                p.error('native backends require --compiler and --runtime')
+            if args.compiler is None or args.runtime is None or args.observed is None:
+                p.error('native backends require --compiler, --runtime and --observed')
             l12 = work / 'runner_l12.hirsel'
             l12_module(l12, L12[0], values['base'])
             # The same module with another `place` list (registrations permuted), built after
@@ -457,8 +442,8 @@ def main():
                         passed=code == 0 and [t['definition'] for t in tests] == [definition]
                         and all(t.get('passed') for t in tests),
                         result=tests or report)
-                held, figures = l4_rss(args, root, work, engine)
-                row(engine=engine, law='l4_ru_maxrss', passed=held, result=figures)
+                held, figures = l4_retained(args, root, work, engine)
+                row(engine=engine, law='l4_peak_retained', passed=held, result=figures)
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
     failures = [r for r in rows if not r['passed']]

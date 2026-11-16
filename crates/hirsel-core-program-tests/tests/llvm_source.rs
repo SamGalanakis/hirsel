@@ -31,7 +31,7 @@ impl NativeInput for hirsel_core_program_tests::SourceProgram {
     }
     fn verify(&self, target: Target, observing: bool) {
         for module in &self.modules {
-            verify_ir(&emit_ir_for_target(module, target, observing).unwrap());
+            verify_ir(&emit_ir_for_test(module, target, observing, false, None).unwrap());
         }
     }
 }

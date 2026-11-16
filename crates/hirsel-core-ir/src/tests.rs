@@ -1089,6 +1089,33 @@ fn a_frame_slot_ends_with_its_activation() {
     assert!(err.contains("use of a freed block"), "{err}");
 }
 
+/// Retiring a buffer must keep its address identity and all stale-pointer faults,
+/// including after another allocation. Native engines trust lifetime checking;
+/// these deliberately malformed runs test the evaluator's oracle itself.
+#[test]
+fn retired_blocks_keep_stale_read_write_and_free_faults() {
+    for (operation, expected) in [
+        ("  v5: u64 = read a0\n", "use of a freed block"),
+        ("  store a0, v0\n", "use of a freed block"),
+        ("  free v1 charge v0\n", "free of a non-block"),
+    ] {
+        let source = format!(
+            "core v1\nsig g0 = () -> ()\ninst n0 = core@1/m/probe [] []\nfn f0 = n0 g0 {{\n  addr a0 = v1 : u64\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc for seq u64 v0 align 8 charge v0\n  address a0\n  store a0, v0\n  free v1 charge v0\n  v3: ptr, v4: u64 = alloc for seq u64 v0 align 8 charge v0\n{operation}  free v3 charge v0\n  return\n}}\n"
+        );
+        let module = load("retired", &source);
+        wf::module(&module).unwrap();
+        let fault = std::panic::catch_unwind(|| eval::run(&module, FuncId(0), &[], 8))
+            .err()
+            .expect("a stale pointer must fault");
+        let message = fault
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| fault.downcast_ref::<String>().map(String::as_str))
+            .unwrap();
+        assert_eq!(message, expected, "{operation}");
+    }
+}
+
 /// FORM #97: the conformance harnesses run [`eval::Nans::Scrambled`] so that a producer
 /// reading float-holding bytes at another type misses its hand-derived run line. The
 /// bug this catches is a scramble that never reaches memory: such a pun would then

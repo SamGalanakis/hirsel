@@ -164,6 +164,39 @@ struct Blk {
     /// slot's offset, whether it holds a value, and its size.
     marks: BTreeMap<usize, (bool, usize)>,
 }
+impl Blk {
+    /// Keep the address's tombstone for stale-pointer checks, release its storage.
+    fn retire(&mut self) {
+        self.live = false;
+        self.bytes = Vec::new();
+        self.marks.clear();
+    }
+}
+
+#[cfg(test)]
+mod retired_storage_tests {
+    use super::*;
+
+    #[test]
+    fn retirement_releases_storage_and_keeps_the_tombstone() {
+        let mut block = Blk {
+            bytes: vec![42; 65536],
+            live: true,
+            limit: Some(7),
+            charge: 65536,
+            res: None,
+            counted: None,
+            class: None,
+            fixed: false,
+            marks: BTreeMap::new(),
+        };
+        block.retire();
+        assert_eq!(block.bytes.capacity(), 0);
+        assert!(!block.live);
+        assert_eq!(block.limit, Some(7));
+        assert_eq!(block.charge, 65536);
+    }
+}
 struct Res {
     grant: u64,
     settled: bool,
@@ -880,8 +913,7 @@ impl Machine<'_> {
             panic!("free of a block whose slot at +{at} is live: a slot kernel left a value in it");
         }
         let blk = &mut self.mem[b];
-        blk.live = false;
-        blk.marks.clear();
+        blk.retire();
         let mut n = blk.charge;
         if let Some(r) = &blk.res {
             n -= if r.settled { r.grant } else { 0 };
@@ -1816,8 +1848,7 @@ impl Machine<'_> {
         let r = self.frame(t, b, args, &slots, self.inherits[f.index()]);
         for p in slots {
             let blk = &mut self.mem[split(p).0];
-            blk.live = false;
-            blk.marks.clear();
+            blk.retire();
         }
         r
     }

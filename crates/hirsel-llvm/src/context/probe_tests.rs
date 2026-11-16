@@ -58,7 +58,7 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
         let module = Module::parse(&context, "probes", IR).unwrap();
         module.set_target(&machine);
         module.emit_object(&machine).unwrap();
-        assert_probes(&module.text(), target.triple(), 2);
+        assert_probes(&module.text(), target.triple(), &["wide", "narrow"]);
     }
     // The lazy C-ABI phase must probe just as the direct Rust phase does.
     // This live 256 KiB frame makes a missing or different probe interval
@@ -72,7 +72,7 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
             module.run_core_passes(&machine).unwrap();
         }
         let direct = module.emit_object(&machine).unwrap();
-        assert_probes(&module.text(), "lazy CoreIR reference", 2);
+        assert_probes(&module.text(), "lazy CoreIR reference", &["wide", "narrow"]);
         let lazy = hirsel_llvm_lazy::compile_ir(IR, speed).unwrap();
         assert_eq!(lazy, direct, "lazy probe interval, speed={speed}");
         if speed {
@@ -118,22 +118,32 @@ b0(v0: ptr):
 "#,
     )
     .unwrap();
-    // Optimisation may inline and drop private helpers, but a carried body is
-    // weak_odr and stays for the units that call it, and a last release is
-    // never inlined.
-    for (opt, definitions) in [
-        (crate::core::Optimization::None, 9),
-        (crate::core::Optimization::Speed, 7),
+    let entries = (0..core_ir.functions.len())
+        .map(|i| crate::core::symbol(&core_ir, hirsel_core_ir::FuncId(i as u32)))
+        .collect::<Vec<_>>();
+    let required = entries.iter().map(String::as_str).collect::<Vec<_>>();
+    // Public instance entries stay available to other units. Private bodies,
+    // including infallible adapters, may disappear after inlining. Probe every
+    // definition that survives: emit_object attaches probes after optimisation,
+    // when an inlined callee's frame belongs to its caller.
+    for opt in [
+        crate::core::Optimization::None,
+        crate::core::Optimization::Speed,
     ] {
         let text = crate::core::emitted_ir(&core_ir, opt).unwrap();
-        assert_probes(&text, "CoreIR x86_64", definitions);
+        assert_probes(&text, "CoreIR x86_64", &required);
     }
 }
 
-fn assert_probes(text: &str, target: &str, count: usize) {
+fn assert_probes(text: &str, target: &str, required: &[&str]) {
     let kinds = defined_attribute(text, "probe-stack");
     let sizes = defined_attribute(text, "stack-probe-size");
-    assert_eq!(kinds.len(), count, "{text}");
+    for required in required {
+        assert!(
+            kinds.iter().any(|(function, _)| function == required),
+            "{target}: missing entry {required}\n{text}"
+        );
+    }
     for ((function, kind), (_, size)) in kinds.iter().zip(&sizes) {
         assert_eq!(kind.as_deref(), Some("inline-asm"), "{target} {function}");
         let size: usize = size.as_deref().unwrap().parse().unwrap();

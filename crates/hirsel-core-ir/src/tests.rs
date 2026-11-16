@@ -53,6 +53,7 @@ fn host_return_place_and_instruction_allowance() {
         eval::Nans::Scrambled,
         Some(&mut destination),
         100,
+        &eval::Revisions::new(),
     );
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![]));
     assert_eq!(u64::from_le_bytes(destination), 73);
@@ -65,7 +66,16 @@ fn host_return_place_and_instruction_allowance() {
     );
     wf::module(&looping).unwrap();
     let fault = std::panic::catch_unwind(|| {
-        eval::run_nans_into(&looping, FuncId(0), &[], 0, eval::Nans::Canonical, None, 3)
+        eval::run_nans_into(
+            &looping,
+            FuncId(0),
+            &[],
+            0,
+            eval::Nans::Canonical,
+            None,
+            3,
+            &eval::Revisions::new(),
+        )
     })
     .err()
     .expect("the explicit allowance stops an empty loop");

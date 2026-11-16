@@ -46,6 +46,14 @@ fn evaluate(
         .units([root.clone()], 65_536)
         .map_err(|e| format!("{e:?}"))?;
     let revision = units.revision(&root).unwrap();
+    // PROG-9: the revisions a native link of this walk gives its carriers, so a
+    // described item has the same revision here as on every other engine.
+    let revisions: eval::Revisions = units
+        .revisions()
+        .ok_or("a records-free walk retains every reached unit")?
+        .into_iter()
+        .map(|(identity, revision)| (identity.digest(), revision))
+        .collect();
     let joined = hirsel_core_materialize::join(&units.modules().map_err(|e| e.to_string())?, &root);
     let (module, function) = match joined {
         Ok(joined) => joined,
@@ -55,7 +63,7 @@ fn evaluate(
         return Ok(json!({"error":format!("not well formed: {error}"), "revision":revision}));
     }
     let mut result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run(&module, function, instructions)
+        run(&module, function, instructions, &revisions)
     })) {
         Ok(result) => result?,
         Err(fault) => fault_report(fault),
@@ -68,6 +76,7 @@ fn run(
     module: &Module,
     function: hirsel_core_ir::FuncId,
     instructions: u64,
+    revisions: &eval::Revisions,
 ) -> Result<Value, String> {
     let signature = &module.signatures[module.functions[function.index()].signature.index()];
     let recipes = compute(&module.types).map_err(|e| format!("layouts: {e:?}"))?;
@@ -90,6 +99,7 @@ fn run(
         eval::Nans::Scrambled,
         destination.as_deref_mut(),
         instructions,
+        revisions,
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {

@@ -697,6 +697,8 @@ pub fn run_revisions(
 /// A host caller's return place and explicit instruction allowance. The place is
 /// frame memory outside logical admission, just as a native caller's stack place.
 /// Its pointer is supplied before `args`; its bytes are copied back after the run.
+/// Its descriptors' revision carriers hold `revisions`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_nans_into(
     m: &Module,
     f: FuncId,
@@ -705,6 +707,7 @@ pub fn run_nans_into(
     nans: Nans,
     destination: Option<&mut [u8]>,
     instructions: u64,
+    revisions: &Revisions,
 ) -> (Report, Checked) {
     run_world(
         m,
@@ -715,6 +718,7 @@ pub fn run_nans_into(
             nans,
             destination,
             instructions,
+            revisions: Some(revisions),
             ..WorldInput::default()
         },
     )

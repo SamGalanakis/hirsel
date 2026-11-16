@@ -30,6 +30,11 @@ impl Units {
     pub fn revision(&self, root: &Identity) -> Option<ContentHash> {
         self.instances.revision(root, None)
     }
+    /// The code revision of each instance a reached unit describes, as a
+    /// link of this walk gives its revision carriers.
+    pub fn revisions(&self) -> Option<std::collections::BTreeMap<Identity, ContentHash>> {
+        self.instances.revisions(&self.reached, None)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

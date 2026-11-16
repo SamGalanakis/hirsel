@@ -3296,7 +3296,7 @@ fn codec_of_without_the_bound_is_refused_at_the_call() {
 // A codec declaration's generated items repeat its refusals at text no one wrote, past the
 // end of the file. The declaration's own refusals stand (a field that is not codec, at the
 // field; a default of another type, at the default) and the generated ones are dropped; a
-// gap only the generated items meet (a tuple field's `of`) is reported once, at the
+// gap only the generated items meet (a fixed array field's `of`) is reported once, at the
 // declaration's name. Spans by hand from the source.
 #[test]
 fn derived_codec_refusals_point_at_the_declaration() {
@@ -3307,8 +3307,8 @@ fn derived_codec_refusals_point_at_the_declaration() {
                   type Held: codec { a: u64, f: Plain }\n\
                   type Sum: codec = A | B(Plain)\n\
                   type Late: codec { s: i64 = \"x\" }\n\
-                  type Pairs: codec { t: (u64, u64) }\n\
-                  fn nested() -> std.codec.Codec[List[Option[(u64, u64)]]] { std.codec.of() }\n";
+                  type Pairs: codec { t: Inline[u64, 2] }\n\
+                  fn nested() -> std.codec.Codec[List[Option[Inline[u64, 2]]]] { std.codec.of() }\n";
     std::fs::write(app.join("main.hirsel"), source).unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut request = CheckRequest::program(&app, &root, &dir.path().join("store")).unwrap();

@@ -288,7 +288,7 @@ impl KeyOp {
     }
 }
 
-fn signature_id(module: &mut Module, sig: Signature) -> SigId {
+pub(super) fn signature_id(module: &mut Module, sig: Signature) -> SigId {
     if let Some(i) = module.signatures.iter().position(|s| *s == sig) {
         return SigId(i as u32);
     }
@@ -350,7 +350,7 @@ impl KeyOp {
 /// arguments' closures alone ([`super::templates::materialize_glue`]), with no
 /// published definition.
 pub fn is_glue(definition: &DefPath) -> bool {
-    KeyOp::named(definition, || Some(0)).is_some()
+    KeyOp::named(definition, || Some(0)).is_some() || super::codec_glue::is_glue(definition)
 }
 
 fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
@@ -788,7 +788,7 @@ impl Derive<'_> {
                 match c.body.addresses[address.index()].ty {
                     PlaceTy::Declared(row) => match self.module.types[row.index()].carried {
                         Carried::Nothing => continue,
-                        Carried::Value(t) => Arg::Value(c.read_address(address, t)),
+                        Carried::Value(t) => Arg::Value(c.read_at(address, t)),
                         Carried::Address => arg,
                     },
                     PlaceTy::Value(_) => arg,
@@ -2000,6 +2000,9 @@ impl Code {
     pub(super) fn start(&mut self, b: BlockId) {
         self.current = b;
     }
+    pub(super) fn current(&self) -> BlockId {
+        self.current
+    }
     pub(super) fn end(&mut self, t: Terminator) {
         self.body.blocks[self.current.index()].insts =
             PoolRange::push(&mut self.body.insts, self.open.drain(..));
@@ -2121,7 +2124,7 @@ impl Code {
             self.offset_value(p, offset)
         }
     }
-    fn read_address(&mut self, address: AddressId, ty: Ty) -> ValueId {
+    pub(super) fn read_at(&mut self, address: AddressId, ty: Ty) -> ValueId {
         let address = if self.body.addresses[address.index()].ty == PlaceTy::Value(ty) {
             address
         } else {

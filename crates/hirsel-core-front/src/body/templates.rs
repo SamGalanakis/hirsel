@@ -235,6 +235,10 @@ pub fn materialize_glue(
         arguments: roots,
         dictionaries: identity.dictionaries.clone(),
     };
+    if let Some((op, rows)) = codec_glue::CodecOp::of(&key) {
+        let f = codec_glue::derive(&mut module, &key.definition, &rows, op)?;
+        return Ok((module, f));
+    }
     let (op, ty) = key_glue::KeyOp::of(&key)
         .ok_or_else(|| format!("{} is not a glue operation", identity.definition))?;
     let f = key_glue::derive_glue(&mut module, ty, op).map_err(str::to_owned)?;
@@ -932,6 +936,13 @@ impl Emitter {
                 // A glue row is an instance of its own: derive it in place. A
                 // region-only generic's call row is its instance's row (MEM-6).
                 key_glue::ensure(&mut self.module, ty, op).map_err(str::to_owned)?;
+            } else if function.body.is_none()
+                && let Some((op, rows)) = codec_glue::CodecOp::of(key)
+                && !rigid(&self.module, key)
+            {
+                // A tuple codec's operation is glue too, derived in place alike.
+                let definition = key.definition.clone();
+                codec_glue::derive(&mut self.module, &definition, &rows, op)?;
             } else if function.body.is_none()
                 && !key.arguments.is_empty()
                 && !self.generic_calls.contains_key(&f)

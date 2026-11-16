@@ -2097,3 +2097,71 @@ fn structural_through() -> (bool, bool) {
 fn owned(x: String) -> String {
     result.unwrap(string.from(x))
 }
+
+// Tuples (the front derives a tuple's codec per tuple row). (5, "a") is the u64, then the
+// String; every prefix is Truncated within it; the schema is the tuple opcode 18, arity 2,
+// then u64 (6) and String (13), with no definitions; least 16. ("a", 5) round-trips and
+// its prefixes drop the decoded String; ((1, true), "b") nests, least 17.
+// expect: run tuple_codec() = (true, true, true, 16, true, true, 17)
+fn tuple_codec() -> (bool, bool, bool, u64, bool, bool, u64) {
+    let c: codec.Codec[(u64, String)] = codec.of()
+    let b = unhex("0500000000000000 0100000000000000 61")
+    let r: codec.Codec[(String, u64)] = codec.of()
+    let rb = unhex("0100000000000000 61 0500000000000000")
+    let n: codec.Codec[((u64, bool), String)] = codec.of()
+    let nb = unhex("0100000000000000 01 0100000000000000 62")
+    let schema = result.unwrap(codec.schema(c)) == unhex("01 0000000000000000 12 0200000000000000 06 0d")
+    (enc(c, (5u64, "a")) == b && again(c, b), prefixes(c, b), schema, codec.least(c), again(r, rb) && prefixes(r, rb), enc(n, ((1u64, true), "b")) == nb && again(n, nb), codec.least(n))
+}
+
+// A tuple field in a derived record is its components in order: least 17.
+type DTup: codec {
+    p: (u64, String),
+    on: bool
+}
+
+// expect: run derived_tuple_field() = (true, true, 17)
+fn derived_tuple_field() -> (bool, bool, u64) {
+    let c: codec.Codec[DTup] = codec.of()
+    let b = unhex("0500000000000000 0100000000000000 61 01")
+    (enc(c, DTup(p: (5, "a"), on: true)) == b, again(c, b), codec.least(c))
+}
+
+// A tuple over a parameter: its codec is built at each instance.
+fn tuple_generic[T: codec](take x: T, b: Bytes) -> bool {
+    let c: codec.Codec[(T, u64)] = codec.of()
+    enc(c, (take x, 7u64)) == b && again(c, b)
+}
+
+type DTupG[T]: codec {
+    p: (T, u64)
+}
+
+// expect: run tuple_generic_laws() = (true, true, true)
+fn tuple_generic_laws() -> (bool, bool, bool) {
+    let g: codec.Codec[DTupG[String]] = codec.of()
+    let gb = unhex("0100000000000000 61 0700000000000000")
+    (tuple_generic("a", unhex("0100000000000000 61 0700000000000000")), tuple_generic((1u64, true), unhex("0100000000000000 01 0700000000000000")), enc(g, DTupG(p: ("a", 7))) == gb && again(g, gb))
+}
+
+// A via over a tuple: the tuple's bytes; the schema defines DPt as a via (kind 2) written
+// as the tuple, and its root is that definition.
+type DPt: codec via(u64, String) (to: dpt_wire, from: dpt) {
+    w: (u64, String)
+}
+
+fn dpt_wire(o: DPt) -> View[(u64, String)] in o {
+    view o.w
+}
+
+fn dpt(take w: (u64, String)) -> Result[DPt, ()] {
+    Ok(DPt(w: w))
+}
+
+// expect: run derived_via_tuple() = (true, true, true)
+fn derived_via_tuple() -> (bool, bool, bool) {
+    let c: codec.Codec[DPt] = codec.of()
+    let b = unhex("0500000000000000 0100000000000000 61")
+    let want = unhex("01 0100000000000000 1300000000000000 7374642e74657374732e636f6465632e445074 0000000000000000 02 12 0200000000000000 06 0d 13 0000000000000000")
+    (enc(c, DPt(w: (5, "a"))) == b, again(c, b), result.unwrap(codec.schema(c)) == want)
+}

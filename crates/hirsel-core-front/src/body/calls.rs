@@ -1040,17 +1040,29 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return Some(self.emit_call(maker as usize, &args, vals, result, n));
         }
         // A core List, Map, Option or Result's maker is std's `of_list` and the rest at
-        // its arguments; one that holds a tuple waits on the tuple's.
+        // its arguments.
         if let TyKind::Adt(d, args) = self.t.kind(ty).clone()
             && let Some(&(_, maker)) = self.p.structural_codecs().iter().find(|(x, _)| *x == d)
         {
-            if holds_tuple(&self.t, ty) {
-                self.gap(n, "the codec of this type is not built");
-                return Some(None);
-            }
             return Some(self.emit_call(maker as usize, &args, vals, result, n));
         }
         // A sibling read of `of` (`crate::SIBLING_READS`).
+        // A tuple's maker is the one the front derives, its row's codec hook.
+        if let TyKind::Tuple(_) = self.t.kind(ty) {
+            let Some(row) = self.e.type_row(self.p, &mut self.t, ty) else {
+                self.gap(n, "codec type layout is not built");
+                return Some(None);
+            };
+            self.e.tuple_codec(self.p, &mut self.t, ty, row);
+            let maker = self.e.module.types[row.index()].codec;
+            return Some(match maker {
+                Some(maker) if self.codec_built(ty) => self.call_maker(FuncId(maker.0), result, n),
+                _ => {
+                    self.gap(n, "the codec of this type is not built");
+                    None
+                }
+            });
+        }
         let name = crate::decls::layout_name(&self.p.decls, &self.t, ty);
         let maker = templates::builtin_codec(&name).and_then(|maker| {
             let mut path = self.p.fns[f].path.clone();
@@ -1062,6 +1074,60 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return Some(None);
         };
         Some(self.emit_call(maker, &[], vals, result, n))
+    }
+
+    /// Whether `of` at `ty` reaches a maker: a parameter's is its instance's; a tuple's,
+    /// or a List, Map, Option or Result's, is built when its arguments' are; a declared
+    /// codec type has its derived one.
+    fn codec_built(&mut self, ty: TyId) -> bool {
+        let mut ty = ty;
+        while let TyKind::Anchored(x, _) | TyKind::View(x) = *self.t.kind(ty) {
+            ty = x;
+        }
+        match self.t.kind(ty).clone() {
+            TyKind::Param(_) => true,
+            TyKind::Tuple(xs) => xs.into_iter().all(|x| self.codec_built(x)),
+            TyKind::Adt(d, _)
+                if self.p.decls[d.index()]
+                    .codec()
+                    .and_then(|c| c.maker)
+                    .is_some() =>
+            {
+                true
+            }
+            TyKind::Adt(d, args) if self.p.structural_codecs().iter().any(|(x, _)| *x == d) => {
+                args.into_iter().all(|x| self.codec_built(x))
+            }
+            _ => {
+                let name = crate::decls::layout_name(&self.p.decls, &self.t, ty);
+                templates::builtin_codec(&name).is_some()
+            }
+        }
+    }
+    /// A call of the maker row `maker`, `() -> Codec[T]`, whose result has type `result`.
+    fn call_maker(&mut self, maker: FuncId, result: TyId, n: NodeId) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let signature = self.e.module.functions[maker.index()].signature;
+        let dest = self.e.module.signatures[signature.index()].dest?;
+        let at = self.new_slot(PlaceTy::Declared(dest), n);
+        let args = PoolRange::push(&mut self.b.pools.args, [Arg::Address(at)]);
+        let results = PoolRange::push(&mut self.b.pools.values, []);
+        let fail = self.fail_to(n);
+        self.b.calls.push(CallSite {
+            callee: Callee::Direct(maker),
+            signature,
+            args,
+            results,
+            fail,
+            cold: false,
+        });
+        let call = CallId(self.b.calls.len() as u32 - 1);
+        self.inst(Inst::Call { call }, n);
+        let p = self.pointer(at, n);
+        self.temp(result, Some(p));
+        Some(p)
     }
 
     pub(super) fn emit_call(
@@ -1988,15 +2054,6 @@ fn contained(
 }
 
 /// Whether `path` is `std.codec.of`, whose calls name a maker per instance.
-/// Whether `ty` is or holds a tuple, whose codec is not built.
-pub(crate) fn holds_tuple(t: &impl TyRead, ty: TyId) -> bool {
-    match t.kind(ty) {
-        TyKind::Tuple(_) => true,
-        TyKind::Adt(_, args) => args.iter().any(|&x| holds_tuple(t, x)),
-        TyKind::Anchored(x, _) | TyKind::View(x) | TyKind::Array(x, _) => holds_tuple(t, *x),
-        _ => false,
-    }
-}
 pub(super) fn is_codec_of(path: &DefPath) -> bool {
     path.0.package.name == "std" && path.0.modules == ["codec"] && path.0.name == "of"
 }

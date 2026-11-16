@@ -47,6 +47,7 @@ mod calls;
 mod cleanup;
 mod clone_glue;
 mod closures;
+mod codec_glue;
 mod compact;
 mod compare;
 mod constants;
@@ -74,7 +75,6 @@ pub use templates::{
     BUILTIN_CODEC_MAKERS, GenericTemplate, NamePart, import_instance, materialize, materialize_glue,
 };
 mod values;
-pub(crate) use calls::holds_tuple;
 use types::*;
 pub(crate) use types::{float_bits, float_suffix, int_magnitude, int_suffix};
 
@@ -322,8 +322,12 @@ impl Emitter {
             .collect::<Result<_, &'static str>>()?;
         let mut dictionaries = vec![];
         for ((generic, &row), &ty) in fd.generics.iter().zip(&rows).zip(arguments) {
-            if generic.bounds & crate::decls::CODEC != 0 && has_param(t, ty) {
-                self.structural_codec(p, t, ty, row);
+            if generic.bounds & crate::decls::CODEC != 0 {
+                // `of` through the instance reaches the argument's maker by its row.
+                self.tuple_codec(p, t, ty, row);
+                if has_param(t, ty) {
+                    self.structural_codec(p, t, ty, row);
+                }
             }
             for bit in 0..u16::BITS {
                 if generic.bounds & (1 << bit) != 0 {
@@ -373,7 +377,7 @@ impl Emitter {
     /// closure hash; a generic row gets one only where it is asked for, as hooking every
     /// generic row builds makers whose bodies lay out further generic rows without end.
     fn structural_codec(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId, row: TypeId) {
-        if self.module.types[row.index()].codec.is_some() || holds_tuple(t, ty) {
+        if self.module.types[row.index()].codec.is_some() {
             return;
         }
         let TyKind::Adt(d, args) = t.kind(ty).clone() else {

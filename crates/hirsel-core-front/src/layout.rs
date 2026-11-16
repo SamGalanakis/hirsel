@@ -77,7 +77,6 @@ impl<T: TyRead> Shapes<'_, T> {
         let &(_, maker) = self.codecs.iter().find(|(x, _)| *x == d)?;
         if !self.module
             || has_param(&*self.types, ty)
-            || crate::body::holds_tuple(&*self.types, ty)
             || crate::decls::has_bounds(self.decls, &*self.types, ty, &[]) & crate::decls::CODEC
                 == 0
         {

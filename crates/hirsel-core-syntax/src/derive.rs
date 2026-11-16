@@ -184,10 +184,6 @@ impl<'a> File<'a> {
             _ => Ty::With(self.text(item, n)),
         }
     }
-    /// Whether the type `n` is or holds a tuple.
-    fn holds_tuple(&self, n: NodeId) -> bool {
-        self.kind(n) == NodeKind::TupleType || self.children(n).iter().any(|&c| self.holds_tuple(c))
-    }
     /// Every bare type name under `n`.
     fn mentions(&self, item: &Item<'a>, n: NodeId, into: &mut BTreeSet<&'a str>) {
         if self.kind(n) == NodeKind::TypePath {
@@ -224,12 +220,6 @@ impl<'a> File<'a> {
                 }
                 NodeKind::CodecVia => {
                     let v = self.children(c);
-                    // `of[R]` is built for every codec type but a tuple (the front's,
-                    // not yet built), so a via over one, or over a type holding one,
-                    // is not derived and `of` refuses it as a gap.
-                    if self.holds_tuple(v[0]) {
-                        return None;
-                    }
                     self.mentions(item, v[0], &mut wire);
                     via = Some(Via {
                         wire: self.text(item, v[0]),

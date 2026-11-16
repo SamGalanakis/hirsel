@@ -67,8 +67,11 @@ a key that is not a transact entry (`NoEntry`), an argument that does not decode
 under the entry's n (`Malformed`), an n its account cannot grant (`Budget`), and more
 than q requests held (`Overloaded`). It forwards the rest to
 the head and holds each forwarded position in a slot with a deadline timer until the
-head's answer arrives; a timer that fires first answers `Abandoned`. `hang_up()`
-closes the session.
+head's answer arrives; a timer that fires first answers `Abandoned`. Every send gets
+exactly one Outcome: a send of a position already held joins its slot without being
+forwarded again, the deadline (the latest send's) answers each unanswered send with
+`Abandoned`, and the head's answer goes once to each send still unanswered, so to none
+when the position was Abandoned and not sent again. `hang_up()` closes the session.
 
 S5 (admit and reply) is not on main. A table `runner.streams`, which the head creates
 at open, stands in for it with STORE-SPEC §1.8's rules. An Error reply is kept in a

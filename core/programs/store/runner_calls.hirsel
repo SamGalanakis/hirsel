@@ -404,6 +404,72 @@ pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks) -> bool waits 
     served_in(c, r, tasks, o, drive_store_refusal)
 }
 
+// Rule 5: every send ends in exactly one Outcome (review 1042, law_abandoned_no_resend).
+// Each position runs once, as an admit and an effect commit, so after the two setup
+// commits the n-th run returns 2n + 2:
+// - p1 sent alone before p0 is Abandoned at its deadline and not re-sent; p0 then runs (4),
+//   and p1 runs behind it (6) with no Outcome, because its one send was answered;
+// - meanwhile another stream of the session proceeds (8), and p2 is the next frame (10);
+// - a position sent twice before its Outcome gets two, from one run (12); its next
+//   position is the next frame (14);
+// - p1 Abandoned and then re-sent twice gets two more Outcomes, one per send, after p0
+//   (16, 18), and p2 is next (20);
+// - p1 Abandoned in a session that then ends: the head runs it for nobody, and another
+//   session's p0 and p2 of that stream are answered (22, 26).
+fn drive_one_outcome_per_send(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 2u64)
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(1u64), 2000000u64)
+    let a = frame(s0)
+    want(a.p == 1u64 && is(a.outcome, Abandoned), "one_outcome: p1 Abandoned")
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(0u64), LATER)
+    let b = frame(s0)
+    want(b.p == 0u64 && ok_value(b.outcome) == Some(4u64), "one_outcome: p0 at 4")
+    ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(100u64), LATER)
+    let other = frame(s0)
+    want(other.stream == sid(1u64) && other.p == 0u64 && ok_value(other.outcome) != None, "one_outcome: another stream proceeds, and p1's run has no Outcome")
+    ask(s0, d.clock, 0u64, 2u64, k_write(), u64_arg(2u64), LATER)
+    let c = frame(s0)
+    want(c.stream == sid(0u64) && c.p == 2u64 && ok_value(c.outcome) == Some(10u64), "one_outcome: p2 next, and p1 ran once with no Outcome")
+    ask(s0, d.clock, 2u64, 0u64, k_write(), u64_arg(200u64), LATER)
+    ask(s0, d.clock, 2u64, 0u64, k_write(), u64_arg(200u64), LATER)
+    let d0 = frame(s0)
+    let d1 = frame(s0)
+    want(d0.p == 0u64 && d1.p == 0u64 && ok_value(d0.outcome) == Some(12u64) && is(d0.outcome, d1.outcome), "one_outcome: two sends before the Outcome get two")
+    ask(s0, d.clock, 2u64, 1u64, k_write(), u64_arg(201u64), LATER)
+    let d2 = frame(s0)
+    want(d2.p == 1u64 && ok_value(d2.outcome) == Some(14u64), "one_outcome: no third Outcome, one run")
+    ask(s0, d.clock, 3u64, 1u64, k_write(), u64_arg(301u64), 2000000u64)
+    let e = frame(s0)
+    want(e.p == 1u64 && is(e.outcome, Abandoned), "one_outcome: stream 3 p1 Abandoned")
+    ask(s0, d.clock, 3u64, 1u64, k_write(), u64_arg(301u64), LATER)
+    ask(s0, d.clock, 3u64, 1u64, k_write(), u64_arg(301u64), LATER)
+    ask(s0, d.clock, 3u64, 0u64, k_write(), u64_arg(300u64), LATER)
+    let e0 = frame(s0)
+    want(e0.p == 0u64 && ok_value(e0.outcome) == Some(16u64), "one_outcome: stream 3 p0 at 16")
+    let e1 = frame(s0)
+    let e2 = frame(s0)
+    want(e1.p == 1u64 && e2.p == 1u64 && ok_value(e1.outcome) == Some(18u64) && is(e1.outcome, e2.outcome), "one_outcome: two re-sends after Abandoned get two")
+    ask(s0, d.clock, 3u64, 2u64, k_write(), u64_arg(302u64), LATER)
+    let e3 = frame(s0)
+    want(e3.p == 2u64 && ok_value(e3.outcome) == Some(20u64), "one_outcome: stream 3 p2 next")
+    let s1 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s1, d.clock, 4u64, 1u64, k_write(), u64_arg(401u64), 2000000u64)
+    let f = frame(s1)
+    want(f.p == 1u64 && is(f.outcome, Abandoned), "one_outcome: stream 4 p1 Abandoned")
+    hang(take s1)
+    ask(s0, d.clock, 4u64, 0u64, k_write(), u64_arg(400u64), LATER)
+    let f0 = frame(s0)
+    want(f0.p == 0u64 && ok_value(f0.outcome) == Some(22u64), "one_outcome: stream 4 p0 at 22")
+    ask(s0, d.clock, 4u64, 2u64, k_write(), u64_arg(402u64), LATER)
+    let f2 = frame(s0)
+    want(f2.p == 2u64 && ok_value(f2.outcome) == Some(26u64), "one_outcome: stream 4 p2 after p1 ran for the ended session")
+    hang(take s0)
+}
+
+pub fn law_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_one_outcome_per_send)
+}
+
 // L7/deadline_held (v2.4), on the real head. p1 of a fresh stream, sent before p0, waits
 // in the head's FIFO (S7: Rejected(0)); the session answers Abandoned at its deadline
 // (V1), at its last version 0, and keeps the slot (V2). Then p0 is sent and p1 re-sent:
@@ -512,6 +578,11 @@ fn test_calls_duplicate(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] wai
 @test
 fn test_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_calls_refusals(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_one_outcome_per_send(c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 @test

@@ -28,7 +28,7 @@ SIZES = (1, 100)
 N_PLACE = 8 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_store_refusal', 'calls_deadline_held', 'calls_held_head', 'l14_handles')
+         'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_held_head', 'l14_handles')
 
 # (name, [(old text, new text)], module, the law that must turn red). Each is a wrong
 # implementation the law names:
@@ -41,6 +41,8 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 #   durable version;
 # - queue_outside_account: a session that frees a slot when it answers Abandoned.
 # - store_v22_admit: an admit of latest+1 while latest is unreplied.
+# - late_completion_resent: a session that sends the head's answer to a position whose
+#   sends were all answered (Abandoned, not re-sent), a second Outcome for one send.
 MUTANTS = (
     ('duplicate_unchecked',
      [('    if map.contains(r.slots, key) {\n        return Error(AlreadyRegistered(take key))\n    }\n', '')],
@@ -79,12 +81,16 @@ MUTANTS = (
       ('Release(version: d, snapshot', 'Release(version: wv, snapshot')],
      'runner_calls', 'calls_group_version'),
     ('queue_outside_account',
-     [('                if fired {\n                    let named',
-       '                if fired {\n                    let _ = map.remove(mut held, slot_key(t.stream, t.p))\n                    let named')],
+     [('                if fired > 0u64 {\n                    for',
+       '                if fired > 0u64 {\n                    let _ = map.remove(mut held, slot_key(t.stream, t.p))\n                    for')],
      'runner_calls', 'calls_held_head'),
     ('store_v22_admit',
      [('Some(r) => p == r.p + 1u64 && r.replied,', 'Some(r) => p == r.p + 1u64,')],
      'runner_calls', 'calls_store_refusal'),
+    ('late_completion_resent',
+     [('                if owed > 0u64 {\n                    last = f.version',
+       '                if true {\n                    last = f.version')],
+     'runner_calls', 'calls_one_outcome_per_send'),
 )
 
 

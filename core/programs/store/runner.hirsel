@@ -798,9 +798,12 @@ pub fn hang_up() -> Event {
     Event(e: Closing)
 }
 
-// A forwarded position keeps its slot until the head's answer arrives (V2). Its timer
-// is the deadline of the latest send; dropping the slot cancels the timer (CONC-8).
-type Held { generation: u64, waiting: bool, timer: Task[()] }
+// A forwarded position keeps its slot until the head's answer arrives (V2). `owed` counts
+// the sends of the position not yet answered (rule 5: one Outcome per send): a send adds
+// one, the deadline answers each with Abandoned, and the head's answer goes once to each
+// owed send, so to none after Abandoned without a re-send. Its timer is the deadline of
+// the latest send; dropping the slot cancels the timer (CONC-8).
+type Held { generation: u64, owed: u64, timer: Task[()] }
 
 type Timer: send { clock: Clock, at: u64, to: Sender[Event], stream: Bytes, p: u64, generation: u64 }
 
@@ -879,7 +882,13 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                     continue
                 }
                 let k = slot_key(c.stream, c.p)
-                let again = map.remove(mut held, k)
+                let again = match map.remove(mut held, k) {
+                    Some(take h) => {
+                        let Held(generation: _, owed: o, timer: _) = take h
+                        Some(o)
+                    },
+                    None => None,
+                }
                 if let None = again {
                     if map.len(held) >= s.q + 1u64 {
                         let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c
@@ -906,28 +915,48 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                         return Ok(())
                     }
                 }
-                result.unwrap(map.insert(mut held, take k, Held(generation: generation, waiting: true, timer: take timing)))
+                let owed = match again {
+                    Some(o) => o + 1u64,
+                    None => 1u64,
+                }
+                result.unwrap(map.insert(mut held, take k, Held(generation: generation, owed: owed, timer: take timing)))
             },
             Answered(take f) => {
-                let _ = map.remove(mut held, slot_key(f.stream, f.p))
-                last = f.version
-                let _ = channel.send(s.client, take f)
+                let owed = match map.remove(mut held, slot_key(f.stream, f.p)) {
+                    Some(take h) => {
+                        let Held(generation: _, owed: o, timer: _) = take h
+                        o
+                    },
+                    None => 0u64,
+                }
+                if owed > 0u64 {
+                    last = f.version
+                    for _ in 1u64 .. owed {
+                        let each: Frame = result.unwrap(clone(f))
+                        let _ = channel.send(s.client, take each)
+                    }
+                    let _ = channel.send(s.client, take f)
+                }
             },
             Expired(t) => {
                 let g = t.generation
-                let fired = match map.update(mut held, slot_key(t.stream, t.p), fn(mut h: Held) -> bool {
-                    let now = h.waiting && h.generation == g
-                    if now {
-                        h.waiting = false
+                let fired = match map.update(mut held, slot_key(t.stream, t.p), fn(mut h: Held) -> u64 {
+                    if h.generation == g {
+                        let o = h.owed
+                        h.owed = 0u64
+                        o
+                    } else {
+                        0u64
                     }
-                    now
                 }) {
-                    Some(true) => true,
-                    _ => false,
+                    Some(o) => o,
+                    None => 0u64,
                 }
-                if fired {
-                    let named: Bytes = result.unwrap(clone(t.stream))
-                    tell(s.client, last, take named, t.p, Abandoned)
+                if fired > 0u64 {
+                    for _ in 0u64 .. fired {
+                        let named: Bytes = result.unwrap(clone(t.stream))
+                        tell(s.client, last, take named, t.p, Abandoned)
+                    }
                 }
             },
         }

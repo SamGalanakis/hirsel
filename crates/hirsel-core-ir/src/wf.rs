@@ -2,9 +2,10 @@
 //! it on what they built; no product path does (we trust our own implementation).
 //! It checks references, single definition, arity, the operand typing each
 //! instruction states, that type rows have recipes, and that no failure path
-//! reaches a `return` (FAIL-14: nothing catches a failure), and that every value
-//! and address is defined on every path to each use. It does not check drop-flag
-//! discipline or limit-scope balance.
+//! reaches a `return` (FAIL-14: nothing catches a failure), that every value
+//! and address is defined on every path to each use, and that every read of a
+//! slot's contents follows a write on every path (a drop flag counting as one). It
+//! does not check limit-scope balance.
 
 use crate::*;
 
@@ -556,7 +557,8 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
         return Err(format!("v{v} defined {} times", c.defined[v]));
     }
     no_catch(b)?;
-    available(b)
+    available(b)?;
+    written(m, b)
 }
 
 /// The blocks control leaves `bi` for: its instructions' failure blocks and its
@@ -1546,4 +1548,413 @@ pub fn without_marks(m: &Module) -> Module {
         (b.insts, b.inst_anchors) = (insts, anchors);
     }
     m
+}
+
+/// A place in one of the body's slots, as far as its address names it statically:
+/// the slot and its field, case-field and carrier-word steps, cut at the first
+/// step whose offset is a run-time value (`index`, `element`, `byte`), which then
+/// stands for some part of the place before it.
+type Place = (usize, Vec<(u8, u32, u32)>);
+
+/// What one instruction or terminator does to slot contents, as [`written`]
+/// reads it: the places it reads, the places it writes (on its normal edge
+/// only), the slots whose contents end or begin unwritten, and the slots it
+/// lets escape behind a pointer.
+#[derive(Default)]
+struct Touch {
+    reads: Vec<Place>,
+    writes: Vec<Place>,
+    resets: Vec<usize>,
+}
+
+/// Resolve address `a` to the slot place it names, with the places its
+/// evaluation reads (each `deref` step reads the pointer stored before it).
+fn place_of(b: &Body, a: AddressId, reads: &mut Vec<Place>) -> Option<Place> {
+    let info = b.addresses.get(a.index())?;
+    let mut at = match info.base {
+        AddressBase::Slot(s) => Some((s.index(), vec![])),
+        AddressBase::Value(_) => None,
+        AddressBase::Address(x) => place_of(b, x, reads),
+    };
+    let mut cut = false;
+    for s in info.steps.get(&b.pools.steps).unwrap_or_default() {
+        let Some(p) = at.as_mut() else { break };
+        match *s {
+            Step::Deref => {
+                reads.push(p.clone());
+                at = None;
+            }
+            _ if cut => {}
+            Step::Field(f) => p.1.push((0, f, 0)),
+            Step::CaseField { case, field } => p.1.push((1, case, field)),
+            Step::Seq(w) => p.1.push((2, w as u32, 0)),
+            Step::Index(_) | Step::Element(_) | Step::Byte(_) => cut = true,
+        }
+    }
+    at
+}
+
+/// Whether a place of this type has no bytes (`()`, a record of such fields): a
+/// read of it reads nothing, so it needs no write.
+fn no_bytes(m: &Module, ty: PlaceTy) -> bool {
+    fn field(m: &Module, f: &hirsel_core_layout::FieldTy) -> bool {
+        use hirsel_core_layout::FieldTy as F;
+        match f {
+            F::Inline(r) => record(m, r.index()),
+            F::Array(x, n) => *n == 0 || field(m, x),
+            _ => false,
+        }
+    }
+    fn record(m: &Module, t: usize) -> bool {
+        m.types.get(t).is_some_and(|t| match &t.body {
+            hirsel_core_layout::Body::Record(f) => f.iter().all(|f| field(m, &f.ty)),
+            hirsel_core_layout::Body::Variant(_) => false,
+        })
+    }
+    match ty {
+        PlaceTy::Declared(t) => record(m, t.index()),
+        PlaceTy::Value(_) => false,
+    }
+}
+
+fn touch(m: &Module, b: &Body, i: &Inst) -> Touch {
+    let mut t = Touch::default();
+    let read = |t: &mut Touch, a: AddressId| {
+        let mut r = vec![];
+        let p = place_of(b, a, &mut r);
+        t.reads.extend(r);
+        p
+    };
+    // The place `a` names, as something read: none when it has no bytes.
+    let bytes = |a: AddressId, p: Option<Place>| {
+        p.filter(|_| {
+            !b.addresses
+                .get(a.index())
+                .is_some_and(|i| no_bytes(m, i.ty))
+        })
+    };
+    match *i {
+        Inst::Address { address, .. } => {
+            read(&mut t, address);
+        }
+        Inst::Read { address, .. } | Inst::Case { address, .. } | Inst::Drop { address, .. } => {
+            let p = read(&mut t, address);
+            t.reads.extend(bytes(address, p));
+        }
+        Inst::Store { address, .. } | Inst::SetCase { address, .. } => {
+            let p = read(&mut t, address);
+            t.writes.extend(p);
+        }
+        Inst::Copy { to, from, .. } => {
+            let p = read(&mut t, from);
+            t.reads.extend(bytes(from, p));
+            let p = read(&mut t, to);
+            t.writes.extend(p);
+        }
+        Inst::Grow { carrier, .. } => {
+            let p = read(&mut t, carrier);
+            t.reads.extend(p.clone());
+            t.writes.extend(p);
+        }
+        // Whatever reads or writes the place through the pointer is out of
+        // sight: the whole slot counts as written from here on.
+        Inst::Pointer { address, .. } => {
+            if let Some((s, _)) = read(&mut t, address) {
+                t.writes.push((s, vec![]));
+            }
+        }
+        Inst::StorageLive { slot } | Inst::StorageDead { slot } => t.resets.push(slot.index()),
+        Inst::Call { call } => {
+            let Some(site) = b.calls.get(call.index()) else {
+                return t;
+            };
+            let Some(sig) = m.signatures.get(site.signature.index()) else {
+                return t;
+            };
+            let args = site.args.get(&b.pools.args).unwrap_or_default();
+            let dest = usize::from(sig.dest.is_some());
+            for (k, arg) in args.iter().enumerate() {
+                let Arg::Address(a) = *arg else { continue };
+                let p = read(&mut t, a);
+                if k < dest {
+                    t.writes.extend(p);
+                    continue;
+                }
+                match sig.params.get(k - dest) {
+                    // A `mut` place may be an out-place the callee fills
+                    // (`rt.join`'s result, a receive's item).
+                    Some(Param::Address {
+                        loan: Loan::Mut, ..
+                    }) => t.writes.extend(p),
+                    _ => t.reads.extend(bytes(a, p)),
+                }
+            }
+        }
+        _ => {}
+    }
+    t
+}
+
+/// Every reachable read of a slot's contents follows, on every path to it from the
+/// entry, a write that overlaps the place read (crate docs, "Values, slots and
+/// addresses"). Writes are a store, copy, `set_case`, `grow`, a call's destination
+/// or `mut` argument (which may be an out-place the callee fills, so it is not a
+/// read), and a `pointer` to the slot (after which writes are out of sight).
+/// Reads are `read`, `case`, `drop`, a copy's source, a `grow`'s carrier, a `view`
+/// or `take` argument, a `deref` step and a `raise fail` cause; a place with no
+/// bytes is never read. A `storage_live` or `storage_dead` leaves the slot
+/// unwritten. Places are compared by their static steps: a write overlaps a read
+/// when one's steps are a prefix of the other's.
+///
+/// A drop flag is how the IR says a place is written on some paths only: a `bool`
+/// slot that is stored `true` only where a place is written on every path to the
+/// store guards that place, and the `yes` edge of a branch on a read of the flag
+/// carries the place as written.
+fn written(m: &Module, b: &Body) -> R {
+    let blocks = b.blocks.len();
+    let insts = |bi: usize| b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
+    let touches: Vec<Vec<Touch>> = (0..blocks)
+        .map(|bi| insts(bi).iter().map(|i| touch(m, b, i)).collect())
+        .collect();
+    // Places are interned per body; a state is the set of places written on every path.
+    let mut ids: std::collections::HashMap<Place, usize> = Default::default();
+    let mut all: Vec<Place> = vec![];
+    for t in touches.iter().flatten() {
+        for p in t.reads.iter().chain(&t.writes) {
+            ids.entry(p.clone()).or_insert_with(|| {
+                all.push(p.clone());
+                all.len() - 1
+            });
+        }
+    }
+    let mut by_slot: Vec<Vec<usize>> = vec![vec![]; b.slots.len()];
+    for (k, p) in all.iter().enumerate() {
+        if let Some(v) = by_slot.get_mut(p.0) {
+            v.push(k);
+        }
+    }
+    let words = all.len().div_ceil(64).max(1);
+    type Set = Vec<u64>;
+    let has = |s: &Set, k: usize| s[k / 64] >> (k % 64) & 1 == 1;
+    let apply = |now: &mut Set, t: &Touch| {
+        for &s in &t.resets {
+            for &k in by_slot.get(s).map_or(&[][..], |v| v) {
+                now[k / 64] &= !(1 << (k % 64));
+            }
+        }
+        for p in &t.writes {
+            let k = ids[p];
+            now[k / 64] |= 1 << (k % 64);
+        }
+    };
+    let covered = |now: &Set, p: &Place| {
+        by_slot.get(p.0).is_some_and(|ks| {
+            ks.iter()
+                .any(|&k| has(now, k) && (all[k].1.starts_with(&p.1) || p.1.starts_with(&all[k].1)))
+        })
+    };
+    // Drop flags: whole `bool` slots, the reads of them, and the constants stored.
+    let is_flag = |a: AddressId| {
+        b.addresses
+            .get(a.index())
+            .is_some_and(|i| i.ty == PlaceTy::Value(Ty::Scalar(hirsel_core_layout::Scalar::Bool)))
+    };
+    let whole = |a: AddressId| {
+        place_of(b, a, &mut vec![])
+            .filter(|p| p.1.is_empty() && is_flag(a))
+            .map(|p| p.0)
+    };
+    let mut flag_of: std::collections::HashMap<usize, usize> = Default::default();
+    let mut consts: std::collections::HashMap<usize, u64> = Default::default();
+    for i in b.insts.iter() {
+        match *i {
+            Inst::Read {
+                result, address, ..
+            } => {
+                if let Some(f) = whole(address) {
+                    flag_of.insert(result.index(), f);
+                }
+            }
+            Inst::Const { result, bits } => {
+                consts.insert(result.index(), bits);
+            }
+            _ => {}
+        }
+    }
+    // A guard per flag slot: None is "every place" (not yet narrowed), the start of
+    // the greatest fixpoint.
+    let mut guards: Vec<Option<Set>> = vec![None; b.slots.len()];
+    let solve = |guards: &Vec<Option<Set>>| -> Vec<Option<Set>> {
+        let out = |bi: usize, start: &Set| -> Vec<(usize, Set)> {
+            let mut now = start.clone();
+            let mut edges = vec![];
+            for (k, i) in insts(bi).iter().enumerate() {
+                if let Some(f) = i.fail(b) {
+                    edges.push((f.index(), now.clone()));
+                }
+                apply(&mut now, &touches[bi][k]);
+            }
+            let edge = |e: &EdgeId| b.edges[e.index()].target.index();
+            if let Terminator::Branch { condition, yes, no } = &b.terminators[bi] {
+                let mut taken = now.clone();
+                if let Some(&f) = flag_of.get(&condition.index()) {
+                    match &guards[f] {
+                        None => taken.iter_mut().for_each(|w| *w = !0),
+                        Some(g) => taken.iter_mut().zip(g).for_each(|(w, g)| *w |= g),
+                    }
+                }
+                edges.push((edge(yes), taken));
+                edges.push((edge(no), now));
+            } else {
+                for t in successors_of_terminator(b, bi) {
+                    edges.push((t, now.clone()));
+                }
+            }
+            edges
+        };
+        let mut start: Vec<Option<Set>> = vec![None; blocks];
+        if blocks > 0 {
+            start[0] = Some(vec![0; words]);
+        }
+        let mut work = vec![0usize];
+        while let Some(bi) = work.pop() {
+            let Some(s) = start[bi].clone() else { continue };
+            for (t, carried) in out(bi, &s) {
+                if t == 0 {
+                    continue;
+                }
+                let next = match &start[t] {
+                    None => carried,
+                    Some(old) => old.iter().zip(&carried).map(|(x, y)| x & y).collect(),
+                };
+                if start[t].as_ref() != Some(&next) {
+                    start[t] = Some(next);
+                    work.push(t);
+                }
+            }
+        }
+        start
+    };
+    let branches_on_flags = b.terminators.iter().any(|t| {
+        matches!(t, Terminator::Branch { condition, .. } if flag_of.contains_key(&condition.index()))
+    });
+    let start = loop {
+        let start = solve(&guards);
+        if !branches_on_flags {
+            break start;
+        }
+        // Narrow each flag's guard to what is written wherever it is set.
+        let mut next: Vec<Option<Set>> = vec![None; b.slots.len()];
+        let mut meet = |f: usize, s: Set| {
+            next[f] = Some(match next[f].take() {
+                None => s,
+                Some(o) => o.iter().zip(&s).map(|(x, y)| x & y).collect(),
+            })
+        };
+        for bi in 0..blocks {
+            let Some(mut now) = start[bi].clone() else {
+                continue;
+            };
+            for (k, i) in insts(bi).iter().enumerate() {
+                match *i {
+                    Inst::Store { address, value } => {
+                        if let Some(f) = whole(address) {
+                            match consts.get(&value.index()) {
+                                Some(0) => {}
+                                Some(_) => meet(f, now.clone()),
+                                None => meet(f, vec![0; words]),
+                            }
+                        }
+                    }
+                    _ => {
+                        for p in &touches[bi][k].writes {
+                            if p.1.is_empty() && guards.get(p.0).is_some() && is_flag_slot(b, p.0) {
+                                meet(p.0, vec![0; words]);
+                            }
+                        }
+                    }
+                }
+                apply(&mut now, &touches[bi][k]);
+            }
+        }
+        // A flag never set true guards nothing it could need.
+        let next: Vec<Option<Set>> = next
+            .into_iter()
+            .map(|g| Some(g.unwrap_or_else(|| vec![0; words])))
+            .collect();
+        if next == guards {
+            break start;
+        }
+        guards = next;
+    };
+    let show = |p: &Place| {
+        let mut s = format!("s{}", p.0);
+        for &(k, x, y) in &p.1 {
+            match k {
+                0 => s += &format!(".{x}"),
+                1 => s += &format!(".case{x}.{y}"),
+                _ => s += &format!(".seq{x}"),
+            }
+        }
+        s
+    };
+    for bi in 0..blocks {
+        let Some(mut now) = start[bi].clone() else {
+            continue;
+        };
+        let check = |now: &Set, p: &Place| {
+            need(covered(now, p), || {
+                format!(
+                    "b{bi}: {} is read on a path that does not write it",
+                    show(p)
+                )
+            })
+        };
+        for t in &touches[bi] {
+            for p in &t.reads {
+                check(&now, p)?;
+            }
+            apply(&mut now, t);
+        }
+        if let Terminator::Raise {
+            cause: RaiseCause::Fail(a),
+            ..
+        } = b.terminators[bi]
+        {
+            let mut r = vec![];
+            let p = place_of(b, a, &mut r);
+            for p in r.iter().chain(&p) {
+                check(&now, p)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether slot `s` is a `bool` value place (a drop flag's shape).
+fn is_flag_slot(b: &Body, s: usize) -> bool {
+    b.slots.get(s)
+        == Some(&PlaceTy::Value(Ty::Scalar(
+            hirsel_core_layout::Scalar::Bool,
+        )))
+}
+
+/// The blocks `bi`'s terminator continues to.
+fn successors_of_terminator(b: &Body, bi: usize) -> Vec<usize> {
+    let edge = |e: &EdgeId| b.edges[e.index()].target.index();
+    match &b.terminators[bi] {
+        Terminator::Jump(e) => vec![edge(e)],
+        Terminator::Branch { yes, no, .. } => vec![edge(yes), edge(no)],
+        Terminator::Switch {
+            arms, otherwise, ..
+        } => arms
+            .get(&b.pools.arms)
+            .unwrap_or_default()
+            .iter()
+            .map(|a| edge(&a.edge))
+            .chain([edge(otherwise)])
+            .collect(),
+        Terminator::Raise { cleanup, .. } => cleanup.iter().map(|c| c.index()).collect(),
+        Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => vec![],
+    }
 }

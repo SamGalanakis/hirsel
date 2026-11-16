@@ -118,6 +118,15 @@ fn well_formedness_rejects_producer_mistakes() {
         "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  propagate\n}\n";
     wf::module(&parse(&format!("{head}{ok}{tail}")).unwrap())
         .expect("the base case is well formed");
+    // s0 written on b1 or b2, s1 its drop flag, read under the flag after the join.
+    let flagged = |arms: &str| {
+        format!(
+            "slot s0 = i32\nslot s1 = bool\naddr a0 = s0 : i32\naddr a1 = s1 : bool\nb0(v0: i32, v1: i32):\n  live s0\n  live s1\n  address a0\n  address a1\n  v2: bool = const false\n  store a1, v2\n  v3: bool = lt v0, v1\n  branch v3, b1, b2\n{arms}b3:\n  v5: bool = read a1\n  branch v5, b4, b5\nb4:\n  v6: i32 = read a0\n  return v6\nb5:\n  return v0\n}}\n"
+        )
+    };
+    let unguarded = flagged(
+        "b1:\n  store a0, v0\n  jump b3\nb2:\n  v4: bool = const true\n  store a1, v4\n  jump b3\n",
+    );
     let cases = [
         // a failure path that returns would catch the failure (FAIL-14)
         (
@@ -210,11 +219,29 @@ fn well_formedness_rejects_producer_mistakes() {
             "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  v3: i32 = add v2, v0 fail b2\n  propagate\nb2:\n  propagate\n}\n",
             "b1: v2 is used on a path that does not define it",
         ),
+        // A slot's contents are read only where every path wrote them: engines give
+        // an unwritten home's stack bytes (Cranelift), undef (LLVM) or 0 (evaluator).
+        // b0 -> b2 skips b1, the only store to s0.
+        (
+            "slot s0 = i32\naddr a0 = s0 : i32\nb0(v0: i32, v1: i32):\n  live s0\n  address a0\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  store a0, v0\n  jump b2\nb2:\n  v3: i32 = read a0\n  return v3\n}\n",
+            "b2: s0 is read on a path that does not write it",
+        ),
+        // a drop flag set on the arm that does not write s0 guards nothing
+        (
+            unguarded.as_str(),
+            "b4: s0 is read on a path that does not write it",
+        ),
     ];
     // An address evaluated on each arm before the join is defined on every path.
     let joined = "slot s0 = i32\naddr a0 = s0 : i32\nb0(v0: i32, v1: i32):\n  live s0\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  address a0\n  store a0, v0\n  jump b3\nb2:\n  address a0\n  store a0, v1\n  jump b3\nb3:\n  v3: i32 = read a0\n  return v3\n}\n";
     wf::module(&parse(&format!("{head}{joined}{tail}")).unwrap())
         .expect("an address evaluated on both arms is defined at the join");
+    // A drop flag stored true only where s0 is written: its yes edge reads s0.
+    let guarded = flagged(
+        "b1:\n  store a0, v0\n  v4: bool = const true\n  store a1, v4\n  jump b3\nb2:\n  jump b3\n",
+    );
+    wf::module(&parse(&format!("{head}{guarded}{tail}")).unwrap())
+        .expect("a read under the drop flag of its writes is written");
     for (body, why) in cases {
         let m = parse(&format!("{head}{body}{tail}")).unwrap();
         let err = wf::module(&m).expect_err(why);
@@ -781,7 +808,8 @@ fn an_alloc_names_the_edge_that_cleans_it() {
 fn loans_stop_producer_aliasing() {
     let module = |main: &str, callee: &str| {
         format!(
-            "core v1\ntype t0 = own \"P\" {{ a: u64 }}\nsig g0 = () -> ()\nsig g1 = (&view t0, &mut t0) -> ()\nsig g2 = (&view t0, ptr) -> ()\nsig g3 = (&take t0, &mut t0) -> ()\nsig g4 = (&view t0, &take t0) -> ()\nsig g5 = (&take t0, ptr) -> ()\ninst n0 = p@0/m/main [] []\ninst n1 = p@0/m/callee [] []\nfn f0 = n0 g0 {{\n  slot s0 = t0\n  slot s1 = t0\n  addr a0 = s0 : t0\n  addr a1 = s1 : t0\nb0:\n  live s0\n  live s1\n  address a0\n  address a1\n{main}  return\n}}\n{callee}"
+            "core v1\ntype t0 = own \"P\" {{ a: u64 }}\nsig g0 = () -> ()\nsig g1 = (&view t0, &mut t0) -> ()\nsig g2 = (&view t0, ptr) -> ()\nsig g3 = (&take t0, &mut t0) -> ()\nsig g4 = (&view t0, &take t0) -> ()\nsig g5 = (&take t0, ptr) -> ()\ninst n0 = p@0/m/main [] []\ninst n1 = p@0/m/callee [] []\nfn f0 = n0 g0 {{\n  slot s0 = t0\n  slot s1 = t0\n  addr a0 = s0 : t0\n  addr a1 = s1 : t0\n  addr a2 = s0 field 0 : u64\n  addr a3 = s1 field 0 : u64\nb0:\n  live s0\n  live s1\n  address a0\n  address a1\n  address a2\n  address a3\n  v0: u64 = const 0\n  store a2, v0\n  store a3, v0\n{main}  return\n}}\n{callee}",
+            main = main.replace("v0", "v1")
         )
     };
     // the callee writes its `mut` place, or a place it was handed as a pointer

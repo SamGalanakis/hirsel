@@ -1037,7 +1037,7 @@ b4():
 }
 
 #[test]
-fn local_homes_keep_ssa_addresses_unwritten_arms_and_entry_back_edges() {
+fn local_homes_keep_ssa_addresses_across_blocks_and_entry_back_edges() {
     let module = text::parse(
         r#"core v1
 sig g0 = (u64) -> (u64)
@@ -1068,9 +1068,9 @@ fn f2 = n2 g1 {
 b0(v0: bool, v1: u64):
  live s0
  address a0
+ store a0, v1
  branch v0, b1(), b2()
 b1():
- store a0, v1
  jump b2()
 b2():
  branch v0, b3(), b4()

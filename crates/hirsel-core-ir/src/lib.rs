@@ -783,9 +783,9 @@
 //! # Values, slots and addresses
 //!
 //! A value is defined once, by a block parameter or an instruction result, and is
-//! a scalar ([`Scalar`]) or a pointer. A slot is a typed piece of frame memory with
-//! no initialization discipline beyond what its producer guarantees: `StorageLive`
-//! begins it, `StorageDead` ends it, reads and stores in between name addresses.
+//! a scalar ([`Scalar`]) or a pointer. A slot is a typed piece of frame memory:
+//! `StorageLive` begins it unwritten, `StorageDead` ends it, reads and stores in
+//! between name addresses.
 //! Its address is fixed for its function's activation, and every slot ends when the
 //! activation does, by return or by failure: a later use of an address into it is
 //! a stop.
@@ -796,7 +796,16 @@
 //! failure edge carries the state before its failing instruction). Engines read
 //! a value or address as computed on the path taken and do not re-check; an
 //! address evaluated on each arm before a join counts as defined at the join.
-//! A slot's contents have no such rule: initialization is its producer's.
+//! A slot's contents are read only where they were written: every reachable read
+//! of a place in a slot (a `read`, `case`, `drop`, copy source, `grow` carrier,
+//! `view` or `take` argument, `deref`, `raise fail` cause) follows, on every path
+//! from the entry, a write overlapping it (a store, copy, `set_case`, `grow`, a
+//! call's destination or `mut` argument, or a `pointer` to the slot, after which
+//! writes are out of sight). A place with no bytes is never read. A drop flag is the
+//! IR's statement that a place is written on some paths only: a `bool` slot stored
+//! `true` only where the place is written makes it written on the `yes` edge of a
+//! branch on the flag. Engines give no meaning to an unwritten home (Cranelift reads
+//! the stack's old bytes, LLVM an undefined value, the evaluator 0).
 //!
 //! # Calling convention (FORM v0)
 //!

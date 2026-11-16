@@ -165,7 +165,7 @@ observation, every `task.check_cancel()`, publication by `send`, every `try_send
 change of a channel's sender count, `join`, channel close, every `latest.publish` and
 `latest.read` and every change of a `Latest` root's handle count (CONC-13), every slice end ([MEM-30](budgets.md#mem-30-step-bounds)), every charge or refund that
 crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), every `Arc`
-creation, share, release and `try_unwrap`, and every admission that returns `Capacity`
+creation, share, release, `try_unwrap` and `with_unique` test, and every admission that returns `Capacity`
 ([MEM-21](budgets.md#mem-21-admission)). Each operation observes the state that the order gives.
 That list follows one rule: an operation whose result can depend on the order of tasks is
 an event, and one whose result cannot, such as a change to a value only its own task
@@ -183,7 +183,7 @@ is ended by its provider (CONC-7).
 
 A **poll** is a non-waiting operation that returns without effect because of another
 task's state: a `try_send` that returns `Full`, a `try_receive` that returns `Empty`, a `task.check_cancel()` that finds no
-request, a `try_unwrap` that returns the `Arc`, and an admission that returns `Capacity`;
+request, a `try_unwrap` that returns the `Arc`, a `with_unique` that returns `None`, and an admission that returns `Capacity`;
 any later operation of that kind is a poll too. Every event is a point where the scheduler
 may run another task, and every scheduler provider is fair: no task performs unboundedly
 many polls while another task that is not waiting performs no event, unless that other
@@ -209,13 +209,16 @@ fn wait_gate(tx: Sender[()]) {
 
 An `Arc` node stays charged to the limit that created it; its last release, in whichever
 task it happens, refunds it there. Counts are exact under the event order: `try_unwrap`
-succeeds in exactly the runs whose order puts it after every other holder's release.
+succeeds, and `with_unique` runs its callback, in exactly the runs whose order puts the
+test after every other holder's release ([MEM-15](memory.md#mem-15-arc)).
 
 ### CONC-12: No shared mutable state
 
 v1 has no mutable value reachable from two tasks, except a `Latest` root (CONC-13), which
 holds an `Arc`: no mutable statics, no cells, no mutexes, no atomics, and no write through
-the view an `Arc` gives ([OWN-12](ownership.md#own-12-assignment)). Top-level `const` values are plain and immutable.
+the view an `Arc` gives ([OWN-12](ownership.md#own-12-assignment)). `arc.with_unique`
+writes an `Arc` payload only while its count is 1, when no other task reaches it
+([MEM-15](memory.md#mem-15-arc)). Top-level `const` values are plain and immutable.
 
 ```hirsel
 const LIMIT: u64 = 64

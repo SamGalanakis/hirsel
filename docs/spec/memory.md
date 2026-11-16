@@ -457,9 +457,68 @@ fn wrap(take f: HostFile) { let _ = rc.new(take f) }       // refused: LANG-12, 
 ### MEM-15: Arc
 
 `arc.new(take x) -> Result[Arc[T], (Capacity, T)]` requires `T: shareable + send`. An
-`Arc[T]`'s payload is immutable, and an `Arc` is `send`. Its creation, every share, every release and every
-`try_unwrap` is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)),
-so the count each operation observes is the count that order gives.
+`Arc[T]`'s payload is immutable except through `arc.with_unique`, and an `Arc` is `send`.
+Its creation, every share, every release, every `try_unwrap` and every `with_unique` test
+is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)), so the
+count each operation observes is the count that order gives.
+
+`arc.with_unique[T: shareable + send, R](mut h: Arc[T], f: scoped fn(mut T) -> R) ->
+Option[R]` tests whether `h` is the payload's only holder. When the count is 1 it lends
+the payload to `f` as `f`'s `mut` parameter, runs `f` once in place and returns `Some(r)`;
+when the count is greater than 1 it returns `None` and `f` does not run. The operation
+itself copies nothing, admits nothing and leaves the count unchanged; `f` may admit as any
+code does. The test is one event, of the same kind as `try_unwrap`'s and ordered the same
+way (CONC-10, [CONC-11](tasks.md#conc-11-arc-across-tasks)), and a `None` is a poll. The
+payload is the one place reached through a counted value that is ever writable
+([OWN-12](ownership.md#own-12-assignment)), and only as `f`'s parameter. That is sound
+because, while `f` runs, `h` is the only holder and nothing else can reach the payload or
+add a holder:
+
+- **Count 1 means `h` alone.** Every holder is a slot, a field, an element or a `Latest`
+  root that holds the node, and `h` is one of them, so a count of 1 leaves none other, in
+  this task or any other. There are no weak counted references in v1
+  ([reserved](reserved.md#not-in-v1)); if they are added, the test must also find none.
+- **`h` is a writable place.** It is lent `mut` ([OWN-11](ownership.md#own-11-call-arguments)),
+  so an `Arc` reached through a view, a stable value or another counted value cannot be
+  passed: an `Arc` field of a shared payload has count 1 and is reachable by every holder of
+  the outer node, and is refused here. Inside an outer `with_unique`, the outer payload is
+  `f`'s `mut` parameter, so a nested `with_unique(mut p.inner, g)` is accepted.
+- **The count cannot rise while `f` runs.** A share needs a holder
+  ([MEM-16](#mem-16-counting)), the only holder is `h`, and `h` is lent to `with_unique` for
+  the whole call, so `f` cannot name it, view it, share it, move it, send it or assign it
+  ([OWN-9](ownership.md#own-9-overlap), [OWN-21](ownership.md#own-21-scoped-callbacks)). No
+  other task holds the node, so none can share it either. This holds whatever events `f`
+  performs.
+- **The loan cannot escape.** `f` is scoped, so neither `R` nor anything `f` stores may be
+  anchored to its parameter ([OWN-21](ownership.md#own-21-scoped-callbacks)), and a
+  `mut` parameter is never returned or taken (OWN-11). Views of the payload made inside `f`
+  end with its invocation.
+- **The payload is a complete `T` at every point.** `f` changes it only by assignment,
+  `replace` and `mut` loans, which keep a complete value in place
+  ([OWN-12](ownership.md#own-12-assignment), [OWN-13](ownership.md#own-13-replace),
+  [OWN-14](ownership.md#own-14-no-partial-moves)). A failure inside `f` propagates from
+  `with_unique` and leaves the payload holding what `f` had installed before it; `h` stays
+  with its owner and is cleaned by [FAIL-8](failure.md#fail-8-exit-edge-cleanup) like any
+  other holder. A run stop ends the run without cleanup
+  ([FAIL-15](failure.md#fail-15-run-stops)).
+- **Charges follow the existing rules.** The node stays charged to the limit that created
+  it (CONC-11). Growing a collection in the payload charges the limit its storage's record
+  leads to ([MEM-26](budgets.md#mem-26-growth-keeps-the-limit)), which may be another
+  task's or its parent's; a charge or refund that crosses tasks is already an event
+  ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)).
+
+A write through `f` is not an event: once the test has found the count 1, no other task
+reaches the payload (CONC-10's rule), and every earlier read by another task is ordered
+before the release that dropped the count to 1.
+
+Copy-on-write is std, not core: `arc.update[T: shareable + send, R](mut h: Arc[T], f:
+scoped fn(mut T) -> R) -> Result[R, Capacity]` runs `f` through `with_unique`, and when
+`h` is shared first replaces `h` with a new `Arc` holding `clone(h)`
+([MEM-17](#mem-17-clone)), releasing the old share. `T: shareable` is the whole clone bound:
+a shareable type holds no resource, scoped value or opaque owner
+([OWN-4](ownership.md#own-4-bounds)), so `clone` accepts every payload. On `Capacity`, from
+the copy or the new node, `h` is unchanged and `f` has not run. `f` runs exactly once on
+`Ok`.
 
 ### MEM-16: Counting
 

@@ -263,6 +263,9 @@ fn key_order[K: ordered + shareable + send](ks: List[K], i: u64, k: K) -> Order 
 fn lower[K: ordered + shareable + send](ks: List[K], k: K) -> u64 {
     let mut a: u64 = 0
     let mut b = list.len(ks)
+    if b > 0 && ks[b - 1] < k {
+        return b
+    }
     while a < b {
         let mid = a + (b - a) / 2
         if ks[mid] < k {
@@ -279,6 +282,9 @@ fn lower[K: ordered + shareable + send](ks: List[K], k: K) -> u64 {
 fn upper_child[K: ordered + shareable + send](ks: List[K], k: K) -> u64 {
     let mut a: u64 = 0
     let mut b = list.len(ks)
+    if b > 0 && !(k < ks[b - 1]) {
+        return b - 1
+    }
     while a < b {
         let mid = a + (b - a) / 2
         if k < ks[mid] {

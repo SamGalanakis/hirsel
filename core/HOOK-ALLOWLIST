@@ -78,6 +78,8 @@ core@1/core/ParseError
 core@1/core/Process
 core@1/core/Random
 core@1/core/Rc
+# result type of channel.try_receive; ruling 2026-11-15 23:48, clarified 2026-11-16 07:55 (DECISIONS.md)
+core@1/core/ReceiveError
 core@1/core/Receiver
 core@1/core/Region
 core@1/core/Result

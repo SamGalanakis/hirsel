@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Run the runner's named laws and cases (RUNNER-SPEC v2.2 §9) from checkout sources.
+"""Run the runner's named laws and cases (RUNNER-SPEC v2.4 §9) from checkout sources.
 
-The laws in core/programs/store/runner_laws.hirsel run on the evaluator; their test_
-twins, and the cases that need tasks, run natively on each selected backend. Two
-generated modules complete the R0 list: runner_p19 (one `place` of 1, 100 and 1,000
-entries, run in two tasks) and runner_l12 (describe across permuted registrations, an
-added A field and a changed R). Each mutant applies one text change to a copy of
-runner.hirsel and must turn its law red on the evaluator.
+Every law runs on the evaluator (a law_ function) and natively on each selected backend
+(its test_ twin): R0's in core/programs/store/runner_laws.hirsel, R1's in
+core/programs/store/runner_calls.hirsel, and two generated modules, runner_p19 (one
+`place` of 1 and 100 entries, run in two tasks) and runner_l12 (describe across permuted
+registrations, an added A field and a changed R). Each mutant applies its text changes
+to a copy of runner.hirsel and must turn its law red on the evaluator.
 """
 import argparse
 import json
@@ -19,28 +19,68 @@ from std_native import ROOT, wait_load
 from store_tests import inputs
 
 
-LAWS = ('p01_call', 'p09_describe', 'p13_duplicate_refused', 'p15_types_roundtrip', 'p19_place_bound',
-        'l4_malformed_flood')
-NATIVE_ONLY = ('p02_start_finish',)
+LAWS = ('p01_call', 'p02_start_finish', 'p09_describe', 'p13_duplicate_refused', 'p15_types_roundtrip',
+        'p19_place_bound', 'l4_malformed_flood')
 # p19 at 1,000 entries waits on the generic code.identity dispatch: in a program that
 # reaches about 1,500 functions, its frame alone overflows a task's 64 KiB stack
 # (followups 2026-11-16 runner-build-1033 -> core-ops-914).
 SIZES = (1, 100)
 N_PLACE = 8 * 1024 * 1024
 
-# (name, old text, new text, the law that must turn red). Each is a wrong implementation
-# the law names: a registry that accepts a key twice; an adapter that decodes the
-# argument under a bound that ignores the caller's n; a describe without the argument and result schemas.
+CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
+         'calls_deadline_held', 'calls_held_head', 'l14_handles')
+
+# (name, [(old text, new text)], module, the law that must turn red). Each is a wrong
+# implementation the law names:
+# - duplicate_unchecked: a registry that accepts a key twice;
+# - decode_unbounded: an adapter that decodes the argument under a bound that ignores n;
+# - encode_outside_bound (v2.3): an adapter that encodes R after leaving the bound;
+# - describe_without_schemas: a describe without the argument and result schemas;
+# - direct_commitless: a head that answers a commitless outcome straight to the session;
+# - release_at_commit_version: a Release at its own commit version, not the group's
+#   durable version;
+# - queue_outside_account: a session that frees a slot when it answers Abandoned.
 MUTANTS = (
     ('duplicate_unchecked',
-     '    if map.contains(r.slots, key) {\n        return Error(AlreadyRegistered(take key))\n    }\n', '',
-     'p13_duplicate_refused'),
+     [('    if map.contains(r.slots, key) {\n        return Error(AlreadyRegistered(take key))\n    }\n', '')],
+     'runner_laws', 'p13_duplicate_refused'),
     ('decode_unbounded',
-     '    let ran = bound bytes n {\n', '    let ran = bound bytes 4611686018427387904u64 {\n',
-     'l4_malformed_flood'),
+     [('    let ran = bound bytes n {\n', '    let ran = bound bytes 4611686018427387904u64 {\n')],
+     'runner_laws', 'l4_malformed_flood'),
+    ('encode_outside_bound',
+     [('        let run = scoped fn() -> Result[Outcome, DecodeFail] {',
+       '        let run = scoped fn() -> Result[Result[R, Outcome], DecodeFail] {'),
+      ('                    Ok(take r) => Ok(encoded(cr, r)),\n'
+       '                    Error(c) => Ok(Failed(OutOfBytes(room(c)))),\n'
+       '                },\n'
+       '                Ok(Error(e)) => Error(DecodeFail(e: e)),\n'
+       '                Error(c) => Ok(Failed(OutOfBytes(room(c)))),',
+       '                    Ok(take r) => Ok(Ok(take r)),\n'
+       '                    Error(c) => Ok(Error(Failed(OutOfBytes(room(c))))),\n'
+       '                },\n'
+       '                Ok(Error(e)) => Error(DecodeFail(e: e)),\n'
+       '                Error(c) => Ok(Error(Failed(OutOfBytes(room(c))))),'),
+      ('        Ok(Ok(Ok(Ok(take o)))) => take o,',
+       '        Ok(Ok(Ok(Ok(Ok(take r))))) => encoded(cr, r),\n        Ok(Ok(Ok(Ok(Error(take o))))) => take o,')],
+     'runner_laws', 'l4_malformed_flood'),
     ('describe_without_schemas',
-     'args: take args, result: take result, error: take error', 'args: list.new(), result: list.new(), error: take error',
-     'l12'),
+     [('args: take args, result: take result, error: take error',
+       'args: list.new(), result: list.new(), error: take error')],
+     'l12', 'l12'),
+    ('direct_commitless',
+     [('    let mut answers: List[Answer] = list.new()\n'
+       '    result.unwrap(list.push(mut answers, Answer(to: take to, stream: take stream, p: p, outcome: take o)))\n'
+       '    let _ = channel.send(hd.out, Release(version: 0u64, snapshot: None, answers: take answers))',
+       '    let _ = channel.send(to, Event(e: Answered(Frame(version: 0u64, stream: take stream, p: p, outcome: take o))))')],
+     'runner_calls', 'calls_duplicate'),
+    ('release_at_commit_version',
+     [('let Worker(p: p, version: _, outcome', 'let Worker(p: p, version: wv, outcome'),
+      ('Release(version: d, snapshot', 'Release(version: wv, snapshot')],
+     'runner_calls', 'calls_group_version'),
+    ('queue_outside_account',
+     [('                if fired {\n                    let named',
+       '                if fired {\n                    let _ = map.remove(mut held, slot_key(t.stream, t.p))\n                    let named')],
+     'runner_calls', 'calls_held_head'),
 )
 
 
@@ -51,7 +91,7 @@ def p19_module(path):
         lines.append(f'fn e{i}(take x: u64) -> Result[u64, Capacity] {{ Ok(x + {i}u64) }}')
     for n in SIZES:
         lines += ['', f'fn place_{n}(mut r: Reg) -> Result[(), runner.RegisterError] {{']
-        lines += [f'    runner.compute(mut r, code.describe(e{i}))?' for i in range(n)]
+        lines += [f'    runner.compute(mut r, code.describe(e{i}), 65536u64)?' for i in range(n)]
         lines += ['    Ok(())', '}']
     lines += ['', 'fn described(n: u64, entries: u64) -> Bytes {', '    let made = bound bytes n {',
               '        let mut r: Reg = runner.registry()', '        let placed = match entries {']
@@ -73,9 +113,10 @@ def p19_module(path):
               '    match std.codec.take_list(mine, mut at, c) {',
               '        Ok(ds) => list.len(ds) == entries && at == list.len(mine) && mine == theirs,',
               '        Error(_) => false,', '    }', '}', '',
-              '@test', 'fn test_p19_place_twice(tasks: Tasks) -> Result[(), ()] waits {']
-    lines += [line for n in SIZES for line in (f'    if !twice(tasks, {n}u64) {{', '        return Error(())', '    }')]
-    lines += ['    Ok(())', '}', '']
+              'pub fn law_p19_place_twice(tasks: Tasks) -> bool waits {']
+    lines += [line for n in SIZES for line in (f'    if !twice(tasks, {n}u64) {{', '        return false', '    }')]
+    lines += ['    true', '}', '', '@test', 'fn test_p19_place_twice(tasks: Tasks) -> Result[(), ()] waits {',
+              '    if law_p19_place_twice(tasks) { Ok(()) } else { Error(()) }', '}', '']
     path.write_text('\n'.join(lines))
 
 
@@ -94,7 +135,7 @@ def l12_module(path, variant, expect=None):
              f'fn ea(take p: P) -> Result[Q, Capacity] {{ Ok(Q({q})) }}',
              'fn eb(take x: u64) -> Result[u64, Capacity] { Ok(x) }', '',
              'fn place(mut r: Reg) -> Result[(), runner.RegisterError] {']
-    lines += [f'    runner.compute(mut r, code.describe({e}))?' for e in order]
+    lines += [f'    runner.compute(mut r, code.describe({e}), 65536u64)?' for e in order]
     lines += ['    Ok(())', '}', '', 'fn described() -> Bytes {', '    let mut r: Reg = runner.registry()',
               '    result.unwrap(place(mut r))', '    let mut b: Bytes = list.new()',
               '    result.unwrap(runner.describe(r, mut b))', '    b', '}', '',
@@ -150,6 +191,22 @@ def l12_holds(values):
             and all(values[v[0]] not in (None, 0, base) for v in L12[1:]))
 
 
+def native_run(args, engine, inputs_path, store, prefix):
+    command = [str(args.compiler.resolve()), 'test', '--inputs', str(inputs_path), '--source-core',
+               '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
+               '--store', str(store), '--json', '--filter', prefix,
+               '--limit', str(64 * 1024 * 1024), '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random']
+    if args.cc:
+        command += ['--cc', str(args.cc.resolve())]
+    wait_load()
+    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        report = json.loads(result.stdout)
+    except ValueError:
+        report = {'stdout': result.stdout, 'stderr': result.stderr}
+    return result.returncode, report
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', type=Path, default=ROOT)
@@ -176,34 +233,47 @@ def main():
         base = manifest(root, work, 'inputs')
         values = l12_values(evaluator, root, work, 'tree')
         row(engine='evaluator', law='l12', passed=l12_holds(values), result=values)
+        p19 = work / 'runner_p19.hirsel'
+        p19_module(p19)
         if 'evaluator' in engines:
             for name in LAWS:
                 value, report = evaluate(evaluator, base, 'store@1/runner_laws/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1, result=report)
-        # A mutant is red only when it builds and its law returns false.
+            value, report = evaluate(evaluator, manifest(root, work, 'p19', None, [(p19, 'runner_p19')]),
+                                     'store@1/runner_p19/law_p19_place_twice')
+            row(engine='evaluator', law='p19_place_twice', passed=value == 1, result=report)
+            for name in CALLS:
+                value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
+                row(engine='evaluator', law=name, passed=value == 1, result=report)
+        # A mutant is red only when it builds and its law fails.
         if not args.no_mutants:
-            for name, old, new, law in MUTANTS:
-                text = (root / 'core/programs/store/runner.hirsel').read_text()
-                if text.count(old) != 1:
+            text = (root / 'core/programs/store/runner.hirsel').read_text()
+            for name, edits, module, law in MUTANTS:
+                mutated_text = text
+                found = True
+                for old, new in edits:
+                    found = found and mutated_text.count(old) == 1
+                    mutated_text = mutated_text.replace(old, new)
+                if not found:
                     row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
                     continue
                 mutated = work / f'mutant_{name}' / 'runner.hirsel'
                 mutated.parent.mkdir()
-                mutated.write_text(text.replace(old, new))
-                if law == 'l12':
+                mutated.write_text(mutated_text)
+                if module == 'l12':
                     seen = l12_values(evaluator, root, work, name, mutated)
-                    red = None not in seen.values() and not l12_holds(seen)
-                else:
-                    value, _ = evaluate(evaluator, manifest(root, work, 'mutant_' + name, mutated),
-                                        'store@1/runner_laws/law_' + law)
-                    red = value == 0
-                row(engine='evaluator', mutant=name, law=law, passed=red)
+                    row(engine='evaluator', mutant=name, law=law,
+                        passed=None not in seen.values() and not l12_holds(seen))
+                    continue
+                value, report = evaluate(evaluator, manifest(root, work, 'mutant_' + name, mutated),
+                                         f'store@1/{module}/law_{law}')
+                # Red: the law returns false, or one of its `want` checks fails it (cause Fail only).
+                red = value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
+                row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
         natives = [e for e in engines if e != 'evaluator']
         if natives:
             if args.compiler is None or args.runtime is None:
                 p.error('native backends require --compiler and --runtime')
-            p19 = work / 'runner_p19.hirsel'
-            p19_module(p19)
             l12 = work / 'runner_l12.hirsel'
             l12_module(l12, L12[0], values['base'])
             # The same module with another `place` list (registrations permuted), built after
@@ -215,7 +285,8 @@ def main():
             l12_want = {'store@1/runner_l12/test_l12_describe'}
             # p19's place builds as its own program, so its frame size is its own.
             groups = (('laws', [(l12, 'runner_l12')], 'store@1/runner_', 'shared',
-                       {f'store@1/runner_laws/test_{n}' for n in LAWS + NATIVE_ONLY} | l12_want),
+                       {f'store@1/runner_laws/test_{n}' for n in LAWS} | l12_want
+                       | {f'store@1/runner_calls/test_{n}' for n in CALLS}),
                       ('p19', [(p19, 'runner_p19')], 'store@1/runner_p19/', 'shared',
                        {'store@1/runner_p19/test_p19_place_twice'}),
                       ('l12_permuted', [(permuted, 'runner_l12')], 'store@1/runner_l12/', 'shared', l12_want),
@@ -223,24 +294,13 @@ def main():
             for engine in natives:
                 for group, extra, prefix, store, want in groups:
                     native = manifest(root, work, 'native_' + group, None, extra)
-                    command = [str(args.compiler.resolve()), 'test', '--inputs', str(native), '--source-core',
-                               '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
-                               '--store', str(work / f'store-{engine}-{store}'), '--json', '--filter', prefix,
-                               '--limit', str(64 * 1024 * 1024), '--grant', 'Clock', '--grant', 'Tasks']
-                    if args.cc:
-                        command += ['--cc', str(args.cc.resolve())]
-                    wait_load()
-                    result = subprocess.run(command, capture_output=True, text=True)
-                    try:
-                        report = json.loads(result.stdout)
-                    except ValueError:
-                        report = {'stdout': result.stdout, 'stderr': result.stderr}
+                    code, report = native_run(args, engine, native, work / f'store-{engine}-{store}', prefix)
                     tests = report.get('tests', [])
                     for t in tests:
                         row(engine=engine, test=t['definition'], passed=bool(t.get('passed')), result=t)
                     selected = {t['definition'] for t in tests}
                     row(engine=engine, group=group, selection=f'{len(selected & want)}/{len(want)}',
-                        passed=result.returncode == 0 and selected == want,
+                        passed=code == 0 and selected == want,
                         result=sorted(want ^ selected) or report.get('stderr', ''))
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')

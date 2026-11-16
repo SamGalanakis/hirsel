@@ -1,4 +1,4 @@
-// The runner's R0 laws and cases (RUNNER-SPEC v2.2 §9). Each law_ returns whether its
+// The runner's R0 laws and cases (RUNNER-SPEC v2.4 §9). Each law_ returns whether its
 // expectations, taken from the specification, the std codec and code.identity, hold;
 // core/tools/runner_tests.py runs them on the evaluator and their test_ twins natively.
 type Reg = runner.Registry[Clock, ()]
@@ -20,6 +20,21 @@ fn stamp(c: Clock, take n: u32) -> Result[u64, Capacity] waits {
     std.clock.sleep_ns(c, 1000u64)
     let m: u64 = int.widen(n)
     Ok(m + 1u64)
+}
+
+// v2.3's L4 case: an R of k bytes, whose encoding is 8 + k bytes more.
+fn grow(take k: u64) -> Result[String, Capacity] {
+    let mut b: Bytes = list.with_capacity(k)?
+    for _ in 0u64 .. k {
+        match list.push(mut b, 97u8) {
+            Ok(()) => (),
+            Error((c, _)) => return Error(c),
+        }
+    }
+    match string.from_utf8(take b) {
+        Ok(take s) => Ok(take s),
+        Error(_) => fail("grow: ASCII is UTF-8"),
+    }
 }
 
 fn e0(take x: u64) -> Result[u64, Capacity] {
@@ -61,9 +76,9 @@ fn string_arg(n: u64, trailing: bool) -> Bytes {
 
 fn three() -> Reg {
     let mut r: Reg = runner.registry()
-    result.unwrap(runner.compute(mut r, code.describe(toggle)))
-    result.unwrap(runner.compute(mut r, code.describe(boom)))
-    result.unwrap(runner.granted(mut r, code.describe(stamp)))
+    result.unwrap(runner.compute(mut r, code.describe(toggle), 65536u64))
+    result.unwrap(runner.compute(mut r, code.describe(boom), 65536u64))
+    result.unwrap(runner.granted(mut r, code.describe(stamp), 65536u64))
     r
 }
 
@@ -75,45 +90,47 @@ fn described(r: Reg) -> Bytes {
 
 // p01: a compute call answers Returned with R's bytes, Failed(Raised) for a fault,
 // Refused(NoEntry) for an unknown key or a key of another kind, Refused(Malformed) for
-// bytes that do not decode, and Refused(Budget) for a bound the caller cannot grant.
+// bytes that do not decode, and Refused(Budget) for an entry's bound the caller cannot grant.
 pub fn law_p01_call() -> bool {
     let r = three()
     let four = u32_arg(4u32)
     let tk = key_of(code.identity(code.describe(toggle)), std.codec.of_u32(), std.codec.of_bool())
-    let ok = match runner.call(r, tk, four, 65536u64) {
+    let ok = match runner.call(r, tk, four) {
         Returned(b) => list.len(b) == 1u64 && b[0u64] == 1u8,
         _ => false,
     }
-    let odd = match runner.call(r, tk, u32_arg(3u32), 65536u64) {
+    let odd = match runner.call(r, tk, u32_arg(3u32)) {
         Returned(b) => list.len(b) == 1u64 && b[0u64] == 0u8,
         _ => false,
     }
-    let fault = match runner.call(r, key_of(code.identity(code.describe(boom)), std.codec.of_u32(), std.codec.of_u32()), four, 65536u64) {
+    let fault = match runner.call(r, key_of(code.identity(code.describe(boom)), std.codec.of_u32(), std.codec.of_u32()), four) {
         Failed(Raised(2u32)) => true,
         _ => false,
     }
-    let missing = match runner.call(r, string.as_bytes("missing"), four, 65536u64) {
+    let missing = match runner.call(r, string.as_bytes("missing"), four) {
         Refused(NoEntry) => true,
         _ => false,
     }
-    let other_kind = match runner.call(r, key_of(code.identity(code.describe(stamp)), std.codec.of_u32(), std.codec.of_u64()), four, 65536u64) {
+    let other_kind = match runner.call(r, key_of(code.identity(code.describe(stamp)), std.codec.of_u32(), std.codec.of_u64()), four) {
         Refused(NoEntry) => true,
         _ => false,
     }
     let empty: Bytes = list.new()
-    let short = match runner.call(r, tk, empty, 65536u64) {
+    let short = match runner.call(r, tk, empty) {
         Refused(Malformed(m)) => m.kind == 0u32 && m.at == 0u64,
         _ => false,
     }
     let mut five = u32_arg(4u32)
     result.unwrap(list.push(mut five, 9u8))
-    let trailing = match runner.call(r, tk, five, 65536u64) {
+    let trailing = match runner.call(r, tk, five) {
         Refused(Malformed(m)) => m.kind == 4u32 && m.at == 4u64,
         _ => false,
     }
-    // Inside a 64 KiB bound, a 1 MiB call bound cannot be granted.
+    // Inside a 64 KiB bound, an entry registered with 1 MiB cannot be granted.
+    let mut big: Reg = runner.registry()
+    result.unwrap(runner.compute(mut big, code.describe(toggle), 1048576u64))
     let inside = bound bytes 65536u64 {
-        match runner.call(r, tk, four, 1048576u64) {
+        match runner.call(big, tk, four) {
             Refused(Budget(_)) => true,
             _ => false,
         }
@@ -160,15 +177,15 @@ pub fn law_p13_duplicate_refused() -> bool {
     let mut r = three()
     let before = described(r)
     let tk = key_of(code.identity(code.describe(toggle)), std.codec.of_u32(), std.codec.of_bool())
-    let refused = match runner.compute(mut r, code.describe(toggle)) {
+    let refused = match runner.compute(mut r, code.describe(toggle), 65536u64) {
         Error(AlreadyRegistered(k)) => k == tk,
         _ => false,
     }
-    let again = match runner.granted(mut r, code.describe(stamp)) {
+    let again = match runner.granted(mut r, code.describe(stamp), 65536u64) {
         Error(AlreadyRegistered(_)) => true,
         _ => false,
     }
-    let still = match runner.call(r, tk, u32_arg(4u32), 65536u64) {
+    let still = match runner.call(r, tk, u32_arg(4u32)) {
         Returned(b) => list.len(b) == 1u64 && b[0u64] == 1u8,
         _ => false,
     }
@@ -248,10 +265,10 @@ pub fn law_p15_types_roundtrip() -> bool {
 }
 
 fn place_branching(mut r: Reg) -> Result[(), runner.RegisterError] {
-    runner.compute(mut r, code.describe(e0))?
+    runner.compute(mut r, code.describe(e0), 65536u64)?
     let scratch: Result[List[u64], Capacity] = list.with_capacity(8192u64)
     match scratch {
-        Ok(_) => runner.compute(mut r, code.describe(e1)),
+        Ok(_) => runner.compute(mut r, code.describe(e1), 65536u64),
         Error(_) => Ok(()),
     }
 }
@@ -281,8 +298,14 @@ pub fn law_p19_place_bound() -> bool {
     list.len(small) > 8u64 && small == again && small != large && large == branching_under(33554432u64)
 }
 
-fn size_call(r: Reg, key: Bytes, arg: Bytes, n: u64) -> runner.Outcome {
-    runner.call(r, key, arg, n)
+fn size_call(r: Reg, key: Bytes, arg: Bytes) -> runner.Outcome {
+    runner.call(r, key, arg)
+}
+
+fn sized(n: u64) -> Reg {
+    let mut r: Reg = runner.registry()
+    result.unwrap(runner.compute(mut r, code.describe(size), n))
+    r
 }
 
 // The smallest outer bound in which one valid call answers Returned.
@@ -292,7 +315,7 @@ fn valid_peak(r: Reg, key: Bytes, arg: Bytes, n: u64) -> u64 {
     while lo < hi {
         let mid = lo + (hi - lo) / 2u64
         let fits = bound bytes mid {
-            match size_call(r, key, arg, n) {
+            match size_call(r, key, arg) {
                 Returned(_) => true,
                 _ => false,
             }
@@ -309,23 +332,25 @@ fn valid_peak(r: Reg, key: Bytes, arg: Bytes, n: u64) -> u64 {
     lo
 }
 
-// L4: the argument is decoded inside the call's bound, so a call's charge is its bound
-// and nothing outside it. (a) A 4,096-byte String under an 1,024-byte bound is
-// Failed(OutOfBytes), and Returned(4,096) under 1 MiB. (b) 10,000 malformed calls
-// (the same String plus one trailing byte, so each decodes the whole String before it
-// is refused) all answer Refused(Malformed) inside the smallest bound that holds one
-// valid call: the flood's peak charge is at most one valid call's.
+// L4: the argument is decoded, and the result encoded, inside the entry's bound, so a
+// call's charge is its bound and nothing outside it. (a) A 4,096-byte String is
+// Failed(OutOfBytes) for an entry registered with 1,024 bytes, and Returned(4,096) for
+// one registered with 16,384. (b) 10,000 malformed calls (the same String plus one
+// trailing byte, so each decodes the whole String before it is refused) all answer
+// Refused(Malformed) inside the smallest bound that holds one valid call: the flood's
+// peak charge is at most one valid call's. (c) v2.3: an entry registered with 4,096
+// bytes whose body returns 3,000 bytes, which encode to 3,008 more (6,008 together), is
+// Failed(OutOfBytes), and the caller goes on to a call that fits (100 bytes).
 pub fn law_l4_malformed_flood() -> bool {
-    let mut r: Reg = runner.registry()
-    result.unwrap(runner.compute(mut r, code.describe(size)))
+    let r = sized(16384u64)
     let key = key_of(code.identity(code.describe(size)), std.codec.of_string(), std.codec.of_u64())
     let valid = string_arg(4096u64, false)
-    let small = match runner.call(r, key, valid, 1024u64) {
+    let small = match runner.call(sized(1024u64), key, valid) {
         Failed(OutOfBytes(_)) => true,
         _ => false,
     }
     let n = 16384u64
-    let large = match runner.call(r, key, valid, n) {
+    let large = match runner.call(r, key, valid) {
         Returned(b) => b == {
             let mut e: Bytes = list.new()
             result.unwrap(std.codec.put_u64(4096u64, mut e))
@@ -338,7 +363,7 @@ pub fn law_l4_malformed_flood() -> bool {
     let flood = bound bytes peak {
         let mut all = true
         for _ in 0u64 .. 10000u64 {
-            match size_call(r, key, bad, n) {
+            match size_call(r, key, bad) {
                 Refused(Malformed(m)) => {
                     if m.kind != 4u32 {
                         all = false
@@ -355,7 +380,26 @@ pub fn law_l4_malformed_flood() -> bool {
         Ok(true) => true,
         _ => false,
     }
-    small && large && held
+    let mut g: Reg = runner.registry()
+    result.unwrap(runner.compute(mut g, code.describe(grow), 4096u64))
+    let gk = key_of(code.identity(code.describe(grow)), std.codec.of_u64(), std.codec.of_string())
+    let over = match runner.call(g, gk, {
+        let mut a: Bytes = list.new()
+        result.unwrap(std.codec.put_u64(3000u64, mut a))
+        a
+    }) {
+        Failed(OutOfBytes(_)) => true,
+        _ => false,
+    }
+    let fits = match runner.call(g, gk, {
+        let mut a: Bytes = list.new()
+        result.unwrap(std.codec.put_u64(100u64, mut a))
+        a
+    }) {
+        Returned(b) => list.len(b) == 108u64,
+        _ => false,
+    }
+    small && large && held && over && fits
 }
 
 @test
@@ -390,13 +434,12 @@ fn test_l4_malformed_flood() -> Result[(), ()] {
 
 // p02: a granted entry runs as a task under `bytes n` holding its grant (the Clock),
 // and waits; start refuses a key of another kind.
-@test
-fn test_p02_start_finish(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+pub fn law_p02_start_finish(c: Clock, tasks: Tasks) -> bool waits {
     let r = three()
     let sk = key_of(code.identity(code.describe(stamp)), std.codec.of_u32(), std.codec.of_u64())
-    let t = match runner.start(r, tasks, c, sk, u32_arg(41u32), 65536u64) {
+    let t = match runner.start(r, tasks, c, sk, u32_arg(41u32)) {
         Ok(take t) => take t,
-        Error(_) => return Error(()),
+        Error(_) => return false,
     }
     let ok = match runner.finish(take t) {
         Returned(b) => b == {
@@ -407,17 +450,22 @@ fn test_p02_start_finish(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
         _ => false,
     }
     let tk = key_of(code.identity(code.describe(toggle)), std.codec.of_u32(), std.codec.of_bool())
-    let other = match runner.start(r, tasks, c, tk, u32_arg(41u32), 65536u64) {
+    let other = match runner.start(r, tasks, c, tk, u32_arg(41u32)) {
         Error(NoEntry) => true,
         _ => false,
     }
     let empty: Bytes = list.new()
-    let m = match runner.start(r, tasks, c, sk, take empty, 65536u64) {
+    let m = match runner.start(r, tasks, c, sk, take empty) {
         Ok(take t2) => match runner.finish(take t2) {
             Refused(Malformed(b)) => b.kind == 0u32,
             _ => false,
         },
         Error(_) => false,
     }
-    if ok && other && m { Ok(()) } else { Error(()) }
+    ok && other && m
+}
+
+@test
+fn test_p02_start_finish(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    if law_p02_start_finish(c, tasks) { Ok(()) } else { Error(()) }
 }

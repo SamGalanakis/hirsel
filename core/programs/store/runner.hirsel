@@ -14,13 +14,15 @@ pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refus
 
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes, error: Bytes }
 
-pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes)
+pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes)
 
 pub type OpenError = Store(store.Error) | Place(RegisterError) | HandlesChanged
 
-// One erased adapter per kind. A compute slot runs in the caller's task; a granted slot
-// starts a task under `bytes n` that holds the grant.
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes, u64) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes, u64) -> Result[Task[Outcome], Capacity])
+// One erased adapter per kind, holding the entry's byte bound n from registration
+// (RUNNER-SPEC v2.4 §1.1). A compute slot runs in the caller's task; a granted slot
+// starts a task under `bytes n` that holds the grant. A transact slot has two: the
+// session's check (rule 5: decode the argument, keep nothing) and the head's run.
+type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran)
 
 pub opaque type Registry[G: send, H: send]: send {
     slots: Map[Bytes, Slot[G, H]],
@@ -35,6 +37,7 @@ fn room(c: Capacity) -> Room {
     Room(requested: c.requested, available: c.available)
 }
 
+// RUNNER-SPEC §1.1's fixed Bad.kind table.
 fn bad(e: std.codec.DecodeError) -> Bad {
     match e {
         Truncated(at) => Bad(kind: 0u32, at: at),
@@ -47,7 +50,7 @@ fn bad(e: std.codec.DecodeError) -> Bad {
     }
 }
 
-// The first cause's kind, numbered in CauseKind's declaration order from 1.
+// The first cause's kind, by RUNNER-SPEC §1.1's fixed Raised table (Overflow 1 .. Capacity 7).
 fn raised(cs: Causes) -> u32 {
     for c in cs {
         return match c.kind {
@@ -153,28 +156,28 @@ fn insert[G: send, H: send](mut r: Registry[G, H], take key: Bytes, take d: Desc
     }
 }
 
-pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Result[(), RegisterError] {
+pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), Compute, ca, cr, list.new()) {
         Ok(take kd) => take kd,
         Error(c) => return Error(Full(c)),
     }
-    let made = fn(arg: Bytes, n: u64) -> Outcome { adapt_compute(f, ca, cr, arg, n) }
+    let made = fn(arg: Bytes) -> Outcome { adapt_compute(f, ca, cr, arg, n) }
     match made {
         Ok(take run) => insert(mut r, take key, take d, Compute(take run)),
         Error((c, _)) => Error(Full(c)),
     }
 }
 
-pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits]) -> Result[(), RegisterError] {
+pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits], n: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), Granted, ca, cr, list.new()) {
         Ok(take kd) => take kd,
         Error(c) => return Error(Full(c)),
     }
-    let made = fn(tasks: Tasks, take g: G, take arg: Bytes, n: u64) -> Result[Task[Outcome], Capacity] {
+    let made = fn(tasks: Tasks, take g: G, take arg: Bytes) -> Result[Task[Outcome], Capacity] {
         let j = Job(f: f, ca: ca, cr: cr, grant: take g, arg: take arg)
         match task.spawn(tasks, bytes n, take j, adapt_granted) {
             Ok(take t) => Ok(take t),
@@ -193,19 +196,20 @@ pub fn describe[G: send, H: send](r: Registry[G, H], mut out: Bytes) -> Result[(
     std.codec.put_list(r.described, c, mut out)
 }
 
-// A compute call in the caller's task. A key that names no compute entry is NoEntry.
-pub fn call[G: send, H: send](r: Registry[G, H], key: Bytes, arg: Bytes, n: u64) -> Outcome {
+// A compute call in the caller's task, under the entry's n. A key that names no compute
+// entry is NoEntry.
+pub fn call[G: send, H: send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outcome {
     match map.get(r.slots, key) {
-        Some(Compute(run)) => run(arg, n),
+        Some(Compute(run)) => run(arg),
         _ => Refused(NoEntry),
     }
 }
 
-// A granted call: a task under `bytes n` holding g. A key that names no granted entry is
-// NoEntry; a task the place cannot grant is Budget.
-pub fn start[G: send, H: send](r: Registry[G, H], tasks: Tasks, take g: G, key: Bytes, take arg: Bytes, n: u64) -> Result[Task[Outcome], Refusal] {
+// A granted call: a task under the entry's `bytes n` holding g. A key that names no
+// granted entry is NoEntry; a task the place cannot grant is Budget.
+pub fn start[G: send, H: send](r: Registry[G, H], tasks: Tasks, take g: G, key: Bytes, take arg: Bytes) -> Result[Task[Outcome], Refusal] {
     match map.get(r.slots, key) {
-        Some(Granted(go)) => match go(tasks, take g, take arg, n) {
+        Some(Granted(go)) => match go(tasks, take g, take arg) {
             Ok(take t) => Ok(take t),
             Error(c) => Error(Budget(room(c))),
         },
@@ -218,5 +222,714 @@ pub fn finish(take t: Task[Outcome]) -> Outcome waits {
         Ok(take o) => take o,
         Error(Failed(cs)) => Failed(Raised(raised(cs))),
         Error(Cancelled(cs)) => Failed(Raised(raised(cs))),
+    }
+}
+
+// ---- R1 (RUNNER-SPEC v2.4 §2, §3): transact, the head, sessions and the publisher.
+
+// Rule 10: every task that runs entries runs the place's one `place` function itself,
+// here under `bytes n_place`, so the head's, the publisher's and each session's lists
+// are the same list.
+fn placed[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[Registry[G, H], RegisterError] {
+    let go = code.callable(place)
+    let built: Result[Result[Registry[G, H], RegisterError], Capacity] = bound bytes n_place {
+        let mut r: Registry[G, H] = registry()
+        match go(mut r) {
+            Ok(()) => Ok(take r),
+            Error(take e) => Error(take e),
+        }
+    }
+    match take built {
+        Ok(take x) => take x,
+        Error(c) => Error(Full(c)),
+    }
+}
+
+// A transact run, for the head: an effect to commit with its reply, a typed error whose
+// reply is kept alone, a fault after entry, or a refusal that records nothing.
+type Ran: send = Commit(Bytes) | Abort(Bytes) | Faulted(Fault) | Refuse(Refusal)
+
+// The session's check (rule 5): the argument decodes under n, and the value is dropped.
+// Running out of n is not a refusal; the head's run answers it with Failed(OutOfBytes).
+fn check_arg[A](ca: std.codec.Codec[A], arg: Bytes, n: u64) -> Option[Refusal] {
+    let seen = bound bytes n {
+        match std.codec.decode(ca, arg) {
+            Ok(Error(e)) => {
+                let why: Refusal = Malformed(bad(e))
+                Some(take why)
+            },
+            _ => None,
+        }
+    }
+    match take seen {
+        Ok(take o) => take o,
+        Error(c) => Some(Budget(room(c))),
+    }
+}
+
+// The transact adapter, inside the head's `store.run` (which isolates it): decode A, call
+// f with the Tx and the handles, and encode its Result[R, E], all inside `bound bytes n`.
+fn adapt_transact[H: send, A, R, E](f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]], ca: std.codec.Codec[A], cr: std.codec.Codec[R], ce: std.codec.Codec[E], mut tx: store.Tx, h: H, arg: Bytes, n: u64) -> Ran {
+    let body = code.callable(f)
+    let tried = bound bytes n {
+        match std.codec.decode(ca, arg) {
+            Ok(Ok(take a)) => {
+                let res = body(mut tx, h, take a)
+                let kept = match res {
+                    Ok(_) => true,
+                    Error(_) => false,
+                }
+                let mut out: Bytes = list.new()
+                match std.codec.put_result(res, cr, ce, mut out) {
+                    Ok(()) => if kept {
+                        Commit(take out)
+                    } else {
+                        Abort(take out)
+                    },
+                    Error(c) => Faulted(OutOfBytes(room(c))),
+                }
+            },
+            Ok(Error(e)) => Refuse(Malformed(bad(e))),
+            Error(c) => Faulted(OutOfBytes(room(c))),
+        }
+    }
+    match take tried {
+        Ok(take r) => take r,
+        Error(c) => Refuse(Budget(room(c))),
+    }
+}
+
+pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]], n: u64) -> Result[(), RegisterError] {
+    let ca: std.codec.Codec[A] = std.codec.of()
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let ce: std.codec.Codec[E] = std.codec.of()
+    let error = match std.codec.schema(ce) {
+        Ok(take s) => take s,
+        Error(c) => return Error(Full(c)),
+    }
+    let (take key, take d) = match described(code.identity(f), Transact, ca, cr, take error) {
+        Ok(take kd) => take kd,
+        Error(c) => return Error(Full(c)),
+    }
+    let check = fn(arg: Bytes) -> Option[Refusal] { check_arg(ca, arg, n) }
+    let run = fn(mut tx: store.Tx, h: H, arg: Bytes) -> Ran { adapt_transact(f, ca, cr, ce, mut tx, h, arg, n) }
+    match check {
+        Ok(take c) => match run {
+            Ok(take go) => insert(mut r, take key, take d, Transact(take c, take go)),
+            Error((e, _)) => Error(Full(e)),
+        },
+        Error((e, _)) => Error(Full(e)),
+    }
+}
+
+// ---- The S5 seam. STORE-SPEC §1.8's `admit` and `reply` are not on main (slice S5). They
+// stand in here with §1.8's rules, S7 included, over a table of the runner's own. Each
+// difference goes when S5 lands:
+// - the table `runner.streams` is created at open, and both take its handle;
+// - an Admission carries no ticket, because the head never waits on one (H2);
+// - S1's abort drops a reply written by a body that returns Error, so the head keeps that
+//   reply in a reply-only commit, where S5 keeps it in the aborted run's one frame (F2).
+type Row: codec { p: u64, replied: bool, reply: Bytes }
+
+type Admission = Admitted | Duplicate(Bytes) | Rejected(u64) | Abandoned
+
+fn streams_table(mut db: store.Db) -> Result[store.Table[Bytes, Row], store.Error] waits {
+    let cu: std.codec.Codec[Row] = std.codec.of()
+    match store.table(mut db, "runner.streams", std.codec.key_bytes(), cu) {
+        Error(Missing(_)) => {
+            let cv: std.codec.Codec[Row] = std.codec.of()
+            let _ = store.create_table(mut db, "runner.streams", std.codec.key_bytes(), cv)?
+            let cw: std.codec.Codec[Row] = std.codec.of()
+            store.table(mut db, "runner.streams", std.codec.key_bytes(), cw)
+        },
+        take other => take other,
+    }
+}
+
+fn admit(mut db: store.Db, t: store.Table[Bytes, Row], stream: Bytes, p: u64) -> Result[Admission, store.Error] waits {
+    let shape = store.shape(t)
+    let ran = store.run(mut db, scoped fn(mut tx: store.Tx) -> Result[(), Result[Admission, store.Error]] {
+        let row = match store.fetch(tx, shape, stream) {
+            Ok(take x) => take x,
+            Error(e) => return Error(Error(e)),
+        }
+        let fresh = match row {
+            None => p == 0u64,
+            Some(r) => p == r.p + 1u64 && r.replied,
+        }
+        if !fresh {
+            return Error(Ok(match row {
+                None => Rejected(0u64),
+                Some(r) => if p == r.p {
+                    if r.replied {
+                        let copied: Result[Bytes, Capacity] = clone(r.reply)
+                        match take copied {
+                            Ok(take b) => Duplicate(take b),
+                            Error(c) => return Error(Error(Full(c))),
+                        }
+                    } else {
+                        Abandoned
+                    }
+                } else {
+                    Rejected(r.p)
+                },
+            }))
+        }
+        match store.put(mut tx, t, stream, Row(p: p, replied: false, reply: list.new())) {
+            Ok(()) => Ok(()),
+            Error(e) => Error(Error(e)),
+        }
+    })?
+    match take ran {
+        Committed(_) => Ok(Admitted),
+        Aborted(take u) => {
+            let store.Undone(value: take v, ticket: _) = take u
+            take v
+        },
+        Failed(_) => fail("runner: admit faulted"),
+        Refused(c) => Error(Full(c)),
+    }
+}
+
+fn reply(mut tx: store.Tx, t: store.Table[Bytes, Row], stream: Bytes, p: u64, o: Outcome) -> Result[(), store.Error] {
+    let co: std.codec.Codec[Outcome] = std.codec.of()
+    let mut b: Bytes = list.new()
+    match std.codec.encode(co, o, mut b) {
+        Ok(()) => (),
+        Error(c) => return Error(Full(c)),
+    }
+    store.put(mut tx, t, stream, Row(p: p, replied: true, reply: take b))
+}
+
+// ---- P2: the head (H1-H4) and its gate (V3, V4).
+
+pub opaque type Req: send {
+    stream: Bytes,
+    p: u64,
+    key: Bytes,
+    arg: Bytes,
+    reply_to: Sender[Event]
+}
+
+type Answer: send { to: Sender[Event], stream: Bytes, p: u64, outcome: Outcome }
+
+// With a snapshot, a Release carries its group's durable version (V4). Without one it
+// carries commitless answers, which the publisher sends at its base (V3).
+pub opaque type Release: send {
+    version: u64,
+    snapshot: Option[store.Snapshot],
+    answers: List[Answer]
+}
+
+// A session's join to the publisher: its budget and subscriptions, which R2 serves. R1's
+// batches carry outcomes only, and they reach a session by its Req's reply sender.
+pub opaque type Join: send { to: Sender[Event] }
+
+// A stream's worker, from its commit until the gate releases its group.
+type Worker: send { p: u64, version: u64, outcome: Outcome, waiters: List[Sender[Event]] }
+
+type Waiting: send { req: Req, parked: bool }
+
+type Head[G: send, H: send] {
+    db: store.Db,
+    streams: store.Table[Bytes, Row],
+    r: Registry[G, H],
+    h: H,
+    out: Sender[Release],
+    busy: Map[Bytes, Worker],
+    waiting: List[Waiting],
+    group: List[Bytes],
+    last: Option[store.Ticket]
+}
+
+type Publish[G: send, H: send]: send {
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    n_place: u64,
+    h: H,
+    from: Receiver[Release],
+    sessions: Receiver[Join],
+    ready: Sender[Option[RegisterError]]
+}
+
+// The publisher task runs `place` itself and tells the head whether it could.
+fn publish[G: send, H: send](take p: Publish[G, H]) -> () waits {
+    let Publish(place: place, n_place: n_place, h: take h, from: take from, sessions: take sessions, ready: take ready) = take p
+    let r = match placed(place, n_place) {
+        Ok(take x) => take x,
+        Error(take e) => {
+            let _ = channel.send(ready, Some(take e))
+            return
+        },
+    }
+    if let Error(_) = channel.send(ready, None) {
+        return
+    }
+    publisher(take r, take h, take from, take sessions)
+}
+
+// Rule 10: the head and the publisher each run `place` under n_place. Rule 12: `handles`
+// runs twice; the head keeps the first H and moves the second to the publisher it starts.
+// A second call that moves the version fails the open. The publisher's first Release
+// carries the version at open, so its base starts there.
+pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], take inbox: Receiver[Req], take sessions: Receiver[Join], tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+    let r = match placed(place, n_place) {
+        Ok(take x) => take x,
+        Error(take e) => return Error(Place(take e)),
+    }
+    let mut owned = take db
+    let streams = match streams_table(mut owned) {
+        Ok(take t) => take t,
+        Error(e) => return Error(Store(e)),
+    }
+    let make = code.callable(handles)
+    let h = match make(mut owned) {
+        Ok(take x) => take x,
+        Error(e) => return Error(Store(e)),
+    }
+    let before = store.version(store.snapshot(owned))
+    let h2 = match make(mut owned) {
+        Ok(take x) => take x,
+        Error(e) => return Error(Store(e)),
+    }
+    if store.version(store.snapshot(owned)) != before {
+        return Error(HandlesChanged)
+    }
+    let made: Result[(Sender[Release], Receiver[Release]), Capacity] = channel.new(64u64)
+    let (out, from) = match take made {
+        Ok(take pair) => take pair,
+        Error(c) => return Error(Store(Full(c))),
+    }
+    let told: Result[(Sender[Option[RegisterError]], Receiver[Option[RegisterError]]), Capacity] = channel.new(1u64)
+    let (ready, readied) = match take told {
+        Ok(take pair) => take pair,
+        Error(c) => return Error(Store(Full(c))),
+    }
+    let p = Publish(place: place, n_place: n_place, h: take h2, from: take from, sessions: take sessions, ready: take ready)
+    let publishing = match task.spawn(tasks, bytes n_publisher, take p, publish) {
+        Ok(take t) => take t,
+        Error((c, _)) => return Error(Store(Full(c))),
+    }
+    match channel.receive(readied) {
+        Ok(None) => (),
+        Ok(Some(take e)) => {
+            let _ = task.join(take publishing)
+            return Error(Place(take e))
+        },
+        // The task ended without a word: `place` already ran here, so the task's own
+        // allowance could not hold it.
+        Error(_) => {
+            let _ = task.join(take publishing)
+            return Error(Place(Full(Capacity(requested: n_publisher, available: 0u64))))
+        },
+    }
+    let opened = Release(version: before, snapshot: Some(store.snapshot(owned)), answers: list.new())
+    let _ = channel.send(out, take opened)
+    let mut hd = Head(db: take owned, streams: take streams, r: take r, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None)
+    let served = serve(mut hd, inbox)
+    let Head(db: take kept, streams: _, r: _, h: _, out: _, busy: _, waiting: _, group: _, last: _) = take hd
+    let _ = task.join(take publishing)
+    match take served {
+        Ok(()) => (),
+        Error(e) => return Error(Store(e)),
+    }
+    match store.close(take kept) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(Store(e)),
+    }
+}
+
+// Arrivals first; then a waiting request whose stream has no worker; then the gate; and
+// with nothing left, wait for an arrival. Every arrival clears the parks (H2).
+fn serve[G: send, H: send](mut hd: Head[G, H], inbox: Receiver[Req]) -> Result[(), store.Error] waits {
+    loop {
+        match channel.try_receive(inbox) {
+            Ok(take q) => {
+                unpark(mut hd);
+                route(mut hd, take q)?;
+                continue
+            },
+            Error(_) => (),
+        }
+        if next_waiting(mut hd)? {
+            continue
+        }
+        if list.len(hd.group) > 0u64 {
+            gate(mut hd)?;
+            continue
+        }
+        match channel.receive(inbox) {
+            Ok(take q) => {
+                unpark(mut hd);
+                route(mut hd, take q)?
+            },
+            Error(_) => return Ok(()),
+        }
+    }
+}
+
+fn unpark[G: send, H: send](mut hd: Head[G, H]) {
+    let mut i = 0u64
+    while i < list.len(hd.waiting) {
+        hd.waiting[i].parked = false;
+        i += 1u64
+    }
+}
+
+// H1: a request for its stream's worker position joins the waiters; another position waits.
+fn route[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.Error] waits {
+    let running = match map.get(hd.busy, q.stream) {
+        Some(w) => Some(w.p),
+        None => None,
+    }
+    match running {
+        Some(p) => if p == q.p {
+            let Req(stream: take stream, p: _, key: _, arg: _, reply_to: take to) = take q
+            let mut w = match map.remove(mut hd.busy, stream) {
+                Some(take x) => take x,
+                None => return Ok(()),
+            }
+            result.unwrap(list.push(mut w.waiters, take to))
+            result.unwrap(map.insert(mut hd.busy, take stream, take w))
+            Ok(())
+        } else {
+            result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: false)))
+            Ok(())
+        },
+        None => begin(mut hd, take q),
+    }
+}
+
+// The first unparked waiting request whose stream has no worker starts.
+fn next_waiting[G: send, H: send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
+    let mut i = 0u64
+    while i < list.len(hd.waiting) {
+        if !hd.waiting[i].parked && !map.contains(hd.busy, hd.waiting[i].req.stream) {
+            let Waiting(req: take q, parked: _) = list.remove(mut hd.waiting, i)
+            begin(mut hd, take q)?
+            return Ok(true)
+        }
+        i += 1u64
+    }
+    Ok(false)
+}
+
+// H2.
+fn begin[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.Error] waits {
+    let a = match admit(mut hd.db, hd.streams, q.stream, q.p) {
+        Ok(take x) => take x,
+        Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
+        Error(e) => return Error(e),
+    }
+    match take a {
+        Admitted => execute(mut hd, take q),
+        Abandoned => execute(mut hd, take q),
+        Duplicate(b) => {
+            let co: std.codec.Codec[Outcome] = std.codec.of()
+            match std.codec.decode(co, b) {
+                Ok(Ok(take o)) => commitless(mut hd, take q, take o),
+                _ => fail("runner: a stored reply does not decode"),
+            }
+        },
+        Rejected(l) => if q.p < l {
+            commitless(mut hd, take q, Superseded)
+        } else {
+            result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: true)))
+            Ok(())
+        },
+    }
+}
+
+// What a failed transact run leaves: a reply to keep alone, or a refusal that records nothing.
+type Kept = Alone(Outcome) | Nothing(Refusal)
+
+// The effect run: the slot's body and its reply in one commit. It takes the head's parts
+// as separate places, so the body can view the registry and handles while db is lent.
+fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, streams: store.Table[Bytes, Row], q: Req) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
+    match map.get(r.slots, q.key) {
+        Some(Transact(_, go)) => Some(store.run(mut db, scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
+            match go(mut tx, h, q.arg) {
+                Commit(take b) => {
+                    let o = Returned(take b)
+                    match reply(mut tx, streams, q.stream, q.p, o) {
+                        Ok(()) => Ok(take o),
+                        Error(_) => Error(Nothing(Overloaded)),
+                    }
+                },
+                Abort(take b) => Error(Alone(Returned(take b))),
+                Faulted(take f) => Error(Alone(Failed(take f))),
+                Refuse(take why) => Error(Nothing(take why)),
+            }
+        })),
+        _ => None,
+    }
+}
+
+fn execute[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.Error] waits {
+    let tried = effect(mut hd.db, hd.r, hd.h, hd.streams, q)
+    let ran = match take tried {
+        Some(take x) => match take x {
+            Ok(take y) => take y,
+            Error(e) => return Error(e),
+        },
+        None => return reply_only(mut hd, take q, Failed(Gone)),
+    }
+    match take ran {
+        Committed(take d) => {
+            let store.Done(value: take o, ticket: t, info: i, reads: _) = take d
+            worker(mut hd, take q, take o, t, i.id.version)
+        },
+        Aborted(take u) => match take u {
+            store.Undone(value: take v, ticket: _) => match take v {
+            Alone(take o) => reply_only(mut hd, take q, take o),
+            Nothing(take why) => commitless(mut hd, take q, Refused(take why)),
+            },
+        },
+        Failed(cs) => reply_only(mut hd, take q, Failed(Raised(raised(cs)))),
+        Refused(_) => commitless(mut hd, take q, Refused(Overloaded)),
+    }
+}
+
+fn reply_alone(mut db: store.Db, streams: store.Table[Bytes, Row], q: Req, o: Outcome) -> Result[store.Outcome[(), store.Error], store.Error] waits {
+    store.run(mut db, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        reply(mut tx, streams, q.stream, q.p, o)
+    })
+}
+
+// A reply with no effect: a run whose body only replies (STORE-SPEC §1.8).
+fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome) -> Result[(), store.Error] waits {
+    let ran = reply_alone(mut hd.db, hd.streams, q, o)?
+    match take ran {
+        Committed(d) => worker(mut hd, take q, take o, d.ticket, d.info.id.version),
+        Refused(_) => commitless(mut hd, take q, Refused(Overloaded)),
+        Aborted(take u) => {
+            let store.Undone(value: take e, ticket: _) = take u
+            Error(take e)
+        },
+        Failed(_) => fail("runner: a reply-only commit faulted"),
+    }
+}
+
+fn worker[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
+    let Req(stream: take stream, p: p, key: _, arg: _, reply_to: take to) = take q
+    let mut waiters: List[Sender[Event]] = list.new()
+    result.unwrap(list.push(mut waiters, take to))
+    let named: Bytes = result.unwrap(clone(stream))
+    result.unwrap(map.insert(mut hd.busy, take named, Worker(p: p, version: version, outcome: take o, waiters: take waiters)))
+    result.unwrap(list.push(mut hd.group, take stream))
+    hd.last = Some(t)
+    Ok(())
+}
+
+// V3: a commitless answer goes at once, in a snapshot-less Release behind every earlier
+// Release on the one FIFO to the publisher.
+fn commitless[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome) -> Result[(), store.Error] waits {
+    let Req(stream: take stream, p: p, key: _, arg: _, reply_to: take to) = take q
+    let mut answers: List[Answer] = list.new()
+    result.unwrap(list.push(mut answers, Answer(to: take to, stream: take stream, p: p, outcome: take o)))
+    let _ = channel.send(hd.out, Release(version: 0u64, snapshot: None, answers: take answers))
+    Ok(())
+}
+
+// H3, V4: one durable for the group, then each worker's Release at the group's durable
+// version, in commit order; the workers end, and the waiting requests may start.
+fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
+    if let Some(t) = replace(mut hd.last, None) {
+        store.durable(mut hd.db, t)?
+    }
+    let d = store.version(store.snapshot(hd.db))
+    let group = replace(mut hd.group, list.new())
+    for stream in group {
+        let w = match map.remove(mut hd.busy, stream) {
+            Some(take x) => take x,
+            None => continue,
+        }
+        let Worker(p: p, version: _, outcome: take o, waiters: take waiters) = take w
+        let mut answers: List[Answer] = list.new()
+        for take to in waiters {
+            let s: Bytes = result.unwrap(clone(stream))
+            let each: Outcome = result.unwrap(clone(o))
+            result.unwrap(list.push(mut answers, Answer(to: take to, stream: take s, p: p, outcome: take each)))
+        }
+        let _ = channel.send(hd.out, Release(version: d, snapshot: Some(store.snapshot(hd.db)), answers: take answers))
+    }
+    unpark(mut hd)
+    Ok(())
+}
+
+// ---- The publisher. R1's batches carry outcomes only (G1): a Release with a snapshot
+// moves the base to its version, and each answer goes to its session in a frame at the base.
+fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take from: Receiver[Release], take sessions: Receiver[Join]) -> () waits {
+    let mut base = 0u64
+    loop {
+        let got = match channel.receive(from) {
+            Ok(take x) => take x,
+            Error(_) => return,
+        }
+        let Release(version: v, snapshot: take snap, answers: take answers) = take got
+        if let Some(_) = snap {
+            base = v
+        }
+        for take a in answers {
+            let Answer(to: take to, stream: take stream, p: p, outcome: take o) = take a
+            let _ = channel.send(to, Event(e: Answered(Frame(version: base, stream: take stream, p: p, outcome: take o))))
+        }
+    }
+}
+
+// ---- §3: sessions. A client's call, in the session clock's mono_ns.
+pub type Call: send { stream: Bytes, p: u64, key: Bytes, arg: Bytes, deadline: u64 }
+
+// One answer to a client, in a frame at `version`.
+pub type Frame: send { version: u64, stream: Bytes, p: u64, outcome: Outcome }
+
+type Tick: send { stream: Bytes, p: u64, generation: u64 }
+
+// A session has one inbox, because v1 has no selection: its client's calls, the
+// publisher's frames and its own deadline timers all arrive there.
+type Received: send = Asked(Call) | Answered(Frame) | Expired(Tick) | Closing
+
+pub opaque type Event: send { e: Received }
+
+pub fn ask(take c: Call) -> Event {
+    Event(e: Asked(take c))
+}
+
+pub fn hang_up() -> Event {
+    Event(e: Closing)
+}
+
+// A forwarded position keeps its slot until the head's answer arrives (V2). Its timer
+// is the deadline of the latest send; dropping the slot cancels the timer (CONC-8).
+type Held { generation: u64, waiting: bool, timer: Task[()] }
+
+type Timer: send { clock: Clock, at: u64, to: Sender[Event], stream: Bytes, p: u64, generation: u64 }
+
+fn timer(take t: Timer) -> () waits {
+    host.sleep_until(t.clock, t.at)
+    let Timer(clock: _, at: _, to: take to, stream: take stream, p: p, generation: g) = take t
+    let _ = channel.send(to, Event(e: Expired(Tick(stream: take stream, p: p, generation: g))))
+}
+
+type Session[G: send, H: send]: send {
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    n_place: u64,
+    inbox: Receiver[Event],
+    me: Sender[Event],
+    head: Sender[Req],
+    client: Sender[Frame],
+    clock: Clock,
+    tasks: Tasks,
+    q: u64
+}
+
+// A session as a task under `bytes n_session`: it runs `place` itself under n_place
+// (rule 10), forwards to the head, and answers its client on `client`. The returned
+// sender is the client's way in; the task ends with Place's error if `place` fails.
+pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], take client: Sender[Frame], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity] {
+    let (tx, rx): (Sender[Event], Receiver[Event]) = channel.new(64u64)?
+    let s = Session(place: place, n_place: n_place, inbox: take rx, me: channel.sender(tx), head: channel.sender(head), client: take client, clock: clock, tasks: tasks, q: q)
+    match task.spawn(tasks, bytes n_session, take s, session) {
+        Ok(take t) => Ok((take tx, take t)),
+        Error((c, _)) => Error(c),
+    }
+}
+
+fn slot_key(stream: Bytes, p: u64) -> Bytes {
+    let mut k: Bytes = result.unwrap(list.with_capacity(list.len(stream) + 8u64))
+    result.unwrap(list.append(mut k, stream))
+    result.unwrap(std.codec.put_u64(p, mut k))
+    k
+}
+
+// V1: what the session answers itself, before forwarding.
+fn refusal[G: send, H: send](r: Registry[G, H], s: Session[G, H], c: Call) -> Option[Outcome] {
+    if c.deadline <= host.mono_ns(s.clock) {
+        return Some(Refused(Deadline))
+    }
+    match map.get(r.slots, c.key) {
+        Some(Transact(check, _)) => match check(c.arg) {
+            Some(take why) => Some(Refused(take why)),
+            None => None,
+        },
+        _ => Some(Refused(NoEntry)),
+    }
+}
+
+fn tell(to: Sender[Frame], version: u64, take stream: Bytes, p: u64, take o: Outcome) -> () waits {
+    let _ = channel.send(to, Frame(version: version, stream: take stream, p: p, outcome: take o))
+}
+
+fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError] waits {
+    let r = placed(s.place, s.n_place)?
+    let mut held: Map[Bytes, Held] = map.new()
+    let mut last = 0u64
+    let mut generation = 0u64
+    loop {
+        let got = match channel.receive(s.inbox) {
+            Ok(take x) => take x,
+            Error(_) => return Ok(()),
+        }
+        let Event(e: take e) = take got
+        match take e {
+            Closing => return Ok(()),
+            Asked(take c) => {
+                if let Some(take o) = refusal(r, s, c) {
+                    let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c
+                    tell(s.client, last, take stream, p, take o);
+                    continue
+                }
+                let k = slot_key(c.stream, c.p)
+                let again = map.remove(mut held, k)
+                if let None = again {
+                    if map.len(held) >= s.q + 1u64 {
+                        let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c
+                        tell(s.client, last, take stream, p, Refused(Overloaded));
+                        continue
+                    }
+                }
+                generation += 1u64
+                let named: Bytes = result.unwrap(clone(c.stream))
+                let t = Timer(clock: s.clock, at: c.deadline, to: channel.sender(s.me), stream: take named, p: c.p, generation: generation)
+                let timing = match task.spawn(s.tasks, bytes 4096u64, take t, timer) {
+                    Ok(take x) => take x,
+                    Error(_) => {
+                        let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c
+                        tell(s.client, last, take stream, p, Refused(Overloaded));
+                        continue
+                    },
+                }
+                // V2: a position already forwarded is joined locally, never forwarded twice.
+                if let None = again {
+                    let Call(stream: take stream, p: p, key: take key, arg: take arg, deadline: _) = take c
+                    let q = Req(stream: take stream, p: p, key: take key, arg: take arg, reply_to: channel.sender(s.me))
+                    if let Error(_) = channel.send(s.head, take q) {
+                        return Ok(())
+                    }
+                }
+                result.unwrap(map.insert(mut held, take k, Held(generation: generation, waiting: true, timer: take timing)))
+            },
+            Answered(take f) => {
+                let _ = map.remove(mut held, slot_key(f.stream, f.p))
+                last = f.version
+                let _ = channel.send(s.client, take f)
+            },
+            Expired(t) => {
+                let g = t.generation
+                let fired = match map.update(mut held, slot_key(t.stream, t.p), fn(mut h: Held) -> bool {
+                    let now = h.waiting && h.generation == g
+                    if now {
+                        h.waiting = false
+                    }
+                    now
+                }) {
+                    Some(true) => true,
+                    _ => false,
+                }
+                if fired {
+                    let named: Bytes = result.unwrap(clone(t.stream))
+                    tell(s.client, last, take named, t.p, Abandoned)
+                }
+            },
+        }
     }
 }

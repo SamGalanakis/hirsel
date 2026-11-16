@@ -1,0 +1,484 @@
+// The runner's R1 cases (RUNNER-SPEC v2.4 §2, §3 and §8): transact through sessions, the
+// head and the publisher, as law_ functions on the evaluator and test_ twins natively.
+// Expected values come from
+// the specification and the std codec:
+// - outcome bytes are std.codec.put_result of the body's Result[u64, u32];
+// - versions count commits from STORE-SPEC v2.8, where every commit, schema commits
+//   included, advances the branch version by one. Each case's store creates the table
+//   "data" (version 1) and place_head creates the streams table (2). A call's admit is one
+//   commit and its run, or its reply-only commit, is the next; a refusal, a Duplicate and
+//   a Superseded commit nothing.
+type Hd: send { t: store.Table[u64, u64] }
+
+type Calls = runner.Registry[(), Hd]
+
+fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
+    Ok(Hd(t: t))
+}
+
+// L14's negative: a `handles` that commits on every call.
+fn handles_commits(mut db: store.Db) -> Result[Hd, store.Error] waits {
+    let h = handles(mut db)?
+    let _ = store.run(mut db, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, h.t, 0u64, 0u64)
+    })?
+    Ok(h)
+}
+
+// The body writes k and returns its commit's version.
+fn write(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    match store.put(mut tx, h.t, k, k) {
+        Ok(()) => Ok(store.info(mut tx).id.version),
+        Error(_) => Error(1u32),
+    }
+}
+
+fn refuse(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    let _ = store.put(mut tx, h.t, k, k)
+    Error(7u32)
+}
+
+// A deterministic fault (Bounds, Raised(2)) after a write.
+fn crash(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    let _ = store.put(mut tx, h.t, k, k)
+    let xs: List[u64] = list.new()
+    Ok(xs[k])
+}
+
+// The place's one `place` function (rule 10): the head, the publisher and every session
+// run it.
+fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(write), 65536u64)?
+    runner.transact(mut r, code.describe(refuse), 65536u64)?
+    runner.transact(mut r, code.describe(crash), 65536u64)
+}
+
+const N_PLACE: u64 = 1048576u64
+
+// A key as a client builds it: identity ++ fingerprint(A) ++ fingerprint(R).
+fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
+    let mut key: Bytes = list.new()
+    result.unwrap(list.append(mut key, id))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key))
+    key
+}
+
+fn k_write() -> Bytes {
+    key_of(code.identity(code.describe(write)), std.codec.of_u64(), std.codec.of_u64())
+}
+
+fn k_refuse() -> Bytes {
+    key_of(code.identity(code.describe(refuse)), std.codec.of_u64(), std.codec.of_u64())
+}
+
+fn k_crash() -> Bytes {
+    key_of(code.identity(code.describe(crash)), std.codec.of_u64(), std.codec.of_u64())
+}
+
+fn u64_arg(x: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(x, mut b))
+    b
+}
+
+fn sid(s: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(s, mut b))
+    b
+}
+
+fn want(ok: bool, take what: String) {
+    if !ok {
+        fail(take what)
+    }
+}
+
+// Outcomes compare by their std codec bytes (C3's byte-equality).
+fn is(a: runner.Outcome, b: runner.Outcome) -> bool {
+    let co: std.codec.Codec[runner.Outcome] = std.codec.of()
+    let mut x: Bytes = list.new()
+    let mut y: Bytes = list.new()
+    result.unwrap(std.codec.encode(co, a, mut x))
+    result.unwrap(std.codec.encode(co, b, mut y))
+    x == y
+}
+
+fn empty(inbox: Receiver[runner.Req]) -> bool {
+    match channel.try_receive(inbox) {
+        Ok(_) => false,
+        Error(_) => true,
+    }
+}
+
+// The value of a Returned(Ok(v)), from the std codec.
+fn ok_value(o: runner.Outcome) -> Option[u64] {
+    match o {
+        Returned(b) => {
+            let mut at = 0u64
+            match std.codec.take_result(b, mut at, std.codec.of_u64(), std.codec.of_u32()) {
+                Ok(Ok(v)) => if at == list.len(b) {
+                    Some(v)
+                } else {
+                    None
+                },
+                _ => None,
+            }
+        },
+        _ => None,
+    }
+}
+
+fn err_value(o: runner.Outcome) -> Option[u32] {
+    match o {
+        Returned(b) => {
+            let mut at = 0u64
+            match std.codec.take_result(b, mut at, std.codec.of_u64(), std.codec.of_u32()) {
+                Ok(Error(e)) => if at == list.len(b) {
+                    Some(e)
+                } else {
+                    None
+                },
+                _ => None,
+            }
+        },
+        _ => None,
+    }
+}
+
+const NEVER: u64 = 18446744073709551615u64
+
+// A client: its way into a session, the session's frames, and a watchdog that sends a
+// frame at version NEVER after 5 s, so a call left unanswered fails its case.
+type Conn { to: Sender[runner.Event], from: Receiver[runner.Frame], dog: Task[()], session: Task[Result[(), runner.RegisterError]] }
+
+type Dog: send { clock: Clock, at: u64, to: Sender[runner.Frame] }
+
+fn bark(take d: Dog) -> () waits {
+    host.sleep_until(d.clock, d.at)
+    let Dog(clock: _, at: _, to: take to) = take d
+    let _ = channel.send(to, runner.Frame(version: NEVER, stream: list.new(), p: 0u64, outcome: InDoubt))
+}
+
+type Drive: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks }
+
+fn conn(tasks: Tasks, head: Sender[runner.Req], clock: Clock, q: u64) -> Conn {
+    let made: Result[(Sender[runner.Frame], Receiver[runner.Frame]), Capacity] = channel.new(64u64)
+    let (tx, rx) = result.unwrap(take made)
+    let d = Dog(clock: clock, at: host.mono_ns(clock) + 5000000000u64, to: channel.sender(tx))
+    let dog = match task.spawn(tasks, bytes 65536u64, take d, bark) {
+        Ok(take t) => take t,
+        Error(_) => fail("calls: watchdog spawn"),
+    }
+    let (to, session) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, take tx, clock, q, 2097152u64))
+    Conn(to: take to, from: take rx, dog: take dog, session: take session)
+}
+
+// A call with its deadline `after` ns from now.
+fn ask(cn: Conn, clock: Clock, s: u64, p: u64, take key: Bytes, take arg: Bytes, after: u64) -> () waits {
+    let c = runner.Call(stream: sid(s), p: p, key: take key, arg: take arg, deadline: host.mono_ns(clock) + after)
+    if let Error(_) = channel.send(cn.to, runner.ask(take c)) {
+        fail("calls: session gone")
+    }
+}
+
+fn frame(cn: Conn) -> runner.Frame waits {
+    match channel.receive(cn.from) {
+        Ok(take f) => {
+            want(f.version != NEVER, "calls: a call was not answered within 5 s")
+            take f
+        },
+        Error(_) => fail("calls: client channel closed"),
+    }
+}
+
+fn hang(take cn: Conn) -> () waits {
+    let _ = channel.send(cn.to, runner.hang_up())
+    let Conn(to: _, from: _, dog: _, session: take s) = take cn
+    let _ = task.join(take s)
+}
+
+const LATER: u64 = 10000000000u64
+
+// One place: a fresh memory store with "data", place_head on this task, and the case's
+// client driver as a task that ends by dropping its head sender.
+fn served(c: Clock, r: Random, tasks: Tasks, f: fn(take Drive) -> () waits) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
+    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
+    let (head, inbox) = result.unwrap(take made)
+    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
+    let (_, joins) = result.unwrap(take joined)
+    let d = Drive(head: take head, clock: c, tasks: tasks)
+    let driving = match task.spawn(tasks, bytes 33554432u64, take d, f) {
+        Ok(take t) => take t,
+        Error(_) => return false,
+    }
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), take inbox, take joins, tasks, 1048576u64)
+    let drove = task.join(take driving)
+    match opened {
+        Ok(()) => (),
+        Error(_) => return false,
+    }
+    match drove {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+// two_sessions_two_streams, and C5: each outcome arrives in a frame at its commit's
+// version or later, and a session's frame versions never go back.
+fn drive_two_streams(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    let s1 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
+    let a0 = frame(s0)
+    want(ok_value(a0.outcome) == Some(4u64) && a0.version == 4u64, "two_streams: A p0 at 4")
+    ask(s1, d.clock, 1u64, 0u64, k_write(), u64_arg(20u64), LATER)
+    let b0 = frame(s1)
+    want(ok_value(b0.outcome) == Some(6u64) && b0.version == 6u64, "two_streams: B p0 at 6")
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(11u64), LATER)
+    let a1 = frame(s0)
+    want(ok_value(a1.outcome) == Some(8u64) && a1.version == 8u64, "two_streams: A p1 at 8")
+    hang(take s0)
+    hang(take s1)
+}
+
+pub fn law_calls_two_streams(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_two_streams)
+}
+
+// V4 (release_at_commit_version): A and B, sent together, commit in one group (A at 4,
+// B at 6); both answers arrive in frames at the group's durable version, 6.
+fn drive_group(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(1u64), LATER)
+    ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(2u64), LATER)
+    let x = frame(s0)
+    let y = frame(s0)
+    let (fa, fb) = if x.stream == sid(0u64) {
+        (x, y)
+    } else {
+        (y, x)
+    }
+    want(ok_value(fa.outcome) == Some(4u64) && ok_value(fb.outcome) == Some(6u64), "group: commits at 4 and 6")
+    want(fa.version == 6u64 && fb.version == 6u64, "group: both frames at the group's durable version")
+    hang(take s0)
+}
+
+pub fn law_calls_group_version(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_group)
+}
+
+// joiners (drop_joiner): two sessions send one position; both are answered with the one
+// run's outcome, and the run happened once (the next position commits at 6).
+fn drive_joiners(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    let s1 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    let a = frame(s0)
+    let b = frame(s1)
+    want(ok_value(a.outcome) == Some(4u64) && a.version == 4u64, "joiners: first session")
+    want(ok_value(b.outcome) == Some(4u64) && b.version == 4u64, "joiners: second session")
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(6u64), LATER)
+    want(ok_value(frame(s0).outcome) == Some(6u64), "joiners: one run for p0")
+    hang(take s0)
+    hang(take s1)
+}
+
+pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_joiners)
+}
+
+// V3 and C3/C5 (direct_commitless): a re-send from another session gets the stored reply,
+// byte-equal, in a frame at or above its commit; an older position gets Superseded.
+fn drive_duplicate(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    let first = frame(s0)
+    want(ok_value(first.outcome) == Some(4u64) && first.version == 4u64, "duplicate: first answer")
+    hang(take s0)
+    let s1 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    let again = frame(s1)
+    want(is(again.outcome, first.outcome), "duplicate: byte-equal reply")
+    want(again.version >= 4u64, "duplicate: frame below the commit it reports")
+    ask(s1, d.clock, 0u64, 1u64, k_write(), u64_arg(6u64), LATER)
+    let next = frame(s1)
+    want(ok_value(next.outcome) == Some(6u64) && next.version == 6u64, "duplicate: p1 at 6")
+    ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    let old = frame(s1)
+    want(is(old.outcome, Superseded) && old.version == 6u64, "duplicate: Superseded at 6")
+    hang(take s1)
+}
+
+pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_duplicate)
+}
+
+// refusals with L2 and L3, one session with q = 0:
+// - V1, C7, L2: 10,000 malformed calls are answered at once at the last version (0) and
+//   record nothing, so the first valid call still commits at 4;
+// - NoEntry and Deadline likewise;
+// - an Error is kept alone in a reply-only commit, and a fault is Failed(Raised(2));
+// - L3: the failed position re-sent 3 times returns the stored reply and runs nothing
+//   (the next position commits at 10).
+fn drive_refusals(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 0u64)
+    for _ in 0u64 .. 10000u64 {
+        ask(s0, d.clock, 1u64, 0u64, k_write(), list.new(), LATER)
+        let f = frame(s0)
+        want(is(f.outcome, Refused(Malformed(runner.Bad(kind: 0u32, at: 0u64)))) && f.version == 0u64, "refusals: malformed")
+    }
+    ask(s0, d.clock, 1u64, 0u64, key_of(code.identity(code.describe(write)), std.codec.of_u32(), std.codec.of_u64()), u64_arg(3u64), LATER)
+    want(is(frame(s0).outcome, Refused(NoEntry)), "refusals: NoEntry")
+    ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(3u64), 0u64)
+    want(is(frame(s0).outcome, Refused(Deadline)), "refusals: Deadline")
+    ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(3u64), LATER)
+    let v = frame(s0)
+    want(ok_value(v.outcome) == Some(4u64) && v.version == 4u64, "refusals: nothing recorded before the valid call")
+    ask(s0, d.clock, 0u64, 0u64, k_refuse(), u64_arg(4u64), LATER)
+    let e = frame(s0)
+    want(err_value(e.outcome) == Some(7u32) && e.version == 6u64, "refusals: Error kept alone at 6")
+    for _ in 0u64 .. 4u64 {
+        ask(s0, d.clock, 0u64, 1u64, k_crash(), u64_arg(5u64), LATER)
+        let f = frame(s0)
+        want(is(f.outcome, Failed(Raised(2u32))) && f.version == 8u64, "refusals: Failed(Raised(2)) at 8")
+    }
+    ask(s0, d.clock, 0u64, 2u64, k_write(), u64_arg(6u64), LATER)
+    want(ok_value(frame(s0).outcome) == Some(10u64), "refusals: the failed position ran once")
+    hang(take s0)
+}
+
+pub fn law_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_refusals)
+}
+
+// L7/deadline_held (v2.4), on the real head. p1 of a fresh stream, sent before p0, waits
+// in the head's FIFO (S7: Rejected(0)); the session answers Abandoned at its deadline
+// (V1), at its last version 0, and keeps the slot (V2). Then p0 is sent and p1 re-sent:
+// p0 commits at 4, and p1, which the re-send joins locally, runs once and commits at 6.
+// The next position is the next frame, at 8, so p1 was answered once.
+fn drive_deadline_held(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(11u64), 2000000u64)
+    let a = frame(s0)
+    want(is(a.outcome, Abandoned) && a.p == 1u64 && a.version == 0u64, "deadline_held: Abandoned at the deadline")
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(11u64), LATER)
+    let f0 = frame(s0)
+    want(f0.p == 0u64 && ok_value(f0.outcome) == Some(4u64) && f0.version == 4u64, "deadline_held: p0 at 4")
+    let f1 = frame(s0)
+    want(f1.p == 1u64 && ok_value(f1.outcome) == Some(6u64) && f1.version == 6u64, "deadline_held: p1 once, at 6")
+    ask(s0, d.clock, 0u64, 2u64, k_write(), u64_arg(12u64), LATER)
+    let f2 = frame(s0)
+    want(f2.p == 2u64 && ok_value(f2.outcome) == Some(8u64), "deadline_held: p1 answered once")
+    hang(take s0)
+}
+
+pub fn law_calls_deadline_held(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_deadline_held)
+}
+
+// The session's V1 and V2 logic against a head that holds every request and answers none
+// (a held-head case; not L7/deadline_hung, which waits on D5):
+// - q = 0: A p0 is Abandoned at its deadline (V1) and keeps its slot (V2), so B p0 is
+//   Overloaded at once, and the head holds one request (C6, queue_outside_account);
+//   a re-send of A p0 joins locally and is Abandoned again, still one request;
+// - q = 1: p0 and p1 of one stream both forwarded and both Abandoned at their deadlines,
+//   though the head answers neither (deadline_rides_release).
+pub fn law_calls_held_head(c: Clock, tasks: Tasks) -> bool waits {
+    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
+    let (head, inbox) = result.unwrap(take made)
+    let s0 = conn(tasks, head, c, 0u64)
+    ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
+    let a = frame(s0)
+    want(is(a.outcome, Abandoned) && a.version == 0u64, "held_head: Abandoned at the deadline")
+    ask(s0, c, 1u64, 0u64, k_write(), u64_arg(2u64), LATER)
+    want(is(frame(s0).outcome, Refused(Overloaded)), "held_head: the slot stays held")
+    let mut held = 0u64
+    while !empty(inbox) {
+        held += 1u64
+    }
+    want(held == 1u64, "held_head: the head holds 1 + q")
+    ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
+    want(is(frame(s0).outcome, Abandoned), "held_head: a re-send joins locally")
+    want(empty(inbox), "held_head: a re-send is not forwarded")
+    hang(take s0)
+    let s1 = conn(tasks, head, c, 1u64)
+    ask(s1, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
+    ask(s1, c, 0u64, 1u64, k_write(), u64_arg(2u64), 2000000u64)
+    want(is(frame(s1).outcome, Abandoned) && is(frame(s1).outcome, Abandoned), "held_head: both answered by the session")
+    hang(take s1)
+    true
+}
+
+// L14: a `handles` that commits on its second call fails the open; one that resolves opens.
+pub fn law_l14_handles(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut ok = true
+    for commits in [false, true] {
+        let mut db = store.memory(c, r, store.defaults())
+        let cv: std.codec.Codec[u64] = std.codec.of()
+        let _ = result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
+        let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(1u64)
+        let (_, inbox) = result.unwrap(take made)
+        let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(1u64)
+        let (_, joins) = result.unwrap(take joined)
+        let h = if commits {
+            code.describe(handles_commits)
+        } else {
+            code.describe(handles)
+        }
+        let opened = runner.place_head(take db, code.describe(place), N_PLACE, h, take inbox, take joins, tasks, 1048576u64)
+        ok = ok && match opened {
+            Ok(()) => !commits,
+            Error(HandlesChanged) => commits,
+            Error(_) => false,
+        }
+    }
+    ok
+}
+
+@test
+fn test_calls_two_streams(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_two_streams(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_group_version(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_group_version(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_joiners(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_joiners(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_duplicate(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_duplicate(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_refusals(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_held_head(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_held_head(c, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_calls_deadline_held(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_deadline_held(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_l14_handles(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_l14_handles(c, r, tasks) { Ok(()) } else { Error(()) }
+}

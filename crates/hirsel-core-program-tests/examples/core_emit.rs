@@ -10,10 +10,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("expected input.core output.o [--speed]")?,
     )?;
     let modules = if let Some(i) = args.iter().position(|a| a == "--front") {
-        let _fixture_root = args.get(i + 1).ok_or("--front requires the fixture root")?;
-        hirsel_core_program_tests::SourceProgram::lower(&source, None)
-            .0
-            .modules
+        let fixture_root =
+            std::path::Path::new(args.get(i + 1).ok_or("--front requires the fixture root")?);
+        hirsel_core_program_tests::SourceProgram::lower_with_core(
+            &source,
+            None,
+            &fixture_root.join("../core"),
+        )
+        .0
+        .modules
     } else {
         vec![
             hirsel_core_ir::text::parse(&source)

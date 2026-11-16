@@ -18,8 +18,15 @@ impl Deref for SourceProgram {
 }
 impl SourceProgram {
     pub fn lower(source: &str, entry: Option<&str>) -> (Self, HashMap<String, FuncId>) {
+        Self::lower_with_core(source, entry, &crate::repo().join("core/core"))
+    }
+    pub fn lower_with_core(
+        source: &str,
+        entry: Option<&str>,
+        core: &std::path::Path,
+    ) -> (Self, HashMap<String, FuncId>) {
         let entry = entry.map(|name| DefPath::from_full(&format!("app@1/main/{name}")).unwrap());
-        let checked = Checked::source(source, entry);
+        let checked = Checked::source_with_core(source, entry, core);
         let product = &checked.product;
         let mut expected = source
             .lines()

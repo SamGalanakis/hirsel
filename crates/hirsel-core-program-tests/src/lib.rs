@@ -24,14 +24,16 @@ pub struct Checked {
 }
 impl Checked {
     pub fn source(source: &str, entry: Option<DefPath>) -> Self {
+        Self::source_with_core(source, entry, &repo().join("core/core"))
+    }
+    pub fn source_with_core(source: &str, entry: Option<DefPath>, core: &Path) -> Self {
         let files = tempfile::tempdir().unwrap();
         let path = files.path().join("main.hirsel");
         std::fs::write(&path, source).unwrap();
         let inputs = CorpusManifest {
             core: package("core"),
             packages: vec![
-                PackageManifest::directory(&repo().join("core/core"), package("core"), true)
-                    .unwrap(),
+                PackageManifest::directory(core, package("core"), true).unwrap(),
                 PackageManifest {
                     package: package("app"),
                     dependencies: vec![package("core")],

@@ -193,10 +193,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let text = std::fs::read_to_string(&args[1])?;
         if let Some(i) = args.iter().position(|a| a == "--front") {
             {
-                let _fixture_root = &args[i + 1];
-                hirsel_core_program_tests::SourceProgram::lower(&text, None)
-                    .0
-                    .modules
+                let fixture_root = std::path::Path::new(&args[i + 1]);
+                hirsel_core_program_tests::SourceProgram::lower_with_core(
+                    &text,
+                    None,
+                    &fixture_root.join("../core"),
+                )
+                .0
+                .modules
             }
         } else {
             vec![hirsel_core_ir::text::parse(&text).map_err(|e| format!("{e:?}"))?]

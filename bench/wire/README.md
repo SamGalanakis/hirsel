@@ -73,7 +73,10 @@ refuses after Hello with Close 1013.
 The load run counts exactly N subscribed connections, including one observer
 that makes no calls. Each other connection uses one stream with at most one
 call in flight. The scheduler offers arrivals at absolute instants independently
-of replies. Each connection has one queued arrival; a full queue increments
+of replies. Offered arrival i toggles bit i modulo 1,000,000, and connections
+are selected round-robin. This deterministic input is identical for both servers;
+the reported coalescing counts expose how many calls share a publication.
+Each connection has one queued arrival; a full queue increments
 `missed_arrivals`. The next transmitted position advances only on admission.
 Missed arrivals or unmatched observations make the command fail after reporting
 its JSON, so a lower completed rate cannot masquerade as the offered rate.

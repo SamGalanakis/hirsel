@@ -68,18 +68,19 @@ line lists (`tools/check-hot-files`), the std API index, the ignored-test homes,
 (Rust and changed Hirsel sources, against the candidate's formatter) and the source
 audits (`//:land-audit-workspace-layering`). It then runs one Buck2 build of everything
 the later checks read: the workspace without test harnesses, the installed toolchain
-bundle, every Clippy twin's report and the `[inputs]` of each core acceptance suite. A
+bundle, every Clippy twin's report and the `[inputs]` of every Core suite, the gate's and
+the post-push run's, so a harness that does not compile blocks the land. A
 daemon serves one command at a time while another holds a different state, so separate
 concurrent checks would wait for each other. Clippy then only reads reports. Last, it
-runs the core acceptance suites (`CORE_ACCEPTANCE` in `tools/land`), with `//:test-land`
+runs the gate's Core suites (`CORE_ACCEPTANCE` in `tools/land`, [What the gate runs](#what-the-gate-runs)), with `//:test-land`
 when the change touches the land tool, and prints the core cost guard's report when the
 change touches the front end, the core libraries or the M1 programs. Both
 `//:core-check-cost` and `//:core-front-cost` run with `--report-only`; a cost red is
 reported, not refused. The land checkout's daemon keeps 128 remote actions in flight, a
 lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`).
 Measurement tool crashes still refuse the push. The rows, including regressions,
-are retained in each ticket's log and completion event. `//:core-check-cost-unit`
-stays in acceptance because it tests synthetic inputs, not measured ceilings.
+are retained in each ticket's log and completion event. `//:core-check-cost-unit`,
+which tests the cost tool on synthetic inputs, runs after the push.
 Land then writes only smaller measured ceilings, initializes new cells with their
 measured margin, and commits that change in the pushed tree. It drops historical
 observations from the ceiling documents; each ticket's log and event retain the
@@ -90,7 +91,7 @@ The land process consumes them and logs the reason. The fixed budget stays 60,00
 
 
 The queue controller updates to its rebased tree's `tools/land` before leading.
-For every candidate, including waiting tickets and bisection groups, a fresh Python
+For every candidate, including waiting tickets and tickets checked alone, a fresh Python
 process loads `fast` or `full` from that merged tree's `tools/land`, with that
 tree's helper modules and acceptance list. Adding a required target or validation
 rule therefore takes effect in the change's own land. The log records the checked
@@ -104,6 +105,48 @@ registered tracked documents are regenerated and amended into the candidate afte
 rebasing, before their whole-file checks.
 `tools/sweep` runs the longer native suites (both engines, AArch64, the laws, m2b and
 the land tool's own tests) on current main when asked; it has no automatic schedule.
+
+## What the gate runs
+
+A Core suite is in the gate (`CORE_ACCEPTANCE`) only when its red blocks a land:
+it tests that data is kept (store, replay, durability) or that a wrong program is
+refused (soundness of V or checked H), or it is needed to produce std and the
+toolchain and to compile a program. Seconds are each suite's own time in a green
+Core suites run of 2026-11-16 (event log `1794849700000481739-1023108`), and
+`core-runner-r1`'s measured alone after the split. The gate's wall clock is its
+longest suite, `core-runner-r1`.
+
+| Target | Seconds | Why it blocks |
+| --- | ---: | --- |
+| `//:core-runner-r1` | 243 | R1 calls: transactions at durable versions, runs-once, store refusal |
+| `//:hirsel-core-front-unittest` | 223 | the checker: wrong programs are refused |
+| `//:core-store-s1` | 163 | store laws: what a commit writes is read back |
+| `//:core-store-s3` | 160 | the store journal: crash cuts keep or refuse whole transactions |
+| `//:core-store-s2` | 145 | store laws on disk across reopen |
+| `//:land-core-evaluator` | 120 | std's laws on the evaluator, and the law-selection policy that produces std |
+| `//:hirsel-core-driver-unittest` | 103 | the compiler store: checksummed record reads keep data or refuse it |
+| `//:core-m1-cranelift` | 4 | the toolchain compiles and runs the M1 programs |
+| `//:core-recursive-instances` | 1 | LANG-12: a recursive instance is refused |
+| `//:gate-distribution-notices` | 1 | policy: NOTICES.md matches the shipped dependencies |
+
+Every other Core suite (`POST_PUSH` in `tools/land`) runs after the push. That
+includes `//:core-runner-r0` (R0's laws, p19, l12, L4 and every runner mutant),
+the other crates' unit tests, the LLVM, Cranelift and AArch64 suites and the
+native capability laws.
+
+## After the push
+
+After each push the train starts `tools/land-post` in a detached systemd user
+unit, `land-post-<commit>`, on the land CPUs at lane priority, and does not
+wait for it. The unit checks out the pushed commit in its own detached
+checkout and runs the pushed tree's `POST_PUSH` suites. A target red there that
+was not red at the last finished run is appended to the land events
+(`/workspace/code/hirsel-briefs/land-events.tsv`) as a `POSTRED` row: the
+branches and tickets landed since that run, the commit range, and the new red
+targets, which `tools/round-check.sh` prints. When a newer push's run starts, it
+stops the older run's unit by its recorded name (`land-post.json` in the common
+git directory) and removes that run's checkout, so the newer range includes the
+older one. A post-push red holds no one: the tickets named fix forward.
 
 Before publishing a ticket, land finds and probes Cargo and rustc locally;
 an unavailable toolchain refuses submission with one line. Checks and
@@ -187,8 +230,8 @@ ahead of the ticket stands only if every one of them lands; otherwise the
 ticket stays queued for the next head. A change that touches generated
 files is refused at once.
 
-Before any build, the head screens every candidate, including single tickets
-and bisection groups, with the checks
+Before any build, the head screens every candidate, including single tickets,
+with the checks
 that take seconds: build-file sync, independent line lists, fmt and the source
 layering, runtime descriptor and runtime/C-header agreement audits. The source
 audits run the existing Rust test bodies with only their source data, without
@@ -196,24 +239,26 @@ native tools, runtime archives or std products. These are the full checks' own
 scripts and test bodies. A green screen can be reused only for the
 same Git tree within that batch. The final fmt check after build and Clippy
 remains in place. If the combined tree fails, and
-origin/main passes them, a binary search over the batch's cumulative trees
-finds the first ticket that turns them red. That ticket leaves with its
-first error, and the rest are screened again. A fmt slip therefore costs
-seconds, not a build and a bisection.
+origin/main passes them, each ticket runs them alone on origin/main, in
+ticket order, and each red one leaves with its first error. A fmt slip
+therefore costs seconds, not a build.
 
-Groups of tickets are checked one at a time, each on the tip pushed so
-far, and a green group is pushed at once. A red group splits into halves,
-checked in ticket order. A ticket is blamed only when a check of its
-change alone, on a green tree, is red; the culprit exits with that check's
-first error, and the rest land. A red that does not repeat blames nobody.
-A ticket withdrawn mid-batch leaves every group not yet checked.
-A batch of one is a single land.
+The batch is checked on origin/main, and pushed at once when green. When it
+is red, each ticket is checked alone, in ticket order, on the tip pushed so
+far: a green ticket is pushed at once, and a red one exits with that check's
+first error. A ticket is blamed only when a check of its change alone is red;
+a red batch whose tickets are each green alone blames nobody, and all of them
+land. A ticket withdrawn mid-batch is not checked again. A batch of one is a
+single land.
 
 ## Red main and repairs
 
 A failing candidate does not establish that the candidate caused the failure.
-Before bisecting a full failure, land checks bare main once. A named target that
-also fails there establishes a red base; unnamed checks must reproduce the same
+When a ticket alone is red on named targets that none of its changed paths
+reaches (`buck2 uquery "allpaths(<targets>, owner(<paths>))"` is empty), land
+checks bare main once before blaming it. A build, Clippy or screen red, or a
+target its change reaches, is the ticket's own. A named target that
+also fails on main establishes a red base; unnamed checks must reproduce the same
 error. An unrelated base failure stops attribution without blaming a ticket.
 A tree the train pushed is green by construction: every green check it pushes
 is recorded by its Git tree in the queue's `green-trees.json`, and a base whose
@@ -224,7 +269,7 @@ that changes any other path is checked as usual.
 Land records a reproduced failure in the queue's `red-main.json`, keyed by the
 exact base commit, and reports `main is red at <target>, first seen at <commit>`
 to every waiting ticket. The commit is the first observed failing base, not a
-claim that land bisected the introduction. It stops candidate bisection. If no
+claim that land found the introduction. It stops candidate attribution. If no
 verified repair is queued, the blocked cohort exits with the same diagnosis and
 no candidate is blamed. Later tickets on that same base reuse the diagnosis.
 
@@ -278,9 +323,10 @@ The design follows four merge trains:
   the Chromium CQ, gives each verdict to one change, and retries failed
   tryjobs before it blames that change (lines 43–60).
 
-Unlike bors-ng, land never blames by elimination, and it does not queue a
-separate batch for each half: one process settles the whole batch, so the
-lanes behind it keep waiting. Unlike Zuul and GitHub, it checks one tree at
+Unlike bors-ng, land never blames by elimination and does not halve a red
+batch: like Zuul and GitHub, it removes only the failing ticket, by checking
+each one alone on the tip pushed so far. One process settles the whole batch,
+so the lanes behind it keep waiting. Unlike Zuul and GitHub, it checks one tree at
 a time: no concurrent land slots and no speculative batches. On the landing
 record of 2026-10-24 to 2026-11-02 they paid on one busy day, 2026-10-25,
 and once after it (see [Mechanisms on the record](#mechanisms-on-the-record)).
@@ -297,7 +343,7 @@ overwritten by its next land, so log counts are lower bounds.
 | Ticket queue | every land | not measurable (it is what batching claims from) | yes |
 | Batching | 996 of 1,381 tickets in 239 multi-ticket pushes | 757 full checks not run | yes |
 | Fast screen | 64 heads found a fmt or line-list red | a red batch build and bisection per firing | yes |
-| Bisection | 25 red batches | 112 full checks fewer than checking each ticket alone | yes |
+| Bisection | 25 red batches | 112 full checks fewer than checking each ticket alone | no (2026-11-16: each ticket alone, on a smaller gate) |
 | Row-only check reuse | 11 retries | 57–986 s each, about 6,500 s in all | yes |
 | Several land slots | 9 heads checked trees at once (8 on 2026-10-25) | at most 23,700 s of overlap, before the rechecks it caused | no |
 | Speculative batches | 6 heads, all on 2026-10-25 | inside the slot overlap above | no |
@@ -322,7 +368,9 @@ after losing its ticket. Re-execution retains the ticket and PID identity.
 Batch cases: three clean changes
 land with one check run; a fmt-red change in a batch of four leaves in
 the screen, before the one build; a build-red change in a batch of four
-bisects in five builds, and the green half lands first; a
+is refused alone in five builds, and the other three land; a red suite
+outside the gate lands and is reported as POSTRED; a base the train pushed,
+with its ceilings commit, is not checked again; a
 conflict in the middle ticket leaves only that ticket; a conflict with a
 red ticket ahead stays queued and lands next; a dead lane's ticket is dropped; a batch that
 loses a push race is checked again and lands whole; a passed batch rebases

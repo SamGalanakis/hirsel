@@ -29,6 +29,8 @@ from unittest.mock import patch
 module = runpy.run_path('tools/land', run_name='land_test')
 module['LandQueue'].HEARTBEAT = .05
 module['main'].__globals__['BATCH'] = int(os.environ.get('FAKE_BATCH', module['BATCH']))
+# The post-push run starts outside systemd and finishes before the land returns.
+module['main'].__globals__['post_unit'] = lambda unit, directory: []
 real_git = module['git']
 pushes = iter(json.loads(os.environ.get('FAKE_PUSH_ERRORS', '[]')))
 fetch_error = None
@@ -71,16 +73,22 @@ if os.environ.get('FAKE_RED_AFTER_RACE') and STAGE == os.environ['FAKE_RED_AFTER
 '''
 
 FAKE_BUCK = '''#!/bin/sh
+# No changed path reaches a failing target, so a named red alone is checked against main.
+case "$1 $*" in uquery*allpaths*) exit 0 ;; esac
 if [ "$1" = test ]; then
   case "$*" in
-    *hirsel-core-ir-unittest*)
+    *core-store-s1*)
       if [ -n "$FAKE_TARGET_LOG" ]; then git rev-parse HEAD >> "$FAKE_TARGET_LOG"; fi
       if [ -f main-red ]; then
-        echo '✗ Fail: root//:hirsel-core-ir-unittest'
+        echo '✗ Fail: root//:core-store-s1'
         echo 'error: main fixture is red'
         exit 1
       fi
-      if [ -f broken-core-suite ]; then echo 'core evaluator body failed' >&2; exit 1; fi ;;
+      if [ -f broken-core-suite ]; then
+        echo '✗ Fail: root//:core-store-s1'
+        echo 'error: core evaluator body failed'
+        exit 1
+      fi ;;
   esac
   case "$*" in
     *core-front-cost*)
@@ -108,7 +116,7 @@ if [ "$1" = test ]; then
       if [ -f broken-arm-core ]; then echo 'ARM CoreIR body failed' >&2; exit 1; fi ;;
   esac
   case "$*" in
-    *land-core-cranelift-custody*|*hirsel-cranelift-test-core_native*)
+    *land-core-cranelift-custody*|*core-m1-cranelift*)
       if [ -f broken-custody ]; then echo 'custody native agreement failed' >&2; exit 1; fi ;;
     *land-audit-workspace-layering*)
       if [ -f broken-layering ]; then echo 'crate layering: a lower crate depends on a higher one' >&2; exit 1; fi ;;
@@ -155,10 +163,17 @@ class Land(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('GIT_', 'HIRSEL_'))} | dict(
             GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t',
             FAKE_ORIGIN=str(self.origin))
+        # A land through tools/land-run starts no real post-push unit; the POSTRED law runs it in-process.
+        fakes = self.top / 'bin'
+        fakes.mkdir()
+        (fakes / 'systemd-run').write_text('#!/bin/sh\nexit 0\n')
+        (fakes / 'systemd-run').chmod(0o755)
+        self.env['PATH'] = f"{fakes}{os.pathsep}{self.env.get('PATH', os.defpath)}"
         self.git(self.top, 'init', '-q', '--bare', '-b', 'main', str(self.origin))
         self.git(self.top, 'clone', '-q', str(self.origin), str(self.lane))
         files = dict(FAKES, **{'tools/land': Path(os.environ.get('HIRSEL_TEST_LAND', ROOT / 'tools/land')).read_text(),
                                'tools/land-run': (ROOT / 'tools/land-run').read_text(),
+                               'tools/land-post': (ROOT / 'tools/land-post').read_text(),
                                'tools/check-conflict-markers': (ROOT / 'tools/check-conflict-markers').read_text(),
                                'tools/land_events.py': (ROOT / 'tools/land_events.py').read_text(),
                                'tools/buck2/generated.py': (ROOT / 'tools/buck2/generated.py').read_text(),
@@ -335,15 +350,26 @@ class Land(unittest.TestCase):
         self.assertIn('custody native agreement failed', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 
-    def test_red_arm_core_suite_refuses_the_push(self):
+    def test_a_red_outside_the_gate_lands_and_is_reported_as_postred(self):
+        # The ARM CoreIR suite runs after the push: its red lands, and the post-push run reports it.
         (self.lane / 'broken-arm-core').write_text('broken ARM body\n')
         self.git(self.lane, 'add', 'broken-arm-core')
         self.git(self.lane, 'commit', '-qm', 'break an ARM core body')
-        refused = self.land()
-        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
-        self.assertIn('FAIL  Core suites', refused.stdout)
-        self.assertIn('ARM CoreIR body failed', refused.stdout)
-        self.assertEqual(self.main_log(), ['base'])
+        base = self.git(self.origin, 'rev-parse', 'main').strip()
+        events = self.top / 'land-events.tsv'
+        landed = self.land(HIRSEL_LAND_EVENTS=str(events))
+        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
+        self.assertNotIn('ARM CoreIR body failed', landed.stdout)
+        tip = self.git(self.origin, 'rev-parse', 'main').strip()
+        self.assertEqual(self.main_log(), ['break an ARM core body', 'change', 'base'])
+        with events.open() as rows:
+            [row] = list(csv.reader(rows, delimiter='\t'))
+        state, lane, ticket, log, code, commits, red = row[:7]
+        self.assertEqual((state, lane, ticket, commits), ('POSTRED', 'my-lane', '1', f'{base}..{tip}'))
+        self.assertNotEqual(code, '0')
+        self.assertIn('ARM CoreIR body failed', Path(log).read_text())
+        # The checkout it ran in is gone.
+        self.assertEqual(len(self.git(self.lane, 'worktree', 'list').splitlines()), 1)
 
     def test_conflict_markers_refuse_the_push_with_file_and_line(self):
         for marker in ('<<<<<<< lane\nours\n=======\ntheirs\n>>>>>>> main\n',
@@ -710,23 +736,6 @@ Path(os.environ['FAKE_PREPARED']).write_text(found)
                 self.assertIn('Rust toolchain unavailable' if installed else 'no Rust toolchain found', landed.stdout)
                 self.assertFalse((self.lane / '.git/land-queue').exists())
 
-    def test_a_tree_without_a_target_mains_tool_asks_for_is_refused_before_queueing(self):
-        # A tree that renames a target must not join a batch still requesting it.
-        other = self.top / 'other'
-        self.git(self.top, 'clone', '-q', str(self.origin), str(other))
-        with (other / 'tools/land').open('a') as tool:
-            tool.write("\nOLD_CHECK = '//:test-old-name'\n")
-        self.git(other, 'commit', '-qam', 'main asks for an old name')
-        self.git(other, 'push', '-q', 'origin', 'main')
-        buck2 = self.lane / '.buck2/bin/buck2'
-        buck2.write_text('#!/bin/sh\ncase "$*" in *test-old-name*) echo "Unknown target" >&2; exit 1;; esac\n'
-                         'echo root//:a\n')
-        refused = self.land()
-        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn('//:test-old-name', refused.stdout)
-        self.assertFalse((self.lane / '.git/land-queue').exists())
-        self.assertEqual(self.main_log(), ['main asks for an old name', 'base'])
-
     def test_a_push_rejected_because_main_moved_rebases_rebuilds_and_lands(self):
         landed = self.land(FAKE_OTHER_LANE=str(self.top / 'other'))
         self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
@@ -1084,13 +1093,13 @@ if not (root / 'release-build').exists():
         holder.unlink()
         outputs = [self.finish_land(land, 1) for land in lands]
         for output in outputs:
-            self.assertIn('main is red at root//:hirsel-core-ir-unittest', output)
+            self.assertIn('main is red at root//:core-store-s1', output)
             self.assertIn('first seen at ' + base, output)
             self.assertIn('no ticket is blamed', output)
             self.assertNotIn('bisecting', output)
         probes = (self.top / 'target-checks').read_text().splitlines()
         self.assertEqual(probes.count(base), 1)
-        self.assertEqual(len(probes), 2, 'one candidate and one bare-main check')
+        self.assertEqual(len(probes), 3, 'the batch, the head alone and one bare-main check')
         self.assertEqual(self.git(self.origin, 'rev-parse', 'main').strip(), base)
         # A later cohort sees the same recorded base failure, without running
         # the failing target again or changing its first observed commit.
@@ -1109,7 +1118,7 @@ if not (root / 'release-build').exists():
                 (lane / 'main-red').unlink()
                 self.git(lane, 'add', 'main-red')
         checks, lanes, lands, holder = self.batch_lanes(3, prepare=prepare,
-            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+            arguments={2: ['--repair-main', '//:core-store-s1']})
         base = self.git(self.origin, 'rev-parse', 'main').strip()
         holder.unlink()
         outputs = [self.finish_land(land) for land in lands]
@@ -1117,14 +1126,14 @@ if not (root / 'release-build').exists():
         self.assertEqual(len(pushed), 2)
         self.assertEqual(self.subjects(pushed[:1]), ['lane 2'])
         self.assertEqual(self.git(self.origin, 'log', '--format=%s', f'{base}..{pushed[0]}').splitlines(), ['lane 2'])
-        self.assertIn('verified main-repair target //:hirsel-core-ir-unittest', outputs[0])
+        self.assertIn('verified main-repair target //:core-store-s1', outputs[0])
         self.assertIn('checking alone', outputs[0])
         self.assertEqual(self.main_log()[:3], ['lane 1', 'lane 0', 'lane 2'])
         self.assertEqual(self.queued(), [])
 
     def test_repair_label_does_not_grant_priority_on_green_main(self):
         checks, lanes, lands, holder = self.batch_lanes(3,
-            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+            arguments={2: ['--repair-main', '//:core-store-s1']})
         holder.unlink()
         outputs = [self.finish_land(land) for land in lands]
         pushed = (checks / 'received').read_text().splitlines()
@@ -1134,12 +1143,12 @@ if not (root / 'release-build').exists():
 
     def test_cleared_cached_failure_does_not_grant_repair_priority(self):
         checks, lanes, lands, holder = self.batch_lanes(3,
-            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+            arguments={2: ['--repair-main', '//:core-store-s1']})
         base = self.git(self.origin, 'rev-parse', 'main').strip()
         # A transient failure was observed earlier at the same source commit.
         (holder.parent / 'red-main.json').write_text(json.dumps(dict(
-            base=base, first_seen=base, targets=['root//:hirsel-core-ir-unittest'],
-            report=['FAIL  Core suites', 'failing targets: root//:hirsel-core-ir-unittest'])))
+            base=base, first_seen=base, targets=['root//:core-store-s1'],
+            report=['FAIL  Core suites', 'failing targets: root//:core-store-s1'])))
         holder.unlink()
         outputs = [self.finish_land(land) for land in lands]
         pushed = (checks / 'received').read_text().splitlines()
@@ -1157,7 +1166,7 @@ if not (root / 'release-build').exists():
                 (lane / 'broken-custody').touch()
                 self.git(lane, 'add', 'main-red', 'broken-custody')
         checks, lanes, lands, holder = self.batch_lanes(3, prepare=prepare,
-            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+            arguments={2: ['--repair-main', '//:core-store-s1']})
         base = self.git(self.origin, 'rev-parse', 'main')
         holder.unlink()
         outputs = [self.finish_land(land, 1) for land in lands]
@@ -1177,11 +1186,11 @@ if not (root / 'release-build').exists():
     def test_repair_label_cannot_bypass_a_still_red_target(self):
         self.red_main_fixture()
         checks, lanes, lands, holder = self.batch_lanes(3,
-            arguments={2: ['--repair-main', '//:hirsel-core-ir-unittest']})
+            arguments={2: ['--repair-main', '//:core-store-s1']})
         base = self.git(self.origin, 'rev-parse', 'main')
         holder.unlink()
         outputs = [self.finish_land(land, 1) for land in lands]
-        self.assertIn('does not fix //:hirsel-core-ir-unittest', ''.join(outputs))
+        self.assertIn('does not fix //:core-store-s1', ''.join(outputs))
         self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), base)
         self.assertFalse((checks / 'received').exists())
         self.assertEqual(self.queued(), [])
@@ -1274,41 +1283,41 @@ if not (root / 'release-build').exists():
         self.assertIn('Diff in red.txt at line 1:', outputs[1])
         self.assertIn('refusing to push a red tree', outputs[1])
         self.assertNotIn('Diff in', outputs[2] + outputs[3])
-        # The screen: all four red, main green, lanes 0-1 red, lane 0 green, then the other three green.
-        self.assertEqual(outputs[0].count('screen: formatting'), 5, outputs[0])
+        # The screen: all four red, main green, then each lane alone (lane 1 red), then the full
+        # check's own screen of the other three.
+        self.assertEqual(outputs[0].count('screen: formatting'), 7, outputs[0])
         self.assertEqual(outputs[0].count('workspace build'), 1, outputs[0])
         self.assertEqual(outputs[0].count('FAIL  formatting'), 0, outputs[0])
         self.assertEqual(len((checks / 'received').read_text().splitlines()), 1)
         self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 2', 'lane 0', 'red fmt'])
         self.assertEqual(self.queued(), [])
 
-    def test_a_build_red_change_in_a_batch_of_four_bisects_and_the_green_half_lands_first(self):
+    def test_a_build_red_change_in_a_batch_of_four_is_refused_alone_and_the_others_land(self):
         checks, lanes, lands, holder = self.batch_lanes(4, edits={2: ('red.txt', 'red\n')}, red='build')
         holder.unlink()
         outputs = [self.finish_land(land, 1 if i == 2 else 0) for i, land in enumerate(lands)]
         self.assertIn('error[E0425]: red.txt is red', outputs[2])
         self.assertIn('refusing to push a red tree', outputs[2])
-        # Five candidate builds, plus one bare-main check before blaming any
-        # ticket. The passed lanes 0-1 already prove the later base is green.
-        self.assertEqual(outputs[0].count('workspace build'), 6, outputs[0])
+        # The batch, then each lane alone on the tip pushed so far. A build red names no
+        # target, so main is not checked.
+        self.assertEqual(outputs[0].count('workspace build'), 5, outputs[0])
         self.assertIn('with 5 checks', outputs[0])
         received = (checks / 'received').read_text().splitlines()
-        self.assertEqual(self.subjects(received), ['lane 1', 'lane 3'])
+        self.assertEqual(self.subjects(received), ['lane 0', 'lane 1', 'lane 3'])
         self.assertEqual(self.subjects(self.landed(outputs[1])), ['lane 1'])
         self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 1', 'lane 0', 'red build'])
         self.assertEqual(self.queued(), [])
-        # Train checks per landed ticket: lanes 0-1 in the batch of four and its first half;
-        # lane 3 in the batch, the red half [2, 3] and alone.
+        # Train checks per landed ticket: the batch of four, then its own check alone.
         rows = [json.loads(line) for line in (self.lane / '.git/hirsel-landings.jsonl').read_text().splitlines()]
         self.assertEqual({row['branch']: row['train_checks'] for row in rows},
-                         {'my-lane': 2, 'lane1': 2, 'lane3': 3})
+                         {'my-lane': 2, 'lane1': 2, 'lane3': 2})
         for row in rows:
             self.assertLessEqual(row['submitted'], row['first_batch_check'])
             self.assertLessEqual(row['first_batch_check'], row['at'])
         for line in outputs[0].splitlines():
             self.assertRegex(line, r'^(?!land: )|^land: \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \+\d+s ')
 
-    def test_a_ticket_withdrawn_during_a_red_check_is_not_built_again_in_the_bisect(self):
+    def test_a_ticket_withdrawn_during_a_red_check_is_not_built_again_alone(self):
         # Ticket 3505 was withdrawn mid-bisect, yet its group was built and failed again.
         checks, lanes, lands, holder = self.batch_lanes(4, edits={2: ('red.txt', 'red\n')}, red='build',
                                                         hold_build=True)
@@ -1318,10 +1327,9 @@ if not (root / 'release-build').exists():
         self.finish_land(lands[2], 128 + signal.SIGTERM)
         (checks / 'release-build').touch()
         outputs = [self.finish_land(land) for i, land in enumerate(lands) if i != 2]
-        # Three candidate builds and one bare-main check; withdrawn lane 2
-        # is never built again during attribution.
+        # The batch, then lanes 0, 1 and 3 alone; withdrawn lane 2 is never built again.
         self.assertEqual(outputs[0].count('workspace build'), 4, outputs[0])
-        self.assertIn('with 3 checks', outputs[0])
+        self.assertIn('with 4 checks', outputs[0])
         self.assertEqual(self.main_log()[:4], ['lane 3', 'lane 1', 'lane 0', 'hold first build'])
         self.assertEqual(self.queued(), [])
 
@@ -2027,7 +2035,7 @@ class Units(unittest.TestCase):
                 self.assertEqual([kind for kind, _ in calls[:3]], ['check', 'query', 'query'])
                 core = calls[-1][1]
                 self.assertEqual(core[:3], [sys.executable, 'tools/buck2/event_logs.py', 'test'])
-                self.assertIn('//:hirsel-cranelift-test-core_native', core)
+                self.assertIn('//:core-m1-cranelift', core)
                 self.assertEqual('//:test-land' in core, land_suite)
 
     def test_empty_build_query_refuses_the_aggregate(self):

@@ -9,6 +9,11 @@ registrations, an added A field and a changed R). Each mutant applies its text c
 to a copy of runner.hirsel and must turn its law red on the evaluator. L4's high-water
 case builds core/programs/store/runner_rss.hirsel per native backend and compares
 the runtime's exact peak of live backing bytes across its two modes.
+
+--part r1 runs R1's calls (transactions at durable versions, runs-once, store refusal)
+and their native twins: the land gate's part. --part r0 runs the rest, which runs after
+the push: R0's laws, p19, l12, L4, and every mutant (a mutant qualifies a law, not the
+runner a change lands). Without --part both run.
 """
 import argparse
 import json
@@ -345,7 +350,9 @@ def main():
     p.add_argument('--no-mutants', action='store_true')
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
+    p.add_argument('--part', choices=['r0', 'r1'])
     args = p.parse_args()
+    r0, r1 = args.part != 'r1', args.part != 'r0'
     root = args.root.resolve()
     evaluator = args.evaluator.resolve()
     engines = args.backend or ['evaluator', 'cranelift', 'llvm']
@@ -358,22 +365,24 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
         base = manifest(root, work, 'inputs')
-        values = l12_values(evaluator, root, work, 'tree')
-        row(engine='evaluator', law='l12', passed=l12_holds(values), result=values)
+        if r0:
+            values = l12_values(evaluator, root, work, 'tree')
+            row(engine='evaluator', law='l12', passed=l12_holds(values), result=values)
         p19 = work / 'runner_p19.hirsel'
         p19_module(p19)
-        if 'evaluator' in engines:
+        if 'evaluator' in engines and r0:
             for name in LAWS:
                 value, report = evaluate(evaluator, base, 'store@1/runner_laws/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1, result=report)
             value, report = evaluate(evaluator, manifest(root, work, 'p19', None, [(p19, 'runner_p19')]),
                                      'store@1/runner_p19/law_p19_place_twice')
             row(engine='evaluator', law='p19_place_twice', passed=value == 1, result=report)
+        if 'evaluator' in engines and r1:
             for name in CALLS:
                 value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
         # A mutant is red only when it builds and its law fails.
-        if not args.no_mutants:
+        if r0 and not args.no_mutants:
             text = (root / 'core/programs/store/runner.hirsel').read_text()
             for name, edits, module, law in MUTANTS:
                 mutated_text = text
@@ -403,19 +412,25 @@ def main():
             if args.compiler is None or args.runtime is None or args.observed is None:
                 p.error('native backends require --compiler, --runtime and --observed')
             l12 = work / 'runner_l12.hirsel'
-            l12_module(l12, L12[0], values['base'])
+            if r0:
+                l12_module(l12, L12[0], values['base'])
             # The same module with another `place` list (registrations permuted), built after
             # the base list in one store and again in a fresh store: the runner is the
             # heaviest user of code.identity, whose dispatch a store once reused across
             # manifests (reuse-history-fault-1031). The oracle is the evaluator's value.
             permuted = work / 'runner_l12_permuted.hirsel'
-            l12_module(permuted, L12[1], values['permuted'])
+            if r0:
+                l12_module(permuted, L12[1], values['permuted'])
             l12_want = {'store@1/runner_l12/test_l12_describe'}
             # p19's place builds as its own program, in the store the laws primed and in a
             # fresh one: at 10,000 entries it reaches over 10,000 functions, each described.
-            groups = (('laws', [(l12, 'runner_l12')], 'store@1/runner_', 'shared',
-                       {f'store@1/runner_laws/test_{n}' for n in LAWS} | l12_want
-                       | {f'store@1/runner_calls/test_{n}' for n in CALLS}),
+            # R1's calls build alone under --part r1; 'store@1/runner_l' selects runner_laws and runner_l12.
+            calls = ('calls', [], 'store@1/runner_calls/', 'shared',
+                     {f'store@1/runner_calls/test_{n}' for n in CALLS})
+            groups = (calls,) if r1 else ()
+            groups += () if not r0 else (
+                      ('laws', [(l12, 'runner_l12')], 'store@1/runner_l', 'shared',
+                       {f'store@1/runner_laws/test_{n}' for n in LAWS} | l12_want),
                       ('p19', [(p19, 'runner_p19')], 'store@1/runner_p19/', 'shared',
                        {'store@1/runner_p19/test_p19_place_twice'}),
                       ('p19_fresh', [(p19, 'runner_p19')], 'store@1/runner_p19/', 'fresh',
@@ -433,7 +448,7 @@ def main():
                     row(engine=engine, group=group, selection=f'{len(selected & want)}/{len(want)}',
                         passed=code == 0 and selected == want,
                         result=sorted(want ^ selected) or report.get('stderr', ''))
-                for name in COUNTS:
+                for name in COUNTS if r1 else ():
                     definition = f'store@1/runner_calls/test_{name}'
                     code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition,
                                               counting_cc(args, root, work, name))
@@ -442,8 +457,9 @@ def main():
                         passed=code == 0 and [t['definition'] for t in tests] == [definition]
                         and all(t.get('passed') for t in tests),
                         result=tests or report)
-                held, figures = l4_retained(args, root, work, engine)
-                row(engine=engine, law='l4_peak_retained', passed=held, result=figures)
+                if r0:
+                    held, figures = l4_retained(args, root, work, engine)
+                    row(engine=engine, law='l4_peak_retained', passed=held, result=figures)
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
     failures = [r for r in rows if not r['passed']]

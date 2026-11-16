@@ -42,10 +42,13 @@ def report_events(path, output):
                 if len(values) not in (len(FIELDS) - 1, len(FIELDS)):
                     raise ValueError('malformed land event')
                 row = dict(zip(FIELDS, values))
-                if row['state'] not in ('SUBMITTED', 'LANDED', 'FAILED'):
+                if row['state'] not in ('SUBMITTED', 'LANDED', 'FAILED', 'POSTRED'):
                     raise ValueError('unknown land event state')
                 suffix = f" EXIT {row['exit']}" if row['exit'] else ''
-                if row['landed']:
+                if row['state'] == 'POSTRED':
+                    # tools/land-post: the commit range in `landed`, the new red targets in `submitted`.
+                    suffix += f" range {row['landed']} red {row['submitted']}"
+                elif row['landed']:
                     suffix += f" landed {row['landed']}"
                 print(f"LAND {row['state']} {row['lane']} ticket {row['ticket'] or '?'}{suffix} log {row['log']}",
                       file=output, flush=True)

@@ -16,8 +16,8 @@ belong to its next ticket and its branch stays untouched. The queue head
 lands a batch: its own commits, then
 those of up to 15 waiting tickets in ticket order, checked once together in
 a land-owned detached checkout and pushed in one push; a conflicting ticket leaves the batch,
-and a red batch on a green base bisects until its culprits are found, pushing each green group
-at once (docs/landing.md). A waiting ticket landed in a batch exits with its
+and a red batch checks each ticket alone, in ticket order, on the tip pushed so far, pushing
+each green one at once and refusing each red one (docs/landing.md). A waiting ticket landed in a batch exits with its
 own landed commits. A push rejected because main moved goes back to the rebase
 with full jitter and no attempt limit. Row-only main moves reuse a batch's
 passed checks after a clean rebase; every other proposed tree is checked in
@@ -25,9 +25,11 @@ full. Transient push failures retry the same checked commit once while main
 is unchanged, fetching to resolve ambiguous completion. A red check
 refuses the push and prints its first error.
 
-Land builds the installed toolchain bundle before pushing. The lane runs
-the other tests its change can break, and tools/sweep runs every suite on
-current main when requested by hand; it has no automatic schedule. Each push
+Land builds the installed toolchain bundle before pushing. The gate runs only
+the Core suites whose red blocks a land (CORE_ACCEPTANCE); after each push a
+detached user unit runs the rest (POST_PUSH, tools/land-post) on the pushed
+commit, never holding the queue, and a red there is appended to the land events
+as POSTRED with the commit range and the tickets it landed. Each push
 is appended to `hirsel-landings.jsonl` in the common git directory, per ticket
 with its submission, first train check, push time and train check count. Every
 `land:` line carries the UTC time and the seconds since the ticket was submitted.
@@ -74,8 +76,9 @@ ENV = {'HIRSEL_BUCK2_CONFIG': ' '.join(CONFIG), 'GIT_EDITOR': 'true',
 # The workspace without tests, Clippy twins and campaign targets.
 # Test harnesses stay out: each one's Clippy twin (CLIPPY_TWINS) checks the same
 # crate, sources and dependencies, so linking it again on every batch at checked
-# O3 only re-proves the link. Explicit CORE_ACCEPTANCE inputs below add the
-# harnesses the gate actually executes to this same workspace build.
+# O3 only re-proves the link. Explicit CORE_ACCEPTANCE and POST_PUSH inputs below
+# add the harnesses the gate and the post-push run execute to this same workspace
+# build, so a harness that does not compile blocks the land.
 BUILD_SET = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-clippy$", root//:)'
              ' - attrregexfilter(name, "-harness$", root//:)'
              ' - attrfilter(labels, gate, root//:)')
@@ -83,32 +86,37 @@ BUILD_SET = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-cl
 CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
 # These reuse the existing harnesses with source data only.
 SOURCE_AUDITS = ('//:land-audit-workspace-layering',)
-# Whole suites qualify here only after every body passes. Outstanding suites and
-# their fixing owners are recorded in core-cranelift-904/RED-CENSUS.md.
+# The gate's suites: each one's red blocks a land (docs/landing.md "What the gate runs"),
+# because it tests that data is kept (store, replay, durability) or that a wrong program is
+# refused, or it is how the toolchain proves it compiles and runs a program.
 CORE_ACCEPTANCE = (
-    '//:hirsel-core-ids-unittest',
-    '//:hirsel-core-diag-unittest', '//:hirsel-core-syntax-unittest', '//:hirsel-core-resolve-unittest',
-    '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest',
-    '//:hirsel-core-rt-unittest',
-    '//:hirsel-core-front-unittest', '//:hirsel-cranelift-unittest',
-    '//:hirsel-core-driver-unittest', '//:core-driver-sites',
-    '//:land-core-library-modes', '//:core-llvm-aarch64-front',
-    '//:core-llvm-aarch64-runtime', '//:core-llvm-aarch64-abi', '//:core-llvm-aarch64-failure',
-    '//:core-llvm-native', '//:core-driver-provider-m3', '//:core-m2b', '//:core-m2b-host', '//:core-store-s1', '//:core-store-s2', '//:core-store-s3', '//:core-runner-r0',
-    '//:test-core-m1-runner', '//:core-recursive-instances', '//:core-check-cost-unit', '//:core-bookkeeping-stop', '//:core-memory-report', '//:core-closed-pipe', '//:core-store-no-sync',
-    '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
-    '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64',
-    '//:core-aarch64-provider', '//:land-core-evaluator', '//:core-event-order', '//:land-core-native-capabilities',
-    '//:core-m1-cranelift', '//:core-m1-llvm', '//:core-llvm-aarch64-m1',
-    # native::tests in two halves: the #[ignore] bodies that need the host's
-    # openat2, run one per target on the invoking host, and the pool of the rest.
-    '//:core-driver-native-openat2', '//:core-driver-native-pool',
+    '//:core-store-s1', '//:core-store-s2', '//:core-store-s3', '//:core-runner-r1',
+    '//:hirsel-core-driver-unittest', '//:hirsel-core-front-unittest', '//:core-recursive-instances',
+    '//:core-m1-cranelift',
+    # std's library laws on the evaluator, and its law-selection policy
+    # (core/tools/gate_evaluator.py: a module with no evaluator law is refused).
+    '//:land-core-evaluator',
     # NOTICES.md against Cargo.lock, llvm-23.lock and the built installation.
     '//:gate-distribution-notices',
 )
-# A target literal in a tools/land: the tool on main checks every batch this
-# tree joins, so each one it names must exist in the tree submitted.
-NAMED = re.compile(r'''['"](?:root)?//:([A-Za-z0-9_.+-]+)['"]''')
+# Every other Core suite runs after the push (tools/land-post); a red there is a POSTRED
+# event naming the landed tickets, and blocks no one.
+POST_PUSH = (
+    '//:core-runner-r0', '//:land-core-native-capabilities',
+    '//:hirsel-core-ids-unittest', '//:hirsel-core-diag-unittest', '//:hirsel-core-syntax-unittest',
+    '//:hirsel-core-resolve-unittest', '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest',
+    '//:hirsel-core-rt-unittest', '//:hirsel-cranelift-unittest', '//:core-driver-sites',
+    '//:land-core-library-modes', '//:core-llvm-aarch64-front', '//:core-llvm-aarch64-runtime',
+    '//:core-llvm-aarch64-abi', '//:core-llvm-aarch64-failure', '//:core-llvm-native',
+    '//:core-driver-provider-m3', '//:core-m2b', '//:core-m2b-host', '//:test-core-m1-runner',
+    '//:core-check-cost-unit', '//:core-bookkeeping-stop', '//:core-memory-report', '//:core-closed-pipe',
+    '//:core-store-no-sync', '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
+    '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64', '//:core-aarch64-provider',
+    '//:core-event-order', '//:core-m1-llvm', '//:core-llvm-aarch64-m1',
+    # native::tests in two halves: the #[ignore] bodies that need the host's
+    # openat2, run one per target on the invoking host, and the pool of the rest.
+    '//:core-driver-native-openat2', '//:core-driver-native-pool',
+)
 REJECTED = ('[rejected]', 'fetch first', 'non-fast-forward', 'failed to update ref', 'cannot lock ref')
 LANDINGS = 'hirsel-landings.jsonl'
 # Trees the train checked green (land-queue/), so verify_base never checks a tip it pushed again.
@@ -653,28 +661,6 @@ def check(name, command):
     return [f'FAIL  {name}', *error.splitlines()]
 
 
-def previous_tool_refusal():
-    """Retain the preflight target-compatibility rule for older queued tickets.
-
-    Validation itself runs from each merged tree. A submitted change still
-    keeps main's named targets available to an older ticket's checks.
-    """
-    if (fetched := git('fetch', '-q', 'origin', 'main')).returncode:
-        return 'git fetch failed\n' + fetched.stderr
-    shown = git('show', 'origin/main:tools/land')
-    names = sorted(set(NAMED.findall(shown.stdout))) if shown.returncode == 0 else []
-    if not names:
-        return None
-    if (synced := run([PY, 'tools/buck2/sync.py', '--if-stale'])).returncode:
-        return 'cannot generate build files\n' + first_error(synced.stderr + synced.stdout)
-    missing = [name for name in names if run([BUCK2, 'uquery', *CONFIG, '//:' + name]).returncode]
-    if missing:
-        return ('main\'s tools/land checks this change in a batch and asks for '
-                + ', '.join('//:' + name for name in missing) + ', which this tree lacks; keep the old name '
-                'working (an alias or a suite) in the same change')
-    return None
-
-
 def move(tree):
     """Check out a tree detached in this worktree, which must stay clean."""
     if git('checkout', '-q', '--detach', tree).returncode or not unchanged(tree):
@@ -759,7 +745,7 @@ def full(tree, base, screened=False):
     """The gate on the checked-out tree: None or the first red check's report."""
     if not unchanged(tree):
         raise Refusal('the worktree changed before checks; refusing to push')
-    # Bisection may have generated inputs for another tree since this tree's
+    # Screening tickets alone may have generated inputs for another tree since this tree's
     # screen passed. Reuse the checks, but synchronize its ignored build files.
     report = (check('sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale'])
               if screened else fast(tree))
@@ -776,7 +762,7 @@ def full(tree, base, screened=False):
             say('\n'.join(report))
         else:
             targets = [*queries[0].stdout.split(), *(t + '[clippy.txt]' for t in queries[1].stdout.split()),
-                       *(t + '[inputs]' for t in CORE_ACCEPTANCE)]
+                       *(t + '[inputs]' for t in (*CORE_ACCEPTANCE, *POST_PUSH))]
             report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
                                                 '--materializations', 'none', *targets])
                       or check('Clippy', [PY, 'tools/buck2/clippy.py'])
@@ -787,6 +773,42 @@ def full(tree, base, screened=False):
     if not unchanged(tree):
         raise Refusal('the worktree changed during checks; refusing to push')
     return report
+
+
+def post_unit(unit, directory):
+    """The detached user unit a post-push run starts in: lane priority (Buck2's default), the land CPUs."""
+    runtime = f'/run/user/{os.getuid()}'
+    return ['env', f'XDG_RUNTIME_DIR={runtime}', f'DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus',
+            'systemd-run', '--user', '--collect', '--quiet', '-p', 'CPUAffinity=0-11 16-27', f'--unit={unit}',
+            f'--working-directory={directory}', '-E', 'PATH', '-E', 'HOME', '-E', 'SSH_AUTH_SOCK']
+
+
+def post_push(tip):
+    """Start the POST_PUSH suites on the pushed commit; the land never waits for them.
+
+    The land checkout is removed when the land exits, so the run starts from a
+    copy of tools/land-post in the common git directory.
+    """
+    if not (events := os.environ.get('HIRSEL_LAND_EVENTS')):
+        return
+    unit = 'land-post-' + tip[:12]
+    try:
+        common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip())
+        home = common / 'land-post'
+        home.mkdir(exist_ok=True)
+        for name in ('land-post', 'land_events.py'):
+            temporary = home / (name + '.tmp')
+            temporary.write_bytes((ROOT / 'tools' / name).read_bytes())
+            os.replace(temporary, home / name)
+        command = [*post_unit(unit, common), PY, str(home / 'land-post'), tip, events, unit]
+        started = subprocess.run(command, capture_output=True, text=True, env=os.environ.copy())
+    except OSError as error:
+        say(f'post-push run not started: {error}')
+        return
+    if started.returncode:
+        say('post-push run not started: ' + (started.stderr or started.stdout).strip())
+    else:
+        say(f'post-push suites run in {unit}')
 
 
 def land_tool_suite(base, tree):
@@ -937,8 +959,8 @@ class Batch:
     """One attempt's merge train: the head's commits, then each waiting ticket's, on one origin/main.
 
     bors-ng batches every waiting change into one build and pushes it in one
-    push, then bisects a red batch into halves (lib/worker/batcher.ex:10-22;
-    lib/worker/batcher/divider.ex:9-27, 89-94; bors-ng ca725797). Zuul's
+    push (lib/worker/batcher.ex:10-22; bors-ng ca725797); it bisects a red
+    batch into halves, which costs log2(batch) serial checks per red. Zuul's
     dependent pipeline tests each change on the changes ahead of it, and a
     change that does not merge leaves the queue while the rest move onto the
     nearest non-failing item (zuul/manager/__init__.py:1955-1972; zuul
@@ -947,9 +969,10 @@ class Batch:
     merge queue", merge limits). LUCI CV, the Chromium CQ, gives every
     verdict to one change and retries failed tryjobs before blaming it
     (cv/internal/tryjob/execute/retry.go:43-60; luci-go f46b764f). Here a
-    ticket is blamed only by a red check of its own change on a green tree,
-    never by elimination, so a red that does not repeat blames no one and the
-    batch lands. Every pushed tree is one this attempt checked green, on
+    red batch checks each ticket alone on the tip pushed so far, so a ticket
+    is blamed only by a red check of its own change on a green tree, never by
+    elimination, and main is checked only when that change cannot reach the
+    failing target. Every pushed tree is one this attempt checked green, on
     exactly the tip it is pushed onto.
     """
 
@@ -1030,41 +1053,37 @@ class Batch:
     def screen(self, base, members):
         """Drop each ticket whose own change fails the fast checks, before any build.
 
-        The combined tree runs them first. When it is red, a binary search
-        over the batch's cumulative trees finds the first ticket that turns
-        them red, on a tree that passes them without it; that ticket leaves
-        with its first error, and the rest are screened again. The fast checks
-        are the full checks' own scripts, so the screen is never stricter.
+        The combined tree runs them first. When it is red on a green base, each
+        ticket runs them alone on the base, in ticket order, and each red one
+        leaves with its first error. The fast checks are the full checks' own
+        scripts, so the screen is never stricter.
         """
-        while True:
-            tip, applied = self.apply(base, members)
-            members = [member for member, _ in applied]
-            if not applied:
-                return members
-            if not (report := candidate_check('fast', tip, base)):
-                self.screened.add(git('rev-parse', tip + '^{tree}').stdout.strip())
-                return members
-            if (base, 'fast') not in self.base_checks:
-                self.base_checks[base, 'fast'] = candidate_check('fast', base, base)
-            if failed := self.base_checks[base, 'fast']:
-                if targets := matching_checks(report, failed):
-                    raise MainRed(self.queue.record_red(base, failed, targets))
-                raise Refusal('main fails a different fast check; refusing to blame a ticket\n' + '\n'.join(failed))
-            if len(applied) == 1:
-                self.red(members[0], report)
-                return []
-            # trees[i] holds the first i tickets: trees[low] passes, trees[high] fails.
-            trees = [base, *(commits[-1] for _, commits in applied)]
-            low, high = 0, len(applied)
-            while high - low > 1:
-                middle = (low + high) // 2
-                if found := candidate_check('fast', trees[middle], base):
-                    high, report = middle, found
-                else:
-                    low = middle
-            culprit = members[high - 1]
-            self.red(culprit, report)
-            members.remove(culprit)
+        tip, applied = self.apply(base, members)
+        members = [member for member, _ in applied]
+        if not applied:
+            return members
+        if not (report := candidate_check('fast', tip, base)):
+            self.screened.add(git('rev-parse', tip + '^{tree}').stdout.strip())
+            return members
+        if (base, 'fast') not in self.base_checks:
+            self.base_checks[base, 'fast'] = candidate_check('fast', base, base)
+        if failed := self.base_checks[base, 'fast']:
+            if targets := matching_checks(report, failed):
+                raise MainRed(self.queue.record_red(base, failed, targets))
+            raise Refusal('main fails a different fast check; refusing to blame a ticket\n' + '\n'.join(failed))
+        if len(applied) == 1:
+            self.red(members[0], report)
+            return []
+        kept = []
+        for member in members:
+            tree, alone = self.apply(base, [member])
+            if not alone:
+                continue
+            if found := candidate_check('fast', tree, base):
+                self.red(member, found)
+            else:
+                kept.append(member)
+        return kept
 
     def confirm_push(self, tip):
         """Reconcile a failed push against a fetched remote, never a cached ref."""
@@ -1146,6 +1165,7 @@ class Batch:
         with open(common / LANDINGS, 'a') as log:
             for member, commits in fresh:
                 log.write(json.dumps(dict(landed=commits[-1], pushed=tip, base=self.pushed, branch=member.lane,
+                                          ticket=member.ticket,
                                           unchecked_rebase=False, at=at, **timings[member.ticket]),
                                      sort_keys=True) + '\n')
         self.landed += fresh
@@ -1170,6 +1190,7 @@ class Batch:
                             f'{self.own.lane} ({self.checked} checks): ' + ' '.join(commits)))
         if len(fresh) > 1 or self.checked > 1:
             say(f'pushed {tip[:12]} with {len(fresh)} tickets: ' + ', '.join(str(m) for m, _ in fresh))
+        post_push(tip)
 
     def green(self, tree, applied, base):
         """One full check of the checked-out tree: None when it passed, else its report."""
@@ -1202,7 +1223,7 @@ class Batch:
 
         A matching request must turn that target green, then pass the full
         merged-tree gate alone. Without a verified repair the whole cohort
-        receives the same base diagnosis, with no candidate bisection.
+        receives the same base diagnosis, with no candidate attribution.
         """
         message = (f'main is red at {", ".join(fact["targets"])}, '
                    f'first seen at {fact["first_seen"]}; refusing to push a red tree; no ticket is blamed')
@@ -1249,11 +1270,11 @@ class Batch:
         return self.pushed
 
     def resolve_groups(self, members, previous=None):
-        """Check groups of tickets one at a time and push each green one at once.
+        """Check the batch on origin/main and push it when green; else check each ticket alone.
 
-        A group is checked on the tip pushed so far; a green group is pushed
-        at once. A red group splits in halves, checked in ticket order; a red
-        ticket alone is a culprit. Returns the pushed tip.
+        Each ticket alone is checked on the tip pushed so far, in ticket order;
+        a green one is pushed at once and a red one is the culprit. Returns the
+        pushed tip.
         """
         if previous and row_only_move(previous[0], self.main):
             # Finish the checked cohort. New arrivals get their own batch;
@@ -1278,42 +1299,69 @@ class Batch:
                     self.publish(tree, applied)
                     return self.pushed
         members = self.screen(self.pushed, members)
-        pending = [members] if members else []
-        while pending:
-            group = pending.pop(0)
+        if not (red := self.check_group(members)):
+            return self.pushed
+        group, tree, report = red
+        if len(group) == 1:
+            self.alone_red(group[0], tree, report)
+            return self.pushed
+        # Every member is checked alone, in ticket order, on the tip pushed so far:
+        # a green one is pushed at once, a red one is refused with its own report.
+        say('red batch; checking each ticket alone: ' + ', '.join(map(str, group)))
+        for member in group:
+            if alone := self.check_group([member]):
+                self.alone_red(member, alone[1], alone[2])
+        return self.pushed
+
+    def check_group(self, group):
+        """Check tickets together on the pushed tip and push them when green.
+
+        Returns None when they were pushed (or none is left), else the members
+        checked, the tree and its report.
+        """
+        while group:
             # A ticket withdrawn since the batch formed is not built again.
             left = [member for member in group if member is not self.own]
             if gone := set(left) - set(self.queue.live(left)):
                 say('withdrawn, so not checked again: ' + ', '.join(map(str, gone)))
-                if not (group := [member for member in group if member not in gone]):
-                    continue
-            base = self.pushed
-            tree, applied = self.apply(base, group)
-            if not applied:
+                group = [member for member in group if member not in gone]
                 continue
+            tree, applied = self.apply(self.pushed, group)
+            if not applied:
+                return None
             self.checked += 1
-            report = self.green(tree, applied, base)
+            report = self.green(tree, applied, self.pushed)
             group = [member for member, _ in applied]
-            if not report:
-                left = [m for m in group if m is not self.own]
-                if gone := set(left) - set(self.queue.live(left)):
-                    say('a batched ticket left the queue during the checks; checking again'
-                        ' without ' + ', '.join(map(str, gone)))
-                    if rest := [m for m in group if m not in gone]:
-                        pending.insert(0, rest)
-                else:
-                    self.proof = (base, tree, {member.ticket: member.head for member in group}, self.costs)
-                    self.publish(tree, applied)
-            elif len(group) == 1:
-                self.verify_base(base, report)
-                self.red(group[0], report)
-            else:
-                self.verify_base(base, report)
-                half = len(group) // 2
-                say(f'red batch; bisecting into {", ".join(map(str, group[:half]))} and '
-                    f'{", ".join(map(str, group[half:]))}')
-                pending[:0] = [group[:half], group[half:]]
-        return self.pushed
+            if report:
+                return group, tree, report
+            left = [m for m in group if m is not self.own]
+            if gone := set(left) - set(self.queue.live(left)):
+                say('a batched ticket left the queue during the checks; checking again'
+                    ' without ' + ', '.join(map(str, gone)))
+                group = [m for m in group if m not in gone]
+                continue
+            self.proof = (self.pushed, tree, {member.ticket: member.head for member in group}, self.costs)
+            self.publish(tree, applied)
+            return None
+        return None
+
+    def alone_red(self, member, tree, report):
+        """Refuse a ticket red alone; main is checked first only when its diff cannot reach the failure."""
+        if not self.could_cause(tree, report):
+            self.verify_base(self.pushed, report)
+        self.red(member, report)
+
+    def could_cause(self, tree, report):
+        """True when the red is unnamed (a build, Clippy or screen red) or a failing target depends on a changed path."""
+        targets = failed_checks(report)
+        if not all(name.startswith(('root//', '//')) for name in targets):
+            return True
+        paths = [path for path in changed_paths(self.pushed, tree) if (ROOT / path).exists()]
+        if not paths:
+            return False
+        query = run([BUCK2, 'uquery', *CONFIG, 'allpaths(set({}), owner(set({})))'.format(
+            ' '.join(targets), ' '.join(json.dumps(path) for path in paths))])
+        return query.returncode == 0 and bool(query.stdout.strip())
 
     def verify_base(self, base, candidate_report):
         if (base, 'full') not in self.base_checks and self.queue.green_tree(base):
@@ -1373,9 +1421,6 @@ def main():
         say(str(error))
         return 1
     merging.install(ROOT)
-    if not os.environ.get('HIRSEL_LAND_TICKET') and (refusal := previous_tool_refusal()):
-        say(refusal)
-        return 1
     branch = os.environ.get('HIRSEL_LAND_BRANCH') or git('branch', '--show-current').stdout.strip()
     previous_signal = signal.signal(signal.SIGTERM, withdraw_signal)
     try:

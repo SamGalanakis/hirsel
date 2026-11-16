@@ -87,4 +87,5 @@ that returns at once; crash, poison and gone cases are not built yet.
 closure is never shareable, so every task that runs entries runs `place` itself.
 Laws and cases: `core/programs/store/runner_laws.hirsel` (R0) and
 `core/programs/store/runner_calls.hirsel` (R1), run by `core/tools/runner_tests.py`
-(target `//:core-runner-r0`) on the evaluator, Cranelift and LLVM.
+on the evaluator, Cranelift and LLVM: R1 in the land gate (`//:core-runner-r1`), and R0
+after the push (`//:core-runner-r0`).

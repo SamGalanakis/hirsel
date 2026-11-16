@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 NAMES = ['args-empty', 'args-len', 'args-print', 'args-returned-views', 'args-values',
-         'clocks', 'host-close-cancel', 'host-read', 'host-wait-cancel', 'host', 'host-rename-sleep',
+         'clocks', 'host-close-cancel', 'host-read', 'host-wait-cancel', 'host', 'host-rename-sleep', 'sleep-peer',
          'mkdtemp-bounds', 'mkdtemp', 'stderr-cancel', 'stderr-closed', 'stdout-cancel',
          'stdout-closed', 'streams', 'string-growth-refusal', 'string-growth', 'string-shorten']
 
@@ -55,9 +55,11 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                 grants = ['Stdout', 'Stderr', 'Tasks']
             if name == 'args-returned-views':
                 grants = ['Stdout']
-            host = name.startswith('host') or name in ('clocks', 'mkdtemp', 'mkdtemp-bounds')
+            host = name.startswith('host') or name in ('clocks', 'mkdtemp', 'mkdtemp-bounds', 'sleep-peer')
             if host:
                 grants = ['Clock', 'Tasks']
+            if name == 'sleep-peer':
+                grants = ['Clock', 'Stdout', 'Tasks']
             binary = scratch / 'program'
             command = [str(compiler), 'build', '--source-core', '--inputs', str(inputs),
                        '--entry', 'app@1/main/main', '--backend', backend,
@@ -97,7 +99,7 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                     if writer is not None:
                         os.close(writer)
                 row['ran'] = True
-                want_stdout = b'alphabeta' if name in ('args-print', 'args-returned-views') else b'out' if name == 'streams' else b''
+                want_stdout = b'alphabeta' if name in ('args-print', 'args-returned-views') else b'out' if name == 'streams' else b'PS' if name == 'sleep-peer' else b''
                 want_stderr = b'err' if name == 'streams' else b''
                 want_exit = 101 if name == 'mkdtemp-bounds' else 0
                 assert result.returncode == want_exit, f'exit {result.returncode}, stderr={result.stderr!r}'

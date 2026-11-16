@@ -1,0 +1,21 @@
+// CONC-7/10: sleep waits and lets the runnable peer publish first.
+type Input:send { clock: Clock, out: Stdout }
+
+fn sleeper(take x: Input) waits {
+    let v = take x
+    let now = host.mono_ns(v.clock)
+    host.sleep_until(v.clock, now + 20_000_000u64)
+    result.unwrap(stdout.write(v.out, "S"))
+}
+
+fn peer(take out: Stdout) waits {
+    result.unwrap(stdout.write(out, "P"))
+}
+
+pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let a = result.unwrap(task.spawn(tasks, bytes 4096, Input(clock: clock, out: out), sleeper))
+    let b = result.unwrap(task.spawn(tasks, bytes 4096, out, peer))
+    result.unwrap(task.join(take a))
+    result.unwrap(task.join(take b))
+    Ok(())
+}

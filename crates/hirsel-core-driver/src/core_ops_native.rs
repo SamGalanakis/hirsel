@@ -370,6 +370,7 @@ fn host_operations(backend: Backend) {
         ("mkdtemp", 0),
         ("host-wait-cancel", 0),
         ("host-rename-sleep", 0),
+        ("sleep-peer", 0),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let grant = dir.path().join("grant");
@@ -413,7 +414,7 @@ fn host_operations(backend: Backend) {
             root_limit: 1_048_576,
             instance_limit: 64,
             directories: vec![grant.to_str().unwrap().into()],
-            grant_mask: (1 << 2) | (1 << 9),
+            grant_mask: (1 << 2) | (1 << 4) | (1 << 9),
             logical_charge_report: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -424,7 +425,12 @@ fn host_operations(backend: Backend) {
             "{name}: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.stdout.is_empty(), "{name}");
+        let want_stdout = if name == "sleep-peer" {
+            b"PS".as_slice()
+        } else {
+            b""
+        };
+        assert_eq!(output.stdout, want_stdout, "{name}");
         if expected_exit == 0 {
             assert!(
                 output.stderr.is_empty(),

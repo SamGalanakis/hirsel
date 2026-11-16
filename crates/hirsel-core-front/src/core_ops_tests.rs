@@ -465,6 +465,51 @@ fn host_rename_and_sleep_rows_are_replayable_in_evaluator() {
 }
 
 #[test]
+fn evaluator_sleep_wait_runs_a_runnable_peer_first() {
+    let source = r#"
+type Input:send { clock: Clock, out: Stdout }
+fn sleeper(take x: Input) waits {
+    let v = take x
+    let now = host.mono_ns(v.clock)
+    host.sleep_until(v.clock, now + 20_000_000u64)
+    result.unwrap(stdout.write(v.out, "S"))
+}
+fn peer(take out: Stdout) waits { result.unwrap(stdout.write(out, "P")) }
+fn f(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits {
+    let a = result.unwrap(task.spawn(tasks, bytes 4096, Input(clock: clock, out: out), sleeper))
+    let b = result.unwrap(task.spawn(tasks, bytes 4096, out, peer))
+    result.unwrap(task.join(take a))
+    result.unwrap(task.join(take b))
+    0u64
+}
+"#;
+    let (index, modules) = canonical(source);
+    let p = Program::declare(&index, &modules);
+    let mut emitter = Emitter::new();
+    let mut entry = None;
+    for (f, fd) in p
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|(_, fd)| fd.path.0.package.name == "app")
+    {
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        if fd.path.0.name == "f" {
+            entry = check.function;
+        }
+    }
+    emitter.materialize_instances().unwrap();
+    wf::module(&emitter.module).unwrap();
+    let run = eval::run(&emitter.module, entry.unwrap(), &[1, 1, 1], 1 << 20);
+    assert_eq!(run.outcome, eval::Outcome::Returned(vec![0]));
+    assert_eq!(run.stdout, b"PS");
+}
+
+#[test]
 fn log_boxed_list_append_and_finish_in_evaluator() {
     let source = r#"fn f() -> u64 {
         let l:Log[u64] = result.unwrap(log.new())

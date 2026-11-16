@@ -18,3 +18,12 @@ Used, by FAIL-16 and MEM-24 (the isolate cell is 32):
 - A later caught failure uses that primary, so its own reserved cell takes its place. The dropped Causes then
   refunds the earlier cell, so 32 stays; an isolate that returns refunds its own reservation.
 - So every case returns with 32 used.
+
+In a child task (`spawn` with `bytes 4096`, then `join`), by FAIL-16, FAIL-10, MEM-20 and MEM-23:
+- child_drop: the child runs `drop`, so 1. The catch installs the child's reserved cell (32, admitted from the
+  child's limit) as the child's primary, and the child returns. Its limit ends and is handed over to the root
+  (MEM-20), so the cell's record leads to the root. `join` cleans the child's context, which refunds that cell
+  to the root; the unused reservation, the task record and the message String are refunded too. So 0 stays.
+- child_kept: the child returns its Causes through `join`; the root reads it (Fail, so 1) and drops it, which
+  refunds its cell and message to the root, where the child's records now lead. The child's own replacement
+  cell is refunded when `join` cleans the child. So 0 stays.

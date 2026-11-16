@@ -127,11 +127,16 @@ impl Drop for Cell {
     fn drop(&mut self) {
         // SAFETY: this cell owns its inline String; unused cells have capacity zero.
         unsafe { drop_string(&self.cause.message) };
-        if !self.startup {
-            self.funding.refund(charge::CAUSE_CELL);
-        }
+        // A reservation's record is its own root until it is handed over, and
+        // that root still names the task that reserved it, which may have
+        // ended (a caught failure's cell is dropped when its Context retires).
+        // Hand over first, so the refund goes to the live limit the record now
+        // leads to (MEM-20); the cell's outstanding charge pins the slot.
         if self.reserved {
             self.funding.finish_reserved();
+        }
+        if !self.startup {
+            self.funding.refund(charge::CAUSE_CELL);
         }
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::deallocated((self as *const Self).cast());

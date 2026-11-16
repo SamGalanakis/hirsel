@@ -115,7 +115,7 @@
     {"workload": "tx", "package": {"name": "tx", "version": "1"}, "module": "main"},
     {"workload": "replay", "package": {"name": "app", "version": "1"}, "module": "main", "grants": ["Clock"]},
     {"workload": "replay_fail", "package": {"name": "failing", "version": "1"}, "module": "main"},
-    {"workload": "causes", "package": {"name": "causes", "version": "1"}, "module": "main"},
+    {"workload": "causes", "package": {"name": "causes", "version": "1"}, "module": "main", "grants": ["Tasks"]},
     {"workload": "dispatch_cross_package", "package": {"name": "app", "version": "1"}, "module": "main", "grants": ["Clock"],
      "mixed": {"copy": ["app", "lib"], "file": "core/programs/m2b/dispatch/cross_lib.hirsel",
                "from": "    let id = code.identity(s)\n    list.len(id)\n", "to": "    let id = code.identity(s)\n    let n = list.len(id)\n    n + 0u64\n",

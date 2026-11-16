@@ -451,13 +451,12 @@ impl Payer {
     pub(crate) fn finish_reserved(self) {
         let child = self.slot().id;
         let funding = Funding { payer: self };
-        let winner = funding.end_id();
-        // `end_id` merges the child into its parent but preserves the child's
-        // own handle pin. The reservation cell is that handle's final owner;
-        // release it so the slot returns to the forest free list.
-        let forest = funding.payer.forest();
-        forest.retain(winner);
-        forest.release(child);
+        // `end_id` merges the child into its parent and releases the parent-edge
+        // pin `isolate_reserve` took, but preserves the child's own handle pin.
+        // The reservation cell is that handle's final owner; release it, and
+        // the slot returns to the free list once its charge is refunded.
+        funding.end_id();
+        funding.payer.forest().release(child);
         std::mem::forget(funding);
     }
 }
@@ -471,10 +470,16 @@ impl Funding {
     /// Reserve an isolate cell without replacing the context's current scope.
     /// The returned payer is a child record whose charge is later installed in
     /// an obligation or refunded and merged back into this scope.
+    ///
+    /// Unlike `enter`, the context keeps its own pin on this scope, so the
+    /// record's parent edge takes a pin of its own: the cell may outlive the
+    /// scope (a caught failure's replacement cell lives until the task's
+    /// Context drops), and `end_id` releases that edge when the cell finishes.
     pub(crate) fn isolate_reserve(&mut self, bytes: u64) -> Result<Payer, Capacity> {
         let live = self.reserve_scope(bytes)?;
         let domain = unsafe { self.payer.0.as_ref().domain };
         let forest = unsafe { &mut *domain.as_ref().forest.get() };
+        forest.retain(self.payer.slot().id);
         let payer = forest.take(domain, live);
         unsafe {
             let record = &mut *payer.local();

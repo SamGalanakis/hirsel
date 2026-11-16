@@ -931,7 +931,7 @@ impl Driver {
                 let product = if let Some(product) = cached {
                     publication.rows.insert(
                         fd.path.clone(),
-                        check_index::Row::Live {
+                        check_index::Row {
                             key: key_hash,
                             body: product.record,
                         },
@@ -1021,7 +1021,7 @@ impl Driver {
                 publication.bodies.push((record, bytes));
                 publication.rows.insert(
                     path,
-                    check_index::Row::Live {
+                    check_index::Row {
                         key: key_hash,
                         body: record,
                     },

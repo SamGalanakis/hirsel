@@ -290,7 +290,7 @@ fn a_body_record_with_another_module_part_misses_its_object() {
             for (_, rows) in leaves {
                 for (p, row) in rows {
                     if *p == path {
-                        *row = check_index::Row::Live { key, body: forged };
+                        *row = check_index::Row { key, body: forged };
                     }
                 }
             }

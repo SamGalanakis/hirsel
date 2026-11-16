@@ -2,16 +2,17 @@
 //!
 //! - A **body record** is one checked definition (`DiskCheck`), addressed by the
 //!   digest of its envelope: that address is the product's content hash.
-//! - The **index** is a 16-way trie over H(DefPath). Its rows are small: a live row
-//!   holds the definition key's hash and the body record's address; a tombstone
-//!   marks a path that left a file of the request. No row holds IR.
+//! - The **index** is a 16-way trie over H(DefPath). Its rows are small: each
+//!   holds the definition key's hash and the body record's address of a live
+//!   definition of the request. No row holds IR, and a path that left the
+//!   request has no row, so the root is a function of the live rows and files:
+//!   an incremental publication is a fresh one's.
 //! - A **file record** holds a module's source hash, its namespace map
 //!   (name → DefPath) and its anchor map (item ordinal → DefPath, line base).
 //! - The **root node** is the trie's top node plus the file records and the
-//!   key shape its live rows' keys were derived under. One selection rename
-//!   publishes root, rows, tombstones and maps together.
+//!   key shape its rows' keys were derived under. One selection rename
+//!   publishes root, rows and maps together.
 //!
-//! Lookup by DefPath treats a tombstone as not found.
 //! A record that fails its digest or decode is a miss, never a hit.
 use crate::store::Store;
 use crate::{decode, encode};
@@ -22,7 +23,8 @@ use std::collections::BTreeMap;
 use std::io;
 
 /// The selection naming the current root node.
-pub(crate) const SELECTION: &str = "program-index";
+/// `v2`: rows are live definitions only, with no tombstones.
+pub(crate) const SELECTION: &str = "program-index-v2";
 /// A leaf splits into an inner node above this many rows. With about 500
 /// rows a changed row rewrites its leaf and the root: two nodes.
 const LEAF_ROWS: usize = 48;
@@ -39,15 +41,11 @@ pub(crate) fn module_key(path: &DefPath) -> ModuleKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) enum Row {
-    Live {
-        /// H(the canonical encoding of the `DefinitionKey`).
-        key: ContentHash,
-        /// The body record's address (its content hash).
-        body: ContentHash,
-    },
-    /// The path left a file of the request: the file record that dropped it.
-    Removed { file: Option<ContentHash> },
+pub(crate) struct Row {
+    /// H(the canonical encoding of the `DefinitionKey`).
+    pub key: ContentHash,
+    /// The body record's address (its content hash).
+    pub body: ContentHash,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -66,7 +64,7 @@ enum Node {
 }
 #[derive(Serialize, Deserialize)]
 struct RootNode {
-    /// Every live row's body record holds its key under this shape.
+    /// Every row's body record holds its key under this shape.
     shape: ContentHash,
     files: Vec<(ModuleKey, ContentHash)>,
     children: Vec<(u8, ContentHash)>,
@@ -126,12 +124,9 @@ impl ProgramIndex {
         }
         Ok(index)
     }
-    /// A live row, never a tombstone.
+    /// The row of a live definition.
     pub fn live(&self, path: &DefPath) -> Option<(ContentHash, ContentHash)> {
-        match self.rows.get(path)? {
-            &Row::Live { key, body } => Some((key, body)),
-            Row::Removed { .. } => None,
-        }
+        self.rows.get(path).map(|row| (row.key, row.body))
     }
     /// The published file record of each module.
     #[cfg(test)]
@@ -162,7 +157,8 @@ impl Publication {
         }
     }
     /// Write what the prior publication does not hold, then rename the selection.
-    /// Returns the root node's address, a deterministic function of the rows and files.
+    /// Returns the root node's address, a deterministic function of this
+    /// request's rows and files alone.
     pub fn publish(mut self, store: &Store, prior: &ProgramIndex) -> io::Result<ContentHash> {
         hirsel_core_front::cost_scope!("non-check", "program index publication");
         let mut writes: Vec<(ContentHash, Vec<u8>)> = std::mem::take(&mut self.bodies);
@@ -173,26 +169,6 @@ impl Publication {
                 writes.push((hash, bytes));
             }
             files.push((module.clone(), hash));
-        }
-        // Paths that left a file of this request leave a tombstone; earlier
-        // tombstones stay while their file is still part of the request.
-        for (path, row) in prior.rows() {
-            if self.rows.contains_key(path) {
-                continue;
-            }
-            let module = module_key(path);
-            if self.files.contains_key(&module) {
-                let removed = match row {
-                    Row::Live { .. } => Row::Removed {
-                        file: files
-                            .binary_search_by(|f| f.0.cmp(&module))
-                            .ok()
-                            .map(|i| files[i].1),
-                    },
-                    removed => *removed,
-                };
-                self.rows.insert(path.clone(), removed);
-            }
         }
         let mut hashed = Vec::with_capacity(self.rows.len());
         for (path, row) in self.rows {

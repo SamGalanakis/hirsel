@@ -2035,11 +2035,11 @@ fn program_request(kind: &str, dir: &Path, store: &Path) -> CheckRequest {
     }
     req
 }
-/// §2d edit-kind gate. Law: an incremental build publishes the live rows and
-/// file records of a fresh build of the same sources, and a tombstoned path
-/// never resolves by path. Oracle: the fresh build.
+/// §2d edit-kind gate. Law: an incremental build publishes the root of a
+/// fresh build of the same sources: the same rows and file records, and no
+/// row for a path the edit took away. Oracle: the fresh build.
 #[test]
-fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
+fn edit_kinds_publish_the_fresh_build() {
     for kind in [
         "body",
         "signature",
@@ -2058,7 +2058,7 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let incremental = dir.path().join("incremental");
-        Driver::default()
+        let base = Driver::default()
             .check(
                 program_request("base", dir.path(), &incremental),
                 &mut Meter::new(false),
@@ -2087,15 +2087,12 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
         };
         let index = open(&incremental);
         let fresh_index = open(&dir.path().join("fresh"));
-        let live = |index: &check_index::ProgramIndex| -> BTreeMap<DefPath, check_index::Row> {
-            index
-                .rows()
-                .filter(|r| matches!(r.1, check_index::Row::Live { .. }))
-                .map(|(p, r)| (p.clone(), *r))
-                .collect()
+        let rows = |index: &check_index::ProgramIndex| -> BTreeMap<DefPath, check_index::Row> {
+            index.rows().map(|(p, r)| (p.clone(), *r)).collect()
         };
-        assert_eq!(live(&index), live(&fresh_index), "{kind}: live rows");
-        assert_eq!(fresh_index.rows().count(), live(&fresh_index).len());
+        assert_eq!(rows(&index), rows(&fresh_index), "{kind}: rows");
+        assert_eq!(index.root, fresh_index.root, "{kind}: root");
+        assert_eq!(built.root, fresh.root, "{kind}: product root");
         let modules: Vec<_> = program_sources(kind)
             .iter()
             .map(|(m, _)| ("app".to_string(), "1".to_string(), vec![m.to_string()]))
@@ -2106,20 +2103,6 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
                 fresh_index.files().into_iter().find(|(m, _)| m == module),
                 "{kind}: file record {module:?}"
             );
-        }
-        let tombstones: Vec<DefPath> = index
-            .rows()
-            .filter(|r| matches!(r.1, check_index::Row::Removed { .. }))
-            .map(|r| r.0.clone())
-            .collect();
-        assert_eq!(
-            !tombstones.is_empty(),
-            matches!(kind, "remove" | "rename"),
-            "{kind}: {tombstones:?}"
-        );
-        for path in &tombstones {
-            assert!(index.live(path).is_none());
-            assert!(!built.definitions.contains_key(path));
         }
         // Hand-derived fan-out. A signature edit of `helper.config` rechecks
         // config and its four readers. Trivia before an item changes only its
@@ -2135,10 +2118,17 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
             _ => unreachable!(),
         };
         assert_eq!(names(&built), rechecked, "{kind}: rechecked");
+        // The paths the edit took away: their rows leave their leaves.
+        let removed: Vec<DefPath> = base
+            .definitions
+            .keys()
+            .filter(|p| !built.definitions.contains_key(*p))
+            .cloned()
+            .collect();
         assert_eq!(
-            tombstones.len(),
+            removed.len(),
             usize::from(matches!(kind, "remove" | "rename")),
-            "{kind}: tombstones"
+            "{kind}: removed"
         );
         // Every write the request made. With under 48 rows the trie is the
         // root over one leaf per first nibble of H(path): each changed row
@@ -2148,7 +2138,7 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
         let leaves: std::collections::BTreeSet<u8> = built
             .rechecked
             .iter()
-            .chain(&tombstones)
+            .chain(&removed)
             .map(|p| {
                 ContentHash::of_parts(
                     "hirsel.program-index.path.v1",
@@ -2319,14 +2309,7 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                     }
                     // Each row keeps its own key; only the body records it
                     // names trade places.
-                    let (
-                        check_index::Row::Live { body: d, .. },
-                        check_index::Row::Live { body: m, .. },
-                    ) = (&mut d.unwrap().1, &mut m.unwrap().1)
-                    else {
-                        panic!("both rows are live")
-                    };
-                    std::mem::swap(d, m);
+                    std::mem::swap(&mut d.unwrap().1.body, &mut m.unwrap().1.body);
                 });
                 vec!["dispatch", "main"]
             }
@@ -3048,41 +3031,24 @@ fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
             "{case}: diagnostics"
         );
         assert_eq!(records(&built), records(&fresh), "{case}: products");
-        // The publication is the fresh one but for the tombstones of the
-        // paths the edit took away.
+        // The publication is the fresh one, root and all: a path the edit
+        // took away has no row.
         let rows = |store: &Path| {
             let index = check_index::ProgramIndex::open(&Store::new(store).unwrap()).unwrap();
-            let mut live = BTreeMap::new();
-            let mut removed = vec![];
-            for (path, row) in index.rows() {
-                match row {
-                    check_index::Row::Live { .. } => drop(live.insert(path.clone(), *row)),
-                    check_index::Row::Removed { .. } => removed.push(path.0.name.clone()),
-                }
-            }
-            removed.sort();
-            (live, removed)
+            let rows: BTreeMap<DefPath, check_index::Row> =
+                index.rows().map(|(p, r)| (p.clone(), *r)).collect();
+            (rows, index.root)
         };
         let files = |store: &Path| {
             check_index::ProgramIndex::open(&Store::new(store).unwrap())
                 .unwrap()
                 .files()
         };
-        let (live, removed) = rows(&incremental);
         assert_eq!(
-            (live, files(&incremental)),
-            (rows(&fresh_store).0, files(&fresh_store)),
+            (rows(&incremental), files(&incremental)),
+            (rows(&fresh_store), files(&fresh_store)),
             "{case}: publication"
         );
-        let gone: &[&str] = match case {
-            "remove" | "rename" => &["spare"],
-            "a module function a local shadows is removed" => &["g"],
-            "a clone hook moves to another core module" | "a clone hook is removed" => {
-                &["P.$clone"]
-            }
-            _ => &[],
-        };
-        assert_eq!(removed, gone, "{case}: tombstones");
         if let Some(expect) = expect {
             assert_eq!(names(&built), expect, "{case}: rechecked");
         }

@@ -720,16 +720,16 @@ impl CheckProduct {
             .ok_or_else(|| NativeStop::Entry("a build needs `reachable_for` its options".into()))?;
         let reach = reached.reach.as_ref();
         let prior = reach.and_then(|r| r.prior.as_ref());
+        // The items of instances expanded from the record, by its path
+        // indices, and those of the rest.
+        let mut recorded_items: Vec<u32> = Vec::new();
         let mut items: Vec<&DefPath> = Vec::new();
         let hit = reach.is_some_and(|r| r.hit);
         let mut expansions = reached.materialized.expansions(instances);
         for (k, instance) in instances.iter().enumerate() {
             let expanded = expansions.next().flatten().or(hit.then_some(k as u32));
             match expanded {
-                Some(i) => {
-                    let prior = prior.unwrap();
-                    items.extend(prior.items(&prior.instances[i as usize]))
-                }
+                Some(i) => recorded_items.extend(&prior.unwrap().instances[i as usize].items),
                 None => items.extend(reached.materialized.items(instance)?),
             }
         }
@@ -738,12 +738,12 @@ impl CheckProduct {
         let files = reach
             .map(|_| crate::reach::files_digest(self))
             .transpose()?;
-        let recorded = prior
-            .filter(|p| hit && Some(p.files) == files)
-            .map(|p| p.sources);
+        let same_files = prior.is_some_and(|p| Some(p.files) == files);
+        let recorded = prior.filter(|_| hit && same_files).map(|p| p.sources);
+        let rows = || self.link_rows(prior, &recorded_items, &items, same_files);
         let source_rows = match recorded {
             Some(_) => None,
-            None => Some(self.source_rows(&items)?),
+            None => Some(rows()?),
         };
         let sources = match (&source_rows, recorded) {
             (Some(rows), _) => crate::reach::sources_digest(self, rows)?,
@@ -795,6 +795,7 @@ impl CheckProduct {
                 &table.closures,
                 &link,
                 (sources, files.expect("a record is drafted with its reach")),
+                source_rows.as_deref().unwrap_or_default(),
             )? as u64;
         }
         let entry_plan = crate::native_entry::Plan::new(
@@ -816,7 +817,7 @@ impl CheckProduct {
             sources,
             || match &source_rows {
                 Some(rows) => self.source_map(rows),
-                None => self.source_map(&self.source_rows(&items)?),
+                None => self.source_map(&rows()?),
             },
             inputs.toolchain.image,
             inputs.recipe.clone(),

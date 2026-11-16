@@ -10,6 +10,42 @@ impl CheckProduct {
         self.source_map(&self.source_rows(&items)?)
     }
 
+    /// The rows of a link's items: those of `prior`'s items at `recorded`
+    /// (path indices) borrowed from the record where the record's place still
+    /// holds, the rest and `items` found. A recorded place holds when its file
+    /// is the image's, which the record's key names, or when the request's
+    /// files are the record's (`same_files`), which fixes every module and
+    /// offset. Each distinct item, in path order.
+    pub(crate) fn link_rows<'p>(
+        &self,
+        prior: Option<&'p crate::reach::Reach>,
+        recorded: &[u32],
+        items: &[&'p DefPath],
+        same_files: bool,
+    ) -> io::Result<Vec<SourceRow<'p>>> {
+        let mut rest = items.to_vec();
+        let mut rows = Vec::with_capacity(recorded.len());
+        if let Some(prior) = prior {
+            let request: BTreeSet<ModuleId> = self.files.iter().map(|f| f.module).collect();
+            for &i in recorded {
+                let path = &prior.paths[i as usize];
+                match prior.places[i as usize] {
+                    Some((module, file_offset)) if same_files || !request.contains(&module) => rows
+                        .push(SourceRow {
+                            path,
+                            module,
+                            file_offset,
+                        }),
+                    _ => rest.push(path),
+                }
+            }
+        }
+        rows.extend(self.source_rows(&rest)?);
+        rows.sort_unstable_by(|a, b| a.path.cmp(b.path));
+        rows.dedup_by(|a, b| a.path == b.path);
+        Ok(rows)
+    }
+
     /// Each distinct item, in path order, with its module and file offset.
     pub(crate) fn source_rows<'p>(&self, items: &[&'p DefPath]) -> io::Result<Vec<SourceRow<'p>>> {
         hirsel_core_ids::published::catch_io(|| {
@@ -49,6 +85,7 @@ impl CheckProduct {
                 items: BTreeMap::new(),
             };
             let mut files = BTreeMap::new();
+            let mut items = Vec::with_capacity(rows.len());
             for row in rows {
                 let file = if let Some(&file) = files.get(&row.module) {
                     file
@@ -66,14 +103,16 @@ impl CheckProduct {
                     files.insert(row.module, file);
                     file
                 };
-                result.items.insert(
+                items.push((
                     row.path.clone(),
                     ItemSource {
                         file,
                         file_offset: row.file_offset,
                     },
-                );
+                ));
             }
+            // Rows are in path order and distinct: the map is built in bulk.
+            result.items = items.into_iter().collect();
             Ok(result)
         })
     }

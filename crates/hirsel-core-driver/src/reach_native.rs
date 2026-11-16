@@ -415,3 +415,71 @@ fn parallel_builds_launch_at_once() {
         assert_eq!(refused, 0, "{backend:?} release={optimize}: launches refused with ETXTBSY");
     }
 }
+
+/// Build `files` (name, source) as project `project` over std imaged into
+/// `dir/cache`, with debug lines, into `store`: the executable's bytes and its
+/// run's exit and stderr.
+fn reach_files_build(dir: &Path, project: &str, files: &[(&str, &str)], store: &str) -> (Vec<u8>, (Option<i32>, Vec<u8>)) {
+    let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let project = dir.join(project);
+    if project.exists() {
+        std::fs::remove_dir_all(&project).unwrap();
+    }
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(dir.join("cache")).unwrap();
+    for (name, source) in files {
+        std::fs::write(project.join(name), source).unwrap();
+    }
+    let request = CheckRequest::program(&project, &libraries, &dir.join(store).join("check")).unwrap();
+    let product = Driver::default()
+        .check_reachable_with_product(request, &dir.join("cache"), &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+    let mut options = native_options(Backend::Cranelift, dir);
+    options.store = dir.join(store).join("native");
+    options.output = dir.join(store).join("program");
+    options.debug_lines = true;
+    options.grant_mask = 1 << 4;
+    let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
+    let output = Command::new(&built.executable).output().unwrap();
+    (std::fs::read(&built.executable).unwrap(), (output.status.code(), output.stderr))
+}
+
+/// A link's source places (each reached item's file and offset) are the
+/// current sources', whichever the record that a primed store holds says:
+/// the record's place of an item in an image file is borrowed, the rest found
+/// again. Each step is built in one primed store and in an empty one, with
+/// debug lines, over a program in three files whose failure report names its
+/// line: blank lines above a reached item (its row holds, its place moves), an
+/// edit in a file the link reaches nothing in, a file added ahead of the
+/// others, an item added above a reached one, and an item moved between
+/// files. Oracle: the empty store's executable. Mutant: every recorded place
+/// borrowed, red (the blank lines move the reported line).
+#[test]
+#[ignore = "explicit native integration target"]
+fn reach_source_places_are_the_current_sources() {
+    const MAIN: &str = "pub fn main() -> Result[(), Exit] {\n    if string.starts_with(\"ab\", \"a\") && other.f(200u8) > 0u8 { Ok(()) } else { Error(Exit(status: 3)) }\n}\n";
+    const OTHER: &str = "pub fn f(x: u8) -> u8 {\n    x + 100u8\n}\n";
+    const SPARE: &str = "pub fn unused() -> u8 { 1u8 }\n";
+    let moved_main = "pub fn main() -> Result[(), Exit] {\n    if string.starts_with(\"ab\", \"a\") && f(200u8) > 0u8 { Ok(()) } else { Error(Exit(status: 3)) }\n}\nfn f(x: u8) -> u8 {\n    x + 100u8\n}\n";
+    let shifted = format!("pub fn g() -> u8 {{\n    2u8\n}}\n{OTHER}");
+    let blank = format!("\n\n\n{OTHER}");
+    let steps: [&[(&str, &str)]; 6] = [
+        &[("main.hirsel", MAIN), ("other.hirsel", OTHER), ("spare.hirsel", SPARE)],
+        &[("main.hirsel", MAIN), ("other.hirsel", &blank), ("spare.hirsel", SPARE)],
+        &[("main.hirsel", MAIN), ("other.hirsel", OTHER), ("spare.hirsel", "\n\npub fn unused() -> u8 { 2u8 }\n")],
+        &[("aaa.hirsel", SPARE), ("main.hirsel", MAIN), ("other.hirsel", OTHER), ("spare.hirsel", SPARE)],
+        &[("aaa.hirsel", SPARE), ("main.hirsel", MAIN), ("other.hirsel", &shifted), ("spare.hirsel", SPARE)],
+        &[("aaa.hirsel", SPARE), ("main.hirsel", moved_main), ("other.hirsel", SPARE), ("spare.hirsel", SPARE)],
+    ];
+    let lines = ["app@1/other.hirsel:2", "app@1/other.hirsel:5", "app@1/other.hirsel:2", "app@1/other.hirsel:2", "app@1/other.hirsel:5", "app@1/main.hirsel:5"];
+    let dir = tempfile::tempdir().unwrap();
+    for (n, files) in steps.iter().enumerate() {
+        let (primed, ran) = reach_files_build(dir.path(), "app", files, "primed");
+        let (fresh, expected) = reach_files_build(dir.path(), "app", files, &format!("fresh{n}"));
+        assert_eq!(ran.0, Some(101), "step {n}: {:?}", String::from_utf8_lossy(&ran.1));
+        assert!(String::from_utf8_lossy(&ran.1).contains(lines[n]), "step {n}: {}", String::from_utf8_lossy(&ran.1));
+        assert_eq!(ran, expected, "step {n}: what the program reports");
+        assert!(primed == fresh, "step {n}: the primed store's executable is a fresh store's");
+    }
+}

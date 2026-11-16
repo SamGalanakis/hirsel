@@ -20,7 +20,7 @@ use crate::store::Bare;
 use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const REACH_SCHEMA: u32 = 2;
+pub(crate) const REACH_SCHEMA: u32 = 3;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -107,6 +107,10 @@ pub(crate) struct Reach {
     /// [`files_digest`] of the request that wrote it: a hit whose request
     /// files are these has these sources.
     pub files: ContentHash,
+    /// Each path's source place in the link that wrote the record, by path
+    /// index: its module and file offset, for an item the link's source map
+    /// named.
+    pub places: Vec<Option<(ModuleId, u32)>>,
 }
 
 /// The record's bytes: each path once, every other path an index of it, in
@@ -124,6 +128,7 @@ struct Stored<P, R, E, N, C, L> {
     entry: L,
     sources: ContentHash,
     files: ContentHash,
+    places: Vec<Option<(ModuleId, u32)>>,
 }
 /// One table instance as stored: its identity's definition by index.
 #[derive(Serialize, Deserialize)]
@@ -190,6 +195,7 @@ pub(crate) fn decode_record(bytes: &[u8]) -> Option<Reach> {
         .collect::<Option<Vec<_>>>()?;
     let count = read.paths.len() as u32;
     let indices_in_range = read.rows.len() <= read.paths.len()
+        && read.places.len() == read.paths.len()
         && instances.iter().all(|e| e.items.iter().all(|&i| i < count));
     indices_in_range.then_some(Reach {
         paths: read.paths,
@@ -201,6 +207,7 @@ pub(crate) fn decode_record(bytes: &[u8]) -> Option<Reach> {
         entry: read.entry,
         sources: read.sources,
         files: read.files,
+        places: read.places,
     })
 }
 
@@ -459,6 +466,7 @@ pub(crate) fn publish(
     closures: &[Arc<Closure>],
     entry: &EntryLink,
     (sources, files): (ContentHash, ContentHash),
+    places: &[crate::native_sources::SourceRow<'_>],
 ) -> io::Result<usize> {
     use bincode::Options;
     let (rows, graph): (Vec<(&DefPath, &Row)>, &[Node]) = match draft {
@@ -502,6 +510,14 @@ pub(crate) fn publish(
             closures: &e.closures,
         })
         .collect();
+    let placed: Vec<(u32, (ModuleId, u32))> = places
+        .iter()
+        .map(|r| (index(r.path), (r.module, r.file_offset)))
+        .collect();
+    let mut places = vec![None; paths.len()];
+    for (i, place) in placed {
+        places[i as usize] = Some(place);
+    }
     let stored = Stored {
         schema: REACH_SCHEMA,
         rows: rows.iter().map(|(_, r)| *r).collect(),
@@ -512,6 +528,7 @@ pub(crate) fn publish(
         entry,
         sources,
         files,
+        places,
         paths,
     };
     let bytes = options().serialize(&stored).map_err(io::Error::other)?;

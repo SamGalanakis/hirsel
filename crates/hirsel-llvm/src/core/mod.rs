@@ -243,7 +243,10 @@ fn emit_ir_target_with_role_facts(
         observe_charge,
         facts,
         source,
-        provided_roles,
+        EmissionFacts {
+            roles: provided_roles,
+            ..EmissionFacts::default()
+        },
         &mut text,
     )?;
     Ok(text.finish())
@@ -329,6 +332,16 @@ fn release_last_name(t: u32, atomic: bool) -> String {
     )
 }
 
+#[derive(Clone, Copy, Default)]
+struct EmissionFacts<'a> {
+    roles: Option<&'a hirsel_core_ir::roles::Facts>,
+    neutral: Option<&'a BTreeSet<hirsel_core_ids::ContentHash>>,
+}
+#[cfg(hirsel_lazy_core)]
+pub(crate) fn step_neutral_program(modules: &[&Module]) -> BTreeSet<hirsel_core_ids::ContentHash> {
+    steps::program_neutral(modules)
+}
+
 /// Lower one CoreIR module, item by item in module order, into `sink`.
 fn emit_module(
     module: &Module,
@@ -336,7 +349,7 @@ fn emit_module(
     observe_charge: bool,
     facts: bool,
     source: SourceEmission,
-    provided_roles: Option<&hirsel_core_ir::roles::Facts>,
+    provided: EmissionFacts<'_>,
     sink: &mut dyn Sink,
 ) -> Result<()> {
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
@@ -457,14 +470,15 @@ fn emit_module(
     let mut items = Items::default();
     let mut next_scope = alias::private_steps(sink);
     let failures = failure::Failures::new(module);
+    let step_neutral = steps::neutral_functions(module, provided.neutral);
     let debug = if source.debug_lines {
         sites::debug_plan(module, &failures, &mut next_scope, sink)
     } else {
         module.functions.iter().map(|_| None).collect()
     };
     let local_roles =
-        (facts && provided_roles.is_none()).then(|| hirsel_core_ir::roles::Facts::new(module));
-    let role_facts = provided_roles.or(local_roles.as_ref()).filter(|_| facts);
+        (facts && provided.roles.is_none()).then(|| hirsel_core_ir::roles::Facts::new(module));
+    let role_facts = provided.roles.or(local_roles.as_ref()).filter(|_| facts);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
@@ -517,6 +531,8 @@ fn emit_module(
             address_slots: values::address_slots(body, &flow),
             step_labels: Default::default(),
             unchecked_steps: false,
+            precharge: None,
+            step_neutral: &step_neutral,
             step_counter: None,
             neutral_step_call: false,
             aliases,
@@ -588,7 +604,7 @@ fn emit_module(
             e.step_counter = Some(counter);
             e.reload_steps();
         }
-        let step_loops = steps::loops(module, body, e.constants);
+        let step_loops = steps::loops(module, body, e.constants, &step_neutral);
         if !step_loops.is_empty() {
             // Both loop copies define the same source values and addresses.
             // Entry allocas give mem2reg their joins before ordinary O3 runs.
@@ -612,11 +628,7 @@ fn emit_module(
         }
         let step_ends = step_loops
             .iter()
-            .map(|_| {
-                let slot = e.fresh();
-                e.sink.alloca(slot, &Type::I64, 8);
-                slot
-            })
+            .map(|_| e.step_window())
             .collect::<Vec<_>>();
         // A constant is a literal at each use: it has no effects or operands, and
         // a value defined once for the whole function would be live, and spilled,
@@ -727,6 +739,7 @@ pub(crate) fn emit_native_module_in_context(
     roles: &hirsel_core_ir::roles::Facts,
     observe_charge: bool,
     debug_lines: bool,
+    neutral: &BTreeSet<hirsel_core_ids::ContentHash>,
 ) -> Result<crate::construction::NativeModule> {
     native_module(
         module,
@@ -738,7 +751,10 @@ pub(crate) fn emit_native_module_in_context(
             relocatable_sites: true,
             debug_lines,
         },
-        Some(roles),
+        EmissionFacts {
+            roles: Some(roles),
+            neutral: Some(neutral),
+        },
     )
 }
 
@@ -749,7 +765,7 @@ fn native_module(
     context: std::rc::Rc<crate::construction::Context>,
     observe_charge: bool,
     source: SourceEmission,
-    roles: Option<&hirsel_core_ir::roles::Facts>,
+    provided: EmissionFacts<'_>,
 ) -> Result<crate::construction::NativeModule> {
     let facts = facts_enabled();
     let mut native = sink::native::NativeSink::new(context);
@@ -759,7 +775,7 @@ fn native_module(
         observe_charge,
         facts,
         source,
-        roles,
+        provided,
         &mut native,
     )?;
     if let Some(dir) = std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE") {
@@ -767,7 +783,17 @@ fn native_module(
             std::path::Path::new(&dir),
             module,
             &native.print().map_err(Error::Llvm)?,
-            |text| emit_module(module, target, observe_charge, facts, source, roles, text),
+            |text| {
+                emit_module(
+                    module,
+                    target,
+                    observe_charge,
+                    facts,
+                    source,
+                    provided,
+                    text,
+                )
+            },
         )?;
     }
     native.finish().map_err(Error::Llvm)
@@ -953,7 +979,14 @@ fn emit_object_site_binding(
     #[cfg(hirsel_lazy_core)]
     {
         let context = std::rc::Rc::new(crate::construction::Context::new().map_err(Error::Llvm)?);
-        let native = native_module(module, target, context, observe_charge, source, None)?;
+        let native = native_module(
+            module,
+            target,
+            context,
+            observe_charge,
+            source,
+            EmissionFacts::default(),
+        )?;
         crate::loader::compile_module(native, matches!(opt, Optimization::Speed), target)
             .map_err(Error::Llvm)
     }
@@ -1096,6 +1129,8 @@ struct FunctionEmitter<'a> {
     address_slots: Vec<bool>,
     step_labels: std::collections::BTreeMap<usize, Label>,
     unchecked_steps: bool,
+    precharge: Option<steps::Precharge>,
+    step_neutral: &'a [bool],
     step_counter: Option<Value>,
     neutral_step_call: bool,
     sink: &'a mut dyn Sink,
@@ -1323,7 +1358,7 @@ impl FunctionEmitter<'_> {
     fn branch_failure(&mut self, flag: &Value, fail: Option<BlockId>, cause: Option<u8>) {
         let n = self.counter();
         let ok = Label::new("ok", n);
-        if let (None, Some(fail)) = (cause, fail) {
+        if let (None, Some(fail), None) = (cause, fail, &self.precharge) {
             // The callee has already recorded its cause. This edge has no
             // arguments or cleanup to perform before the existing successor.
             self.cond(flag, Label::block(fail.0), ok);
@@ -1331,6 +1366,7 @@ impl FunctionEmitter<'_> {
             let bad = Label::new("bad", n);
             self.cond(flag, bad, ok);
             self.block(bad);
+            self.step_refund();
             if let Some(cause) = cause {
                 self.raise(cause);
             }
@@ -1593,8 +1629,10 @@ impl FunctionEmitter<'_> {
                 self.put(result, &x);
             }
             Inst::Call { call } => {
-                self.neutral_step_call =
-                    steps::pure(self.module, self.body, self.constants, inst, true);
+                self.neutral_step_call = match self.body.calls[call.index()].callee {
+                    Callee::Direct(f) if self.precharge.is_some() => self.step_neutral[f.index()],
+                    _ => steps::pure(self.module, self.body, self.constants, inst, true),
+                };
                 let result = self.call_site(&self.body.calls[call.index()]);
                 self.neutral_step_call = false;
                 result?;
@@ -1706,6 +1744,7 @@ impl FunctionEmitter<'_> {
                 }
             }
             Terminator::Return(values) => {
+                self.step_refund();
                 let xs = values
                     .get(&self.body.pools.values)
                     .unwrap()
@@ -1715,8 +1754,12 @@ impl FunctionEmitter<'_> {
                 self.return_values(&xs);
             }
             Terminator::Unreachable => self.effect(Operation::Unreachable),
-            Terminator::Propagate => self.return_failure(),
+            Terminator::Propagate => {
+                self.step_refund();
+                self.return_failure();
+            }
             Terminator::Raise { cause, cleanup } => {
+                self.step_refund();
                 match cause {
                     RaiseCause::Unwrap => self.raise(3),
                     RaiseCause::Bounds => self.raise(1),

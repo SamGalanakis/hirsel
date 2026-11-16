@@ -764,3 +764,170 @@ fn probe(s: u64) -> u64 {
         }
     }
 }
+
+#[test]
+fn fallible_step_regions_refund_partial_work_and_check_strided_remainders() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let source = r#"
+fn probe(s: u64) -> u64 {
+    match (bound steps s {
+        let first = result.unwrap(isolate(fn() -> u64 {
+            let mut xs: List[u64] = result.unwrap(list.with_capacity(8))
+            for i in 0u64 .. 8u64 {
+                result.unwrap(list.push(mut xs, i))
+                let _ = 100u64 / (5u64 - i)
+            }
+            list.len(xs)
+        }))
+        let n = match take first { Ok(n) => n, Error(take cs) => 19u64 }
+        for _ in 0u64 .. 7u64 {}
+        n
+    }) { Ok(n) => 1000 + n, Error(e) => e.steps }
+}
+fn boundary_overflow(s: u64) -> u64 {
+    match (bound steps s {
+        for _ in 0u64 .. 65535u64 {}
+        let mut k = 18446744073709551612u64
+        while k <= 18446744073709551615u64 { k += 2u64 }
+        k
+    }) { Ok(n) => n, Error(e) => e.steps }
+}
+fn resetting(s: u64) -> u64 {
+    match (bound steps s {
+        let mut k = 1u64
+        let initial = k
+        while k <= 10u64 { k = initial + 1u64 }
+        k
+    }) { Ok(n) => 1000 + n, Error(e) => e.steps }
+}
+fn strided(s: u64, stride: u64) -> u64 {
+    match (bound steps s {
+        let mut xs: List[u64] = result.unwrap(list.with_capacity(16))
+        let mut k = 1u64
+        while k <= 10u64 {
+            result.unwrap(list.push(mut xs, k))
+            k += stride
+        }
+        list.len(xs)
+    }) { Ok(n) => 1000 + n, Error(e) => e.steps }
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower_with_core(source, None, &root);
+    let mut cases = Vec::new();
+    for s in 0..=64 {
+        cases.push(Case {
+            function: names["probe"],
+            args: vec![s],
+            limit: 1_000_000,
+            injection: None,
+        });
+        cases.push(Case {
+            function: names["resetting"],
+            args: vec![s],
+            limit: 1_000_000,
+            injection: None,
+        });
+        for stride in [0, 1, 2, 3, u64::MAX] {
+            cases.push(Case {
+                function: names["strided"],
+                args: vec![s, stride],
+                limit: 1_000_000,
+                injection: None,
+            });
+        }
+    }
+    for s in 65536..=65540 {
+        cases.push(Case {
+            function: names["boundary_overflow"],
+            args: vec![s],
+            limit: 1_000_000,
+            injection: None,
+        });
+    }
+    assert_eq!(
+        eval::run(&module, names["probe"], &[64], 1_000_000).outcome,
+        eval::Outcome::Returned(vec![1019])
+    );
+    // isolate call + user entry + two allocation calls, five full trips
+    // at three Steps, two calls in the failing trip, outer unwrap, seven latches.
+    // 1 + 1 + 2 + 5*3 + 2 + 1 + 7 = 29. Failure is caught before the tail.
+    for (s, want) in [(28, 28), (29, 1019)] {
+        assert_eq!(
+            eval::run(&module, names["probe"], &[s], 1_000_000).outcome,
+            eval::Outcome::Returned(vec![want])
+        );
+    }
+    // Two setup calls, three Steps per checked-stride trip, then list.len.
+    for (s, stride, want) in [(33, 1, 1010), (18, 2, 1005), (15, 3, 1004)] {
+        assert_eq!(
+            eval::run(&module, names["strided"], &[s, stride], 1_000_000).outcome,
+            eval::Outcome::Returned(vec![want])
+        );
+    }
+    for facts in [false, true] {
+        let ir = emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                    .unwrap();
+            let reports = execute_object(&module, &cases, "", "", optimization, Some(object));
+            for (case, report) in cases.iter().zip(reports) {
+                assert_eq!(
+                    report.outcome,
+                    eval::run(&module, case.function, &case.args, case.limit).outcome,
+                    "facts={facts}, function={:?}, args={:?}",
+                    case.function,
+                    case.args
+                );
+            }
+        }
+    }
+    let modules = module
+        .functions
+        .iter()
+        .enumerate()
+        .filter_map(|(root, f)| {
+            f.body.as_ref()?;
+            let mut unit = module.clone();
+            for (i, f) in unit.functions.iter_mut().enumerate() {
+                if i != root {
+                    f.body = None;
+                } else if let Some(body) = &mut f.body {
+                    body.inst_anchors.fill(None);
+                    for block in &mut body.blocks {
+                        block.anchor = None;
+                    }
+                }
+            }
+            Some(unit)
+        })
+        .collect::<Vec<_>>();
+    let facts = modules
+        .iter()
+        .map(hirsel_core_ir::roles::Facts::new)
+        .collect::<Vec<_>>();
+    let units = modules
+        .iter()
+        .zip(&facts)
+        .map(|(module, facts)| hirsel_llvm_lazy::Unit::Core {
+            module,
+            facts,
+            observe_charge: false,
+            debug_lines: false,
+        })
+        .collect::<Vec<_>>();
+    let exports = ["probe", "strided", "resetting", "boundary_overflow"]
+        .map(|name| symbol(&module, names[name]));
+    let object = hirsel_llvm_lazy::emit_program(&units, &exports).unwrap();
+    let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
+    for (case, report) in cases.iter().zip(reports) {
+        assert_eq!(
+            report.outcome,
+            eval::run(&module, case.function, &case.args, case.limit).outcome,
+            "split units, function={:?}, args={:?}",
+            case.function,
+            case.args
+        );
+    }
+}

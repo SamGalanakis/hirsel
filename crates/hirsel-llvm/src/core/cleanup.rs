@@ -56,6 +56,8 @@ pub(super) fn glue_emitter<'a>(
         address_slots: Vec::new(),
         step_labels: Default::default(),
         unchecked_steps: false,
+        precharge: None,
+        step_neutral: &[],
         step_counter: None,
         neutral_step_call: false,
         empty_bounds: empty::EmptyBounds::default(),

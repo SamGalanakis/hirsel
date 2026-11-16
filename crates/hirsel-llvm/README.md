@@ -39,6 +39,11 @@ Invariants:
   and synchronizes it at remaining calls and returns. Runtime calls may access
   Context through the current task, so the Context argument itself is not
   `noalias`.
+- Step batching uses a maximum path cost only when both the bound and slice
+  leave room before their boundary. Fast copies retain path progress and refund
+  unfinished work at every normal or failing exit. Calls qualify only when
+  release-wide body summaries prove no nested Steps or scheduling operation;
+  short windows execute the original checked path before any source effect.
 - Objects install 4 KiB stack probes, so native stack exhaustion is a run stop at a probed
   guard.
 - Variant tags are read and written only through `hirsel-core-layout`'s `read_case` and

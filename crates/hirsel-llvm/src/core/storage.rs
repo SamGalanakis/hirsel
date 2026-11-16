@@ -422,6 +422,9 @@ impl FunctionEmitter<'_> {
         self.block(success);
     }
     pub(super) fn step(&mut self, fail: Option<BlockId>) {
+        if self.prepaid_step() {
+            return;
+        }
         if self.unchecked_steps {
             return;
         }

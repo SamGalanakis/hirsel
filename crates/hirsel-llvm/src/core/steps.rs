@@ -1,5 +1,5 @@
-//! Exact step batching. Unchecked copies contain no failing or observable body
-//! operation; a short window executes one original checked trip.
+//! Exact step batching. A reservation covers the bound and the current slice.
+//! Fast copies refund their unexecuted suffix; short windows keep checked work.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,8 +12,9 @@ pub(super) struct Loop {
     yes: EdgeId,
     no: EdgeId,
     cost: u64,
-    index_slot: AddressId,
     constant: Option<(u64, u64)>,
+    stride: Stride,
+    inclusive: bool,
 }
 fn next(body: &Body, block: usize) -> Option<Vec<usize>> {
     let edge = |e: EdgeId| body.edges[e.index()].target.index();
@@ -22,6 +23,118 @@ fn next(body: &Body, block: usize) -> Option<Vec<usize>> {
         Terminator::Branch { yes, no, .. } => vec![edge(*yes), edge(*no)],
         _ => return None,
     })
+}
+#[derive(Clone, Copy)]
+enum Stride {
+    Constant(u64),
+    Value(ValueId),
+    Slot(AddressId, Ty),
+}
+fn root_slot(body: &Body, mut address: AddressId) -> Option<SlotId> {
+    loop {
+        match body.addresses[address.index()].base {
+            AddressBase::Slot(slot) => return Some(slot),
+            AddressBase::Address(parent) => address = parent,
+            AddressBase::Value(_) => return None,
+        }
+    }
+}
+fn writes(body: &Body, inst: &Inst, root: Option<SlotId>) -> bool {
+    let address = match *inst {
+        Inst::Store { address, .. } | Inst::SetCase { address, .. } => address,
+        Inst::Copy { to, .. } => to,
+        Inst::Grow { carrier, .. } => carrier,
+        _ => return false,
+    };
+    root_slot(body, address) == root
+}
+fn escapes(body: &Body, address: AddressId) -> bool {
+    let root = root_slot(body, address);
+    body.insts.iter().any(|inst| match *inst {
+        Inst::Pointer { address, .. } => root_slot(body, address) == root,
+        Inst::Call { call } => body.calls[call.index()]
+            .args
+            .get(&body.pools.args)
+            .unwrap()
+            .iter()
+            .any(|arg| matches!(arg, Arg::Address(a) if root_slot(body, *a) == root)),
+        _ => false,
+    })
+}
+fn read_index(
+    body: &Body,
+    value: ValueId,
+    index: ValueId,
+    slot: AddressId,
+    nodes: &BTreeSet<usize>,
+) -> bool {
+    value == index
+        || nodes.iter().any(|&b| {
+            body.blocks[b].insts.get(&body.insts).unwrap().iter().any(|i|
+        matches!(*i, Inst::Read { result, address, .. } if result == value && address == slot))
+        })
+}
+
+fn stride(
+    body: &Body,
+    value: ValueId,
+    constants: &[Option<u64>],
+    nodes: &BTreeSet<usize>,
+    header: usize,
+) -> Option<Stride> {
+    if let Some(n) = constants[value.index()] {
+        return (n != 0).then_some(Stride::Constant(n));
+    }
+    for &b in nodes {
+        for inst in body.blocks[b].insts.get(&body.insts).unwrap() {
+            if let Inst::Read {
+                result, address, ..
+            } = *inst
+                && result == value
+            {
+                if !local(body, address)
+                    || body.addresses[address.index()].steps.len != 0
+                    || escapes(body, address)
+                {
+                    return None;
+                }
+                let root = root_slot(body, address);
+                if nodes.iter().any(|&b| {
+                    body.blocks[b]
+                        .insts
+                        .get(&body.insts)
+                        .unwrap()
+                        .iter()
+                        .any(|i| writes(body, i, root))
+                }) {
+                    return None;
+                }
+                return Some(Stride::Slot(address, body.values[value.index()]));
+            }
+        }
+    }
+    let flow = flow::Flow::new(body);
+    let at = (header, 0);
+    let parameter = body.blocks[0]
+        .params
+        .get(&body.pools.values)
+        .unwrap()
+        .contains(&value);
+    if parameter {
+        return Some(Stride::Value(value));
+    }
+    // For a nonconstant value, use the defining read only. Computed in-trip
+    // strides need a separate invariant proof.
+    for (b, row) in body.blocks.iter().enumerate() {
+        for (n, inst) in row.insts.get(&body.insts).unwrap().iter().enumerate() {
+            if matches!(*inst, Inst::Read { result, .. } if result == value)
+                && flow.available((b, n), at)
+            {
+                return Some(Stride::Value(value));
+            }
+        }
+    }
+    None
 }
 fn local(body: &Body, mut address: AddressId) -> bool {
     loop {
@@ -107,6 +220,165 @@ pub(super) fn pure(
         _ => false,
     }
 }
+fn inert_field(
+    module: &Module,
+    field: &hirsel_core_layout::FieldTy,
+    seen: &mut BTreeSet<usize>,
+) -> bool {
+    use hirsel_core_layout::FieldTy::*;
+    match field {
+        Inline(t) => inert_drop(module, t.index(), seen),
+        Seq(e) | Array(e, _) => inert_field(module, e, seen),
+        Map(_, _) | Box(_) => false,
+        OwnFn | Handle(_) | Rc(_) | Arc(_) => false,
+        _ => true,
+    }
+}
+fn inert_drop(module: &Module, ty: usize, seen: &mut BTreeSet<usize>) -> bool {
+    if !seen.insert(ty) {
+        return true;
+    }
+    let shape = &module.types[ty];
+    if shape.finalizer.is_some() {
+        return false;
+    }
+    match &shape.body {
+        hirsel_core_layout::Body::Record(fs) => fs.iter().all(|f| inert_field(module, &f.ty, seen)),
+        hirsel_core_layout::Body::Variant(cs) => cs
+            .iter()
+            .flat_map(|c| &c.fields)
+            .all(|f| inert_field(module, &f.ty, seen)),
+    }
+}
+fn neutral_runtime(op: RtOp) -> bool {
+    matches!(
+        op,
+        RtOp::DestId
+            | RtOp::CompareBytes
+            | RtOp::HashBytes
+            | RtOp::CauseNext
+            | RtOp::CauseValue
+            | RtOp::ArgsLen
+            | RtOp::ArgsGet
+    )
+}
+fn neutral_inst(module: &Module, body: &Body, inst: &Inst, neutral: &[bool]) -> bool {
+    match *inst {
+        Inst::Step { .. } | Inst::Share { .. } | Inst::Release { .. } | Inst::TryUnwrap { .. } => {
+            false
+        }
+        Inst::Drop { ty, .. } => inert_drop(module, ty.index(), &mut BTreeSet::new()),
+        Inst::Call { call } => match body.calls[call.index()].callee {
+            Callee::Direct(f) => neutral[f.index()],
+            Callee::Runtime(op) => neutral_runtime(op),
+            Callee::Indirect(_) => false,
+        },
+        _ => true,
+    }
+}
+pub(super) fn neutral_functions(
+    module: &Module,
+    program: Option<&BTreeSet<hirsel_core_ids::ContentHash>>,
+) -> Vec<bool> {
+    let mut neutral = module
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            program.is_some_and(|known| known.contains(&module.code_identity(FuncId(i as u32))))
+        })
+        .collect::<Vec<_>>();
+    loop {
+        let mut changed = false;
+        for (i, f) in module.functions.iter().enumerate() {
+            if !neutral[i]
+                && f.body.as_ref().is_some_and(|b| {
+                    b.insts
+                        .iter()
+                        .all(|inst| neutral_inst(module, b, inst, &neutral))
+                })
+            {
+                neutral[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return neutral;
+        }
+    }
+}
+#[cfg(hirsel_lazy_core)]
+pub(super) fn program_neutral(modules: &[&Module]) -> BTreeSet<hirsel_core_ids::ContentHash> {
+    let mut known = BTreeSet::new();
+    loop {
+        let before = known.len();
+        for module in modules {
+            let neutral = neutral_functions(module, Some(&known));
+            for (i, accepted) in neutral.iter().enumerate() {
+                if *accepted {
+                    known.insert(module.code_identity(FuncId(i as u32)));
+                }
+            }
+        }
+        if known.len() == before {
+            return known;
+        }
+    }
+}
+fn region_inst(module: &Module, body: &Body, inst: &Inst, neutral: &[bool]) -> bool {
+    matches!(inst, Inst::Step { .. }) || neutral_inst(module, body, inst, neutral)
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Window {
+    pub end: Local,
+    spent: Local,
+    charged: Local,
+}
+#[derive(Clone)]
+pub(super) struct Precharge {
+    spent: Value,
+    charged: Value,
+}
+impl FunctionEmitter<'_> {
+    pub(super) fn step_window(&mut self) -> Window {
+        let mut slot = || {
+            let p = self.fresh();
+            self.sink.alloca(p, &Type::I64, 8);
+            p
+        };
+        Window {
+            end: slot(),
+            spent: slot(),
+            charged: slot(),
+        }
+    }
+    fn reserve_progress(&mut self, window: Window, charge: &Value) {
+        self.store(&Type::I64, &int(0), &Value::Local(window.spent), 8);
+        self.store(&Type::I64, charge, &Value::Local(window.charged), 8);
+    }
+    pub(super) fn step_refund(&mut self) {
+        let Some(progress) = self.precharge.clone() else {
+            return;
+        };
+        let spent = self.load(&Type::I64, &progress.spent, 8);
+        let charged = self.load(&Type::I64, &progress.charged, 8);
+        let refund = self.bin(Binary::Sub, &Type::I64, &charged, &spent);
+        let counter = self.step_counter();
+        let left = self.load_steps(&counter);
+        let left = self.bin(Binary::Add, &Type::I64, &left, &refund);
+        self.store_steps(&left, &counter);
+    }
+    pub(super) fn prepaid_step(&mut self) -> bool {
+        let Some(progress) = self.precharge.clone() else {
+            return false;
+        };
+        let old = self.load(&Type::I64, &progress.spent, 8);
+        let next = self.bin(Binary::Add, &Type::I64, &old, &int(1));
+        self.store(&Type::I64, &next, &progress.spent, 8);
+        true
+    }
+}
 fn path_cost(
     module: &Module,
     body: &Body,
@@ -115,6 +387,7 @@ fn path_cost(
     block: usize,
     state: &mut BTreeMap<usize, Option<u64>>,
     known: &BTreeMap<usize, Loop>,
+    neutral: &[bool],
 ) -> Option<u64> {
     if block == header {
         return Some(0);
@@ -125,7 +398,9 @@ fn path_cost(
             state.insert(node, Some(0));
         }
         let after = body.edges[child.no.index()].target.index();
-        let tail = path_cost(module, body, constants, header, after, state, known)?;
+        let tail = path_cost(
+            module, body, constants, header, after, state, known, neutral,
+        )?;
         return child.cost.checked_mul(trips)?.checked_add(tail);
     }
     if let Some(cost) = state.get(&block) {
@@ -133,15 +408,24 @@ fn path_cost(
     }
     state.insert(block, None);
     let insts = body.blocks[block].insts.get(&body.insts)?;
-    if !insts.iter().all(|i| pure(module, body, constants, i, true)) {
+    if !insts.iter().all(|i| region_inst(module, body, i, neutral)) {
         return None;
     }
-    let mut tails = next(body, block)?.into_iter();
-    let first = path_cost(module, body, constants, header, tails.next()?, state, known)?;
-    for successor in tails {
-        if path_cost(module, body, constants, header, successor, state, known)? != first {
-            return None;
-        }
+    let successors = next(body, block).or_else(|| {
+        matches!(
+            body.terminators[block],
+            Terminator::Return(_)
+                | Terminator::Raise { .. }
+                | Terminator::Propagate
+                | Terminator::Unreachable
+        )
+        .then(Vec::new)
+    })?;
+    let mut first = 0;
+    for successor in successors {
+        first = first.max(path_cost(
+            module, body, constants, header, successor, state, known, neutral,
+        )?);
     }
     let cost = first.checked_add(
         insts
@@ -152,7 +436,12 @@ fn path_cost(
     state.insert(block, Some(cost));
     Some(cost)
 }
-pub(super) fn loops(module: &Module, body: &Body, constants: &[Option<u64>]) -> Vec<Loop> {
+pub(super) fn loops(
+    module: &Module,
+    body: &Body,
+    constants: &[Option<u64>],
+    neutral: &[bool],
+) -> Vec<Loop> {
     let mut known = BTreeMap::new();
     loop {
         let before = known.len();
@@ -169,7 +458,7 @@ pub(super) fn loops(module: &Module, body: &Body, constants: &[Option<u64>]) -> 
                     },
                     Inst::Compare {
                         result: condition,
-                        op: CompareOp::Lt,
+                        op: comparison @ (CompareOp::Lt | CompareOp::Le),
                         left,
                         right: limit,
                     },
@@ -200,8 +489,9 @@ pub(super) fn loops(module: &Module, body: &Body, constants: &[Option<u64>]) -> 
             }
             let entry = body.edges[yes.index()].target.index();
             let mut state = BTreeMap::new();
-            let Some(cost) = path_cost(module, body, constants, header, entry, &mut state, &known)
-            else {
+            let Some(cost) = path_cost(
+                module, body, constants, header, entry, &mut state, &known, neutral,
+            ) else {
                 continue;
             };
             if cost == 0 {
@@ -212,18 +502,64 @@ pub(super) fn loops(module: &Module, body: &Body, constants: &[Option<u64>]) -> 
             if nodes.contains(&body.edges[no.index()].target.index()) {
                 continue;
             }
-            // The one induction update is i+1, at every return to the head. No
-            // source break, return, nested cycle, or nonuniform path was admitted.
+            // Every back edge advances by the same positive stride. A checked
+            // overflow exits through the refund path; zero strides stay checked.
+            let inclusive = *comparison == CompareOp::Le;
+            if escapes(body, *index_slot) {
+                continue;
+            }
+            let mut delta = None;
             let mut updates = Vec::new();
             let mut valid = true;
             for &block in &nodes {
                 for inst in body.blocks[block].insts.get(&body.insts).unwrap() {
+                    if !matches!(inst, Inst::Store { .. })
+                        && writes(body, inst, root_slot(body, *index_slot))
+                    {
+                        valid = false;
+                    }
                     if let Inst::Store { address, value } = *inst {
-                        if address == *index_slot {
-                            let increment = body.blocks[block].insts.get(&body.insts).unwrap().iter().any(|i|
-                            matches!(*i, Inst::IntArith { result, flag: None, op: ArithOp::Add, mode: ArithMode::Wrapping, left, right }
-                                if result == value && left == *index && constants[right.index()] == Some(1)));
-                            if !increment {
+                        if root_slot(body, address) == root_slot(body, *index_slot) {
+                            if address != *index_slot {
+                                valid = false;
+                                continue;
+                            }
+                            let increment = body.blocks[block]
+                                .insts
+                                .get(&body.insts)
+                                .unwrap()
+                                .iter()
+                                .find_map(|i| match *i {
+                                    Inst::IntArith {
+                                        result,
+                                        flag: None,
+                                        op: ArithOp::Add,
+                                        mode: ArithMode::Wrapping,
+                                        left,
+                                        right,
+                                    } if result == value
+                                        && read_index(body, left, *index, *index_slot, &nodes)
+                                        && constants[right.index()] == Some(1)
+                                        && !inclusive =>
+                                    {
+                                        Some(right)
+                                    }
+                                    Inst::Binary {
+                                        result,
+                                        op: BinaryOp::Add,
+                                        left,
+                                        right,
+                                        ..
+                                    } if result == value
+                                        && read_index(body, left, *index, *index_slot, &nodes) =>
+                                    {
+                                        Some(right)
+                                    }
+                                    _ => None,
+                                });
+                            if let Some(increment) = increment {
+                                delta = Some(increment);
+                            } else {
                                 valid = false;
                             }
                             updates.push(block);
@@ -243,6 +579,10 @@ pub(super) fn loops(module: &Module, body: &Body, constants: &[Option<u64>]) -> 
             if !valid || updates.len() != 1 {
                 continue;
             }
+            let Some(stride) = delta.and_then(|v| stride(body, v, constants, &nodes, header))
+            else {
+                continue;
+            };
             let update = updates[0];
             // Every back edge passes the induction update, including a source
             // continue. Reject a path that could repeat a trip without advancing.
@@ -281,7 +621,18 @@ pub(super) fn loops(module: &Module, body: &Body, constants: &[Option<u64>]) -> 
             let constant = if fixed {
                 initial
                     .zip(constants[limit.index()])
-                    .and_then(|(start, end)| Some((start, end.checked_sub(start)?)))
+                    .and_then(|(start, end)| {
+                        let Stride::Constant(step) = stride else {
+                            return None;
+                        };
+                        let gap = end.checked_sub(start)?;
+                        let count = if inclusive {
+                            (gap / step).checked_add(1)?
+                        } else {
+                            gap / step + u64::from(gap % step != 0)
+                        };
+                        Some((start, count))
+                    })
                     .filter(|(_, trips)| cost.checked_mul(*trips).is_some())
             } else {
                 None
@@ -296,8 +647,9 @@ pub(super) fn loops(module: &Module, body: &Body, constants: &[Option<u64>]) -> 
                     yes,
                     no,
                     cost,
-                    index_slot: *index_slot,
                     constant,
+                    stride,
+                    inclusive,
                 },
             );
         }
@@ -351,7 +703,7 @@ impl FunctionEmitter<'_> {
             self.zext(&t, &v, &Type::I64)
         }
     }
-    pub(super) fn step_dispatch(&mut self, plan: &Loop, end: Local, number: usize) {
+    pub(super) fn step_dispatch(&mut self, plan: &Loop, window: Window, number: usize) {
         let condition = match self.body.terminators[plan.header] {
             Terminator::Branch { condition, .. } => condition,
             _ => unreachable!(),
@@ -366,37 +718,52 @@ impl FunctionEmitter<'_> {
         self.block(reserve);
         let index = self.step_word(plan.index);
         let limit = self.step_word(plan.limit);
-        let trips = self.bin(Binary::Sub, &Type::I64, &limit, &index);
+        let gap = self.bin(Binary::Sub, &Type::I64, &limit, &index);
+        let stride = match plan.stride {
+            Stride::Constant(n) => int(n),
+            Stride::Value(v) => self.step_word(v),
+            Stride::Slot(a, t) => {
+                let pointer = self.address(a);
+                let word = self.load(&ty(t), &pointer, 1);
+                if ty(t) == Type::I64 {
+                    word
+                } else {
+                    self.zext(&ty(t), &word, &Type::I64)
+                }
+            }
+        };
+        let nonzero = self.cmp(Predicate::Ne, &Type::I64, &stride, &int(0));
+        let divisor = self.select(&Type::I64, &nonzero, &stride, &int(1));
+        let quotient = self.bin(Binary::UDiv, &Type::I64, &gap, &divisor);
+        let trips = if plan.inclusive {
+            self.bin(Binary::Add, &Type::I64, &quotient, &int(1))
+        } else {
+            let rem = self.bin(Binary::URem, &Type::I64, &gap, &divisor);
+            let extra = self.cmp(Predicate::Ne, &Type::I64, &rem, &int(0));
+            let extra = self.zext(&Type::I1, &extra, &Type::I64);
+            self.bin(Binary::Add, &Type::I64, &quotient, &extra)
+        };
+        let count_fits = self.cmp(Predicate::Ne, &Type::I64, &trips, &int(0));
+        let eligible = self.bin(Binary::And, &Type::I1, &nonzero, &count_fits);
         let counter = self.step_counter();
         let before = self.load_steps(&counter);
-        let quota = self.bin(Binary::UDiv, &Type::I64, &before, &int(plan.cost));
-        let full = if let Some((start, count)) = plan.constant {
-            let first = self.cmp(Predicate::Eq, &Type::I64, &index, &int(start));
-            let enough = self.cmp(Predicate::Uge, &Type::I64, &quota, &int(count));
-            self.bin(Binary::And, &Type::I1, &first, &enough)
-        } else {
-            self.cmp(Predicate::Uge, &Type::I64, &quota, &trips)
-        };
+        // Equality must take checked execution: its last Step yields before
+        // the following source effect. A fast region never reaches that boundary.
+        let spare = self.cmp(Predicate::Sgt, &Type::I64, &before, &int(1));
+        let room = self.bin(Binary::Sub, &Type::I64, &before, &int(1));
+        let room = self.select(&Type::I64, &spare, &room, &int(0));
+        let quota = self.bin(Binary::UDiv, &Type::I64, &room, &int(plan.cost));
+        let quota = self.select(&Type::I64, &eligible, &quota, &int(0));
+        let full = self.cmp(Predicate::Uge, &Type::I64, &quota, &trips);
+        let full = self.bin(Binary::And, &Type::I1, &full, &eligible);
         let whole = Label::new("step_whole", n);
         let partial = Label::new("step_partial", n);
         self.likely(&full, whole, partial);
         self.block(whole);
-        if let Some((start, _)) = plan.constant {
-            let slot = self.address(plan.index_slot);
-            self.store(
-                &ty(self.body.values[plan.index.index()]),
-                &int(start),
-                &slot,
-                1,
-            );
-        }
-        let charge = if let Some((_, count)) = plan.constant {
-            int(count * plan.cost)
-        } else {
-            self.bin(Binary::Mul, &Type::I64, &trips, &int(plan.cost))
-        };
+        let charge = self.bin(Binary::Mul, &Type::I64, &trips, &int(plan.cost));
         let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
         self.store_steps(&after, &counter);
+        self.reserve_progress(window, &charge);
         self.br(version_label(
             number,
             self.body.blocks.len(),
@@ -410,13 +777,15 @@ impl FunctionEmitter<'_> {
         self.cond(&any, chunk, checked);
         self.emit_edge(checked, plan.yes);
         self.block(chunk);
-        let fits = self.cmp(Predicate::Ult, &Type::I64, &quota, &trips);
-        let quota = self.select(&Type::I64, &fits, &quota, &trips);
-        let stop = self.bin(Binary::Add, &Type::I64, &index, &quota);
-        self.store(&Type::I64, &stop, &Value::Local(end), 8);
+        // This edge has a nonzero quota below trips. Its stop index fits;
+        // a whole remaining loop uses the original checked induction instead.
+        let span = self.bin(Binary::Mul, &Type::I64, &quota, &stride);
+        let stop = self.bin(Binary::Add, &Type::I64, &index, &span);
+        self.store(&Type::I64, &stop, &Value::Local(window.end), 8);
         let charge = self.bin(Binary::Mul, &Type::I64, &quota, &int(plan.cost));
         let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
         self.store_steps(&after, &counter);
+        self.reserve_progress(window, &charge);
         self.br(version_label(
             number,
             self.body.blocks.len(),
@@ -427,7 +796,7 @@ impl FunctionEmitter<'_> {
     pub(super) fn step_versions(
         &mut self,
         plan: &Loop,
-        end: Local,
+        window: Window,
         number: usize,
         location: impl Fn(Option<Anchor>) -> Option<usize>,
     ) -> Result<()> {
@@ -438,13 +807,17 @@ impl FunctionEmitter<'_> {
                 .map(|&b| (b, version_label(number, self.body.blocks.len(), b, full)))
                 .collect();
             self.unchecked_steps = true;
+            self.precharge = Some(Precharge {
+                spent: Value::Local(window.spent),
+                charged: Value::Local(window.charged),
+            });
             let n = self.counter();
             let done = Label::new("step_chunk_done", n);
             for &block in &plan.nodes {
                 self.block(self.step_label(block));
                 let row = &self.body.blocks[block];
                 for (offset, inst) in row.insts.get(&self.body.insts).unwrap().iter().enumerate() {
-                    if !matches!(inst, Inst::Const { .. } | Inst::Step { .. }) {
+                    if !matches!(inst, Inst::Const { .. }) {
                         self.debug_location =
                             location(self.body.inst_anchors[row.insts.start as usize + offset]);
                         self.inst(inst, row.insts.start as usize + offset)?;
@@ -462,7 +835,7 @@ impl FunctionEmitter<'_> {
                         self.cmp(Predicate::Ne, &Type::I8, &condition, &int(0))
                     } else {
                         let index = self.step_word(plan.index);
-                        let limit = self.load(&Type::I64, &Value::Local(end), 8);
+                        let limit = self.load(&Type::I64, &Value::Local(window.end), 8);
                         self.cmp(Predicate::Ult, &Type::I64, &index, &limit)
                     };
                     let yes = self.edge_label(plan.yes);
@@ -475,7 +848,8 @@ impl FunctionEmitter<'_> {
             self.step_labels.clear();
             self.unchecked_steps = false;
             self.block(done);
-            self.step_settle_chunk();
+            self.step_refund();
+            self.precharge = None;
             if full {
                 let out = self.edge(plan.no);
                 self.br(out);

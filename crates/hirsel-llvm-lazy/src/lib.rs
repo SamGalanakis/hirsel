@@ -52,6 +52,14 @@ pub fn emit_program_for_target(
         .any(|unit| matches!(unit, Unit::Core { .. }))
         .then(|| construction::Context::new().map(std::rc::Rc::new))
         .transpose()?;
+    let modules = units
+        .iter()
+        .filter_map(|unit| match unit {
+            Unit::Core { module, .. } => Some(*module),
+            Unit::Text(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let neutral = core::step_neutral_program(&modules);
     let mut lowered = Vec::with_capacity(units.len());
     for unit in units {
         match unit {
@@ -68,6 +76,7 @@ pub fn emit_program_for_target(
                     facts,
                     *observe_charge,
                     *debug_lines,
+                    &neutral,
                 )
                 .map_err(|e| e.to_string())?,
             )),

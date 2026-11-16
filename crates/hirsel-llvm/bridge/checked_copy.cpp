@@ -196,8 +196,39 @@ static bool stepWord(Instruction &I, Value *Context, const DataLayout &DL) {
   int64_t Offset = 0;
   return GetPointerBaseWithConstantOffset(P, Offset, DL) == Context && Offset == 16;
 }
+// Metering expands tiny helpers with checked slow paths before the ordinary
+// inliner prices them. Revisit direct loop calls after O3 has simplified those
+// paths, sharing one finite expansion budget across introduced helper calls.
+static void inlineLoopHelpers(Module &M) {
+  for (Function &F : M) {
+    if (F.isDeclaration()) continue;
+    DominatorTree DT(F);
+    LoopInfo LI(DT);
+    SmallVector<CallBase *, 16> Pending;
+    for (BasicBlock &BB : F) if (LI.getLoopFor(&BB))
+      for (Instruction &I : BB) if (auto *C = dyn_cast<CallInst>(&I))
+        if (C->getCalledFunction()) Pending.push_back(C);
+    unsigned Budget = 2048;
+    while (!Pending.empty()) {
+      CallBase *Call = Pending.pop_back_val();
+      Function *Target = Call->getCalledFunction();
+      if (!Target || Target->isDeclaration() || Target == &F ||
+          Target->hasFnAttribute(Attribute::NoInline) ||
+          Call->hasFnAttr(Attribute::NoInline) ||
+          Target->getInstructionCount() > 256 ||
+          Target->getInstructionCount() > Budget) continue;
+      unsigned Cost = Target->getInstructionCount();
+      InlineFunctionInfo Info;
+      if (InlineFunction(*Call, Info, true).isSuccess()) {
+        Budget -= Cost;
+        Pending.append(Info.InlinedCallSites.begin(), Info.InlinedCallSites.end());
+      }
+    }
+  }
+}
 extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
   auto &M = *unwrap(static_cast<LLVMModuleRef>(ModuleRef));
+  inlineLoopHelpers(M);
   for (Function &F : M) {
     if (F.isDeclaration() || F.arg_empty() || !F.getArg(0)->getType()->isPointerTy()) continue;
     SmallVector<Instruction *, 16> Accesses;

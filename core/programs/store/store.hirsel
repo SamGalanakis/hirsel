@@ -159,8 +159,8 @@ fn state_of(heads: List[Head], pins: List[Pin], next_branch: u32) -> Result[Stat
         result.capacity_only(list.push(mut tips, Tip(id: h.id, name: string.from(h.name)?, parent: h.parent, forked_at: h.forked_at, roots: share_roots(h.roots), head: h.head, at: h.at)))?
     }
     let mut kept: List[Pin] = list.with_capacity(list.len(pins))?
-    for pin in pins {
-        result.capacity_only(list.push(mut kept, share_pin(pin)?))?
+    for held in pins {
+        result.capacity_only(list.push(mut kept, share_pin(held)?))?
     }
     Ok(State(tips: take tips, pins: take kept, next_branch: next_branch))
 }
@@ -170,8 +170,16 @@ fn current_state(db: Db) -> Result[State, Capacity] {
 }
 
 fn prospect(db: Db) -> Result[Prospect, Capacity] {
+    prospect_except(db, list.len(db.heads), list.len(db.pins))
+}
+
+// The current heads and pins, leaving out head `gone` and pin `unpinned`
+// (an index past the end leaves nothing out).
+fn prospect_except(db: Db, gone: u64, unpinned: u64) -> Result[Prospect, Capacity] {
     let mut heads: List[Head] = list.with_capacity(list.len(db.heads) + 1)?
-    for h in db.heads {
+    for k in 0u64 .. list.len(db.heads) {
+        if k == gone { continue }
+        let h = db.heads[k]
         let following: Option[Latest[Snapshot]] = match h.following {
             Some(f) => Some(latest.handle(f)),
             None => None
@@ -179,8 +187,9 @@ fn prospect(db: Db) -> Result[Prospect, Capacity] {
         result.capacity_only(list.push(mut heads, Head(id: h.id, name: string.from(h.name)?, parent: h.parent, forked_at: h.forked_at, roots: share_roots(h.roots), head: h.head, at: h.at, following: following)))?
     }
     let mut pins: List[Pin] = list.with_capacity(list.len(db.pins) + 1)?
-    for pin in db.pins {
-        result.capacity_only(list.push(mut pins, share_pin(pin)?))?
+    for k in 0u64 .. list.len(db.pins) {
+        if k == unpinned { continue }
+        result.capacity_only(list.push(mut pins, share_pin(db.pins[k])?))?
     }
     Ok(Prospect(heads: take heads, pins: take pins, next_branch: db.next_branch))
 }
@@ -204,8 +213,8 @@ fn state_roots(s: State) -> Result[List[Roots], Capacity] {
     for t in s.tips {
         result.capacity_only(list.push(mut all, share_roots(t.roots)))?
     }
-    for pin in s.pins {
-        result.capacity_only(list.push(mut all, share_roots(pin.roots)))?
+    for held in s.pins {
+        result.capacity_only(list.push(mut all, share_roots(held.roots)))?
     }
     Ok(take all)
 }
@@ -368,6 +377,146 @@ pub fn snapshot(db: Db) -> Snapshot {
 pub fn snapshot_of(db: Db, b: Branch) -> Result[Snapshot, Error] {
     let i = branch_index(db, b)?
     Ok(head_snapshot(db, i))
+}
+
+fn same_name(a: String, b: String) -> bool {
+    string.as_bytes(a) == string.as_bytes(b)
+}
+
+fn checked_name(name: String) -> Result[String, Error] {
+    if string.byte_len(name) > 255 {
+        return Error(Limit(Name))
+    }
+    named(name)
+}
+
+pub fn branch(db: Db, name: String) -> Option[Branch] {
+    for h in db.heads {
+        if same_name(h.name, name) {
+            return Some(Branch(store: db.store, id: h.id))
+        }
+    }
+    None
+}
+
+fn pin_index(db: Db, name: String) -> u64 {
+    for k in 0u64 .. list.len(db.pins) {
+        if same_name(db.pins[k].name, name) {
+            return k
+        }
+    }
+    list.len(db.pins)
+}
+
+pub fn pinned(db: Db, name: String) -> Option[Snapshot] {
+    let k = pin_index(db, name)
+    if k == list.len(db.pins) {
+        return None
+    }
+    let p = db.pins[k]
+    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots)))
+}
+
+// Section 1.9 and 1.12: fork and pin take only a Snapshot of this open, whose
+// node ids this open issued.
+fn this_open(db: Db, s: Snapshot) -> Result[(), Error] {
+    if !same(s.store, db.store) || s.open != open_number(db) {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+// Section 1.9: an operation made by a cut. Nothing is installed unless the
+// cut is acked Checkpointed; on Refused the result is Full and the store is
+// unchanged (section 3.5).
+fn cut_install(mut db: Db, take planned: Prospect) -> Result[Ticket, Error] waits {
+    let s = capacity(prospect_state(planned))?
+    let ticket = cut_state(mut db, take s)?
+    install_prospect(mut db, take planned)
+    Ok(ticket)
+}
+
+pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket), Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    this_open(db, from)?
+    let owned = checked_name(name)?
+    if let Some(_) = branch(db, name) {
+        return Error(Exists(take owned))
+    }
+    // Section 1.11: the new tree's accounted size is admitted before the fork.
+    let live = int.saturating_add(db.resident, journal_account(from.roots))
+    if live > db.ceiling {
+        return Error(Full(Capacity(requested: live, available: db.ceiling)))
+    }
+    // A Snapshot carries no wall time; the branch it was taken on, if it is
+    // still live, gives the at its CallInfo continues from (section 1.7).
+    let mut at = db.heads[0].at
+    for h in db.heads {
+        if h.id == from.branch { at = h.at }
+    }
+    let id = db.next_branch
+    let mut planned = capacity(prospect(db))?
+    let head = Head(id: id, name: take owned, parent: from.branch, forked_at: from.head, roots: share_roots(from.roots), head: from.head, at: at, following: None)
+    capacity(result.capacity_only(list.push(mut planned.heads, take head)))?
+    planned.next_branch = id + 1
+    let ticket = cut_install(mut db, take planned)?
+    Ok((Branch(store: db.store, id: id), ticket))
+}
+
+// AA1: a fast-forward of main to b, exactly when b forked from main at main's
+// current version; b is then deleted. Any other case is Diverged(b).
+pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    let i = branch_index(db, b)?
+    if i == 0 || db.heads[i].parent != 0 || db.heads[0].head != db.heads[i].forked_at {
+        return Error(Diverged(b.id))
+    }
+    let mut planned = capacity(prospect_except(db, i, list.len(db.pins)))?
+    planned.heads[0].roots = share_roots(db.heads[i].roots)
+    planned.heads[0].head = db.heads[i].head
+    planned.heads[0].at = db.heads[i].at
+    let ticket = cut_install(mut db, take planned)?
+    publish(db, 0)
+    Ok(ticket)
+}
+
+// Main is not deletable: it is Missing("branch") like an id that is not live.
+pub fn delete_branch(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    let i = branch_index(db, b)?
+    if i == 0 {
+        return Error(Missing("branch"))
+    }
+    let planned = capacity(prospect_except(db, i, list.len(db.pins)))?
+    cut_install(mut db, take planned)
+}
+
+pub fn pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    this_open(db, s)?
+    let owned = checked_name(name)?
+    if pin_index(db, name) != list.len(db.pins) {
+        return Error(Exists(take owned))
+    }
+    let mut planned = capacity(prospect(db))?
+    let kept = Pin(name: take owned, branch: s.branch, version: s.head, roots: share_roots(s.roots))
+    capacity(result.capacity_only(list.push(mut planned.pins, take kept)))?
+    cut_install(mut db, take planned)
+}
+
+pub fn unpin(mut db: Db, name: String) -> Result[Ticket, Error] waits {
+    journal_poll(mut db)?
+    healthy(db)?
+    let k = pin_index(db, name)
+    if k == list.len(db.pins) {
+        return Error(Missing(named(name)?))
+    }
+    let planned = capacity(prospect_except(db, list.len(db.heads), k))?
+    cut_install(mut db, take planned)
 }
 
 pub fn version(s: Snapshot) -> u64 {
@@ -2011,9 +2160,7 @@ fn schema_publish(mut db: Db, take roots: Roots, live: u64) -> Result[Ticket, Er
     let mut planned = capacity(prospect(db))?
     planned.heads[0].roots = take roots
     planned.heads[0].head += 1
-    let s = capacity(prospect_state(planned))?
-    let ticket = cut_state(mut db, take s)?
-    install_prospect(mut db, take planned)
+    let ticket = cut_install(mut db, take planned)?
     publish(db, 0)
     Ok(ticket)
 }
@@ -3528,11 +3675,11 @@ pub fn law_changes_identity(c: Clock) -> bool {
     let a = snapshot(db)
     let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots())
     let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots())
-    let branch = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots())
+    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots())
     if !is_foreign(changes(a, other_open)) || !is_foreign(changes(a, other_store)) {
         return false
     }
-    list.len(result.unwrap(changes(a, branch))) == 0
+    list.len(result.unwrap(changes(a, br))) == 0
 }
 
 @test
@@ -3962,6 +4109,122 @@ pub fn law_overwrite_account(c: Clock) -> bool waits {
         }
     }
     result.unwrap(get(snapshot(db), shape(t), 1)) == Some(100000u64)
+}
+
+// L30, AA1's trace by hand. Main is at v1 after create_table; b forks there
+// (parent 0, forked_at 1). Main's A (k1 = 100) is main v2, b's B (k1 = 200)
+// is b v2, and c forks from b at 2, so c's parent is b. adopt(c) is
+// Diverged(c) and main still reads A at v2. A fork of main with no main
+// commit since adopts as a fast-forward; one more main commit after a fork
+// makes it Diverged; adopt(main) is Diverged(0). Branch ids are b 1, c 2,
+// d 3, e 4, never reused. Wrong implementation caught: an adopt that
+// compares versions only, which gives main B at v2.
+pub fn law_branches(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = shape(t)
+    if version(snapshot(db)) != 1 { return false }
+    let arg1 = snapshot(db)
+    let (b, _) = result.unwrap(fork(mut db, "b", arg1))
+    let arg2 = snapshot(db)
+    match fork(mut db, "b", arg2) { Error(Exists(_)) => {}, _ => return false }
+    if !typed_put(mut db, t, 1, 100) { return false }
+    let on_b = result.unwrap(run_on(mut db, b, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 1, 200) }))
+    match take on_b {
+        Committed(done) => if done.info.id.branch != 1 || done.info.id.version != 2 { return false },
+        _ => return false
+    }
+    let at_b = result.unwrap(snapshot_of(db, b))
+    if version(at_b) != 2 || result.unwrap(get(at_b, sh, 1)) != Some(200u64) { return false }
+    let (cb, _) = result.unwrap(fork(mut db, "c", at_b))
+    match adopt(mut db, cb) { Error(Diverged(id)) => if id != 2 { return false }, _ => return false }
+    if version(snapshot(db)) != 2 || result.unwrap(get(snapshot(db), sh, 1)) != Some(100u64) { return false }
+    let arg3 = main_branch(db)
+    match adopt(mut db, arg3) { Error(Diverged(id)) => if id != 0 { return false }, _ => return false }
+    // D5 per branch: b's handle sees b's commits and not main's.
+    let h = result.unwrap(follow(mut db, b))
+    if version(latest.read(h)) != 2 { return false }
+    let on_b_again = result.unwrap(run_on(mut db, b, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 4, 500) }))
+    match take on_b_again { Committed(_) => {}, _ => return false }
+    if version(latest.read(h)) != 3 || result.unwrap(get(latest.read(h), sh, 4)) != Some(500u64) { return false }
+    // (b) a fork of main with no main commit since its fork: a fast-forward.
+    let arg4 = snapshot(db)
+    let (dd, _) = result.unwrap(fork(mut db, "d", arg4))
+    let on_d = result.unwrap(run_on(mut db, dd, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 2, 300) }))
+    match take on_d { Committed(_) => {}, _ => return false }
+    let _ = result.unwrap(adopt(mut db, dd))
+    let main_now = snapshot(db)
+    if version(main_now) != 3 || result.unwrap(get(main_now, sh, 2)) != Some(300u64) || result.unwrap(get(main_now, sh, 1)) != Some(100u64) { return false }
+    if let Some(_) = branch(db, "d") { return false }
+    match snapshot_of(db, dd) { Error(Missing(_)) => {}, _ => return false }
+    // (d) one more main commit after the fork.
+    let arg5 = snapshot(db)
+    let (e, _) = result.unwrap(fork(mut db, "e", arg5))
+    if e.id != 4 || !typed_put(mut db, t, 3, 400) { return false }
+    match adopt(mut db, e) { Error(Diverged(id)) => if id != 4 { return false }, _ => return false }
+    let _ = result.unwrap(delete_branch(mut db, e))
+    match snapshot_of(db, e) { Error(Missing(_)) => {}, _ => return false }
+    let arg6 = main_branch(db)
+    match delete_branch(mut db, arg6) { Error(Missing(_)) => {}, _ => return false }
+    // A pin reads its version after later commits; unpin forgets it.
+    let arg7 = snapshot(db)
+    let _ = result.unwrap(pin(mut db, "p", arg7))
+    let arg8 = snapshot(db)
+    match pin(mut db, "p", arg8) { Error(Exists(_)) => {}, _ => return false }
+    if !typed_put(mut db, t, 3, 401) { return false }
+    match pinned(db, "p") {
+        Some(s) => if version(s) != 4 || result.unwrap(get(s, sh, 3)) != Some(400u64) { return false },
+        None => return false
+    }
+    let _ = result.unwrap(unpin(mut db, "p"))
+    if let Some(_) = pinned(db, "p") { return false }
+    match unpin(mut db, "p") { Error(Missing(_)) => {}, _ => return false }
+    // L20: a Snapshot of another store or of another open is Foreign.
+    let other = memory_at(c, StoreId(hi: 3, lo: 4), defaults())
+    match fork(mut db, "x", snapshot(other)) { Error(Foreign) => {}, _ => return false }
+    let mut stale = snapshot(db)
+    stale.open = 9
+    match pin(mut db, "x", stale) { Error(Foreign) => {}, _ => return false }
+    match branch(db, "b") { Some(found) => found.id == 1 && version(snapshot(db)) == 5, None => false }
+}
+
+// L27(b), I4 by hand from L27(a)'s figures: catalog 134, row 94. While pin p
+// holds k1's first row, an overwrite charges 94 and frees nothing. The exact
+// account is 322: the catalog once, the pin's leaf and main's leaf. The limit
+// 416 admits one unsettled overwrite (322, then 416); each later one passes
+// it conservatively (510), settles to 322 and is admitted at 416. A checkpoint
+// gives 322, and unpin 228. Wrong implementations caught: a refusal on
+// unsettled charges; an exact count that counts a shared node twice (456).
+pub fn law_pin_settle(c: Clock) -> bool waits {
+    let mut options = defaults()
+    options.resident_limit = 416
+    let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 1) || db.resident != 228 { return false }
+    let arg9 = snapshot(db)
+    let _ = result.unwrap(pin(mut db, "p", arg9))
+    if db.resident != 228 { return false }
+    for step in 0u64 .. 100 {
+        if !typed_put(mut db, t, 1, step + 2) { return false }
+        if db.resident != (if step == 0 { 322u64 } else { 416u64 }) { return false }
+    }
+    let _ = result.unwrap(checkpoint(mut db))
+    if db.resident != 322 { return false }
+    let _ = result.unwrap(unpin(mut db, "p"))
+    if db.resident != 228 || !typed_put(mut db, t, 1, 7) || db.resident != 228 { return false }
+    result.unwrap(get(snapshot(db), shape(t), 1)) == Some(7u64)
+}
+
+@test
+fn test_branches(c: Clock) -> Result[(), ()] waits {
+    if law_branches(c) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_pin_settle(c: Clock) -> Result[(), ()] waits {
+    if law_pin_settle(c) { Ok(()) } else { Error(()) }
 }
 
 // J1: same J rewrites only the primary key; changing J rewrites old+new index
@@ -4954,10 +5217,10 @@ fn disk_manifest_payload(file: String, raw: Bytes, header: DiskHeader, frame: Di
         if i > 0 && pins[i - 1].name >= name {
             return Error(disk_fault(file, at, Order))
         }
-        let branch: u32 = int.truncate(disk_number(file, payload, mut at, 4)?)
+        let br: u32 = int.truncate(disk_number(file, payload, mut at, 4)?)
         let v = disk_number(file, payload, mut at, 8)?
         let roots = disk_take_roots(file, payload, mut at)?
-        capacity(result.capacity_only(list.push(mut pins, DiskPin(name: take name, branch: branch, version: v, roots: roots))))?
+        capacity(result.capacity_only(list.push(mut pins, DiskPin(name: take name, branch: br, version: v, roots: roots))))?
     }
     if at != list.len(payload) {
         return Error(disk_fault(file, at, Malformed))
@@ -5910,12 +6173,12 @@ fn disk_decode_packs(d: Dir, id: StoreId, take manifest: DiskManifest) -> Result
     // remove released the payloads, but the empty Map still owns its buckets.
     let _ = take raw_nodes
     let mut all: List[Roots] = list.new()
-    for branch in manifest.branches {
-        let roots = disk_attach_roots(nodes, branch.roots)?
+    for br in manifest.branches {
+        let roots = disk_attach_roots(nodes, br.roots)?
         capacity(result.capacity_only(list.push(mut all, take roots)))?
     }
-    for pin in manifest.pins {
-        let roots = disk_attach_roots(nodes, pin.roots)?
+    for held in manifest.pins {
+        let roots = disk_attach_roots(nodes, held.roots)?
         capacity(result.capacity_only(list.push(mut all, take roots)))?
     }
     // The attached Arc roots now retain every live child. The temporary id
@@ -6012,8 +6275,8 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
     manifest.next_table = db.next_table
     manifest.packs = take packs
     manifest.next_pack = next_pack
-    let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 40, at: 0, roots: disk_root_ids(db.heads[0].roots))
-    let _ = list.set(mut manifest.branches, 0, take branch)
+    let br = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 40, at: 0, roots: disk_root_ids(db.heads[0].roots))
+    let _ = list.set(mut manifest.branches, 0, take br)
     result.unwrap(disk_publish_manifest(d, db.store, manifest))
     disk_insert_skipped_node_frame(d, db.store, manifest.packs[0])
     let orphan = result.unwrap(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: next_pack + 1), 0))
@@ -6135,8 +6398,8 @@ pub fn disk_law_compact(d: Dir, c: Clock) -> bool waits {
     let DiskPackSet(packs: take packs, retired: take retired, next: _) = take output
     manifest.packs = take packs
     manifest.retired = take retired
-    let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 160, at: 0, roots: disk_root_ids(db.heads[0].roots))
-    let _ = list.set(mut manifest.branches, 0, take branch)
+    let br = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 160, at: 0, roots: disk_root_ids(db.heads[0].roots))
+    let _ = list.set(mut manifest.branches, 0, take br)
     result.unwrap(disk_publish_manifest(d, db.store, manifest))
     let loaded = result.unwrap(disk_load(d, 96 * 86))
     for k in 0u64 .. 96 {
@@ -6279,12 +6542,12 @@ fn disk_prepare(d: Dir, state: DiskState, cut: DiskCut, cap: u64) -> Result[Disk
     // Heads are kept in id order, so the branches are written sorted by id.
     let mut branches: List[DiskBranch] = list.new()
     for t in cut.state.tips {
-        let branch = DiskBranch(id: t.id, name: capacity(string.from(t.name))?, parent: t.parent, forked_at: t.forked_at, version: t.head, at: t.at, roots: disk_root_ids(t.roots))
-        capacity(result.capacity_only(list.push(mut branches, take branch)))?
+        let br = DiskBranch(id: t.id, name: capacity(string.from(t.name))?, parent: t.parent, forked_at: t.forked_at, version: t.head, at: t.at, roots: disk_root_ids(t.roots))
+        capacity(result.capacity_only(list.push(mut branches, take br)))?
     }
     let mut pins: List[DiskPin] = list.new()
-    for pin in cut.state.pins {
-        let kept = DiskPin(name: capacity(string.from(pin.name))?, branch: pin.branch, version: pin.version, roots: disk_root_ids(pin.roots))
+    for held in cut.state.pins {
+        let kept = DiskPin(name: capacity(string.from(held.name))?, branch: held.branch, version: held.version, roots: disk_root_ids(held.roots))
         capacity(result.capacity_only(list.push(mut pins, take kept)))?
     }
     let manifest = DiskManifest(generation: cut.generation, next_node: cut.next_node, next_branch: cut.state.next_branch, next_table: cut.next_table, next_pack: next_pack, first_live: cut.first_live, prev_first: state.manifest.first_live, packs: take packs, retired: take retired, branches: take branches, pins: take pins)
@@ -6652,8 +6915,8 @@ fn manifest_state(m: DiskManifest, all: List[Roots]) -> Result[State, Capacity] 
         k += 1
     }
     let mut pins: List[Pin] = list.with_capacity(list.len(m.pins))?
-    for pin in m.pins {
-        result.capacity_only(list.push(mut pins, Pin(name: string.from(pin.name)?, branch: pin.branch, version: pin.version, roots: share_roots(all[k]))))?
+    for held in m.pins {
+        result.capacity_only(list.push(mut pins, Pin(name: string.from(held.name)?, branch: held.branch, version: held.version, roots: share_roots(all[k]))))?
         k += 1
     }
     Ok(State(tips: take tips, pins: take pins, next_branch: m.next_branch))
@@ -6873,8 +7136,8 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     let State(tips: take tips, pins: take pins, next_branch: next_branch) = take state
     let mut heads: List[Head] = capacity(list.with_capacity(list.len(tips)))?
     for take t in take tips {
-        let Tip(id: branch, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at) = take t
-        capacity(result.capacity_only(list.push(mut heads, Head(id: branch, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at, following: None))))?
+        let Tip(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at) = take t
+        capacity(result.capacity_only(list.push(mut heads, Head(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at, following: None))))?
     }
     db.heads = take heads
     db.pins = take pins
@@ -7030,6 +7293,79 @@ fn disk_close_connection(take connection: DiskConnection) -> Result[(), Error] w
     let joined = task.join(take worker)
     let _ = take lock
     result.unwrap(take joined)
+}
+
+// L30(a) on disk: AA1's trace, then b's v3 (k5 = 555) as a journal frame
+// after the last cut. Reopen gives main v2 with A and no k5, b v3, c with
+// parent b at 2, and adopt(c) still Diverged. Wrong implementations caught: a
+// COMMIT that names main (replay puts k5 on main); a cut that writes only
+// main (b and c are lost, and b's frame is a Gap).
+// I4 on disk: law_pin_settle's figures, with the limit raised by 128 for the
+// frame in flight. One put's COMMIT is over 34 and under 128 bytes, so 510
+// plus it passes 544 and 416 plus it does not. Each settle is a cut that
+// rotates the segment, so the frame is encoded again for the new one. The
+// last value survives reopen, and open's exact account is 322. Wrong
+// implementation caught: a frame kept with the old segment's binding, which
+// reopen drops as a torn tail.
+pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.checkpoint_task_bytes = 1048576
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = shape(t)
+    let at_one = snapshot(db)
+    let (b, _) = result.unwrap(fork(mut db, "b", at_one))
+    if !typed_put(mut db, t, 1, 100) { return false }
+    let on_b = result.unwrap(run_on(mut db, b, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 1, 200) }))
+    match take on_b { Committed(_) => {}, _ => return false }
+    let at_b_two = result.unwrap(snapshot_of(db, b))
+    let (cb, _) = result.unwrap(fork(mut db, "c", at_b_two))
+    match adopt(mut db, cb) { Error(Diverged(_)) => {}, _ => return false }
+    let late = result.unwrap(run_on(mut db, b, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 5, 555) }))
+    match take late { Committed(done) => result.unwrap(durable(mut db, done.ticket)), _ => return false }
+    result.unwrap(close(take db))
+    let mut reopened = result.unwrap(open(tasks, d, c, r, options))
+    let main_now = snapshot(reopened)
+    if version(main_now) != 2 || result.unwrap(get(main_now, sh, 1)) != Some(100u64) || result.unwrap(get(main_now, sh, 5)) != None { return false }
+    let again_b = match branch(reopened, "b") { Some(x) => x, None => return false }
+    let at_b = result.unwrap(snapshot_of(reopened, again_b))
+    if again_b.id != 1 || version(at_b) != 3 || result.unwrap(get(at_b, sh, 1)) != Some(200u64) || result.unwrap(get(at_b, sh, 5)) != Some(555u64) { return false }
+    let again_c = match branch(reopened, "c") { Some(x) => x, None => return false }
+    let at_c = result.unwrap(snapshot_of(reopened, again_c))
+    if again_c.id != 2 || version(at_c) != 2 || reopened.heads[2].parent != 1 || reopened.heads[2].forked_at != 2 { return false }
+    match adopt(mut reopened, again_c) { Error(Diverged(_)) => {}, _ => return false }
+    result.unwrap(close(take reopened))
+
+    let settle_dir = disk_test_directory(d)
+    options.resident_limit = 544
+    let mut sdb = result.unwrap(open(tasks, settle_dir, c, r, options))
+    result.unwrap(create_table(mut sdb, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let st = result.unwrap(table(mut sdb, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut sdb, st, 1, 1) { return false }
+    let first = Ticket(store: sdb.store, open: open_number(sdb), mark: Journal(sdb.frame_seq))
+    result.unwrap(durable(mut sdb, first))
+    let first_snap = snapshot(sdb)
+    let _ = result.unwrap(pin(mut sdb, "p", first_snap))
+    if sdb.resident != 228 { return false }
+    for step in 0u64 .. 20 {
+        let committed = result.unwrap(run(mut sdb, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, st, 1, step + 2) }))
+        match take committed { Committed(done) => result.unwrap(durable(mut sdb, done.ticket)), _ => return false }
+        if sdb.resident != (if step == 0 { 322u64 } else { 416u64 }) { return false }
+    }
+    result.unwrap(close(take sdb))
+    let settled_open = result.unwrap(open(tasks, settle_dir, c, r, options))
+    let held = match pinned(settled_open, "p") { Some(s) => s, None => return false }
+    let good = settled_open.resident == 322 && result.unwrap(get(snapshot(settled_open), shape(st), 1)) == Some(21u64) && result.unwrap(get(held, shape(st), 1)) == Some(1u64)
+    result.unwrap(close(take settled_open))
+    good
+}
+
+@test
+fn disk_test_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_branches(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 // Private S2 opener, final cut/handle rules. Journal durability and close's
@@ -7407,6 +7743,16 @@ fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String)
             _ => fail("crash refusal delete")
         }
         let _ = checkpoint(mut db)?
+    } else if scenario == "branches" {
+        // L7 at every W2 cut: pin, fork, a fork commit made durable, unpin.
+        let arg10 = snapshot(db)
+        let _ = pin(mut db, "p", arg10)?
+        let arg11 = snapshot(db)
+        let (b, _) = fork(mut db, "b", arg11)?
+        let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        let on_b = run_on(mut db, b, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 0, 500) })?
+        match take on_b { Committed(done) => durable(mut db, done.ticket)?, _ => fail("crash fork put") }
+        let _ = unpin(mut db, "p")?
     } else {
         let _ = checkpoint(mut db)?
     }
@@ -7448,7 +7794,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         }
     }
     // L4's input was durable in init; a checkpoint cut never loses it.
-    let mut good = new
+    let mut good = if scenario == "branches" { true } else { new }
     if scenario == "schema" {
         good = old
         match table(mut db, "added", std.codec.key_u64(), std.codec.of_u64()) {
@@ -7477,6 +7823,24 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
             },
             None => if db.heads[0].head == 99 { good = false }
         }
+    } else if scenario == "branches" {
+        // The states in write order: nothing; pin p at 97; and b at 97; b at
+        // 98 with k0 = 500; p gone. Main is at 97 with every row k + 1 in all.
+        let has_pin = match pinned(db, "p") {
+            Some(s) => { if version(s) != 97 || get(s, sh, 0)? != Some(1u64) { good = false }; true },
+            None => false
+        }
+        let b_head = match branch(db, "b") {
+            Some(b) => {
+                let at_b = snapshot_of(db, b)?
+                let k0: Option[u64] = if version(at_b) == 98 { Some(500) } else { Some(1) }
+                if get(at_b, sh, 0)? != k0 || get(at_b, sh, 95)? != Some(96u64) { good = false }
+                version(at_b)
+            },
+            None => 0u64
+        }
+        let known = (b_head == 0) || (has_pin && b_head == 97) || b_head == 98
+        good = good && old && db.heads[0].head == 97 && known && (!required_new || (!has_pin && b_head == 98))
     } else if scenario == "genesis" {
         good = old && db.heads[0].head >= 1 && db.heads[0].head <= 97 && (!required_new || db.heads[0].head == 97)
     }
@@ -7564,7 +7928,7 @@ fn journal_ops(file: String, raw: Bytes, mut at: u64) -> Result[List[JournalOp],
 
 fn journal_decode(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
     let mut at = 0u64
-    let branch: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
+    let br: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
     let head = disk_number(file, raw, mut at, 8)?
     let wall = disk_number(file, raw, mut at, 8)?
     let sections = disk_number(file, raw, mut at, 1)?
@@ -7605,7 +7969,7 @@ fn journal_decode(file: String, raw: Bytes) -> Result[JournalCommit, Error] {
         }
         if !matching { return Error(disk_fault(file, at, Malformed)) }
     }
-    Ok(JournalCommit(branch: branch, version: head, at: wall, data: take data, streams: take streams, call: take call))
+    Ok(JournalCommit(branch: br, version: head, at: wall, data: take data, streams: take streams, call: take call))
 }
 
 // AD1 (vi): the hand-written revision 0x00, 0x01, ..., 0x1f.
@@ -8561,6 +8925,30 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     if let Some(_) = result.unwrap(recorded(reopened, b, 1)) { return false }
     if std.omap.len(reopened.heads[0].roots.streams) != 1 { return false }
     result.unwrap(close(take reopened))
+    // AD1: the same frame with a 1-byte revision. Payload 88 + 4 + 1 = 93,
+    // so the frame ends at 72 + 16 + 93 = 181, below d: open is Corrupt.
+    let bad_dir = disk_test_directory(d)
+    let bad = result.unwrap(open(tasks, bad_dir, c, r, options))
+    let bad_id = bad.store
+    let bad_seq = bad.file_seq
+    result.unwrap(close(take bad))
+    let mut one: Bytes = list.new()
+    result.unwrap(list.fill(mut one, 1, 7u8))
+    let mut short = result.unwrap(copied(list.slice(payload, 0, 88)))
+    result.unwrap(blob(mut short, one))
+    if list.len(short) != 93 { return false }
+    let short_raw = result.unwrap(disk_seal(DiskContext(store: bad_id, role: 2, seq: bad_seq), 72, 0x0011, 1, short))
+    let short_path = result.unwrap(disk_path("j-", bad_seq, ""))
+    let mut short_file = result.unwrap(host.open(bad_dir, short_path, Append))
+    result.unwrap(host.write(mut short_file, short_raw))
+    result.unwrap(host.sync(mut short_file))
+    result.unwrap(host.close(take short_file))
+    let short_end = result.unwrap(disk_path("j-", bad_seq, ".end"))
+    result.unwrap(disk_write_synced(bad_dir, short_end, journal_end_bytes(bad_id, bad_seq, 181)))
+    match open(tasks, bad_dir, c, r, options) {
+        Error(Corrupt(fault)) => match fault.why { Malformed => {}, _ => return false },
+        _ => return false
+    }
     let in_memory = memory(c, r, options)
     let memory_branch = main_branch(in_memory)
     match result.unwrap(recorded(in_memory, memory_branch, 1)) { None => true, Some(_) => false }
@@ -8569,6 +8957,52 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
 @test
 fn journal_test_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if journal_law_recorded(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+// L24(v), Z1 by hand: 100 main commits made durable leave journaled at frame
+// 100. A fork from version 1 commits its v2 with a CALL section as frame 101,
+// which the journal task has not taken. recorded(fork, 2) must send the
+// barrier and read Some, with AD1's revision. Main's v2 is under the fork's
+// cut, so it is None. After reopen the fork's v2 is replayed and read again.
+// Wrong implementations caught: a fast path that compares the version with
+// journaled (2 <= 100 skips the barrier and reads None); a cover test that
+// compares the version with main's head at the last cut (2 <= 101 is None).
+pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = journal_crash_options()
+    options.resident_limit = 4194304
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let early = snapshot(db)
+    for k in 0u64 .. 100 {
+        if !typed_put(mut db, t, k, k) { return false }
+    }
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    result.unwrap(durable(mut db, last))
+    if db.journaled != 100 || db.heads[0].head != 101 { return false }
+    let (f, _) = result.unwrap(fork(mut db, "f", early))
+    let ticket = result.unwrap(journal_fixture_call(mut db, 1, false, Some(revision_vector())))
+    match result.unwrap(recorded(db, f, 2)) {
+        Some(captured) => if !revision_is_vector(captured.revision) || captured.stream != string.as_bytes("stream00") { return false },
+        None => return false
+    }
+    let main = main_branch(db)
+    if let Some(_) = result.unwrap(recorded(db, main, 2)) { return false }
+    result.unwrap(durable(mut db, ticket))
+    result.unwrap(close(take db))
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    let again = match branch(reopened, "f") { Some(x) => x, None => return false }
+    let good = match result.unwrap(recorded(reopened, again, 2)) {
+        Some(captured) => revision_is_vector(captured.revision),
+        None => false
+    }
+    result.unwrap(close(take reopened))
+    good
+}
+
+@test
+fn journal_test_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_recorded_fork(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 fn journal_crash_options() -> Options {
@@ -8667,6 +9101,12 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
             journal_note(out, db.heads[0].head)
         }
     }
+    if scenario == "journal" {
+        // L24(vi): head 8 is a CALL frame whose revision is AD1's vector.
+        let ticket = journal_fixture_call(mut db, 0, false, Some(revision_vector()))?
+        durable(mut db, ticket)?
+        journal_note(out, db.heads[0].head)
+    }
     close(take db)
 }
 
@@ -8677,11 +9117,19 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = shape(t)
     let head = db.heads[0].head
-    let last = if scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else { 7u64 }
+    let last = if scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else if scenario == "journal" { 8u64 } else { 7u64 }
     if head < 1 || head > last || head < minimum { return Ok(false) }
     // The independent W2 provider returns wall_ms=phase: genesis0, writes1.
     // Every replayed write must retain1; recovery itself runs under clock2.
-    if db.heads[0].at != (if head == 1 { 0u64 } else { 1u64 }) { return Ok(false) }
+    // The fixture CALL frame at head 8 takes the previous at + 1.
+    if db.heads[0].at != (if head == 1 { 0u64 } else if head == 8 { 2u64 } else { 1u64 }) { return Ok(false) }
+    if scenario == "journal" {
+        let b = main_branch(db)
+        match recorded(db, b, 8)? {
+            Some(captured) => if head != 8 || !revision_is_vector(captured.revision) { return Ok(false) },
+            None => if head == 8 { return Ok(false) }
+        }
+    }
     for k in 0u64 .. 6 {
         let expected = if k + 1 < head { Some(k + 10) } else { None }
         if get(snapshot(db), sh, k)? != expected { return Ok(false) }
@@ -8805,7 +9253,11 @@ fn journal_test_call_vector() -> Result[(), ()] {
 
 // S3's producer fixture feeds the final three-section encoder and the normal
 // handoff. S5 adds record/reply's public validation on this same frame shape.
-fn journal_fixture_call(mut db: Db, large: bool, take revision: Option[Bytes]) -> Result[Ticket, Error] waits {
+fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[Bytes]) -> Result[Ticket, Error] waits {
+    // Y1: every Frame sender drains acks first, as run_on does at its start;
+    // a W2 cut's write failure arrives here as Poisoned.
+    journal_poll(mut db)?
+    healthy(db)?
     let stream = result.unwrap(copied(string.as_bytes("stream00")))
     let mut value: Bytes = list.new()
     result.unwrap(le(mut value, 1, 8))
@@ -8821,7 +9273,7 @@ fn journal_fixture_call(mut db: Db, large: bool, take revision: Option[Bytes]) -
     let checked = CallRecord(key: take entry_key, args: take args, stream: take stream, revision: take revision)
     call_checked(checked)?
     let call = Some(take checked)
-    let ci = call_info(db.store, 0, db.heads[0].head + 1, db.heads[0].at + 1, db.heads[0].at)
+    let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, db.heads[i].at + 1, db.heads[i].at)
     let data: std.omap.OMap[Bytes, Option[Bytes]] = std.omap.new()
     let raw = result.unwrap(encode_sections(ci, data, streams, call, db.file_seq, db.file_end))
     let size = list.len(raw)
@@ -8829,20 +9281,18 @@ fn journal_fixture_call(mut db: Db, large: bool, take revision: Option[Bytes]) -
         let payload = list.slice(raw, 16, size)
         result.unwrap(journal_decode("fixture", payload))
     }
-    let mut replay = journal_main(share_roots(db.heads[0].roots), db.heads[0].head, db.heads[0].at, db.next_node)
+    let mut replay = JournalReplay(state: result.unwrap(current_state(db)), next_node: db.next_node)
     result.unwrap(journal_apply("fixture", mut replay, commit))
-    db.heads[0].roots = share_roots(replay.state.tips[0].roots)
-    db.heads[0].head = replay.state.tips[0].head
-    db.heads[0].at = replay.state.tips[0].at
+    db.heads[i].roots = share_roots(replay.state.tips[i].roots)
+    db.heads[i].head = replay.state.tips[i].head
+    db.heads[i].at = replay.state.tips[i].at
     db.next_node = replay.next_node
     db.changes += 1
-    db.resident = journal_account(db.heads[0].roots)
+    db.resident = result.unwrap(state_account(replay.state))
     db.inflight += size
     db.file_end += size
     db.frame_seq += 1
     let ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
-    // Y1: every Frame sender drains acks first, as run_on does at its start.
-    result.unwrap(journal_poll(mut db))
     if let Some(sender) = db.journal { result.unwrap(channel.send(sender, Frame(take raw, db.frame_seq))) }
     Ok(ticket)
 }
@@ -8857,28 +9307,28 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
         let mut wrong: Bytes = list.new()
         result.unwrap(list.fill(mut wrong, size, 7u8))
         let before = db.heads[0].head
-        match journal_fixture_call(mut db, refuse, Some(take wrong)) { Error(Missing(name)) => if name != "revision" { return false }, _ => return false }
+        match journal_fixture_call(mut db, 0, refuse, Some(take wrong)) { Error(Missing(name)) => if name != "revision" { return false }, _ => return false }
         if db.heads[0].head != before { return false }
     }
-    let _ = result.unwrap(journal_fixture_call(mut db, refuse, Some(revision_vector())))
+    let _ = result.unwrap(journal_fixture_call(mut db, 0, refuse, Some(revision_vector())))
     let head = db.heads[0].head
-    let branch = main_branch(db)
+    let br = main_branch(db)
     // The journal has not had a blocking turn since handoff. Only the
     // write barrier makes this answer independent of when it drains.
-    match result.unwrap(recorded(db, branch, head)) {
+    match result.unwrap(recorded(db, br, head)) {
         Some(captured) => if list.len(captured.key) != 32 || list.len(captured.args) != 16 || captured.stream != string.as_bytes("stream00") || !revision_is_vector(captured.revision) { return false },
         None => return false
     }
     let state = result.unwrap(current_state(db))
     let cut = result.unwrap(disk_begin_cut(mut db, take state))
-    if let Some(_) = result.unwrap(recorded(db, branch, head)) { return false }
+    if let Some(_) = result.unwrap(recorded(db, br, head)) { return false }
     let learned = durable(mut db, cut)
     if refuse {
         match take learned { Error(Full(_)) => {}, _ => return false }
-        match result.unwrap(recorded(db, branch, head)) { Some(_) => {}, None => return false }
+        match result.unwrap(recorded(db, br, head)) { Some(_) => {}, None => return false }
     } else {
         if let Error(_) = learned { return false }
-        if let Some(_) = result.unwrap(recorded(db, branch, head)) { return false }
+        if let Some(_) = result.unwrap(recorded(db, br, head)) { return false }
     }
     result.unwrap(close(take db))
     true
@@ -8913,14 +9363,14 @@ pub fn journal_law_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let mut db = result.unwrap(open(tasks, disk_test_directory(d), c, r, journal_ack_options()))
     result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let branch = main_branch(db)
+    let br = main_branch(db)
     for k in 0u64 .. 8 {
         match result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, k, k + 10) })) {
             Committed(_) => {},
             _ => return false
         }
         let head = db.heads[0].head
-        match recorded(db, branch, head) { Ok(None) => {}, _ => return false }
+        match recorded(db, br, head) { Ok(None) => {}, _ => return false }
     }
     result.unwrap(close(take db))
     true
@@ -8937,9 +9387,9 @@ fn journal_ack_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
         let committed = run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, k, k + 10) })?
         match take committed { Committed(_) => {}, _ => fail("journal-ack commit") }
     }
-    let branch = main_branch(db)
+    let br = main_branch(db)
     let head = db.heads[0].head
-    match recorded(db, branch, head)? { None => {}, Some(_) => fail("journal-ack record") }
+    match recorded(db, br, head)? { None => {}, Some(_) => fail("journal-ack record") }
     let cut = checkpoint(mut db)?
     durable(mut db, cut)?
     close(take db)

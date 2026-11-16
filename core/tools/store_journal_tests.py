@@ -13,7 +13,7 @@ from store_tests import inputs
 from store_crash_tests import checked, run_crashes
 
 LAWS = ('end', 'payload', 'segment', 'apply', 'recovery', 'bootstrap', 'worker',
-        'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel')
+        'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel', 'recorded_fork')
 TESTS = {'store@1/store/journal_test_' + name for name in LAWS if name not in ('frame_size_boundary', 'frame_oversize')}
 SCENARIOS = ('journal', 'journal-group', 'journal-rotate')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut')

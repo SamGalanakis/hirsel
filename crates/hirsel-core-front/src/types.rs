@@ -278,6 +278,10 @@ impl Types {
     pub fn len(&self) -> usize {
         self.base_len + self.kinds.len()
     }
+    /// The first id this table interned itself, past its base's.
+    pub(crate) fn own_start(&self) -> usize {
+        self.base_len
+    }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

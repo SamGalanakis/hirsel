@@ -24,6 +24,7 @@ mod native_sources;
 mod prebuild;
 pub use prebuild::Prebuilt;
 mod core_inventory;
+mod layers;
 mod link_closure;
 mod reach;
 mod reachability;
@@ -424,6 +425,8 @@ impl CheckProduct {
 pub struct Driver {
     pub published: Option<Arc<CheckProduct>>,
     store: Option<PathBuf>,
+    #[cfg(test)]
+    pub(crate) layers: layers::Probe,
 }
 
 /// The module of a canonical record site: its item is an index into the
@@ -522,6 +525,12 @@ impl Driver {
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
         request.inputs.normalise();
+        #[cfg(test)]
+        {
+            self.layers.installed = None;
+            self.layers.shape = None;
+            self.layers.tables.clear();
+        }
         // Read source bytes exactly once. The source digest is reused by file publication.
         let mut sources = vec![];
         let mut bytes_total = 0;
@@ -820,14 +829,47 @@ impl Driver {
             sources.iter().map(|s| s.1).collect::<Vec<bool>>(),
         ))?);
         let same_shape = prior.shape == Some(publication.shape);
+        // The record's selections are read after the declaration stage, outside
+        // the front's metered work; only the test-only install reads them first.
+        let layer;
+        let mut layer_record = None;
         {
-            let mut p = Program::declare_with_library(
-                &index,
-                &modules,
-                resolutions.clone(),
-                library.as_deref(),
-            );
+            #[cfg(test)]
+            let installed = match layers::Layer::read(&store, publication.shape)? {
+                selected if self.layers.install && selected.selected => store
+                    .get(selected.key)?
+                    .and_then(|bytes| decode::<hirsel_core_front::Declared>(&bytes))
+                    .and_then(|record| {
+                        Program::install(
+                            &index,
+                            &modules,
+                            resolutions.clone(),
+                            library.as_deref(),
+                            record,
+                        )
+                    }),
+                _ => None,
+            };
+            #[cfg(not(test))]
+            let installed = None;
+            #[cfg(test)]
+            {
+                self.layers.installed = Some(installed.is_some());
+                self.layers.shape = Some(publication.shape);
+            }
+            let mut p = installed.unwrap_or_else(|| {
+                Program::declare_with_library(
+                    &index,
+                    &modules,
+                    resolutions.clone(),
+                    library.as_deref(),
+                )
+            });
             p.entry = request.entry.clone();
+            #[cfg(test)]
+            if self.layers.law {
+                self.layers.tables = p.tables();
+            }
             result.diagnostics.extend(p.refusals.iter().cloned());
             result.incomplete.extend(p.gaps.iter().map(|g| Incomplete {
                 primary: g.site,
@@ -841,6 +883,10 @@ impl Driver {
                 }));
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
+            layer = layers::Layer::read(&store, publication.shape)?;
+            if layer.wanted() && declarations_accepted && !reachable_only {
+                layer_record = p.declared().map(|d| encode(&d)).transpose()?;
+            }
             let mut fresh: Vec<(DefPath, ContentHash)> = Vec::new();
             // A duplicate definition is a refusal of the declarations.
             let duplicated: BTreeSet<&DefPath> = if declarations_accepted {
@@ -1070,6 +1116,10 @@ impl Driver {
         result.headers = Arc::new(std::mem::take(&mut keys.headers));
         result.root = publication.publish(&store, &prior)?;
         meter.finish("publish/program index");
+        if result.accepted() && !reachable_only {
+            layer.finish(&store, layer_record.as_deref())?;
+        }
+        meter.finish("publish/declared layer");
         let result = Arc::new(result);
         self.published = Some(Arc::clone(&result));
         self.store = Some(request.store.clone());

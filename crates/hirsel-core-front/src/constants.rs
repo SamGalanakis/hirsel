@@ -13,7 +13,7 @@ pub struct Constant {
     pub at: ItemRef,
     pub ty: TyId,
     pub value: Option<ConstValue>,
-    expr: NodeId,
+    pub(crate) expr: NodeId,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ConstValue {

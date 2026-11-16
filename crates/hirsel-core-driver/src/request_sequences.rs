@@ -258,6 +258,8 @@ struct Answer {
     /// None when the core package product refuses before the check.
     root: Option<ContentHash>,
     native: Option<serde_json::Value>,
+    /// The declared-state record's part (crate::layers::Probe).
+    layer: crate::layers::Probe,
 }
 fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) -> Answer {
     let check = serde_json::json!({
@@ -290,17 +292,23 @@ fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) ->
         check,
         root: Some(product.root),
         native,
+        layer: Default::default(),
     }
 }
 /// Answer one request from the store at `store`. A core package product that
 /// is incomplete refuses the request with an error, and that error is its answer.
+/// With `install`, the store's declared-state record for the request's shape
+/// stands in for declaration.
 fn request(
     driver: &mut Driver,
     req: &Req,
     inputs: CorpusManifest,
     store: PathBuf,
     options: Option<NativeOptions>,
+    install: bool,
 ) -> Answer {
+    driver.layers.install = install;
+    driver.layers.law = true;
     let products = store.with_extension("products");
     let request = CheckRequest {
         inputs,
@@ -317,13 +325,17 @@ fn request(
                     check: serde_json::json!({ "core_product": refused.to_string() }),
                     root: None,
                     native: None,
+                    layer: std::mem::take(&mut driver.layers),
                 };
             }
         }
     } else {
         driver.check(request, meter).unwrap()
     };
-    answer(&product, req, options.as_ref())
+    Answer {
+        layer: std::mem::take(&mut driver.layers),
+        ..answer(&product, req, options.as_ref())
+    }
 }
 fn fault(store: &Path, fault: Fault) {
     match fault {
@@ -343,9 +355,25 @@ fn fault(store: &Path, fault: Fault) {
         }
     }
 }
+/// The declared-state record's law (OPTION-L v3.2). A primed request installs
+/// the store's record for its shape in place of declaration, and an installed
+/// program's tables equal an empty store's declared ones, table by table. A
+/// last request installs exactly when its recorded gate class is fast.
+#[derive(Default)]
+struct LayerLaw {
+    /// Per table: the installed requests compared, and those unequal.
+    tables: std::collections::BTreeMap<&'static str, (usize, usize)>,
+    /// Last requests whose install disagrees with the recorded gate class.
+    classes: Vec<String>,
+}
 /// Run one sequence; return each step's failures of the law and, separately, the
 /// steps whose roots differ while everything else agrees.
-fn run_sequence(seq: &Seq, backend: Option<Backend>) -> (Vec<String>, Vec<String>) {
+fn run_sequence(
+    seq: &Seq,
+    backend: Option<Backend>,
+    law: &mut LayerLaw,
+) -> (Vec<String>, Vec<String>) {
+    let mut first_shape = None;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("checkout");
     let mut written = BTreeSet::new();
@@ -380,6 +408,7 @@ fn run_sequence(seq: &Seq, backend: Option<Backend>) -> (Vec<String>, Vec<String
             inputs.clone(),
             dir.path().join("resident"),
             options("resident", req),
+            true,
         );
         let disk_answer = request(
             &mut Driver::default(),
@@ -387,8 +416,10 @@ fn run_sequence(seq: &Seq, backend: Option<Backend>) -> (Vec<String>, Vec<String
             inputs.clone(),
             dir.path().join("disk"),
             options("disk", req),
+            true,
         );
         if n == 0 {
+            first_shape = resident_answer.layer.shape;
             continue;
         }
         let fresh_store = dir.path().join(format!("fresh{n}"));
@@ -398,8 +429,49 @@ fn run_sequence(seq: &Seq, backend: Option<Backend>) -> (Vec<String>, Vec<String
             inputs,
             fresh_store,
             options(&format!("fresh{n}"), req),
+            false,
         );
         for (path, primed) in [("resident", &resident_answer), ("disk", &disk_answer)] {
+            let installed = primed.layer.installed == Some(true);
+            if installed {
+                for ((table, rows), (_, fresh_rows)) in
+                    primed.layer.tables.iter().zip(&fresh.layer.tables)
+                {
+                    let count = law.tables.entry(table).or_default();
+                    count.0 += 1;
+                    if rows != fresh_rows {
+                        count.1 += 1;
+                        let row = (0..rows.len().max(fresh_rows.len()))
+                            .find(|&i| rows.get(i) != fresh_rows.get(i))
+                            .unwrap();
+                        failures.push(format!(
+                            "{} step {n} ({path} store): installed {table} differ at row {row}: {:?}\n  fresh {:?}",
+                            seq.name, rows.get(row), fresh_rows.get(row)
+                        ));
+                    }
+                }
+            }
+            if n == seq.steps.len() && path == "resident" {
+                eprintln!(
+                    "LAYER-SEQ {} recorded {:?} installed {:?} shape {} A's",
+                    seq.name,
+                    seq.gate,
+                    primed.layer.installed,
+                    if primed.layer.shape == first_shape { "equal to" } else { "unlike" }
+                );
+            }
+            // A request the driver serves whole from its snapshot declares nothing.
+            if n == seq.steps.len()
+                && primed.layer.installed.is_some()
+                && installed != (seq.gate == Gate::Fast)
+            {
+                law.classes.push(format!(
+                    "{} ({path} store): recorded {:?}, installed {installed}, shape {} A's",
+                    seq.name,
+                    seq.gate,
+                    if primed.layer.shape == first_shape { "equal to" } else { "unlike" }
+                ));
+            }
             if (&primed.check, &primed.native) != (&fresh.check, &fresh.native) {
                 failures.push(format!(
                     "{} step {n} ({path} store, predicted gate {:?}): primed {:#} {:?}\n  fresh {:#} {:?}",
@@ -416,10 +488,17 @@ fn run_sequence(seq: &Seq, backend: Option<Backend>) -> (Vec<String>, Vec<String
 /// exactly `unequal_roots` (name, step, store).
 fn run_sequences(seqs: Vec<Seq>, backend: Option<Backend>, unequal_roots: &[&str]) {
     let (mut failures, mut roots) = (vec![], vec![]);
+    let mut law = LayerLaw::default();
     for seq in &seqs {
-        let (f, r) = run_sequence(seq, backend);
+        let (f, r) = run_sequence(seq, backend, &mut law);
         failures.extend(f);
         roots.extend(r);
+    }
+    for (table, (compared, unequal)) in &law.tables {
+        eprintln!("LAYER-LAW {table}: {compared} installed requests, {unequal} unequal");
+    }
+    for class in &law.classes {
+        eprintln!("LAYER-CLASS {class}");
     }
     assert!(
         failures.is_empty(),
@@ -431,6 +510,11 @@ fn run_sequences(seqs: Vec<Seq>, backend: Option<Backend>, unequal_roots: &[&str
     assert_eq!(
         roots, unequal_roots,
         "steps whose check root differs from an empty store's"
+    );
+    assert!(
+        law.classes.is_empty(),
+        "last requests whose install disagrees with the recorded gate class:\n{}",
+        law.classes.join("\n")
     );
 }
 
@@ -1631,12 +1715,29 @@ fn tuple_sequences() -> Vec<Seq> {
         ),
     ]
 }
+/// Edits the declared-state record must survive, or must never be offered
+/// (OPTION-L v3.2): a header respaced in place keeps the shape and moves every
+/// site in it; a finalizer's body is header text of its type. A clone hook's
+/// body (`clone_body`), a constant's initialiser (`constant_value`) and a test
+/// attribute (`test_added`) are above.
+#[rustfmt::skip]
+fn layer_sequences() -> Vec<Seq> {
+    vec![
+        seq("header_respaced", vec![
+            check(app(&[("a.hirsel", "a", "pub type T{x:u8}\npub fn f(x:u8)->u8{x}"), ("b.hirsel", "b", "fn use(t:a.T)->u8{a.f(t.x)}")])),
+            check(app(&[("a.hirsel", "a", "pub type T{ x : u8 }\npub fn f( x : u8 ) -> u8 {x}"), ("b.hirsel", "b", "fn use(t:a.T)->u8{a.f(t.x)}")]))]),
+        seq("finalizer_body_edit", vec![
+            check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")])),
+            check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){let _=0u8}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")]))]),
+    ]
+}
 /// Not request sequences here: image_recursion compares an image layer with
 /// sources; resource needs a process allocation limit.
 fn sequences() -> Vec<Seq> {
     let mut seqs = review_sequences();
     seqs.extend(review_1039_sequences());
     seqs.extend(tuple_sequences());
+    seqs.extend(layer_sequences());
     seqs
 }
 
@@ -1690,11 +1791,12 @@ const GATES: &[(&str, Gate)] = &[
     ("dependency_version", Gate::Fallback),
     ("doc_trivia", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("duplicate_copy_body", Gate::Fallback), // not in 1039: A refuses the duplicate
-    ("entry_warning_interleave", Gate::Fallback),
+    ("entry_warning_interleave", Gate::Fast), // v3.2: fast; C has A's context and shape, and A' published A's record
     ("extension_candidate", Gate::Fallback),
     ("extension_new_ambiguous", Gate::Fallback),
     ("failure_body", Gate::Fast),
     ("finalizer_body", Gate::Fallback),
+    ("finalizer_body_edit", Gate::Fallback), // v3.2: a finalizer body is its type's header text
     ("finalizer_cross_module", Gate::Fast),
     ("foreign_duplicate_span", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("foreign_private_span", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
@@ -1707,6 +1809,7 @@ const GATES: &[(&str, Gate)] = &[
     ("generic_transitive", Gate::Fast),
     ("global_summary_refusal", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("header_alternates", Gate::Fast), // not in 1039: B's shape falls back and does not publish; A' published A's generation
+    ("header_respaced", Gate::Fast), // v3.2: the same tokens, so the same shape
     ("header_type_before_function", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("header_type_before_function_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("holds_transitive", Gate::Fallback),
@@ -1754,10 +1857,10 @@ const GATES: &[(&str, Gate)] = &[
     ("reverse_twin_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("ring", Gate::Fast),
     ("root_limit", Gate::Fast),
-    ("root_missing", Gate::Fallback),
+    ("root_missing", Gate::Fast), // v3.2: fast; the declared record does not live under the check root
     ("same_module_file_tie", Gate::Fallback),
     ("same_shape_refused_constant", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
-    ("source_moves_module", Gate::Fallback),
+    ("source_moves_module", Gate::Fast), // v3.2: fast; a file name is not in the shape, and declaration reads no file name
     ("std_dependency_added", Gate::Fallback),
     ("symbol_body_insertion", Gate::Fast),
     ("symlink_directory", Gate::Fast),

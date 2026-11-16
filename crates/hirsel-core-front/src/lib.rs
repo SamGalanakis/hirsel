@@ -18,6 +18,8 @@ pub use constants::{ConstData, ConstValue, Constant};
 mod decls;
 mod defaults;
 mod identity;
+mod layer;
+pub use layer::Declared;
 mod layout;
 mod library;
 pub use library::{Library, Rows};
@@ -302,6 +304,29 @@ impl<'a> Program<'a> {
         library: Option<&Library>,
     ) -> Self {
         crate::cost_scope!("phase", "declaration summaries");
+        let mut p = Self::open(index, modules, resolutions, library);
+        p.register();
+        p.lower_headers();
+        p.check_recursive_instances();
+        p.register_constants();
+        p.summarize();
+        p.evaluate_constants();
+        test_functions::check(&mut p);
+
+        for f in p.fns.base_len()..p.fns.len() {
+            p.core_operations.push(body::core_ops::binding(&p.fns[f]));
+        }
+        p
+    }
+
+    /// The program before declaration: the resolver's rows and diagnostics,
+    /// over the library's tables.
+    fn open(
+        index: &'a NameIndex,
+        modules: &'a [ModuleInput],
+        resolutions: Vec<Vec<std::sync::Arc<Resolution>>>,
+        library: Option<&Library>,
+    ) -> Self {
         let mut refusals = index.diagnostics.clone();
         let items = modules
             .iter()
@@ -324,7 +349,7 @@ impl<'a> Program<'a> {
                     .collect()
             })
             .collect();
-        let mut p = Program {
+        Program {
             index,
             modules,
             items,
@@ -373,19 +398,7 @@ impl<'a> Program<'a> {
             alias_stack: vec![],
             core_declarations: std::array::from_fn(|_| std::sync::OnceLock::new()),
             structural_codecs: std::sync::OnceLock::new(),
-        };
-        p.register();
-        p.lower_headers();
-        p.check_recursive_instances();
-        p.register_constants();
-        p.summarize();
-        p.evaluate_constants();
-        test_functions::check(&mut p);
-
-        for f in p.fns.base_len()..p.fns.len() {
-            p.core_operations.push(body::core_ops::binding(&p.fns[f]));
         }
-        p
     }
 
     pub(crate) fn item(&self, at: ItemRef) -> Item<'a> {

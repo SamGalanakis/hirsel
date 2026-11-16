@@ -5939,18 +5939,24 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
     let (acks, received): (Sender[DiskCutAck], Receiver[DiskCutAck]) = result.unwrap(channel.new(1))
     let input = DiskWorker(d: d, state: take state, cap: 512, receive: take receive, send: take acks)
     let worker = result.unwrap(task.spawn(tasks, bytes 131072, take input, disk_worker))
-    for k in 0u64 .. 40 {
+    for k in 0u64 .. 96 {
         if !put_one(mut db, k, k + 1) {
             return false
         }
     }
     result.unwrap(channel.send(send, disk_cut(db, 2, 1)))
     match result.unwrap(channel.receive(received)) {
-        Saved(2, 3440) => {},
+        Saved(2, 8256) => {},
         _ => return false
     }
-    let saved = result.unwrap(disk_load(d, 512, 3440))
+    let saved = result.unwrap(disk_load(d, 512, 8256))
     let next_pack = saved.manifest.next_pack
+    // The retry retains this changed sibling of the oversized row's leaf.
+    // Installing counts from the refused draft would mark it already known
+    // without ever writing its NODE to a published pack (inplace_counts).
+    if !put_one(mut db, 95, 195) {
+        return false
+    }
     let mut large: Bytes = result.unwrap(list.with_capacity(1048576))
     result.unwrap(list.fill(mut large, 1048576, 7u8))
     let inserted = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
@@ -5965,8 +5971,8 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
         NoRoom(3, _) => {},
         _ => return false
     }
-    let after_refusal = result.unwrap(disk_load(d, 512, 3440))
-    if after_refusal.manifest.generation != 2 || after_refusal.manifest.next_pack != next_pack || after_refusal.manifest.branches[0].version != 40 {
+    let after_refusal = result.unwrap(disk_load(d, 512, 8256))
+    if after_refusal.manifest.generation != 2 || after_refusal.manifest.next_pack != next_pack || after_refusal.manifest.branches[0].version != 96 {
         return false
     }
     let deleted = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[bool, Error] {
@@ -5980,7 +5986,7 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
     }
     result.unwrap(channel.send(send, disk_cut(db, 3, 1)))
     match result.unwrap(channel.receive(received)) {
-        Saved(3, 3354) => {},
+        Saved(3, 8170) => {},
         _ => return false
     }
     let _ = take send
@@ -5988,8 +5994,8 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
         Ok(()) => {},
         _ => return false
     }
-    let reopened = result.unwrap(disk_load(d, 512, 3354))
-    if reopened.manifest.generation != 3 || reopened.manifest.branches[0].version != 42 || reopened.graph.live != 39 * 86 {
+    let reopened = result.unwrap(disk_load(d, 512, 8170))
+    if reopened.manifest.generation != 3 || reopened.manifest.branches[0].version != 99 || reopened.graph.live != 95 * 86 {
         return false
     }
     let mut wrote_expected_pack = false
@@ -5999,7 +6005,12 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
         }
     }
     let key = result.unwrap(physical(1, key_word(0)))
-    wrote_expected_pack && std.omap.get(reopened.roots.data, key) == None
+    let changed = result.unwrap(physical(1, key_word(95)))
+    let changed_value = match std.omap.get(reopened.roots.data, changed) {
+        Some(raw) => decode_word(raw) == 195,
+        None => false
+    }
+    wrote_expected_pack && std.omap.get(reopened.roots.data, key) == None && changed_value
 }
 
 @test
@@ -6663,6 +6674,63 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
 @test
 fn disk_test_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if disk_law_schema_refusal(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn disk_try_publish(d: Dir, state: DiskState, cut: DiskCut) -> Result[(), Error] waits {
+    let prepared = disk_prepare(d, state, cut, 512)?
+    let _ = disk_commit(d, take prepared)?
+    Ok(())
+}
+
+// L28: removal names are part of preparation, even when the named files are
+// already absent. At each bound a refused cut keeps generation1; an accepted
+// one publishes generation2. Moving those allocations past rename can instead
+// return Full after generation2 is durable (alloc_after_publish).
+pub fn disk_law_publish_refusal(d: Dir) -> bool waits {
+    let id = StoreId(hi: 1, lo: 2)
+    let roots = Roots(data: std.omap.new(), streams: std.omap.new(), catalog: std.omap.new())
+    let mut refused_count: u64 = 0
+    let mut saved_count: u64 = 0
+    for step in 1u64 .. 129 {
+        let child = disk_test_directory(d)
+        let manifest = disk_genesis_fixture()
+        result.unwrap(disk_publish_manifest(child, id, manifest))
+        let state = DiskState(store: id, manifest: take manifest, graph: disk_graph())
+        let cut = DiskCut(generation: 2, roots: share_roots(roots), head: 0, at: 0, next_node: 1, next_table: 1, first_live: 97)
+        let trial: Result[Result[(), Error], Capacity] = bound bytes (step * 512) {
+            disk_try_publish(child, state, cut)
+        }
+        let saved = match take trial {
+            Ok(Ok(())) => true,
+            Ok(Error(Full(_))) => false,
+            Error(_) => false,
+            _ => return false
+        }
+        let raw = result.unwrap(disk_read_file(child, "MANIFEST", 1048576))
+        let persisted = result.unwrap(disk_read_manifest("MANIFEST", raw))
+        let (_, take current) = take persisted
+        if saved {
+            saved_count += 1
+            if current.generation != 2 || current.first_live != 97 {
+                return false
+            }
+        } else {
+            refused_count += 1
+            if current.generation != 1 || current.first_live != 1 {
+                return false
+            }
+        }
+    }
+    refused_count > 0 && saved_count > 0
+}
+
+@test
+fn disk_test_publish_refusal(d: Dir) -> Result[(), ()] waits {
+    if disk_law_publish_refusal(disk_test_directory(d)) {
         Ok(())
     } else {
         Error(())

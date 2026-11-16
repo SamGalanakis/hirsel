@@ -83,6 +83,8 @@ pub struct Checked {
 /// - Nothing is ever cancelled.
 #[derive(Default)]
 struct World {
+    launch_target: (u64, u64),
+    launch: Option<hirsel_core_ids::launch::Metadata>,
     args: Vec<u64>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
@@ -739,6 +741,28 @@ pub fn run_args(m: &Module, f: FuncId, args: &[u64], limit: u64, argv: &[&str]) 
     )
     .0
 }
+/// Launch an evaluator with an artifact or embedder identity captured before entry.
+pub fn run_launch(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    argv: &[&str],
+    launch: &hirsel_core_ids::launch::Metadata,
+) -> Report {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            argv,
+            launch: Some(launch),
+            ..WorldInput::default()
+        },
+    )
+    .0
+}
 /// Deterministic admission refusal for native/evaluator agreement fixtures.
 pub fn run_injected(
     m: &Module,
@@ -804,6 +828,7 @@ pub fn run_network(m: &Module, f: FuncId, args: &[u64], limit: u64, network: Net
 struct WorldInput<'a> {
     network: Option<Network>,
     network_out: Option<&'a mut Network>,
+    launch: Option<&'a hirsel_core_ids::launch::Metadata>,
     revisions: Option<&'a Revisions>,
     injection: Option<(usize, bool)>,
     argv: &'a [&'a str],
@@ -816,6 +841,7 @@ impl Default for WorldInput<'_> {
         Self {
             network: None,
             network_out: None,
+            launch: None,
             revisions: None,
             injection: None,
             argv: &[],
@@ -857,7 +883,16 @@ fn run_world(
         admissions: 0,
         instructions: input.instructions,
         injection: input.injection,
-        world: World::default(),
+        world: World {
+            launch: Some(input.launch.cloned().unwrap_or_else(|| {
+                hirsel_core_ids::launch::Metadata::source(
+                    "",
+                    hirsel_core_ids::launch::DEFAULT_N_PLACE,
+                    false,
+                )
+            })),
+            ..World::default()
+        },
         frozen: Vec::new(),
         loans: 0,
         facts: Arc::new(roles::Facts::new(m)),
@@ -881,6 +916,20 @@ fn run_world(
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
         mach.mem[split(p).0].bytes.clone_from(&s.bytes);
         mach.mem[split(p).0].fixed = true;
+    }
+    let target = mach
+        .world
+        .launch
+        .as_ref()
+        .unwrap()
+        .target()
+        .as_bytes()
+        .to_vec();
+    if !target.is_empty() {
+        let target_data = mach.block(target.len() as u64, None, 0, None);
+        mach.mem[split(target_data).0].bytes.clone_from(&target);
+        mach.mem[split(target_data).0].fixed = true;
+        mach.world.launch_target = (target_data, target.len() as u64);
     }
     for a in input.argv {
         let data = mach.block(a.len() as u64, None, 0, None);
@@ -2706,6 +2755,14 @@ impl Machine<'_> {
                 panic!("{NO_TAPE}")
             }
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
+            RtOp::LaunchWord => vec![self.world.launch.as_ref().unwrap().word(a[0], a[1])],
+            RtOp::LaunchTarget { .. } => {
+                let (data, len) = self.world.launch_target;
+                self.store(a[0], 8, data);
+                self.store(a[0] + 8, 8, len);
+                self.store(a[0] + 16, 8, 0);
+                vec![]
+            }
             RtOp::Host(op) => self.host(t, op, a)?,
             RtOp::CompareBytes => {
                 let range = |p: u64, n: u64| match n {

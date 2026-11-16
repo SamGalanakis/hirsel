@@ -35,6 +35,52 @@ fn load(name: &str, text: &str) -> Module {
     parse(text).unwrap_or_else(|e| panic!("{name}: line {}: {}", e.line, e.message))
 }
 
+fn launch_module() -> Module {
+    let module = load(
+        "launch",
+        "core v1\nsig g0 = () -> (u64, u64, u64)\nsig g1 = (u64, u64) -> (u64)\ninst n0 = app@1/main/launch [] []\nfn f0 = n0 g0 {\nb0:\n v0:u64=const 0\n v1:u64=const 1\n v2:u64=const 2\n v3:u64=call rt.launch_word g1 (v0,v0)\n v4:u64=call rt.launch_word g1 (v1,v0)\n v5:u64=call rt.launch_word g1 (v2,v0)\n return v3,v4,v5\n}\n",
+    );
+    wf::module(&module).unwrap();
+    module
+}
+
+#[test]
+fn evaluator_identity_unavailable() {
+    let module = launch_module();
+    let source = hirsel_core_ids::launch::Metadata::source("test", 73, false);
+    assert_eq!(
+        eval::run_launch(&module, FuncId(0), &[], 4096, &[], &source).outcome,
+        eval::Outcome::Returned(vec![73, 0, 0])
+    );
+    let missing = std::env::temp_dir().join(format!("hirsel-eval-missing-{}", std::process::id()));
+    let unreadable = hirsel_core_ids::launch::Metadata::artifact(&missing, "test", 73, false);
+    assert_eq!(
+        eval::run_launch(&module, FuncId(0), &[], 4096, &[], &unreadable).outcome,
+        eval::Outcome::Returned(vec![73, 0, 0])
+    );
+}
+
+#[test]
+fn evaluator_identity_stable() {
+    let module = launch_module();
+    let path = std::env::temp_dir().join(format!("hirsel-eval-image-{}", std::process::id()));
+    std::fs::write(&path, b"abc").unwrap();
+    let artifact = hirsel_core_ids::launch::Metadata::artifact(&path, "test", 73, false);
+    std::fs::write(&path, b"replacement image").unwrap();
+    assert_eq!(
+        eval::run_launch(&module, FuncId(0), &[], 4096, &[], &artifact).outcome,
+        eval::Outcome::Returned(vec![73, 32, 0xba])
+    );
+    let loaded = hirsel_core_ids::launch::Metadata::loaded(b"abc", "test", 73, false);
+    assert_eq!(loaded.digest(), artifact.digest());
+    std::fs::remove_file(path).unwrap();
+    let embedded = hirsel_core_ids::launch::Metadata::embedded(Some([42; 32]), "test", 419, true);
+    assert_eq!(
+        eval::run_launch(&module, FuncId(0), &[], 4096, &[], &embedded).outcome,
+        eval::Outcome::Returned(vec![419, 32, 42])
+    );
+}
+
 /// A host destination receives the returned bytes without admission. A loop
 /// with no instructions still spends its explicit allowance on terminators.
 #[test]

@@ -40,9 +40,57 @@ pub struct Config {
     pub capabilities: *const crate::entry::Grant,
     pub capabilities_len: usize,
     pub close_grants: Option<unsafe extern "C" fn(*mut u8)>,
+    /// Immutable metadata pinned by the launch owner, never a per-session lookup.
+    pub launch: *const hirsel_core_ids::launch::Metadata,
 }
 
 pub const NOT_STARTED: u8 = 103;
+
+/// Private runner metadata transport. Missing metadata is source-only identity.
+/// # Safety
+/// The context and its configuration are pinned for the current run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_launch_word(
+    context: *const Context,
+    field: u64,
+    index: u64,
+) -> u64 {
+    // SAFETY: the launch owner pins Config and its immutable metadata.
+    unsafe {
+        let run = (*context).run;
+        if run.is_null() || (*run).launch.is_null() {
+            return if field == 0 {
+                hirsel_core_ids::launch::DEFAULT_N_PLACE
+            } else {
+                0
+            };
+        }
+        (*(*run).launch).word(field, index)
+    }
+}
+
+/// # Safety
+/// The context pins launch metadata; output is a fresh three-word String view.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_launch_target(
+    context: *const Context,
+    output: *mut crate::provider::Buffer,
+) {
+    // SAFETY: the caller owns output; the run pins the target's immutable bytes.
+    unsafe {
+        let run = (*context).run;
+        let target = if run.is_null() || (*run).launch.is_null() {
+            ""
+        } else {
+            (*(*run).launch).target()
+        };
+        *output = crate::provider::Buffer {
+            data: target.as_ptr().cast_mut(),
+            len: target.len(),
+            capacity: 0,
+        };
+    }
+}
 
 /// # Safety
 /// Config, entry and all borrowed grants/arguments remain live through the run.

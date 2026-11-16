@@ -130,6 +130,8 @@ pub struct OsConfig {
     pub parameters_len: usize,
     pub net_rules: *const hirsel_core_net::Rule,
     pub net_rules_len: usize,
+    /// Executable target, emitted by the linker for either native backend.
+    pub target: View,
 }
 pub struct OsProcess {
     pub(crate) sources: *const crate::abi_sites::SourceTable,
@@ -143,6 +145,7 @@ pub struct OsProcess {
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
     config: Config,
+    _launch: Box<hirsel_core_ids::launch::Metadata>,
 }
 #[repr(C)]
 pub struct OpenProcess {
@@ -213,6 +216,30 @@ impl OsProcess {
                     .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
                 args.push(value.to_vec());
             }
+            let mut n_place = hirsel_core_ids::launch::DEFAULT_N_PLACE;
+            let mut describe_mode = false;
+            let mut prefix = 0;
+            for argument in &args {
+                if argument == b"--hirsel-describe" {
+                    describe_mode = true;
+                } else if let Some(value) = argument.strip_prefix(b"--hirsel-n-place=") {
+                    n_place = std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+                } else {
+                    break;
+                }
+                prefix += 1;
+            }
+            args.drain(..prefix);
+            let target = std::str::from_utf8(bytes(input.target))
+                .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
+            let launch = Box::new(hirsel_core_ids::launch::Metadata::native(
+                target,
+                n_place,
+                describe_mode,
+            ));
             let views = args
                 .iter()
                 .map(|a| Buffer {
@@ -279,6 +306,7 @@ impl OsProcess {
                 capabilities: metadata.as_ptr(),
                 capabilities_len: metadata.len(),
                 close_grants: Some(close_grants),
+                launch: &*launch,
             };
             let mut process = Box::new(Self {
                 sources: std::ptr::null(),
@@ -292,6 +320,7 @@ impl OsProcess {
                 grants: Vec::with_capacity(input.parameters_len),
                 diagnostic: vec![],
                 config,
+                _launch: launch,
             });
             let mut probe = Some(probe);
             for n in 0..input.parameters_len {

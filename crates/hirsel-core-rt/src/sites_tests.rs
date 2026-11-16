@@ -53,6 +53,10 @@ fn table(files: &[SourceFile], items: &[SourceItem]) -> SourceTable {
 fn run(sources: *const SourceTable, entry: Entry, explicit_owner: bool) -> (u8, String) {
     let (mut reader, writer) = UnixStream::pair().unwrap();
     let config = OsConfig {
+        target: crate::process::View {
+            data: std::ptr::null(),
+            len: 0,
+        },
         root_limit: 1 << 20,
         args: ptr::null(),
         args_len: 0,

@@ -774,6 +774,12 @@ pub enum RtOp {
     StepLeave,
     /// Close a failed step scope, catching only its own OutOfTime causes.
     StepCatch,
+    /// Private immutable launch metadata: `(field, index) -> word`.
+    LaunchWord,
+    /// Private launch target as a borrowed String carrier, anchored to this run.
+    LaunchTarget {
+        view: TypeId,
+    },
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1008,6 +1014,8 @@ impl RtOp {
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
+            RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
+            RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
             RtOp::TapeOpen => (
                 vec![V(u64_), V(p), V(u8_), V(p), V(p), V(u64_), V(u64_), V(u64_)],
                 vec![u64_, u64_],
@@ -1109,6 +1117,7 @@ impl RtOp {
             | RtOp::Receive { item }
             | RtOp::TryReceive { item }
             | RtOp::LatestNew { item } => vec![item],
+            RtOp::LaunchTarget { view } => vec![view],
             RtOp::Cancel
             | RtOp::CheckCancel
             | RtOp::ChannelSender
@@ -1122,6 +1131,7 @@ impl RtOp {
             | RtOp::CauseValue
             | RtOp::ArgsLen
             | RtOp::ArgsGet
+            | RtOp::LaunchWord
             | RtOp::Host(_)
             | RtOp::TapeOpen
             | RtOp::TapeEnd

@@ -219,6 +219,16 @@ impl FunctionEmitter<'_> {
             RtOp::ArgsLen => {
                 self.native_call("hirsel_core_args_len", &[U], &[ptr(CONTEXT), u(&args[0])])
             }
+            RtOp::LaunchWord => self.native_call(
+                "hirsel_core_launch_word",
+                &[U],
+                &[ptr(CONTEXT), u(&args[0]), u(&args[1])],
+            ),
+            RtOp::LaunchTarget { .. } => self.native_call(
+                "hirsel_core_launch_target",
+                &[],
+                &[ptr(CONTEXT), p(&args[0])],
+            ),
             RtOp::ArgsGet => self.native_call(
                 "hirsel_core_args_get",
                 &[P],

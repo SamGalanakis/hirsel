@@ -73,6 +73,10 @@ impl Fixture {
             })
             .collect();
         let input = OsConfig {
+            target: crate::process::View {
+                data: std::ptr::null(),
+                len: 0,
+            },
             root_limit,
             args: args.as_ptr(),
             args_len: args.len(),

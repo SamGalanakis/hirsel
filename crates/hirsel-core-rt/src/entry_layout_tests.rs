@@ -17,6 +17,7 @@ fn published_entry_layout_matches_c_abi() {
         (offset_of!(OsConfig, grant_mask), OS_CONFIG_GRANT_MASK),
         (offset_of!(OsConfig, stdout_fd), OS_CONFIG_STREAMS),
         (offset_of!(OsConfig, parameters), OS_CONFIG_PARAMETERS),
+        (offset_of!(OsConfig, target), OS_CONFIG_TARGET),
         (
             offset_of!(OsConfig, parameters_len),
             OS_CONFIG_PARAMETERS_LEN,

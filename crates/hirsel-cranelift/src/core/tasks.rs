@@ -176,6 +176,24 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
+            RtOp::LaunchWord => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_launch_word",
+                    &[P, U, U],
+                    &[U],
+                    &[self.context, args[0], args[1]],
+                )?[0];
+                1
+            }
+            RtOp::LaunchTarget { .. } => {
+                self.c_call(
+                    "hirsel_core_launch_target",
+                    &[P, P],
+                    &[],
+                    &[self.context, args[0]],
+                )?;
+                0
+            }
             RtOp::ArgsGet => {
                 outputs[0] = self.c_call(
                     "hirsel_core_args_get",

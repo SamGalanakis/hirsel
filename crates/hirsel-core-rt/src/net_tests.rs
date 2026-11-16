@@ -52,6 +52,10 @@ fn net_laws_child() {
         parameters_len: 0,
         net_rules: &rule,
         net_rules_len: 1,
+        target: crate::process::View {
+            data: b"test-target".as_ptr(),
+            len: 11,
+        },
     };
     // SAFETY: fixture pins configuration, context and registry through all calls.
     unsafe {

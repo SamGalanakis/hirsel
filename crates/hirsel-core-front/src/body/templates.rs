@@ -819,6 +819,9 @@ impl Substitution<'_> {
             RtOp::LatestNew { item } => RtOp::LatestNew {
                 item: self.ty(item),
             },
+            RtOp::LaunchTarget { view } => RtOp::LaunchTarget {
+                view: self.ty(view),
+            },
             RtOp::Send { item } => RtOp::Send {
                 item: self.ty(item),
             },

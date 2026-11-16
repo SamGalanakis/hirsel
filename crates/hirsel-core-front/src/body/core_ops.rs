@@ -345,6 +345,16 @@ operations! {
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
+    if f.path.package_is("store", "1")
+        && f.path.0.modules == ["runner"]
+        && matches!(f.path.0.name.as_str(), "launch_word" | "launch_text")
+    {
+        return Some(if f.path.0.name == "launch_word" {
+            u16::MAX
+        } else {
+            u16::MAX - 1
+        });
+    }
     if !f.path.package_is("core", "1") || f.body.is_some() {
         return None;
     }
@@ -367,6 +377,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<Option<ValueId>> {
+        if self.p.core_operations[f] == Some(u16::MAX - 1) {
+            let view = self.runtime_type(result, n)?;
+            let output = self.new_slot(PlaceTy::Declared(view), n);
+            self.runtime_row(RtOp::LaunchTarget { view }, &[Arg::Address(output)], n)?;
+            return Some(Some(self.pointer(output, n)));
+        }
+        if self.p.core_operations[f] == Some(u16::MAX) {
+            return Some(
+                self.runtime_row(
+                    RtOp::LaunchWord,
+                    &[Arg::Value(vals[0]?), Arg::Value(vals[1]?)],
+                    n,
+                )
+                .map(|v| v[0]),
+            );
+        }
         match OPERATIONS[self.p.core_operations[f]? as usize].lane {
             Lane::Runtime(kernel) => Some(self.runtime_kernel(kernel, f, types, vals, result, n)),
             Lane::PendingCode => self.pending_code(f, types, vals, result, n),
@@ -1493,6 +1519,9 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
         let Some(i) = p.core_operations[f] else {
             continue;
         };
+        if i >= u16::MAX - 1 {
+            continue;
+        }
         let Lane::Runtime(kernel) = OPERATIONS[i as usize].lane else {
             continue;
         };

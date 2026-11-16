@@ -91,6 +91,7 @@ impl Remap {
                         *r = self.types[r.index()];
                     }
                     RtOp::Join { r } => *r = self.types[r.index()],
+                    RtOp::LaunchTarget { view } => *view = self.types[view.index()],
                     RtOp::ChannelNew { item }
                     | RtOp::Send { item }
                     | RtOp::TrySend { item }

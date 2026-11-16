@@ -1,5 +1,105 @@
 use crate::{Context, entry::*, process::*, provider::*};
 use std::{fs::File, os::fd::AsRawFd, ptr};
+
+fn launch_config(launch: &hirsel_core_ids::launch::Metadata) -> Config {
+    unsafe extern "C" fn diagnostic(_: *mut u8, _: *const u8, _: usize) {
+        panic!("launch identity emitted a diagnostic");
+    }
+    Config {
+        root_limit: 4096,
+        args: ptr::null(),
+        args_len: 0,
+        grants: ptr::null(),
+        grants_len: 0,
+        provider: ptr::null(),
+        state: ptr::null_mut(),
+        diagnostic,
+        describe: None,
+        scheduler: crate::tasks::SchedulerProvider::default(),
+        stop_fd: 2,
+        capabilities: ptr::null(),
+        capabilities_len: 0,
+        close_grants: None,
+        launch,
+    }
+}
+
+#[test]
+fn identity_stable() {
+    use std::io::{BufRead, Read, Write};
+    let executable = std::env::current_exe().unwrap();
+    if executable.file_name().unwrap() == "launch-child" {
+        let launch = hirsel_core_ids::launch::Metadata::native("test-target", 419, false);
+        let config = launch_config(&launch);
+        let mut context = Context::new(4096);
+        context.run = &config;
+        let digest = || {
+            // SAFETY: Config, context and launch remain pinned in this child.
+            unsafe {
+                (0..hirsel_core_launch_word(&context, 1, 0))
+                    .map(|i| format!("{:02x}", hirsel_core_launch_word(&context, 2, i)))
+                    .collect::<String>()
+            }
+        };
+        println!("IDENTITY {}", digest());
+        std::io::stdout().flush().unwrap();
+        std::io::stdin().read_exact(&mut [0]).unwrap();
+        println!("IDENTITY {}", digest());
+        return;
+    }
+    let directory =
+        std::env::temp_dir().join(format!("hirsel-launch-identity-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let child_path = directory.join("launch-child");
+    std::fs::copy(&executable, &child_path).unwrap();
+    let mut child = std::process::Command::new(&child_path)
+        .args(["--exact", "entry_tests::identity_stable", "--nocapture"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut first = String::new();
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            output.read_line(&mut line).unwrap(),
+            0,
+            "child exited before identity"
+        );
+        if let Some((_, digest)) = line.split_once("IDENTITY ") {
+            first = digest.trim().into();
+            break;
+        }
+    }
+    assert_eq!(first.len(), 64);
+    let replacement = directory.join("replacement");
+    std::fs::write(&replacement, b"a different executable on disk").unwrap();
+    std::fs::rename(replacement, &child_path).unwrap();
+    child.stdin.take().unwrap().write_all(&[1]).unwrap();
+    let mut tail = String::new();
+    output.read_to_string(&mut tail).unwrap();
+    assert!(child.wait().unwrap().success(), "{tail}");
+    assert!(
+        tail.lines().any(|line| line == format!("IDENTITY {first}")),
+        "{tail}"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn identity_unavailable() {
+    let missing = std::env::temp_dir().join(format!("hirsel-missing-exe-{}", std::process::id()));
+    let launch = hirsel_core_ids::launch::Metadata::artifact(&missing, "test", 73, false);
+    let config = launch_config(&launch);
+    let mut context = Context::new(4096);
+    context.run = &config;
+    // SAFETY: the immutable launch and its owner remain live through both reads.
+    unsafe {
+        assert_eq!(hirsel_core_launch_word(&context, 1, 0), 0);
+        assert_eq!(hirsel_core_launch_word(&context, 0, 0), 73);
+    }
+}
 #[test]
 fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
     crate::openat2_required::require();
@@ -39,6 +139,10 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
     ];
     let net_rule = hirsel_core_net::Rule::parse("Connect 0.0.0.0/0 0-65535").unwrap();
     let config = OsConfig {
+        target: crate::process::View {
+            data: std::ptr::null(),
+            len: 0,
+        },
         root_limit: 4096,
         args: argv.as_ptr(),
         args_len: 1,
@@ -144,6 +248,10 @@ fn c_constructor_refuses_missing_grants_bad_descriptors_and_invalid_argv_before_
         index: 0,
     }];
     let config = OsConfig {
+        target: crate::process::View {
+            data: std::ptr::null(),
+            len: 0,
+        },
         root_limit: 1,
         args: ptr::null(),
         args_len: 0,
@@ -227,6 +335,10 @@ fn c_u64_capability_operands_feed_host_requests_and_ok_is_initialized() {
         index: 0,
     }];
     let config = OsConfig {
+        target: crate::process::View {
+            data: std::ptr::null(),
+            len: 0,
+        },
         root_limit: 1024,
         args: ptr::null(),
         args_len: 0,
@@ -280,6 +392,7 @@ fn product_start_double_isolate_catch_refunds_the_first_cause_cell() {
         panic!("unexpected product diagnostic");
     }
     let config = Config {
+        launch: std::ptr::null(),
         root_limit: 1024,
         args: ptr::null(),
         args_len: 0,
@@ -328,6 +441,7 @@ fn run_closes_grants_after_main_cleanup_and_before_reporting_status_without_admi
     }
     let mut state = State { events: vec![] };
     let config = Config {
+        launch: std::ptr::null(),
         root_limit: 1024,
         args: ptr::null(),
         args_len: 0,
@@ -401,6 +515,10 @@ fn broken_pipe_child() {
             index: 0,
         }];
         let config = OsConfig {
+            target: crate::process::View {
+                data: std::ptr::null(),
+                len: 0,
+            },
             root_limit: 1024,
             args: ptr::null(),
             args_len: 0,

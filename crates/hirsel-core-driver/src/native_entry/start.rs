@@ -52,6 +52,10 @@ pub(super) fn emit(
     let streams = f.constant((2u64 << 32) | 1);
     let net_rules = f.address(data.net_rules);
     let net_rules_len = f.constant(plan.net_rules.len() as u64);
+    let triple = f.object.isa().triple().to_string();
+    let target_data = data::bytes(f.object, None, triple.as_bytes().to_vec(), 1)?;
+    let target = f.address(target_data);
+    let target_len = f.constant(triple.len() as u64);
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -64,6 +68,8 @@ pub(super) fn emit(
         (abi::OS_CONFIG_PARAMETERS_LEN, parameters_len),
         (abi::OS_CONFIG_NET_RULES, net_rules),
         (abi::OS_CONFIG_NET_RULES_LEN, net_rules_len),
+        (abi::OS_CONFIG_TARGET, target),
+        (abi::OS_CONFIG_TARGET_LEN, target_len),
     ] {
         f.store(value, config, offset);
     }

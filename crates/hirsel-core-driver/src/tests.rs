@@ -23,6 +23,45 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
         entry: None,
     }
 }
+
+#[test]
+fn private_runner_launch_hook_is_lowered_and_evaluated() {
+    let directory = tempfile::tempdir().unwrap();
+    let runner = include_str!("../../../core/programs/store/runner.hirsel");
+    let hooks = &runner
+        [runner.find("// Private runtime").unwrap()..runner.find("// One erased adapter").unwrap()];
+    let source = format!(
+        "{hooks}\npub fn probe(a: Args) -> u64 {{\n let d = result.unwrap(launch_digest())\n let t = result.unwrap(launch_target(a))\n launch_word(0u64, 0u64) + list.len(d) + string.byte_len(t)\n}}\n"
+    );
+    let mut req = request(&source, directory.path());
+    req.inputs.packages[0].package = package("store");
+    req.inputs.packages[0].sources[0].modules = vec!["runner".into()];
+    req.inputs.packages[0].dependencies.push(package("core"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    req.inputs.packages.insert(
+        0,
+        PackageManifest::directory(&root, package("core"), true).unwrap(),
+    );
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let identity =
+        hirsel_core_ir::Identity::plain(DefPath::from_full("store@1/runner/probe").unwrap());
+    let units = product.units([identity.clone()], 65_536).unwrap();
+    let modules = units.modules().unwrap();
+    let (module, entry) = hirsel_core_materialize::join(&modules, &identity).unwrap();
+    let launch = hirsel_core_ids::launch::Metadata::embedded(Some([7; 32]), "test", 419, false);
+    assert_eq!(
+        eval::run_launch(&module, entry, &[0], 1_000_000, &[], &launch).outcome,
+        eval::Outcome::Returned(vec![419 + 32 + 4])
+    );
+}
 /// Separate definition units must preserve generic calls and function values.
 /// The oracle is 20 + 21 + 1. Two definitions claiming the same code variant
 /// while returning different values are a link conflict.

@@ -2,6 +2,17 @@
 use super::*;
 use hirsel_core_ir::{ArithMode, ArithOp};
 
+/// What asks a list for room: it decides the room test and whether growth is cold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ask {
+    /// A small constant or another list's length.
+    Bounded,
+    /// `list.reserve(n)` with a caller's n; it usually asks for a few at a time.
+    Reserve,
+    /// `list.fill(n)` with a caller's n; a fresh list's fill always grows.
+    Fill,
+}
+
 #[derive(Clone, Copy)]
 enum ListStorage {
     Empty,
@@ -211,7 +222,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.place_row(result, "put_word_le without a Result place is not built", n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let width = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
-        let reserved = self.list_reserve(scalar(Scalar::U8), header, width, true, result, n)?;
+        let reserved =
+            self.list_reserve(scalar(Scalar::U8), header, width, Ask::Bounded, result, n)?;
         let at = self.address(
             AddressBase::Value(reserved),
             &[],
@@ -575,7 +587,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: TyId,
         header: ValueId,
         additional: ValueId,
-        bounded: bool,
+        ask: Ask,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
@@ -583,7 +595,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // A stored element has a nonzero size, so len <= isize::MAX; a bounded
         // `additional` (a small constant or another list's length) is too, and
         // len + additional cannot wrap: the room test is one compare.
-        let unwrappable = bounded && matches!(self.list_storage_static(item), Some(true));
+        let unwrappable =
+            ask == Ask::Bounded && matches!(self.list_storage_static(item), Some(true));
         let id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
@@ -610,7 +623,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let growth = self.new_block(&[]);
         let success = self.new_block(&[]);
         let done = self.new_block(&[]);
-        self.list_branch(grow, growth, success, n);
+        // Growth is amortized and rare except for fill: that edge is cold.
+        let yes = self.edge(growth, &[]);
+        self.b.edges[yes.index()].cold = ask != Ask::Fill;
+        let no = self.edge(success, &[]);
+        self.end(
+            Terminator::Branch {
+                condition: grow,
+                yes,
+                no,
+            },
+            Some(n),
+        );
         self.start(growth);
         match self.list_storage(item, n)? {
             ListStorage::Stored => {}
@@ -948,7 +972,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let count = self.carrier_word(source, carrier, SeqWord::Len, n);
-        let reserved = self.list_reserve(item, header, count, true, result, n)?;
+        let reserved = self.list_reserve(item, header, count, Ask::Bounded, result, n)?;
         let result_id = self.place_row(result, "a list result without a place is not built", n)?;
         let at = self.address(
             AddressBase::Value(reserved),
@@ -1008,7 +1032,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let reserved = self.list_reserve(item, header, count, false, result, n)?;
+        let reserved = self.list_reserve(item, header, count, Ask::Fill, result, n)?;
         let result_id = self.place_row(result, "a list result without a place is not built", n)?;
         let at = self.address(
             AddressBase::Value(reserved),

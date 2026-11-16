@@ -98,6 +98,7 @@ fn edge(body: &mut Body, target: BlockId) -> EdgeId {
     body.edges.push(Edge {
         target,
         args: PoolRange::EMPTY,
+        cold: false,
     });
     e
 }

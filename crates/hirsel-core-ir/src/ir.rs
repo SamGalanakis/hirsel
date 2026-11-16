@@ -1120,6 +1120,10 @@ pub struct CallSite {
 pub struct Edge {
     pub target: BlockId,
     pub args: PoolRange<ValueId>,
+    /// The front knows this edge is rarely taken: it enters the growth path of
+    /// a list reserve, which runs only when the list lacks room. A hint with no
+    /// behaviour; an engine may ignore it.
+    pub cold: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

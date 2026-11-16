@@ -2005,7 +2005,11 @@ impl Code {
     pub(super) fn edge(&mut self, target: BlockId, args: &[ValueId]) -> EdgeId {
         let args = PoolRange::push(&mut self.body.pools.values, args.iter().copied());
         let id = EdgeId(self.body.edges.len() as u32);
-        self.body.edges.push(Edge { target, args });
+        self.body.edges.push(Edge {
+            target,
+            args,
+            cold: false,
+        });
         id
     }
     pub(super) fn jump(&mut self, target: BlockId, args: &[ValueId]) {

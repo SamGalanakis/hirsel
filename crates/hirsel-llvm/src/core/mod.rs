@@ -1528,9 +1528,13 @@ impl FunctionEmitter<'_> {
         }
         Label::block(e.target.0)
     }
-    /// Whether `edge` enters a block that makes a call the front marked cold
-    /// (core-ir CallSite::cold: the true arm of a growth check).
+    /// Whether the front marked `edge` cold (core-ir Edge::cold), or it enters a
+    /// block that makes a call the front marked cold (core-ir CallSite::cold: the
+    /// true arm of a growth check).
     fn cold_edge(&self, edge: EdgeId) -> bool {
+        if self.body.edges[edge.index()].cold {
+            return true;
+        }
         let target = self.body.edges[edge.index()].target;
         let block = &self.body.blocks[target.index()];
         block

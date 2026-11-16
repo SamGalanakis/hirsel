@@ -2014,7 +2014,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     fn edge(&mut self, target: BlockId, args: &[ValueId]) -> EdgeId {
         let args = PoolRange::push(&mut self.b.pools.values, args.iter().copied());
-        self.b.edges.push(Edge { target, args });
+        self.b.edges.push(Edge {
+            target,
+            args,
+            cold: false,
+        });
         EdgeId(self.b.edges.len() as u32 - 1)
     }
     fn jump(&mut self, target: BlockId, args: &[ValueId], n: NodeId) {

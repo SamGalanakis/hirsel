@@ -377,10 +377,15 @@ impl Printer {
         let edge = |e: EdgeId| {
             let e = &b.edges[e.index()];
             let args = vals(e.args);
+            let cold = if e.cold { " cold" } else { "" };
             if args.is_empty() {
-                format!("b{}", e.target.0)
+                format!("b{}{cold}", e.target.0)
             } else {
-                format!("b{}({})", e.target.0, list(args, |v| format!("v{}", v.0)))
+                format!(
+                    "b{}({}){cold}",
+                    e.target.0,
+                    list(args, |v| format!("v{}", v.0))
+                )
             }
         };
         let anchor = |a: Option<Anchor>| match a {
@@ -1201,7 +1206,8 @@ impl BodyParser {
             Vec::new()
         };
         let args = PoolRange::push(&mut self.body.pools.values, args);
-        self.body.edges.push(Edge { target, args });
+        let cold = l.eat("cold");
+        self.body.edges.push(Edge { target, args, cold });
         Ok(EdgeId(self.body.edges.len() as u32 - 1))
     }
     fn ty_of(&self, v: ValueId) -> R<Ty> {

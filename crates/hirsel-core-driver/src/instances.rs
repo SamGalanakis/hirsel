@@ -74,6 +74,8 @@ pub(crate) enum Location {
 /// The fields of an instance record that are read from its module.
 pub(crate) struct Fields {
     pub own: Option<ContentHash>,
+    /// The module's `revision::body`.
+    pub body: ContentHash,
     pub children: Vec<Identity>,
     pub closures: Vec<Arc<hirsel_core_ir::Closure>>,
 }
@@ -86,13 +88,13 @@ pub(crate) struct Records {
     pub library: Option<Store>,
 }
 impl Records {
-    /// An instance's key: `hirsel.core-instance.v1` over the encoded
+    /// An instance's key: `hirsel.core-instance.v2` over the encoded
     /// `(env, identity, own)` (a tuple encodes as its fields in order).
     pub fn key(&self, identity: &Identity, own: Option<ContentHash>) -> io::Result<ContentHash> {
         let mut bytes = self.env.clone();
         bytes.extend(encode(&(identity, own))?);
         Ok(ContentHash::of_parts(
-            "hirsel.core-instance.v1",
+            "hirsel.core-instance.v2",
             [&bytes[..]],
         ))
     }
@@ -133,6 +135,8 @@ pub(crate) struct InstanceBody {
     pub product: Option<Arc<DefinitionProduct>>,
     module: Option<Module>,
     pub function: hirsel_core_ir::FuncId,
+    /// The module's `revision::body`.
+    pub body: ContentHash,
     /// The module's signature-only rows the walk reached, by ascending row, with
     /// the instance each names.
     externals: Vec<(hirsel_core_ir::FuncId, Identity)>,
@@ -211,6 +215,38 @@ impl InstanceSet {
                 }
             })
             .collect())
+    }
+    /// `revision::revision(root)` over this walk's instances: a materialised
+    /// one's module, a hit's record, or an expanded one's entry in `prior`,
+    /// the reach record it was expanded from (every instance, on a hit of
+    /// the whole record).
+    pub(crate) fn revision(
+        &self,
+        root: &Identity,
+        prior: Option<&crate::reach::Reach>,
+    ) -> Option<ContentHash> {
+        crate::revision::revision(root, |identity| {
+            if let Some(&row) = self.rows.get(identity) {
+                let body = &self.bodies[row];
+                return Some((
+                    body.body,
+                    body.externals.iter().map(|(_, c)| c.clone()).collect(),
+                ));
+            }
+            if let Some(record) = self.hits.get(identity) {
+                return Some((record.body, record.children.clone()));
+            }
+            let prior = prior?;
+            let entry = prior.entry(prior.instance(identity)?);
+            Some((
+                entry.body,
+                entry
+                    .children
+                    .iter()
+                    .map(|&c| prior.entry(c as usize).identity.clone())
+                    .collect(),
+            ))
+        })
     }
     /// The materialised instance of `definition` whose type arguments' row names are
     /// `arguments`, for tests that name an instance by its source text.
@@ -385,6 +421,14 @@ impl CheckProduct {
                 }
             };
             observe(key, "materialize");
+            let body = {
+                let module = match (&built.module, &product) {
+                    (Some(module), _) => module,
+                    (None, Some(product)) => product.ir().map_err(|e| input(e.to_string()))?,
+                    (None, None) => unreachable!("a glue instance is materialised"),
+                };
+                crate::revision::body(module, &mut Vec::new()).map_err(|e| input(e.to_string()))?
+            };
             resolver.add(&built.children);
             if records.is_some() {
                 let mut closures = std::collections::BTreeMap::new();
@@ -397,6 +441,7 @@ impl CheckProduct {
                     key.clone(),
                     Fields {
                         own,
+                        body,
                         children: built
                             .children
                             .iter()
@@ -427,6 +472,7 @@ impl CheckProduct {
                 product,
                 module: built.module,
                 function: built.function,
+                body,
                 externals,
             });
             observe(key, "dependencies");

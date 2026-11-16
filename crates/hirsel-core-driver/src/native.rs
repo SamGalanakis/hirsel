@@ -210,6 +210,9 @@ pub struct BuildProduct {
     /// The executable's key: its objects' identities, the entry plan, the
     /// sources digest and the link inputs. Its record is stored under it.
     pub identity: ContentHash,
+    /// The entry's code revision (`revision::revision`): its reached
+    /// instances' checked CoreIR, independent of engine, build and layout.
+    pub revision: ContentHash,
     pub compiled: usize,
     pub linked: bool,
     /// True means diagnostic instrumentation; timings are not performance samples.
@@ -360,6 +363,7 @@ impl Table {
         instances: &[Identity],
         identity: &Identity,
         own: Option<ContentHash>,
+        body: ContentHash,
         location: crate::instances::Location,
         object: Bare,
         debug: Option<ContentHash>,
@@ -391,6 +395,7 @@ impl Table {
         self.entries.push(crate::reach::Fresh {
             identity: identity.clone(),
             own,
+            body,
             location,
             object,
             debug,
@@ -511,6 +516,7 @@ impl CheckProduct {
                             instances,
                             instance,
                             e.own,
+                            e.body,
                             e.location,
                             e.object,
                             e.debug,
@@ -537,6 +543,7 @@ impl CheckProduct {
                             instances,
                             instance,
                             record.own,
+                            record.body,
                             location,
                             record.object,
                             record.debug,
@@ -561,6 +568,7 @@ impl CheckProduct {
                     schema: crate::native_object::INSTANCE_SCHEMA,
                     identity: instance.clone(),
                     own: fields.own,
+                    body: fields.body,
                     env: records.digest,
                     object: Default::default(),
                     debug: None,
@@ -575,6 +583,7 @@ impl CheckProduct {
                         instances,
                         instance,
                         fields.own,
+                        fields.body,
                         location,
                         bare,
                         debug,
@@ -855,6 +864,7 @@ impl CheckProduct {
             inputs.recipe.clone(),
             counters,
             record,
+            reached.revision(entry)?,
         )
     }
     /// The entry's declaration part, bound by check.
@@ -1018,6 +1028,7 @@ impl CheckProduct {
             schema: crate::native_object::INSTANCE_SCHEMA,
             identity: identity.clone(),
             own: Some(own),
+            body: crate::revision::body(&module, &mut Vec::new())?,
             env: records.digest,
             object: Default::default(),
             debug: None,
@@ -1353,6 +1364,7 @@ fn link_objects(
     recipe: crate::tool_inputs::LinkRecipe,
     mut counters: crate::reach::ReachCounters,
     record: impl FnOnce(ContentHash) -> io::Result<u64>,
+    revision: ContentHash,
 ) -> Result<Linked, NativeStop> {
     // Development links use lld's cheap string-merging mode. Release keeps
     // the linker default; this spelling is part of the executable key below.
@@ -1555,6 +1567,7 @@ fn link_objects(
         private_variants: objects.iter().map(|o| o.private_variants).sum(),
         executable: options.output.clone(),
         identity: link_key,
+        revision,
         compiled: objects.iter().filter(|o| o.compiled).count(),
         linked,
         observation_mode: options.logical_charge_report.is_some(),
@@ -1607,6 +1620,7 @@ mod tests {
     include!("reach_native.rs");
     include!("tape_build_native.rs");
     include!("request_sequences.rs");
+    include!("revision_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

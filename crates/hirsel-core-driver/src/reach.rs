@@ -34,7 +34,7 @@ use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-pub(crate) const REACH_SCHEMA: u32 = 5;
+pub(crate) const REACH_SCHEMA: u32 = 6;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -66,6 +66,8 @@ pub(crate) type Graph = BTreeMap<(DefPath, bool), (Vec<(DefPath, bool)>, bool)>;
 pub(crate) struct Entry {
     pub identity: Identity,
     pub own: Option<ContentHash>,
+    /// The instance's `revision::body`.
+    pub body: ContentHash,
     pub location: Location,
     pub object: Bare,
     pub debug: Option<ContentHash>,
@@ -79,6 +81,8 @@ pub(crate) struct Entry {
 pub(crate) struct Fresh {
     pub identity: Identity,
     pub own: Option<ContentHash>,
+    /// The instance's `revision::body`.
+    pub body: ContentHash,
     pub location: Location,
     pub object: Bare,
     pub debug: Option<ContentHash>,
@@ -111,6 +115,7 @@ struct StoredEntry<S, H, U> {
     dictionaries: S,
     closure_hashes: H,
     own: Option<ContentHash>,
+    body: ContentHash,
     location: Location,
     object: Bare,
     debug: Option<ContentHash>,
@@ -451,6 +456,7 @@ impl Reach {
                     closures: e.closure_hashes,
                 },
                 own: e.own,
+                body: e.body,
                 location: e.location,
                 object: e.object,
                 debug: e.debug,
@@ -697,7 +703,7 @@ pub(crate) fn patched(product: &CheckProduct, prior: &Reach, changed: &[bool]) -
     }
 }
 
-/// The selection: `hirsel.core-reach.v3` over the environment digest, the
+/// The selection: `hirsel.core-reach.v4` over the environment digest, the
 /// image, the entry and its declaration part, whether it is a test, the
 /// entry policy and the instance limit.
 pub(crate) fn selection(
@@ -716,7 +722,7 @@ pub(crate) fn selection(
         return Ok(None);
     };
     crate::native::key(
-        "hirsel.core-reach.v3",
+        "hirsel.core-reach.v4",
         &(
             records.digest,
             product.image.as_ref().map(|i| i.identity),
@@ -863,6 +869,7 @@ fn encode_record<'a>(
             dictionaries: &e.identity.dictionaries,
             closure_hashes: &e.identity.closures,
             own: e.own,
+            body: e.body,
             location: e.location,
             object: e.object,
             debug: e.debug,

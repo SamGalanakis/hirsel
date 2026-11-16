@@ -103,7 +103,7 @@ pub(crate) fn load(
 }
 
 /// A Cranelift development instance's record, under its instance key
-/// (`hirsel.core-instance.v1` over the environment, the instance's identity
+/// (`hirsel.core-instance.v2` over the environment, the instance's identity
 /// and its template body record's address, or none for glue). Every field a
 /// hit reads is a function of the key: the object and its debug rows are the
 /// emission of the materialised module, and `children`, `items` and
@@ -114,6 +114,8 @@ pub(crate) struct Instance {
     pub schema: u32,
     pub identity: hirsel_core_ir::Identity,
     pub own: Option<ContentHash>,
+    /// The module's `revision::body`, which a hit's revision reads.
+    pub body: ContentHash,
     /// The digest of the encoded environment the key was made with.
     pub env: ContentHash,
     pub object: Bare,
@@ -124,7 +126,7 @@ pub(crate) struct Instance {
     /// Every closure a child's arguments name, deduplicated, by hash.
     pub closures: Vec<std::sync::Arc<hirsel_core_ir::Closure>>,
 }
-pub(crate) const INSTANCE_SCHEMA: u32 = 2;
+pub(crate) const INSTANCE_SCHEMA: u32 = 3;
 
 /// Publish an emitted instance's object, debug rows and record under its
 /// key; the object, the debug rows' name and the descriptor the object's
@@ -202,6 +204,7 @@ mod tests {
             schema: INSTANCE_SCHEMA,
             identity: hirsel_core_ir::Identity::plain(hirsel_core_ids::DefPath::core(name)),
             own: None,
+            body: ContentHash::of_bytes(b"body"),
             env: ContentHash::of_bytes(b"env"),
             object: Default::default(),
             debug: None,

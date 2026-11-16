@@ -34,6 +34,15 @@ pub struct Reachable<'a> {
     pub(crate) reach: Option<crate::reach::Use>,
 }
 impl Reachable<'_> {
+    /// `entry`'s code revision over this walk's instances.
+    pub(crate) fn revision(&self, entry: &DefPath) -> Result<ContentHash, NativeStop> {
+        let prior = self.reach.as_ref().and_then(|r| r.prior.as_ref());
+        self.materialized
+            .revision(&Identity::plain(entry.clone()), prior)
+            .ok_or_else(|| {
+                NativeStop::Entry(format!("{entry}: a reached instance has no revision row"))
+            })
+    }
     pub fn accepted(&self) -> bool {
         self.diagnostics.is_empty()
             && self.incomplete.is_empty()

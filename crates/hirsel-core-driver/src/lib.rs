@@ -938,6 +938,19 @@ impl Driver {
                 }
                 let resolution =
                     Arc::clone(&resolutions[fd.at.module as usize][fd.at.item as usize]);
+                // Unresolved bodies can still report independent body diagnostics.
+                // Recompute these on every request: their sites may name other
+                // items, which the body's record key does not cover.
+                if !resolution.diagnostics.is_empty() && resolution.resource_refusal.is_none() {
+                    let check = p.check_lower(f, &mut Emitter::new());
+                    result.diagnostics.extend(check.refusals);
+                    result
+                        .incomplete
+                        .extend(check.gaps.into_iter().map(|g| Incomplete {
+                            primary: g.site,
+                            message: g.what.into(),
+                        }));
+                }
                 let item = modules[fd.at.module as usize]
                     .syntax
                     .item(fd.at.item as usize);
@@ -1002,10 +1015,8 @@ impl Driver {
                     product
                 } else {
                     let mut emitter = Emitter::new();
-                    // An unresolved body records no refusals: they are the
-                    // resolver's, reported by declarations on every request,
-                    // and they may cite other items, whose sites the key does
-                    // not cover.
+                    // Unresolved diagnostics were reported for this request;
+                    // none may be reused from the body record.
                     let check = if !resolution.diagnostics.is_empty()
                         || resolution.resource_refusal.is_some()
                     {

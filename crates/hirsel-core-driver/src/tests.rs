@@ -2604,6 +2604,25 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
     req
 }
 
+#[test]
+fn unresolved_bodies_keep_secondary_diagnostics_on_cold_and_cached_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "type Choice = Yes | No(u64)\nfn pattern(x: Choice) -> u64 { match x { Yes => 1u64, Missing(_) => 0u64 } }\n";
+    for attempt in 0..2 {
+        let product = Driver::default()
+            .check(request(source, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        assert!(!product.accepted());
+        for rule in ["LANG-7", "LANG-17"] {
+            assert!(
+                product.diagnostics.iter().any(|r| r.rule == rule),
+                "attempt {attempt}: missing {rule}: {:?}",
+                product.diagnostics
+            );
+        }
+    }
+}
+
 /// Attack 960's resolution counterexamples 1 and 6, and attack 979's H1 both
 /// ways and across a package, as edit-kind cases. Law: after an edit, an
 /// incremental build reports the diagnostics, holds the products and publishes

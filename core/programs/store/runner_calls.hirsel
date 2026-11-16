@@ -21,7 +21,7 @@ fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
 // L14's negative: a `handles` that commits on every call.
 fn handles_commits(mut db: store.Db) -> Result[Hd, store.Error] waits {
     let h = handles(mut db)?
-    let _ = store.run(mut db, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+    let _ = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         store.put(mut tx, h.t, 0u64, 0u64)
     })?
     Ok(h)
@@ -76,15 +76,36 @@ fn flood(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
     Ok(k)
 }
 
+// L7/deadline_hung: s=65536, e=241 pre-loop calls/latches. First send is
+// Step242; send k is Step241+2*k-1, so exactly32648 TRY_SEND events.
+// Source tally: Tx/snapshots13, runner adapters5, decode7, this prelude3,
+// put/checks18, key encoding59, row reads32, write bookkeeping33,
+// ordered-map updates69, value encoding2. No core bodies or glue Steps.
+// core/tools/runner_tests.py and runner_count.c enforce this independent oracle.
+fn hung(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
+    let _ = store.put(mut tx, h.t, k, k)
+    let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
+    let (to, _) = result.unwrap(take made)
+    loop { let _ = channel.try_send(to, 0u64) }
+}
+fn answer(take k: u64) -> Result[u64, Capacity] {
+    let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
+    let (to, _) = result.unwrap(take made)
+    let _ = channel.try_send(to, k)
+    Ok(k)
+}
+
 // The place's one `place` function (rule 10): the head, the publisher and every session
 // run it.
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
-    runner.transact(mut r, code.describe(write), 65536u64)?
-    runner.transact(mut r, code.describe(refuse), 65536u64)?
-    runner.transact(mut r, code.describe(crash), 65536u64)?
-    runner.transact(mut r, code.describe(tally), 65536u64)?
-    runner.transact(mut r, code.describe(named), 16384u64)?
-    runner.transact(mut r, code.describe(flood), 1048576u64)
+    runner.transact(mut r, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(refuse), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(crash), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(tally), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(named), 16384u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(flood), 1048576u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(hung), 65536u64, 65536u64)?
+    runner.compute(mut r, code.describe(answer), 65536u64, runner.DEFAULT_STEPS)
 }
 
 const N_PLACE: u64 = 1048576u64
@@ -760,4 +781,42 @@ fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] wai
 @test
 fn test_l14_handles(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_l14_handles(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+// A stopped transaction is reply-only, is replayed for a Duplicate, and leaves
+// its writes absent. The second session's compute call also receives its answer.
+fn drive_deadline_hung(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    let s1 = conn(d.tasks, d.head, d.clock, 1u64)
+    let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), std.codec.of_u64())
+    let ka = key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64())
+    ask(s0, d.clock, 0u64, 0u64, result.unwrap(clone(kh)), u64_arg(5u64), LATER)
+    ask(s1, d.clock, 1u64, 0u64, take ka, u64_arg(19u64), LATER)
+    let computed = frame(s1)
+    match computed.outcome {
+        Returned(b) => {
+            let c: std.codec.Codec[u64] = std.codec.of()
+            match std.codec.decode(c, b) { Ok(Ok(19)) => {}, _ => fail("hung: compute did not answer") }
+        },
+        _ => fail("hung: compute faulted"),
+    }
+    let stopped = frame(s0)
+    want(is(stopped.outcome, Failed(OutOfTime(65536))), "hung: wrong stop")
+    want(stopped.version == 4u64, "hung: stop is not a reply-only commit")
+    ask(s0, d.clock, 0u64, 0u64, take kh, u64_arg(5u64), LATER)
+    want(is(frame(s0).outcome, stopped.outcome), "hung: duplicate reran")
+    // The next admitted position still runs after the reply-only stop.
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(5u64), LATER)
+    want(ok_value(frame(s0).outcome) == Some(6u64), "hung: next position did not run")
+    hang(take s0)
+    hang(take s1)
+}
+
+pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_deadline_hung)
+}
+
+@test
+fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_deadline_hung(c, r, tasks) { Ok(()) } else { Error(()) }
 }

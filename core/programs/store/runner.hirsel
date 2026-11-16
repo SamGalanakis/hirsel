@@ -1,4 +1,4 @@
-// Module runner (package store): the entries of a place (RUNNER-SPEC v2.2).
+// Module runner (package store): the entries of a place (RUNNER-SPEC v2.10).
 // Room and Bad mirror Capacity and DecodeError, which are not codec (OWN-4).
 pub type Room: codec + send { requested: u64, available: u64 }
 
@@ -16,13 +16,15 @@ pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, res
 
 pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes)
 
+pub const DEFAULT_STEPS: u64 = 1 << 30
+
 pub type OpenError = Store(store.Error) | Place(RegisterError) | HandlesChanged
 
 // One erased adapter per kind, holding the entry's byte bound n from registration
 // (RUNNER-SPEC v2.4 §1.1). A compute slot runs in the caller's task; a granted slot
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
 // session's check (rule 5: decode the argument, keep nothing) and the head's run.
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran)
+type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran)
 
 pub opaque type Registry[G: send, H: send]: send {
     slots: Map[Bytes, Slot[G, H]],
@@ -50,7 +52,7 @@ fn bad(e: std.codec.DecodeError) -> Bad {
     }
 }
 
-// The first cause's kind, by RUNNER-SPEC v2.10 §1.1's fixed Raised table (OutOfTime 8, Tape 9).
+// RUNNER-SPEC v2.10 §1.1: fixed wire kinds, independent of core ordinals.
 fn raised(cs: Causes) -> u32 {
     for c in cs {
         return match c.kind {
@@ -81,10 +83,11 @@ fn encoded[R](cr: std.codec.Codec[R], r: R) -> Outcome {
 // The compute adapter: decode A, call f and encode R, all inside `bound bytes n` and
 // `isolate`. A budget the place cannot grant is Refused(Budget); exhaustion after entry
 // is Failed(OutOfBytes); a fault is Failed(Raised).
-fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.codec.Codec[A], cr: std.codec.Codec[R], arg: Bytes, n: u64) -> Outcome {
+fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.codec.Codec[A], cr: std.codec.Codec[R], arg: Bytes, n: u64, s: u64) -> Outcome {
     let body = code.callable(f)
     let ran = bound bytes n {
-        let run = scoped fn() -> Result[Outcome, DecodeFail] {
+        let run = scoped fn() -> Result[Result[Outcome, DecodeFail], OutOfTime] {
+            bound steps s {
             match std.codec.decode(ca, arg) {
                 Ok(Ok(take a)) => match body(take a) {
                     Ok(take r) => Ok(encoded(cr, r)),
@@ -93,12 +96,14 @@ fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.c
                 Ok(Error(e)) => Error(DecodeFail(e: e)),
                 Error(c) => Ok(Failed(OutOfBytes(room(c)))),
             }
+            }
         }
         isolate(run)
     }
     match take ran {
-        Ok(Ok(Ok(Ok(take o)))) => take o,
-        Ok(Ok(Ok(Error(d)))) => Refused(Malformed(bad(d.e))),
+        Ok(Ok(Ok(Ok(Ok(take o))))) => take o,
+        Ok(Ok(Ok(Ok(Error(d))))) => Refused(Malformed(bad(d.e))),
+        Ok(Ok(Ok(Error(e)))) => Failed(OutOfTime(e.steps)),
         Ok(Ok(Error(cs))) => Failed(Raised(raised(cs))),
         Ok(Error(c)) => Failed(OutOfBytes(room(c))),
         Error(c) => Refused(Budget(room(c))),
@@ -110,20 +115,26 @@ type Job[G: send, A, R]: send {
     ca: std.codec.Codec[A],
     cr: std.codec.Codec[R],
     grant: G,
-    arg: Bytes
+    arg: Bytes,
+    steps: u64
 }
 
 // The granted adapter, the body of the task `start` spawns under `bytes n`.
 fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
-    let body = code.callable(j.f)
-    match std.codec.decode(j.ca, j.arg) {
-        Ok(Ok(take a)) => match body(j.grant, take a) {
-            Ok(take r) => encoded(j.cr, r),
+    let allowance = j.steps
+    let ran = bound steps allowance {
+        let job = take j
+        let body = code.callable(job.f)
+        match std.codec.decode(job.ca, job.arg) {
+            Ok(Ok(take a)) => match body(job.grant, take a) {
+                Ok(take r) => encoded(job.cr, r),
+                Error(c) => Failed(OutOfBytes(room(c))),
+            },
+            Ok(Error(e)) => Refused(Malformed(bad(e))),
             Error(c) => Failed(OutOfBytes(room(c))),
-        },
-        Ok(Error(e)) => Refused(Malformed(bad(e))),
-        Error(c) => Failed(OutOfBytes(room(c))),
+        }
     }
+    match take ran { Ok(take o) => take o, Error(e) => Failed(OutOfTime(e.steps)) }
 }
 
 // Key = identity ++ fingerprint(A) ++ fingerprint(R), each fingerprint u64 little-endian.
@@ -158,21 +169,21 @@ fn insert[G: send, H: send](mut r: Registry[G, H], take key: Bytes, take d: Desc
     }
 }
 
-pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64) -> Result[(), RegisterError] {
+pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), Compute, ca, cr, list.new()) {
         Ok(take kd) => take kd,
         Error(c) => return Error(Full(c)),
     }
-    let made = fn(arg: Bytes) -> Outcome { adapt_compute(f, ca, cr, arg, n) }
+    let made = fn(arg: Bytes) -> Outcome { adapt_compute(f, ca, cr, arg, n, s) }
     match made {
         Ok(take run) => insert(mut r, take key, take d, Compute(take run)),
         Error((c, _)) => Error(Full(c)),
     }
 }
 
-pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits], n: u64) -> Result[(), RegisterError] {
+pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let (take key, take d) = match described(code.identity(f), Granted, ca, cr, list.new()) {
@@ -180,7 +191,7 @@ pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: S
         Error(c) => return Error(Full(c)),
     }
     let made = fn(tasks: Tasks, take g: G, take arg: Bytes) -> Result[Task[Outcome], Capacity] {
-        let j = Job(f: f, ca: ca, cr: cr, grant: take g, arg: take arg)
+        let j = Job(f: f, ca: ca, cr: cr, grant: take g, arg: take arg, steps: s)
         match task.spawn(tasks, bytes n, take j, adapt_granted) {
             Ok(take t) => Ok(take t),
             Error((c, _)) => Error(c),
@@ -301,12 +312,12 @@ fn adapt_transact[H: send, A, R, E](f: StaticFn[fn(mut store.Tx, H, take A) -> R
     }
 }
 
-pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]], n: u64) -> Result[(), RegisterError] {
+pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let ce: std.codec.Codec[E] = std.codec.of()
     let error = match std.codec.schema(ce) {
-        Ok(take s) => take s,
+        Ok(take schema) => take schema,
         Error(c) => return Error(Full(c)),
     }
     let (take key, take d) = match described(code.identity(f), Transact, ca, cr, take error) {
@@ -317,7 +328,7 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
     let run = fn(mut tx: store.Tx, h: H, arg: Bytes) -> Ran { adapt_transact(f, ca, cr, ce, mut tx, h, arg, n) }
     match check {
         Ok(take c) => match run {
-            Ok(take go) => insert(mut r, take key, take d, Transact(take c, take go)),
+            Ok(take go) => insert(mut r, take key, take d, Transact(s, take c, take go)),
             Error((e, _)) => Error(Full(e)),
         },
         Error((e, _)) => Error(Full(e)),
@@ -350,7 +361,7 @@ fn streams_table(mut db: store.Db) -> Result[store.Table[Bytes, Row], store.Erro
 
 fn admit(mut db: store.Db, t: store.Table[Bytes, Row], stream: Bytes, p: u64) -> Result[Admission, store.Error] waits {
     let shape = store.shape(t)
-    let ran = store.run(mut db, scoped fn(mut tx: store.Tx) -> Result[(), Result[Admission, store.Error]] {
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Result[Admission, store.Error]] {
         let row = match store.fetch(tx, shape, stream) {
             Ok(take x) => take x,
             Error(e) => return Error(Error(e)),
@@ -389,6 +400,7 @@ fn admit(mut db: store.Db, t: store.Table[Bytes, Row], stream: Bytes, p: u64) ->
             take v
         },
         Failed(_) => fail("runner: admit faulted"),
+        Stopped(_) => fail("runner: admit faulted"),
         Refused(c) => Error(Full(c)),
     }
 }
@@ -648,7 +660,7 @@ type Kept = Alone(Outcome) | Nothing(Refusal)
 // as separate places, so the body can view the registry and handles while db is lent.
 fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, streams: store.Table[Bytes, Row], q: Req) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
     match map.get(r.slots, q.key) {
-        Some(Transact(_, go)) => Some(store.run(mut db, scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
+        Some(Transact(s, _, go)) => Some(store.run(mut db, Some(s), scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
             match go(mut tx, h, q.arg) {
                 Commit(take b) => {
                     let o = Returned(take b)
@@ -687,12 +699,13 @@ fn execute[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), stor
             },
         },
         Failed(cs) => reply_only(mut hd, take q, Failed(Raised(raised(cs)))),
+        Stopped(e) => reply_only(mut hd, take q, Failed(OutOfTime(e.steps))),
         Refused(_) => commitless(mut hd, take q, Refused(Overloaded)),
     }
 }
 
 fn reply_alone(mut db: store.Db, streams: store.Table[Bytes, Row], q: Req, o: Outcome) -> Result[store.Outcome[(), store.Error], store.Error] waits {
-    store.run(mut db, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+    store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         reply(mut tx, streams, q.stream, q.p, o)
     })
 }
@@ -708,6 +721,7 @@ fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome
             Error(take e)
         },
         Failed(_) => fail("runner: a reply-only commit faulted"),
+        Stopped(e) => commitless(mut hd, take q, Failed(OutOfTime(e.steps))),
     }
 }
 
@@ -857,7 +871,8 @@ fn refusal[G: send, H: send](r: Registry[G, H], s: Session[G, H], c: Call) -> Op
         return Some(Refused(Deadline))
     }
     match map.get(r.slots, c.key) {
-        Some(Transact(check, _)) => match check(c.arg) {
+        Some(Compute(run)) => Some(run(c.arg)),
+        Some(Transact(_, check, _)) => match check(c.arg) {
             Some(take why) => Some(Refused(take why)),
             None => None,
         },

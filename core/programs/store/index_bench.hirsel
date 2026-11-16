@@ -42,7 +42,7 @@ fn bucket(a: Account) -> Result[u64, Capacity] {
 }
 
 fn save(mut db: store.Db, t: store.Table[u64, Account], k: u64, balance: u64) -> u64 waits {
-    let done = result.unwrap(store.run(mut db, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
+    let done = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
         let a = Account(id: k, owner: result.unwrap(string.from("owner000")), balance: int.narrow(balance))
         store.put(mut tx, t, k, a)?
         Ok(balance)

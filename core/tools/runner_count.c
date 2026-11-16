@@ -8,9 +8,32 @@
 #error "define TRY_SENDS"
 #endif
 static uint64_t try_sends;
+#ifdef HUNG_BODY_SENDS
+static struct { uint64_t object, task, count; int before_slice; } senders[2];
+static size_t sender_count;
+static uint64_t slice_task, slices;
+static int too_many_senders;
+#endif
 static void event(void *state, HirselCoreEvent e) {
     (void)state;
-    if (e.kind == HIRSEL_CORE_EVENT_TRY_SEND) try_sends++;
+    if (e.kind == HIRSEL_CORE_EVENT_TRY_SEND) {
+        try_sends++;
+#ifdef HUNG_BODY_SENDS
+        size_t i = 0;
+        while (i < sender_count && senders[i].object != e.object) i++;
+        if (i == 2) { too_many_senders = 1; return; }
+        if (i == sender_count) {
+            sender_count++;
+            senders[i].object = e.object;
+            senders[i].task = e.task;
+            senders[i].before_slice = slices == 0;
+        }
+        senders[i].count++;
+#endif
+    }
+#ifdef HUNG_BODY_SENDS
+    if (e.kind == HIRSEL_CORE_EVENT_STEP_SLICE) { slice_task = e.task; slices++; }
+#endif
 }
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     const HirselCoreView *names, const HirselCoreSourceTable *sources, HirselCoreEntry entry) {
@@ -25,5 +48,13 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     dprintf(2, "runner_count: try_send %llu, want %llu\n", (unsigned long long)try_sends,
             (unsigned long long)TRY_SENDS);
     if (status) return status;
+#ifdef HUNG_BODY_SENDS
+    if (too_many_senders || sender_count != 2 || slices != 1) return 105;
+    size_t body = senders[0].count == HUNG_BODY_SENDS ? 0 : 1;
+    size_t marker = 1 - body;
+    if (senders[body].count != HUNG_BODY_SENDS || senders[marker].count != 1 ||
+        senders[body].task != slice_task || senders[marker].task == slice_task ||
+        !senders[marker].before_slice) return 105;
+#endif
     return try_sends == TRY_SENDS ? 0 : 105;
 }

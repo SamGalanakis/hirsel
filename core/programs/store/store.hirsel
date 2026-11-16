@@ -283,7 +283,7 @@ pub type Ticket {
 
 pub type Read = Point(Bytes) | Span(Bytes, Bytes)
 
-pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(Causes) | Refused(Capacity)
+pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(Causes) | Refused(Capacity) | Stopped(OutOfTime)
 
 pub type Undone[A] {
     value: A,
@@ -560,17 +560,17 @@ pub fn info(mut tx: Tx) -> CallInfo {
     tx.info
 }
 
-pub fn run[R, A](mut db: Db, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+pub fn run[R, A](mut db: Db, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let b = main_branch(db)
-    run_on(mut db, b, body)
+    run_on(mut db, b, steps, body)
 }
 
-pub fn run_on[R, A](mut db: Db, b: Branch, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+pub fn run_on[R, A](mut db: Db, b: Branch, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     journal_poll(mut db)?
     healthy(db)?
     let i = branch_index(db, b)?
     let wall = host.wall_ms(db.clock)
-    let outcome: Result[Outcome[R, A], Error] = match stage(mut db, i, wall, body) {
+    let outcome: Result[Outcome[R, A], Error] = match stage(mut db, i, wall, steps, body) {
         Over(take o) => Ok(take o),
         Ran(take ran) => settle_admit(mut db, i, take ran)
     }
@@ -609,7 +609,7 @@ type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R])
 
 // Runs the body on branch `i` inside isolate. Everything but a body that
 // returned Ok is final here.
-fn stage[R, A](mut db: Db, i: u64, wall: u64, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let read_log: Result[Log[Read], Capacity] = log.new()
     let reads: Log[Read] = match take read_log {
         Ok(take x) => take x,
@@ -621,26 +621,32 @@ fn stage[R, A](mut db: Db, i: u64, wall: u64, body: scoped[view] fn(mut Tx) -> R
         Error(c) => return Over(Refused(c))
     }
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
-    let caught = isolate(fn() -> (Result[R, A], Roots, u64, Option[Capacity], bool, Option[Bytes], std.omap.OMap[Bytes, Option[Bytes]]) {
-        let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, resident: db.resident, retain_old: retaining(db), reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci)
-        let outcome = body(mut tx)
-        let frame: Option[Bytes] = match outcome {
-            Error(_) => None,
-            Ok(_) => if let Some(_) = db.journal {
-                let encoded = encode_commit(ci, tx.ops, db.file_seq, db.file_end)
-                match take encoded {
-                    Ok(take raw) => Some(take raw),
-                    Error(c) => {
-                        tx.refusal = Some(c);
-                        None
+    let caught = isolate(fn() -> Result[(Result[R, A], Roots, u64, Option[Capacity], bool, Option[Bytes], std.omap.OMap[Bytes, Option[Bytes]]), OutOfTime] {
+        let perform = scoped fn() -> (Result[R, A], Roots, u64, Option[Capacity], bool, Option[Bytes], std.omap.OMap[Bytes, Option[Bytes]]) {
+            let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, resident: db.resident, retain_old: retaining(db), reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci)
+            let outcome = body(mut tx)
+            let frame: Option[Bytes] = match outcome {
+                Error(_) => None,
+                Ok(_) => if let Some(_) = db.journal {
+                    let encoded = encode_commit(ci, tx.ops, db.file_seq, db.file_end)
+                    match take encoded {
+                        Ok(take raw) => Some(take raw),
+                        Error(c) => {
+                            tx.refusal = Some(c);
+                            None
+                        }
                     }
+                } else {
+                    None
                 }
-            } else {
-                None
             }
+            let Tx(store: _, roots: take roots, ids: _, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: _, wrote: wrote, ops: take ops, op_ids: _, info: _) = take tx
+            (take outcome, take roots, live, no_room, wrote, take frame, take ops)
         }
-        let Tx(store: _, roots: take roots, ids: _, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: _, wrote: wrote, ops: take ops, op_ids: _, info: _) = take tx
-        (take outcome, take roots, live, no_room, wrote, take frame, take ops)
+        match steps {
+            Some(s) => bound steps s { perform() },
+            None => Ok(perform()),
+        }
     })
     let consumed = log.finish(take issued)
     for n in consumed {
@@ -650,7 +656,8 @@ fn stage[R, A](mut db: Db, i: u64, wall: u64, body: scoped[view] fn(mut Tx) -> R
     match take caught {
         Error(c) => Over(Refused(c)),
         Ok(Error(take cs)) => Over(Failed(take cs)),
-        Ok(Ok((take result, take roots, live, no_room, wrote, take frame, take ops))) => {
+        Ok(Ok(Error(e))) => Over(Stopped(e)),
+        Ok(Ok(Ok((take result, take roots, live, no_room, wrote, take frame, take ops)))) => {
             if let Some(c) = no_room {
                 return Over(Refused(c))
             }
@@ -728,8 +735,8 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R]) -> Result[Outcome[R,
 }
 
 // Runs and commits without the I4 settle: the S1 laws' direct entry.
-fn execute[R, A](mut db: Db, i: u64, wall: u64, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
-    match stage(mut db, i, wall, body) {
+fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
+    match stage(mut db, i, wall, steps, body) {
         Over(take o) => Ok(take o),
         Ran(take ran) => Ok(admit(mut db, i, take ran))
     }
@@ -3553,7 +3560,7 @@ fn test_abort_budget(c: Clock) -> Result[(), ()] {
     }
 }
 
-pub type Looked[R] = Seen(Seen[R]) | Failed(Causes) | Refused(Capacity)
+pub type Looked[R] = Seen(Seen[R]) | Failed(Causes) | Refused(Capacity) | Stopped(OutOfTime)
 
 pub type Seen[R] {
     value: R,
@@ -3561,7 +3568,7 @@ pub type Seen[R] {
     reads: List[Read]
 }
 
-pub fn look[R](s: Snapshot, body: scoped[view] fn(Tx) -> R) -> Result[Looked[R], Error] {
+pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) -> Result[Looked[R], Error] {
     let read_log: Result[Log[Read], Capacity] = log.new()
     let reads = match take read_log {
         Ok(take x) => take x,
@@ -3572,15 +3579,22 @@ pub fn look[R](s: Snapshot, body: scoped[view] fn(Tx) -> R) -> Result[Looked[R],
         Ok(take x) => take x,
         Error(c) => return Ok(Refused(c))
     }
-    let caught = isolate(fn() -> R {
-        let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, resident: 0, retain_old: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
-        body(tx)
+    let caught = isolate(fn() -> Result[R, OutOfTime] {
+        let perform = scoped fn() -> R {
+            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, resident: 0, retain_old: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
+            body(tx)
+        }
+        match steps {
+            Some(n) => bound steps n { perform() },
+            None => Ok(perform()),
+        }
     })
     let seen = log.finish(take reads)
     match take caught {
         Error(c) => Ok(Refused(c)),
         Ok(Error(take cs)) => Ok(Failed(take cs)),
-        Ok(Ok(take value)) => Ok(Seen(Seen(value: take value, version: s.head, reads: take seen)))
+        Ok(Ok(Error(e))) => Ok(Stopped(e)),
+        Ok(Ok(Ok(take value))) => Ok(Seen(Seen(value: take value, version: s.head, reads: take seen)))
     }
 }
 
@@ -10066,4 +10080,30 @@ pub fn journal_law_frame_oversize() -> bool {
 @test
 fn journal_frame_oversize() -> Result[(), ()] {
     if journal_law_frame_oversize() { Ok(()) } else { Error(()) }
+}
+
+pub fn law_step_bounds(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("steps", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
+    let before = db.heads[0].head
+    let live = db.resident
+    let ran = result.unwrap(run(mut db, Some(65536u64), scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 91u64)?
+        loop {}
+    }))
+    match take ran { Stopped(e) => if e.steps != 65536 { return false }, _ => return false }
+    if db.heads[0].head != before || db.resident != live { return false }
+    let stopped = result.unwrap(look(snapshot(db), Some(65536u64), scoped fn(tx: Tx) -> u64 { loop {} }))
+    match take stopped { Stopped(e) => if e.steps != 65536 { return false }, _ => return false }
+    let inspected = result.unwrap(look(snapshot(db), None, scoped fn(tx: Tx) -> Result[Option[u64], Error] {
+        fetch(tx, shape(t), 1u64)
+    }))
+    match take inspected { Seen(v) => match v.value { Ok(None) => db.heads[0].head == before, _ => false }, _ => false }
+}
+
+@test
+fn test_step_bounds(c: Clock) -> Result[(), ()] waits {
+    if law_step_bounds(c) { Ok(()) } else { Error(()) }
+
 }

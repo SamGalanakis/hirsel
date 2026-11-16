@@ -12,7 +12,7 @@ pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
     result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
     let mut ix = result.unwrap(store.index(db, mut t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
     for i in 0u64 .. 2 {
-        let done = store.run(mut db, fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        let done = store.run(mut db, None, fn(mut tx: store.Tx) -> Result[(), store.Error] {
             store.put(mut tx, t, 1, i)
         })
         match take done {

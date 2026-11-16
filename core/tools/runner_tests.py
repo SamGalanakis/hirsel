@@ -36,7 +36,7 @@ from store_crash_tests import checked, run_crashes
 
 
 LAWS = ('p01_call', 'p02_start_finish', 'p09_describe', 'p13_duplicate_refused', 'p15_types_roundtrip',
-        'p19_place_bound', 'l4_malformed_flood')
+        'p19_place_bound', 'l4_malformed_flood', 'step_bounds')
 SIZES = (1, 100, 1000, 10000)
 # place_n registers in chunks of CHUNK calls, one function each, so no one function's
 # frame grows with n (N13(b): a frame holds about 3,000 calls).
@@ -46,7 +46,7 @@ CHUNK = 500
 N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_held_head', 'l14_handles')
+         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles')
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
 # L3's tally handler is the only caller of try_send (TRY_SEND is kind 7 in
@@ -54,14 +54,31 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 # exactly once, however often that position is re-sent. The evaluator's count comes from
 # its event log; natively, core/tools/runner_count.c is linked into the case's test
 # executable as its event sink and fails the run on any other count.
-COUNTS = {'calls_runs_once': (7, 1)}
+# L7 adds32648 sends by the hung body and one marker by the other session's
+# compute body; the marker precedes the head's exhaustion slice (kind21).
+COUNTS = {'calls_runs_once': (7, 1), 'calls_deadline_hung': (7, 32649)}
 
 
 def counted(name, report):
     if name not in COUNTS:
         return True
     kind, want = COUNTS[name]
-    return sum(1 for e in report.get('events', []) if e[0] == kind) == want
+    events = report.get('events', [])
+    if sum(1 for e in events if e[0] == kind) != want:
+        return False
+    if name == 'calls_deadline_hung':
+        sends = {}
+        for at, e in enumerate(events):
+            if e[0] == 7:
+                sends.setdefault(e[2], []).append((at, e[1]))
+        if sorted(map(len, sends.values())) != [1, 32648]:
+            return False
+        marker = next(v[0] for v in sends.values() if len(v) == 1)
+        body = next(v for v in sends.values() if len(v) == 32648)
+        slices = [(at, e[1]) for at, e in enumerate(events) if e[0] == 21]
+        return (len(slices) == 1 and marker[0] < slices[0][0]
+                and marker[1] != slices[0][1] == body[0][1])
+    return True
 
 
 # L4 (RUNNER-SPEC v2.5 §8): runner_rss.hirsel's program, built per native backend against
@@ -128,8 +145,8 @@ MUTANTS = (
      [('    let ran = bound bytes n {\n', '    let ran = bound bytes 4611686018427387904u64 {\n')],
      'runner_laws', 'l4_malformed_flood'),
     ('encode_outside_bound',
-     [('        let run = scoped fn() -> Result[Outcome, DecodeFail] {',
-       '        let run = scoped fn() -> Result[Result[R, Outcome], DecodeFail] {'),
+     [('        let run = scoped fn() -> Result[Result[Outcome, DecodeFail], OutOfTime] {',
+       '        let run = scoped fn() -> Result[Result[Result[R, Outcome], DecodeFail], OutOfTime] {'),
       ('                    Ok(take r) => Ok(encoded(cr, r)),\n'
        '                    Error(c) => Ok(Failed(OutOfBytes(room(c)))),\n'
        '                },\n'
@@ -140,8 +157,8 @@ MUTANTS = (
        '                },\n'
        '                Ok(Error(e)) => Error(DecodeFail(e: e)),\n'
        '                Error(c) => Ok(Error(Failed(OutOfBytes(room(c))))),'),
-      ('        Ok(Ok(Ok(Ok(take o)))) => take o,',
-       '        Ok(Ok(Ok(Ok(Ok(take r))))) => encoded(cr, r),\n        Ok(Ok(Ok(Ok(Error(take o))))) => take o,')],
+      ('        Ok(Ok(Ok(Ok(Ok(take o))))) => take o,',
+       '        Ok(Ok(Ok(Ok(Ok(Ok(take r)))))) => encoded(cr, r),\n        Ok(Ok(Ok(Ok(Ok(Error(take o)))))) => take o,')],
      'runner_laws', 'l4_malformed_flood'),
     ('describe_without_schemas',
      [('args: take args, result: take result, error: take error',
@@ -203,7 +220,7 @@ def p19_module(path):
         chunks = range(0, n, CHUNK)
         for c in chunks:
             lines += ['', f'fn place_{n}_{c}(mut r: Reg) -> Result[(), runner.RegisterError] {{']
-            lines += [f'    runner.compute(mut r, code.describe(e{i}), 65536u64)?' for i in range(c, min(n, c + CHUNK))]
+            lines += [f'    runner.compute(mut r, code.describe(e{i}), 65536u64, runner.DEFAULT_STEPS)?' for i in range(c, min(n, c + CHUNK))]
             lines += ['    Ok(())', '}']
         lines += ['', f'fn place_{n}(mut r: Reg) -> Result[(), runner.RegisterError] {{']
         lines += [f'    place_{n}_{c}(mut r)?' for c in chunks]
@@ -250,7 +267,7 @@ def l12_module(path, variant, expect=None, revision=None):
              f'fn ea(take p: P) -> Result[Q, Capacity] {{ Ok(Q({q})) }}',
              'fn eb(take x: u64) -> Result[u64, Capacity] { Ok(x) }', '',
              'fn place(mut r: Reg) -> Result[(), runner.RegisterError] {']
-    lines += [f'    runner.compute(mut r, code.describe({e}), 65536u64)?' for e in order]
+    lines += [f'    runner.compute(mut r, code.describe({e}), 65536u64, runner.DEFAULT_STEPS)?' for e in order]
     lines += ['    Ok(())', '}', '', 'fn described() -> Bytes {', '    let mut r: Reg = runner.registry()',
               '    result.unwrap(place(mut r))', '    let mut b: Bytes = list.new()',
               '    result.unwrap(runner.describe(r, mut b))', '    b', '}', '',
@@ -371,6 +388,7 @@ def counting_cc(args, root, work, name):
     support = work / f'count_{name}.o'
     subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
+                    *(['-DHUNG_BODY_SENDS=32648'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '

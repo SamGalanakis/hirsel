@@ -22,7 +22,7 @@ fn named(mut tx: store.Tx, h: Hd, take s: String) -> Result[u64, u32] {
 }
 
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
-    runner.transact(mut r, code.describe(named), 16384u64)
+    runner.transact(mut r, code.describe(named), 16384u64, runner.DEFAULT_STEPS)
 }
 
 fn k_named() -> Bytes {

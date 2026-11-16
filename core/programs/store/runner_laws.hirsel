@@ -76,9 +76,9 @@ fn string_arg(n: u64, trailing: bool) -> Bytes {
 
 fn three() -> Reg {
     let mut r: Reg = runner.registry()
-    result.unwrap(runner.compute(mut r, code.describe(toggle), 65536u64))
-    result.unwrap(runner.compute(mut r, code.describe(boom), 65536u64))
-    result.unwrap(runner.granted(mut r, code.describe(stamp), 65536u64))
+    result.unwrap(runner.compute(mut r, code.describe(toggle), 65536u64, runner.DEFAULT_STEPS))
+    result.unwrap(runner.compute(mut r, code.describe(boom), 65536u64, runner.DEFAULT_STEPS))
+    result.unwrap(runner.granted(mut r, code.describe(stamp), 65536u64, runner.DEFAULT_STEPS))
     r
 }
 
@@ -128,7 +128,7 @@ pub fn law_p01_call() -> bool {
     }
     // Inside a 64 KiB bound, an entry registered with 1 MiB cannot be granted.
     let mut big: Reg = runner.registry()
-    result.unwrap(runner.compute(mut big, code.describe(toggle), 1048576u64))
+    result.unwrap(runner.compute(mut big, code.describe(toggle), 1048576u64, runner.DEFAULT_STEPS))
     let inside = bound bytes 65536u64 {
         match runner.call(big, tk, four) {
             Refused(Budget(_)) => true,
@@ -177,11 +177,11 @@ pub fn law_p13_duplicate_refused() -> bool {
     let mut r = three()
     let before = described(r)
     let tk = key_of(code.identity(code.describe(toggle)), std.codec.of_u32(), std.codec.of_bool())
-    let refused = match runner.compute(mut r, code.describe(toggle), 65536u64) {
+    let refused = match runner.compute(mut r, code.describe(toggle), 65536u64, runner.DEFAULT_STEPS) {
         Error(AlreadyRegistered(k)) => k == tk,
         _ => false,
     }
-    let again = match runner.granted(mut r, code.describe(stamp), 65536u64) {
+    let again = match runner.granted(mut r, code.describe(stamp), 65536u64, runner.DEFAULT_STEPS) {
         Error(AlreadyRegistered(_)) => true,
         _ => false,
     }
@@ -265,10 +265,10 @@ pub fn law_p15_types_roundtrip() -> bool {
 }
 
 fn place_branching(mut r: Reg) -> Result[(), runner.RegisterError] {
-    runner.compute(mut r, code.describe(e0), 65536u64)?
+    runner.compute(mut r, code.describe(e0), 65536u64, runner.DEFAULT_STEPS)?
     let scratch: Result[List[u64], Capacity] = list.with_capacity(8192u64)
     match scratch {
-        Ok(_) => runner.compute(mut r, code.describe(e1), 65536u64),
+        Ok(_) => runner.compute(mut r, code.describe(e1), 65536u64, runner.DEFAULT_STEPS),
         Error(_) => Ok(()),
     }
 }
@@ -304,7 +304,7 @@ fn size_call(r: Reg, key: Bytes, arg: Bytes) -> runner.Outcome {
 
 fn sized(n: u64) -> Reg {
     let mut r: Reg = runner.registry()
-    result.unwrap(runner.compute(mut r, code.describe(size), n))
+    result.unwrap(runner.compute(mut r, code.describe(size), n, runner.DEFAULT_STEPS))
     r
 }
 
@@ -382,7 +382,7 @@ pub fn law_l4_malformed_flood() -> bool {
         _ => false,
     }
     let mut g: Reg = runner.registry()
-    result.unwrap(runner.compute(mut g, code.describe(grow), 4096u64))
+    result.unwrap(runner.compute(mut g, code.describe(grow), 4096u64, runner.DEFAULT_STEPS))
     let gk = key_of(code.identity(code.describe(grow)), std.codec.of_u64(), std.codec.of_string())
     let over = match runner.call(g, gk, {
         let mut a: Bytes = list.new()
@@ -469,4 +469,52 @@ pub fn law_p02_start_finish(c: Clock, tasks: Tasks) -> bool waits {
 @test
 fn test_p02_start_finish(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
     if law_p02_start_finish(c, tasks) { Ok(()) } else { Error(()) }
+}
+
+resource type BusyGrant: send { clock: Clock } drop(g) { loop {} }
+fn grant_returns(g: BusyGrant, take x: u32) -> Result[u32, Capacity] waits {
+    std.clock.sleep_ns(g.clock, 0u64)
+    Ok(x)
+}
+fn forever(take x: u32) -> Result[u32, Capacity] { loop {} }
+fn granted_forever(c: Clock, take x: u32) -> Result[u32, Capacity] waits { std.clock.sleep_ns(c, 0u64); loop {} }
+
+// Both forms return the registered allowance, including a stop in decode.
+pub fn law_step_bounds(c: Clock, tasks: Tasks) -> bool waits {
+    let mut r: Reg = runner.registry()
+    result.unwrap(runner.compute(mut r, code.describe(forever), 65536u64, 65536u64))
+    result.unwrap(runner.granted(mut r, code.describe(granted_forever), 65536u64, 65536u64))
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let cr: std.codec.Codec[u32] = std.codec.of()
+    let k = key_of(code.identity(code.describe(forever)), ca, cr)
+    match runner.call(r, k, u32_arg(7u32)) {
+        Failed(OutOfTime(65536)) => {}, _ => return false,
+    }
+    let kg = key_of(code.identity(code.describe(granted_forever)), ca, cr)
+    let h = match runner.start(r, tasks, c, kg, u32_arg(7u32)) {
+        Ok(take t) => take t, _ => return false,
+    }
+    match runner.finish(take h) {
+        Failed(OutOfTime(65536)) => {}, _ => return false,
+    }
+    let mut zero: Reg = runner.registry()
+    result.unwrap(runner.compute(mut zero, code.describe(toggle), 65536u64, 0u64))
+    let kz = key_of(code.identity(code.describe(toggle)), ca, std.codec.of_bool())
+    match runner.call(zero, kz, u32_arg(2u32)) {
+        Failed(OutOfTime(0)) => {}, _ => return false,
+    }
+    // The granted task owns its grant. Its finalizer gets no unmetered tail.
+    let mut owned: runner.Registry[BusyGrant, ()] = runner.registry()
+    result.unwrap(runner.granted(mut owned, code.describe(grant_returns), 65536u64, 32u64))
+    let ko = key_of(code.identity(code.describe(grant_returns)), ca, cr)
+    let g = result.unwrap(BusyGrant(clock: c))
+    let finalizing = match runner.start(owned, tasks, take g, ko, u32_arg(2u32)) {
+        Ok(take t) => take t, _ => return false,
+    }
+    match runner.finish(take finalizing) { Failed(OutOfTime(32)) => true, _ => false }
+}
+
+@test
+fn test_step_bounds(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    if law_step_bounds(c, tasks) { Ok(()) } else { Error(()) }
 }

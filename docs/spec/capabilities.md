@@ -122,7 +122,7 @@ fn replace(d: Dir, b: Bytes) -> Result[(), IoError] waits {
 Random bytes land in capacity the caller already holds, so a draw admits nothing, and a
 replay supplies the same bytes:
 
-```hirsel unbuilt
+```hirsel
 fn store_id(r: Random) -> Result[Bytes, Capacity] {
   let mut b: Bytes = list.with_capacity(16)?
   host.random(r, mut b)

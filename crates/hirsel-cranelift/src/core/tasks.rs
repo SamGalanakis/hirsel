@@ -76,8 +76,22 @@ impl Function<'_, '_, '_> {
             _ => self.b.ins().iconst(types::I64, 0),
         };
         let n = match op {
-            RtOp::StepEnter | RtOp::StepLeave | RtOp::StepCatch => {
-                return Err(unsupported("native step scopes are not built"));
+            RtOp::StepEnter => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_step_enter",
+                    &[P, U],
+                    &[B],
+                    &[self.context, args[0]],
+                )?[0];
+                1
+            }
+            RtOp::StepLeave => {
+                self.c_call("hirsel_core_step_leave", &[P], &[], &[self.context])?;
+                0
+            }
+            RtOp::StepCatch => {
+                outputs[0] = self.c_call("hirsel_core_step_catch", &[P], &[B], &[self.context])?[0];
+                1
             }
             RtOp::IsolateEnter => {
                 let values =

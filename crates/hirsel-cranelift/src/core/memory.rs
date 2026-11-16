@@ -58,8 +58,60 @@ impl Function<'_, '_, '_> {
         results: &[Ty],
         args: &[Value],
     ) -> Result<calls::NativeValues> {
-        self.calls
-            .c(self.object, &mut self.b, name, params, results, args)
+        self.step_flush();
+        let values = self
+            .calls
+            .c(self.object, &mut self.b, name, params, results, args)?;
+        self.step_reload();
+        Ok(values)
+    }
+    pub fn step_flush(&mut self) {
+        if let Some(variable) = self.step_var {
+            let value = self.b.use_var(variable);
+            self.b.ins().store(
+                MemFlagsData::trusted(),
+                value,
+                self.context,
+                memory_layout::CONTEXT_STEPS as i32,
+            );
+        }
+    }
+    pub fn step_reload(&mut self) {
+        if let Some(variable) = self.step_var {
+            let value = self.b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                self.context,
+                memory_layout::CONTEXT_STEPS as i32,
+            );
+            self.b.def_var(variable, value);
+        }
+    }
+    fn step(&mut self, fail: Option<BlockId>) -> Result<()> {
+        let variable = self.step_var.unwrap();
+        let before = self.b.use_var(variable);
+        let after = self.b.ins().iadd_imm_s(before, -1);
+        self.b.def_var(variable, after);
+        let exhausted = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::SignedLessThanOrEqual, after, 0);
+        let slow = self.b.create_block();
+        self.b.set_cold_block(slow);
+        let ready = self.b.create_block();
+        self.b.ins().brif(exhausted, slow, &[], ready, &[]);
+        self.b.switch_to_block(slow);
+        let site = self.site()?;
+        let status = self.c_call(
+            "hirsel_core_step_out",
+            &[Ty::Ptr, Ty::Scalar(Scalar::U64)],
+            &[Ty::Scalar(Scalar::U8)],
+            &[self.context, site],
+        )?[0];
+        self.call_failure(status, fail)?;
+        self.b.ins().jump(ready, &[]);
+        self.b.switch_to_block(ready);
+        Ok(())
     }
     pub fn memory(&mut self, inst: &Inst) -> Result<()> {
         let p = Ty::Ptr;
@@ -417,7 +469,7 @@ impl Function<'_, '_, '_> {
                 self.set(admitted, ok);
                 self.set(available, values[2]);
             }
-            Inst::Step { .. } => {}
+            Inst::Step { fail } => self.step(fail)?,
             Inst::LimitExit => {
                 if self.empty_bound {
                     return Ok(());

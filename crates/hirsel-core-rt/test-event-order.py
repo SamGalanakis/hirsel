@@ -114,6 +114,10 @@ def main():
         if report.get('outcome') != outcome:
             failures.append(f'{fixture.stem}: evaluator {report.get("outcome")}')
             continue
+        printed = re.search(r'// hand-derived stdout: (.*)', text)
+        if printed and bytes(report['stdout']) != printed.group(1).encode():
+            failures.append(f'{fixture.stem}: evaluator stdout {bytes(report["stdout"])!r}, expected {printed.group(1)!r}')
+            continue
         sends = re.search(r'// hand-derived try-send: (\d+)', text)
         if sends:
             count = sum(e[0] == KIND['TRY_SEND'] for e in report['events'])

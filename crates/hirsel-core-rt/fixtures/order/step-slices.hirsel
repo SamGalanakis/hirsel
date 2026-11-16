@@ -1,0 +1,17 @@
+// hand-derived stdout: BA
+// Slices yield at the 65,536th taken step, even when that exactly uses the bound.
+// The unbounded child writes B before the parent's A. No operation in the loop
+// can yield on its own, and entering/leaving the scope takes no step.
+fn ready(take out: Stdout) waits { let _ = stdout.write(out, "B") }
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, out, ready))
+    let finished = bound steps 65536 {
+        let mut n = 0u64
+        while n < 65536 { n += 1 }
+        n
+    }
+    match finished { Ok(65536) => {}, _ => return Error(Exit(status: 1)) }
+    result.unwrap(stdout.write(out, "A"))
+    result.unwrap(task.join(take h))
+    Ok(())
+}

@@ -1080,6 +1080,9 @@ impl<'m> Machine<'m> {
     /// queue's tail (native `poll_turn`). It continues when the driver hands the
     /// baton back; its frozen places and footprints stay with it meanwhile.
     fn park(&mut self, wait: Option<Wait>) {
+        self.park_turn(wait, true);
+    }
+    fn park_turn(&mut self, wait: Option<Wait>, poll: bool) {
         let k = self.sched.current;
         match wait {
             Some(Wait::Sleep(deadline)) => {
@@ -1091,7 +1094,11 @@ impl<'m> Machine<'m> {
             Some(Wait::Task) => self.sched.tasks[k].state = State::Blocked,
             None => {
                 self.sched.tasks[k].state = State::Ready;
-                self.sched.deferred.push_back(k);
+                if poll {
+                    self.sched.deferred.push_back(k);
+                } else {
+                    self.sched.ready.push_back(k);
+                }
             }
         }
         let link = self.links[k].take().expect("the running task's link");
@@ -3375,7 +3382,7 @@ impl Machine<'_> {
                     t.slice_steps += 1;
                     if t.slice_steps == 65_536 {
                         t.slice_steps = 0;
-                        self.park(None);
+                        self.park_turn(None, false);
                     }
                 }
             }

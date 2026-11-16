@@ -58,7 +58,7 @@ stream's row (one position per stream, H1–H4), runs at most one body per strea
 groups commits and releases a group only after it is durable (V4). Answers that need
 no commit (a duplicate's stored reply, Superseded, a refusal) go in a Release
 without a snapshot and the publisher sends them at its base (V3). The publisher
-sends each answer as a `Frame` at the version of the last Release that carried a
+sends each answer as a `Told` at the version of the last Release that carried a
 snapshot (G1).
 
 `connect(tasks, place, n_place, head, client, clock, q, n_session)` spawns a session

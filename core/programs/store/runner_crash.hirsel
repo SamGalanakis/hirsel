@@ -197,7 +197,7 @@ fn ack(out: Stdout, v: u64) waits {
 // leave its sessions open and the head waiting, so it hangs up every session, drains
 // each channel to its close, and returns its verdict (empty when every call was answered
 // as expected) for the caller to fail on.
-type Client: send { from: List[Receiver[runner.Frame]], to: List[Sender[runner.Event]], calls: List[Pos], out: Stdout }
+type Client: send { from: List[Receiver[runner.Told]], to: List[Sender[runner.Event]], calls: List[Pos], out: Stdout }
 
 fn later(calls: List[Pos], x: Pos) -> bool {
     for y in calls {
@@ -281,12 +281,12 @@ fn served(take db: store.Db, c: Clock, tasks: Tasks, out: Stdout, sessions: u64,
     let (head, inbox) = result.unwrap(take made)
     let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
     let (_, joins) = result.unwrap(take joined)
-    let mut from: List[Receiver[runner.Frame]] = list.new()
+    let mut from: List[Receiver[runner.Told]] = list.new()
     let mut to: List[Sender[runner.Event]] = list.new()
     let mut mine: List[Sender[runner.Event]] = list.new()
     let mut running: List[Task[Result[(), runner.RegisterError]]] = list.new()
     for _ in 0u64 .. sessions {
-        let pair: Result[(Sender[runner.Frame], Receiver[runner.Frame]), Capacity] = channel.new(64u64)
+        let pair: Result[(Sender[runner.Told], Receiver[runner.Told]), Capacity] = channel.new(64u64)
         let (tx, rx) = result.unwrap(take pair)
         let (s, t) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, take tx, c, 4u64, 2097152u64))
         result.unwrap(list.push(mut mine, channel.sender(s)))

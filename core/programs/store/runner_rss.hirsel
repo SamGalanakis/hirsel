@@ -50,10 +50,10 @@ const FAR: u64 = 18000000000000000000u64
 
 type D: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks, flood: u64 }
 
-fn answer(rx: Receiver[runner.Frame]) -> runner.Outcome waits {
+fn answer(rx: Receiver[runner.Told]) -> runner.Outcome waits {
     match channel.receive(rx) {
         Ok(take f) => {
-            let runner.Frame(version: _, stream: _, p: _, outcome: take o) = take f
+            let runner.Told(version: _, stream: _, p: _, outcome: take o) = take f
             take o
         },
         Error(_) => fail("runner_rss: client channel closed"),
@@ -61,7 +61,7 @@ fn answer(rx: Receiver[runner.Frame]) -> runner.Outcome waits {
 }
 
 fn drive(take d: D) -> () waits {
-    let made: Result[(Sender[runner.Frame], Receiver[runner.Frame]), Capacity] = channel.new(64u64)
+    let made: Result[(Sender[runner.Told], Receiver[runner.Told]), Capacity] = channel.new(64u64)
     let (tx, rx) = result.unwrap(take made)
     let (to, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), 1048576u64, d.head, take tx, d.clock, 1u64, 2097152u64))
     let key = k_named()

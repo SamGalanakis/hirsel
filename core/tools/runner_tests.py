@@ -151,7 +151,7 @@ MUTANTS = (
      [('    let mut answers: List[Answer] = list.new()\n'
        '    result.unwrap(list.push(mut answers, Answer(to: take to, stream: take stream, p: p, outcome: take o)))\n'
        '    let _ = channel.send(hd.out, Release(version: 0u64, snapshot: None, answers: take answers))',
-       '    let _ = channel.send(to, Event(e: Answered(Frame(version: 0u64, stream: take stream, p: p, outcome: take o))))')],
+       '    let _ = channel.send(to, Event(e: Answered(Told(version: 0u64, stream: take stream, p: p, outcome: take o))))')],
      'runner_calls', 'calls_duplicate'),
     ('release_at_commit_version',
      [('let Worker(p: p, version: _, outcome', 'let Worker(p: p, version: wv, outcome'),

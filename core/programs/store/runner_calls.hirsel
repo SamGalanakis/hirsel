@@ -211,14 +211,14 @@ const NEVER: u64 = 18446744073709551615u64
 
 // A client: its way into a session, the session's frames, and a watchdog that sends a
 // frame at version NEVER after 5 s, so a call left unanswered fails its case.
-type Conn { to: Sender[runner.Event], from: Receiver[runner.Frame], dog: Task[()], session: Task[Result[(), runner.RegisterError]] }
+type Conn { to: Sender[runner.Event], from: Receiver[runner.Told], dog: Task[()], session: Task[Result[(), runner.RegisterError]] }
 
-type Dog: send { clock: Clock, at: u64, to: Sender[runner.Frame] }
+type Dog: send { clock: Clock, at: u64, to: Sender[runner.Told] }
 
 fn bark(take d: Dog) -> () waits {
     host.sleep_until(d.clock, d.at)
     let Dog(clock: _, at: _, to: take to) = take d
-    let _ = channel.send(to, runner.Frame(version: NEVER, stream: list.new(), p: 0u64, outcome: InDoubt))
+    let _ = channel.send(to, runner.Told(version: NEVER, stream: list.new(), p: 0u64, outcome: InDoubt))
 }
 
 type Drive: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks }
@@ -228,7 +228,7 @@ fn conn(tasks: Tasks, head: Sender[runner.Req], clock: Clock, q: u64) -> Conn {
 }
 
 fn conn_in(tasks: Tasks, head: Sender[runner.Req], clock: Clock, q: u64, n_session: u64) -> Conn {
-    let made: Result[(Sender[runner.Frame], Receiver[runner.Frame]), Capacity] = channel.new(64u64)
+    let made: Result[(Sender[runner.Told], Receiver[runner.Told]), Capacity] = channel.new(64u64)
     let (tx, rx) = result.unwrap(take made)
     let d = Dog(clock: clock, at: host.mono_ns(clock) + 5000000000u64, to: channel.sender(tx))
     let dog = match task.spawn(tasks, bytes 65536u64, take d, bark) {
@@ -247,7 +247,7 @@ fn ask(cn: Conn, clock: Clock, s: u64, p: u64, take key: Bytes, take arg: Bytes,
     }
 }
 
-fn frame(cn: Conn) -> runner.Frame waits {
+fn frame(cn: Conn) -> runner.Told waits {
     match channel.receive(cn.from) {
         Ok(take f) => {
             want(f.version != NEVER, "calls: a call was not answered within 5 s")

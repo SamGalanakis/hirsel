@@ -773,7 +773,7 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take from: Rec
         }
         for take a in answers {
             let Answer(to: take to, stream: take stream, p: p, outcome: take o) = take a
-            let _ = channel.send(to, Event(e: Answered(Frame(version: base, stream: take stream, p: p, outcome: take o))))
+            let _ = channel.send(to, Event(e: Answered(Told(version: base, stream: take stream, p: p, outcome: take o))))
         }
     }
 }
@@ -782,13 +782,13 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take from: Rec
 pub type Call: send { stream: Bytes, p: u64, key: Bytes, arg: Bytes, deadline: u64 }
 
 // One answer to a client, in a frame at `version`.
-pub type Frame: send { version: u64, stream: Bytes, p: u64, outcome: Outcome }
+pub type Told: send { version: u64, stream: Bytes, p: u64, outcome: Outcome }
 
 type Tick: send { stream: Bytes, p: u64, generation: u64 }
 
 // A session has one inbox, because v1 has no selection: its client's calls, the
 // publisher's frames and its own deadline timers all arrive there.
-type Received: send = Asked(Call) | Answered(Frame) | Expired(Tick) | Closing
+type Received: send = Asked(Call) | Answered(Told) | Expired(Tick) | Closing
 
 pub opaque type Event: send { e: Received }
 
@@ -826,7 +826,7 @@ type Session[G: send, H: send]: send {
     inbox: Receiver[Event],
     me: Sender[Event],
     head: Sender[Req],
-    client: Sender[Frame],
+    client: Sender[Told],
     clock: Clock,
     tasks: Tasks,
     q: u64
@@ -835,7 +835,7 @@ type Session[G: send, H: send]: send {
 // A session as a task under `bytes n_session`: it runs `place` itself under n_place
 // (rule 10), forwards to the head, and answers its client on `client`. The returned
 // sender is the client's way in; the task ends with Place's error if `place` fails.
-pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], take client: Sender[Frame], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity] {
+pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], take client: Sender[Told], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity] {
     let (tx, rx): (Sender[Event], Receiver[Event]) = channel.new(64u64)?
     let s = Session(place: place, n_place: n_place, inbox: take rx, me: channel.sender(tx), head: channel.sender(head), client: take client, clock: clock, tasks: tasks, q: q)
     match task.spawn(tasks, bytes n_session, take s, session) {
@@ -865,8 +865,8 @@ fn refusal[G: send, H: send](r: Registry[G, H], s: Session[G, H], c: Call) -> Op
     }
 }
 
-fn tell(to: Sender[Frame], version: u64, take stream: Bytes, p: u64, take o: Outcome) -> () waits {
-    let _ = channel.send(to, Frame(version: version, stream: take stream, p: p, outcome: take o))
+fn tell(to: Sender[Told], version: u64, take stream: Bytes, p: u64, take o: Outcome) -> () waits {
+    let _ = channel.send(to, Told(version: version, stream: take stream, p: p, outcome: take o))
 }
 
 fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError] waits {
@@ -944,7 +944,7 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                 if owed > 0u64 {
                     last = f.version
                     for _ in 1u64 .. owed {
-                        let each: Frame = result.unwrap(clone(f))
+                        let each: Told = result.unwrap(clone(f))
                         let _ = channel.send(s.client, take each)
                     }
                     let _ = channel.send(s.client, take f)

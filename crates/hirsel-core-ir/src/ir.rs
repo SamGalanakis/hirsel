@@ -575,9 +575,10 @@ pub enum Inst {
         kind: Counted,
         ty: TypeId,
     },
-    /// `try_unwrap`: true exactly when this is the only holder; the payload is then
-    /// the caller's (moved out with `Copy`) and the node is freed with `Free`, which
-    /// refunds the node only. False leaves the holder unchanged.
+    /// Uniqueness test shared by `try_unwrap` and `with_unique`: true exactly
+    /// when this is the only holder. It leaves the node and payload in place.
+    /// `try_unwrap` separately moves the payload out and frees the node;
+    /// `with_unique` lends the payload mutably while keeping the holder.
     TryUnwrap {
         result: ValueId,
         node: ValueId,

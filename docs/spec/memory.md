@@ -438,7 +438,7 @@ type Chain = End | Link(u64, Chain)                       // refused: OWN-2, use
 
 `rc.new(take x) -> Result[Rc[T], (Capacity, T)]` requires `T: shareable` and moves the
 complete owner `x` into a new counted node with count 1
-([T1.3](ownership.md#own-26-the-transition-table)). An `Rc[T]`'s payload is immutable, and an `Rc` is task-local:
+([T1.3](ownership.md#own-26-the-transition-table)). An `Rc[T]`'s payload is immutable except through `rc.with_unique`, and an `Rc` is task-local:
 it is never `send`. A counted value is read where a view of its payload is expected.
 Because a node is made only from a complete owner, counted values form no cycles; a
 cyclic structure uses a library pool (MEM-18). Wrapping a value in `Rc` or `Arc` frees nothing it
@@ -453,6 +453,10 @@ fn cons(take l: String, take tail: Option[Rc[Node]]) -> Result[Rc[Node], (Capaci
 ```hirsel
 fn wrap(take f: HostFile) { let _ = rc.new(take f) }       // refused: LANG-12, at take f: not shareable
 ```
+
+`rc.with_unique[T: shareable, R](mut h: Rc[T], f: scoped fn(mut T) -> R) -> Option[R]`
+has the same contract as `arc.with_unique` below, with a non-atomic task-local count
+test and no CONC event because `Rc` is not `send`.
 
 ### MEM-15: Arc
 
@@ -519,6 +523,24 @@ a shareable type holds no resource, scoped value or opaque owner
 ([OWN-4](ownership.md#own-4-bounds)), so `clone` accepts every payload. On `Capacity`, from
 the copy or the new node, `h` is unchanged and `f` has not run. `f` runs exactly once on
 `Ok`.
+
+```hirsel
+type Hits: shareable + send { n: u64 }
+fn bump(mut a: Arc[Hits]) -> Option[()] { arc.with_unique(mut a, scoped fn(mut h: Hits) { h.n += 1 }) }
+```
+```hirsel
+type Hits: shareable + send { n: u64 }
+fn twice(mut a: Arc[Hits]) -> Option[u64] {
+  arc.with_unique(mut a, scoped fn(mut h: Hits) -> u64 { let b = arc.share(a); h.n })   // refused: OWN-9, a is lent to with_unique
+}
+```
+```hirsel
+type Leaf: shareable + send { n: u64 }
+type Pair: shareable + send { leaf: Arc[Leaf] }
+fn reach(mut p: Arc[Pair]) -> Option[()] {
+  arc.with_unique(mut p.leaf, scoped fn(mut l: Leaf) { l.n = 1 })   // refused: OWN-11, p.leaf is reached through an Arc
+}
+```
 
 ### MEM-16: Counting
 

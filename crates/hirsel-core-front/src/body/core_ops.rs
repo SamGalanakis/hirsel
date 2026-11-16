@@ -17,6 +17,7 @@ pub(crate) enum Kernel {
     NewOwner(Option<Counted>),
     Share(Counted),
     TryUnwrap(Counted),
+    WithUnique(Counted),
     Unbox,
     Spawn,
     CheckCancel,
@@ -100,6 +101,7 @@ operations! {
     ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc))), "A", "core-ops-914", false),
     ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc)), "A", "core-ops-914", false),
     ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc)), "A", "core-ops-914", false),
+    ("arc", "with_unique", Lane::Runtime(Kernel::WithUnique(Counted::Arc)), "A", "core-ops-914", false),
     ("args", "len", Lane::Runtime(Kernel::ArgsLen), "B", "core-ops-914", false),
     ("args", "get", Lane::Runtime(Kernel::ArgsGet), "B", "core-ops-914", false),
     ("box", "new", Lane::Runtime(Kernel::NewOwner(None)), "A", "core-ops-914", false),
@@ -272,6 +274,7 @@ operations! {
     ("rc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Rc))), "A", "core-ops-914", false),
     ("rc", "share", Lane::Runtime(Kernel::Share(Counted::Rc)), "A", "core-ops-914", false),
     ("rc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Rc)), "A", "core-ops-914", false),
+    ("rc", "with_unique", Lane::Runtime(Kernel::WithUnique(Counted::Rc)), "A", "core-ops-914", false),
     ("result", "unwrap", Lane::Value, "A", "core-check-calls-910", false),
     ("seq", "len", Lane::Language, "A", "core-check-895", false),
     ("seq", "nth", Lane::Language, "A", "core-check-895", false),
@@ -611,6 +614,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::NewOwner(kind) => self.runtime_new_owner(kind, types[0], vals[0], result, n),
             Kernel::Share(kind) => self.runtime_share(kind, vals[0]?, result, n),
             Kernel::TryUnwrap(kind) => self.runtime_try_unwrap(kind, types[0], vals[0]?, result, n),
+            Kernel::WithUnique(kind) => self.runtime_with_unique(kind, types[0], vals, result, n),
             Kernel::Unbox => self.runtime_unbox(types[0], vals[0]?, n),
             Kernel::ArgsLen => self
                 .runtime_row(RtOp::ArgsLen, &[Arg::Value(vals[0]?)], n)
@@ -850,7 +854,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.end(Terminator::Branch { condition, yes, no }, Some(n));
     }
 
-    /// Both arms initialize an ordinary Result's tag and active payload. Its owner
+    /// Both arms initialize a Result or Option's tag and active payload. Its owner
     /// starts only after the join, so failure before the call commits cleans inputs.
     pub(super) fn runtime_result(
         &mut self,
@@ -872,6 +876,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return None;
         };
+        let (yes_case, no_case) = if arguments.len() == 1 { (1, 0) } else { (0, 1) };
         let id = self.runtime_type(ty, n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let yes = self.new_block(&[]);
@@ -882,7 +887,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.inst(
             Inst::SetCase {
                 address: to,
-                case: 0,
+                case: yes_case,
             },
             n,
         );
@@ -892,11 +897,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.inst(
             Inst::SetCase {
                 address: to,
-                case: 1,
+                case: no_case,
             },
             n,
         );
-        error(self, to, arguments[1]);
+        error(self, to, arguments.get(1).copied().unwrap_or(UNIT));
         self.jump(join, &[], n);
         self.start(join);
         if !self.live() {
@@ -1384,6 +1389,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::NewOwner(_)
             | Kernel::Share(_)
             | Kernel::TryUnwrap(_)
+            | Kernel::WithUnique(_)
             | Kernel::Unbox
             | Kernel::Spawn
             | Kernel::CheckCancel
@@ -2188,6 +2194,48 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let node = self.runtime_handle(value, n);
         self.inst(Inst::Share { node, kind }, n);
         self.runtime_carrier(result, node, n)
+    }
+
+    fn runtime_with_unique(
+        &mut self,
+        kind: Counted,
+        item: TyId,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = self.runtime_type(item, n)?;
+        // A mut holder argument points at its carrier, whose first word is the node.
+        let node = self.runtime_handle(vals[0]?, n);
+        let callback = vals[1]?;
+        let ok = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::TryUnwrap {
+                result: ok,
+                node,
+                kind,
+            },
+            n,
+        );
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                if let Some(payload) = cx.owner_payload(node, id, true, n) {
+                    let pointer = cx.pointer(payload, n);
+                    let callable = cx.t.mk(TyKind::Fn(
+                        vec![(Mode::Mut, item)],
+                        ty,
+                        false,
+                        Callable::Scoped,
+                    ));
+                    let value = cx.call_lowered(callable, callback, &[Some(pointer)], n);
+                    cx.runtime_case_payload(to, 1, ty, value, n);
+                }
+            },
+            |_, _, _| {},
+        )
     }
 
     fn runtime_try_unwrap(

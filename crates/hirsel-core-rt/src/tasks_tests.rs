@@ -504,6 +504,8 @@ fn arc_unwrap_observes_release_order_and_foreign_last_refund() {
             assert_eq!(unique, release_first);
             if unique {
                 assert_eq!(node.as_ptr().add(8).cast::<u64>().read(), 41);
+                node.as_ptr().add(8).cast::<u64>().write(42);
+                assert_eq!(node.as_ptr().add(8).cast::<u64>().read(), 42);
                 hirsel_core_free(node, 16);
             } else {
                 hirsel_core_release(context, node, true, 16, empty_recipe);

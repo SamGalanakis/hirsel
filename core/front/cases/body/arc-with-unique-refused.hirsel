@@ -1,0 +1,49 @@
+type Hits: shareable + send { n: u64 }
+type Pair: shareable + send { leaf: Arc[Hits] }
+type RcPair: shareable { leaf: Rc[Hits] }
+fn captured(mut a: Arc[Hits]) -> Option[u64] {
+    arc.with_unique(mut a, scoped fn(mut h: Hits) -> u64 { let b = arc.share(a); h.n })
+}
+fn reached(mut p: Arc[Pair]) -> Option[()] {
+    arc.with_unique(mut p.leaf, scoped fn(mut l: Hits) { l.n = 1 })
+}
+fn viewed(a: Arc[Hits]) -> Option[()] {
+    arc.with_unique(mut a, scoped fn(mut l: Hits) { l.n = 1 })
+}
+fn stolen(mut a: Arc[Hits]) -> Option[Hits] {
+    arc.with_unique(mut a, scoped fn(mut h: Hits) -> Hits { take h })
+}
+fn escaped(mut a: Arc[Hits]) -> Option[View[Hits]] in a {
+    arc.with_unique(mut a, scoped fn(mut h: Hits) -> View[Hits] in h { h })
+}
+fn rc_captured(mut a: Rc[Hits]) -> Option[u64] {
+    rc.with_unique(mut a, scoped fn(mut h: Hits) -> u64 { let b = rc.share(a); h.n })
+}
+fn rc_reached(mut p: Rc[RcPair]) -> Option[()] {
+    rc.with_unique(mut p.leaf, scoped fn(mut l: Hits) { l.n = 1 })
+}
+fn rc_viewed(a: Rc[Hits]) -> Option[()] {
+    rc.with_unique(mut a, scoped fn(mut l: Hits) { l.n = 1 })
+}
+fn rc_stolen(mut a: Rc[Hits]) -> Option[Hits] {
+    rc.with_unique(mut a, scoped fn(mut h: Hits) -> Hits { take h })
+}
+fn rc_escaped(mut a: Rc[Hits]) -> Option[View[Hits]] in a {
+    rc.with_unique(mut a, scoped fn(mut h: Hits) -> View[Hits] in h { h })
+}
+// expect: refuse OWN-9 at 5:28
+// expect: cause OWN-9 at 5:28 from 5:21
+// expect: refuse OWN-8 at 8:21
+// expect: refuse OWN-5 at 11:21
+// expect: cause OWN-5 at 11:21 from 10:11
+// expect: refuse OWN-11 at 14:61
+// expect: cause OWN-11 at 14:61 from 14:38
+// expect: refuse LANG-13 at 17:28
+// expect: refuse OWN-9 at 20:27
+// expect: cause OWN-9 at 20:27 from 20:20
+// expect: refuse OWN-8 at 23:20
+// expect: refuse OWN-5 at 26:20
+// expect: cause OWN-5 at 26:20 from 25:14
+// expect: refuse OWN-11 at 29:60
+// expect: cause OWN-11 at 29:60 from 29:37
+// expect: refuse LANG-13 at 32:27

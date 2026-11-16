@@ -1,0 +1,47 @@
+type Hits: shareable + send {
+    n: u64
+}
+
+// Shared update copies, unique update admits no second 16-byte node.
+// expect: run update_copies_only_shared() = true
+fn update_copies_only_shared() -> bool {
+    let mut a = result.unwrap(arc.new(Hits(n: 41)))
+    let g = arc.share(a)
+    let value = result.unwrap(arc.update(mut a, scoped fn(mut p: Hits) -> u64 {
+        p.n += 1;
+        p.n
+    }))
+    let unique = bound bytes 16 {
+        let mut b = result.unwrap(arc.new(Hits(n: 41)))
+        result.unwrap(arc.update(mut b, scoped fn(mut p: Hits) {
+            p.n += 1
+        }))
+        b.n == 42
+    }
+    value == 42 && a.n == 42 && g.n == 41 && match unique {
+        Ok(v) => v,
+        _ => false
+    }
+}
+
+// A refused replacement leaves h shared and does not run f.
+// expect: run update_capacity_keeps_holder() = true
+fn update_capacity_keeps_holder() -> bool {
+    let r = bound bytes 16 {
+        let mut a = result.unwrap(arc.new(Hits(n: 41)))
+        let g = arc.share(a)
+        let mut calls = 0u64
+        let refused = match arc.update(mut a, scoped fn(mut p: Hits) {
+            calls += 1;
+            p.n = 99
+        }) {
+            Error(_) => true,
+            Ok(_) => false
+        }
+        refused && calls == 0 && a.n == 41 && g.n == 41
+    }
+    match r {
+        Ok(v) => v,
+        _ => false
+    }
+}

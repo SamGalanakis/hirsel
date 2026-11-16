@@ -5,3 +5,4 @@
 # meets a red it did not cause adds a row itself and pushes it straight to main; the lane that fixes a
 # red removes its row.
 hirsel-core-driver-unittest::native::tests::scalar_core_instances_match_closed_bodies	Census904: sum materialized slots7 vs closed3 after implied-dictionary fixture repair; RED-CENSUS.md	core-check-calls-910	2026-11-13
+std-native::core.arc_unique:foreign_share	The fixed 64-event schedule bound is below the 64-poll turn plus lifecycle events; seed 1 emits 74 on both native engines.	arc-unique-build-1050	2026-11-16

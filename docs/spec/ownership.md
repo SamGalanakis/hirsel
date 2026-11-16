@@ -512,7 +512,7 @@ fn steal(mut xs: List[u64]) -> List[u64] { take xs }       // refused: OWN-11
 A **writable place** is a slot that is writable ([OWN-5](#own-5-availability)), or a
 field, tuple component, `List` element, `Inline` element or `Box` payload of a writable place; nothing
 reached through a view, a counted value or a stable value is one. The one exception is
-an `Arc` payload lent by `arc.with_unique` ([MEM-15](memory.md#mem-15-arc)): it is
+an `Rc` or `Arc` payload lent by `rc.with_unique` or `arc.with_unique` ([MEM-15](memory.md#mem-15-arc)): it is
 reached as the callback's `mut` parameter, which is a writable slot, and only after the
 count has been found to be 1. `q` must be a writable
 place, except that a `let` slot declared without an initializer is assigned while it is
@@ -944,7 +944,7 @@ The only conversions between kinds are:
 | `rc.new(take x)`, `arc.new(take x)` | own or plain, `shareable` | counted | [MEM-14](memory.md#mem-14-rc), MEM-15 |
 | `rc.share(h)`, `arc.share(h)` | counted | another holder | MEM-16 |
 | `rc.try_unwrap(take h)`, `arc.try_unwrap(take h)` | counted | own, if the count is 1 | MEM-16 |
-| `arc.with_unique(mut h, f)` | counted | the payload lent `mut` to `f`, if the count is 1 | MEM-15 |
+| `rc.with_unique(mut h, f)`, `arc.with_unique(mut h, f)` | counted | the payload lent `mut` to `f`, if the count is 1 | MEM-15 |
 | `clone(x)`, `clone_in(r, x)` | view of own, stable or counted | own, or stable in `r` | [MEM-17](memory.md#mem-17-clone) |
 
 There is no implicit counting, copy-on-write (std's `arc.update` is explicit), inferred
@@ -1020,7 +1020,7 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | T4.2 | holder drop, count > 1 | count − 1 (Arc: recorded) | cannot fail | |
 | T4.3 | holder drop, count = 1 | payload released by worklist; each node `ref` (Arc: one recorded event) | cannot fail | |
 | T4.4 | `try_unwrap(take h)` | count = 1: payload L, the node alone `ref`; Arc: recorded | count > 1 | the error owns `h`; count unchanged |
-| T4.5 | `arc.with_unique(mut h, f)` | count = 1, recorded: payload lent `mut` to `f`, result `Some(r)`; count unchanged | count > 1, recorded: `None`, `f` not run; a failure in `f` | `h` keeps its holder; after a failure the payload holds what `f` installed; prop |
+| T4.5 | `rc.with_unique(mut h, f)`, `arc.with_unique(mut h, f)` | count = 1, Arc recorded: payload lent `mut` to `f`, result `Some(r)`; count unchanged | count > 1, Arc recorded: `None`, `f` not run; a failure in `f` | `h` keeps its holder; after a failure the payload holds what `f` installed; prop |
 
 **T5 Regions and limits**
 

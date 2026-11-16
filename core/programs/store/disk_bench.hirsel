@@ -34,7 +34,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     // The task allowance and resident limit keep their specified defaults.
     let mut db = result.unwrap(open(tasks, child, c, r, options))
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
-    result.unwrap(create_table(mut db, "accounts", std.codec.key_u64(), dictionary))
+    result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), dictionary)))
     let mut t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     if with_index {
         result.unwrap(create_index(mut db, t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))

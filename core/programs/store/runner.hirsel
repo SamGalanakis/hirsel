@@ -340,7 +340,7 @@ fn streams_table(mut db: store.Db) -> Result[store.Table[Bytes, Row], store.Erro
     match store.table(mut db, "runner.streams", std.codec.key_bytes(), cu) {
         Error(Missing(_)) => {
             let cv: std.codec.Codec[Row] = std.codec.of()
-            let _ = store.create_table(mut db, "runner.streams", std.codec.key_bytes(), cv)?
+            let _ = store.create_table(mut db, store.spec("runner.streams", std.codec.key_bytes(), cv))?
             let cw: std.codec.Codec[Row] = std.codec.of()
             store.table(mut db, "runner.streams", std.codec.key_bytes(), cw)
         },

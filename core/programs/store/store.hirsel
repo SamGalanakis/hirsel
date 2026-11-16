@@ -1729,6 +1729,55 @@ pub opaque type Index[J, K, V]: shareable + send {
     readers: Arc[Readers[V]]
 }
 
+// AB1: a table declared whole, for create_table and migrate. Each index keeps
+// what the catalog stores (name, `code.identity` of `by`, key schema) and the
+// erased extractor that builds its entries from V rows.
+type IndexSpec[V]: send {
+    name: String,
+    by: Bytes,
+    key: Bytes,
+    extract: own[send] fn(V) -> Result[Bytes, Capacity]
+}
+
+pub opaque type TableSpec[K, V]: send {
+    name: String,
+    key: std.codec.Key[K],
+    value: std.codec.Codec[V],
+    indexes: List[IndexSpec[V]]
+}
+
+pub fn spec[K, V](take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> TableSpec[K, V] {
+    TableSpec(name: take name, key: key, value: value, indexes: list.new())
+}
+
+// The one place an index extractor is erased, for `index` and `with_index`
+// alike: `by`, then the key codec, as the bytes an index entry starts with.
+fn erase[J, V](by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[own[send] fn(V) -> Result[Bytes, Capacity], Error] {
+    let made: Result[own[send] fn(V) -> Result[Bytes, Capacity], (Capacity, (StaticFn[fn(V) -> Result[J, Capacity]], std.codec.Key[J]))] = fn(v: V) -> Result[Bytes, Capacity] {
+        let j = (code.callable(by))(v)?
+        let mut raw: Bytes = list.new()
+        std.codec.encode_key(key, j, mut raw)?
+        Ok(take raw)
+    }
+    match take made {
+        Ok(take f) => Ok(take f),
+        Error((f, _)) => Error(Full(f))
+    }
+}
+
+pub fn with_index[J, K, V](mut s: TableSpec[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[(), Error] {
+    let owned = checked_name(name)?
+    for ix in s.indexes {
+        if same_name(ix.name, owned) {
+            return Error(Exists(take owned))
+        }
+    }
+    let schema = capacity(std.codec.key_schema(key))?
+    let extract = erase(by, key)?
+    let declared = IndexSpec(name: take owned, by: copied(code.identity(by))?, key: take schema, extract: take extract)
+    capacity(result.capacity_only(list.push(mut s.indexes, take declared)))
+}
+
 pub opaque type Rows[K, V]: send {
     cursor: ByteRows,
     table: u32,
@@ -2171,22 +2220,33 @@ fn schema_publish(mut db: Db, take roots: Roots, live: u64) -> Result[Ticket, Er
     Ok(ticket)
 }
 
-pub fn create_table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Ticket, Error] waits {
+// AB1: the table and every index `s` declares, in one schema commit. The
+// table takes the next id and its indexes the ids after it, in `s`'s order.
+pub fn create_table[K, V](mut db: Db, take s: TableSpec[K, V]) -> Result[Ticket, Error] waits {
     healthy(db)?
-    let k = table_key(name)?
+    let k = table_key(s.name)?
     if let Some(_) = std.omap.get(db.heads[0].roots.catalog, k) {
-        return Error(Exists(named(name)?))
+        return Error(Exists(named(s.name)?))
     }
-    let schema = capacity(std.codec.schema(value))?
+    let schema = capacity(std.codec.schema(s.value))?
     let mut schemas: List[ValueSchema] = list.new()
     let fp = std.codec.fingerprint_of(schema)
     capacity(result.capacity_only(list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))))?
-    let c = Catalog(kind: 1, id: db.next_table, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(key))?, schemas: take schemas, next: 1, by: list.new(), revision: list.new())
+    let id = db.next_table
+    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(s.key))?, schemas: take schemas, next: 1, by: list.new(), revision: list.new())
     let raw = encode_catalog(c)?
-    let live = catalog_recharge(db.resident, db.heads[0].roots, k, raw, retaining(db))
+    let mut live = catalog_recharge(db.resident, db.heads[0].roots, k, raw, retaining(db))
     let base = share_roots(db.heads[0].roots)
-    let roots = catalog_put(mut db, base, k, raw)?
-    db.next_table += 1
+    let mut roots = catalog_put(mut db, base, k, raw)?
+    let mut index_id = id + 1
+    for ix in s.indexes {
+        let ik = catalog_index_key(id, ix.name)?
+        let entry_raw = encode_catalog(Catalog(kind: 2, id: index_id, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new()))?
+        live = catalog_recharge(live, db.heads[0].roots, ik, entry_raw, retaining(db))
+        roots = catalog_put(mut db, roots, ik, entry_raw)?
+        index_id += 1
+    }
+    db.next_table = index_id
     schema_publish(mut db, take roots, live)
 }
 
@@ -2321,16 +2381,7 @@ pub fn index[J, K, V](db: Db, mut t: Table[K, V], name: String, by: StaticFn[fn(
         }
     }
     if !present {
-        let made: Result[own[send] fn(V) -> Result[Bytes, Capacity], (Capacity, (StaticFn[fn(V) -> Result[J, Capacity]], std.codec.Key[J]))] = fn(v: V) -> Result[Bytes, Capacity] {
-            let j = (code.callable(by))(v)?
-            let mut raw: Bytes = list.new()
-            std.codec.encode_key(key, j, mut raw)?
-            Ok(take raw)
-        }
-        let extract = match take made {
-            Ok(take f) => take f,
-            Error((f, _)) => return Error(Full(f))
-        }
+        let extract = erase(by, key)?
         capacity(result.capacity_only(list.push(mut t.indexes, IndexOf(id: c.id, extract: take extract))))?
     }
     let all = index_catalog(db, t.id)?
@@ -2389,6 +2440,170 @@ pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error
     schema_publish(mut db, take roots, live)
 }
 
+// What a migrate builds before its cut: the new roots and the account.
+type Built {
+    roots: Roots,
+    live: u64
+}
+
+fn over_ceiling(live: u64, ceiling: u64) -> Result[(), Error] {
+    if live > ceiling {
+        return Error(Full(Capacity(requested: live, available: ceiling)))
+    }
+    Ok(())
+}
+
+fn insert_row(mut ids: u64, mut roots: Roots, take p: Bytes, take raw: Bytes) -> Result[bool, Error] {
+    let shared = capacity(result.capacity_only(arc.new(take raw)))?
+    let (take data, replaced) = capacity(result.capacity_only(std.omap.insert(mut ids, roots.data, take p, take shared)))?
+    roots.data = take data
+    Ok(match replaced { Some(_) => true, None => false })
+}
+
+// AB1, section 1.2. Every row of `from`, read from `source`, goes through `f`
+// into table `id` under schema `number`; each index `to` declares, in order,
+// gets id + 1 + i and its entries from the V2 rows by its own extractor. Then
+// `from`'s rows, index entries and catalog entries go, and the new entries
+// come in. The account takes every new entry as it is built and is checked
+// against the ceiling before the next (section 1.11); old entries come off
+// only when nothing retains them. Nothing here waits: it is all built before
+// the cut, so a refusal changes nothing.
+fn migrate_build[K, V, K2, V2](source: Snapshot, take base: Roots, mut ids: u64, start: u64, ceiling: u64, retained: bool, from: Table[K, V], olds: List[Catalog], to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity], id: u32, number: u16, target: Bytes) -> Result[Built, Error] {
+    let mut roots = take base
+    let mut live = start
+    let mut rows = scan_bytes(source, from.id, Unbounded, Unbounded)?
+    while let Some((primary, encoded)) = next_bytes(mut rows)? {
+        let user_key = list.slice(primary, 4, list.len(primary))
+        let k = decoded(std.codec.decode_key(from.key, user_key))?
+        let v = row_value(from.readers, from.id, encoded)?
+        if let Some((k2, v2)) = capacity(f(k, v))? {
+            let key2 = encode_key(to.key, k2)?
+            let p = physical(id, key2)?
+            if list.len(p) > 4096 {
+                return Error(Limit(Key))
+            }
+            let mut raw: Bytes = list.new()
+            capacity(le(mut raw, int.widen(number), 2))?
+            capacity(std.codec.encode(to.value, v2, mut raw))?
+            if list.len(raw) > 1048576 {
+                return Error(Limit(Value))
+            }
+            live = int.saturating_add(live, entry(p, raw))
+            over_ceiling(live, ceiling)?
+            if insert_row(mut ids, mut roots, take p, take raw)? {
+                return Error(Exists(named(to.name)?))
+            }
+            let mut position: u32 = 1
+            for ix in to.indexes {
+                let mut ik = capacity((ix.extract)(v2))?
+                capacity(list.append(mut ik, key2))?
+                let ip = physical(id + position, ik)?
+                if list.len(ip) > 4096 {
+                    return Error(Limit(Key))
+                }
+                let empty: Bytes = list.new()
+                live = int.saturating_add(live, entry(ip, empty))
+                over_ceiling(live, ceiling)?
+                let _ = insert_row(mut ids, mut roots, take ip, take empty)?
+                position += 1
+            }
+        }
+    }
+    let mut gone: List[u32] = list.new()
+    capacity(result.capacity_only(list.push(mut gone, from.id)))?
+    for old in olds {
+        capacity(result.capacity_only(list.push(mut gone, old.id)))?
+    }
+    for old_id in gone {
+        let mut old_rows = byte_cursor(roots.data, prefix(old_id)?, prefix(old_id + 1)?)?
+        while let Some((k, v)) = next_bytes(mut old_rows)? {
+            if !retained { live = int.saturating_sub(live, entry(k, v)) }
+            roots.data = capacity(std.omap.remove(mut ids, roots.data, k))?
+        }
+    }
+    let low = index_prefix(from.id)?
+    let high = index_prefix(from.id + 1)?
+    let mut entries = capacity(result.capacity_only(std.omap.range(roots.catalog, Included(copied(low)?), Excluded(copied(high)?))))?
+    while let Some((k, v)) = capacity(std.omap.next(mut entries))? {
+        if !retained { live = int.saturating_sub(live, entry(k, v)) }
+        roots.catalog = capacity(std.omap.remove(mut ids, roots.catalog, k))?
+    }
+    if let Some(raw) = std.omap.get(roots.catalog, from.catalog_key) {
+        if !retained { live = int.saturating_sub(live, entry(from.catalog_key, raw)) }
+    }
+    roots.catalog = capacity(std.omap.remove(mut ids, roots.catalog, from.catalog_key))?
+    let schema = capacity(std.codec.schema(to.value))?
+    let fp = std.codec.fingerprint_of(schema)
+    let mut schemas: List[ValueSchema] = list.new()
+    capacity(result.capacity_only(list.push(mut schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))))?
+    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(to.key))?, schemas: take schemas, next: number + 1, by: list.new(), revision: list.new()))?
+    live = int.saturating_add(live, entry(target, table_raw))
+    let with_table = catalog_insert(mut ids, take roots, target, table_raw)?
+    roots = take with_table
+    let mut position: u32 = 1
+    for ix in to.indexes {
+        let ik = catalog_index_key(id, ix.name)?
+        let ix_raw = encode_catalog(Catalog(kind: 2, id: id + position, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new()))?
+        live = int.saturating_add(live, entry(ik, ix_raw))
+        let with_entry = catalog_insert(mut ids, take roots, ik, ix_raw)?
+        roots = take with_entry
+        position += 1
+    }
+    over_ceiling(live, ceiling)?
+    Ok(Built(roots: take roots, live: live))
+}
+
+fn same_bytes(a: Bytes, b: Bytes) -> bool {
+    a == b
+}
+
+fn catalog_insert(mut ids: u64, take roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Error] {
+    let shared_value = capacity(result.capacity_only(arc.new(copied(v)?)))?
+    let inserted = std.omap.insert(mut ids, roots.catalog, copied(k)?, take shared_value)
+    let catalog = match take inserted {
+        Ok((take tree, _)) => take tree,
+        Error((c, _)) => return Error(Full(c))
+    }
+    Ok(Roots(data: std.omap.snapshot(roots.data), streams: std.omap.snapshot(roots.streams), catalog: take catalog))
+}
+
+// AB1: rewrite `from` as the table `to` declares, in one schema commit at
+// version + 1. The table and each index get new ids (I3), so every handle
+// made before is Stale against later state and still reads older Snapshots
+// and pins. The rows take one new schema number, the source entry's next, so
+// no number is ever reused (L17); all older numbers retire. A rename is a
+// migrate whose `f` keeps every row.
+pub fn migrate[K, V, K2, V2](mut db: Db, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[Ticket, Error] waits {
+    healthy(db)?
+    if !same(db.store, from.store) {
+        return Error(Foreign)
+    }
+    let meta = catalog_entry(db, from.catalog_key)?
+    if meta.id != from.id {
+        return Error(Stale(from.id))
+    }
+    let target = table_key(to.name)?
+    if !same_bytes(target, from.catalog_key) {
+        if let Some(_) = std.omap.get(db.heads[0].roots.catalog, target) {
+            return Error(Exists(named(to.name)?))
+        }
+    }
+    if meta.next == 65535 {
+        return Error(Limit(Value))
+    }
+    let olds = index_catalog(db, from.id)?
+    let id = db.next_table
+    let count: u32 = int.truncate(list.len(to.indexes))
+    let source = snapshot(db)
+    let base = share_roots(db.heads[0].roots)
+    let mut ids = db.next_node
+    let built = migrate_build(source, take base, mut ids, db.resident, db.ceiling, retaining(db), from, olds, to, f, id, meta.next, target)
+    db.next_node = ids
+    let Built(roots: take roots, live: live) = built?
+    db.next_table = id + 1 + count
+    schema_publish(mut db, take roots, live)
+}
+
 fn bucket(v: u64) -> Result[u64, Capacity] {
     Ok(v % 4)
 }
@@ -2416,7 +2631,7 @@ fn typed_value(s: Snapshot, t: Shape[u64, u64], k: u64) -> u64 {
 
 pub fn law_typed_indexes(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     for k in 0u64 .. 24 {
         if !typed_put(mut db, t, k, k + 1) {
@@ -2649,7 +2864,7 @@ fn new_codec() -> std.codec.Codec[NewAccount] {
 // Wrong implementation: overwrite the old schema, or treat a fingerprint match as identity.
 pub fn law_schema_numbers(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "accounts", std.codec.key_u64(), old_codec()))
+    result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), old_codec())))
     let old = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), old_codec()))
     let first = run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, old, 1, OldAccount(balance: 10))
@@ -2715,10 +2930,158 @@ fn test_schema_numbers(c: Clock) -> Result[(), ()] waits {
     }
 }
 
+fn old_balance(v: OldAccount) -> Result[u64, Capacity] {
+    Ok(v.balance)
+}
+
+fn twice_balance(v: OldAccount) -> Result[u64, Capacity] {
+    Ok(v.balance * 2)
+}
+
+fn new_bonus(v: NewAccount) -> Result[u64, Capacity] {
+    Ok(v.bonus)
+}
+
+// L31 (b): Capacity from the extractor on the second row, k2 (balance 9).
+fn bonus_refuses(v: NewAccount) -> Result[u64, Capacity] {
+    if v.balance == 9 { Error(Capacity(requested: 1, available: 0)) } else { Ok(v.bonus) }
+}
+
+// L31 (b): an index key of 5000 bytes, past the 4096-byte key limit.
+fn wide_key(v: NewAccount) -> Result[Bytes, Capacity] {
+    let mut raw: Bytes = list.new()
+    list.fill(mut raw, 5000, int.truncate(v.balance))?
+    Ok(take raw)
+}
+
+fn upgrade(k: u64, v: OldAccount) -> Result[Option[(u64, NewAccount)], Capacity] {
+    Ok(Some((k, NewAccount(balance: v.balance, bonus: v.balance * 10))))
+}
+
+fn keep_new(k: u64, v: NewAccount) -> Result[Option[(u64, NewAccount)], Capacity] {
+    Ok(Some((k, v)))
+}
+
+fn collapse(k: u64, v: NewAccount) -> Result[Option[(u64, NewAccount)], Capacity] {
+    Ok(Some((0, v)))
+}
+
+// by_b's order as one number: each row is k * 1000 + bonus, four digits
+// each, so (70, k1), (90, k2) is 1070 2090.
+fn bonus_order(s: Snapshot, ix: Index[u64, u64, NewAccount]) -> Result[u64, Error] {
+    let mut rows = find(s, ix, Unbounded, Unbounded)?
+    let mut keys = 0u64
+    while let Some((k, v)) = next(mut rows)? {
+        keys = keys * 10000 + k * 1000 + v.bonus
+    }
+    Ok(keys)
+}
+
+fn new_spec(name: String, index_name: String) -> TableSpec[u64, NewAccount] {
+    let mut s = spec(result.unwrap(string.from(name)), std.codec.key_u64(), new_codec())
+    result.unwrap(with_index(mut s, index_name, code.describe(new_bonus), std.codec.key_u64()))
+    s
+}
+
+// L31 by hand, AB1's trace with Old {balance} for Old {a} and New {balance,
+// bonus} for New {b}. Table t (id 1) with by_a (id 2) = Old.balance holds
+// k1 = Old 7 and k2 = Old 9 at v2. migrate to `t` with by_b = New.bonus and
+// f(k, Old a) = (k, New a, 10a): t gets id 3 and by_b id 4, at v3; the rows
+// take schema number 1, the old entry's next, and number 0 retires. by_b
+// lists (70, k1), (90, k2); by_a and its entries are gone. Old handles are
+// Stale(1) and Stale(2) against v3 and read M at v2, where the new handles
+// are Stale(3). A New put k3 = (5, 50) joins by_b first. (b) A migrate whose
+// extractor refuses k2 is Full, one whose index key is 5000 bytes is
+// Limit(Key), one whose f sends two rows to one key is Exists, and a spec
+// repeating an index name is Exists; each leaves v4, the catalog and by_b as
+// they were. (c) A table declared with two indexes is one commit, and both
+// hold the first put. Wrong implementations caught: a migrate that keeps
+// from's indexes (by_a still listed); one that installs rows past a failed
+// index build (b is Ok); a reused schema number (the entry lists 0).
+pub fn law_migrate(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    let mut declared = spec("t", std.codec.key_u64(), old_codec())
+    result.unwrap(with_index(mut declared, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    match with_index(mut declared, "by_a", code.describe(twice_balance), std.codec.key_u64()) { Error(Exists(_)) => {}, _ => return false }
+    result.unwrap(create_table(mut db, take declared))
+    let mut t = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
+    let ix_a = result.unwrap(index(db, mut t, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let mut writer = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
+    let _ = result.unwrap(index(db, mut writer, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let first = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1, OldAccount(balance: 7))?
+        put(mut tx, t, 2, OldAccount(balance: 9))
+    }))
+    match take first { Committed(_) => {}, _ => return false }
+    let before = snapshot(db)
+    let _ = result.unwrap(pin(mut db, "before", before))
+    let old_shape = shape(t)
+    if version(before) != 2 || t.id != 1 || ix_a.id != 2 { return false }
+    result.unwrap(migrate(mut db, take t, new_spec("t", "by_b"), upgrade))
+    let now = snapshot(db)
+    if version(now) != 3 { return false }
+    let mut nt = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
+    if version(snapshot(db)) != 3 || nt.id != 3 { return false }
+    let ix_b = result.unwrap(index(db, mut nt, "by_b", code.describe(new_bonus), std.codec.key_u64()))
+    let meta = result.unwrap(catalog_entry(db, nt.catalog_key))
+    if ix_b.id != 4 || list.len(meta.schemas) != 1 || meta.schemas[0].number != 1 || meta.next != 2 { return false }
+    let listed = result.unwrap(index_catalog(db, 3))
+    if list.len(listed) != 1 || listed[0].id != 4 || list.len(result.unwrap(index_catalog(db, 1))) != 0 { return false }
+    let order = result.unwrap(bonus_order(now, ix_b))
+    if order != 10702090 { return false }
+    match get(now, old_shape, 1) { Error(Stale(id)) => if id != 1 { return false }, _ => return false }
+    match find(now, ix_a, Unbounded, Unbounded) { Error(Stale(id)) => if id != 2 { return false }, _ => return false }
+    match result.unwrap(get(before, old_shape, 1)) { Some(v) => if v.balance != 7 { return false }, None => return false }
+    let mut old_rows = result.unwrap(find(before, ix_a, Unbounded, Unbounded))
+    match result.unwrap(next(mut old_rows)) { Some((k, _)) => if k != 1 { return false }, None => return false }
+    match get(before, shape(nt), 1) { Error(Stale(id)) => if id != 3 { return false }, _ => return false }
+    let held = match pinned(db, "before") { Some(x) => x, None => return false }
+    match get(held, shape(nt), 1) { Error(Stale(_)) => {}, _ => return false }
+    let late = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, nt, 3, NewAccount(balance: 5, bonus: 50)) }))
+    match take late { Committed(_) => {}, _ => return false }
+    let stale_put = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, writer, 4, OldAccount(balance: 1)) }))
+    match take stale_put { Aborted(undone) => match undone.value { Stale(id) => if id != 1 { return false }, _ => return false }, _ => return false }
+    if result.unwrap(bonus_order(snapshot(db), ix_b)) != 305010702090 || version(snapshot(db)) != 4 { return false }
+    // (b) each refusal leaves v4, ids, catalog and by_b as they were.
+    let mut refusing = spec("t", std.codec.key_u64(), new_codec())
+    result.unwrap(with_index(mut refusing, "by_r", code.describe(bonus_refuses), std.codec.key_u64()))
+    match migrate(mut db, take nt, take refusing, keep_new) { Error(Full(_)) => {}, _ => return false }
+    let mut wide = spec("t", std.codec.key_u64(), new_codec())
+    result.unwrap(with_index(mut wide, "by_w", code.describe(wide_key), std.codec.key_bytes()))
+    let again = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
+    match migrate(mut db, take again, take wide, keep_new) { Error(Limit(Key)) => {}, _ => return false }
+    let third = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
+    match migrate(mut db, take third, new_spec("t", "by_b"), collapse) { Error(Exists(_)) => {}, _ => return false }
+    let fourth = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
+    if version(snapshot(db)) != 4 || db.next_table != 5 || fourth.id != 3 { return false }
+    if list.len(result.unwrap(index_catalog(db, 3))) != 1 || result.unwrap(bonus_order(snapshot(db), ix_b)) != 305010702090 { return false }
+    // (c) two indexes, one commit.
+    let mut both = spec("w", std.codec.key_u64(), old_codec())
+    result.unwrap(with_index(mut both, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    result.unwrap(with_index(mut both, "by_twice", code.describe(twice_balance), std.codec.key_u64()))
+    result.unwrap(create_table(mut db, take both))
+    if version(snapshot(db)) != 5 { return false }
+    let mut w = result.unwrap(table(mut db, "w", std.codec.key_u64(), old_codec()))
+    let wa = result.unwrap(index(db, mut w, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let wt = result.unwrap(index(db, mut w, "by_twice", code.describe(twice_balance), std.codec.key_u64()))
+    let put_w = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, w, 1, OldAccount(balance: 3)) }))
+    match take put_w { Committed(_) => {}, _ => return false }
+    let mut by_a = result.unwrap(find(snapshot(db), wa, Included(3), Included(3)))
+    let mut by_t = result.unwrap(find(snapshot(db), wt, Included(6), Included(6)))
+    let a_hit = match result.unwrap(next(mut by_a)) { Some((k, _)) => k == 1, None => false }
+    let t_hit = match result.unwrap(next(mut by_t)) { Some((k, _)) => k == 1, None => false }
+    a_hit && t_hit && w.id == 5 && wa.id == 6 && wt.id == 7
+}
+
+@test
+fn test_migrate(c: Clock) -> Result[(), ()] waits {
+    if law_migrate(c) { Ok(()) } else { Error(()) }
+}
+
 // Initial ids and epochs are input validity rules, not B-tree invariants.
 pub fn law_catalog_invalid(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let mut meta = result.unwrap(catalog_entry(db, t.catalog_key))
     if meta.id != 1 || meta.epoch != 1 || meta.next != 1 || meta.schemas[0].number != 0 {
@@ -2767,7 +3130,7 @@ fn reject_999(v: u64) -> Result[u64, Capacity] {
 // Catching that error and committing must preserve the old row and every index.
 pub fn law_index_refusal(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 1, 99) {
         return false
@@ -2824,7 +3187,7 @@ fn is_foreign[T](take r: Result[T, Error]) -> bool {
 fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
     let mut a = test_db(c, 1073741824)
     let mut b = memory_at(c, other_id, defaults())
-    result.unwrap(create_table(mut a, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut a, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut a, "rows", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut a, t, "i", code.describe(bucket), std.codec.key_u64()))
     let ix = result.unwrap(index(a, mut t, "i", code.describe(bucket), std.codec.key_u64()))
@@ -2876,7 +3239,7 @@ fn test_typed_foreign(c: Clock) -> Result[(), ()] waits {
 
 pub fn law_drop_recreate(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let old = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let saved = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, old, 1, 10) {
@@ -2892,7 +3255,7 @@ pub fn law_drop_recreate(c: Clock) -> bool waits {
     if db.resident != 0 || typed_value(held, sh, 1) != 10 {
         return false
     }
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let fresh = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if fresh.id != 2 {
         return false
@@ -2920,7 +3283,7 @@ pub fn law_drop_recreate(c: Clock) -> bool waits {
     let second_held = snapshot(db)
     let second_shape = shape(second_saved)
     result.unwrap(drop_table(mut db, take fresh))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let third = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if third.id != 3 {
         return false
@@ -2950,7 +3313,7 @@ fn test_drop_recreate(c: Clock) -> Result[(), ()] waits {
 
 pub fn law_typed_resident(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     // Scalar schemas are 1 + 4 + 1 = 6 bytes each. Catalog size is
     // 17 + (4 + 6) + 2 + (2 + 8 + 4 + 6) + 2 + 4 + 4 = 59 bytes.
@@ -2995,7 +3358,7 @@ fn test_typed_resident(c: Clock) -> Result[(), ()] waits {
 pub fn law_typed_model(c: Clock) -> bool waits {
     for seed in 0u64 .. 2 {
         let mut db = test_db(c, 1073741824)
-        result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+        result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
         let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
         result.unwrap(create_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
         let _ = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
@@ -3099,7 +3462,7 @@ type TypedReader: send {
 @test
 fn test_typed_snapshot_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     for k in 0u64 .. 24 {
         if !typed_put(mut db, t, k, k + 1) {
@@ -3381,7 +3744,7 @@ fn equal_reads(a: List[Read], b: List[Read]) -> bool {
 // Wrong implementations: look publishes, omits reads or reports another version.
 pub fn law_look(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "look", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("look", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut db, "look", std.codec.key_u64(), std.codec.of_u64()))
     for k in 1u64 .. 4 {
         if !typed_put(mut db, t, k, k * 10) {
@@ -3645,7 +4008,7 @@ fn test_changes(c: Clock) -> Result[(), ()] {
 @test
 fn test_look_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "look_task", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("look_task", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "look_task", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 1, 41) {
         return Error(())
@@ -3856,7 +4219,7 @@ fn resident_rounding_points() -> bool {
 
 fn range_boundary_points(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "boundary", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("boundary", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "boundary", std.codec.key_u64(), std.codec.of_u64()))
     let sh = shape(t)
     // The review's one-row witness, before any node split can distract from it.
@@ -3913,7 +4276,7 @@ fn range_boundary_points(c: Clock) -> bool waits {
             }
         }
     }
-    result.unwrap(create_table(mut db, "other_boundary", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("other_boundary", std.codec.key_u64(), std.codec.of_u64())))
     let second_table = result.unwrap(table(mut db, "other_boundary", std.codec.key_u64(), std.codec.of_u64()))
     let second_shape = shape(second_table)
     let second_witness = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[bool, Error] {
@@ -4009,7 +4372,7 @@ fn stale_reads(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64], table_id: 
 // not invalidate readers; drop/recreate replaces the incarnation (ids1 ->4).
 pub fn law_read_liveness(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("live", std.codec.key_u64(), std.codec.of_u64())))
     let mut old = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
     let old_shape = shape(old)
     if !typed_put(mut db, old, 1, 10) {
@@ -4031,7 +4394,7 @@ pub fn law_read_liveness(c: Clock) -> bool waits {
         Error(Stale(1)) => {},
         _ => return false
     }
-    result.unwrap(create_table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("live", std.codec.key_u64(), std.codec.of_u64())))
     let mut fresh = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
     let fresh_index = result.unwrap(index(db, mut fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
@@ -4104,7 +4467,7 @@ pub fn law_overwrite_account(c: Clock) -> bool waits {
     let mut options = defaults()
     options.resident_limit = 322
     let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if db.resident != 134 {
         return false
@@ -4127,7 +4490,7 @@ pub fn law_overwrite_account(c: Clock) -> bool waits {
 // compares versions only, which gives main B at v2.
 pub fn law_branches(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = shape(t)
     if version(snapshot(db)) != 1 { return false }
@@ -4207,7 +4570,7 @@ pub fn law_pin_settle(c: Clock) -> bool waits {
     let mut options = defaults()
     options.resident_limit = 416
     let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 1, 1) || db.resident != 228 { return false }
     let arg9 = snapshot(db)
@@ -4238,7 +4601,7 @@ fn test_pin_settle(c: Clock) -> Result[(), ()] waits {
 // entries. Three indexes make these counts1 and7, independent of tree shape.
 pub fn law_index_writes(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "writes", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("writes", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut db, "writes", std.codec.key_u64(), std.codec.of_u64()))
     for i in 0u64 .. 3 {
         let name = if i == 0 {
@@ -4344,7 +4707,7 @@ fn observe_lookup(s: Snapshot, ix: Index[u64, u64, u64], limit: u64) -> (List[u6
 // A value-only change, and delete+reput at that J, hit only the primary Point.
 fn lookup_cover_points(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "cover", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("cover", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut db, "cover", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, t, "i", code.describe(bucket), std.codec.key_u64()))
     let ix = result.unwrap(index(db, mut t, "i", code.describe(bucket), std.codec.key_u64()))
@@ -4532,8 +4895,8 @@ pub fn law_read_cover(c: Clock) -> bool waits {
         return false
     }
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "left", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(create_table(mut db, "right", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("left", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(create_table(mut db, spec("right", std.codec.key_u64(), std.codec.of_u64())))
     let mut a = result.unwrap(table(mut db, "left", std.codec.key_u64(), std.codec.of_u64()))
     let mut b = result.unwrap(table(mut db, "right", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, a, "i", code.describe(bucket), std.codec.key_u64()))
@@ -4713,7 +5076,7 @@ fn frame_size_boundary(c: Clock) -> Result[(), ()] {
 // Subtracting a re-encode of the resolved old value would add nothing.
 pub fn law_stored_size(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
-    result.unwrap(create_table(mut db, "sizes", std.codec.key_u64(), old_codec()))
+    result.unwrap(create_table(mut db, spec("sizes", std.codec.key_u64(), old_codec())))
     let old = result.unwrap(table(mut db, "sizes", std.codec.key_u64(), old_codec()))
     let first = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, old, 1, OldAccount(balance: 10))
@@ -6004,7 +6367,7 @@ pub fn disk_law_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     options.pack_bytes = 41943040
     options.resident_limit = 134217728
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    result.unwrap(create_table(mut db, spec("large", std.codec.key_u64(), std.codec.of_string())))
     let t = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
     let base = db.resident
     let mut raw: Bytes = result.unwrap(list.with_capacity(1048566))
@@ -7320,7 +7683,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = shape(t)
     let at_one = snapshot(db)
@@ -7349,7 +7712,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     let settle_dir = disk_test_directory(d)
     options.resident_limit = 544
     let mut sdb = result.unwrap(open(tasks, settle_dir, c, r, options))
-    result.unwrap(create_table(mut sdb, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut sdb, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let st = result.unwrap(table(mut sdb, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut sdb, st, 1, 1) { return false }
     let first = Ticket(store: sdb.store, open: open_number(sdb), mark: Journal(sdb.frame_seq))
@@ -7375,6 +7738,51 @@ fn disk_test_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), (
     if disk_law_branches(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
+// L31 (a) on disk: law_migrate's trace to v4, made durable, then reopen.
+// The catalog lists t as id 3 with only by_b (id 4), by_b gives k3, k1, k2,
+// and the old ids hold nothing. Wrong implementation caught: a cut that
+// writes the migrated catalog but not the new rows' tree, or the reverse.
+pub fn disk_law_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.checkpoint_task_bytes = 1048576
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let mut declared = spec("t", std.codec.key_u64(), old_codec())
+    result.unwrap(with_index(mut declared, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    result.unwrap(create_table(mut db, take declared))
+    let mut t = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
+    let _ = result.unwrap(index(db, mut t, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let first = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1, OldAccount(balance: 7))?
+        put(mut tx, t, 2, OldAccount(balance: 9))
+    }))
+    match take first { Committed(_) => {}, _ => return false }
+    result.unwrap(migrate(mut db, take t, new_spec("t", "by_b"), upgrade))
+    let mut nt = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
+    let _ = result.unwrap(index(db, mut nt, "by_b", code.describe(new_bonus), std.codec.key_u64()))
+    let late = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, nt, 3, NewAccount(balance: 5, bonus: 50)) }))
+    match take late { Committed(done) => result.unwrap(durable(mut db, done.ticket)), _ => return false }
+    result.unwrap(close(take db))
+    let mut reopened = result.unwrap(open(tasks, d, c, r, options))
+    let mut back = result.unwrap(table(mut reopened, "t", std.codec.key_u64(), new_codec()))
+    let ix = result.unwrap(index(reopened, mut back, "by_b", code.describe(new_bonus), std.codec.key_u64()))
+    let listed = result.unwrap(index_catalog(reopened, 3))
+    let now = snapshot(reopened)
+    let mut leftovers = result.unwrap(scan_bytes(now, 1, Unbounded, Unbounded))
+    let mut old_index = result.unwrap(scan_bytes(now, 2, Unbounded, Unbounded))
+    let empty_old = match result.unwrap(next_bytes(mut leftovers)) { None => true, Some(_) => false }
+    let empty_index = match result.unwrap(next_bytes(mut old_index)) { None => true, Some(_) => false }
+    let good = back.id == 3 && ix.id == 4 && list.len(listed) == 1 && version(now) == 4 && empty_old && empty_index && result.unwrap(bonus_order(now, ix)) == 305010702090
+    result.unwrap(close(take reopened))
+    good
+}
+
+@test
+fn disk_test_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_migrate(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
 // Private S2 opener, final cut/handle rules. Journal durability and close's
 // last-frame promise are exercised in S3 (T1); this law explicitly cuts first.
 pub fn disk_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
@@ -7392,7 +7800,7 @@ pub fn disk_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
         Error(Held) => {},
         _ => return false
     }
-    let schema_ticket = result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let schema_ticket = result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     if version(snapshot(db)) != 1 || schema_ticket.open != open_id {
         return false
     }
@@ -7433,7 +7841,7 @@ pub fn disk_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
         Error(Foreign) => {},
         _ => return false
     }
-    result.unwrap(create_table(mut reopened, "second", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut reopened, spec("second", std.codec.key_u64(), std.codec.of_u64())))
     let second = result.unwrap(table(mut reopened, "second", std.codec.key_u64(), std.codec.of_u64()))
     if second.id != 2 {
         return false
@@ -7461,7 +7869,7 @@ pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     options.resident_limit = 2097152 + 1048639
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    result.unwrap(create_table(mut db, spec("large", std.codec.key_u64(), std.codec.of_string())))
     let t = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
     let mut raw: Bytes = result.unwrap(list.with_capacity(1048566))
     result.unwrap(list.fill(mut raw, 1048566, 97u8))
@@ -7545,7 +7953,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
             Error(Full(_)) => continue,
             _ => return false
         }
-        match create_table(mut db, "base", std.codec.key_u64(), std.codec.of_u64()) {
+        match create_table(mut db, spec("base", std.codec.key_u64(), std.codec.of_u64())) {
             Ok(_) => {},
             Error(Full(_)) => {
                 result.unwrap(close(take db));
@@ -7559,7 +7967,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
                 return false
             }
         }
-        let made = create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())
+        let made = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))
         match take made {
             Error(Full(_)) => {
                 refusals += 1
@@ -7676,9 +8084,9 @@ fn disk_crash_options(scenario: String) -> Options {
 fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) -> Result[(), Error] waits {
     let options = disk_crash_options(scenario)
     let mut db = open(tasks, d, c, r, options)?
-    let _ = create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     if scenario == "refusal" {
-        let _ = create_table(mut db, "big", std.codec.key_u64(), std.codec.of_string())?
+        let _ = create_table(mut db, spec("big", std.codec.key_u64(), std.codec.of_string()))?
     }
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 96 {
@@ -7722,7 +8130,7 @@ fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String)
     let options = disk_crash_options(scenario)
     let mut db = open(tasks, d, c, r, options)?
     if scenario == "schema" {
-        let _ = create_table(mut db, "added", std.codec.key_u64(), std.codec.of_u64())?
+        let _ = create_table(mut db, spec("added", std.codec.key_u64(), std.codec.of_u64()))?
     } else if scenario == "refusal" {
         let big = table(mut db, "big", std.codec.key_u64(), std.codec.of_string())?
         let mut raw: Bytes = capacity(list.with_capacity(1048566))?
@@ -7750,6 +8158,12 @@ fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String)
             _ => fail("crash refusal delete")
         }
         let _ = checkpoint(mut db)?
+    } else if scenario == "migrate" {
+        // L17: rows k -> k + 1 become k -> k + 1001 with index by_v, at once.
+        let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        let mut declared = spec("rows", std.codec.key_u64(), std.codec.of_u64())
+        with_index(mut declared, "by_v", code.describe(crash_value), std.codec.key_u64())?
+        let _ = migrate(mut db, take t, take declared, crash_thousand)?
     } else if scenario == "branches" {
         // L7 at every W2 cut: pin, fork, a fork commit made durable, unpin.
         let arg10 = snapshot(db)
@@ -7764,6 +8178,14 @@ fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String)
         let _ = checkpoint(mut db)?
     }
     close(take db)
+}
+
+fn crash_value(v: u64) -> Result[u64, Capacity] {
+    Ok(v)
+}
+
+fn crash_thousand(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+    Ok(Some((k, v + 1000)))
 }
 
 fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, required_new: bool) -> Result[bool, Error] waits {
@@ -7801,7 +8223,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         }
     }
     // L4's input was durable in init; a checkpoint cut never loses it.
-    let mut good = if scenario == "branches" { true } else { new }
+    let mut good = if scenario == "branches" || scenario == "migrate" { true } else { new }
     if scenario == "schema" {
         good = old
         match table(mut db, "added", std.codec.key_u64(), std.codec.of_u64()) {
@@ -7830,6 +8252,29 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
             },
             None => if db.heads[0].head == 99 { good = false }
         }
+    } else if scenario == "migrate" {
+        // Before: head 97, rows k + 1, no index. After: head 98, rows
+        // k + 1001, and by_v lists all 96 in key order. Nothing between.
+        let mut moved = true
+        for k in 0u64 .. 96 {
+            if get(snapshot(db), sh, k)? != Some(k + 1001) { moved = false }
+        }
+        let listed = list.len(index_catalog(db, t.id)?)
+        let mut whole = false
+        if moved && listed == 1 && db.heads[0].head == 98 {
+            let mut indexed = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+            let ix = index(db, mut indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
+            let mut rows = find(snapshot(db), ix, Unbounded, Unbounded)?
+            let mut expect = 0u64
+            whole = true
+            while let Some((k, v)) = next(mut rows)? {
+                if k != expect || v != k + 1001 { whole = false }
+                expect += 1
+            }
+            whole = whole && expect == 96
+        }
+        let before = old && listed == 0 && db.heads[0].head == 97
+        good = (before && !required_new) || whole
     } else if scenario == "branches" {
         // The states in write order: nothing; pin p at 97; and b at 97; b at
         // 98 with k0 = 500; p gone. Main is at 97 with every row k + 1 in all.
@@ -8404,7 +8849,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let table_handle = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = shape(table_handle)
     let id = db.store
@@ -8746,7 +9191,7 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let sh = shape(t)
     let before = db.file_seq
@@ -8978,7 +9423,7 @@ pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
     let mut options = journal_crash_options()
     options.resident_limit = 4194304
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let early = snapshot(db)
     for k in 0u64 .. 100 {
@@ -9071,7 +9516,7 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
         }
     }
     if !journal_is_poisoned(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 2, 12) })) { return false }
-    if !journal_is_poisoned(create_table(mut db, "later", std.codec.key_u64(), std.codec.of_u64())) { return false }
+    if !journal_is_poisoned(create_table(mut db, spec("later", std.codec.key_u64(), std.codec.of_u64()))) { return false }
     if !journal_is_poisoned(checkpoint(mut db)) { return false }
     if !journal_is_poisoned(durable(mut db, saved)) { return false }
     true
@@ -9152,7 +9597,7 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
     let scenario = option.unwrap(args.get(argv, 1))
     if phase == "init" {
         let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
-        result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+        result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
         result.unwrap(close(take db))
         Ok(())
     } else if phase == "write" {
@@ -9202,7 +9647,7 @@ pub fn journal_law_options(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     options.group_commits = 1
     options.group_bytes = 1
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 1, 11) || !typed_put(mut db, t, 2, 22) { return false }
     let sh = shape(t)
@@ -9368,7 +9813,7 @@ fn journal_ack_options() -> Options {
 
 pub fn journal_law_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = result.unwrap(open(tasks, disk_test_directory(d), c, r, journal_ack_options()))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let br = main_branch(db)
     for k in 0u64 .. 8 {
@@ -9431,7 +9876,7 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     let empty = result.unwrap(checkpoint(mut db))
     result.unwrap(durable(mut db, empty))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     for k in 0u64 .. 3 { if !typed_put(mut db, t, k, k + 10) { return false } }
     let wanted = db.frame_seq
@@ -9463,7 +9908,7 @@ fn journal_test_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
 // out by hand. Rewriting row2 to the same value emits no Change.
 pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     for k in 0u64 .. 3 { if !typed_put(mut db, t, k, (k + 1) * 10) { return false } }
     let before = snapshot(db)
@@ -9579,7 +10024,7 @@ fn journal_frame_size_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 pub fn journal_law_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let options = journal_crash_options()
     let mut db = result.unwrap(open(tasks, d, c, r, options))
-    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if !typed_put(mut db, t, 7, 70) { return false }
     let sh = shape(t)

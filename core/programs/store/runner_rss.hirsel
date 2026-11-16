@@ -97,7 +97,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args) -> Result[()
     let flood = if result.unwrap(std.int.parse_uint(m, 10u32)) == 1u64 { 10000u64 } else { 0u64 }
     let mut db = store.memory(clock, random, store.defaults())
     let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)

@@ -13,7 +13,7 @@ from store_tests import inputs
 from store_crash_tests import run_crashes
 
 LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact',
-        'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches')
+        'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate')
 NATIVE_TESTS = {'store@1/store/disk_test_' + name for name in LAWS if name != 'pack_bound'}
 
 # Orchestrator ruling: these evaluator assembly defects ride with owner914.

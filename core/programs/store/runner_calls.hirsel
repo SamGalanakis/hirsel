@@ -274,7 +274,7 @@ fn served(c: Clock, r: Random, tasks: Tasks, f: fn(take Drive) -> () waits) -> b
 fn served_in(c: Clock, r: Random, tasks: Tasks, o: store.Options, f: fn(take Drive) -> () waits) -> bool waits {
     let mut db = store.memory(c, r, o)
     let cv: std.codec.Codec[u64] = std.codec.of()
-    let _ = result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
@@ -682,7 +682,7 @@ pub fn law_l14_handles(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     for commits in [false, true] {
         let mut db = store.memory(c, r, store.defaults())
         let cv: std.codec.Codec[u64] = std.codec.of()
-        let _ = result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
+        let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
         let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(1u64)
         let (_, inbox) = result.unwrap(take made)
         let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(1u64)

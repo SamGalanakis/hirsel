@@ -7,7 +7,7 @@ fn assembly_bucket(v: u64) -> Result[u64, Capacity] {
 
 pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, store.defaults())
-    result.unwrap(store.create_table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(store.create_table(mut db, store.spec("t", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
     let mut ix = result.unwrap(store.index(db, mut t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
@@ -27,7 +27,7 @@ pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
             return false
         }
         result.unwrap(store.drop_table(mut db, take t))
-        result.unwrap(store.create_table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
+        result.unwrap(store.create_table(mut db, store.spec("t", std.codec.key_u64(), std.codec.of_u64())))
         t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
         result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
         ix = result.unwrap(store.index(db, mut t, "i", code.describe(assembly_bucket), std.codec.key_u64()))

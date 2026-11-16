@@ -14,7 +14,7 @@ import subprocess
 
 from std_native import wait_load
 
-SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches')
+SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate')
 
 
 def checked(command, env=None):

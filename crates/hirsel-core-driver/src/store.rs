@@ -51,9 +51,16 @@ thread_local! {
 }
 #[cfg(test)]
 thread_local! {
-    /// Sweep the store once between this thread's next temporary's create
-    /// and its lock: the window another opener's sweep can fall into.
-    static SWEEP_BEFORE_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Sweep the store once inside this thread's next temporary's create and
+    /// lock, where another opener's sweep can fall: before the writer opens
+    /// what it locks, or between that open and the lock.
+    static SWEEP_BEFORE_LOCK: std::cell::Cell<Option<Window>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Window {
+    BeforeOpen,
+    BeforeLock,
 }
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -305,13 +312,19 @@ impl Store {
                 made => made?,
             };
             #[cfg(test)]
-            if SWEEP_BEFORE_LOCK.take() {
+            let window = SWEEP_BEFORE_LOCK.take();
+            #[cfg(test)]
+            if window == Some(Window::BeforeOpen) {
                 self.sweep()?;
             }
             let file = match open(&path, &made) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 file => file?,
             };
+            #[cfg(test)]
+            if window == Some(Window::BeforeLock) {
+                self.sweep()?;
+            }
             lock(&file, libc::LOCK_EX)?;
             if still_named(&path, &file)? {
                 return Ok((path, made, file));
@@ -720,21 +733,31 @@ mod tests {
     }
 
     /// Law: a sweep that falls between a temporary's create and its lock
-    /// (another opener of the store) never fails the writer: it gets a live
-    /// temporary, file or scratch directory, which a later sweep keeps.
-    /// Bug: the scratch directory, reopened by path, was gone (NotFound);
-    /// seen as `parallel_builds_launch_at_once` failing in a shared store.
-    /// Land target: hirsel-core-driver unittest.
+    /// (another opener of the store) never fails the writer: in either
+    /// window, before the writer opens what it locks or between that open
+    /// and the lock, it gets a live temporary, file or scratch directory,
+    /// which a later sweep keeps. The sweep removes only what it holds
+    /// locked; the writer, once locked, checks the path still names what it
+    /// locked and otherwise starts again. Bugs: the scratch directory,
+    /// reopened by path, was gone (NotFound, seen as
+    /// `parallel_builds_launch_at_once` failing in a shared store); a writer
+    /// that skipped the check would hold an unlinked directory. Land target:
+    /// hirsel-core-driver unittest.
     #[test]
     fn a_sweep_before_the_lock_leaves_the_writer_a_live_temporary() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path()).unwrap();
-        super::SWEEP_BEFORE_LOCK.set(true);
-        let scratch = store.scratch().unwrap();
-        super::SWEEP_BEFORE_LOCK.set(true);
-        let file = store.temporary().unwrap();
-        Store::new(dir.path()).unwrap();
-        assert!(scratch.path().is_dir(), "the scratch directory is live");
-        assert!(file.path.is_file(), "the temporary is live");
+        for window in [super::Window::BeforeOpen, super::Window::BeforeLock] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::new(dir.path()).unwrap();
+            super::SWEEP_BEFORE_LOCK.set(Some(window));
+            let scratch = store.scratch().unwrap();
+            super::SWEEP_BEFORE_LOCK.set(Some(window));
+            let file = store.temporary().unwrap();
+            Store::new(dir.path()).unwrap();
+            assert!(
+                scratch.path().is_dir(),
+                "{window:?}: the scratch directory is live"
+            );
+            assert!(file.path.is_file(), "{window:?}: the temporary is live");
+        }
     }
 }

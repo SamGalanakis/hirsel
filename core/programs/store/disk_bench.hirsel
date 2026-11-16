@@ -27,7 +27,7 @@ fn disk_bench_next_pack(d: Dir) -> u64 waits { disk_bench_manifest(d).next_pack 
 // R4/R5 (MEASURE.md, store-build-1010's workload): commit c (from 0) puts Account
 // {id c % 16, balance c, owner "owner000"} at key c % 16 and returns c.
 fn disk_bench_commit(mut db: Db, t: Table[u64, DiskAccount], c: u64) -> Ticket waits {
-    let done = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[u64, Error] {
+    let done = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
         let a = DiskAccount(id: c % 16, balance: int.narrow(c), owner: result.unwrap(string.from("owner000")))
         put(mut tx, t, c % 16, a)?
         Ok(c)

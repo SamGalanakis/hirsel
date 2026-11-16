@@ -60,7 +60,7 @@
     },
     "suite-edit": {
       "instructions_per_token": {
-        "parse": 445.0609158381179,
+        "parse": 444.98529617700603,
         "index": 11.763058395182748,
         "resolve": 254.41534799047753,
         "input counts": 8.46380058815292,

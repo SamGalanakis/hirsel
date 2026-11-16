@@ -513,6 +513,8 @@ fn emit_module(
             address_slots: values::address_slots(body, &flow),
             step_labels: Default::default(),
             unchecked_steps: false,
+            step_counter: None,
+            neutral_step_call: false,
             aliases,
             module,
             body,
@@ -575,6 +577,11 @@ fn emit_module(
         let signature = e.abi.signature(params);
         e.sink
             .begin_function(&body_name, &signature, &locals, &attrs);
+        if body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
+            let counter = e.temp(Type::I64);
+            e.step_counter = Some(counter);
+            e.reload_steps();
+        }
         let step_loops = steps::loops(module, body, e.constants);
         if !step_loops.is_empty() {
             // Both loop copies define the same source values and addresses.
@@ -681,6 +688,7 @@ fn emit_module(
             })?;
         }
         e.sink.end_function();
+        e.step_counter = None;
         if !has_status {
             e.infallible_wrapper(&name, sig, facts, function_debug.and_then(|d| d.wrapper));
         }
@@ -1066,6 +1074,8 @@ struct FunctionEmitter<'a> {
     address_slots: Vec<bool>,
     step_labels: std::collections::BTreeMap<usize, Label>,
     unchecked_steps: bool,
+    step_counter: Option<Value>,
+    neutral_step_call: bool,
     sink: &'a mut dyn Sink,
     items: &'a mut Items,
     next: usize,
@@ -1168,19 +1178,30 @@ impl FunctionEmitter<'_> {
         self.effect(Operation::Conditional(c, yes, no, false));
     }
     fn ret(&mut self, t: &Type, v: &Value) {
+        self.flush_steps();
         self.effect(Operation::Return(Some((t, v))));
     }
     fn ret_void(&mut self) {
+        self.flush_steps();
         self.effect(Operation::Return(None));
     }
     fn call(&mut self, sig: &FnSig, callee: &Value, args: &[Value], attrs: &CallAttrs) -> Value {
+        let flush = !self.neutral_step_call
+            && !matches!(callee, Value::Global(name) if name.starts_with("llvm."));
+        if flush {
+            self.flush_steps();
+        }
         let op = Operation::Call(sig, callee, args, attrs);
-        if sig.result.is_void() {
+        let value = if sig.result.is_void() {
             self.effect(op);
             Value::Poison
         } else {
             self.emit(op)
+        };
+        if flush {
+            self.reload_steps();
         }
+        value
     }
     /// Declare `name` once and call it with `args` and `attrs`.
     fn call_declared(
@@ -1547,7 +1568,13 @@ impl FunctionEmitter<'_> {
                 };
                 self.put(result, &x);
             }
-            Inst::Call { call } => self.call_site(&self.body.calls[call.index()])?,
+            Inst::Call { call } => {
+                self.neutral_step_call =
+                    steps::pure(self.module, self.body, self.constants, inst, true);
+                let result = self.call_site(&self.body.calls[call.index()]);
+                self.neutral_step_call = false;
+                result?;
+            }
             _ => self.storage(inst, index)?,
         }
         Ok(())

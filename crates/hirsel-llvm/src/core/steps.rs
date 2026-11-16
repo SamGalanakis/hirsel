@@ -3,6 +3,7 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Clone)]
 pub(super) struct Loop {
     pub header: usize,
     nodes: BTreeSet<usize>,
@@ -11,6 +12,8 @@ pub(super) struct Loop {
     yes: EdgeId,
     no: EdgeId,
     cost: u64,
+    index_slot: AddressId,
+    constant: Option<(u64, u64)>,
 }
 fn next(body: &Body, block: usize) -> Option<Vec<usize>> {
     let edge = |e: EdgeId| body.edges[e.index()].target.index();
@@ -29,7 +32,7 @@ fn local(body: &Body, mut address: AddressId) -> bool {
         }
     }
 }
-fn pure(
+pub(super) fn pure(
     module: &Module,
     body: &Body,
     constants: &[Option<u64>],
@@ -111,9 +114,19 @@ fn path_cost(
     header: usize,
     block: usize,
     state: &mut BTreeMap<usize, Option<u64>>,
+    known: &BTreeMap<usize, Loop>,
 ) -> Option<u64> {
     if block == header {
         return Some(0);
+    }
+    if let Some(child) = known.get(&block) {
+        let (_, trips) = child.constant?;
+        for &node in &child.nodes {
+            state.insert(node, Some(0));
+        }
+        let after = body.edges[child.no.index()].target.index();
+        let tail = path_cost(module, body, constants, header, after, state, known)?;
+        return child.cost.checked_mul(trips)?.checked_add(tail);
     }
     if let Some(cost) = state.get(&block) {
         return *cost;
@@ -124,9 +137,9 @@ fn path_cost(
         return None;
     }
     let mut tails = next(body, block)?.into_iter();
-    let first = path_cost(module, body, constants, header, tails.next()?, state)?;
+    let first = path_cost(module, body, constants, header, tails.next()?, state, known)?;
     for successor in tails {
-        if path_cost(module, body, constants, header, successor, state)? != first {
+        if path_cost(module, body, constants, header, successor, state, known)? != first {
             return None;
         }
     }
@@ -140,111 +153,187 @@ fn path_cost(
     Some(cost)
 }
 pub(super) fn loops(module: &Module, body: &Body, constants: &[Option<u64>]) -> Vec<Loop> {
-    let mut result = Vec::new();
-    let mut claimed = BTreeSet::new();
-    for (header, row) in body.blocks.iter().enumerate() {
-        let Some(
-            [
-                Inst::Read {
-                    result: index,
-                    address: index_slot,
-                    ..
-                },
-                Inst::Compare {
-                    result: condition,
-                    op: CompareOp::Lt,
-                    left,
-                    right: limit,
-                },
-            ],
-        ) = row.insts.get(&body.insts)
-        else {
-            continue;
-        };
-        if left != index
-            || !matches!(
-                body.values[index.index()],
-                Ty::Scalar(Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64)
-            )
-            || !local(body, *index_slot)
-        {
-            continue;
-        }
-        let Terminator::Branch {
-            condition: tested,
-            yes,
-            no,
-        } = body.terminators[header]
-        else {
-            continue;
-        };
-        if tested != *condition || body.edges[no.index()].args.len != 0 {
-            continue;
-        }
-        let entry = body.edges[yes.index()].target.index();
-        let mut state = BTreeMap::new();
-        let Some(cost) = path_cost(module, body, constants, header, entry, &mut state) else {
-            continue;
-        };
-        if cost == 0 {
-            continue;
-        }
-        let mut nodes = state.keys().copied().collect::<BTreeSet<_>>();
-        nodes.insert(header);
-        if !nodes.is_disjoint(&claimed) || nodes.contains(&body.edges[no.index()].target.index()) {
-            continue;
-        }
-        // The one induction update is i+1, at every return to the head. No
-        // source break, return, nested cycle, or nonuniform path was admitted.
-        let mut updates = Vec::new();
-        let mut valid = true;
-        for &block in &nodes {
-            for inst in body.blocks[block].insts.get(&body.insts).unwrap() {
-                if let Inst::Store { address, value } = *inst {
-                    if address == *index_slot {
-                        let increment = body.blocks[block].insts.get(&body.insts).unwrap().iter().any(|i|
+    let mut known = BTreeMap::new();
+    loop {
+        let before = known.len();
+        for (header, row) in body.blocks.iter().enumerate() {
+            if known.contains_key(&header) {
+                continue;
+            }
+            let Some(
+                [
+                    Inst::Read {
+                        result: index,
+                        address: index_slot,
+                        ..
+                    },
+                    Inst::Compare {
+                        result: condition,
+                        op: CompareOp::Lt,
+                        left,
+                        right: limit,
+                    },
+                ],
+            ) = row.insts.get(&body.insts)
+            else {
+                continue;
+            };
+            if left != index
+                || !matches!(
+                    body.values[index.index()],
+                    Ty::Scalar(Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64)
+                )
+                || !local(body, *index_slot)
+            {
+                continue;
+            }
+            let Terminator::Branch {
+                condition: tested,
+                yes,
+                no,
+            } = body.terminators[header]
+            else {
+                continue;
+            };
+            if tested != *condition || body.edges[no.index()].args.len != 0 {
+                continue;
+            }
+            let entry = body.edges[yes.index()].target.index();
+            let mut state = BTreeMap::new();
+            let Some(cost) = path_cost(module, body, constants, header, entry, &mut state, &known)
+            else {
+                continue;
+            };
+            if cost == 0 {
+                continue;
+            }
+            let mut nodes = state.keys().copied().collect::<BTreeSet<_>>();
+            nodes.insert(header);
+            if nodes.contains(&body.edges[no.index()].target.index()) {
+                continue;
+            }
+            // The one induction update is i+1, at every return to the head. No
+            // source break, return, nested cycle, or nonuniform path was admitted.
+            let mut updates = Vec::new();
+            let mut valid = true;
+            for &block in &nodes {
+                for inst in body.blocks[block].insts.get(&body.insts).unwrap() {
+                    if let Inst::Store { address, value } = *inst {
+                        if address == *index_slot {
+                            let increment = body.blocks[block].insts.get(&body.insts).unwrap().iter().any(|i|
                             matches!(*i, Inst::IntArith { result, flag: None, op: ArithOp::Add, mode: ArithMode::Wrapping, left, right }
                                 if result == value && left == *index && constants[right.index()] == Some(1)));
-                        if !increment {
+                            if !increment {
+                                valid = false;
+                            }
+                            updates.push(block);
+                        }
+                    }
+                }
+                if block != header {
+                    for (other, _) in body.blocks.iter().enumerate() {
+                        if !nodes.contains(&other)
+                            && next(body, other).is_some_and(|n| n.contains(&block))
+                        {
                             valid = false;
                         }
-                        updates.push(block);
                     }
                 }
             }
-            if block != header {
-                for (other, _) in body.blocks.iter().enumerate() {
-                    if !nodes.contains(&other)
-                        && next(body, other).is_some_and(|n| n.contains(&block))
-                    {
-                        valid = false;
-                    }
+            if !valid || updates.len() != 1 {
+                continue;
+            }
+            let update = updates[0];
+            // Every back edge passes the induction update, including a source
+            // continue. Reject a path that could repeat a trip without advancing.
+            if nodes.iter().any(|&b| {
+                b != header && next(body, b).is_some_and(|n| n.contains(&header)) && b != update
+            }) {
+                continue;
+            }
+            let mut initial = None;
+            let mut fixed = true;
+            for (b, row) in body.blocks.iter().enumerate() {
+                if nodes.contains(&b) || !next(body, b).is_some_and(|n| n.contains(&header)) {
+                    continue;
+                }
+                let stored = row
+                    .insts
+                    .get(&body.insts)
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find_map(|i| {
+                        if let Inst::Store { address, value } = *i {
+                            if address == *index_slot {
+                                return Some(constants[value.index()]);
+                            }
+                        }
+                        None
+                    })
+                    .flatten();
+                match (initial, stored) {
+                    (_, None) => fixed = false,
+                    (Some(a), Some(b)) if a != b => fixed = false,
+                    (_, Some(n)) => initial = Some(n),
                 }
             }
+            let constant = if fixed {
+                initial
+                    .zip(constants[limit.index()])
+                    .and_then(|(start, end)| Some((start, end.checked_sub(start)?)))
+                    .filter(|(_, trips)| cost.checked_mul(*trips).is_some())
+            } else {
+                None
+            };
+            known.insert(
+                header,
+                Loop {
+                    header,
+                    nodes,
+                    index: *index,
+                    limit: *limit,
+                    yes,
+                    no,
+                    cost,
+                    index_slot: *index_slot,
+                    constant,
+                },
+            );
         }
-        if !valid || updates.len() != 1 {
-            continue;
+        if known.len() == before {
+            break;
         }
-        let update = updates[0];
-        // Every back edge passes the induction update, including a source
-        // continue. Reject a path that could repeat a trip without advancing.
-        if nodes.iter().any(|&b| {
-            b != header && next(body, b).is_some_and(|n| n.contains(&header)) && b != update
-        }) {
-            continue;
-        }
-        claimed.extend(&nodes);
-        result.push(Loop {
-            header,
-            nodes,
-            index: *index,
-            limit: *limit,
-            yes,
-            no,
-            cost,
-        });
     }
-    result
+    let nested = known
+        .values()
+        .flat_map(|p| p.nodes.iter().copied().filter(|b| *b != p.header))
+        .collect::<BTreeSet<_>>();
+    known
+        .into_values()
+        .filter(|p| !nested.contains(&p.header))
+        .collect()
+}
+impl FunctionEmitter<'_> {
+    pub(super) fn step_counter(&mut self) -> Value {
+        self.step_counter
+            .clone()
+            .unwrap_or_else(|| self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64))
+    }
+    pub(super) fn flush_steps(&mut self) {
+        if let Some(counter) = self.step_counter.clone() {
+            let value = self.load(&Type::I64, &counter, 8);
+            let context = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
+            self.store(&Type::I64, &value, &context, 8);
+        }
+    }
+    pub(super) fn reload_steps(&mut self) {
+        if let Some(counter) = self.step_counter.clone() {
+            let context = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
+            let value = self.load(&Type::I64, &context, 8);
+            self.store(&Type::I64, &value, &counter, 8);
+        }
+    }
 }
 impl FunctionEmitter<'_> {
     pub(super) fn step_label(&self, block: usize) -> Label {
@@ -278,15 +367,34 @@ impl FunctionEmitter<'_> {
         let index = self.step_word(plan.index);
         let limit = self.step_word(plan.limit);
         let trips = self.bin(Binary::Sub, &Type::I64, &limit, &index);
-        let counter = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
+        let counter = self.step_counter();
         let before = self.load(&Type::I64, &counter, 8);
         let quota = self.bin(Binary::UDiv, &Type::I64, &before, &int(plan.cost));
-        let full = self.cmp(Predicate::Uge, &Type::I64, &quota, &trips);
+        let full = if let Some((start, count)) = plan.constant {
+            let first = self.cmp(Predicate::Eq, &Type::I64, &index, &int(start));
+            let enough = self.cmp(Predicate::Uge, &Type::I64, &quota, &int(count));
+            self.bin(Binary::And, &Type::I1, &first, &enough)
+        } else {
+            self.cmp(Predicate::Uge, &Type::I64, &quota, &trips)
+        };
         let whole = Label::new("step_whole", n);
         let partial = Label::new("step_partial", n);
         self.likely(&full, whole, partial);
         self.block(whole);
-        let charge = self.bin(Binary::Mul, &Type::I64, &trips, &int(plan.cost));
+        if let Some((start, _)) = plan.constant {
+            let slot = self.address(plan.index_slot);
+            self.store(
+                &ty(self.body.values[plan.index.index()]),
+                &int(start),
+                &slot,
+                1,
+            );
+        }
+        let charge = if let Some((_, count)) = plan.constant {
+            int(count * plan.cost)
+        } else {
+            self.bin(Binary::Mul, &Type::I64, &trips, &int(plan.cost))
+        };
         let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
         self.store(&Type::I64, &after, &counter, 8);
         self.br(version_label(
@@ -302,6 +410,8 @@ impl FunctionEmitter<'_> {
         self.cond(&any, chunk, checked);
         self.emit_edge(checked, plan.yes);
         self.block(chunk);
+        let fits = self.cmp(Predicate::Ult, &Type::I64, &quota, &trips);
+        let quota = self.select(&Type::I64, &fits, &quota, &trips);
         let stop = self.bin(Binary::Add, &Type::I64, &index, &quota);
         self.store(&Type::I64, &stop, &Value::Local(end), 8);
         let charge = self.bin(Binary::Mul, &Type::I64, &quota, &int(plan.cost));
@@ -376,7 +486,7 @@ impl FunctionEmitter<'_> {
         Ok(())
     }
     fn step_settle_chunk(&mut self) {
-        let counter = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
+        let counter = self.step_counter();
         let remaining = self.load(&Type::I64, &counter, 8);
         let positive = self.cmp(Predicate::Sgt, &Type::I64, &remaining, &int(0));
         let n = self.counter();
@@ -444,7 +554,7 @@ pub(super) fn merged(
 }
 impl FunctionEmitter<'_> {
     pub(super) fn step_group(&mut self, sites: &[usize]) {
-        let counter = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
+        let counter = self.step_counter();
         let before = self.load(&Type::I64, &counter, 8);
         let enough = self.cmp(
             Predicate::Sge,

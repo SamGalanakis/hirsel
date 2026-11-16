@@ -425,7 +425,7 @@ impl FunctionEmitter<'_> {
         if self.unchecked_steps {
             return;
         }
-        let counter = self.offset(&CONTEXT, memory_layout::CONTEXT_STEPS as u64);
+        let counter = self.step_counter();
         let before = self.load(&Type::I64, &counter, 8);
         let after = self.bin(Binary::Sub, &Type::I64, &before, &int(1));
         self.store(&Type::I64, &after, &counter, 8);

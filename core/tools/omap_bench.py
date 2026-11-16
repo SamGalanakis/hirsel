@@ -163,7 +163,7 @@ def measure(argv, directory, env, tag, expected, recording=False, host_directory
             counts[cols[2]] = int(cols[0].replace(',', ''))
     instructions = next((int(line.split('\t')[0].replace(',', '')) for line in raw.splitlines()
                          if '\tinstructions:u\t' in line and line.split('\t')[0].replace(',', '').isdigit()), None)
-    ok = code == 0 and match is not None and int(match[1]) == expected and (recording or instructions is not None)
+    ok = code == 0 and match is not None and (expected is None or int(match[1]) == expected) and (recording or instructions is not None)
     row = dict(tag=tag, exit=code, complete=ok, instructions=instructions, counts=counts,
                wall_ns=int(match[2]) if match else None,
                resident_before_kib=start_resident['VmRSS'], peak_rss_kib=peak['VmHWM'] if peak else None,

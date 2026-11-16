@@ -2,6 +2,7 @@
 """tools/land against a scratch origin with fake Buck2 checks: a push rejected
 because main moved goes back to the rebase, and a red check refuses the push."""
 import argparse
+import ast
 import contextlib
 import csv
 import fcntl
@@ -1648,6 +1649,38 @@ class Units(unittest.TestCase):
                     query.return_value = SimpleNamespace(returncode=0, stdout=output)
                     with self.assertRaises(SystemExit):
                         module['main']()
+
+
+class CoreScriptArguments(unittest.TestCase):
+    def test_core_scripts_accept_land_serial_argument(self):
+        land = runpy.run_path(str(ROOT / 'tools/land'))
+        registry = ast.parse((ROOT / 'tools/buck2/sync.py').read_text())
+        scripts = set()
+        for call in ast.walk(registry):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id == 'call' and call.args
+                    and isinstance(call.args[0], ast.Constant) and call.args[0].value == 'hirsel_script_test'):
+                continue
+            fields = {kw.arg: kw.value for kw in call.keywords}
+            name = fields['name']
+            # Include every loop-generated script target as well as the named Core targets.
+            if not isinstance(name, ast.Constant) or '//:' + name.value in land['CORE_ACCEPTANCE']:
+                scripts.add(ast.literal_eval(fields['script']))
+        self.assertIn('core/tools/recursive_instances.py', scripts)
+        for script in sorted(scripts):
+            with self.subTest(script=script):
+                source = ast.parse((ROOT / script).read_text())
+                registrations = [call for call in ast.walk(source)
+                                 if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                                 and call.func.attr == 'add_argument' and call.args
+                                 and isinstance(call.args[0], ast.Constant) and call.args[0].value == '--test-threads']
+                self.assertEqual(len(registrations), 1, script + ' must register land\'s --test-threads argument')
+                registration = registrations[0]
+                registration.func.value = ast.Name(id='parser', ctx=ast.Load())
+                parser = argparse.ArgumentParser()
+                exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.Expr(registration)], type_ignores=[])),
+                             script, 'exec'), dict(parser=parser, argparse=argparse))
+                self.assertEqual(parser.parse_args(['--test-threads', '1']).test_threads, 1)
 
 
 class CoreCostGuard(unittest.TestCase):

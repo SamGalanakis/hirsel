@@ -729,7 +729,12 @@ def first_party(meta: dict) -> str:
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
                                   "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py",
-                                  "//tools/buck2:priorities.bzl"],
+                                  "//tools/buck2:priorities.bzl", "//tools/buck2:sync.py",
+                                  "core/tools/test_m1.py", "core/tools/gate_library_modes.py", "core/tools/m1.py", "core/tools/m2b.py",
+                                  "core/tools/recursive_instances.py", "core/tools/aarch64.py", "core/tools/store_tests.py", "core/tools/gate_native_laws.py",
+                                  "crates/hirsel-core-front/front-cost.py", "crates/hirsel-core-front/test-check-cost.py",
+                                  "tools/tests/core_aarch64_provider.py", "tools/tests/core_bookkeeping_stop.py", "tools/tests/core_closed_pipe.py",
+                                  "tools/tests/core_store_no_sync.py", "tools/tests/core_memory_report.py", "tools/tests/distribution_notices.py"],
                             files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
     out.append("\n" + call("hirsel_script_test", name="land-core-evaluator", script="core/tools/gate_evaluator.py", full=False,
                             production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},

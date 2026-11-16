@@ -417,7 +417,13 @@ impl Scheduler {
                 Phase::Entry | Phase::Waiting => {
                     let w = match (*op).entered.take() {
                         Some(w) => w,
-                        None => (p.wait)(p.state, request, token),
+                        None => {
+                            #[cfg(test)]
+                            if (*op).phase == Phase::Entry {
+                                FIRST_WAITS.set((FIRST_WAITS.get().0, FIRST_WAITS.get().1 + 1));
+                            }
+                            (p.wait)(p.state, request, token)
+                        }
                     };
                     if wake == Wake::Cancel {
                         // W -> C (CONC-7): the request fails the operation and
@@ -708,6 +714,8 @@ pub(crate) unsafe fn provider_operation(
             let start = Start::Entry(None);
             return slow(context, task, provider, request, token, start, issued);
         }
+        #[cfg(test)]
+        FIRST_WAITS.set((FIRST_WAITS.get().0 + 1, FIRST_WAITS.get().1));
         CURRENT.set(ptr::null_mut());
         let wait = (provider.wait)(provider.state, request, token);
         CURRENT.set(task);
@@ -829,6 +837,10 @@ unsafe fn parked(
 /// to compare against the direct call.
 #[cfg(test)]
 thread_local! { pub(crate) static SCHEDULER_ENTRY: Local<bool> = const { Local::new(false) }; }
+/// Test-only: first waits made (directly by the task, by the scheduler after
+/// the switch), so the comparison sees which path each of its halves took.
+#[cfg(test)]
+thread_local! { pub(crate) static FIRST_WAITS: Local<(usize, usize)> = const { Local::new((0, 0)) }; }
 unsafe fn park_operation(task: *mut Task) {
     // SAFETY: the active task switches to its scheduler, which reads the
     // operation before any other task runs.

@@ -1159,16 +1159,30 @@ fn s0_direct_entry_wait_matches_the_scheduler_switch() {
     }
     for (at, &(wait, issue, resume, body, orders)) in programs.iter().enumerate() {
         for &lifo_choice in orders {
+            // Each half also returns its first waits, (direct, by the
+            // scheduler), so each is seen to take its own path.
             let traced = |switch: bool| {
                 SCHEDULER_ENTRY.set(switch);
+                FIRST_WAITS.set((0, 0));
                 let mut rec = Rec::new(wait, issue, resume);
                 run(&mut rec, lifo_choice, body);
                 SCHEDULER_ENTRY.set(false);
-                trace(&rec)
+                (trace(&rec), FIRST_WAITS.get())
             };
-            let switched = traced(true);
+            let (switched, (direct_waits, scheduler_waits)) = traced(true);
             assert!(switched.0.len() >= 8, "program {at} made its calls");
-            assert_eq!(traced(false), switched, "program {at}, lifo {lifo_choice}");
+            assert!(
+                scheduler_waits > 0,
+                "program {at}: the scheduler made the first waits"
+            );
+            assert_eq!(direct_waits, 0, "program {at}");
+            let (direct, waits) = traced(false);
+            assert_eq!(direct, switched, "program {at}, lifo {lifo_choice}");
+            assert_eq!(
+                waits,
+                (scheduler_waits, 0),
+                "program {at}: the task made them"
+            );
         }
     }
 }

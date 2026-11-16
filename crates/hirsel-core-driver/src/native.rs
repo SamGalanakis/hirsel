@@ -1691,7 +1691,12 @@ mod tests {
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();
-        assert_eq!(result.status.code(), Some(exit));
+        assert_eq!(
+            result.status.code(),
+            Some(exit),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert!(result.stdout.is_empty());
         assert!(result.stderr.is_empty());
     }

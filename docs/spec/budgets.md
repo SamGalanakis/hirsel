@@ -224,7 +224,8 @@ logical amount; an engine that elides a copy still charges for it.
 A **step** is taken at each call, each loop back edge and each other entry of user code,
 and nowhere else; a **step
 bound** of `n` allows `n` steps, and the step after them stops the code with the failure
-`OutOfTime` (FAIL-2), which only the scope whose bound ran out catches. `bound steps n
+`OutOfTime` (FAIL-2), which the scope whose bound ran out catches; no `isolate` catches it
+while that bound is current. `bound steps n
 { body }` evaluates to `Result[T, OutOfTime]`, where `T` is the body's type and `OutOfTime`
 is core's plain record `{ steps: u64 }`.
 
@@ -251,14 +252,16 @@ is core's plain record `{ steps: u64 }`.
 - **Exhaustion.** When a step would use more than the current bound allows, it does not
   happen: a failure with primary cause `OutOfTime` is raised there, its site the call or
   the loop. It propagates as every failure does, cleaning each scope it leaves (FAIL-8), and
-  `isolate` does not catch it ([FAIL-16](failure.md#fail-16-isolation)). The bound stays
+  no `isolate` it passes while the bound that ran out is current catches it
+  ([FAIL-16](failure.md#fail-16-isolation)). The bound stays
   current and exhausted during that cleanup, so a finalizer it would run fails on entry
   with `OutOfTime` ([FAIL-12](failure.md#fail-12-finalizer-failure)): it is abandoned, its
   resource's fields are still cleaned mechanically, and cleanup goes on, so it ends. When the failure reaches the scope
   whose bound ran out and every cause in its chain is that bound's `OutOfTime`, the scope
   catches it: their cells are refunded and it returns `Error(OutOfTime(steps: n))`. If
   cleanup added any other cause, the failure goes on past the scope, as a failure in its
-  place would.
+  place would: from there that bound is not current, the failure is an ordinary one, and an
+  `isolate` it reaches catches it, `OutOfTime` first among its causes.
 - **Places outside.** The body is checked as `isolate`'s argument is (FAIL-16): it is
   refused when it assigns, replaces or lends `mut` a place declared outside it, or invokes a
   scoped callback whose descriptor it cannot see. A place it moves from is maybe moved after
@@ -297,6 +300,16 @@ fn spin(n: u64) -> Result[u64, OutOfTime] {
 ```hirsel unbuilt
 fn first(xs: List[u64]) -> Result[Option[u64], OutOfTime] {
   bound steps 1 { list.get(xs, 0) }    // one call: one step
+}
+```
+```hirsel unbuilt
+fn tries(n: u64) -> Result[u64, OutOfTime] {
+  bound steps 1000 {
+    match isolate(fn() -> u64 { let mut i: u64 = 0; while i < n { i += 1 }; i }) {
+      Ok(Ok(i)) => i,
+      _ => 0,                          // never reached by the bound's OutOfTime, which passes this isolate
+    }
+  }                                    // Error(OutOfTime(steps: 1000)) when the loop runs out
 }
 ```
 ```hirsel unbuilt

@@ -266,9 +266,13 @@ recovery boundary and undoes nothing:
   its place, so the code after `isolate` has an unused cell to fail into; when it did not,
   every caught cause having gone into resources' cells, the reserved cell is refunded. A
   failure is caught whatever its primary cause other than `Cancelled`: `Overflow`,
-  `Bounds`, `Division`, `Unwrap`, `Fail`, `Tape` or a finalizer's `Capacity`
-  ([MEM-27](budgets.md#mem-27-finalizer-grants)).
-- A failure whose primary cause is `Cancelled` or `OutOfTime` is not caught: after the
+  `Bounds`, `Division`, `Unwrap`, `Fail`, `Tape`, a finalizer's `Capacity`
+  ([MEM-27](budgets.md#mem-27-finalizer-grants)), and `OutOfTime` at an `isolate` where the
+  step bound that ran out is no longer current.
+- A failure whose primary cause is `Cancelled` is not caught, and neither is one whose
+  primary cause is `OutOfTime` at an `isolate` where the step bound that ran out is still
+  current, inside that bound's scope or in a task spawned under it
+  ([MEM-30](budgets.md#mem-30-step-bounds)): after the
   same cleanup the reserved cell is refunded, the chain set aside is restored with the failure's causes
   after it, and the failure goes on past `isolate`. A run stop (FAIL-15)
   is not caught, and nothing resumes at the operation that failed. `Capacity` outside a

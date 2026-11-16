@@ -276,18 +276,35 @@ pub fn take_char(b: Bytes, mut at: u64) -> Result[char, Stop] {
     }
 }
 
-// The wire count is bounded even when the caller has a wider in-memory length.
-fn put_count(n: u64, mut out: Bytes) -> Result[(), Capacity] {
+// Check the wire width before any narrowing or output admission.
+fn checked_count(n: u64) -> Result[u32, Capacity] {
     if n > 0xffffffff {
         return Error(Capacity(requested: n, available: 0xffffffff))
     }
-    let small: u32 = int.truncate(n)
-    put_u32(small, mut out)
+    Ok(int.truncate(n))
+}
+
+fn put_count(n: u64, mut out: Bytes) -> Result[(), Capacity] {
+    let mut bits = checked_count(n)?
+    list.fill(mut out, 4, 0u8)?
+    let end = list.len(out)
+    for i in end - 4 .. end {
+        out[i] = int.truncate(bits)
+        bits = bits >> 8
+    }
+    Ok(())
 }
 
 pub fn put_string(x: String, mut out: Bytes) -> Result[(), Capacity] {
     let raw = string.as_bytes(x)
-    put_count(list.len(raw), mut out)?
+    let mut bits = checked_count(list.len(raw))?
+    // Keep prefix and payload in one encoder; put_count's growth body prevents inlining.
+    list.fill(mut out, 4, 0u8)?
+    let end = list.len(out)
+    for i in end - 4 .. end {
+        out[i] = int.truncate(bits)
+        bits = bits >> 8
+    }
     list.append(mut out, raw)
 }
 

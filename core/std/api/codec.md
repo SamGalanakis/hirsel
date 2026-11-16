@@ -43,8 +43,9 @@ of that type runs. So `of[List[E]]` and a derived `List[E]` field have equal byt
 fingerprint and LEAST (law `structural_of`), and `type T: codec via List[E]` derives
 (law `structural_via`). On `core/twins/codec` (100,000 rows `{u64, String, i64}`, LLVM
 release, CPU 16), `of[List[Account]]` and a derived one-field record cost the same:
-20.00M instructions an encode pass (Rust 5.80M, 3.45x) and 66.74M a decode pass (Rust
-55.74M, 1.20x). These are one-sample instruction ratios; see
+14.90M instructions an encode pass (Rust 5.80M, 2.57x, medians of five). The initial
+u32 decode sample was 66.74M (Rust 55.74M, 1.20x); this encode-only fix leaves decode
+unchanged. See
 [the twin measurement](../../twins/codec/MEASURE.md) for the before/after results.
 
 **Writing a codec by hand.** `make(e, d, w, n)` is what the derive calls; `put_X`/`take_X`,

@@ -45,3 +45,35 @@ were rows 2.80 and strings 2.20; this sample exceeds both.
 --out <dir> --check` gates the LLVM row and string encode ratios at 2.80 and 2.20.
 The script defaults to five samples; this lane follows the host's one-sample rule
 and reports the already measured ratios against these unchanged ceilings.
+
+## Reserved-count encode fix
+
+The u32 cutover landed as codec commit `07c3aa575014`, receipt `ab25caba309e`.
+`perf annotate` against its parent `0febbb6f9596` locates the added cost in
+`put_count`: an out-of-line call with a 0x118-byte frame, four capacity checks,
+four byte stores and four length publications. It takes 26.66% of row profile
+samples and 38.60% of string samples. The upper-width test is only a shift/branch;
+Account remains out of line in both binaries, and derive minima affect decode.
+
+The fix checks the width once, fills four slots once and writes the appended
+range. LLVM unrolls that range loop to a 32-bit store. String keeps its prefix
+and payload in the same encoder so it has no call to `put_count`. The shared
+`checked_count` still returns Capacity for u32::MAX + 1 before narrowing or
+admitting output. All other widths and the version bytes remain unchanged.
+
+Five samples per side at N=100,000, R=20, CPU 16, under the shared measurement
+lock and tools/capped at 2 GiB/process. Each sample is `(encode - setup) / R`
+instructions:u; the ratio divides the two sides' medians. Both source sides
+use the same pinned release compiler and shipping fat-LTO runtime; Rust uses
+opt3, checked overflow and one CGU. Measured fix `34c3d96b`, parent `ab25caba309e`;
+subsequent documentation edits do not change measured code. Checksums agree.
+
+| encode pass | parent Hirsel / Rust | fixed Hirsel / Rust | ceiling |
+|---|---:|---:|---:|
+| rows | 20,000,100.55 / 5,800,069.85 = 3.448 | 14,900,077.50 / 5,800,058.95 = 2.569 | 2.80 |
+| strings | 13,600,099.90 / 4,100,082.60 = 3.317 | 8,500,074.65 / 4,100,054.55 = 2.073 | 2.20 |
+
+This removes 25.5% of row and 37.5% of string encode instructions relative to
+the u32 parent. Full profiles, annotated assembly, raw five-sample results and
+rejected diagnostics are recorded in the codec-u32-1046 lane report. The table
+above this section is the initial width-cutover measurement, not this fix.

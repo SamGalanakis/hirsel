@@ -5,6 +5,7 @@ type Entry[K: ordered + shareable + send, V: shareable + send]: shareable + send
     key: K,
     value: V
 }
+
 pub opaque type Node[K: ordered + shareable + send, V: shareable + send]: shareable + send {
     stamp: u64,
     depth: u64,
@@ -268,7 +269,11 @@ fn upper_child[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[
             a = mid + 1
         }
     }
-    if a == 0 { 0u64 } else { a - 1 }
+    if a == 0 {
+        0u64
+    } else {
+        a - 1
+    }
 }
 
 fn child_index[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], k: K) -> u64 {

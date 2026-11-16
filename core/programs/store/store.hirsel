@@ -1,0 +1,356 @@
+// M4 store S1: in-memory state over std.omap's persistent Bytes tree.
+// Typed table/codec entry points are added against std.codec when S0 lands;
+// this module deliberately contains no codec stand-in.
+pub type StoreId {
+    hi: u64,
+    lo: u64
+}
+
+pub type Authority = Directory()
+
+pub type Options {
+    create: bool,
+    group_commits: u32,
+    group_bytes: u32,
+    checkpoint_bytes: u64,
+    pack_bytes: u64,
+    resident_limit: u64,
+    authority: Authority
+}
+
+pub fn defaults() -> Options {
+    Options(create: true, group_commits: 64, group_bytes: 4 * 1024 * 1024, checkpoint_bytes: 64 * 1024 * 1024, pack_bytes: 64 * 1024 * 1024, resident_limit: 1024 * 1024 * 1024, authority: Directory())
+}
+
+pub type Limit = Key | Value | Transaction | Name
+
+pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Malformed
+
+pub type Fault {
+    file: String,
+    offset: u64,
+    why: Why
+}
+
+pub type Error = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(Capacity) | Limit(Limit) | Schema(u64) | Stale(u32) | OutOfScope | Exists(String) | Missing(String) | Diverged(u32) | Foreign
+
+pub opaque type Db {
+    id: StoreId,
+    root: std.omap.OMap[Bytes, Bytes],
+    next_node: u64,
+    version: u64,
+    resident: u64,
+    resident_limit: u64
+}
+
+pub opaque type Table[K, V]: send {
+    store: StoreId,
+    id: u32
+}
+
+pub opaque type Shape[K, V] {
+    store: StoreId,
+    id: u32
+}
+
+pub type Read = Point(u32, Bytes) | Span(u32, Bytes, Bytes)
+
+pub type CallId {
+    store: StoreId,
+    branch: u32,
+    version: u64
+}
+
+pub type CallInfo {
+    id: CallId,
+    at: u64,
+    seed: u64
+}
+
+pub type Mark = Journal(u64) | Cut(u64)
+
+pub type Ticket {
+    store: StoreId,
+    open: u64,
+    mark: Mark
+}
+
+pub type Outcome[R, A] = Committed(Done[R]) | Aborted(A) | Failed(Causes) | Refused(Capacity)
+
+pub type Done[R] {
+    value: R,
+    ticket: Ticket,
+    info: CallInfo,
+    reads: List[Read]
+}
+
+pub scoped type Tx {
+    store: StoreId,
+    base: std.omap.OMap[Bytes, Bytes],
+    working: Map[Bytes, Bytes],
+    deleted: Map[Bytes, bool],
+    resident: u64,
+    resident_limit: u64,
+    reads: List[Read],
+    info: CallInfo
+}
+
+pub opaque type Rows: send {
+    cursor: std.omap.Cursor[Bytes, Bytes]
+}
+
+pub opaque type Snapshot: send {
+    store: StoreId,
+    open: u64,
+    version: u64,
+    root: std.omap.OMap[Bytes, Bytes]
+}
+
+fn mix(x: u64) -> u64 {
+    let mut z = int.wrapping_add(x, 0x9E3779B97F4A7C15u64)
+    z = int.wrapping_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9u64)
+    z = int.wrapping_mul(z ^ (z >> 27), 0x94D049BB133111EBu64)
+    z ^ (z >> 31)
+}
+
+fn make_id(c: Clock) -> StoreId {
+    let wall = host.wall_ms(c)
+    let mono = host.mono_ns(c)
+    StoreId(hi: mix(wall ^ mono), lo: mix(mono ^ wall))
+}
+
+fn ticket(id: StoreId, generation: u64) -> Ticket {
+    Ticket(store: id, open: 0, mark: Cut(generation))
+}
+
+pub fn defaults_id(c: Clock) -> StoreId {
+    make_id(c)
+}
+
+pub fn memory(c: Clock, r: Random, o: Options) -> Db {
+    let _ = r
+    memory_with_id(make_id(c), o)
+}
+
+pub fn memory_with_id(id: StoreId, o: Options) -> Db {
+    Db(id: id, root: std.omap.new(), next_node: 0, version: 0, resident: 0, resident_limit: o.resident_limit)
+}
+
+pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, o: Options) -> Result[Db, Error] {
+    let _ = tasks
+    let _ = d
+    if !o.create {
+        return Error(NotFound)
+    }
+    Ok(memory(c, r, o))
+}
+
+pub fn close(take db: Db) -> Result[(), Error] {
+    let _ = take db
+    Ok(())
+}
+
+pub fn identity(db: Db) -> StoreId {
+    db.id
+}
+
+pub fn table[K, V](db: Db, take name: String) -> Result[Table[K, V], Error] {
+    let _ = take name
+    Ok(Table(store: db.id, id: 1))
+}
+
+pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
+    Shape(store: t.store, id: t.id)
+}
+
+pub fn run[R, A](mut db: Db, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
+    let call_info = CallInfo(id: CallId(store: db.id, branch: 0, version: db.version + 1), at: 0, seed: mix(mix(mix(mix(db.id.hi) ^ db.id.lo) ^ 0) ^ (db.version + 1)))
+    let caught = isolate(fn() -> Result[(R, Map[Bytes, Bytes], Map[Bytes, bool], u64, List[Read], CallInfo), A] {
+        let mut tx = Tx(store: db.id, base: std.omap.snapshot(db.root), working: map.new(), deleted: map.new(), resident: db.resident, resident_limit: db.resident_limit, reads: list.new(), info: call_info)
+        let outcome = body(mut tx)
+        match outcome {
+            Error(take a) => Error(take a),
+            Ok(take value) => {
+                let Tx(store: _, base: _, working: take working, deleted: take deleted, resident: resident, resident_limit: _, reads: take reads, info: tx_info) = take tx
+                Ok((take value, take working, take deleted, resident, take reads, tx_info))
+            }
+        }
+    })
+    match caught {
+        Error(c) => Error(Full(c)),
+        Ok(Error(take causes)) => Ok(Failed(take causes)),
+        Ok(Ok(Error(take a))) => Ok(Aborted(take a)),
+        Ok(Ok(Ok((take value, take working, take deleted, resident, take reads, tx_info)))) => {
+            for (key, stored) in working {
+                let key_copy: Result[Bytes, Capacity] = clone(key)
+                let value_copy: Result[Bytes, Capacity] = clone(stored)
+                let mut ids = db.next_node
+                let updated = match std.omap.insert(mut ids, db.root, result.unwrap(take key_copy), result.unwrap(take value_copy)) {
+                    Ok(take m) => take m,
+                    Error((c, _)) => return Error(Full(c))
+                }
+                db.root = take updated
+                db.next_node = ids
+            }
+            for (key, _) in deleted {
+                let key_copy: Result[Bytes, Capacity] = clone(key)
+                let mut ids = db.next_node
+                let updated = match std.omap.remove(mut ids, db.root, result.unwrap(take key_copy)) {
+                    Ok(take m) => take m,
+                    Error(c) => return Error(Full(c))
+                }
+                db.root = take updated
+                db.next_node = ids
+            }
+            db.resident = resident
+            db.version += 1
+            Ok(Committed(Done(value: take value, ticket: ticket(db.id, db.version), info: tx_info, reads: take reads)))
+        }
+    }
+}
+
+pub fn put_bytes(mut tx: Tx, table_id: u32, take key: Bytes, take value: Bytes) -> Result[(), Error] {
+    let _ = table_id
+    let added = list.len(key) + list.len(value)
+    let after = tx.resident + added
+    if after > tx.resident_limit {
+        return Error(Full(Capacity(requested: after, available: tx.resident_limit)))
+    }
+    let key_copy: Result[Bytes, Capacity] = clone(key)
+    match map.insert(mut tx.working, take key, take value) {
+        Ok(()) => {
+            let _ = map.remove(mut tx.deleted, result.unwrap(take key_copy))
+            tx.resident = after
+            Ok(())
+        },
+        Error((c, _)) => Error(Full(c))
+    }
+}
+
+pub fn delete_bytes(mut tx: Tx, table_id: u32, take key: Bytes) -> Result[bool, Error] {
+    let _ = table_id
+    let key_a: Result[Bytes, Capacity] = clone(key)
+    if let None = map.get(tx.working, result.unwrap(take key_a)) {
+        let key_b: Result[Bytes, Capacity] = clone(key)
+        if let None = map.get(tx.deleted, result.unwrap(take key_b)) {
+            let key_c: Result[Bytes, Capacity] = clone(key)
+            if let None = std.omap.get(tx.base, result.unwrap(take key_c)) {
+                return Ok(false)
+            }
+        }
+    }
+    let key_for_working: Result[Bytes, Capacity] = clone(key)
+    match map.insert(mut tx.deleted, take key, true) {
+        Ok(()) => {
+            let _ = map.remove(mut tx.working, result.unwrap(take key_for_working))
+            Ok(true)
+        },
+        Error((c, _)) => Error(Full(c))
+    }
+}
+
+pub fn fetch_bytes(mut tx: Tx, table_id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
+    let key_copy: Result[Bytes, Capacity] = clone(key)
+    match list.push(mut tx.reads, Point(table_id, result.unwrap(take key_copy))) {
+        Ok(()) => {},
+        Error((c, _)) => return Error(Full(c))
+    }
+    if let Some(value) = map.get(tx.working, key) {
+        let value_copy: Result[Bytes, Capacity] = clone(value)
+        return match value_copy {
+            Ok(take b) => Ok(Some(take b)),
+            Error(c) => Error(Full(c))
+        }
+    }
+    if let Some(_) = map.get(tx.deleted, key) {
+        return Ok(None)
+    }
+    match std.omap.get(tx.base, key) {
+        None => Ok(None),
+        Some(value) => {
+            let value_copy: Result[Bytes, Capacity] = clone(value)
+            match value_copy {
+                Ok(take b) => Ok(Some(take b)),
+                Error(c) => Error(Full(c))
+            }
+        }
+    }
+}
+
+pub fn range_bytes(mut tx: Tx, table_id: u32, take lo: std.omap.Bound[Bytes], take hi: std.omap.Bound[Bytes]) -> Result[Rows, Error] {
+    let cursor = match std.omap.range(tx.base, take lo, take hi) {
+        Ok(take c) => take c,
+        Error((c, _)) => return Error(Full(c))
+    }
+    let mut low: Bytes = list.new()
+    let mut high: Bytes = list.new()
+    match list.push(mut low, 0u8) {
+        Ok(()) => {},
+        Error((c, _)) => return Error(Full(c))
+    }
+    match list.push(mut high, 255u8) {
+        Ok(()) => {},
+        Error((c, _)) => return Error(Full(c))
+    }
+    match list.push(mut tx.reads, Span(table_id, take low, take high)) {
+        Ok(()) => Ok(Rows(cursor: take cursor)),
+        Error((c, _)) => Error(Full(c))
+    }
+}
+
+pub fn next(mut rows: Rows) -> Result[Option[(Bytes, Bytes)], Error] {
+    match std.omap.next(mut rows.cursor) {
+        Ok(pair) => Ok(pair),
+        Error(c) => Error(Full(c))
+    }
+}
+
+pub fn info(tx: Tx) -> CallInfo {
+    tx.info
+}
+
+pub fn touch(mut tx: Tx) -> Result[(), Error] {
+    tx.resident = tx.resident
+    Ok(())
+}
+
+pub fn snapshot(db: Db) -> Snapshot {
+    Snapshot(store: db.id, open: 0, version: db.version, root: std.omap.snapshot(db.root))
+}
+
+pub fn at_version(s: Snapshot) -> u64 {
+    s.version
+}
+
+pub fn get_bytes(s: Snapshot, table_id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
+    if let Some(value) = std.omap.get(s.root, key) {
+        let snapshot_copy: Result[Bytes, Capacity] = clone(value)
+        match snapshot_copy {
+            Ok(take b) => Ok(Some(take b)),
+            Error(c) => Error(Full(c))
+        }
+    } else {
+        let _ = table_id
+        Ok(None)
+    }
+}
+
+pub fn scan_bytes(s: Snapshot, table_id: u32, take lo: std.omap.Bound[Bytes], take hi: std.omap.Bound[Bytes]) -> Result[Rows, Error] {
+    let _ = table_id
+    match std.omap.range(s.root, take lo, take hi) {
+        Ok(take c) => Ok(Rows(cursor: take c)),
+        Error((c, _)) => Error(Full(c))
+    }
+}
+
+pub fn durable(take db: Db, t: Ticket) -> Result[(), Error] {
+    if !same_id(t.store, db.id) || t.open != 0 {
+        return Error(Foreign)
+    }
+    let _ = db
+    Ok(())
+}
+
+fn same_id(a: StoreId, b: StoreId) -> bool {
+    a.hi == b.hi && a.lo == b.lo
+}

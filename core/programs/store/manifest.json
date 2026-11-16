@@ -1,0 +1,18 @@
+{
+  "packages": [
+    {
+      "package": {"name": "store", "version": "1"},
+      "dependencies": [
+        {"name": "core", "version": "1"},
+        {"name": "std", "version": "1"}
+      ],
+      "sources": [
+        {"file": "core/programs/store/store.hirsel", "modules": ["store"], "signatures": false},
+        {"file": "core/programs/store/main.hirsel", "modules": ["main"], "signatures": false}
+      ]
+    }
+  ],
+  "entries": [
+    {"workload": "s1", "package": {"name": "store", "version": "1"}, "module": "main", "grants": ["Stdout"]}
+  ]
+}

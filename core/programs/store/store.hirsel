@@ -4864,7 +4864,10 @@ fn disk_test_nodes(c: Clock) -> Result[(), ()] {
 }
 
 fn disk_io[T](take r: Result[T, IoError]) -> Result[T, Error] {
-    match take r { Ok(take x) => Ok(take x), Error(e) => Error(Io(e)) }
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(e) => Error(Io(e))
+    }
 }
 
 fn disk_path(lead: String, seq: u64, suffix: String) -> Result[String, Capacity] {
@@ -4886,9 +4889,15 @@ fn disk_read_file(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] wait
             }
             break
         }
-        let room = if limit - size < 16384 { limit - size } else { 16384u64 }
+        let room = if limit - size < 16384 {
+            limit - size
+        } else {
+            16384u64
+        }
         let mut chunk: Bytes = capacity(list.with_capacity(room))?
-        if disk_io(host.read(mut file, mut chunk))? == 0 { break }
+        if disk_io(host.read(mut file, mut chunk))? == 0 {
+            break
+        }
         capacity(list.append(mut out, chunk))?
     }
     disk_io(host.close(take file))?
@@ -4897,7 +4906,10 @@ fn disk_read_file(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] wait
 
 fn disk_write_synced(d: Dir, path: String, raw: Bytes) -> Result[(), Error] waits {
     let mut file = disk_io(host.open(d, path, Write))?
-    match host.write(mut file, raw) { Ok(()) => {}, Error(e) => return Error(Io(e.error)) }
+    match host.write(mut file, raw) {
+        Ok(()) => {},
+        Error(e) => return Error(Io(e.error))
+    }
     disk_io(host.sync(mut file))?
     disk_io(host.close(take file))
 }
@@ -4920,7 +4932,9 @@ fn disk_cleanup(d: Dir, m: DiskManifest) -> Result[(), Error] waits {
         let temporary = capacity(disk_path("p-", seq, ".tmp"))?
         let removed = disk_remove_optional(d, path)?
         let removed_tmp = disk_remove_optional(d, temporary)?
-        if !removed && !removed_tmp { break }
+        if !removed && !removed_tmp {
+            break
+        }
         seq += 1
     }
     for retired in m.retired {
@@ -4948,7 +4962,10 @@ fn disk_new_segment(d: Dir, id: StoreId, seq: u64, prev_end: u64) -> Result[(Hos
     let end_path = capacity(disk_path("j-", seq, ".end"))?
     let journal = capacity(disk_header_bytes(DiskContext(store: id, role: 2, seq: seq), prev_end))?
     let mut file = disk_io(host.open(d, path, Write))?
-    match host.write(mut file, journal) { Ok(()) => {}, Error(e) => return Error(Io(e.error)) }
+    match host.write(mut file, journal) {
+        Ok(()) => {},
+        Error(e) => return Error(Io(e.error))
+    }
     disk_io(host.sync(mut file))?
     let ctx = DiskContext(store: id, role: 4, seq: seq)
     let mut end_bytes = capacity(disk_header_bytes(ctx, 0))?
@@ -4957,8 +4974,294 @@ fn disk_new_segment(d: Dir, id: StoreId, seq: u64, prev_end: u64) -> Result[(Hos
     let frame = capacity(disk_seal(ctx, 72, 0x0012, 1, payload))?
     capacity(list.append(mut end_bytes, frame))?
     let mut end_file = disk_io(host.open(d, end_path, Write))?
-    match host.write(mut end_file, end_bytes) { Ok(()) => {}, Error(e) => return Error(Io(e.error)) }
+    match host.write(mut end_file, end_bytes) {
+        Ok(()) => {},
+        Error(e) => return Error(Io(e.error))
+    }
     disk_io(host.sync(mut end_file))?
     disk_io(host.sync_dir(d))?
     Ok((take file, take end_file))
+}
+
+// Checkpoint graph: new nodes contribute their child edges once; root edges
+// change at the cut. Removing a last edge cascades without walking live subtrees.
+type DiskNodeRecord: shareable + send {
+    node: Arc[std.omap.Node[Bytes, Bytes]],
+    pack: u64,
+    size: u64,
+    refs: u64,
+    charge: u64
+}
+
+type DiskGraph: send {
+    nodes: Map[u64, DiskNodeRecord],
+    roots: List[u64],
+    live: u64
+}
+
+fn disk_graph() -> DiskGraph {
+    DiskGraph(nodes: map.new(), roots: list.new(), live: 0)
+}
+
+fn disk_node_size(node: Arc[std.omap.Node[Bytes, Bytes]]) -> u64 {
+    let mut size: u64 = 28
+    for i in 0u64 .. std.omap.node_count(node) {
+        if std.omap.node_level(node) == 0 {
+            size += 8 + list.len(option.unwrap(std.omap.node_key(node, i))) + list.len(option.unwrap(std.omap.node_value(node, i)))
+        } else {
+            size += 12
+            if i != 0 {
+                size += list.len(option.unwrap(std.omap.node_key(node, i)))
+            }
+        }
+    }
+    size
+}
+
+fn disk_node_charge(node: Arc[std.omap.Node[Bytes, Bytes]]) -> u64 {
+    let mut charge: u64 = 0
+    if std.omap.node_level(node) == 0 {
+        for i in 0u64 .. std.omap.node_count(node) {
+            let key = std.omap.node_key(node, i)
+            let value = std.omap.node_value(node, i)
+            let k = option.unwrap(key)
+            let v = option.unwrap(value)
+            charge += entry(k, v)
+        }
+    }
+    charge
+}
+
+fn disk_ref(mut nodes: Map[u64, DiskNodeRecord], id: u64) {
+    let _ = option.unwrap(map.update(mut nodes, id, fn(mut row: DiskNodeRecord) {
+        row.refs += 1
+    }))
+}
+
+fn disk_reach(mut graph: DiskGraph, node: Arc[std.omap.Node[Bytes, Bytes]], mut fresh: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[(), Capacity] {
+    let id = std.omap.node_id(node)
+    if let Some(_) = map.get(graph.nodes, id) {
+        return Ok(())
+    }
+    for i in 0u64 .. std.omap.node_count(node) {
+        if let Some(child) = std.omap.node_child(node, i) {
+            disk_reach(mut graph, child, mut fresh)?
+        }
+    }
+    let charge = disk_node_charge(node)
+    let row = DiskNodeRecord(node: arc.share(node), pack: 0, size: disk_node_size(node), refs: 0, charge: charge)
+    result.capacity_only(map.insert(mut graph.nodes, id, take row))?
+    graph.live += charge
+    for i in 0u64 .. std.omap.node_count(node) {
+        if let Some(child) = std.omap.node_child(node, i) {
+            disk_ref(mut graph.nodes, std.omap.node_id(child))
+        }
+    }
+    result.capacity_only(list.push(mut fresh, arc.share(node)))
+}
+
+fn disk_unref(mut graph: DiskGraph, id: u64) {
+    let refs = option.unwrap(map.update(mut graph.nodes, id, fn(mut row: DiskNodeRecord) -> u64 {
+        row.refs -= 1;
+        row.refs
+    }))
+    if refs == 0 {
+        let removed = option.unwrap(map.remove(mut graph.nodes, id))
+        graph.live -= removed.charge
+        for i in 0u64 .. std.omap.node_count(removed.node) {
+            if let Some(child) = std.omap.node_child(removed.node, i) {
+                disk_unref(mut graph, std.omap.node_id(child))
+            }
+        }
+    }
+}
+
+fn disk_track_tree(mut graph: DiskGraph, tree: std.omap.OMap[Bytes, Bytes], mut roots: List[u64], mut fresh: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[(), Capacity] {
+    if let Some(root) = std.omap.root(tree) {
+        disk_reach(mut graph, root, mut fresh)?
+        let id = std.omap.node_id(root)
+        disk_ref(mut graph.nodes, id)
+        result.capacity_only(list.push(mut roots, id))?
+    }
+    Ok(())
+}
+
+fn disk_track(mut graph: DiskGraph, roots: Roots) -> Result[List[Arc[std.omap.Node[Bytes, Bytes]]], Capacity] {
+    let mut next_roots: List[u64] = list.new()
+    let mut fresh: List[Arc[std.omap.Node[Bytes, Bytes]]] = list.new()
+    disk_track_tree(mut graph, roots.data, mut next_roots, mut fresh)?
+    disk_track_tree(mut graph, roots.streams, mut next_roots, mut fresh)?
+    disk_track_tree(mut graph, roots.catalog, mut next_roots, mut fresh)?
+    let previous = replace(mut graph.roots, take next_roots)
+    for id in previous {
+        disk_unref(mut graph, id)
+    }
+    Ok(take fresh)
+}
+
+// L5: a second identical cut emits zero nodes;64 one-key updates emit at most
+//64*(2h+1), h=2 for96 entries. Counts keep exactly the current reachable graph.
+// Wrong implementation: scan/re-emit an already recorded subtree, or retain
+// old root references after a cut (then the final empty cut is nonempty).
+pub fn disk_law_graph(c: Clock) -> bool {
+    let mut db = test_db(c, 1073741824)
+    for k in 0u64 .. 96 {
+        if !put_one(mut db, k, k + 1) {
+            return false
+        }
+    }
+    let mut graph = disk_graph()
+    let first = result.unwrap(disk_track(mut graph, db.roots))
+    if list.len(first) == 0 || graph.live != 96 * 86 || map.len(graph.nodes) != list.len(first) {
+        return false
+    }
+    for n in first {
+        if disk_node_size(n) != 16 + list.len(result.unwrap(disk_node_bytes(n))) {
+            return false
+        }
+    }
+    let second = result.unwrap(disk_track(mut graph, db.roots))
+    if list.len(second) != 0 || graph.live != 96 * 86 {
+        return false
+    }
+    for k in 0u64 .. 64 {
+        if !put_one(mut db, k, k + 101) {
+            return false
+        }
+    }
+    let third = result.unwrap(disk_track(mut graph, db.roots))
+    if list.len(third) == 0 || list.len(third) > 64 * 5 || graph.live != 96 * 86 {
+        return false
+    }
+    for k in 0u64 .. 96 {
+        let expected = if k < 64 {
+            k + 101
+        } else {
+            k + 1
+        }
+        if value_at(snapshot(db), k) != expected {
+            return false
+        }
+    }
+    let nothing = result.unwrap(disk_track(mut graph, empty_roots()))
+    list.len(nothing) == 0 && graph.live == 0 && map.len(graph.nodes) == 0
+}
+
+@test
+fn disk_test_graph(c: Clock) -> Result[(), ()] {
+    if disk_law_graph(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+type DiskPackWriter {
+    seq: u64,
+    cap: u64,
+    raw: Bytes,
+    ids: List[u64],
+    packs: List[DiskPack]
+}
+
+fn disk_pack_writer(id: StoreId, seq: u64, cap: u64) -> Result[DiskPackWriter, Capacity] {
+    Ok(DiskPackWriter(seq: seq, cap: cap, raw: disk_header_bytes(DiskContext(store: id, role: 3, seq: seq), 0)?, ids: list.new(), packs: list.new()))
+}
+
+fn disk_pack_close(d: Dir, id: StoreId, mut writer: DiskPackWriter, mut graph: DiskGraph) -> Result[(), Error] waits {
+    if list.len(writer.ids) == 0 {
+        return Ok(())
+    }
+    let path = capacity(disk_path("p-", writer.seq, ""))?
+    let temporary = capacity(disk_path("p-", writer.seq, ".tmp"))?
+    // Write truncates and rename replaces, including leftovers of an earlier
+    // unpublished cut. Existence never changes the assigned sequence (H2).
+    disk_write_synced(d, temporary, writer.raw)?
+    disk_io(host.rename(d, temporary, path))?
+    let count: u32 = int.truncate(list.len(writer.ids))
+    capacity(result.capacity_only(list.push(mut writer.packs, DiskPack(seq: writer.seq, nodes: count))))?
+    for node_id in writer.ids {
+        let _ = option.unwrap(map.update(mut graph.nodes, node_id, fn(mut row: DiskNodeRecord) {
+            row.pack = writer.seq
+        }))
+    }
+    writer.seq += 1
+    writer.raw = capacity(disk_header_bytes(DiskContext(store: id, role: 3, seq: writer.seq), 0))?
+    writer.ids = list.new()
+    Ok(())
+}
+
+fn disk_pack_add(d: Dir, id: StoreId, mut writer: DiskPackWriter, mut graph: DiskGraph, node: Arc[std.omap.Node[Bytes, Bytes]]) -> Result[(), Error] waits {
+    let size = disk_node_size(node)
+    if list.len(writer.ids) != 0 && int.saturating_add(list.len(writer.raw), size) > writer.cap {
+        disk_pack_close(d, id, mut writer, mut graph)?
+    }
+    let payload = capacity(disk_node_bytes(node))?
+    let frame = capacity(disk_seal(DiskContext(store: id, role: 3, seq: writer.seq), list.len(writer.raw), 0x0020, 1, payload))?
+    capacity(list.append(mut writer.raw, frame))?
+    capacity(result.capacity_only(list.push(mut writer.ids, std.omap.node_id(node))))
+}
+
+fn disk_write_nodes(d: Dir, id: StoreId, seq: u64, cap: u64, mut graph: DiskGraph, nodes: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[(List[DiskPack], u64), Error] waits {
+    let mut writer = capacity(disk_pack_writer(id, seq, cap))?
+    for node in nodes {
+        disk_pack_add(d, id, mut writer, mut graph, node)?
+    }
+    disk_pack_close(d, id, mut writer, mut graph)?
+    // One directory barrier covers all renames of this cut, before MANIFEST.
+    disk_io(host.sync_dir(d))?
+    let DiskPackWriter(seq: next_pack, cap: _, raw: _, ids: _, packs: take packs) = take writer
+    Ok((take packs, next_pack))
+}
+
+// H1/H2/L25: pack_bytes=1 permits one oversized NODE per pack. Old final and
+// temporary names must be replaced, even when probing cleanup would stop at a
+// missing earlier name. skip_existing is wrong: the replacement bytes differ.
+pub fn disk_law_packs(d: Dir, c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    for k in 0u64 .. 40 {
+        if !put_one(mut db, k, k + 1) {
+            return false
+        }
+    }
+    let mut graph = disk_graph()
+    let nodes = result.unwrap(disk_track(mut graph, db.roots))
+    let old = result.unwrap(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: 7), 0))
+    result.unwrap(disk_write_synced(d, "p-7", old))
+    result.unwrap(disk_write_synced(d, "p-7.tmp", old))
+    // This leftover is beyond a gap at6 and is rewritten at8, not adopted.
+    result.unwrap(disk_write_synced(d, "p-8", old))
+    result.unwrap(host.sync_dir(d))
+    let outcome = result.unwrap(disk_write_nodes(d, db.store, 7, 1, mut graph, nodes))
+    let (take packs, next_pack) = take outcome
+    if list.len(packs) != list.len(nodes) || next_pack != 7 + list.len(nodes) {
+        return false
+    }
+    for i in 0u64 .. list.len(packs) {
+        let pack = packs[i]
+        if pack.seq != 7 + i || pack.nodes != 1 {
+            return false
+        }
+        let path = result.unwrap(disk_path("p-", pack.seq, ""))
+        let raw = result.unwrap(disk_read_file(d, path, 33686116))
+        let header = result.unwrap(disk_read_header(path, raw, 3, Some(pack.seq), Some(db.store)))
+        let frame = result.unwrap(disk_read_frame(path, header.context, raw, 72))
+        if frame.kind != 0x0020 || frame.end != list.len(raw) || list.len(raw) <= 1 {
+            return false
+        }
+        let expected = result.unwrap(disk_node_bytes(nodes[i]))
+        if list.slice(raw, frame.payload, frame.end) != expected {
+            return false
+        }
+    }
+    true
+}
+
+@test
+fn disk_test_packs(d: Dir, c: Clock) -> Result[(), ()] waits {
+    if disk_law_packs(d, c) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }

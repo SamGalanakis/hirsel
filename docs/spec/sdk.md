@@ -32,6 +32,13 @@ The transport implements `call(want, argsBytes, resultDecoder)`, returning
 handle with `unsubscribe()`. The client runtime owns subscription recovery
 after Reset and reconnect.
 
+Compute and Granted calls return `Promise<Outcome<R>>`. Transact calls return
+`Promise<Outcome<Result<R, E>>>`: the Returned payload contains the complete
+Result tag and payload, including a typed Error after an aborted transaction.
+Described.result is the exact Returned payload schema, including Result for
+Transact. There is no separate error schema. The child fingerprints this full
+result schema, so changing E changes result_fp too.
+
 The launch identity contains digest bytes, target and `n_place`. Fingerprints
 come from the described program; the generator does not implement fingerprinting.
 

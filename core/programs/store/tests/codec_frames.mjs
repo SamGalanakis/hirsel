@@ -12,9 +12,15 @@ export async function vectors(c,frame,entries) {
   let unsubscribed = false;
   const client = entries.bind({
     call(want,args,decode) {
-      assert.strictEqual(want,entries.want[0]);
-      assert.equal(Buffer.from(args).toString('hex'),'0700000000000000');
-      return Promise.resolve({tag:'Returned',value:decode(bytes('0800000000000000'))});
+      if (want === entries.want[0]) {
+        assert.equal(Buffer.from(args).toString('hex'),'0700000000000000');
+        return Promise.resolve({tag:'Returned',value:decode(bytes('0800000000000000'))});
+      }
+      assert.strictEqual(want,entries.want[2]);
+      assert.equal(want.result_fp,9n);
+      const committed = args[0] === 1;
+      const payload = committed ? '000000000900000000000000' : '0100000003000000626164';
+      return Promise.resolve({tag:'Returned',value:decode(bytes(payload))});
     },
     subscribe(want,args,onRows) {
       assert.strictEqual(want,entries.want[1]);
@@ -24,6 +30,8 @@ export async function vectors(c,frame,entries) {
     }
   });
   assert.deepEqual(await client.call.toggle(7n),{tag:'Returned',value:8n});
+  assert.deepEqual(await client.call.commit(1n),{tag:'Returned',value:{tag:'Ok',value:{n:9n}}});
+  assert.deepEqual(await client.call.commit(0n),{tag:'Returned',value:{tag:'Error',value:{message:'bad'}}});
   let delivered = false;
   client.subscribe.rows(3, rows => { assert.deepEqual(rows,[]); delivered = true; }).unsubscribe();
   assert.equal(delivered,true); assert.equal(unsubscribed,true);

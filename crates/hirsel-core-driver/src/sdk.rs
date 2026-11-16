@@ -228,7 +228,6 @@ pub struct Exported {
     pub identity: Vec<u8>,
     pub args: Vec<u8>,
     pub result: Vec<u8>,
-    pub error: Vec<u8>,
     pub args_fp: u64,
     pub result_fp: u64,
 }
@@ -256,7 +255,6 @@ impl Describe {
                 identity: r.bytes()?,
                 args: r.bytes()?,
                 result: r.bytes()?,
-                error: r.bytes()?,
                 args_fp: r.word()?,
                 result_fp: r.word()?,
             });
@@ -345,12 +343,6 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         js.push_str(&result.javascript(&result_name));
         dts.push_str(&args.declarations(&arg_name));
         dts.push_str(&result.declarations(&result_name));
-        if !entry.error.is_empty() {
-            let error = Schema::read(&entry.error)?;
-            let error_name = format!("Error{i}");
-            js.push_str(&error.javascript(&error_name));
-            dts.push_str(&error.declarations(&error_name));
-        }
         let name = json!(stub_name(&entry.identity)?);
         if entry.kind == 2 {
             entries.push_str(&format!("subscribe[{name}] = (args,onRows) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onRows);\n"));
@@ -434,10 +426,9 @@ mod tests {
     fn entry(module: &str, name: &str) -> Exported {
         Exported {
             kind: 0,
-            identity: format!("\x01app@1/{module}/{name}(u64)->u64").into_bytes(),
+            identity: format!("\x01app@1/{module}/{name}(take u64)->u64").into_bytes(),
             args: scalar(6),
             result: scalar(6),
-            error: Vec::new(),
             args_fp: u64::MAX,
             result_fp: 7,
         }
@@ -505,6 +496,10 @@ mod tests {
             stub_name(&entry("x", "%74oggle").identity).unwrap(),
             "toggle"
         );
+        assert_eq!(
+            stub_name(b"\x01store@1/runner_launch/echo(take u64)->u64").unwrap(),
+            "echo"
+        );
         let existing = dir.path().join("existing");
         std::fs::create_dir(&existing).unwrap();
         std::fs::write(existing.join("codec.js"), "original").unwrap();
@@ -518,7 +513,7 @@ mod tests {
     fn sdk_generation_preserves_identity_fingerprints_and_entry_kinds() {
         let mut query = entry("m", "rows");
         query.kind = 2;
-        query.error = scalar(13);
+        query.result = scalar(13);
         let d = Describe {
             digest: vec![1, 2],
             target: "x86_64-unknown-linux-gnu".into(),
@@ -531,7 +526,7 @@ mod tests {
         assert!(files["entries.js"].contains("call[\"toggle\"]"));
         assert!(files["entries.js"].contains("subscribe[\"rows\"]"));
         assert!(files["codec.d.ts"].contains("export type Args0 = bigint"));
-        assert!(files["codec.d.ts"].contains("export type Error1 = string"));
+        assert!(files["codec.d.ts"].contains("export type Result1 = string"));
         assert!(!files["codec.js"].contains("require("));
         assert_eq!(
             serde_json::from_str::<Value>(&files["package.json"]).unwrap()["type"],
@@ -587,5 +582,31 @@ mod tests {
         );
         assert!(place_error(&capacity[..19]).is_err());
         assert!(place_error(&[2, 0, 0, 0]).is_err());
+    }
+    #[test]
+    fn sdk_describe_result_is_the_complete_returned_codec() {
+        fn blob(out: &mut Vec<u8>, value: &[u8]) {
+            out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            out.extend_from_slice(value);
+        }
+        let e = entry("m", "commit");
+        let mut bytes = Vec::new();
+        blob(&mut bytes, &[]);
+        blob(&mut bytes, b"t");
+        bytes.extend_from_slice(&17u64.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        blob(&mut bytes, &e.identity);
+        blob(&mut bytes, &e.args);
+        blob(&mut bytes, &[3, 0, 0, 0, 0, 17, 6, 13]);
+        bytes.extend_from_slice(&e.args_fp.to_le_bytes());
+        bytes.extend_from_slice(&e.result_fp.to_le_bytes());
+        let description = Describe::read(&bytes).unwrap();
+        assert_eq!(description.exported[0].args_fp, u64::MAX);
+        assert_eq!(description.exported[0].result_fp, 7);
+        let files = generate(&description).unwrap();
+        assert!(files["codec.d.ts"].contains("export type Result0 = Result<bigint, string>"));
+        assert!(files["entries.js"].contains("codec.Result0.decode"));
+        assert!(!files["codec.js"].contains("export const Error0"));
     }
 }

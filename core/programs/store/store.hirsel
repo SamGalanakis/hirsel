@@ -6829,6 +6829,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
             }
         }
     } else if scenario == "refusal" {
+        good = old
         let big = table(mut db, "big", std.codec.key_u64(), std.codec.of_string())?
         if !old || get(snapshot(db), shape(big), 1)? != None || (db.head != 98 && db.head != 100) || (required_new && db.head != 100) {
             good = false

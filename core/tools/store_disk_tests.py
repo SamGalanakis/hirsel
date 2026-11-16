@@ -9,6 +9,7 @@ import tempfile
 
 from std_native import ROOT, wait_load
 from store_tests import inputs
+from store_crash_tests import run_crashes
 
 LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact',
         'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal')
@@ -22,6 +23,7 @@ def main():
     p.add_argument('--evaluator', type=Path)
     p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     p.add_argument('--cc', type=Path)
+    p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm', 'llvm-release'])
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
@@ -46,8 +48,8 @@ def main():
                     rows.append(dict(engine=engine, law=name, passed=good, result=report))
                     print(f'{engine} {name}: {"PASS" if good else "FAIL"}', flush=True)
             else:
-                if args.compiler is None or args.runtime is None:
-                    p.error('native backends require --compiler and --runtime')
+                if args.compiler is None or args.runtime is None or args.bridge is None:
+                    p.error('native backends require --compiler, --runtime and --bridge')
                 host = work / (engine + '-host')
                 host.mkdir()
                 command = [str(args.compiler.resolve()), 'test', '--inputs', str(manifest),
@@ -70,6 +72,12 @@ def main():
                         and {t['definition'] for t in tests} == NATIVE_TESTS and all(t.get('passed') for t in tests))
                 rows.append(dict(engine=engine, passed=good, result=report))
                 print(f'{engine}: {sum(bool(t.get("passed")) for t in tests)}/{len(NATIVE_TESTS)} passed', flush=True)
+                try:
+                    cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
+                                       args.cc, manifest, work, engine)
+                    rows.append(dict(engine=engine, passed=True, crashes=cuts))
+                except RuntimeError as error:
+                    rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
     failures = [row for row in rows if not row['passed']]

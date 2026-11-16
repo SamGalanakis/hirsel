@@ -757,14 +757,20 @@ def first_party(meta: dict) -> str:
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/std_schedule.c"]')))
+    out.append("\n" + call("hirsel_library", name="core-store-crash-provider", crate="store_crash_bridge",
+                            crate_root="core/tools/store_crash_bridge.rs",
+                            srcs=["core/tools/store_crash_bridge.rs", "crates/hirsel-core-rt/src/test_provider.rs"],
+                            features=["testing"], deps=[], manifest_dir="crates/hirsel-core-rt",
+                            package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_script_test", name="core-store-s2", script="core/tools/store_disk_tests.py", full=False,
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-store-s2/hirsel",
                                   "--evaluator", "buck-out/tmp/cargo-bin-exe/core-store-s2/hirsel-core-contract-eval"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py"]')))
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
+                                       "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"]')))
     # RUNNER-SPEC v2.2 R0: the runner's laws on the evaluator, their twins and the task
     # cases on Cranelift and LLVM, and the standing mutants on the evaluator.
     out.append("\n" + call("hirsel_script_test", name="core-runner-r0", script="core/tools/runner_tests.py", full=False,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and measure std.omap against BTreeMap and im::OrdMap 15.1.0.
+"""Measure operation phases of std.omap against BTreeMap and im 15.1.0.
 
 --prepare compiles only. --measure executes one CPU-16 sample/workload/profile
 under the shared measurement locks, perf instructions:u and a 2 GiB cap.
@@ -13,6 +13,8 @@ import json
 import os
 from pathlib import Path
 import re
+import select
+import sys
 import subprocess
 import time
 
@@ -26,7 +28,7 @@ DEPENDENCIES = [
     ('rand_xoshiro', '0.6.0', ['rand_core'], []),
     ('im', '15.1.0', ['typenum', 'bitmaps', 'sized_chunks', 'rand_core', 'rand_xoshiro'], []),
 ]
-EXPECTED = {'insert': 100000, 'lookup': 5000050000, 'range': 5000000000, 'snapshots': 500500}
+EXPECTED = {'insert': 100000, 'lookup': 5000050000, 'range': 5000000000, 'snapshots': 500500, 'bulk': 100000, 'unwrap': 100000, 'unique': 100000}
 
 
 def inputs(source):
@@ -48,12 +50,15 @@ def command(argv, log, env):
         raise RuntimeError(f'{log}: exit {result.returncode}\n{log.read_text()[-5000:]}')
 
 
-def rust_build(registry, directory, profile, env):
+def rust_build(registry, directory, profile, env, reuse=None):
     directory.mkdir(exist_ok=True)
     flags = ['-Copt-level=' + ('3' if profile == 'release' else '0'), '-Coverflow-checks=yes', '-Ccodegen-units=1']
     for name, version, deps, features in DEPENDENCIES:
         crate = name.replace('-', '_')
         target = directory / ('lib' + crate + '.rlib')
+        if reuse:
+            target.symlink_to(reuse / target.name)
+            continue
         source = registry / (name + '-' + version) / 'src/lib.rs'
         if not source.is_file():
             raise ValueError(f'missing {source}; supply --registry with the exact pinned crates')
@@ -86,26 +91,84 @@ def refusal(compiler, directory, env):
     print('omap resource bound: 1 refused as LANG-12', flush=True)
 
 
-def measure(argv, directory, env, tag, expected):
-    perf = directory / (tag + '-perf.tsv')
-    rss = directory / (tag + '-time.txt')
+def counter_command(controls, action):
+    control, ack = controls
+    os.write(control, (action + '\n').encode())
+    if not select.select([ack], [], [], 30)[0] or not os.read(ack, 4096).startswith(b'ack'):
+        raise RuntimeError('perf control did not acknowledge ' + action)
+
+
+def resident(pid):
+    status = Path('/proc', str(pid), 'status').read_text()
+    return {name: int(re.search('^' + name + r':\s+(\d+)', status, re.M)[1])
+            for name in ['VmRSS', 'VmHWM']}
+
+
+def measure(argv, directory, env, tag, expected, recording=False, host_directory=None):
+    """Counters start after population; HWM resets to resident size at READY.
+
+    The target reports its own monotonic operation duration. The post-DONE gate
+    pins roots until both counters and VmHWM have been read, excluding final drops.
+    """
+    work = directory / tag
+    work.mkdir()
+    host = host_directory or directory / 'host'
+    host.mkdir(exist_ok=True)
+    for path in [host / 'gate', work / 'control', work / 'ack']:
+        path.unlink(missing_ok=True)
+        os.mkfifo(path)
+    gate = os.open(host / 'gate', os.O_RDWR)
+    controls = [os.open(work / name, os.O_RDWR | os.O_NONBLOCK) for name in ['control', 'ack']]
+    perf = work / ('perf.data' if recording else 'perf.tsv')
+    mode = (['record', '-e', 'instructions:u', '-c', '100000' if 'insert' in tag else '10000',
+             '--call-graph', 'fp'] if recording else ['stat', '-x', '\t', '-e', 'instructions:u'])
     wait_load()
-    started = time.monotonic()
-    result = subprocess.run([str(ROOT / 'tools/capped'), 'taskset', '-c', '16',
-                             'perf', 'stat', '-x', '\t', '-e', 'instructions:u', '-o', str(perf), '--',
-                             '/usr/bin/time', '-v', '-o', str(rss), *map(str, argv)],
-                            env=env, capture_output=True, text=True)
-    (directory / (tag + '-stdout.txt')).write_text(result.stdout)
-    (directory / (tag + '-stderr.txt')).write_text(result.stderr)
-    raw = perf.read_text() if perf.exists() else ''
+    with (work / 'stderr').open('w') as err:
+        command_line = [ROOT / 'tools/capped', 'taskset', '-c', '16', 'perf', *mode,
+                        '-D', '-1', '--control=fifo:' + str(work / 'control') + ',' + str(work / 'ack'),
+                        '-o', perf, '--', sys.executable, Path(__file__).resolve(),
+                        '--exec-child', work / 'pid', *argv]
+        process = subprocess.Popen(list(map(str, command_line)), env=env, stdout=subprocess.PIPE,
+                                   stderr=err, text=True, bufsize=1)
+        ready = process.stdout.readline()
+        if ready != 'READY\n':
+            raise RuntimeError('target did not become ready: ' + ready + (work / 'stderr').read_text())
+        pid = int((work / 'pid').read_text())
+        # Setup may finish at the end of capped's 100 ms CPU quota period.
+        # Both periods pass while the target is gated and counters are off.
+        time.sleep(0.2)
+        start_resident = resident(pid)
+        Path('/proc', str(pid), 'clear_refs').write_text('5\n')
+        counter_command(controls, 'enable')
+        os.write(gate, b's')
+        done = process.stdout.readline()
+        match = re.fullmatch(r'DONE (\d+) (\d+)\n', done)
+        if match:
+            counter_command(controls, 'disable')
+            peak = resident(pid)
+            os.write(gate, b'f')
+        else:
+            peak = None
+        remainder = process.stdout.read()
+        code = process.wait()
+    os.close(gate)
+    for fd in controls:
+        os.close(fd)
+    (work / 'stdout').write_text(ready + done + remainder)
+    raw = perf.read_text() if not recording and perf.exists() else ''
     instructions = next((int(line.split('\t')[0].replace(',', '')) for line in raw.splitlines()
                          if '\tinstructions:u\t' in line and line.split('\t')[0].replace(',', '').isdigit()), None)
-    timing = rss.read_text() if rss.exists() else ''
-    match = re.search(r'Maximum resident set size \(kbytes\): (\d+)', timing)
-    ok = result.returncode == 0 and result.stdout.strip() == str(expected) and instructions is not None
-    return dict(tag=tag, exit=result.returncode, complete=ok, instructions=instructions,
-                peak_rss_kib=int(match[1]) if match else None, wall_s=time.monotonic() - started,
-                censored=None if ok else result.stderr[-1000:])
+    ok = code == 0 and match is not None and int(match[1]) == expected and (recording or instructions is not None)
+    row = dict(tag=tag, exit=code, complete=ok, instructions=instructions,
+               wall_ns=int(match[2]) if match else None,
+               resident_before_kib=start_resident['VmRSS'], peak_rss_kib=peak['VmHWM'] if peak else None,
+               censored=None if ok else (work / 'stderr').read_text()[-1000:])
+    if recording and ok:
+        result = subprocess.run(['perf', 'report', '--stdio', '--no-children', '-i', str(perf),
+                                 '--sort', 'dso,symbol', '--call-graph', 'none', '--percent-limit', '0.5'], capture_output=True, text=True)
+        (work / 'profile.txt').write_text(result.stdout + result.stderr)
+    (work / 'row.json').write_text(json.dumps(row, indent=2) + '\n')
+    return row
 
 
 def main():
@@ -114,9 +177,15 @@ def main():
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--registry', type=Path)
+    parser.add_argument('--reuse-rust', type=Path)
+    parser.add_argument('--binary-dir', type=Path, help='measure existing frozen executables without rebuilding')
+    parser.add_argument('--only-implementation', action='append', choices=['hirsel', 'btree', 'im', 'im-unique', 'arc-rewrap', 'arc-unique'])
     parser.add_argument('--prepare', action='store_true')
     parser.add_argument('--measure', action='store_true')
     parser.add_argument('--check-refusal', action='store_true')
+    parser.add_argument('--profile', action='store_true')
+    parser.add_argument('--only-profile', choices=['dev', 'release'])
+    parser.add_argument('--only-workload', action='append', choices=list(EXPECTED))
     args = parser.parse_args()
     directory = args.out.resolve()
     directory.mkdir(parents=True, exist_ok=True)
@@ -128,36 +197,51 @@ def main():
     if args.check_refusal:
         refusal(compiler, directory, env)
     if args.prepare:
+        (directory / 'host').mkdir(exist_ok=True)
         manifest = directory / 'inputs.json'
         manifest.write_text(json.dumps(inputs(ROOT / 'core/programs/omap/main.hirsel')))
         for profile, backend in [('dev', 'cranelift'), ('release', 'llvm')]:
+            if args.only_profile and args.only_profile != profile:
+                continue
             argv = [ROOT / 'tools/capped', compiler, 'build', '--inputs', manifest,
                     '--entry', 'omap_bench@1/main/main', '--backend', backend, '--runtime', runtime,
                     '--cc', ROOT / 'tools/buck2/toolchains/llvm-files/bin/hirsel-clang',
-                    '--grant', 'Stdout', '--store', directory / 'store', '--json', '-o', directory / ('hirsel-' + profile)]
+                    '--grant', 'Stdout', '--grant', 'Clock', '--dir', directory / 'host',
+                    '--debug-lines', 'on', '--store', directory / 'store', '--json', '-o', directory / ('hirsel-' + profile)]
             if profile == 'release':
                 argv += ['--release']
             command(argv, directory / ('hirsel-' + profile + '-build.log'), env)
-            rust_build(registry, directory / ('rust-' + profile), profile, env)
-    if args.measure:
+            rust_build(registry, directory / ('rust-' + profile), profile, env,
+                       args.reuse_rust.resolve() / ('rust-' + profile) if args.reuse_rust else None)
+    if args.measure or args.profile:
+        binaries = args.binary_dir.resolve() if args.binary_dir else directory
         rows = []
         with open('/tmp/core-llvm-905-measure.lock', 'a') as core_lock, open('/tmp/hirsel-langarena-measure.lock', 'a') as shared_lock:
             fcntl.flock(core_lock, fcntl.LOCK_EX)
             fcntl.flock(shared_lock, fcntl.LOCK_EX)
-            for profile in ['dev', 'release']:
+            for profile in ([args.only_profile] if args.only_profile else ['dev', 'release']):
                 for workload, expected in EXPECTED.items():
-                    programs = [('hirsel', [directory / ('hirsel-' + profile), workload]),
-                                ('btree', [directory / ('rust-' + profile) / 'omap', 'btree', workload]),
-                                ('im', [directory / ('rust-' + profile) / 'omap', 'im', workload])]
+                    if args.only_workload and workload not in args.only_workload:
+                        continue
+                    programs = [('hirsel', [binaries / ('hirsel-' + profile), workload]),
+                                ('btree', [binaries / ('rust-' + profile) / 'omap', 'btree', workload, binaries / 'host/gate']),
+                                ('im', [binaries / ('rust-' + profile) / 'omap', 'im', workload, binaries / 'host/gate'])]
+                    if workload == 'unwrap':
+                        programs = [programs[0], *[(name, [binaries / ('rust-' + profile) / 'omap', name, workload, binaries / 'host/gate']) for name in ['arc-rewrap', 'arc-unique']]]
                     if workload == 'insert':
-                        programs.append(('im-unique', [directory / ('rust-' + profile) / 'omap', 'im-unique', workload]))
+                        programs.append(('im-unique', [binaries / ('rust-' + profile) / 'omap', 'im-unique', workload, binaries / 'host/gate']))
                     for implementation, argv in programs:
-                        row = measure(argv, directory, env, profile + '-' + workload + '-' + implementation, expected)
+                        if args.only_implementation and implementation not in args.only_implementation:
+                            continue
+                        row = measure(argv, directory, env, ('profile-' if args.profile else '') + profile + '-' + workload + '-' + implementation, expected, args.profile, binaries / 'host')
                         rows.append(row)
-                        (directory / 'rows.json').write_text(json.dumps(rows, indent=2) + '\n')
+                        (directory / ('profile-rows.json' if args.profile else 'rows.json')).write_text(json.dumps(rows, indent=2) + '\n')
                         print(json.dumps(row), flush=True)
     return 0
 
 
 if __name__ == '__main__':
+    if sys.argv[1:2] == ['--exec-child']:
+        Path(sys.argv[2]).write_text(str(os.getpid()))
+        os.execv(sys.argv[3], sys.argv[3:])
     raise SystemExit(main())

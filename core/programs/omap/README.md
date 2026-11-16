@@ -2,25 +2,43 @@
 
 `core/tools/omap_bench.py` builds this program and `core/twins/omap.rs` in
 Cranelift development / LLVM optimized and Rust development / optimized modes.
-Each program runs in a separate process. Every workload first inserts 100,000
-ascending u64 keys, with value key + 1. The lookup mode adds 100,000 permuted
-lookups, range adds a 50,000-row scan, and snapshots holds 1,000 versions while
-overwriting 1,000 distinct rows. Checksums match in every implementation.
+Each workload runs in a separate process. `insert` measures 100,000 ascending
+u64 inserts from empty. `lookup`, `range` and `snapshots` populate 100,000 rows
+before the measured region. The operations are 100,000 permuted lookups, a
+50,000-row scan, and 1,000 held snapshots with overwrites respectively.
+`unique` uses the consuming std.omap update and im's unique-owner fast path.
+`bulk` builds from sorted input prepared before the measured region. im's
+FromIterator uses repeated unique inserts; BTreeMap uses its sorted collector.
+`unwrap` is a separate wrapper-cost control with 32 child Arcs.
 
-Pass `--compiler`, `--runtime` and `--out` to the script. `--prepare` builds the
-programs; `--check-refusal` checks the actual resource-valued std.omap fixture;
-`--measure` takes one instructions:u / target peak RSS sample per workload and
-profile under tools/capped, CPU 16, both shared measurement locks, and 2 GiB.
-Compilation and the counter process's RSS are excluded. Retain incomplete/OOM
-rows as censored; a partial BTreeMap snapshot run is never a full ratio.
+Pass `--compiler`, `--runtime` and `--out` to `core/tools/omap_bench.py`.
+`--prepare` builds the programs; `--check-refusal` checks the resource fixture;
+`--measure` takes one sample; `--profile` records sampled instruction IPs.
+`--only-workload`, `--only-profile` and `--only-implementation` select cases.
+`--reuse-rust DIR` reuses exact dependency rlibs, rebuilding only the twin.
+Evidence belongs outside the repository. Each measurement tag directory must
+be new; the runner never overwrites a sample. Retain censored rows.
 
-The Rust comparison uses std::collections::BTreeMap with clone-per-snapshot and
-im::OrdMap 15.1.0. For im, each ordinary insertion holds the preceding root until
-the update completes, matching Hirsel's persistent update contract. The
-im-unique insert mode measures im's unique-owner fast path separately. Hirsel
-always path-copies: its update borrows the input version, and public Arc has no
-mutable-payload operation. try_unwrap consumes the Arc and requires a new node
-allocation to publish the owned payload again.
+The target opens a FIFO in its explicit Dir grant. It prints READY after
+setup and waits for the harness. After READY it waits two capped CPU-quota periods outside the measured region
+so setup cannot spend the operation's initial quota. It resets Linux VmHWM through
+/proc/PID/clear_refs, enables perf with an acknowledged control command,
+and releases the target. DONE reports the checked checksum and the target's
+own monotonic operation duration. A second gate keeps maps and snapshots alive
+until perf is disabled and target VmHWM is read. Setup and final destruction
+are excluded from instructions and wall; peak RSS includes the resident map
+at the start plus any peak during the operation. No peak is subtracted.
+All samples use CPU 16, both measurement locks, tools/capped and 2 GiB.
+An OOM before DONE is censored even if an outer wrapper exits zero.
+
+The main Rust comparison uses BTreeMap clone-per-snapshot and im::OrdMap
+15.1.0. In `insert`, im holds the preceding root until the update completes,
+matching Hirsel's borrowed update; `unique` holds no artificial prior root.
+The scalar control compares 100,000 unwrap/new edits with Rust Arc::try_unwrap
+plus Arc::new, and with Arc::get_mut. These are controls, not map inserts.
+Hirsel's consuming update frees and allocates the Arc wrapper at each level;
+core Arc has no mutable-payload operation. The ordinary borrowed APIs and all
+store-facing node/cursor signatures remain unchanged.
 
 The script compiles unmodified upstream registry sources directly with rustc,
 without changing Cargo flags or budgets. `--registry` can name a vendored copy

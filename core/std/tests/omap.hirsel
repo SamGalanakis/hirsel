@@ -367,6 +367,15 @@ fn read_child(take input: ReadInput) -> u64 waits {
 // A child holds both a version and a path cursor while the parent writes.
 // expect: run second_task(tasks) = true
 fn second_task(tasks: Tasks) -> bool waits {
+    task_version(tasks, false)
+}
+
+// expect: run second_task_owned(tasks) = true
+fn second_task_owned(tasks: Tasks) -> bool waits {
+    task_version(tasks, true)
+}
+
+fn task_version(tasks: Tasks, consuming: bool) -> bool waits {
     let mut ids: u64 = 0
     let mut m: omap.OMap[u64, u64] = omap.new()
     for i in 0u64 .. 100 {
@@ -377,7 +386,13 @@ fn second_task(tasks: Tasks) -> bool waits {
     let input = ReadInput(map: omap.snapshot(m), rows: take rows, gate: take rx)
     let h = result.unwrap(task.spawn(tasks, bytes 1048576, take input, read_child))
     for i in 0u64 .. 100 {
-        m = put(mut ids, m, i, 999)
+        if consuming {
+            let previous = take m
+            let changed = result.unwrap(omap.insert_owned(mut ids, take previous, i, 999))
+            m = take changed
+        } else {
+            m = put(mut ids, m, i, 999)
+        }
     }
     result.unwrap(channel.send(tx, 1))
     result.unwrap(task.join(take h)) == 1201 && option.unwrap(omap.get(m, 0)) == 999
@@ -465,4 +480,128 @@ fn partial_capacity_rollback() -> bool {
         }
     }
     refused > 0 && succeeded > 0
+}
+
+// Partition boundaries include two minimally occupied leaves and a third level.
+// expect: run sorted_build() = true
+fn sorted_build() -> bool {
+    for case in 0u64 .. 7 {
+        let n = if case == 0 {
+            0u64
+        } else if case == 1 {
+            1u64
+        } else if case == 2 {
+            16u64
+        } else if case == 3 {
+            32u64
+        } else if case == 4 {
+            33u64
+        } else if case == 5 {
+            65u64
+        } else {
+            1100u64
+        }
+        let mut keys: List[u64] = result.unwrap(list.with_capacity(n))
+        let mut values: List[u64] = result.unwrap(list.with_capacity(n))
+        let mut expected: List[(u64, u64)] = result.unwrap(list.with_capacity(n))
+        for i in 0 .. n {
+            result.unwrap(list.push(mut keys, i * 2))
+            result.unwrap(list.push(mut values, i + 7))
+            result.unwrap(list.push(mut expected, (i * 2, i + 7)))
+        }
+        let mut ids: u64 = 0
+        let map = result.unwrap(omap.from_sorted(mut ids, keys, values))
+        if !equal(map, expected) {
+            return false
+        }
+        if let Some(root) = omap.root(map) {
+            if !nodes(root, true) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// Unique writes alternate with shared roots. Every checkpoint keeps its model.
+// expect: run owned_versions() = true
+fn owned_versions() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    let mut xs: List[(u64, u64)] = list.new()
+    let mut held: List[omap.OMap[u64, u64]] = result.unwrap(list.with_capacity(17))
+    let mut models: List[List[(u64, u64)]] = result.unwrap(list.with_capacity(17))
+    for step in 0u64 .. 128 {
+        if step % 8 == 0 {
+            result.unwrap(list.push(mut held, omap.snapshot(m)))
+            let copied_model: Result[List[(u64, u64)], Capacity] = clone(xs)
+            result.unwrap(list.push(mut models, result.unwrap(take copied_model)))
+        }
+        let k = (step * 79) % 151
+        let previous = take m
+        let changed = result.unwrap(omap.insert_owned(mut ids, take previous, k, step + 7))
+        m = take changed
+        xs = model(xs, k, step + 7, false)
+        if !equal(m, xs) {
+            return false
+        }
+        if !nodes(option.unwrap(omap.root(m)), true) {
+            return false
+        }
+        for i in 0 .. list.len(held) {
+            if !equal(held[i], models[i]) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// A refused consuming update can discard its draft; the rollback root is held.
+// expect: run owned_capacity() = true
+fn owned_capacity() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, String] = omap.new()
+    for i in 0u64 .. 80 {
+        m = result.unwrap(omap.insert(mut ids, m, i, "old"))
+    }
+    let held = omap.snapshot(m)
+    let old_id = omap.node_id(option.unwrap(omap.root(held)))
+    m = result.unwrap(omap.insert(mut ids, m, 80, "draft"))
+    let refused = result.unwrap(bound bytes 0 {
+        omap.insert_owned(mut ids, take m, 81, "new")
+    })
+    match take refused {
+        Error((_, (k, take v))) => k == 81 && v == "new" && omap.len(held) == 80 && omap.node_id(option.unwrap(omap.root(held))) == old_id && option.unwrap(omap.get(held, 0)) == "old",
+        Ok(take changed) => false
+    }
+}
+
+// Unique writes split leaves, branches and roots; reversed writes cross siblings.
+// expect: run owned_splits() = true
+fn owned_splits() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    for i in 0u64 .. 1100 {
+        let previous = take m
+        let changed = result.unwrap(omap.insert_owned(mut ids, take previous, i, i + 5))
+        m = take changed
+    }
+    let held = omap.snapshot(m)
+    let held_id = omap.node_id(option.unwrap(omap.root(held)))
+    for i in 0u64 .. 1100 {
+        let k = 2199 - i
+        let previous = take m
+        let changed = result.unwrap(omap.insert_owned(mut ids, take previous, k, k + 5))
+        m = take changed
+    }
+    let mut expected: List[(u64, u64)] = result.unwrap(list.with_capacity(2200))
+    let mut old: List[(u64, u64)] = result.unwrap(list.with_capacity(1100))
+    for i in 0u64 .. 2200 {
+        result.unwrap(list.push(mut expected, (i, i + 5)))
+        if i < 1100 {
+            result.unwrap(list.push(mut old, (i, i + 5)))
+        }
+    }
+    equal(m, expected) && equal(held, old) && omap.node_id(option.unwrap(omap.root(held))) == held_id && nodes(option.unwrap(omap.root(m)), true) && nodes(option.unwrap(omap.root(held)), true)
 }

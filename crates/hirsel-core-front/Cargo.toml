@@ -6,7 +6,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-test-assembly = []
 cost-profile = []
 
 [dependencies]

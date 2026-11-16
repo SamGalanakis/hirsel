@@ -1,0 +1,2 @@
+
+pub type TestCopy[T] { xs: List[T], n: u64 }

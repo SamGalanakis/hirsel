@@ -28,7 +28,7 @@ pub(crate) fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
     inputs_with_core(source, &core_dir())
 }
 
-fn inputs_with_core(source: &str, core_dir: &Path) -> (NameIndex, Vec<ModuleInput>) {
+pub(crate) fn inputs_with_core(source: &str, core_dir: &Path) -> (NameIndex, Vec<ModuleInput>) {
     inputs_in(source, core_dir, "main")
 }
 

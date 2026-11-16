@@ -95,3 +95,64 @@ mod std_seed;
 
 mod source;
 pub use source::SourceProgram;
+
+#[cfg(test)]
+pub(crate) fn checked_inputs(
+    index: &hirsel_core_resolve::NameIndex,
+    modules: &[hirsel_core_front::ModuleInput],
+) -> Checked {
+    use std::collections::BTreeMap;
+    let files = tempfile::tempdir().unwrap();
+    let core = package("core");
+    let mut packages = BTreeMap::<_, PackageManifest>::new();
+    for (i, module) in modules.iter().enumerate() {
+        let path = index.module_path(module.id);
+        let file = files.path().join(format!("source-{i:05}.hirsel"));
+        std::fs::write(&file, module.syntax.text()).unwrap();
+        let package = packages
+            .entry(path.package.clone())
+            .or_insert_with(|| PackageManifest {
+                dependencies: if path.package == core {
+                    vec![]
+                } else {
+                    vec![core.clone()]
+                },
+                package: path.package.clone(),
+                sources: vec![],
+            });
+        package.sources.push(ModuleSource {
+            file,
+            modules: path.modules,
+            signatures: path.package == core,
+        });
+    }
+    if !packages.contains_key(&core) {
+        packages.insert(
+            core.clone(),
+            PackageManifest::directory(&repo().join("core/core"), core.clone(), true).unwrap(),
+        );
+    }
+    Checked::check(
+        CorpusManifest {
+            core,
+            packages: packages.into_values().collect(),
+        },
+        files,
+        None,
+    )
+}
+
+#[cfg(test)]
+mod lowering;
+
+#[cfg(test)]
+mod core_ops;
+
+#[cfg(test)]
+mod maps;
+
+#[cfg(test)]
+mod ordered;
+
+#[cfg(test)]
+mod slots;

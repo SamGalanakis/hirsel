@@ -1,4 +1,9 @@
-use super::*;
+use crate::cases::inputs_with_core;
+use hirsel_core_front::Program;
+use hirsel_core_ir::eval;
+fn core_dir() -> std::path::PathBuf {
+    crate::repo().join("core/core")
+}
 
 /// Capacity and charge stay bounded by peak live entries even after mass removal.
 /// This overlay only exposes the private capacity word to the law's source.
@@ -24,7 +29,6 @@ fn churn_capacity_and_order() {
         include_str!("../../../core/front/fixtures/map-churn.hirsel"),
         &dir,
     );
-    std::fs::remove_dir_all(dir).unwrap();
     let p = Program::declare(&index, &inputs);
     assert!(
         p.refusals.is_empty() && p.gaps.is_empty(),
@@ -32,25 +36,11 @@ fn churn_capacity_and_order() {
         p.refusals,
         p.gaps
     );
-    let mut emitter = Emitter::new();
-    let mut functions = HashMap::new();
-    for (f, fd) in p.fns.iter().enumerate() {
-        if fd.body.is_none() || !fd.path.package_is("app", "1") && fd.path.0.modules != ["map"] {
-            continue;
-        }
-        let check = p.check_lower(f, &mut emitter);
-        assert!(
-            check.refusals.is_empty() && check.gaps.is_empty(),
-            "{}: {check:?}",
-            fd.path
-        );
-        if let Some(f) = check.function {
-            functions.insert(fd.path.0.name.clone(), f);
-        }
-    }
-    emitter.materialize_instances().unwrap();
+    let (module, functions) =
+        crate::SourceProgram::from_inputs(&index, &inputs, |d| d.package_is("app", "1"));
+    std::fs::remove_dir_all(dir).unwrap();
     for (peak, live) in [(1, 1), (3, 3), (8, 8), (33, 33), (33, 1)] {
-        let report = eval::run(&emitter.module, functions["churn"], &[peak, live], 1 << 20);
+        let report = eval::run(&module, functions["churn"], &[peak, live], 1 << 20);
         assert_eq!(
             report.outcome,
             eval::Outcome::Returned(vec![live]),
@@ -66,7 +56,7 @@ fn churn_capacity_and_order() {
             max_admissions
         );
     }
-    let report = eval::run(&emitter.module, functions["no_room"], &[], 1 << 20);
+    let report = eval::run(&module, functions["no_room"], &[], 1 << 20);
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![134]));
     assert_eq!(report.used, 0);
     assert_eq!(

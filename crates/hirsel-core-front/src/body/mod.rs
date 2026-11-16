@@ -179,13 +179,6 @@ pub struct Emitter {
     generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
     generic_codecs: std::collections::BTreeMap<TypeId, templates::CodecRecipe>,
     generic_calls: std::collections::BTreeMap<FuncId, GenericCall>,
-    #[cfg(any(test, feature = "test-assembly"))]
-    templates: HashMap<DefPath, (FuncId, GenericTemplate)>,
-    /// Immutable source bodies retained between evaluator materialization rounds.
-    /// The driver keeps each checked definition's product available while later
-    /// demands are assembled; the test helper must do the same for nested templates.
-    #[cfg(any(test, feature = "test-assembly"))]
-    template_bodies: HashMap<FuncId, (Body, SigId)>,
     /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
     runs: Vec<[Option<bool>; 2]>,
     /// `module.statics` rows by their bytes.
@@ -2346,10 +2339,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     calls: self.e.generic_calls.clone(),
                     codecs: self.e.generic_codecs.clone(),
                 };
-                #[cfg(any(test, feature = "test-assembly"))]
-                self.e
-                    .templates
-                    .insert(self.fd.path.clone(), (f, template.clone()));
                 self.out.template = Some(template);
             }
         }

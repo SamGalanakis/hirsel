@@ -1009,117 +1009,6 @@ fn fill(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-assembly"))]
-impl Emitter {
-    /// Test/evaluator assembly. Production materializes one immutable definition
-    /// product at a time, using the same `materialize` transformation.
-    pub fn materialize_instances(&mut self) -> Result<(), String> {
-        use std::collections::HashSet;
-        for (&source, (body, signature)) in &self.template_bodies {
-            self.module.functions[source.index()].body = Some(body.clone());
-            self.module.functions[source.index()].signature = *signature;
-        }
-        self.seal();
-        // A row may carry a clone hook even when this program never clones it.
-        // Only a derived clone's call demands that hook's instance. In particular,
-        // storing opaque/resource values does not instantiate an inadmissible clone.
-        let clone_definitions: HashSet<_> = self
-            .module
-            .types
-            .iter()
-            .filter_map(|s| s.clone)
-            .map(|f| {
-                self.module.instances[self.module.functions[f.0 as usize].instance.index()]
-                    .definition
-                    .clone()
-            })
-            .collect();
-        let sources: HashSet<_> = self.templates.values().map(|(f, _)| *f).collect();
-        let mut scheduled = HashSet::new();
-        let mut pending = vec![];
-        let mut scanned = 0;
-        let mut next = 0;
-        loop {
-            while scanned < self.module.functions.len() {
-                let f = FuncId(scanned as u32);
-                scanned += 1;
-                let function = &self.module.functions[f.index()];
-                let key = &self.module.instances[function.instance.index()];
-                if !clone_definitions.contains(&key.definition) && scheduled.insert(f) {
-                    pending.push(f);
-                }
-            }
-            let Some(&f) = pending.get(next) else { break };
-            next += 1;
-            let function = &self.module.functions[f.index()];
-            let key = &self.module.instances[function.instance.index()];
-            if function.body.is_none()
-                && let Some((op, ty)) = key_glue::KeyOp::of(key)
-                && !rigid(&self.module, key)
-            {
-                // A glue row is an instance of its own: derive it in place. A
-                // region-only generic's call row is its instance's row (MEM-6).
-                key_glue::ensure(&mut self.module, ty, op).map_err(str::to_owned)?;
-            } else if function.body.is_none()
-                && let Some((op, rows)) = codec_glue::CodecOp::of(key)
-                && !rigid(&self.module, key)
-            {
-                // A tuple codec's operation is glue too, derived in place alike.
-                let definition = key.definition.clone();
-                codec_glue::derive(&mut self.module, &definition, &rows, op)?;
-            } else if function.body.is_none()
-                && !key.arguments.is_empty()
-                && !self.generic_calls.contains_key(&f)
-                && let Some((source, template)) = self.templates.get(&key.definition).cloned()
-            {
-                let arguments = key.arguments.clone();
-                fill(
-                    &mut self.module,
-                    &mut self.types,
-                    source,
-                    f,
-                    &template,
-                    &arguments,
-                )?;
-            }
-            if !sources.contains(&f)
-                && let Some(body) = &self.module.functions[f.index()].body
-            {
-                for call in &body.calls {
-                    if let Callee::Direct(callee) = call.callee
-                        && scheduled.insert(callee)
-                    {
-                        pending.push(callee);
-                    }
-                }
-            }
-        }
-        for (source, _) in self.templates.values() {
-            if let Some(body) = &self.module.functions[source.index()].body {
-                self.template_bodies
-                    .insert(*source, (body.clone(), self.source_signature(*source)));
-            }
-            self.module.functions[source.index()].body = None;
-        }
-        // Substitution adds rows to the module alone; a later check of one of their
-        // definitions (std's `of_u64`, demanded only through `of[$0]`) must find that
-        // row, not make a second one the call never reaches. So must a later check
-        // that names one of the type rows it added (`Codec[u8]`, from `of_list[u8]`).
-        for (i, function) in self.module.functions.iter().enumerate() {
-            let key = &self.module.instances[function.instance.index()];
-            if !self.funcs.contains_key(key) {
-                self.funcs.insert(key.clone(), FuncId(i as u32));
-            }
-        }
-        for (i, shape) in self.module.types.iter().enumerate() {
-            if !self.types.contains_key(&shape.name) {
-                self.types.insert(shape.name.clone(), TypeRef(i as u32));
-            }
-        }
-        Ok(())
-    }
-}
-
 impl Emitter {
     /// Record semantic name parts for symbolic layout rows once, including a generic
     /// declaration's substituted fields. Closed names remain literal text.
@@ -1265,7 +1154,7 @@ mod tests {
         let (mut generic, mut owner) = (Emitter::new(), Emitter::new());
         let mut eat = None;
         for (f, fd) in p.fns.iter().enumerate() {
-            if !fd.path.package_is("app", "1") {
+            if !fd.path.package_is("app", "1") || !matches!(fd.path.0.name.as_str(), "eat" | "go") {
                 continue;
             }
             let into = if fd.path.0.name == "eat" {

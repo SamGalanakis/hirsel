@@ -82,7 +82,43 @@ impl SourceProgram {
             })
             .map(|d| Identity::plain(d.definition.clone()))
             .collect::<Vec<_>>();
-        let units = product.units(roots.clone(), 65_536).unwrap();
+        Self::checked(checked, roots)
+    }
+    #[cfg(test)]
+    pub(crate) fn from_inputs(
+        index: &hirsel_core_resolve::NameIndex,
+        modules: &[hirsel_core_front::ModuleInput],
+        wanted: impl Fn(&DefPath) -> bool,
+    ) -> (Self, HashMap<String, FuncId>) {
+        let checked = crate::checked_inputs(index, modules);
+        let product = &checked.product;
+        assert!(product.diagnostics.is_empty(), "{:?}", product.diagnostics);
+        assert!(product.resources.is_empty(), "{:?}", product.resources);
+        let roots = product
+            .definitions
+            .values()
+            .filter(|d| {
+                wanted(&d.definition)
+                    && d.check.function.is_some()
+                    && d.check
+                        .template
+                        .as_ref()
+                        .is_none_or(|t| t.parameters.is_empty())
+            })
+            .map(|d| {
+                assert!(
+                    d.incomplete.is_empty(),
+                    "{}: {:?}",
+                    d.definition,
+                    d.incomplete
+                );
+                Identity::plain(d.definition.clone())
+            })
+            .collect::<Vec<_>>();
+        Self::checked(checked, roots)
+    }
+    fn checked(checked: Checked, roots: Vec<Identity>) -> (Self, HashMap<String, FuncId>) {
+        let units = checked.product.units(roots.clone(), 65_536).unwrap();
         let reached = units.modules().unwrap();
         let joined = hirsel_core_materialize::join(
             &reached,
@@ -97,7 +133,7 @@ impl SourceProgram {
             .enumerate()
             .filter_map(|(i, f)| {
                 let key = &joined.instances[f.instance.index()];
-                (key.definition.package_is("app", "1")
+                (roots.iter().any(|r| r.definition == key.definition)
                     && key.arguments.is_empty()
                     && f.body.is_some())
                 .then(|| (key.definition.0.name.clone(), FuncId(i as u32)))

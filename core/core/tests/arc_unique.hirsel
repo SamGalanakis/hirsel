@@ -154,13 +154,19 @@ fn child_read(take a: Arc[Hits]) -> u64 {
     a.n
 }
 
-// Parent's write follows the child's last read and release for every schedule.
-// schedule: seeds 32 max_events 64
+// Parent's write follows both children's last reads and releases for every schedule.
+// Two runnable holders vary the release order across seeds; one gives one stream.
+// Hand count: 64 refused probes + 1 success + 1 Arc new + 2 shares + 3 releases
+// + 2 spawns + 2 joins + 3 task ends + 2 child-limit refunds = 80 events.
+// Ready children run before the polling parent starts its next turn, so no second
+// set of 64 refused probes is needed (CONC-10).
+// schedule: seeds 32 max_events 80
 // expect: run foreign_share(tasks) = true
 fn foreign_share(tasks: Tasks) -> bool waits {
     let mut a = result.unwrap(arc.new(Hits(n: 41)))
     let g = arc.share(a)
     let child = result.unwrap(task.spawn(tasks, bytes 65536, take g, child_read))
+    let second = result.unwrap(task.spawn(tasks, bytes 65536, arc.share(a), child_read))
     loop {
         match arc.with_unique(mut a, scoped fn(mut p: Hits) {
             p.n += 1
@@ -169,5 +175,7 @@ fn foreign_share(tasks: Tasks) -> bool waits {
             None => {}
         }
     }
-    result.unwrap(task.join(take child)) == 41 && a.n == 42
+    let first_seen = result.unwrap(task.join(take child))
+    let second_seen = result.unwrap(task.join(take second))
+    first_seen == 41 && second_seen == 41 && a.n == 42
 }

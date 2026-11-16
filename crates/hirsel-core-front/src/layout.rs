@@ -22,15 +22,7 @@ pub(crate) fn intern_shape(
     names: &mut ShapeNames,
     shape: Shape,
 ) -> (TypeRef, bool) {
-    match names.entry(shape.name.clone()) {
-        std::collections::hash_map::Entry::Occupied(entry) => (*entry.get(), false),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            let row = TypeRef(shapes.len() as u32);
-            shapes.push(shape);
-            entry.insert(row);
-            (row, true)
-        }
-    }
+    hirsel_core_layout::intern_shape(shapes, names, shape.name.clone(), shape)
 }
 
 /// A shape table being extended: rows are keyed by canonical text, which is also the

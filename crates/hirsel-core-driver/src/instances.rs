@@ -6,6 +6,35 @@ use hirsel_core_ir::Identity;
 use hirsel_core_materialize::{Child, Published, Resolver};
 use std::collections::BTreeSet;
 
+/// The records-free walk's units, retained until their consumer finishes. Native
+/// compilation and evaluation materialize the same per-definition products.
+pub struct Units {
+    root: Identity,
+    reached: Vec<Identity>,
+    instances: InstanceSet,
+}
+impl Units {
+    pub fn modules(&self) -> io::Result<Vec<hirsel_core_materialize::Unit<'_>>> {
+        self.reached
+            .iter()
+            .map(|identity| {
+                let body = self.instances.get(identity);
+                Ok(hirsel_core_materialize::Unit {
+                    identity,
+                    module: body.ir()?,
+                    function: body.function,
+                })
+            })
+            .collect()
+    }
+    /// The entry's revision, computed before any link remaps its units.
+    pub fn revision(&self) -> ContentHash {
+        self.instances
+            .revision(&self.root, None)
+            .expect("a records-free walk retains every reached unit")
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstanceStop {
     Resource {
@@ -204,15 +233,15 @@ impl InstanceSet {
         Ok((0..module.functions.len() as u32)
             .map(hirsel_core_ir::FuncId)
             .map(|f| {
-                if let Some(&code) = module.code_variants.get(&f) {
-                    hirsel_core_ir::symbol(code)
-                } else if f == body.function {
-                    name(key)
-                } else if let Ok(i) = body.externals.binary_search_by_key(&f, |(g, _)| *g) {
-                    name(&body.externals[i].1)
-                } else {
-                    hirsel_core_ir::symbol(module.code_identity(f))
-                }
+                hirsel_core_materialize::link_symbol(module, f, || {
+                    if f == body.function {
+                        name(key)
+                    } else if let Ok(i) = body.externals.binary_search_by_key(&f, |(g, _)| *g) {
+                        name(&body.externals[i].1)
+                    } else {
+                        hirsel_core_ir::symbol(module.code_identity(f))
+                    }
+                })
             })
             .collect())
     }
@@ -262,6 +291,16 @@ impl InstanceSet {
     }
 }
 impl CheckProduct {
+    /// Materialize every unit reached from `root`, without native object records.
+    pub fn units(&self, root: Identity, limit: usize) -> Result<Units, InstanceStop> {
+        let mut instances = InstanceSet::default();
+        let reached = self.instances_into([root.clone()], limit, &mut instances)?;
+        Ok(Units {
+            root,
+            reached,
+            instances,
+        })
+    }
     pub fn instances(
         &self,
         roots: impl IntoIterator<Item = Identity>,

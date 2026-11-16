@@ -1018,6 +1018,7 @@ pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;
 
+pub use hirsel_core_layout::{FuncRef, TypeRef, intern_shape};
 pub use ir::*;
 
 #[cfg(test)]

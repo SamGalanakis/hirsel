@@ -16,6 +16,9 @@ use rustc_hash::FxHashMap as HashMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+mod join;
+pub use join::{Unit, join, link_symbol};
+
 /// A published definition's body: its module, its function row and, for a generic
 /// body, the template its instances substitute.
 #[derive(Clone, Copy)]

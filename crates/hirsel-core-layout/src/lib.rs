@@ -23,6 +23,24 @@ mod target;
 
 pub use target::Target;
 
+/// Reserve a shape before filling its references, using the caller's type identity.
+pub fn intern_shape<K: Eq + std::hash::Hash, S: std::hash::BuildHasher>(
+    shapes: &mut Vec<Shape>,
+    rows: &mut std::collections::HashMap<K, TypeRef, S>,
+    key: K,
+    shape: Shape,
+) -> (TypeRef, bool) {
+    match rows.entry(key) {
+        std::collections::hash_map::Entry::Occupied(entry) => (*entry.get(), false),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            let row = TypeRef(shapes.len() as u32);
+            shapes.push(shape);
+            entry.insert(row);
+            (row, true)
+        }
+    }
+}
+
 pub use recipe::{
     CField, CLOSURE_CARRIER, CaseOps, Cleanup, Compact, CompactSet, DropRecipe, Encoding,
     FieldDrop, Fixed, Layout, LayoutError, MapEntry, Niche, POINTER, Pos, Recipe, RecipeScratch,

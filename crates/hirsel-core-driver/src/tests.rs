@@ -22,6 +22,63 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
         entry: None,
     }
 }
+/// Separate definition units must preserve generic calls and function values.
+/// The oracle is 20 + 21 + 1. Two definitions claiming the same code variant
+/// while returning different values are a link conflict.
+#[test]
+fn joined_units_preserve_calls_and_refuse_conflicting_variants() {
+    use hirsel_core_ir::{Identity, Inst};
+    use hirsel_core_materialize::{Unit, join};
+    let dir = tempfile::tempdir().unwrap();
+    let source = "type Pair { x: u64, y: u64 }\nfn id[T](take x: T) -> T { x }\nfn later() -> u64 { let p = id(Pair(x: 20, y: 21)); p.x + p.y }\nfn answer() -> u64 { let f = fn() -> u64 { later() }; id(f()) + 1 }\n";
+    let product = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let identity = Identity::plain(DefPath::from_full("app@1/main/answer").unwrap());
+    let units = product.units(identity.clone(), 65_536).unwrap();
+    let modules = units.modules().unwrap();
+    let (joined, entry) = join(&modules, &identity).unwrap();
+    hirsel_core_ir::wf::module(&joined).unwrap();
+    assert_eq!(
+        eval::run(&joined, entry, &[], 1_000_000).outcome,
+        eval::Outcome::Returned(vec![42])
+    );
+    let root = modules.iter().find(|u| *u.identity == identity).unwrap();
+    let mut a = root.module.clone();
+    a.code_variants.insert(root.function, identity.digest());
+    let mut b = a.clone();
+    let body = b.functions[root.function.index()].body.as_mut().unwrap();
+    let constant = body
+        .insts
+        .iter_mut()
+        .find_map(|i| match i {
+            Inst::Const { bits, .. } if *bits == 1 => Some(bits),
+            _ => None,
+        })
+        .unwrap();
+    *constant = 2;
+    let conflict = [
+        Unit {
+            module: &a,
+            ..*root
+        },
+        Unit {
+            module: &b,
+            ..*root
+        },
+    ];
+    assert!(
+        join(&conflict, &identity)
+            .unwrap_err()
+            .contains("conflicting code identity")
+    );
+}
 /// A body record runs like the checked body, and every product's module hash
 /// is the `hirsel.core-ir.v1` hash of its module's whole serialization: fresh, reopened from
 /// the store, demanded from an image, and the helper for modules no record

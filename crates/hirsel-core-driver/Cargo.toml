@@ -41,7 +41,7 @@ twox-hash = { version = "=2.1.5", default-features = false, features = ["std", "
 [dev-dependencies]
 hirsel-core-front = { path = "../hirsel-core-front", features = ["cost-profile"] }
 tempfile = "3"
-hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval"] }
+hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
 
 [build-dependencies]
 sha2 = "0.10"

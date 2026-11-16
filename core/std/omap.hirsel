@@ -397,7 +397,11 @@ fn split_leaves[K: ordered + shareable + send, V: shareable + send](mut ids: u64
     let total = list.len(ks)
     let mut left_keys = take ks
     let mut left_values = take vs
-    let count = if total <= 32 { 1u64 } else { 2u64 }
+    let count = if total <= 32 {
+        1u64
+    } else {
+        2u64
+    }
     let mut out: List[Arc[Node[K, V]]] = list.with_capacity(count)?
     if total <= 32 {
         ids += 1

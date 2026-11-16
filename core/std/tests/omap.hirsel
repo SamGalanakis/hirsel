@@ -1162,3 +1162,31 @@ fn moved_capacity_payloads() -> bool {
     }
     refused > 1 && completed > 0 && omap.len(m) == 80
 }
+
+// A full 32-child root and full leaves force one borrowed branch split.
+// The retained version keeps all 1024 original values and its root identity.
+// expect: run borrowed_branch_split_keeps_snapshot() = true
+fn borrowed_branch_split_keeps_snapshot() -> bool {
+    let mut ids: u64 = 0
+    let mut keys: List[u64] = result.unwrap(list.with_capacity(1024))
+    let mut values: List[u64] = result.unwrap(list.with_capacity(1024))
+    for i in 0u64 .. 1024 {
+        result.unwrap(list.push(mut keys, i))
+        result.unwrap(list.push(mut values, i + 1))
+    }
+    let old = result.unwrap(omap.from_sorted(mut ids, take keys, take values))
+    let old_id = omap.node_id(option.unwrap(omap.root(old)))
+    let changed = put(mut ids, old, 1024, 1025)
+    if omap.len(old) != 1024 || omap.len(changed) != 1025 || omap.node_id(option.unwrap(omap.root(old))) != old_id {
+        return false
+    }
+    if let Some(_) = omap.get(old, 1024) {
+        return false
+    }
+    for i in 0u64 .. 1024 {
+        if option.unwrap(omap.get(old, i)) != i + 1 || option.unwrap(omap.get(changed, i)) != i + 1 {
+            return false
+        }
+    }
+    option.unwrap(omap.get(changed, 1024)) == 1025 && nodes(option.unwrap(omap.root(old)), true) && nodes(option.unwrap(omap.root(changed)), true)
+}

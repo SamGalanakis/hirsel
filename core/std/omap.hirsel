@@ -446,7 +446,7 @@ fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
             }
             return Ok(Pieces(first: pack_branch(mut ids, take cs, take lows)?, second: None))
         }
-        split_branches(mut ids, cs)
+        split_branches(mut ids, take cs)
     }
 }
 
@@ -558,28 +558,23 @@ fn split_leaves[K: ordered + shareable + send, V: shareable + send](mut ids: u64
     Ok(Pieces(first: take left_node, second: Some(take right_node)))
 }
 
-fn split_branches[K: ordered + shareable + send, V: shareable + send](mut ids: u64, cs: List[Arc[Node[K, V]]]) -> Result[Pieces[K, V], Capacity] {
+fn split_branches[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take cs: List[Arc[Node[K, V]]]) -> Result[Pieces[K, V], Capacity] {
     let total = list.len(cs)
-    let mid = if total <= 32 {
-        total
-    } else {
-        total / 2
+    let mut left = take cs
+    if total <= 32 {
+        return Ok(Pieces(first: fresh_branch(mut ids, take left)?, second: None))
     }
-    let mut a: List[Arc[Node[K, V]]] = list.with_capacity(mid)?
-    for i in 0 .. mid {
-        result.capacity_only(list.push(mut a, arc.share(cs[i])))?
+    let mid = total / 2
+    let mut right: List[Arc[Node[K, V]]] = list.with_capacity(total - mid)?
+    for _ in mid .. total {
+        result.capacity_only(list.push(mut right, option.unwrap(list.pop(mut left))))?
     }
-    let left_node = fresh_branch(mut ids, take a)?
-    let right_node = if mid < total {
-        let mut b: List[Arc[Node[K, V]]] = list.with_capacity(total - mid)?
-        for i in mid .. total {
-            result.capacity_only(list.push(mut b, arc.share(cs[i])))?
-        }
-        Some(fresh_branch(mut ids, take b)?)
-    } else {
-        None
+    for i in 0u64 .. (total - mid) / 2 {
+        list.swap(mut right, i, total - mid - 1 - i)
     }
-    Ok(Pieces(first: take left_node, second: take right_node))
+    let left_node = fresh_branch(mut ids, take left)?
+    let right_node = fresh_branch(mut ids, take right)?
+    Ok(Pieces(first: take left_node, second: Some(take right_node)))
 }
 
 type Pieces[K: ordered + shareable + send, V: shareable + send] {
@@ -954,7 +949,7 @@ fn merge_pair[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
         for c in b.kids {
             result.capacity_only(list.push(mut cs, arc.share(c)))?
         }
-        split_branches(mut ids, cs)
+        split_branches(mut ids, take cs)
     }
 }
 

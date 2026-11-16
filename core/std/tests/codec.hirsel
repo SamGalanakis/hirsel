@@ -1253,3 +1253,51 @@ fn chain_bytes(depth: u64) -> Bytes {
     result.unwrap(list.put_word_le(mut b, 0))
     take b
 }
+
+// A reader held as the store holds it: shareable and send, in one Arc that two holders
+// read through, each read starting after a 2-byte header in place. The values are
+// evolution_reads_old_rows' (resolved and identity); the refusals are
+// resolution_checks_writer_bytes' moved by the header (offsets are into the row); the
+// identity reader's cut name is Truncated at 8 + 2; a start past the end is Truncated
+// at the end. A Reader field that is not shareable is refused at arc.new; a read_at
+// that ignores start, or reports offsets from it, fails.
+// expect: run shared_reader_reads_in_place() = ((5, 2, 7), (9, 2, 3), (1010, 5020, 3018), (1010, 1001))
+fn shared_reader_reads_in_place() -> ((u64, u64, i64), (u64, u64, i64), (u64, u64, u64), (u64, u64)) {
+    let old = result.unwrap(arc.new(sendable(resolved_rows(rows(), schema_bytes(v1_schema)))))
+    let held = arc.share(old)
+    let same = result.unwrap(arc.new(sendable(resolved_rows(rows(), schema_bytes(row_schema)))))
+    let tomb = resolved_rows(rows_tomb(), schema_bytes(noted_schema))
+    let a = row_at(old, behind(enc(rows_v1(), row(5, "ab"))))
+    let b = row_at(same, behind(enc(rows(), row(9, "yz"))))
+    let c = row_at(held, behind(unhex("0500000000000000 0200000000000000 61")))
+    let d = row_at(held, behind(unhex("0500000000000000 0200000000000000 6162 00")))
+    let e = row_at(tomb, behind(unhex("0500000000000000 0100000000000000 ff 0100000000000000 61")))
+    let f = row_at(same, behind(unhex("0900000000000000 0200000000000000 79")))
+    let g = match codec.read_at(same, unhex("ab"), 5) {
+        Ok(Error(x)) => code(x),
+        _ => 0
+    }
+    (a, b, (c.0, d.0, e.0), (f.0, g))
+}
+
+fn sendable[T: shareable + send](take x: T) -> T {
+    take x
+}
+
+fn resolved_rows(c: codec.Codec[Row], writer: Bytes) -> codec.Reader[Row] {
+    result.unwrap(result.unwrap(codec.resolve(c, writer)))
+}
+
+fn behind(b: Bytes) -> Bytes {
+    let mut stored = unhex("abcd")
+    result.unwrap(list.append(mut stored, b))
+    take stored
+}
+
+fn row_at(r: codec.Reader[Row], b: Bytes) -> (u64, u64, i64) {
+    match codec.read_at(r, b, 2) {
+        Ok(Ok(x)) => (x.id, string.byte_len(x.name), x.score),
+        Ok(Error(e)) => (code(e), 0, 0),
+        Error(_) => (9999, 0, 0)
+    }
+}

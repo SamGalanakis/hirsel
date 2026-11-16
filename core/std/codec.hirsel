@@ -49,7 +49,16 @@ pub fn encode[T](c: Codec[T], x: T, mut out: Bytes) -> Result[(), Capacity] {
 /// Fails: Ok(Error(e)) for bytes no value encodes to; Error(c) when an admission is
 /// refused. Either way nothing it admitted remains. Ex: `codec.decode(rows, b)?`
 pub fn decode[T](c: Codec[T], b: Bytes) -> Result[Result[T, DecodeError], Capacity] {
-    let mut at: u64 = 0
+    decode_at(c, b, 0)
+}
+
+/// Decodes b from `start` to its end, as decode does; offsets are into b. A stored
+/// value behind a header is read in place. Ex: `codec.decode_at(rows, row, 2)?`
+pub fn decode_at[T](c: Codec[T], b: Bytes, start: u64) -> Result[Result[T, DecodeError], Capacity] {
+    if start > list.len(b) {
+        return Ok(Error(Truncated(list.len(b))))
+    }
+    let mut at = start
     match (c.decoder)(b, mut at) {
         Ok(x) => {
             if at != list.len(b) {
@@ -656,7 +665,7 @@ pub opaque type Schema {
     defaults: List[Default]
 }
 
-type Default {
+type Default: shareable + send {
     def: u64,
     field: String,
     value: Bytes
@@ -969,7 +978,7 @@ pub fn fingerprint_of(b: Bytes) -> u64 {
 // writer field or 2^63 + default); 7 sum (variants v, v offsets of: live, n, nodes);
 // 8 via (inner).
 /// A codec ready to read bytes written under one writer's schema.
-pub opaque type Reader[T] {
+pub opaque type Reader[T]: shareable + send {
     c: Codec[T],
     same: bool,
     ops: List[u64],
@@ -1661,9 +1670,9 @@ fn word(mut o: Out, x: u64) -> Result[(), Stop] {
 
 // Checks the writer's bytes by the plan and writes the reader's layout into o; the
 // offset where the value ends. marks: (offset in o.raw, offset in b) of each via value.
-fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, mut o: Out, mut marks: List[(u64, u64)]) -> Result[u64, Stop] {
+fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut o: Out, mut marks: List[(u64, u64)]) -> Result[u64, Stop] {
     let mut stack: List[Frame] = list.new()
-    let mut at: u64 = 0
+    let mut at = start
     let mut next: u64 = 0
     let mut starting = true
     loop {
@@ -1828,14 +1837,23 @@ fn raw_at(o: Out, i: u64) -> u64 {
 /// Decodes all of b, written under the schema r was resolved against, as decode does;
 /// offsets are into b. Ex: `codec.read(r, stored)?`
 pub fn read[T](r: Reader[T], b: Bytes) -> Result[Result[T, DecodeError], Capacity] {
+    read_at(r, b, 0)
+}
+
+/// Reads b from `start` to its end, as read does; offsets are into b. A stored value
+/// behind a header is read in place. Ex: `codec.read_at(r, row, 2)?`
+pub fn read_at[T](r: Reader[T], b: Bytes, start: u64) -> Result[Result[T, DecodeError], Capacity] {
     if r.same {
-        return decode(r.c, b)
+        return decode_at(r.c, b, start)
+    }
+    if start > list.len(b) {
+        return Ok(Error(Truncated(list.len(b))))
     }
     let mut o = Out(raw: list.new(), chunks: list.new(), last: 0)
     let mut marks: List[(u64, u64)] = list.new()
     let mut out: Bytes = list.new()
     let walked: Result[(), Stop] = match list.push(mut o.chunks, (0, 0, SKIP)) {
-        Ok(()) => match transcode(r.ops, r.defaults, b, mut o, mut marks) {
+        Ok(()) => match transcode(r.ops, r.defaults, b, start, mut o, mut marks) {
             Ok(end) => if end != list.len(b) {
                 Error(Bad(Trailing(end)))
             } else {

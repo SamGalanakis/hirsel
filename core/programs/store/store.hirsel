@@ -67,6 +67,7 @@ pub opaque type Index[J, K, V] {
 }
 
 pub type Read = Point(u32, Bytes) | Span(u32, Bytes, Bytes)
+
 pub type Bound[K] = Unbounded | Incl(K) | Excl(K)
 
 pub type CallId {
@@ -197,8 +198,7 @@ pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
     Shape(store: t.store, id: t.id, key: t.key, value: t.value)
 }
 
-pub fn create_index[J, K, V](mut db: Db, take t: Table[K, V], take name: String,
-    by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Ticket, Error] {
+pub fn create_index[J, K, V](mut db: Db, take t: Table[K, V], take name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Ticket, Error] {
     let _ = take t
     let _ = take name
     let _ = by
@@ -207,8 +207,7 @@ pub fn create_index[J, K, V](mut db: Db, take t: Table[K, V], take name: String,
     Ok(ticket(db.id, db.version))
 }
 
-pub fn index[J, K, V](db: Db, take t: Table[K, V], take name: String,
-    by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+pub fn index[J, K, V](db: Db, take t: Table[K, V], take name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
     let _ = take name
     let _ = by
     Ok(Index(store: db.id, table: t.id, id: 1, key: take key, primary: t.key, value: t.value))
@@ -462,8 +461,7 @@ pub fn find[J, K, V](take s: Snapshot, ix: Index[J, K, V], take lo: Bound[J], ta
     Error(Missing("index lookup is added with S4"))
 }
 
-pub fn migrate[K, V, K2, V2](mut db: Db, take from: Table[K, V], take key: std.codec.Key[K2], take value: std.codec.Codec[V2],
-    f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[Ticket, Error] {
+pub fn migrate[K, V, K2, V2](mut db: Db, take from: Table[K, V], take key: std.codec.Key[K2], take value: std.codec.Codec[V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[Ticket, Error] {
     let _ = take from
     let _ = key
     let _ = value

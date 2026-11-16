@@ -342,7 +342,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) 
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
         let cv: std.codec.Codec[u64] = std.codec.of()
-        result.unwrap(store.create_table(mut db, "data", std.codec.key_u64(), cv))
+        result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
         // A first head with no calls makes the runner's own table, so a failed sync in
         // write lands on a call's commit rather than on that table's creation.
         let (opened, verdict) = served(take db, c, tasks, out, 1u64, list.new())

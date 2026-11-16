@@ -9,7 +9,6 @@
 // variant's fields. A record or tuple: its fields in declaration order; a removed field
 // is not written. Nothing frames a value but its type, so a value is decoded against the
 // schema that wrote it.
-
 /// SEM-10's decode errors; each u64 is a byte offset, into the writer's schema for
 /// `Schema` and into the decoded bytes otherwise. `Value(i)`: the `from` of a `via` codec
 /// refused the value that starts at i.
@@ -40,7 +39,6 @@ pub fn least[T](c: Codec[T]) -> u64 {
 }
 
 // The whole-value entry points.
-
 /// Appends x's bytes to out. Fails: Capacity; out then holds a prefix of x's bytes.
 /// Ex: `codec.encode(rows, row, mut out)?`
 pub fn encode[T](c: Codec[T], x: T, mut out: Bytes) -> Result[(), Capacity] {
@@ -66,7 +64,6 @@ pub fn decode[T](c: Codec[T], b: Bytes) -> Result[Result[T, DecodeError], Capaci
 
 // The protocol: one put and one take per format row. A generated encode calls the puts
 // in declaration order and a generated decode the takes; `at` is the read offset.
-
 /// Truncated at `at` unless n more bytes follow it.
 pub fn need(b: Bytes, at: u64, n: u64) -> Result[(), Stop] {
     if list.len(b) - at < n {
@@ -130,7 +127,11 @@ pub fn take_unit(b: Bytes, mut at: u64) -> Result[(), Stop] {
 }
 
 pub fn put_bool(x: bool, mut out: Bytes) -> Result[(), Capacity] {
-    put_byte(mut out, if x { 1 } else { 0 })
+    put_byte(mut out, if x {
+        1
+    } else {
+        0
+    })
 }
 
 pub fn take_bool(b: Bytes, mut at: u64) -> Result[bool, Stop] {
@@ -496,7 +497,6 @@ pub fn take_via[T, R](b: Bytes, mut at: u64, c: Codec[R], from: fn(take R) -> Op
 }
 
 // The built-in codecs: core.md's codec rows. `of` resolves to these at scalar types.
-
 pub fn of_unit() -> Codec[()] {
     Codec(encoder: put_unit, decoder: take_unit, describer: schema_unit, smallest: 0)
 }
@@ -646,7 +646,6 @@ fn decode_error_schema(mut s: Schema) -> Result[(), Capacity] {
 // A name is a u64 byte count and UTF-8. Definitions are numbered in the order a
 // depth-first walk from the root first meets them, so a type has one schema; defaults
 // are the reader's, never in the bytes.
-
 /// A schema being built: what a codec's schema function writes into.
 pub opaque type Schema {
     cur: Bytes,
@@ -969,7 +968,6 @@ pub fn fingerprint_of(b: Bytes) -> u64 {
 // writer fields w, w pairs of reader position and node, reader fields r, r sources:
 // writer field or 2^63 + default); 7 sum (variants v, v offsets of: live, n, nodes);
 // 8 via (inner).
-
 /// A codec ready to read bytes written under one writer's schema.
 pub opaque type Reader[T] {
     c: Codec[T],
@@ -990,8 +988,8 @@ type Plan {
 }
 
 const SKIP: u64 = 0xffffffffffffffff
-const DEFAULT: u64 = 0x8000000000000000
 
+const DEFAULT: u64 = 0x8000000000000000
 
 // The end of the name at `at`, or None past `end`.
 fn name_end(b: Bytes, at: u64, end: u64) -> Option[u64] {
@@ -1238,11 +1236,19 @@ fn type_node(mut p: Plan, w: u64, r: u64) -> Result[Result[u64, u64], Capacity] 
         emit(mut p, 0)?
         emit(mut p, int.widen(x))?
     } else if x == 14 || x == 16 {
-        emit(mut p, if x == 14 { 1 } else { 3 })?
+        emit(mut p, if x == 14 {
+            1
+        } else {
+            3
+        })?
         emit(mut p, 0)?
         task(mut p, w + 1, r + 1, index + 1)?
     } else if x == 15 || x == 17 {
-        emit(mut p, if x == 15 { 2 } else { 4 })?
+        emit(mut p, if x == 15 {
+            2
+        } else {
+            4
+        })?
         emit(mut p, 0)?
         emit(mut p, 0)?
         task(mut p, w + 1, r + 1, index + 1)?
@@ -1385,7 +1391,11 @@ fn record_node(mut p: Plan, wd: u64, rd: u64, ws: List[(bool, u64, u64)], rs: Li
             emit(mut p, DEFAULT + d)?
         }
     }
-    let _ = list.set(mut p.ops, index + 1, if identity { 1 } else { 0 })
+    let _ = list.set(mut p.ops, index + 1, if identity {
+        1
+    } else {
+        0
+    })
     Ok(Ok(index))
 }
 
@@ -1674,7 +1684,11 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, mut o: Out, mut 
                 let tag = take_tag(b, mut at, 2)?
                 word(mut o, tag)?
                 if k == 4 || tag == 1 {
-                    next = ops[next + 1 + if k == 4 { tag } else { 0 }]
+                    next = ops[next + 1 + if k == 4 {
+                        tag
+                    } else {
+                        0
+                    }]
                     starting = true
                 }
             } else if k == 5 {
@@ -1858,7 +1872,6 @@ pub fn read[T](r: Reader[T], b: Bytes) -> Result[Result[T, DecodeError], Capacit
 // Unsigned integers big-endian at their width; signed ones the same with the sign bit
 // flipped; bool one byte, 0 or 1; String and Bytes their bytes with each 0x00 written
 // 0x00 0xff, then 0x00 0x00. A key schema is a schema whose version byte is 2.
-
 /// The key codec of T. Generated key codecs and the built-in ones below are the makers.
 pub opaque type Key[T] {
     encoder: fn(T, mut Bytes) -> Result[(), Capacity],

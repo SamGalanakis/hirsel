@@ -2,7 +2,6 @@
 // hand from the format in the module header (little-endian, u64 counts and tags), never
 // taken from an encode. A decode error reads as kind * 1000 + offset: 1 Truncated,
 // 2 Invalid, 3 Utf8, 4 Duplicate, 5 Trailing, 6 Schema, 7 Value; 0 is success.
-
 fn nibble(x: u8) -> u8 {
     if x >= 97 {
         x - 87
@@ -89,37 +88,13 @@ fn format_scalars() -> bool {
     let g: f64 = -0.5
     let small: i8 = -1
     let w: u32 = 7
-    enc(codec.of_u16(), u) == unhex("3412") &&
-        enc(codec.of_i64(), i) == unhex("feffffffffffffff") &&
-        enc(codec.of_f32(), f) == unhex("0000803f") &&
-        enc(codec.of_f64(), g) == unhex("000000000000e0bf") &&
-        enc(codec.of_char(), 'é') == unhex("e9000000") &&
-        enc(codec.of_bool(), true) == unhex("01") &&
-        enc(codec.of_unit(), ()) == unhex("") &&
-        enc(codec.of_string(), "hé") == unhex("0300000000000000 68c3a9") &&
-        enc(codec.of_i8(), small) == unhex("ff") &&
-        enc(codec.of_u32(), w) == unhex("07000000")
+    enc(codec.of_u16(), u) == unhex("3412") && enc(codec.of_i64(), i) == unhex("feffffffffffffff") && enc(codec.of_f32(), f) == unhex("0000803f") && enc(codec.of_f64(), g) == unhex("000000000000e0bf") && enc(codec.of_char(), 'é') == unhex("e9000000") && enc(codec.of_bool(), true) == unhex("01") && enc(codec.of_unit(), ()) == unhex("") && enc(codec.of_string(), "hé") == unhex("0300000000000000 68c3a9") && enc(codec.of_i8(), small) == unhex("ff") && enc(codec.of_u32(), w) == unhex("07000000")
 }
 
 // The extremes of each width come back, and every prefix of them is Truncated.
 // expect: run scalars_round_trip() = true
 fn scalars_round_trip() -> bool {
-    prefixes(codec.of_u8(), unhex("ff")) &&
-        prefixes(codec.of_u16(), unhex("ffff")) &&
-        prefixes(codec.of_u32(), unhex("ffffffff")) &&
-        prefixes(codec.of_u64(), unhex("ffffffffffffffff")) &&
-        prefixes(codec.of_i8(), unhex("80")) &&
-        prefixes(codec.of_i16(), unhex("0080")) &&
-        prefixes(codec.of_i32(), unhex("00000080")) &&
-        prefixes(codec.of_i64(), unhex("0000000000000080")) &&
-        prefixes(codec.of_f32(), unhex("0000c07f")) &&
-        prefixes(codec.of_f64(), unhex("0000000000000080")) &&
-        prefixes(codec.of_f64(), unhex("000000000000f07f")) &&
-        prefixes(codec.of_f64(), unhex("000000000000f87f")) &&
-        prefixes(codec.of_char(), unhex("ffff1000")) &&
-        prefixes(codec.of_bool(), unhex("00")) &&
-        prefixes(codec.of_string(), unhex("0000000000000000")) &&
-        prefixes(codec.of_string(), unhex("0400000000000000 f09f9880"))
+    prefixes(codec.of_u8(), unhex("ff")) && prefixes(codec.of_u16(), unhex("ffff")) && prefixes(codec.of_u32(), unhex("ffffffff")) && prefixes(codec.of_u64(), unhex("ffffffffffffffff")) && prefixes(codec.of_i8(), unhex("80")) && prefixes(codec.of_i16(), unhex("0080")) && prefixes(codec.of_i32(), unhex("00000080")) && prefixes(codec.of_i64(), unhex("0000000000000080")) && prefixes(codec.of_f32(), unhex("0000c07f")) && prefixes(codec.of_f64(), unhex("0000000000000080")) && prefixes(codec.of_f64(), unhex("000000000000f07f")) && prefixes(codec.of_f64(), unhex("000000000000f87f")) && prefixes(codec.of_char(), unhex("ffff1000")) && prefixes(codec.of_bool(), unhex("00")) && prefixes(codec.of_string(), unhex("0000000000000000")) && prefixes(codec.of_string(), unhex("0400000000000000 f09f9880"))
 }
 
 // Bytes no value encodes to are Invalid at the value: bool 2, a NaN other than SEM-2's
@@ -272,7 +247,6 @@ fn mix_near_misses() -> (u64, u64, u64, u64, u64, u64) {
 }
 
 // The expansions (EXPANSION.md): each block is the text the derive generates for its type.
-
 // (a) A record with a defaulted field: `type Row codec { id: u64, name: String,
 // score: i64 = 7 }`. The other row codecs below are earlier or later versions of the
 // same type, as writers: one Row type, several schemas.
@@ -1030,13 +1004,7 @@ fn key_format() -> bool {
     result.unwrap(list.push(mut nul, 0x61))
     result.unwrap(list.push(mut nul, 0))
     result.unwrap(list.push(mut nul, 0x62))
-    key_enc(codec.key_u16(), u) == unhex("1234") &&
-        key_enc(codec.key_i8(), small) == unhex("7f") &&
-        key_enc(codec.key_i64(), big) == unhex("7ffffffffffffffe") &&
-        key_enc(codec.key_i32(), zero) == unhex("80000000") &&
-        key_enc(codec.key_bytes(), nul) == unhex("61 00ff 62 0000") &&
-        key_enc(codec.key_string(), "") == unhex("0000") &&
-        result.unwrap(codec.key_schema(codec.key_u64())) == unhex("02 0000000000000000 06")
+    key_enc(codec.key_u16(), u) == unhex("1234") && key_enc(codec.key_i8(), small) == unhex("7f") && key_enc(codec.key_i64(), big) == unhex("7ffffffffffffffe") && key_enc(codec.key_i32(), zero) == unhex("80000000") && key_enc(codec.key_bytes(), nul) == unhex("61 00ff 62 0000") && key_enc(codec.key_string(), "") == unhex("0000") && result.unwrap(codec.key_schema(codec.key_u64())) == unhex("02 0000000000000000 06")
 }
 
 fn key_enc[T](k: codec.Key[T], x: T) -> Bytes {

@@ -4,31 +4,27 @@ Sources:
 - Hirsel side: `core/twins/tally/tally.hirsel`, which uses `std.tally`.
 - Rust twin: `core/twins/tally/tally.rs` (`tally atomic N` and `tally local N`).
 
-Each side runs four tasks (or threads) that each add 1 N times, then prints the folded total.
+Each side runs four tasks (or threads) that each add 1 N times, then prints the folded total. The Hirsel worker adds with `std.tally.update(mut h, fn(mut n: u64) { n += 1 })`.
 
 Method:
-- The release compiler and the shipping fat-LTO runtime are pinned by `core/tools/measurement_artifacts.py`.
-- Hirsel is measured optimised (LLVM `--release`) and in development (Cranelift dev).
+- The release compiler (sha256 75dd466a…) and the shipping fat-LTO runtime (sha256 0c8ba6b3…) are pinned by `core/tools/measurement_artifacts.py`, built from main at 41493a1a.
+- Hirsel is measured optimised (LLVM `--release`), with Cranelift `--release`, and in development (Cranelift dev).
 - Rust uses the S4 flags (rustc 1.99, target-cpu x86-64, overflow checks on, CGU 1) at opt 3 and at opt 0.
 - Runs are pinned to CPU 16 while holding /tmp/hirsel-langarena-measure.lock.
-- Counts are `perf stat -e instructions:u` over the whole process, with 5 samples per point.
+- Counts are `perf stat -e instructions:u` over the whole process, with 5 samples per point; wall is the median of 5 unprofiled runs.
 - Per add = (median at N=250,000 − median at N=0) / 1,000,000 adds.
-- Raw samples and the script are in /workspace/code/hirsel-briefs/std-seed-api-889/tally/.
+- Raw samples, the scripts and the worker's disassembly are in /workspace/code/hirsel-briefs/std-seed-api-889/tally/.
 
-| instructions per add | optimised | development |
-|---|---:|---:|
-| Hirsel `std.tally.add` | 18.0 | 142.0 |
-| Rust `AtomicU64::fetch_add` (Relaxed) | 1.25 | 72.0 |
-| Rust per-thread u64, joined | 0.0 (the loop folds to `part = n`) | 60.0 |
+| per add (wall: whole run at N=250,000) | optimised | Cranelift release | development |
+|---|---:|---:|---:|
+| Hirsel `std.tally.update` | 1.0 instructions (1.41 ms) | 51.0 (5.46 ms) | 79.0 (6.99 ms) |
+| Rust `AtomicU64::fetch_add` (Relaxed) | 1.25 (3.38 ms) | | 72.0 (8.92 ms) |
+| Rust per-thread u64, joined | 0.0 (1.50 ms; the loop folds to `part = n`) | | 60.0 (7.63 ms) |
 
-## Why the gap is 18 against the study's 1.0
+Startup alone (N=0) is 1.3 to 1.7 ms on every row.
 
-The study's handle held a bare `u64` and added inline. `std.tally.Handle[T]` holds its `combine: fn(take T, take T) -> T` in the resource, so each add is:
-- an indirect call to `combine` (5 instructions in the callee for a checked u64 sum);
-- the call itself;
-- the Option partial's tag store and value store;
-- the loop.
+## Why LLVM reaches 1.0
 
-LLVM cannot see which function the field holds, so it cannot inline or hoist it, even in the whole-program release module. The cost is the price of a general combine stored in data. Removing it needs either:
-- the engine to specialise a callee that is constant-propagated through a resource field (a core change); or
-- a call-site combine (`add(mut h, x, f)`), which changes the API.
+The combine on the hot path is the call-site closure, a direct call that LLVM inlines, and the partial is a plain `u64` with no Option tag. LLVM keeps the partial in a register, hoists the overflow check out of the loop (it counts how many increments fit before the u64 limit) and steps four adds per four-instruction iteration; the partial is stored back once. The function stored at `new` (`combine`) runs only in `finish`, once per handle.
+
+The Cranelift rows (51 and 79) were not profiled in this pass.

@@ -1,6 +1,6 @@
 // Contract tests for `tally` (core/std/tally.hirsel). Each oracle is derived by hand from
-// the contract: finish returns zero folded with the handle partials in handle (issue)
-// order. Laws with tasks run on the native engines only (the evaluator has no tasks);
+// the contract: each handle's partial starts as start() and changes in place by
+// `update`; finish returns start() folded with the partials in handle (issue) order. Laws with tasks run on the native engines only (the evaluator has no tasks);
 // a `// schedule: seeds N` line before a law repeats the law under N seeded schedules, and the shim
 // refuses a law whose seeds all produced one event stream.
 fn sum_f64(take a: f64, take b: f64) -> f64 {
@@ -11,10 +11,34 @@ fn sum_u64(take a: u64, take b: u64) -> u64 {
     a + b
 }
 
+fn zero_f64() -> f64 {
+    0.0
+}
+
+fn zero_u64() -> u64 {
+    0
+}
+
+fn empty() -> String {
+    string.new()
+}
+
 fn concat(take a: String, take b: String) -> String {
     let mut s = take a
     result.unwrap(string.push(mut s, b))
     s
+}
+
+fn add(mut h: tally.Handle[u64], x: u64) {
+    tally.update(mut h, fn(mut n: u64) {
+        n += x
+    })
+}
+
+fn put(mut h: tally.Handle[String], piece: String) {
+    tally.update(mut h, fn(mut s: String) {
+        result.unwrap(string.push(mut s, piece))
+    })
 }
 
 fn issue[T: send](mut t: tally.Tally[T]) -> tally.Handle[T] {
@@ -37,13 +61,15 @@ fn float_part(take h0: tally.Handle[f64]) {
     } else {
         1.0
     }
-    tally.add(mut h, x)
+    tally.update(mut h, fn(mut s: f64) {
+        s += x
+    })
 }
 
 // schedule: seeds 32
 // expect: run float_sum_in_handle_order(tasks) = true
 fn float_sum_in_handle_order(tasks: Tasks) -> bool waits {
-    let mut t: tally.Tally[f64] = result.unwrap(tally.new(4, 0.0, sum_f64))
+    let mut t: tally.Tally[f64] = result.unwrap(tally.new(4, zero_f64, sum_f64))
     let a = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), float_part))
     let b = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), float_part))
     let c = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), float_part))
@@ -57,27 +83,28 @@ fn float_sum_in_handle_order(tasks: Tasks) -> bool waits {
 
 // Handle 0 adds "a" then "b", handle 1 adds "c", flushes, then adds "d" and "e",
 // handle 2 adds nothing, handle 3 adds "f". Handle 1's slot folds its parts in send
-// order ("c" then "de"), so the fold is "" + "ab" + "cde" + "f".
+// order ("c" then "de"), so the fold is "" + "ab" + "cde" + "" + "f". A tally of five
+// gives a queue of five: room for the flush and the four cleanups while the owner joins.
 fn string_part(take h0: tally.Handle[String]) waits {
     let mut h = take h0
     let i = tally.index(h)
     if i == 0 {
-        tally.add(mut h, result.unwrap(string.from("a")))
-        tally.add(mut h, result.unwrap(string.from("b")))
+        put(mut h, result.unwrap(string.from("a")))
+        put(mut h, result.unwrap(string.from("b")))
     } else if i == 1 {
-        tally.add(mut h, result.unwrap(string.from("c")))
+        put(mut h, result.unwrap(string.from("c")))
         tally.flush(mut h)
-        tally.add(mut h, result.unwrap(string.from("d")))
-        tally.add(mut h, result.unwrap(string.from("e")))
+        put(mut h, result.unwrap(string.from("d")))
+        put(mut h, result.unwrap(string.from("e")))
     } else if i == 3 {
-        tally.add(mut h, result.unwrap(string.from("f")))
+        put(mut h, result.unwrap(string.from("f")))
     }
 }
 
 // schedule: seeds 32
 // expect: run concatenation_in_handle_order(tasks) = true
 fn concatenation_in_handle_order(tasks: Tasks) -> bool waits {
-    let mut t: tally.Tally[String] = result.unwrap(tally.new(4, string.new(), concat))
+    let mut t: tally.Tally[String] = result.unwrap(tally.new(5, empty, concat))
     let a = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), string_part))
     let b = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), string_part))
     let c = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), string_part))
@@ -91,19 +118,22 @@ fn concatenation_in_handle_order(tasks: Tasks) -> bool waits {
 
 fn failing_part(take h0: tally.Handle[u64]) {
     let mut h = take h0
-    tally.add(mut h, 5)
-    tally.add(mut h, 6)
+    add(mut h, 5)
+    add(mut h, 6)
     if tally.index(h) == 0 {
         fail("stop")
     }
 }
 
-// The failing task's handle is cleaned by FAIL-8 and delivers 11; the other delivers
-// 11 too, and the join reports the failure.
+// Each partial starts at 100. The failing task's handle is cleaned by FAIL-8 and
+// delivers 111; the other delivers 111 too, and the join reports the failure. finish
+// folds 100 + 111 + 111.
 // schedule: seeds 16
 // expect: run failed_task_delivers(tasks) = true
 fn failed_task_delivers(tasks: Tasks) -> bool waits {
-    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, 100, sum_u64))
+    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, fn() -> u64 {
+        100
+    }, sum_u64))
     let a = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), failing_part))
     let b = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), failing_part))
     let failed = match task.join(take a) {
@@ -111,7 +141,7 @@ fn failed_task_delivers(tasks: Tasks) -> bool waits {
         _ => false,
     }
     result.unwrap(task.join(take b))
-    failed && tally.finish(take t) == 122
+    failed && tally.finish(take t) == 322
 }
 
 type Parked: send {
@@ -124,14 +154,14 @@ type Parked: send {
 fn parked_part(take p: Parked) waits {
     let Parked(h: take h0, ready: ready, gate: gate) = take p
     let mut h = take h0
-    tally.add(mut h, 7)
+    add(mut h, 7)
     result.unwrap(channel.send(ready, ()))
     let _ = channel.receive(gate)
 }
 
 fn one_part(take h0: tally.Handle[u64]) {
     let mut h = take h0
-    tally.add(mut h, 1)
+    add(mut h, 1)
 }
 
 // A cancelled task's handle is cleaned at its cancellation point and delivers 7; a
@@ -139,7 +169,7 @@ fn one_part(take h0: tally.Handle[u64]) {
 // schedule: seeds 16
 // expect: run cancelled_task_delivers(tasks) = true
 fn cancelled_task_delivers(tasks: Tasks) -> bool waits {
-    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, 0, sum_u64))
+    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, zero_u64, sum_u64))
     let (ready_tx, ready_rx): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
     let (gate_tx, gate_rx): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
     let p = Parked(h: issue(mut t), ready: take ready_tx, gate: take gate_rx)
@@ -164,7 +194,7 @@ fn late_part(take h0: tally.Handle[u64]) {
     for _ in 0u64 .. 100 {
         task.check_cancel()
     }
-    tally.add(mut h, 9)
+    add(mut h, 9)
 }
 
 // The owner calls finish before joining (or even running) the child that holds a
@@ -173,7 +203,7 @@ fn late_part(take h0: tally.Handle[u64]) {
 // schedule: seeds 16
 // expect: run leaked_handle_delays_finish(tasks) = true
 fn leaked_handle_delays_finish(tasks: Tasks) -> bool waits {
-    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, 0, sum_u64))
+    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, zero_u64, sum_u64))
     let a = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), late_part))
     let b = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), late_part))
     let total = tally.finish(take t)
@@ -185,15 +215,18 @@ fn leaked_handle_delays_finish(tasks: Tasks) -> bool waits {
 fn counting_part(take h0: tally.Handle[u64]) {
     let mut h = take h0
     for _ in 0u64 .. 500000 {
-        tally.add(mut h, 1)
+        tally.update(mut h, fn(mut n: u64) {
+            n += 1
+        })
     }
 }
 
-// A million adds and at most 64 CONC-10 events in the whole run: add is not an event.
+// A million updates and at most 64 CONC-10 events in the whole run: update is not an
+// event.
 // schedule: seeds 8 max_events 64
-// expect: run add_is_not_an_event(tasks) = true
-fn add_is_not_an_event(tasks: Tasks) -> bool waits {
-    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, 0, sum_u64))
+// expect: run update_is_not_an_event(tasks) = true
+fn update_is_not_an_event(tasks: Tasks) -> bool waits {
+    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, zero_u64, sum_u64))
     let a = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), counting_part))
     let b = result.unwrap(task.spawn(tasks, bytes 65536, issue(mut t), counting_part))
     result.unwrap(task.join(take a))
@@ -211,31 +244,35 @@ fn issued(r: Result[tally.Handle[u64], tally.HandleError]) -> u64 {
 }
 
 // Two handles fit; the third is Exhausted and changes nothing: indexes stay 0 and 1
-// and finish folds 1 + 10 + 20.
+// and, every partial starting at 1, finish folds 1 + (1 + 10) + (1 + 20).
 // expect: run capacity_refuses_extra_handle() = 1
 fn capacity_refuses_extra_handle() -> u64 waits {
-    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, 1, sum_u64))
+    let mut t: tally.Tally[u64] = result.unwrap(tally.new(2, fn() -> u64 {
+        1
+    }, sum_u64))
     let mut h0 = issue(mut t)
     let mut h1 = issue(mut t)
     let third = issued(tally.handle(mut t))
-    tally.add(mut h0, 10)
-    tally.add(mut h1, 20)
+    add(mut h0, 10)
+    add(mut h1, 20)
     let ok = tally.index(h0) == 0 && tally.index(h1) == 1
     {
         let cleaned = take h0
         let cleaned1 = take h1
     }
-    if ok && tally.finish(take t) == 31 {
+    if ok && tally.finish(take t) == 33 {
         third
     } else {
         100
     }
 }
 
-// A zero-capacity tally issues nothing and finishes with zero.
+// A zero-capacity tally issues nothing and finishes with start().
 // expect: run zero_capacity() = 1042
 fn zero_capacity() -> u64 waits {
-    let mut t: tally.Tally[u64] = result.unwrap(tally.new(0, 42, sum_u64))
+    let mut t: tally.Tally[u64] = result.unwrap(tally.new(0, fn() -> u64 {
+        42
+    }, sum_u64))
     issued(tally.handle(mut t)) * 1000 + tally.finish(take t)
 }
 
@@ -243,7 +280,7 @@ fn zero_capacity() -> u64 waits {
 // expect: run refused_new() = true
 fn refused_new() -> bool {
     let r = bound bytes 0 {
-        match tally.new(4, 0u64, sum_u64) {
+        match tally.new(4, zero_u64, sum_u64) {
             Ok(_) => false,
             Error(_) => true,
         }
@@ -258,7 +295,7 @@ fn refused_new() -> bool {
 // nothing: the next handle is index 0 and the only partial is its 5.
 // expect: run refused_handle_changes_nothing() = 2005
 fn refused_handle_changes_nothing() -> u64 waits {
-    let mut t: tally.Tally[u64] = result.unwrap(tally.new(1, 0, sum_u64))
+    let mut t: tally.Tally[u64] = result.unwrap(tally.new(1, zero_u64, sum_u64))
     let r = bound bytes 0 {
         issued(tally.handle(mut t))
     }
@@ -267,7 +304,7 @@ fn refused_handle_changes_nothing() -> u64 waits {
         Error(_) => 99,
     }
     let mut h = issue(mut t)
-    tally.add(mut h, 5)
+    add(mut h, 5)
     let at = tally.index(h)
     {
         let cleaned = take h
@@ -286,18 +323,18 @@ type Flusher: send {
 fn flushing_part(take p: Flusher) waits {
     let Flusher(h: take h0, ready: ready, gate: gate) = take p
     let mut h = take h0
-    tally.add(mut h, 3)
+    add(mut h, 3)
     tally.flush(mut h)
     result.unwrap(channel.send(ready, ()))
     result.unwrap(channel.receive(gate))
-    tally.add(mut h, 4)
+    add(mut h, 4)
     tally.flush(mut h)
-    tally.add(mut h, 5)
+    add(mut h, 5)
 }
 
 fn zero_part(take h0: tally.Handle[u64]) {
     let mut h = take h0
-    tally.add(mut h, 0)
+    add(mut h, 0)
 }
 
 // read folds what has arrived; a second task delivers 0 at any point so that schedules
@@ -308,7 +345,7 @@ fn zero_part(take h0: tally.Handle[u64]) {
 // schedule: seeds 16
 // expect: run read_sees_flushes(tasks) = 312012
 fn read_sees_flushes(tasks: Tasks) -> u64 waits {
-    let mut t: tally.Tally[u64] = result.unwrap(tally.new(3, 0, sum_u64))
+    let mut t: tally.Tally[u64] = result.unwrap(tally.new(3, zero_u64, sum_u64))
     let (ready_tx, ready_rx): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
     let (gate_tx, gate_rx): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
     let p = Flusher(h: issue(mut t), ready: take ready_tx, gate: take gate_rx)

@@ -1,9 +1,13 @@
-// The Hirsel side of the tally twin (tally.rs): four tasks each add 1 N times through
-// their own std.tally handle; finish folds the four partials and main prints the total.
-// The measurement substitutes N.
+// The Hirsel side of the tally twin (tally.rs): four tasks each add 1 N times to their
+// own std.tally handle's partial with `update`; finish folds the four partials and main
+// prints the total. The measurement substitutes N.
 const N: u64 = 250000
 
 type AppError = Io(WriteError) | Mem(Capacity) | Issue(std.tally.HandleError) | Join(JoinError)
+
+fn zero() -> u64 {
+    0
+}
 
 fn sum(take a: u64, take b: u64) -> u64 {
     a + b
@@ -13,7 +17,9 @@ fn worker(take h0: std.tally.Handle[u64]) {
     let mut h = take h0
     let mut i: u64 = 0
     while i < N {
-        std.tally.add(mut h, 1)
+        std.tally.update(mut h, fn(mut n: u64) {
+            n += 1
+        })
         i += 1
     }
 }
@@ -37,7 +43,7 @@ fn joined(take t: Task[()]) -> Result[(), AppError] waits {
 }
 
 pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
-    let mut t: std.tally.Tally[u64] = match std.tally.new(4, 0u64, sum) {
+    let mut t: std.tally.Tally[u64] = match std.tally.new(4, zero, sum) {
         Ok(take t) => take t,
         Error(c) => return Error(Mem(c)),
     }

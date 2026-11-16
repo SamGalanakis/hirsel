@@ -7,17 +7,15 @@ persistent B+ tree with maximum fan-out 32 and minimum non-root occupancy 16.
 `new` allocates nothing, `snapshot` shares the root in O(1) without allocation,
 and `len` reads its entry count. `get`, `first` and `last` borrow one version.
 An update returns a new version while every held version retains its contents.
-Leaf keys and values occupy contiguous node lists. Each branch owns one
-Arc[List[K]] separator block alongside its child-holder list. Sharing is the
-client's choice of leaf payload type, for example Arc[Bytes]. A path copy shares
-an unchanged separator block in O(1); changing a child minimum or boundary
-creates a new flat block and clones its keys once. Branch comparisons borrow
-that contiguous array, with one owner indirection per branch rather than per
-comparison. There are no per-row Arcs or duplicated comparison prefixes.
-Branch search uses an upper bound with one comparison per step; leaf search
-uses a direct less-than comparison. Shared leaf insertion copies each entry
-once directly into its final leaf, including both halves of a split. Splitting
-a temporary owned leaf moves its entries without cloning their payloads. Resources fail the ordinary `shareable` bound.
+Each leaf holds a contiguous list of Arc[Entry[K,V]] rows. Path copying
+shares each unchanged row without copying its key or value. Unique node
+holders keep in-place editing, including the left half of a split. Branches
+share an Arc of separator holders while boundaries stay unchanged. New
+separators retain their minimum leaf row; decoded separators retain the
+supplied key in an Arc, preserving the decoder's exact input. Rebuilding
+separators shares these holders without copying payloads. Branch search uses
+an upper bound and leaf search uses a lower bound, with a right-edge probe.
+Splits and merges transfer or share row holders. Resources fail the ordinary `shareable` bound.
 Versions are sendable; last-holder release frees unreachable nodes and payloads
 through the existing constant-stack Arc worklist.
 
@@ -47,10 +45,9 @@ allocation is needed. This is the transaction-friendly recovery contract;
 All insert forms return `Ok((map, Option[Replaced[K,V]]))`. New keys return
 `None`. Replacements return the value that was stored before the update, from
 the insertion descent without a second lookup or payload clone. Read it with
-`replaced_value(old) -> View[V] in old`. The opaque, sendable result moves the
-old value out of a unique leaf; for a shared leaf it owns an Arc and slot.
-Consequently it can retain the whole old leaf until dropped. It allocates no
-extra box. Snapshots keep their previous values. Error results have no replaced
+`replaced_value(old) -> View[V] in old`. The opaque, sendable result moves the old value out of a unique row or
+retains just the old shared row through its Arc, independently of its leaf.
+It allocates no extra box. Snapshots keep their previous values. Error results have no replaced
 entry. A caller uninterested in the entry binds and drops the second tuple field.
 
 | form | map input | success | Capacity | reason today |
@@ -78,16 +75,16 @@ Checkpoint writers use `root` for an Arc holder and `node_id`, `node_level`,
 nodes. Node level is zero at leaves. Leaf count is the number of key/value
 pairs; branch count is the number of children and their minimum keys. Keys,
 values and children outside their count return None. Branches have no values;
-leaves have no children. Node fields are stamp:u64, depth:u64, size:u64, three 24-byte List headers
-and lows:Option[Arc[List[K]]]. Leaves have inline keys/values, no children and
-None lows. Branches have empty inline keys/values, children and Some lows.
-Logical node charge is 120 bytes plus the list capacities times their element
-sizes: K/V at leaves, Arc[Node] children at branches. Full u64/u64 leaves charge
-632 bytes. A separator block charges 32 bytes for its Arc and List header plus
-capacity times K's size and owned payload allocations. Unchanged path copies
-share that block; changed boundaries rebuild it. Consuming updates reserve spare
-leaf slots explicitly; fan-out by count stays 32. Checkpoint node views still
-expose one key per child and no representation-specific holder.
+leaves have no children. A node has stamp, depth, size, a row-holder list, a child-holder list and an
+optional shared separator list. Leaves have rows and no children or separators;
+branches have children and separators and no rows. The logical node charge is
+96 bytes, plus list backing capacities. Each row pays one counted allocation
+for K and V and their owned payloads; shared holders never charge those payloads
+again. A full u64/u64 leaf charges 1120 bytes: 96 for the node, 256 for its
+32 holders and 32 times 24 for its rows. Sharing reduces path-copy work and
+payload duplication at the cost of one allocation per stored row. Consuming
+updates reserve spare leaf slots explicitly; fan-out by count stays 32.
+Checkpoint views expose keys and values independently of their holders.
 
 A checkpoint cutoff can skip a whole subtree whose id is already persisted.
 `leaf(id,take keys,take values)` and `branch(id,take low_keys,take children)`

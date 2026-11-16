@@ -1044,3 +1044,39 @@ fn owned_replaced_checksums() -> bool {
     }
     first_sum == 605550 && second_sum == 606650 && held_sum == 606650 && final_sum == 607750 && omap.len(m) == 1100 && omap.len(held) == 1100
 }
+
+fn large_byte_row(i: u64) -> Bytes {
+    let mut out: Bytes = result.unwrap(list.with_capacity(1024))
+    for _ in 0u64 .. 1024 {
+        result.unwrap(list.push(mut out, int.narrow(i)))
+    }
+    take out
+}
+
+// A copied 32-row leaf needs 256 bytes of holders, one node and one new row.
+// Its 64 KiB of existing payload must remain shared within this 8 KiB bound.
+// expect: run shared_payload_copy_budget() = true
+fn shared_payload_copy_budget() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[Bytes, Bytes] = omap.new()
+    for i in 0u64 .. 32 {
+        let (take next_map, _) = result.unwrap(omap.insert(mut ids, m, large_byte_row(i), large_byte_row(i)))
+        m = take next_map
+    }
+    let held = omap.snapshot(m)
+    let key = large_byte_row(16)
+    let value = large_byte_row(99)
+    let answer = result.unwrap(bound bytes 8192 {
+        omap.insert_owned(mut ids, take m, take key, take value)
+    })
+    match take answer {
+        Error(_) => false,
+        Ok((take next_map, take old)) => {
+            let old_row = option.unwrap(take old)
+            let original = option.unwrap(omap.get(held, large_byte_row(16)))
+            let changed = option.unwrap(omap.get(next_map, large_byte_row(16)))
+            let old_value = omap.replaced_value(old_row)
+            original[0] == 16 && original[1023] == 16 && changed[0] == 99 && changed[1023] == 99 && old_value[0] == 16 && omap.len(held) == 32 && omap.len(next_map) == 32
+        }
+    }
+}

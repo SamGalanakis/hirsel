@@ -43,3 +43,59 @@ fn test_assembly_indexed_recreate(c: Clock, r: Random) -> Result[(), ()] waits {
         Error(())
     }
 }
+
+fn shared_store_bytes(i: u64) -> Bytes {
+    let mut out: Bytes = result.unwrap(list.with_capacity(1024))
+    for _ in 0u64 .. 1024 {
+        result.unwrap(list.push(mut out, int.narrow(i)))
+    }
+    take out
+}
+
+// One overwritten row needs its log copies and a copied path, not 64 KiB of
+// unchanged leaf payload. The old snapshot must still contain all 32 rows.
+pub fn law_shared_payload_copy(c: Clock) -> bool {
+    let mut db = test_db(c, 1073741824)
+    for i in 0u64 .. 32 {
+        let key = shared_store_bytes(i)
+        let value = shared_store_bytes(i)
+        let _ = result.unwrap(execute(mut db, i, fn(mut tx: Tx) -> Result[(), Error] {
+            put_bytes(mut tx, 1, key, value)
+        }))
+    }
+    let held = snapshot(db)
+    let key = shared_store_bytes(16)
+    let value = shared_store_bytes(99)
+    let attempted = result.unwrap(bound bytes 32768 {
+        execute(mut db, 32, fn(mut tx: Tx) -> Result[(), Error] {
+            put_bytes(mut tx, 1, key, value)
+        })
+    })
+    match take attempted {
+        Ok(Committed(_)) => {},
+        _ => return false
+    }
+    let now = snapshot(db)
+    for i in 0u64 .. 32 {
+        let old = option.unwrap(result.unwrap(get_bytes(held, 1, shared_store_bytes(i))))
+        let current = option.unwrap(result.unwrap(get_bytes(now, 1, shared_store_bytes(i))))
+        let expected = if i == 16 {
+            99u64
+        } else {
+            i
+        }
+        if list.len(old) != 1024 || old[0] != int.narrow(i) || old[1023] != int.narrow(i) || list.len(current) != 1024 || current[0] != int.narrow(expected) || current[1023] != int.narrow(expected) {
+            return false
+        }
+    }
+    version(held) == 32 && version(now) == 33
+}
+
+@test
+fn test_shared_payload_copy(c: Clock) -> Result[(), ()] {
+    if law_shared_payload_copy(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

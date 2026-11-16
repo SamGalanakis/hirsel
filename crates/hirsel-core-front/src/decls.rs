@@ -2935,12 +2935,19 @@ fn write_canonical<const LAYOUT: bool>(
     s: &mut String,
 ) {
     use std::fmt::Write;
+    let child = |ty, s: &mut String| {
+        if LAYOUT {
+            t.with_layout_name(decls, ty, |name| s.push_str(name.as_ref()));
+        } else {
+            write_canonical::<false>(decls, t, ty, root, s);
+        }
+    };
     let list = |xs: &[TyId], s: &mut String| {
         for (i, &x) in xs.iter().enumerate() {
             if i > 0 {
                 s.push_str(", ");
             }
-            write_canonical::<LAYOUT>(decls, t, x, root, s);
+            child(x, s);
         }
     };
     match t.kind(ty) {
@@ -2969,20 +2976,20 @@ fn write_canonical<const LAYOUT: bool>(
             None => s.push_str("in r"),
         },
         TyKind::Anchored(x, r) => {
-            write_canonical::<LAYOUT>(decls, t, *x, root, s);
+            child(*x, s);
             if !LAYOUT {
                 s.push(' ');
-                write_canonical::<LAYOUT>(decls, t, *r, root, s);
+                child(*r, s);
             }
         }
         TyKind::Array(x, n) => {
             s.push_str("Inline[");
-            write_canonical::<LAYOUT>(decls, t, *x, root, s);
+            child(*x, s);
             let _ = write!(s, ", {n}]");
         }
         TyKind::View(x) => {
             s.push_str("View[");
-            write_canonical::<LAYOUT>(decls, t, *x, root, s);
+            child(*x, s);
             s.push(']');
         }
         TyKind::Param(i) => {
@@ -3006,10 +3013,10 @@ fn write_canonical<const LAYOUT: bool>(
                     Mode::Take => "take ",
                     Mode::Bytes => "bytes ",
                 });
-                write_canonical::<LAYOUT>(decls, t, *p, root, s);
+                child(*p, s);
             }
             s.push_str(") -> ");
-            write_canonical::<LAYOUT>(decls, t, *r, root, s);
+            child(*r, s);
             if *w {
                 s.push_str(" waits");
             }

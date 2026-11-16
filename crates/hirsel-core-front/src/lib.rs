@@ -125,6 +125,8 @@ pub struct Program<'a> {
     pub(crate) alias_stack: Vec<(DeclId, Option<Site>)>,
     core_declarations: [std::sync::OnceLock<Option<DeclId>>; PRELUDE.len()],
     structural_codecs: std::sync::OnceLock<Vec<(DeclId, u32)>>,
+    /// Published type spellings shared by body arenas; local types stay local.
+    layout_type_names: std::sync::OnceLock<Vec<std::sync::OnceLock<String>>>,
 }
 
 /// The core types lowering builds, matches or lays out without the program naming
@@ -405,6 +407,7 @@ impl<'a> Program<'a> {
             alias_stack: vec![],
             core_declarations: std::array::from_fn(|_| std::sync::OnceLock::new()),
             structural_codecs: std::sync::OnceLock::new(),
+            layout_type_names: std::sync::OnceLock::new(),
         }
     }
 

@@ -307,6 +307,7 @@ struct LayoutNames<'a> {
     base: &'a Types,
     decls: &'a crate::Rows<crate::decls::TypeDecl>,
     values: std::cell::RefCell<HashMap<TyId, String>>,
+    shared: Option<&'a [std::sync::OnceLock<String>]>,
 }
 impl<'a> Local<'a> {
     pub fn new(base: &'a Types) -> Self {
@@ -326,9 +327,20 @@ impl<'a> Local<'a> {
                 base,
                 decls,
                 values: Default::default(),
+                shared: None,
             }),
             ..Self::new(base)
         }
+    }
+    pub(crate) fn with_program(p: &'a crate::Program<'_>) -> Self {
+        let shared = p.layout_type_names.get_or_init(|| {
+            (0..p.types.len())
+                .map(|_| std::sync::OnceLock::new())
+                .collect()
+        });
+        let mut local = Self::with_decls(&p.types, &p.decls);
+        local.layout_names.as_mut().unwrap().shared = Some(shared);
+        local
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
         crate::cost_scope!("phase", "type interning/hashing");
@@ -440,6 +452,10 @@ impl TyRead for Local<'_> {
                 decls, self, ty,
             )));
         };
+        if let Some(name) = cache.shared.and_then(|names| names.get(ty.0 as usize)) {
+            let name = name.get_or_init(|| crate::decls::uncached_layout_name(decls, self, ty));
+            return read(Cow::Borrowed(name));
+        }
         let values = cache.values.borrow();
         if let Some(name) = values.get(&ty) {
             return read(Cow::Borrowed(name));
@@ -800,6 +816,51 @@ mod interner_tests {
             panic!("tuple")
         };
         assert_eq!(stored.as_ptr(), address, "interner cloned its vector key");
+    }
+
+    #[test]
+    fn published_type_names_are_shared_between_body_arenas() {
+        let (index, modules) = crate::tests::program_inputs("type Local { n: u64 }\n");
+        let p = crate::Program::declare(&index, &modules);
+        let id = p
+            .types
+            .kinds
+            .own_iter()
+            .enumerate()
+            .find_map(|(i, entry)| {
+                matches!(entry.kind, TyKind::Adt(_, _)).then_some(TyId(i as u32))
+            })
+            .unwrap();
+        let first = Local::with_program(&p);
+        let ptr = first.with_layout_name(&p.decls, id, |name| name.as_ptr());
+        let second = Local::with_program(&p);
+        second.with_layout_name(&p.decls, id, |name| {
+            assert!(matches!(name, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(name.as_ptr(), ptr);
+            assert_eq!(
+                name,
+                crate::decls::uncached_layout_name(&p.decls, &second, id)
+            );
+        });
+    }
+
+    #[test]
+    fn layout_names_reuse_shared_argument_spellings() {
+        let (index, modules) = crate::tests::program_inputs("type Local { n: u64 }\n");
+        let p = crate::Program::declare(&index, &modules);
+        let mut local = Local::with_decls(&p.types, &p.decls);
+        let pair = local.intern(TyKind::Tuple(vec![
+            scalar(Scalar::U32),
+            scalar(Scalar::Bool),
+        ]));
+        let array = local.intern(TyKind::Array(pair, 4));
+        assert_eq!(local.layout_name(&p.decls, array), "Inline[(u32, bool), 4]");
+        local.with_layout_name(&p.decls, pair, |name| {
+            assert!(matches!(name, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(name, "(u32, bool)");
+        });
+        let viewed = local.intern(TyKind::View(pair));
+        assert_eq!(local.layout_name(&p.decls, viewed), "View[(u32, bool)]");
     }
 
     #[test]

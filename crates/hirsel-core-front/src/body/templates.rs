@@ -1025,8 +1025,10 @@ impl Emitter {
         if !has_param(t, ty) {
             return;
         }
-        let canonical = crate::decls::layout_name(&p.decls, t, ty);
-        let Some(&row) = self.types.get(&canonical) else {
+        let row = crate::decls::with_layout_name(&p.decls, t, ty, |name| {
+            self.types.get(name.as_ref()).copied()
+        });
+        let Some(row) = row else {
             // A type with no row of its own (a `List[Slot[T]]` is a Seq field) still
             // names rows through its arguments: without their recipes, substitution
             // leaves them rigid under a concrete row (`Pool[A].slots` at `Slot[$0]`).

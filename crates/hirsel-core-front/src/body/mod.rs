@@ -746,7 +746,7 @@ impl Emitter {
         f: usize,
     ) -> Result<(Signature, scalar_abi::SignatureAbi), &'static str> {
         let fd = &p.fns[f];
-        let mut t = Local::with_decls(&p.types, &p.decls);
+        let mut t = Local::with_program(p);
         let arguments: Vec<_> = (0..fd.generics.len())
             .map(|i| t.mk(generic_arg(fd, i)))
             .collect();
@@ -1261,7 +1261,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             definition: f,
             header: item.root,
             params: fd.generics.iter().map(|g| g.bounds).collect(),
-            t: Local::with_decls(&p.types, &p.decls),
+            t: Local::with_program(p),
             e,
             b: Body::default(),
             func: None,

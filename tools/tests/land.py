@@ -148,7 +148,8 @@ class Land(unittest.TestCase):
                                'core/tools/std_native.py': (ROOT / 'core/tools/std_native.py').read_text(),
                                'core/tools/std_native_owners.json': (ROOT / 'core/tools/std_native_owners.json').read_text(),
                                'core/std/example.hirsel': 'pub fn present() -> void {}\n',
-                               'core/std/API.md': '| Module | Extends | Ops | Operations |\n| **total** | | | |\n',
+                               'core/std/API.md': '# API overview\n\n[Operation index](API-INDEX.md). Contracts: api/<module>.md.\n',
+                               'core/std/api/example.md': '# Example\n\nThe example contract.\n',
                                '.gitignore': '.buck2/\n__pycache__/\n'})
         for name, text in files.items():
             (self.lane / name).parent.mkdir(parents=True, exist_ok=True)
@@ -226,22 +227,78 @@ class Land(unittest.TestCase):
         accepted = self.land()
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
 
-    def test_stale_std_api_index_refuses_the_push_until_regenerated(self):
+    def test_stale_std_api_index_is_regenerated_and_committed(self):
         source = self.lane / 'core/std/example.hirsel'
         source.write_text(source.read_text() + 'pub fn added() -> void {}\n')
         self.git(self.lane, 'add', 'core/std/example.hirsel')
         self.git(self.lane, 'commit', '-qm', 'add an operation without updating its index')
-        refused = self.land()
-        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
-        self.assertIn('FAIL  screen: std API index', refused.stdout)
-        self.assertIn('operation index is stale', refused.stdout)
-        self.assertEqual(self.main_log(), ['base'])
-        subprocess.run([sys.executable, 'core/tools/std_api_index.py', '--write'],
-                       cwd=self.lane, check=True)
-        self.git(self.lane, 'add', 'core/std/API.md')
-        self.git(self.lane, 'commit', '-qm', 'regenerate the operation index')
         accepted = self.land()
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        index = self.git(self.origin, 'show', 'main:core/std/API-INDEX.md')
+        self.assertIn('present, added', index)
+        self.assertIn('| **total** | **0 of 1** | **2** | |', index)
+
+    def std_module(self, lane, name, stale=False):
+        source, contract = f'core/std/{name}.hirsel', f'core/std/api/{name}.md'
+        (lane / source).write_text(f'pub fn {name}_operation() -> void {{}}\n')
+        (lane / contract).write_text(f'# {name}\n\nThe {name} contract.\n')
+        if not stale:
+            subprocess.run([sys.executable, 'core/tools/std_api_index.py', '--write'], cwd=lane, check=True)
+        self.git(lane, 'add', source, contract, 'core/std/API-INDEX.md')
+
+    def assert_std_index(self, names):
+        index = self.git(self.origin, 'show', 'main:core/std/API-INDEX.md')
+        self.assertIn(f'| **total** | **0 of {len(names) + 1}** | **{len(names) + 1}** | |', index)
+        for name in names:
+            self.assertIn(f'| [{name}](api/{name}.md) |  | 1 | {name}_operation |', index)
+            self.assertIn(f'# {name}', self.git(self.origin, 'show', f'main:core/std/api/{name}.md'))
+            self.assertIn(f'pub fn {name}_operation', self.git(self.origin, 'show', f'main:core/std/{name}.hirsel'))
+
+    def test_two_std_modules_land_sequentially_without_manual_rebase(self):
+        other = self.top / 'other'
+        self.git(self.lane, 'worktree', 'add', '-qb', 'other', str(other), 'HEAD')
+        (other / '.buck2/bin').mkdir(parents=True)
+        shutil.copy(self.lane / '.buck2/bin/buck2', other / '.buck2/bin/buck2')
+        for lane, name in ((self.lane, 'alpha'), (other, 'beta')):
+            self.std_module(lane, name)
+            self.git(lane, 'commit', '-qm', f'add {name}')
+        self.finish_land(self.start_land(self.lane))
+        self.assert_std_index(['alpha'])
+        output = self.finish_land(self.start_land(other))
+        self.assertIn('resolved generated conflict in core/std/API-INDEX.md', output)
+        self.assert_std_index(['alpha', 'beta'])
+
+    def test_two_std_modules_land_in_one_batch(self):
+        checks, lanes, lands, holder = self.batch_lanes(
+            2, prepare=lambda lane, i: self.std_module(lane, ('alpha', 'beta')[i]))
+        holder.unlink()
+        outputs = [self.finish_land(land) for land in lands]
+        self.assertIn('batch of 2 tickets', outputs[0])
+        self.assertEqual(sum(out.count('pass  workspace build') for out in outputs), 1)
+        self.assert_std_index(['alpha', 'beta'])
+
+    def test_stale_index_does_not_hide_a_real_module_contract_conflict(self):
+        self.conflicting_lanes('core/std/api/example.md')
+        source = self.lane / 'core/std/example.hirsel'
+        source.write_text(source.read_text() + 'pub fn added() -> void {}\n')
+        self.git(self.lane, 'add', 'core/std/example.hirsel')
+        self.git(self.lane, 'commit', '-qm', 'stale generated index and conflicting contract')
+        before = self.git(self.origin, 'rev-parse', 'main')
+        refused = self.land()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('conflicts in: core/std/api/example.md', refused.stdout)
+        self.assertEqual(self.git(self.origin, 'rev-parse', 'main'), before)
+
+    def test_std_index_checks_and_rewrites_the_whole_document(self):
+        path = self.lane / 'core/std/API-INDEX.md'
+        wanted = path.read_bytes()
+        path.write_bytes(wanted + b'=======\n| stale row |\n>>>>>>> orphan\n')
+        checked = subprocess.run([sys.executable, 'core/tools/std_api_index.py', '--check'],
+                                 cwd=self.lane, capture_output=True, text=True)
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn('operation index is stale', checked.stderr)
+        subprocess.run([sys.executable, 'core/tools/std_api_index.py', '--write'], cwd=self.lane, check=True)
+        self.assertEqual(path.read_bytes(), wanted)
 
     def test_red_whole_core_suite_refuses_the_push(self):
         (self.lane / 'broken-core-suite').write_text('broken evaluator body\n')
@@ -694,7 +751,7 @@ if pathlib.Path('lane-0.txt').exists() and not pathlib.Path('lane-1.txt').exists
         [line] = [line for line in output.splitlines() if line.startswith('land: landed ') and ' led by ' in line]
         return line.rsplit(': ', 1)[1].split()
 
-    def batch_lanes(self, count, edits=None, old=(), red=None, hold_build=False):
+    def batch_lanes(self, count, edits=None, old=(), red=None, hold_build=False, prepare=None):
         """`count` worktrees with one commit each, queued in lane order behind a live ticket this test holds.
 
         Lanes in `old` are queued as an older tools/land queues them: a ticket
@@ -733,9 +790,12 @@ if not (root / 'release-build').exists():
             shutil.copy(self.lane / '.buck2/bin/buck2', lane / '.buck2/bin/buck2')
             lanes.append(lane)
         for i, lane in enumerate(lanes):
-            path, text = (edits or {}).get(i, (f'lane-{i}.txt', f'{i}\n'))
-            (lane / path).write_text(text)
-            self.git(lane, 'add', path)
+            if prepare:
+                prepare(lane, i)
+            else:
+                path, text = (edits or {}).get(i, (f'lane-{i}.txt', f'{i}\n'))
+                (lane / path).write_text(text)
+                self.git(lane, 'add', path)
             self.git(lane, 'commit', '-qm', f'lane {i}')
         queue = runpy.run_path(str(ROOT / 'tools/land'))['LandQueue']
         directory = self.lane / '.git/land-queue'

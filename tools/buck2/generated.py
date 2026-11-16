@@ -1,5 +1,4 @@
-"""The repository's generated files. No lane commits one, so no rebase can
-conflict on one.
+"""The repository's generated files, with separate tracked and ignored owners.
 
 BUILD_INPUTS are what sync.py derives from the Cargo workspace and the
 committed measurements and pins. They are gitignored and generated on demand:
@@ -36,6 +35,10 @@ PARTS = {
                     'tools/buck2/workspace-metadata.json', 'tools/native-toolchain/pins.bzl'),
 }
 BUILD_INPUTS = tuple(sorted(path for outputs in PARTS.values() for path in outputs))
+# Tracked documents are regenerated after every successful rebase and included
+# in the candidate commit. Unlike BUILD_INPUTS, these remain tracked on main.
+DOCUMENTS = {'core/std/API-INDEX.md': ('core/tools/std_api_index.py', '--write')}
+REGENERATED = (*BUILD_INPUTS, *DOCUMENTS)
 STAMP = '.buck2/sync-stamp.json'
 SYNC_HINT = 'run python3 tools/buck2/sync.py'
 

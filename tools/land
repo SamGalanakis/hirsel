@@ -683,19 +683,39 @@ def rebase(base, *selection):
     `selection` is `upstream commit` for a batch ticket: its commits after
     origin/main, replayed onto the batch so far without moving any branch.
     Ignored build inventories are removed from Git and sync.py regenerates
-    them before checks.
+    them before checks. Tracked generated documents are restored by their
+    registered generators, then amended into the rebased candidate.
     """
-    result = git('rebase', *(['--onto', base, *selection] if selection else [base]))
+    # Keep rerere from staging a previous generated deletion behind our back:
+    # every conflict must still be visible to the ownership check below.
+    result = git('-c', 'rerere.autoupdate=false', 'rebase',
+                 *(['--onto', base, *selection] if selection else [base]))
     while result.returncode:
         conflicts = git('diff', '--name-only', '--diff-filter=U').stdout.splitlines()
-        if not conflicts or any(path not in generated.BUILD_INPUTS for path in conflicts):
+        if not conflicts or any(path not in generated.REGENERATED for path in conflicts):
             return result
         for path in conflicts:
             resolved = git('rm', '-f', '--ignore-unmatch', '--', path)
             if resolved.returncode:
                 return resolved
             say(f'resolved generated conflict in {path}; its generator owns regeneration')
-        result = git('-c', 'core.editor=true', 'rebase', '--continue')
+        result = git('-c', 'core.editor=true', '-c', 'rerere.autoupdate=false', 'rebase', '--continue')
+    # Never amend the shared base when all submitted commits were already landed.
+    if not git('rev-list', f'{base}..HEAD').stdout.strip():
+        return result
+    for path, command in generated.DOCUMENTS.items():
+        written = run([PY, *command])
+        if written.returncode:
+            say(f'cannot regenerate {path}: ' + first_error(written.stderr + written.stdout))
+            return written
+    if generated.DOCUMENTS:
+        staged = git('add', '--', *generated.DOCUMENTS)
+        if staged.returncode:
+            return staged
+        if git('diff', '--cached', '--quiet').returncode:
+            result = git('commit', '--amend', '--no-edit')
+            if not result.returncode:
+                say('regenerated tracked documents in the rebased candidate')
     return result
 
 

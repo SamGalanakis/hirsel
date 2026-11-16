@@ -4143,3 +4143,822 @@ pub fn law_stored_size(c: Clock) -> bool waits {
 fn test_stored_size(c: Clock) -> Result[(), ()] waits {
     if law_stored_size(c) { Ok(()) } else { Error(()) }
 }
+
+// S2 disk format and recovery. STORE-SPEC v2.8, with v2.5 pack naming.
+type DiskContext {
+    store: StoreId,
+    role: u8,
+    seq: u64
+}
+
+type DiskFrame {
+    kind: u16,
+    flags: u16,
+    payload: u64,
+    end: u64
+}
+
+type DiskHeader {
+    context: DiskContext,
+    prev_end: u64
+}
+
+fn disk_fault(file: String, at: u64, why: Why) -> Error {
+    let name: Result[String, Capacity] = clone(file)
+    match take name {
+        Ok(take owned_name) => Corrupt(Fault(file: take owned_name, offset: at, why: why)),
+        Error(c) => Full(c)
+    }
+}
+
+fn disk_check(ctx: DiskContext, offset: u64, head: Bytes, payload: Bytes) -> Result[u64, Capacity] {
+    let mut binding: Bytes = list.with_capacity(33)?
+    le(mut binding, ctx.store.hi, 8)?
+    le(mut binding, ctx.store.lo, 8)?
+    le(mut binding, int.widen(ctx.role), 1)?
+    le(mut binding, ctx.seq, 8)?
+    le(mut binding, offset, 8)?
+    let mut state = std.check.start()
+    std.check.add(mut state, binding, 0, 33)
+    std.check.add(mut state, head, 0, 8)
+    std.check.add(mut state, payload, 0, list.len(payload))
+    Ok(std.check.finish(state))
+}
+
+fn disk_seal(ctx: DiskContext, offset: u64, kind: u16, flags: u16, payload: Bytes) -> Result[Bytes, Capacity] {
+    let mut head: Bytes = list.with_capacity(8)?
+    le(mut head, int.widen(kind), 2)?
+    le(mut head, int.widen(flags), 2)?
+    le(mut head, list.len(payload), 4)?
+    let checksum = disk_check(ctx, offset, head, payload)?
+    let mut out: Bytes = list.with_capacity(16 + list.len(payload))?
+    list.append(mut out, head)?
+    le(mut out, checksum, 8)?
+    list.append(mut out, payload)?
+    Ok(take out)
+}
+
+fn disk_kind_limit(kind: u16) -> Option[u64] {
+    match kind {
+        0x0001 => Some(56),
+        0x0011 => Some(16777280),
+        0x0012 => Some(8),
+        0x0020 => Some(33686028),
+        0x0030 => Some(67108864),
+        _ => None
+    }
+}
+
+fn disk_read_frame(file: String, ctx: DiskContext, raw: Bytes, at: u64) -> Result[DiskFrame, Error] {
+    if at > list.len(raw) || list.len(raw) - at < 16 {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let kind: u16 = int.truncate(read_le(raw, at, 2))
+    let flags: u16 = int.truncate(read_le(raw, at + 2, 2))
+    let size = read_le(raw, at + 4, 4)
+    if kind == 0 {
+        return Error(disk_fault(file, at, Kind(0)))
+    }
+    if flags & 65534 != 0 {
+        return Error(disk_fault(file, at, Flags))
+    }
+    match disk_kind_limit(kind) {
+        Some(limit) => if size > limit {
+            return Error(disk_fault(file, at, Malformed))
+        },
+        None => if flags & 1 == 0 && size > 65536 {
+            return Error(disk_fault(file, at, Malformed))
+        }
+    }
+    if size > list.len(raw) - at - 16 {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let end = at + 16 + size
+    let head = list.slice(raw, at, at + 8)
+    let payload = list.slice(raw, at + 16, end)
+    let check = capacity(disk_check(ctx, at, head, payload))?
+    if check != read_le(raw, at + 8, 8) {
+        return Error(disk_fault(file, at, Checksum))
+    }
+    if let None = disk_kind_limit(kind) {
+        if flags & 1 != 0 {
+            return Error(Unsupported(int.widen(kind)))
+        }
+    }
+    if kind == 0x0001 && at != 0 {
+        return Error(disk_fault(file, at, Header))
+    }
+    if (kind == 0x0011 && ctx.role != 2) || (kind == 0x0012 && ctx.role != 4) || (kind == 0x0020 && ctx.role != 3) || (kind == 0x0030 && ctx.role != 1) {
+        return Error(disk_fault(file, at, Kind(int.widen(kind))))
+    }
+    Ok(DiskFrame(kind: kind, flags: flags, payload: at + 16, end: end))
+}
+
+fn disk_header_bytes(ctx: DiskContext, prev_end: u64) -> Result[Bytes, Capacity] {
+    let mut payload: Bytes = list.with_capacity(56)?
+    list.append(mut payload, string.as_bytes("HIRSTORE"))?
+    le(mut payload, 1, 4)?
+    le(mut payload, int.widen(ctx.role), 1)?
+    le(mut payload, 0, 1)?
+    le(mut payload, 0, 2)?
+    le(mut payload, ctx.store.hi, 8)?
+    le(mut payload, ctx.store.lo, 8)?
+    le(mut payload, 0, 8)?
+    le(mut payload, ctx.seq, 8)?
+    le(mut payload, prev_end, 8)?
+    disk_seal(ctx, 0, 0x0001, 1, payload)
+}
+
+fn disk_read_header(file: String, raw: Bytes, role: u8, seq: Option[u64], expected_id: Option[StoreId]) -> Result[DiskHeader, Error] {
+    if list.len(raw) < 72 {
+        return Error(disk_fault(file, 0, Truncated))
+    }
+    let ctx = DiskContext(store: StoreId(hi: read_le(raw, 32, 8), lo: read_le(raw, 40, 8)), role: role, seq: read_le(raw, 56, 8))
+    let frame = disk_read_frame(file, ctx, raw, 0)?
+    if frame.kind != 1 || frame.end != 72 {
+        return Error(disk_fault(file, 0, Header))
+    }
+    let magic = list.slice(raw, 16, 24)
+    if magic != string.as_bytes("HIRSTORE") || raw[28] != role || read_le(raw, 30, 2) != 0 {
+        return Error(disk_fault(file, 0, Header))
+    }
+    let format = read_le(raw, 24, 4)
+    if format != 1 {
+        return Error(Unsupported(format))
+    }
+    if raw[29] != 0 {
+        return Error(Unsupported(int.widen(raw[29])))
+    }
+    let epoch = read_le(raw, 48, 8)
+    if epoch != 0 {
+        return Error(Unsupported(epoch))
+    }
+    if let Some(expected) = seq {
+        if expected != ctx.seq {
+            return Error(disk_fault(file, 0, Header))
+        }
+    }
+    if let Some(expected) = expected_id {
+        if !same(expected, ctx.store) {
+            return Error(disk_fault(file, 0, Header))
+        }
+    }
+    let previous = read_le(raw, 64, 8)
+    if role != 2 && previous != 0 {
+        return Error(disk_fault(file, 0, Header))
+    }
+    Ok(DiskHeader(context: ctx, prev_end: previous))
+}
+
+fn disk_corrupt[T](take r: Result[T, Error]) -> bool {
+    match take r {
+        Error(Corrupt(_)) => true,
+        _ => false
+    }
+}
+
+// Frame corpus, independent libxxhash HEADER vector plus every single-byte
+// mutation and truncation. Wrong implementations: checksum without binding,
+// unchecked flags/lengths, or treating unknown MUST kinds as optional.
+pub fn disk_law_frames() -> bool {
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 3, seq: 7)
+    let raw = result.unwrap(disk_header_bytes(ctx, 0))
+    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 83, 182, 203, 170, 91, 139, 51, 224, 72, 73, 82, 83, 84, 79, 82, 69, 1, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    if list.len(raw) != 72 {
+        return false
+    }
+    for i in 0u64 .. 72 {
+        if raw[i] != expected[i] {
+            return false
+        }
+    }
+    let header = result.unwrap(disk_read_header("p-7", raw, 3, Some(7), Some(id)))
+    if header.prev_end != 0 || header.context.seq != 7 {
+        return false
+    }
+    for i in 0u64 .. 72 {
+        let mut broken = result.unwrap(copied(raw))
+        let changed = broken[i] ^ 1u8
+        let _ = list.set(mut broken, i, changed)
+        if !disk_corrupt(disk_read_header("p-7", broken, 3, Some(7), Some(id))) {
+            return false
+        }
+        let short = list.slice(raw, 0, i)
+        if !disk_corrupt(disk_read_header("p-7", short, 3, Some(7), Some(id))) {
+            return false
+        }
+    }
+    if !disk_corrupt(disk_read_frame("p-8", DiskContext(store: id, role: 3, seq: 8), raw, 0)) {
+        return false
+    }
+    if !disk_corrupt(disk_read_frame("j-7", DiskContext(store: id, role: 2, seq: 7), raw, 0)) {
+        return false
+    }
+    if !disk_corrupt(disk_read_header("p-7", raw, 3, Some(7), Some(StoreId(hi: 9, lo: 9)))) {
+        return false
+    }
+    let mut moved: Bytes = result.unwrap(list.with_capacity(88))
+    result.unwrap(list.fill(mut moved, 16, 0u8))
+    result.unwrap(list.append(mut moved, raw))
+    if !disk_corrupt(disk_read_frame("p-7", ctx, moved, 16)) {
+        return false
+    }
+    let payload = key_word(42)
+    let optional = result.unwrap(disk_seal(ctx, 72, 0x0066, 0, payload))
+    let mut file = result.unwrap(copied(raw))
+    result.unwrap(list.append(mut file, optional))
+    let following_frame = result.unwrap(disk_read_frame("p-7", ctx, file, 72))
+    if following_frame.kind != 0x0066 || following_frame.end != 96 {
+        return false
+    }
+    let must = result.unwrap(disk_seal(ctx, 72, 0x0066, 1, payload))
+    let mut required = result.unwrap(copied(raw))
+    result.unwrap(list.append(mut required, must))
+    match disk_read_frame("p-7", ctx, required, 72) {
+        Error(Unsupported(0x0066)) => {},
+        _ => return false
+    }
+    let mut too_large = result.unwrap(copied(file))
+    let _ = list.set(mut too_large, 76, 255u8)
+    let _ = list.set(mut too_large, 77, 255u8)
+    let _ = list.set(mut too_large, 78, 255u8)
+    let _ = list.set(mut too_large, 79, 255u8)
+    disk_corrupt(disk_read_frame("p-7", ctx, too_large, 72))
+}
+
+@test
+fn disk_test_frames() -> Result[(), ()] {
+    if disk_law_frames() {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+type DiskRoots {
+    data: u64,
+    streams: u64,
+    catalog: u64
+}
+
+type DiskPack {
+    seq: u64,
+    nodes: u32
+}
+
+type DiskBranch: shareable + send {
+    id: u32,
+    name: String,
+    parent: u32,
+    forked_at: u64,
+    version: u64,
+    at: u64,
+    roots: DiskRoots
+}
+
+type DiskPin: shareable + send {
+    name: String,
+    branch: u32,
+    version: u64,
+    roots: DiskRoots
+}
+
+type DiskManifest: shareable + send {
+    generation: u64,
+    next_node: u64,
+    next_branch: u32,
+    next_table: u32,
+    next_pack: u64,
+    first_live: u64,
+    prev_first: u64,
+    packs: List[DiskPack],
+    retired: List[u64],
+    branches: List[DiskBranch],
+    pins: List[DiskPin]
+}
+
+fn disk_number(file: String, raw: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
+    if at > list.len(raw) || width > list.len(raw) - at {
+        return Error(disk_fault(file, at, Truncated))
+    }
+    let value = read_le(raw, at, width)
+    at += width
+    Ok(value)
+}
+
+fn disk_count(file: String, raw: Bytes, mut at: u64, least: u64) -> Result[u64, Error] {
+    let n = disk_number(file, raw, mut at, 4)?
+    if n > (list.len(raw) - at) / least {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    Ok(n)
+}
+
+fn disk_name(file: String, raw: Bytes, mut at: u64) -> Result[String, Error] {
+    let size = disk_number(file, raw, mut at, 2)?
+    if size > 255 || size > list.len(raw) - at {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let chars = list.slice(raw, at, at + size)
+    let owned = copied(chars)?
+    at += size
+    match string.from_utf8(take owned) {
+        Ok(take text) => Ok(take text),
+        Error(_) => Error(disk_fault(file, at - size, Malformed))
+    }
+}
+
+fn disk_put_name(mut out: Bytes, name: String) -> Result[(), Capacity] {
+    le(mut out, string.byte_len(name), 2)?
+    list.append(mut out, string.as_bytes(name))
+}
+
+fn disk_put_roots(mut out: Bytes, roots: DiskRoots) -> Result[(), Capacity] {
+    le(mut out, roots.data, 8)?
+    le(mut out, roots.streams, 8)?
+    le(mut out, roots.catalog, 8)
+}
+
+fn disk_take_roots(file: String, raw: Bytes, mut at: u64) -> Result[DiskRoots, Error] {
+    let data = disk_number(file, raw, mut at, 8)?
+    let streams = disk_number(file, raw, mut at, 8)?
+    let catalog = disk_number(file, raw, mut at, 8)?
+    Ok(DiskRoots(data: data, streams: streams, catalog: catalog))
+}
+
+fn disk_manifest_bytes(id: StoreId, m: DiskManifest) -> Result[Bytes, Capacity] {
+    let ctx = DiskContext(store: id, role: 1, seq: m.generation)
+    let mut out = disk_header_bytes(ctx, 0)?
+    let mut payload: Bytes = list.new()
+    le(mut payload, m.generation, 8)?
+    le(mut payload, 4096, 4)?
+    le(mut payload, 1048576, 4)?
+    le(mut payload, 16777216, 4)?
+    le(mut payload, 32, 2)?
+    le(mut payload, m.next_node, 8)?
+    le(mut payload, int.widen(m.next_branch), 4)?
+    le(mut payload, int.widen(m.next_table), 4)?
+    le(mut payload, m.next_pack, 8)?
+    le(mut payload, m.first_live, 8)?
+    le(mut payload, m.prev_first, 8)?
+    le(mut payload, list.len(m.packs), 4)?
+    for pack in m.packs {
+        le(mut payload, pack.seq, 8)?
+        le(mut payload, int.widen(pack.nodes), 4)?
+    }
+    le(mut payload, list.len(m.retired), 4)?
+    for seq in m.retired {
+        le(mut payload, seq, 8)?
+    }
+    le(mut payload, list.len(m.branches), 4)?
+    for b in m.branches {
+        le(mut payload, int.widen(b.id), 4)?
+        disk_put_name(mut payload, b.name)?
+        le(mut payload, int.widen(b.parent), 4)?
+        le(mut payload, b.forked_at, 8)?
+        le(mut payload, b.version, 8)?
+        le(mut payload, b.at, 8)?
+        disk_put_roots(mut payload, b.roots)?
+    }
+    le(mut payload, list.len(m.pins), 4)?
+    for p in m.pins {
+        disk_put_name(mut payload, p.name)?
+        le(mut payload, int.widen(p.branch), 4)?
+        le(mut payload, p.version, 8)?
+        disk_put_roots(mut payload, p.roots)?
+    }
+    let frame = disk_seal(ctx, 72, 0x0030, 1, payload)?
+    list.append(mut out, frame)?
+    Ok(take out)
+}
+
+fn disk_read_manifest(file: String, raw: Bytes) -> Result[(StoreId, DiskManifest), Error] {
+    let header = disk_read_header(file, raw, 1, None, None)?
+    let frame = disk_read_frame(file, header.context, raw, 72)?
+    if frame.kind != 0x0030 || frame.end != list.len(raw) {
+        return Error(disk_fault(file, 72, Malformed))
+    }
+    let payload = list.slice(raw, 0, frame.end)
+    let mut at: u64 = frame.payload
+    let generation = disk_number(file, payload, mut at, 8)?
+    if generation != header.context.seq {
+        return Error(disk_fault(file, 72, Header))
+    }
+    let keys = disk_number(file, payload, mut at, 4)?
+    let values = disk_number(file, payload, mut at, 4)?
+    let transaction = disk_number(file, payload, mut at, 4)?
+    let fanout = disk_number(file, payload, mut at, 2)?
+    if keys != 4096 || values != 1048576 || transaction != 16777216 || fanout != 32 {
+        return Error(disk_fault(file, 72, Malformed))
+    }
+    let next_node = disk_number(file, payload, mut at, 8)?
+    let next_branch: u32 = int.truncate(disk_number(file, payload, mut at, 4)?)
+    let next_table: u32 = int.truncate(disk_number(file, payload, mut at, 4)?)
+    let next_pack = disk_number(file, payload, mut at, 8)?
+    let first_live = disk_number(file, payload, mut at, 8)?
+    let prev_first = disk_number(file, payload, mut at, 8)?
+    let packs_count = disk_count(file, payload, mut at, 12)?
+    let mut packs: List[DiskPack] = list.new()
+    let mut last_seq: u64 = 0
+    for i in 0u64 .. packs_count {
+        let seq = disk_number(file, payload, mut at, 8)?
+        let nodes: u32 = int.truncate(disk_number(file, payload, mut at, 4)?)
+        if i > 0 && seq <= last_seq {
+            return Error(disk_fault(file, at, Order))
+        }
+        last_seq = seq
+        capacity(result.capacity_only(list.push(mut packs, DiskPack(seq: seq, nodes: nodes))))?
+    }
+    let retired_count = disk_count(file, payload, mut at, 8)?
+    let mut retired: List[u64] = list.new()
+    let mut last_retired: u64 = 0
+    for i in 0u64 .. retired_count {
+        let seq = disk_number(file, payload, mut at, 8)?
+        if i > 0 && seq <= last_retired {
+            return Error(disk_fault(file, at, Order))
+        }
+        last_retired = seq
+        capacity(result.capacity_only(list.push(mut retired, seq)))?
+    }
+    let branches_count = disk_count(file, payload, mut at, 58)?
+    let mut branches: List[DiskBranch] = list.new()
+    let mut last_branch: u32 = 0
+    for i in 0u64 .. branches_count {
+        let id: u32 = int.truncate(disk_number(file, payload, mut at, 4)?)
+        if (i == 0 && id != 0) || (i > 0 && id <= last_branch) {
+            return Error(disk_fault(file, at, Order))
+        }
+        last_branch = id
+        let name = disk_name(file, payload, mut at)?
+        let parent: u32 = int.truncate(disk_number(file, payload, mut at, 4)?)
+        let forked_at = disk_number(file, payload, mut at, 8)?
+        let v = disk_number(file, payload, mut at, 8)?
+        let wall = disk_number(file, payload, mut at, 8)?
+        let roots = disk_take_roots(file, payload, mut at)?
+        capacity(result.capacity_only(list.push(mut branches, DiskBranch(id: id, name: take name, parent: parent, forked_at: forked_at, version: v, at: wall, roots: roots))))?
+    }
+    if branches_count == 0 {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let pins_count = disk_count(file, payload, mut at, 38)?
+    let mut pins: List[DiskPin] = list.new()
+    for i in 0u64 .. pins_count {
+        let name = disk_name(file, payload, mut at)?
+        if i > 0 && pins[i - 1].name >= name {
+            return Error(disk_fault(file, at, Order))
+        }
+        let branch: u32 = int.truncate(disk_number(file, payload, mut at, 4)?)
+        let v = disk_number(file, payload, mut at, 8)?
+        let roots = disk_take_roots(file, payload, mut at)?
+        capacity(result.capacity_only(list.push(mut pins, DiskPin(name: take name, branch: branch, version: v, roots: roots))))?
+    }
+    if at != list.len(payload) {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    Ok((header.context.store, DiskManifest(generation: generation, next_node: next_node, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, packs: take packs, retired: take retired, branches: take branches, pins: take pins)))
+}
+
+fn disk_genesis_fixture() -> DiskManifest {
+    let mut branches: List[DiskBranch] = list.new()
+    result.unwrap(list.push(mut branches, DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: DiskRoots(data: 0, streams: 0, catalog: 0))))
+    DiskManifest(generation: 1, next_node: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, packs: list.new(), retired: list.new(), branches: take branches, pins: list.new())
+}
+
+// Independent fixed-layout genesis vector. No schema codec participates.
+pub fn disk_law_manifest() -> bool {
+    let id = StoreId(hi: 1, lo: 2)
+    let m = disk_genesis_fixture()
+    let raw = result.unwrap(disk_manifest_bytes(id, m))
+    if list.len(raw) != 228 || std.check.xxh3(raw, 0, list.len(raw)) != 0x9f20a7c448135b34u64 {
+        return false
+    }
+    let decoded_manifest = result.unwrap(disk_read_manifest("MANIFEST", raw))
+    let (stored_id, take got) = take decoded_manifest
+    if !same(stored_id, id) {
+        return false
+    }
+    if got.generation != 1 || got.next_node != 1 || got.next_branch != 1 || got.next_table != 1 || got.next_pack != 1 || got.first_live != 1 || got.prev_first != 1 {
+        return false
+    }
+    if list.len(got.packs) != 0 || list.len(got.retired) != 0 || list.len(got.pins) != 0 || list.len(got.branches) != 1 {
+        return false
+    }
+    if got.branches[0].name != "main" || got.branches[0].roots.data != 0 {
+        return false
+    }
+    for i in 0u64 .. list.len(raw) {
+        let short = list.slice(raw, 0, i)
+        if !disk_corrupt(disk_read_manifest("MANIFEST", short)) {
+            return false
+        }
+        let mut broken = result.unwrap(copied(raw))
+        let changed = broken[i] ^ 1u8
+        let _ = list.set(mut broken, i, changed)
+        if !disk_corrupt(disk_read_manifest("MANIFEST", broken)) {
+            return false
+        }
+    }
+    let mut unordered = disk_genesis_fixture()
+    result.unwrap(list.push(mut unordered.packs, DiskPack(seq: 2, nodes: 1)))
+    result.unwrap(list.push(mut unordered.packs, DiskPack(seq: 1, nodes: 1)))
+    let bad_order = result.unwrap(disk_manifest_bytes(id, unordered))
+    match disk_read_manifest("MANIFEST", bad_order) {
+        Error(Corrupt(f)) => match f.why {
+            Order => {},
+            _ => return false
+        },
+        _ => return false
+    }
+    let ctx = DiskContext(store: id, role: 1, seq: 1)
+    let payload_view = list.slice(raw, 88, list.len(raw))
+    let mut invalid_utf8 = result.unwrap(copied(payload_view))
+    let _ = list.set(mut invalid_utf8, 80, 255u8)
+    let bad_name_frame = result.unwrap(disk_seal(ctx, 72, 0x0030, 1, invalid_utf8))
+    let header_view = list.slice(raw, 0, 72)
+    let mut bad_name = result.unwrap(copied(header_view))
+    result.unwrap(list.append(mut bad_name, bad_name_frame))
+    if !disk_corrupt(disk_read_manifest("MANIFEST", bad_name)) {
+        return false
+    }
+    let mut extra = result.unwrap(copied(payload_view))
+    result.unwrap(list.push(mut extra, 0u8))
+    let extra_frame = result.unwrap(disk_seal(ctx, 72, 0x0030, 1, extra))
+    let mut overlong = result.unwrap(copied(header_view))
+    result.unwrap(list.append(mut overlong, extra_frame))
+    disk_corrupt(disk_read_manifest("MANIFEST", overlong))
+}
+
+@test
+fn disk_test_manifest() -> Result[(), ()] {
+    if disk_law_manifest() {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn disk_blob(file: String, raw: Bytes, mut at: u64, limit: u64) -> Result[Bytes, Error] {
+    let size = disk_number(file, raw, mut at, 4)?
+    if size > limit || size > list.len(raw) - at {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let value = list.slice(raw, at, at + size)
+    let out = copied(value)?
+    at += size
+    Ok(take out)
+}
+
+fn disk_node_bytes(node: Arc[std.omap.Node[Bytes, Bytes]]) -> Result[Bytes, Capacity] {
+    let mut payload: Bytes = list.new()
+    le(mut payload, std.omap.node_id(node), 8)?
+    le(mut payload, std.omap.node_level(node), 1)?
+    le(mut payload, 0, 1)?
+    let count = std.omap.node_count(node)
+    le(mut payload, count, 2)?
+    for i in 0u64 .. count {
+        if std.omap.node_level(node) == 0 {
+            let k = option.unwrap(std.omap.node_key(node, i))
+            let v = option.unwrap(std.omap.node_value(node, i))
+            blob(mut payload, k)?
+            blob(mut payload, v)?
+        } else {
+            let child = option.unwrap(std.omap.node_child(node, i))
+            le(mut payload, std.omap.node_id(child), 8)?
+            if i == 0 {
+                let empty: Bytes = list.new()
+                blob(mut payload, empty)?
+            } else {
+                let k = option.unwrap(std.omap.node_key(node, i))
+                blob(mut payload, k)?
+            }
+        }
+    }
+    Ok(take payload)
+}
+
+fn disk_parse_node(file: String, raw: Bytes, nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]], next_node: u64) -> Result[Arc[std.omap.Node[Bytes, Bytes]], Error] {
+    let mut at: u64 = 0
+    let id = disk_number(file, raw, mut at, 8)?
+    if id == 0 || id >= next_node {
+        return Error(disk_fault(file, 0, Malformed))
+    }
+    let level = disk_number(file, raw, mut at, 1)?
+    let zero = disk_number(file, raw, mut at, 1)?
+    let count = disk_number(file, raw, mut at, 2)?
+    if zero != 0 || count == 0 || count > 32 {
+        return Error(disk_fault(file, at, Malformed))
+    }
+    let mut keys: List[Bytes] = list.new()
+    if level == 0 {
+        let mut values: List[Bytes] = list.new()
+        for _ in 0u64 .. count {
+            let k = disk_blob(file, raw, mut at, 4096)?
+            let v = disk_blob(file, raw, mut at, 1048576)?
+            capacity(result.capacity_only(list.push(mut keys, take k)))?
+            capacity(result.capacity_only(list.push(mut values, take v)))?
+        }
+        if at != list.len(raw) {
+            return Error(disk_fault(file, at, Malformed))
+        }
+        match std.omap.leaf(id, take keys, take values) {
+            Ok(take node) => Ok(take node),
+            Error((c, _)) => Error(Full(c))
+        }
+    } else {
+        let mut children: List[Arc[std.omap.Node[Bytes, Bytes]]] = list.new()
+        for i in 0u64 .. count {
+            let child_id = disk_number(file, raw, mut at, 8)?
+            if child_id == 0 || child_id >= id {
+                return Error(disk_fault(file, at, Dangling(child_id)))
+            }
+            let encoded_low = disk_blob(file, raw, mut at, 4096)?
+            let child = match map.get(nodes, child_id) {
+                Some(n) => arc.share(n),
+                None => return Error(disk_fault(file, at, Dangling(child_id)))
+            }
+            let low: Bytes = if i == 0 {
+                if list.len(encoded_low) != 0 {
+                    return Error(disk_fault(file, at, Malformed))
+                }
+                let first = option.unwrap(std.omap.node_key(child, 0))
+                copied(first)?
+            } else {
+                take encoded_low
+            }
+            capacity(result.capacity_only(list.push(mut keys, take low)))?
+            capacity(result.capacity_only(list.push(mut children, take child)))?
+        }
+        if at != list.len(raw) {
+            return Error(disk_fault(file, at, Malformed))
+        }
+        match std.omap.branch(id, take keys, take children) {
+            Ok(take node) => Ok(take node),
+            Error((c, _)) => Error(Full(c))
+        }
+    }
+}
+
+fn disk_postorder(node: Arc[std.omap.Node[Bytes, Bytes]], mut out: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[(), Capacity] {
+    for i in 0u64 .. std.omap.node_count(node) {
+        if let Some(child) = std.omap.node_child(node, i) {
+            disk_postorder(child, mut out)?
+        }
+    }
+    result.capacity_only(list.push(mut out, arc.share(node)))
+}
+
+// NODE bytes, including branch entry0's empty low key, reconstruct the map.
+// Reader validates ids/lengths/shape fields; it does not recheck B-tree order.
+pub fn disk_law_nodes(c: Clock) -> bool {
+    let mut db = test_db(c, 1073741824)
+    for k in 0u64 .. 96 {
+        if !put_one(mut db, k, k + 1) {
+            return false
+        }
+    }
+    let root = option.unwrap(std.omap.root(db.roots.data))
+    let mut order: List[Arc[std.omap.Node[Bytes, Bytes]]] = list.new()
+    result.unwrap(disk_postorder(root, mut order))
+    let mut nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]] = map.new()
+    for n in order {
+        let raw = result.unwrap(disk_node_bytes(n))
+        let rebuilt = result.unwrap(disk_parse_node("p-1", raw, nodes, db.next_node + 1))
+        if std.omap.node_id(rebuilt) != std.omap.node_id(n) || std.omap.node_level(rebuilt) != std.omap.node_level(n) {
+            return false
+        }
+        result.unwrap(map.insert(mut nodes, std.omap.node_id(n), take rebuilt))
+        let mut overlong = result.unwrap(copied(raw))
+        result.unwrap(list.push(mut overlong, 0u8))
+        if !disk_corrupt(disk_parse_node("p-1", overlong, nodes, db.next_node + 1)) {
+            return false
+        }
+    }
+    let rebuilt_root = option.unwrap(map.get(nodes, std.omap.node_id(root)))
+    let rebuilt_map = std.omap.from_root(Some(arc.share(rebuilt_root)))
+    for k in 0u64 .. 96 {
+        let p = result.unwrap(physical(1, key_word(k)))
+        match std.omap.get(rebuilt_map, p) {
+            Some(v) => if v != key_word(k + 1) {
+                return false
+            },
+            None => return false
+        }
+    }
+    let mut dangling = result.unwrap(disk_node_bytes(root))
+    // First branch child id is payload[12..20). Self-reference is forbidden.
+    let id = std.omap.node_id(root)
+    for i in 0u64 .. 8 {
+        let _ = list.set(mut dangling, 12 + i, int.truncate(id >> (i * 8)))
+    }
+    disk_corrupt(disk_parse_node("p-1", dangling, nodes, db.next_node + 1))
+}
+
+@test
+fn disk_test_nodes(c: Clock) -> Result[(), ()] {
+    if disk_law_nodes(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn disk_io[T](take r: Result[T, IoError]) -> Result[T, Error] {
+    match take r { Ok(take x) => Ok(take x), Error(e) => Error(Io(e)) }
+}
+
+fn disk_path(lead: String, seq: u64, suffix: String) -> Result[String, Capacity] {
+    let mut path = string.from(lead)?
+    string.push_u64(mut path, seq)?
+    string.push(mut path, suffix)?
+    Ok(take path)
+}
+
+fn disk_read_file(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] waits {
+    let mut file = disk_io(host.open(d, path, Read))?
+    let mut out: Bytes = list.new()
+    loop {
+        let size = list.len(out)
+        if size == limit {
+            let mut probe: Bytes = capacity(list.with_capacity(1))?
+            if disk_io(host.read(mut file, mut probe))? != 0 {
+                return Error(disk_fault(path, size, Malformed))
+            }
+            break
+        }
+        let room = if limit - size < 16384 { limit - size } else { 16384u64 }
+        let mut chunk: Bytes = capacity(list.with_capacity(room))?
+        if disk_io(host.read(mut file, mut chunk))? == 0 { break }
+        capacity(list.append(mut out, chunk))?
+    }
+    disk_io(host.close(take file))?
+    Ok(take out)
+}
+
+fn disk_write_synced(d: Dir, path: String, raw: Bytes) -> Result[(), Error] waits {
+    let mut file = disk_io(host.open(d, path, Write))?
+    match host.write(mut file, raw) { Ok(()) => {}, Error(e) => return Error(Io(e.error)) }
+    disk_io(host.sync(mut file))?
+    disk_io(host.close(take file))
+}
+
+fn disk_remove_optional(d: Dir, path: String) -> Result[bool, Error] waits {
+    match host.remove(d, path) {
+        Ok(()) => Ok(true),
+        Error(NotFound) => Ok(false),
+        Error(e) => Error(Io(e))
+    }
+}
+
+// v2.5 H2: freeing space only. Safety comes from replacing a pack before a
+// manifest newly lists it, not from assuming this probe finds every orphan.
+fn disk_cleanup(d: Dir, m: DiskManifest) -> Result[(), Error] waits {
+    let _ = disk_remove_optional(d, "MANIFEST.tmp")?
+    let mut seq = m.next_pack
+    loop {
+        let path = capacity(disk_path("p-", seq, ""))?
+        let temporary = capacity(disk_path("p-", seq, ".tmp"))?
+        let removed = disk_remove_optional(d, path)?
+        let removed_tmp = disk_remove_optional(d, temporary)?
+        if !removed && !removed_tmp { break }
+        seq += 1
+    }
+    for retired in m.retired {
+        let path = capacity(disk_path("p-", retired, ""))?
+        let _ = disk_remove_optional(d, path)?
+    }
+    for old in m.prev_first .. m.first_live {
+        let path = capacity(disk_path("j-", old, ""))?
+        let end = capacity(disk_path("j-", old, ".end"))?
+        let _ = disk_remove_optional(d, path)?
+        let _ = disk_remove_optional(d, end)?
+    }
+    Ok(())
+}
+
+fn disk_publish_manifest(d: Dir, id: StoreId, m: DiskManifest) -> Result[(), Error] waits {
+    let raw = capacity(disk_manifest_bytes(id, m))?
+    disk_write_synced(d, "MANIFEST.tmp", raw)?
+    disk_io(host.rename(d, "MANIFEST.tmp", "MANIFEST"))?
+    disk_io(host.sync_dir(d))
+}
+
+fn disk_new_segment(d: Dir, id: StoreId, seq: u64, prev_end: u64) -> Result[(HostFile, HostFile), Error] waits {
+    let path = capacity(disk_path("j-", seq, ""))?
+    let end_path = capacity(disk_path("j-", seq, ".end"))?
+    let journal = capacity(disk_header_bytes(DiskContext(store: id, role: 2, seq: seq), prev_end))?
+    let mut file = disk_io(host.open(d, path, Write))?
+    match host.write(mut file, journal) { Ok(()) => {}, Error(e) => return Error(Io(e.error)) }
+    disk_io(host.sync(mut file))?
+    let ctx = DiskContext(store: id, role: 4, seq: seq)
+    let mut end_bytes = capacity(disk_header_bytes(ctx, 0))?
+    let mut payload: Bytes = list.new()
+    capacity(le(mut payload, 72, 8))?
+    let frame = capacity(disk_seal(ctx, 72, 0x0012, 1, payload))?
+    capacity(list.append(mut end_bytes, frame))?
+    let mut end_file = disk_io(host.open(d, end_path, Write))?
+    match host.write(mut end_file, end_bytes) { Ok(()) => {}, Error(e) => return Error(Io(e.error)) }
+    disk_io(host.sync(mut end_file))?
+    disk_io(host.sync_dir(d))?
+    Ok((take file, take end_file))
+}

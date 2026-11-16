@@ -136,6 +136,7 @@ class Land(unittest.TestCase):
         self.git(self.top, 'clone', '-q', str(self.origin), str(self.lane))
         files = dict(FAKES, **{'tools/land': Path(os.environ.get('HIRSEL_TEST_LAND', ROOT / 'tools/land')).read_text(),
                                'tools/land-run': (ROOT / 'tools/land-run').read_text(),
+                               'tools/check-conflict-markers': (ROOT / 'tools/check-conflict-markers').read_text(),
                                'tools/land_events.py': (ROOT / 'tools/land_events.py').read_text(),
                                'tools/buck2/generated.py': (ROOT / 'tools/buck2/generated.py').read_text(),
                                'tools/buck2/merging.py': (ROOT / 'tools/buck2/merging.py').read_text(),
@@ -199,6 +200,31 @@ class Land(unittest.TestCase):
         self.assertIn('FAIL  Core suites', refused.stdout)
         self.assertIn('ARM CoreIR body failed', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
+
+    def test_conflict_markers_refuse_the_push_with_file_and_line(self):
+        for marker in ('<<<<<<< lane\nours\n=======\ntheirs\n>>>>>>> main\n',
+                       '>>>>>>> orphaned\n', '<<<<<<< unfinished\n'):
+            with self.subTest(marker=marker):
+                (self.lane / 'change.txt').write_text('heading\n' + marker)
+                self.git(self.lane, 'add', 'change.txt')
+                self.git(self.lane, 'commit', '-qm', 'unresolved conflict')
+                refused = self.land()
+                self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+                self.assertIn('FAIL  screen: conflict markers', refused.stdout)
+                self.assertIn('change.txt:2: unresolved conflict marker', refused.stdout)
+                self.assertNotIn('pass  workspace build', refused.stdout)
+                self.assertEqual(self.main_log(), ['base'])
+
+    def test_setext_underlines_and_quoted_marker_fixtures_land(self):
+        (self.lane / 'change.txt').write_text('Heading\n=======\n    <<<<<<< fixture\n    >>>>>>> fixture\n')
+        (self.lane / 'binary.dat').write_bytes(b'\0<<<<<<< binary\n')
+        (self.lane / 'untracked.txt').write_text('<<<<<<< untracked\n')
+        with (self.lane / '.gitignore').open('a') as ignore:
+            ignore.write('untracked.txt\n')
+        self.git(self.lane, 'add', 'change.txt', 'binary.dat', '.gitignore')
+        self.git(self.lane, 'commit', '-qm', 'literal markers and underline')
+        accepted = self.land()
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
 
     def test_stale_std_api_index_refuses_the_push_until_regenerated(self):
         source = self.lane / 'core/std/example.hirsel'

@@ -557,7 +557,8 @@ def fast(tree, base=None):
     if base is not None:
         # An older base's formatter ignores this, rather than parsing a new flag.
         formatting = ['env', 'HIRSEL_FMT_BASE=' + base, *formatting]
-    report = (check('screen: prepare.py', [PY, 'tools/buck2/prepare.py'])
+    report = (check('screen: conflict markers', [PY, 'tools/check-conflict-markers'])
+              or check('screen: prepare.py', [PY, 'tools/buck2/prepare.py'])
               or check('screen: sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale'])
               or check('screen: independent line lists', [PY, 'tools/check-hot-files'])
               or check('screen: std API index', [PY, 'core/tools/std_api_index.py', '--check'])

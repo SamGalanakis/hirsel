@@ -23,6 +23,7 @@ raised it:
 | `Fail(text)` | `fail(msg)`, which has type `Never` |
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
 | `Capacity` | an allocation beyond a finalizer's grant ([MEM-27](budgets.md#mem-27-finalizer-grants)) |
+| `TapeEnded` | an operation on a tape's substitute after the tape ended ([CAP-9](capabilities.md#cap-9-tapes)) |
 
 `Capacity` outside a finalizer is an error, never a failure.
 
@@ -170,7 +171,7 @@ which is how fallible finalisation (`close`, `commit`, `flush`) is written; afte
 are transferred the destructure frees and refunds the resource's whole block (its field
 storage, unused cause cell and unused grant), and the blocks its fields own stay charged
 with them. There is no `forget`. A finalizer has a unit result and no `?` of its own; the
-functions it calls may use `?` inside them. It is shielded: it observes no cancellation
+functions it calls may use `?` inside them. It is a shield: it observes no cancellation
 ([CONC-7](tasks.md#conc-7-cancellation-points)), though it may call `waits` operations, and
 it may spawn from its grant. It uses only the capabilities stored in the resource and its grant
 ([MEM-27](budgets.md#mem-27-finalizer-grants)); it cannot move, copy or return the
@@ -261,7 +262,7 @@ recovery boundary and undoes nothing:
   its place, so the code after `isolate` has an unused cell to fail into; when it did not,
   every caught cause having gone into resources' cells, the reserved cell is refunded. A
   failure is caught whatever its primary cause other than `Cancelled`: `Overflow`,
-  `Bounds`, `Division`, `Unwrap`, `Fail` or a finalizer's `Capacity`
+  `Bounds`, `Division`, `Unwrap`, `Fail`, `TapeEnded` or a finalizer's `Capacity`
   ([MEM-27](budgets.md#mem-27-finalizer-grants)).
 - A failure whose primary cause is `Cancelled` is not caught: after the same cleanup the
   reserved cell is refunded, the chain set aside is restored with the failure's causes

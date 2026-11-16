@@ -68,9 +68,9 @@ the refused `Capacity` and leaves the chain as it is when that admission fails, 
 after FAIL-8's cleanup, lets outer effects persist, never catches `Cancelled` or a run stop,
 and accepts only a body whose capture descriptor lends nothing `mut`. `shield` has no v1
 form, and a commit of several provider operations needs none: cancellation reaches a task
-only at a cancellation point and an operation only at its issue
-([CONC-7](tasks.md#conc-7-cancellation-points)); an issued operation completes and
-delivers (CAP-8); a write's error states its committed prefix; a cancelled task's cleanup
+only at a cancellation point and a host operation only at its issue, which completes it
+([CONC-7](tasks.md#conc-7-cancellation-points)); an issued operation delivers exactly one
+result (CAP-8); a write's error states its committed prefix; a cancelled task's cleanup
 finalizes its files, which closes them and ends their locks (FAIL-8,
 [core](core.md#contracts-the-signatures-do-not-state)); and `host.sync` makes durable every
 byte of a file, through whichever handle it was written. So a commit cancelled between two
@@ -84,7 +84,7 @@ FAIL-10, MEM-24, MEM-27.
 
 **R10.** Every outside input and every scheduling or cross-task choice passes the replay
 point, which can supply outcomes without host effects; pure code needs no events or
-yields. *v1:* CAP-5, CAP-8, CONC-7, CONC-10.
+yields. *v1:* CAP-5, CAP-8, CAP-9, CONC-7, CONC-10.
 
 **R11.** "Typed operations take explicit behavior dictionaries:
 `encode(view T,mut Sink,Codec[T])->Result[(),EncodeError]`;
@@ -124,8 +124,8 @@ send` is the place's handles (its Tables and Indexes), passed by view and built 
 the place's `handles(mut db: Db) -> Result[H, store.Error] waits`. The key is `f`'s
 identity bytes with the schema fingerprints of `A` and `R`, so a changed codec schema
 changes the key; a key already registered is refused and the registry is unchanged. Each
-kind has one generic adapter that decodes an `A` inside the call's byte bound, calls `f`,
-and encodes the result. There is no `derive wire` form and no hand-written adapter. A
+kind has one generic adapter that decodes an `A`, calls `f` and encodes the result, all
+inside the call's byte bound and one `isolate` (FAIL-16). There is no `derive wire` form and no hand-written adapter. A
 place's entries are exactly those its capability-free `place(mut r: Registry[G, H])`
 registers; the server runs it to serve and the SDK generator runs it, bounded, to read
 `runner.describe`; no other export list exists. Every task that runs entries runs `place`
@@ -231,7 +231,7 @@ allocator chunk size becomes a logical capacity (MEM-28).
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, the `via` override, tombstones, appended variants and the `u32` tag, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the schema fingerprint that keys a registered entry (R13) and the content hash of a declaration for stored data |
 | D, code descriptors | code identity; identity bytes of closed named functions (PROG-9), including typed `StaticFn` values passed into generic parameters; no address or order dependence | open: `code.revision(s) -> Option[Bytes]`, never part of equality; for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them |
 | L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
-| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, and `host.random` ([core](core.md#contracts-the-signatures-do-not-state)) | open: providers for `Net`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
+| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; tapes and their substitutes (CAP-9); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, and `host.random` ([core](core.md#contracts-the-signatures-do-not-state)) | open: providers for `Net`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1; selection, shared limits, mutexes and atomics later |
 
 ## Not in v1

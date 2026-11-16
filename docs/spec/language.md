@@ -279,6 +279,13 @@ list.new()` and `let r = if c { None } else { Some(1u64) }` are refused without 
 type, and `None == v` is refused where `v == None` is accepted. Each use of a
 generic type writes its arguments.
 
+A type definition is refused when following its recursive references requires infinitely
+many type instances. The refusal is at the field or variant payload that closes a growing
+cycle, whether or not the definition is instantiated. A cycle grows when it feeds a
+parameter back nested inside a type constructor; one that feeds its parameters back
+permuted, closed or projected reaches finitely many instances and is accepted. Removed
+fields and variants ([SEM-10](semantics.md#sem-10-codecs)) count.
+
 ```hirsel
 fn same[T: key](a: T, b: T) -> bool { a == b }
 ```
@@ -303,6 +310,13 @@ fn g() -> u64 { let y = Ok(1u64); 0 }                     // refused: LANG-12, a
 ```hirsel
 fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }    // refused: LANG-12, at the call: f64 is not integer
 fn g(a: f64, b: f64) -> bool { int.wrapping_add(a, b) == a }  // refused: LANG-12, at a: f64 is not integer
+```
+```hirsel
+type Tree[T] { label: T, kids: List[Tree[T]] }
+type Swap[A, B] { kids: List[Swap[B, A]] }               // two instances: Swap[A, B], Swap[B, A]
+```
+```hirsel
+type Nest[T] = Leaf(T) | Deeper(List[Nest[(T, T)]])      // refused: LANG-12, at Deeper's payload: Nest[(T, T)] grows
 ```
 
 ### LANG-13: Callables

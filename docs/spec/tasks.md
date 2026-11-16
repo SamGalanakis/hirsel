@@ -122,11 +122,19 @@ a pending request only at a **cancellation point**: the entry of every core `wai
 operation (`send`, `receive`, `join` and the waiting provider operations of
 [CAP-5](capabilities.md#cap-5-provider-operations)), each moment such an operation would
 wait, and `task.check_cancel()`. At an entry, a pending request is observed before anything
-else is done. A provider operation that has been issued completes and delivers its result
-([CAP-8](capabilities.md#cap-8-the-replay-point)); cancellation reaches it only at issue.
+else is done. A provider operation that has been issued delivers exactly one result
+([CAP-8](capabilities.md#cap-8-the-replay-point)). After its issue a request reaches it only
+through its provider: while the operation is still in progress the provider ends it at once
+with a result of its type, and the request stays pending for the task's next cancellation
+point. The host provider completes every operation at its issue, so no host operation is in
+progress after it.
 A user function declared `waits` is not itself a cancellation point. Observing it is a failure with cause `Cancelled`
 ([FAIL-2](failure.md#fail-2-causes)), which runs the task's cleanup. Pure code is never
-interrupted, finalizers are shielded and observe nothing, and no engine inserts a yield or a check. A loop that
+interrupted, and no engine inserts a yield or a check. A **shield**, a finalizer
+([FAIL-11](failure.md#fail-11-resources)) or the wait of CONC-8, holds a cancellation: inside
+it no cancellation point observes a request and no operation it waits in, issued or not, is
+ended by one; a request made before or during it stays pending and takes effect at the
+first cancellation point after it. A loop that
 should be cancellable calls `task.check_cancel()`. A task holds itself at a point that is
 not a cancellation point by polling a non-waiting operation such as `try_send`; under the
 fairness of CONC-10 the tasks it polls for still run.
@@ -165,6 +173,11 @@ visible.
 The order is chosen by the scheduler provider at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); with the same inputs and the same
 recorded choices, every task behaves identically on every engine.
+A wake of a waiting provider operation (its deadline reached, its provider readying it, or a
+cancellation request) takes effect at one point of the order, before its task runs again,
+and the operation's next step is decided there. A cancellation request ordered before a
+readiness wins over it: an operation not yet issued fails `Cancelled`, and one in progress
+is ended by its provider (CONC-7).
 
 A **poll** is a non-waiting operation that returns without effect because of another
 task's state: a `try_send` that returns `Full`, a `try_receive` that returns `Empty`, a `task.check_cancel()` that finds no

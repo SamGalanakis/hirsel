@@ -18,7 +18,7 @@ fn stamp() -> u64 { host.mono_ns() }                     // refused: CAP-1, no C
 
 A capability type is an opaque type ([PROG-2](programs.md#prog-2-visibility)) of the
 standard library. Its values are made only by its own module, from entry grants (CAP-4) or
-by attenuation (CAP-7), so no program can forge one. A capability that holds state is a
+by attenuation (CAP-7), or by a tape as a substitute (CAP-9), so no program can forge one. A capability that holds state is a
 resource ([OWN-3](ownership.md#own-3-kinds)); one that only designates authority is plain,
 and copying it copies the designation, never the thing designated. Each capability type
 declares whether it is `send` ([CONC-2](tasks.md#conc-2-the-send-bound)).
@@ -65,8 +65,10 @@ The **provider operations** are exactly the host primitives listed in [core](cor
 standard library's capability modules are ordinary code over them, and a program cannot
 declare another. Each is carried out by a **provider**: the implementation behind the
 capability, chosen by the run's configuration (the host, a recording, a replay, a
-simulation). Programs cannot tell providers apart except by the values the operations
-return. A provider operation that may wait is declared `waits` and is a cancellation point
+simulation) or, for a substitute, by its tape (CAP-9). Programs cannot tell providers apart
+except by the values the operations return. An engine may call a provider in more than one
+form, never with different behaviour: a provider that forwards every operation to another
+is indistinguishable from it. A provider operation that may wait is declared `waits` and is a cancellation point
 at its issue ([CONC-7](tasks.md#conc-7-cancellation-points)). Provider operations state
 their allocation in their result types as every operation does
 ([MEM-21](budgets.md#mem-21-admission)); host memory behind them is not charged. Core task,
@@ -156,7 +158,41 @@ order, and a replaying provider can supply the delivery without performing the i
 scheduler choice is recorded; the result of an event is not, since the order and the run's
 other inputs determine it, so a replay that follows the recorded order recomputes every
 `receive`, `try_receive`, `latest.read` and count.
-Once issued, an operation completes and delivers. Given the same values, the run behaves
+Once issued, an operation delivers exactly one result
+([CONC-7](tasks.md#conc-7-cancellation-points)). Given the same values, the run behaves
 identically
 ([SEM-8](semantics.md#sem-8-determinism)). The format of a recording is not part of the
+language.
+
+### CAP-9: Tapes
+
+A **tape** is a core resource, `Tape`, that records or replays the provider operations made
+through the capabilities it substitutes. `tape.open(d, name, mode, header)` opens the tape
+file `name` in the directory `d`, to record or to replay. `tape.clock`, `tape.dir`,
+`tape.stdout`, `tape.stderr` and `tape.args` each take a tape and a capability and return
+a **substitute**: a capability of the same type whose every operation, and every operation
+on a handle made through it, reaches the tape at its issue and at its delivery (CAP-8). A
+substitute differs from its source only by the values its operations return (CAP-5), so
+code that takes the capability runs unchanged on either.
+
+- Recording, the tape performs each operation through its source's provider and records its
+  issue and its delivery in the order of the run.
+- Replaying, the tape performs nothing: it checks each issue against the recording before
+  any effect, delivers the recorded result and never reaches the source's provider, so a
+  replay has no host effect. An issue that differs from the recording, in its operation, its
+  object or its argument, is a divergence and has no effect.
+- `tape.open` refuses, before anything runs, a recording whose code identity
+  ([PROG-9](programs.md#prog-9-code-descriptors)), argument or limit differs from the
+  opener's. How a code revision is compared waits on hook D ([reserved](reserved.md)).
+- `tape.end(take t)` waits until every operation on the tape that is in progress has
+  delivered, then seals the tape. After `end`, or once the tape is dropped, every operation
+  on a substitute or on a handle made through it fails with cause `TapeEnded`
+  ([FAIL-2](failure.md#fail-2-causes)) before its issue and never reaches the source;
+  cleaning such a handle closes the handle behind it, if there is one, and records nothing.
+  A dropped tape keeps what it recorded but is not sealed, as if the run had ended there.
+
+`tape.port(mut t)` returns a `Port` and its `PortEnd`, a way out of code that holds only
+substitutes that carries bytes and nothing else: `port.call(p, request, mut reply)` is a
+provider operation recorded like any other, and the holder of the `PortEnd` takes each call
+with `tape.serve` and replies with `tape.answer`. The format of a tape is not part of the
 language.

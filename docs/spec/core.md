@@ -22,6 +22,7 @@ there with no body is built in, so its summary is the one the table below gives 
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
 | `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
+| `tape`, `port` | not yet in the core source | CAP-9 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `args`, `host`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [host](../../core/core/host.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5 |
@@ -280,9 +281,9 @@ operations it names; nothing else about them may be inferred from an implementat
   renamed or removed before its issue survives a host crash in that state; names in its
   subdirectories are not covered. A failed sync is an **unknown outcome**: which of those
   bytes or names survive a crash is not known, and a later success of the same barrier
-  says nothing about them. Like every waiting operation, each is a cancellation point at
-  its issue only, and once issued it completes and delivers
-  ([CAP-8](capabilities.md#cap-8-the-replay-point)), so cancellation never interrupts one. `host.wall_ms` is milliseconds since 1970 and
+  says nothing about them. Each is a cancellation point at its issue only, and the host
+  provider completes it at its issue ([CONC-7](tasks.md#conc-7-cancellation-points)), so
+  cancellation never interrupts one. `host.wall_ms` is milliseconds since 1970 and
   `host.mono_ns` never decreases in a run. `host.sleep_until(c, deadline_ns)` returns once
   `host.mono_ns(c) >= deadline_ns`, at once for a deadline already reached; it is a
   cancellation point at its entry and while it waits

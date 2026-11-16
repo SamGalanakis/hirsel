@@ -242,7 +242,10 @@ bound ([OWN-4](ownership.md#own-4-bounds)). The standard library's `codec` modul
 as a plain value of type `Codec[T]`: `codec.of`, declared `fn of[T: codec]() -> Codec[T]`,
 admits nothing, and a call at a type without the bound is refused at that call
 ([LANG-12](language.md#lang-12-generics)), so generic code that needs a codec writes `T:
-codec`. A nominal type's codec is generated from its declaration as ordinary checked code,
+codec`. Its `T` is fixed as every type argument is, by the expected type or an earlier
+argument (`let c: codec.Codec[u8] = codec.of()`); `of[T]` names an instance in prose, never a
+call. Each call resolves at its instance's `T`: to the built-in codec of a scalar, `()` or
+`String`, and to the codec generated from the declaration of a nominal type. A nominal type's codec is generated from its declaration as ordinary checked code,
 which visits its fields in declaration order and its variants in declared order. The byte
 format, the framing of a value among others and the encoding of a schema are the library's;
 this rule fixes what every codec does, and how scalars are encoded: integers at their
@@ -284,7 +287,8 @@ writer's schema against the reading declaration's, matching fields and variants 
 so the order of fields may differ, and resolving each matched type in the same way at every
 depth. Exactly three changes survive old data:
 
-- a field added with a default: a field the writer's schema lacks takes its default;
+- a field added with a default: a field the writer's schema lacks, or records as removed,
+  takes its default;
 - a field or variant removed by a **tombstone**, `removed note: String` among the fields or
   `removed Old(u64)` among the variants, written in place of what it removes: a writer's
   field that matches a removed field is skipped, and a writer's variant that matches a
@@ -309,7 +313,7 @@ tombstone stays for as long as old data may hold what it removed; deleting it fr
 name. At resolution the reader verifies what the writer's schema shows: each writer's field
 and variant matches a field, variant or tombstone of the reader by name, the writer's types
 resolve against the matched ones, a tombstone's included, each matched variant has the
-writer's tag, and each field the writer lacks has a default. A schema records its
+writer's tag, and each field the writer lacks or removed has a default. A schema records its
 tombstones, so data whose writer removed a variant resolves against a reader that still has
 it.
 

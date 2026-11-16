@@ -1105,12 +1105,8 @@ fn follow_schedules(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
     let (send2, receive2): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
     let payload = FollowingReader(current: latest.handle(h), done: take receive)
     let payload2 = FollowingReader(current: take h, done: take receive2)
-    let reader = result.unwrap(task.spawn(tasks, bytes 1048576, take payload, fn(take r: FollowingReader) -> bool waits {
-        read_following(take r)
-    }))
-    let reader2 = result.unwrap(task.spawn(tasks, bytes 1048576, take payload2, fn(take r: FollowingReader) -> bool waits {
-        read_following(take r)
-    }))
+    let reader = result.unwrap(task.spawn(tasks, bytes 1048576, take payload, read_following))
+    let reader2 = result.unwrap(task.spawn(tasks, bytes 1048576, take payload2, read_following))
     for v in 1u64 .. 65 {
         if !put_one(mut db, 1, v) {
             return Error(())

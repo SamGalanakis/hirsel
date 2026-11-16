@@ -39,6 +39,7 @@ journal durability to S3; pins, forks and migration to S4; streams and scopes to
 S5. There is no durability promise for a memory store.
 
 `//:core-store-s1` selects the package's evaluator and native laws, including
-32 seeded follower schedules on each native engine. `core/HOOK-ALLOWLIST` gates
+Cranelift, LLVM development and LLVM release, with 32 seeded follower schedules
+in each configuration. `core/HOOK-ALLOWLIST` gates
 the library's core dependencies. The checksum's independent vectors are in
 `core/std/tests/check.hirsel`.

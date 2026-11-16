@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import subprocess
@@ -40,11 +39,11 @@ def main():
     p.add_argument('--evaluator', type=Path)
     p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     p.add_argument('--cc', type=Path)
-    p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm'])
+    p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm', 'llvm-release'])
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
-    engines = args.backend or ['evaluator', 'cranelift', 'llvm']
+    engines = args.backend or ['evaluator', 'cranelift', 'llvm', 'llvm-release']
     rows = []
     with tempfile.TemporaryDirectory(prefix='hirsel-store-laws-') as tmp:
         work = Path(tmp)
@@ -62,26 +61,19 @@ def main():
                     except ValueError:
                         report = {'stdout': result.stdout, 'stderr': result.stderr}
                     good = result.returncode == 0 and report.get('outcome') == {'kind': 'returned', 'values': [1]}
-                    # Orchestrator's 2026-11-16 ruling: these assembly failures
-                    # belong to 914 and ride S1. Execute every eligible law;
-                    # distinguish blocked assembly from an executed answer.
-                    error = report.get('error', '')
-                    blocked = (name in {'schema_numbers', 'drop_recreate', 'typed_resident', 'typed_model'}
-                               and (error == 'generic source body is incomplete'
-                                    or re.fullmatch(r'not well formed: f\d+: b\d+: direct call through another signature', error)))
-                    rows.append(dict(engine=engine, law=name, passed=True if good else None if blocked else False,
-                                     blocked='core-ops-914' if blocked else None, result=report))
-                    status = 'PASS' if good else 'BLOCKED by evaluator assembly (914)' if blocked else 'FAIL'
-                    print(f'{engine} {name}: {status}; admitted={report.get("used")}'
-                          + (f'; {error}' if blocked else ''), flush=True)
+                    rows.append(dict(engine=engine, law=name, passed=good, result=report))
+                    print(f'{engine} {name}: {"PASS" if good else "FAIL"}; admitted={report.get("used")}'
+                          + (f'; {report.get("error")}' if not good else ''), flush=True)
             else:
                 if args.compiler is None or args.runtime is None:
                     p.error('native backends require --compiler and --runtime')
                 command = [str(args.compiler.resolve()), 'test', '--inputs', str(manifest),
-                           '--source-core', '--source-std', '--backend', engine, '--runtime',
+                           '--source-core', '--source-std', '--backend', 'llvm' if engine == 'llvm-release' else engine, '--runtime',
                            str(args.runtime.resolve()), '--store', str(work / engine), '--json',
                            '--filter', 'store@1/store/test_', '--limit', str(64 * 1024 * 1024),
                            '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random', '--grant', 'Stderr']
+                if engine == 'llvm-release':
+                    command.append('--release')
                 if args.cc:
                     command += ['--cc', str(args.cc.resolve())]
                 wait_load()

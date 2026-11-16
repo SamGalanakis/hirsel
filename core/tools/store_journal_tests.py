@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """S3 journal laws, real W2 cuts, named I/O failures and W4 schedules."""
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -8,9 +9,12 @@ import re
 import subprocess
 import tempfile
 
-from std_native import ROOT, wait_load
+from std_native import ROOT, Evaluator, wait_load
 from store_tests import inputs
 from store_crash_tests import checked, run_crashes
+
+# Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
+INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_514_238_519
 
 LAWS = ('end', 'payload', 'segment', 'apply', 'recovery', 'bootstrap', 'worker',
         'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel', 'recorded_fork')
@@ -69,7 +73,7 @@ def main():
     args = parser.parse_args()
     root = args.root.resolve()
     rows = []
-    with tempfile.TemporaryDirectory(prefix='hirsel-store-journal-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='hirsel-store-journal-') as tmp, contextlib.ExitStack() as resources:
         work = Path(tmp)
         manifest = work / 'inputs.json'
         manifest.write_text(json.dumps(inputs(root)))
@@ -78,18 +82,18 @@ def main():
         if args.bridge:
             libraries.insert(0, str(args.bridge.resolve().parent))
         env['LD_LIBRARY_PATH'] = ':'.join(libraries + [env.get('LD_LIBRARY_PATH', '')])
+        evaluator = resources.enter_context(Evaluator(args.evaluator.resolve())) if args.evaluator else None
         for engine in args.backend or ['evaluator', 'cranelift', 'llvm', 'llvm-release']:
             if engine == 'evaluator':
                 if args.evaluator is None:
                     parser.error('evaluator backend requires --evaluator')
                 for name in LAWS:
-                    result = subprocess.run([str(args.evaluator.resolve()), str(manifest),
-                                             'store@1/store/journal_law_' + name],
-                                            capture_output=True, text=True, env=env)
+                    result = evaluator.evaluate(manifest, 'store@1/store/journal_law_' + name,
+                                                instructions=INSTRUCTION_ALLOWANCES.get(name))
                     try:
                         report = json.loads(result.stdout)
                     except ValueError:
-                        report = dict(stdout=result.stdout, stderr=result.stderr)
+                        report = dict(stdout=result.stdout.decode(errors='replace'), stderr=result.stderr.decode(errors='replace'))
                     good = result.returncode == 0 and report.get('outcome') == dict(kind='returned', values=[1])
                     rows.append(dict(engine=engine, law=name, passed=good, result=report))
                     print(f'{engine} {name}: {"PASS" if good else "FAIL"}', flush=True)

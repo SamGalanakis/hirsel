@@ -51,6 +51,8 @@ pub struct Report {
 /// What the run's oracle checks covered (crate docs, "Loans").
 #[derive(Debug, Default, PartialEq)]
 pub struct Checked {
+    /// Executed instructions and terminators, shared by every task of the run.
+    pub instructions: u64,
     /// Lent places: each `view` and `take` place frozen for its call, each `mut`
     /// place and destination checked against the call's other places.
     pub loans: u64,
@@ -955,6 +957,7 @@ fn run_world(
     }
     let sites = chain.iter().map(|c| c.site).collect();
     let checked = Checked {
+        instructions: input.instructions - mach.instructions,
         loans: mach.loans,
         roles: mach.role_checks,
     };

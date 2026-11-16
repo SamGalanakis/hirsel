@@ -45,7 +45,7 @@ fn host_return_place_and_instruction_allowance() {
     );
     wf::module(&module).unwrap();
     let mut destination = [0; 8];
-    let (report, _) = eval::run_nans_into(
+    let (report, checked) = eval::run_nans_into(
         &module,
         FuncId(0),
         &[],
@@ -57,6 +57,8 @@ fn host_return_place_and_instruction_allowance() {
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![]));
     assert_eq!(u64::from_le_bytes(destination), 73);
     assert_eq!(report.used, 0);
+    // Two address instructions, a constant, a store and the return.
+    assert_eq!(checked.instructions, 5);
     let looping = load(
         "budget",
         "core v1\nsig g0 = () -> ()\ninst n0 = app@1/main/looping [] []\nfn f0 = n0 g0 {\nb0:\n jump b0\n}\n",

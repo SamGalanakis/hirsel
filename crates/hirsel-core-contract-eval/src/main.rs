@@ -19,6 +19,7 @@ fn evaluate(
     manifest: &Path,
     entry: DefPath,
     program_entry: bool,
+    instructions: u64,
 ) -> Result<Value, String> {
     let inputs: CorpusManifest =
         serde_json::from_slice(&std::fs::read(manifest).map_err(|e| e.to_string())?)
@@ -53,16 +54,21 @@ fn evaluate(
     if let Err(error) = hirsel_core_ir::wf::module(&module) {
         return Ok(json!({"error":format!("not well formed: {error}"), "revision":revision}));
     }
-    let mut result =
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&module, function))) {
-            Ok(result) => result?,
-            Err(fault) => fault_report(fault),
-        };
+    let mut result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(&module, function, instructions)
+    })) {
+        Ok(result) => result?,
+        Err(fault) => fault_report(fault),
+    };
     result["revision"] = json!(revision);
     Ok(result)
 }
 
-fn run(module: &Module, function: hirsel_core_ir::FuncId) -> Result<Value, String> {
+fn run(
+    module: &Module,
+    function: hirsel_core_ir::FuncId,
+    instructions: u64,
+) -> Result<Value, String> {
     let signature = &module.signatures[module.functions[function.index()].signature.index()];
     let recipes = compute(&module.types).map_err(|e| format!("layouts: {e:?}"))?;
     let result_layout = signature
@@ -83,7 +89,7 @@ fn run(module: &Module, function: hirsel_core_ir::FuncId) -> Result<Value, Strin
         u64::MAX,
         eval::Nans::Scrambled,
         destination.as_deref_mut(),
-        INSTRUCTIONS,
+        instructions,
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {
@@ -111,7 +117,7 @@ fn run(module: &Module, function: hirsel_core_ir::FuncId) -> Result<Value, Strin
     Ok(json!({"outcome":outcome, "used":report.used,
         "stdout":report.stdout, "stderr":report.stderr,
         "events":report.events.iter().map(|e| [u64::from(e.kind), e.task, e.object, e.value]).collect::<Vec<_>>(),
-        "checked":{"loans":checked.loans}}))
+        "checked":{"loans":checked.loans, "instructions":checked.instructions}}))
 }
 fn fault_report(fault: Box<dyn std::any::Any + Send>) -> Value {
     let message = fault
@@ -132,6 +138,7 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
             Path::new(manifest),
             entry,
             input["program_entry"].as_bool().unwrap_or(false),
+            input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
         )
     }));
     match result {

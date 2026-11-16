@@ -188,8 +188,10 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
+        if instructions is not None:
+            request["instructions"] = instructions
         try:
             self.process.stdin.write(json.dumps(request).encode() + b'\n')
             self.process.stdin.flush()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the store's S2 laws from checkout sources with exact body selection."""
 import argparse
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -8,9 +9,12 @@ import re
 import subprocess
 import tempfile
 
-from std_native import ROOT, wait_load
+from std_native import ROOT, Evaluator, wait_load
 from store_tests import inputs
 from store_crash_tests import run_crashes
+
+# Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
+INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
 
 LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact',
         'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate')
@@ -42,21 +46,22 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
     rows = []
-    with tempfile.TemporaryDirectory(prefix='hirsel-store-disk-laws-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='hirsel-store-disk-laws-') as tmp, contextlib.ExitStack() as resources:
         work = Path(tmp)
         manifest = work / 'inputs.json'
         manifest.write_text(json.dumps(inputs(args.root.resolve())))
+        evaluator = resources.enter_context(Evaluator(args.evaluator.resolve())) if args.evaluator else None
         for engine in args.backend or ['evaluator', 'cranelift', 'llvm', 'llvm-release']:
             if engine == 'evaluator':
                 if args.evaluator is None:
                     p.error('evaluator backend requires --evaluator')
                 for name in LAWS:
-                    result = subprocess.run([str(args.evaluator.resolve()), str(manifest),
-                                             'store@1/store/disk_law_' + name], capture_output=True, text=True)
+                    result = evaluator.evaluate(manifest, 'store@1/store/disk_law_' + name,
+                                                instructions=INSTRUCTION_ALLOWANCES.get(name))
                     try:
                         report = json.loads(result.stdout)
                     except ValueError:
-                        report = {'stdout': result.stdout, 'stderr': result.stderr}
+                        report = {'stdout': result.stdout.decode(errors='replace'), 'stderr': result.stderr.decode(errors='replace')}
                     good = result.returncode == 0 and report.get('outcome') == {'kind': 'returned', 'values': [1]}
                     rows.append(dict(engine=engine, law=name, passed=good, result=report))
                     print(f'{engine} {name}: {"PASS" if good else "FAIL"}', flush=True)

@@ -172,39 +172,176 @@ struct Blk {
     /// slot's offset, whether it holds a value, and its size.
     marks: BTreeMap<usize, (bool, usize)>,
 }
-impl Blk {
-    /// Keep the address's tombstone for stale-pointer checks, release its storage.
-    fn retire(&mut self) {
-        self.live = false;
-        self.bytes = Vec::new();
-        self.marks.clear();
+// A pointer's upper word is a monotonically assigned block identity, not a
+// storage slot. Only live blocks occupy records. Absence is the tombstone.
+// Completed empty index chunks are discarded; the top directory is bounded by
+// the 32-bit identity space. One live block can pin one 4096-entry u32 chunk.
+const BLOCK_CHUNK: usize = 4096;
+struct BlockChunk {
+    slots: Box<[u32; BLOCK_CHUNK]>,
+    live: usize,
+}
+#[derive(Default)]
+struct Blocks {
+    next: usize,
+    chunks: Vec<Option<Box<BlockChunk>>>,
+    entries: Vec<(usize, Blk)>,
+}
+impl Blocks {
+    fn insert(&mut self, block: Blk) -> usize {
+        assert!(
+            self.next < u32::MAX as usize,
+            "evaluator block identity space exhausted (a run stop, not Capacity)"
+        );
+        let id = self.next;
+        self.next += 1;
+        let c = id / BLOCK_CHUNK;
+        if c == self.chunks.len() {
+            self.chunks.push(Some(Box::new(BlockChunk {
+                slots: Box::new([0; BLOCK_CHUNK]),
+                live: 0,
+            })));
+        }
+        let chunk = self.chunks[c].as_mut().unwrap();
+        chunk.slots[id % BLOCK_CHUNK] = (self.entries.len() + 1) as u32;
+        chunk.live += 1;
+        self.entries.push((id, block));
+        id
+    }
+    fn slot(&self, id: usize) -> Option<usize> {
+        let chunk = self.chunks.get(id / BLOCK_CHUNK)?.as_ref()?;
+        let slot = chunk.slots[id % BLOCK_CHUNK];
+        (slot != 0).then_some(slot.wrapping_sub(1) as usize)
+    }
+    fn remove(&mut self, id: usize) -> Blk {
+        let slot = self.slot(id).expect("free of a non-block");
+        let chunk = self.chunks[id / BLOCK_CHUNK].as_mut().unwrap();
+        chunk.slots[id % BLOCK_CHUNK] = 0;
+        chunk.live -= 1;
+        if chunk.live == 0 && id / BLOCK_CHUNK < self.next / BLOCK_CHUNK {
+            self.chunks[id / BLOCK_CHUNK] = None;
+        }
+        let (_, block) = self.entries.swap_remove(slot);
+        if let Some(&(moved, _)) = self.entries.get(slot) {
+            self.chunks[moved / BLOCK_CHUNK].as_mut().unwrap().slots[moved % BLOCK_CHUNK] =
+                (slot + 1) as u32;
+        }
+        // Bound record storage by current liveness, not the historical peak.
+        // Hysteresis keeps repeated allocation/free at the boundary amortized.
+        if self.entries.capacity() > 256 && self.entries.len() < self.entries.capacity() / 4 {
+            self.entries.shrink_to((2 * self.entries.len()).max(256));
+        }
+        block
+    }
+}
+// Absent blocks retain only their liveness fact. No diagnostic depends on the
+// retired bytes, size, limit or origin. Mutable indexing always follows a live
+// check, and cannot create an absent entry.
+static DEAD_BLOCK: Blk = Blk {
+    bytes: Vec::new(),
+    live: false,
+    limit: None,
+    charge: 0,
+    res: None,
+    counted: None,
+    class: None,
+    fixed: false,
+    marks: BTreeMap::new(),
+};
+impl std::ops::Index<usize> for Blocks {
+    type Output = Blk;
+    fn index(&self, id: usize) -> &Blk {
+        self.slot(id)
+            .map_or(&DEAD_BLOCK, |slot| &self.entries[slot].1)
+    }
+}
+impl std::ops::IndexMut<usize> for Blocks {
+    fn index_mut(&mut self, id: usize) -> &mut Blk {
+        let slot = self.slot(id).expect("use of a freed block");
+        &mut self.entries[slot].1
     }
 }
 
 #[cfg(test)]
-mod retired_storage_tests {
+mod block_table_tests {
     use super::*;
 
-    #[test]
-    fn retirement_releases_storage_and_keeps_the_tombstone() {
-        let mut block = Blk {
-            bytes: vec![42; 65536],
+    fn block() -> Blk {
+        Blk {
+            bytes: vec![42; 8],
             live: true,
-            limit: Some(7),
-            charge: 65536,
+            limit: None,
+            charge: 0,
             res: None,
             counted: None,
             class: None,
             fixed: false,
             marks: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn block_storage_follows_liveness_and_never_reuses_an_identity() {
+        let mut blocks = Blocks::default();
+        let pinned = blocks.insert(block());
+        let mut previous = pinned;
+        for _ in 0..10 * BLOCK_CHUNK {
+            let id = blocks.insert(block());
+            assert!(id > previous);
+            previous = id;
+            assert_eq!(blocks[id].bytes, [42; 8]);
+            blocks.remove(id);
+            assert!(!blocks[id].live);
+        }
+        assert_eq!(blocks.entries.len(), 1);
+        assert!(blocks.entries.capacity() <= 256);
+        assert_eq!(blocks.chunks.iter().filter(|c| c.is_some()).count(), 2);
+        assert_eq!(blocks[pinned].bytes, [42; 8]);
+        blocks.remove(pinned);
+        assert!(blocks.chunks[0].is_none());
+        assert!(!blocks[pinned].live);
+    }
+
+    #[test]
+    fn removing_a_record_preserves_the_identity_of_the_moved_record() {
+        let mut blocks = Blocks::default();
+        let ids: Vec<_> = (0..2 * BLOCK_CHUNK)
+            .map(|_| blocks.insert(block()))
+            .collect();
+        for &id in &ids[..BLOCK_CHUNK] {
+            blocks.remove(id);
+        }
+        assert!(blocks.chunks[0].is_none());
+        for &id in &ids[BLOCK_CHUNK..] {
+            assert_eq!(blocks[id].bytes, [42; 8]);
+        }
+        for &id in &ids[BLOCK_CHUNK..] {
+            blocks.remove(id);
+        }
+        assert!(blocks.chunks.iter().all(Option::is_none));
+        assert!(blocks.entries.capacity() <= 256);
+    }
+
+    #[test]
+    fn block_identity_exhaustion_stops_instead_of_wrapping() {
+        let mut blocks = Blocks {
+            next: u32::MAX as usize,
+            ..Blocks::default()
         };
-        block.retire();
-        assert_eq!(block.bytes.capacity(), 0);
-        assert!(!block.live);
-        assert_eq!(block.limit, Some(7));
-        assert_eq!(block.charge, 65536);
+        let fault =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| blocks.insert(block())))
+                .unwrap_err();
+        assert_eq!(
+            fault.downcast_ref::<&str>().copied(),
+            Some("evaluator block identity space exhausted (a run stop, not Capacity)")
+        );
+        assert_eq!(blocks.next, u32::MAX as usize);
+        assert!(blocks.entries.is_empty());
+        let last = ptr(u32::MAX as usize - 1, u32::MAX as u64);
+        assert_eq!(split(last), (u32::MAX as usize - 1, u32::MAX as usize));
     }
 }
+
 struct Res {
     grant: u64,
     settled: bool,
@@ -313,7 +450,7 @@ enum At {
 struct Machine<'m> {
     m: &'m Module,
     recipes: Vec<Recipe>,
-    mem: Vec<Blk>,
+    mem: Blocks,
     limits: Vec<Limit>,
     peak_reserved: u64,
     regions: Vec<Vec<usize>>,
@@ -547,7 +684,7 @@ fn run_world(
     let mut mach = Machine {
         m,
         recipes: compute(&m.types).expect("layouts"),
-        mem: Vec::new(),
+        mem: Blocks::default(),
         peak_reserved: 0,
         limits: vec![Limit {
             cap: limit,
@@ -809,7 +946,7 @@ impl<'m> Machine<'m> {
         Machine {
             m: self.m,
             recipes: Vec::new(),
-            mem: Vec::new(),
+            mem: Blocks::default(),
             limits: Vec::new(),
             peak_reserved: 0,
             regions: Vec::new(),
@@ -1193,7 +1330,7 @@ impl Machine<'_> {
             size <= HOST_BYTES,
             "host out of memory: a block of {size} bytes was admitted (a run stop, not Capacity)"
         );
-        self.mem.push(Blk {
+        let id = self.mem.insert(Blk {
             bytes: vec![0; size as usize],
             live: true,
             limit,
@@ -1204,7 +1341,7 @@ impl Machine<'_> {
             fixed: false,
             marks: BTreeMap::new(),
         });
-        ptr(self.mem.len() - 1, 0)
+        ptr(id, 0)
     }
     fn get(&self, p: u64, n: usize) -> &[u8] {
         let (b, o) = split(p);
@@ -1322,6 +1459,7 @@ impl Machine<'_> {
     /// hide the difference.
     fn free_as(&mut self, p: u64, charge: Option<u64>, size: Option<u64>, what: &str) {
         let blk = &self.mem[split(p).0];
+        assert!(blk.live, "free of a non-block");
         let charge = charge.expect("a cleanup charge in range");
         assert_eq!(
             blk.charge, charge,
@@ -1353,8 +1491,7 @@ impl Machine<'_> {
         if let Some((at, _)) = self.mem[b].marks.iter().find(|(_, m)| m.0) {
             panic!("free of a block whose slot at +{at} is live: a slot kernel left a value in it");
         }
-        let blk = &mut self.mem[b];
-        blk.retire();
+        let blk = self.mem.remove(b);
         let mut n = blk.charge;
         if let Some(r) = &blk.res {
             n -= if r.settled { r.grant } else { 0 };
@@ -2337,8 +2474,7 @@ impl Machine<'_> {
             .collect();
         let r = self.frame(t, b, args, &slots, self.inherits[f.index()]);
         for p in slots {
-            let blk = &mut self.mem[split(p).0];
-            blk.retire();
+            self.mem.remove(split(p).0);
         }
         r
     }
@@ -2907,6 +3043,7 @@ impl Machine<'_> {
             }
             Inst::Free { block, charge } => {
                 let p = vals[block.index()];
+                assert!(self.mem[split(p).0].live, "free of a non-block");
                 assert_eq!(
                     self.mem[split(p).0].charge,
                     vals[charge.index()],

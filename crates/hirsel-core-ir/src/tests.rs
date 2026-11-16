@@ -1166,6 +1166,8 @@ fn retired_blocks_keep_stale_read_write_and_free_faults() {
         ("  v5: u64 = read a0\n", "use of a freed block"),
         ("  store a0, v0\n", "use of a freed block"),
         ("  free v1 charge v0\n", "free of a non-block"),
+        ("  mark a0, v0, live : u64\n", "mark of a freed block"),
+        ("  unmark a0, v0, empty : u64\n", "unmark of a freed block"),
     ] {
         let source = format!(
             "core v1\nsig g0 = () -> ()\ninst n0 = core@1/m/probe [] []\nfn f0 = n0 g0 {{\n  addr a0 = v1 : u64\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc for seq u64 v0 align 8 charge v0\n  address a0\n  store a0, v0\n  free v1 charge v0\n  v3: ptr, v4: u64 = alloc for seq u64 v0 align 8 charge v0\n{operation}  free v3 charge v0\n  return\n}}\n"

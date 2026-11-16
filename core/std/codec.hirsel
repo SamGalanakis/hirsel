@@ -5,10 +5,12 @@
 // Format. Integers at their width, a float as its IEEE bits, a `char` as its scalar in a
 // u32, all little-endian; `bool` one byte, 0 or 1; `()` nothing. String, List and Map: a
 // u64 count, then the UTF-8 bytes, the elements, or key and value per entry in insertion
-// order. Option, Result and every sum: the declared variant index as a u64, then the
-// variant's fields. A record or tuple: its fields in declaration order; a removed field
-// is not written. Nothing frames a value but its type, so a value is decoded against the
-// schema that wrote it.
+// order. Option, Result and every sum: the declared variant index, removed variants
+// counted, as a u32, then the variant's fields. A record or tuple: its fields in
+// declaration order; a removed field is not written. Nothing frames a value but its
+// type, so a value is decoded against the schema that wrote it. The version byte of a
+// schema fixes these widths: a decoder written from a version-1 schema alone, in any
+// language, reads u64 counts and lengths and u32 tags.
 /// SEM-10's decode errors; each u64 is a byte offset, into the writer's schema for
 /// `Schema` and into the decoded bytes otherwise. `Value(i)`: the `from` of a `via` codec
 /// refused the value that starts at i.
@@ -355,17 +357,17 @@ fn utf8_stop(b: Bytes, lo: u64, hi: u64) -> u64 {
 }
 
 /// A variant tag: the declared index of the variant, below `count`, else Invalid at it.
-pub fn put_tag(x: u64, mut out: Bytes) -> Result[(), Capacity] {
-    list.put_word_le(mut out, x)
+/// Written as a u32 whatever the number of variants (SEM-10).
+pub fn put_tag(x: u32, mut out: Bytes) -> Result[(), Capacity] {
+    put_u32(x, mut out)
 }
 
-pub fn take_tag(b: Bytes, mut at: u64, count: u64) -> Result[u64, Stop] {
-    need(b, at, 8)?
-    let x = list.word_le(b, at)
+pub fn take_tag(b: Bytes, mut at: u64, count: u32) -> Result[u32, Stop] {
+    let start = at
+    let x = take_u32(b, mut at)?
     if x >= count {
-        return Error(Bad(Invalid(at)))
+        return Error(Bad(Invalid(start)))
     }
-    at += 8
     Ok(x)
 }
 
@@ -451,9 +453,9 @@ pub fn take_map[K: key, V](b: Bytes, mut at: u64, ck: Codec[K], cv: Codec[V]) ->
 
 pub fn put_option[T](x: Option[T], c: Codec[T], mut out: Bytes) -> Result[(), Capacity] {
     match x {
-        None => list.put_word_le(mut out, 0),
+        None => put_tag(0, mut out),
         Some(v) => {
-            list.put_word_le(mut out, 1)?
+            put_tag(1, mut out)?
             (c.encoder)(v, mut out)
         }
     }
@@ -470,11 +472,11 @@ pub fn take_option[T](b: Bytes, mut at: u64, c: Codec[T]) -> Result[Option[T], S
 pub fn put_result[T, E](x: Result[T, E], ct: Codec[T], ce: Codec[E], mut out: Bytes) -> Result[(), Capacity] {
     match x {
         Ok(v) => {
-            list.put_word_le(mut out, 0)?
+            put_tag(0, mut out)?
             (ct.encoder)(v, mut out)
         }
         Error(e) => {
-            list.put_word_le(mut out, 1)?
+            put_tag(1, mut out)?
             (ce.encoder)(e, mut out)
         }
     }
@@ -564,7 +566,7 @@ pub fn of_string() -> Codec[String] {
 
 /// DecodeError's codec, as the derive writes a sum's: a store can keep a refusal.
 pub fn of_decode_error() -> Codec[DecodeError] {
-    Codec(encoder: decode_error_encode, decoder: decode_error_decode, describer: decode_error_schema, smallest: 16)
+    Codec(encoder: decode_error_encode, decoder: decode_error_decode, describer: decode_error_schema, smallest: 12)
 }
 
 fn decode_error_encode(x: DecodeError, mut out: Bytes) -> Result[(), Capacity] {
@@ -1668,6 +1670,12 @@ fn word(mut o: Out, x: u64) -> Result[(), Stop] {
     grow(mut o, lo)
 }
 
+fn tag_word(mut o: Out, x: u32) -> Result[(), Stop] {
+    let lo = list.len(o.raw)
+    admit(put_tag(x, mut o.raw))?
+    grow(mut o, lo)
+}
+
 // Checks the writer's bytes by the plan and writes the reader's layout into o; the
 // offset where the value ends. marks: (offset in o.raw, offset in b) of each via value.
 fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut o: Out, mut marks: List[(u64, u64)]) -> Result[u64, Stop] {
@@ -1690,8 +1698,9 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
                     push_frame(mut stack, frame(k, next, n, 0))?
                 }
             } else if k == 3 || k == 4 {
-                let tag = take_tag(b, mut at, 2)?
-                word(mut o, tag)?
+                let small = take_tag(b, mut at, 2)?
+                let tag: u64 = int.widen(small)
+                tag_word(mut o, small)?
                 if k == 4 || tag == 1 {
                     next = ops[next + 1 + if k == 4 {
                         tag
@@ -1710,11 +1719,12 @@ fn transcode(ops: List[u64], defaults: List[Default], b: Bytes, start: u64, mut 
                 }
             } else if k == 7 {
                 let tag_at = at
-                let tag = take_u64(b, mut at)?
+                let small = take_u32(b, mut at)?
+                let tag: u64 = int.widen(small)
                 if tag >= ops[next + 1] || ops[ops[next + 2 + tag]] != 0 {
                     return Error(Bad(Invalid(tag_at)))
                 }
-                word(mut o, tag)?
+                tag_word(mut o, small)?
                 let v = ops[next + 2 + tag]
                 if ops[v + 1] > 0 {
                     push_frame(mut stack, frame(5, v + 2, ops[v + 1], 0))?

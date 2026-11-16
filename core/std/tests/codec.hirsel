@@ -1,5 +1,5 @@
 // Contract tests for `codec` (core/std/codec.hirsel). Expected bytes are written out by
-// hand from the format in the module header (little-endian, u64 counts and tags), never
+// hand from the format in the module header (little-endian, u64 counts, u32 tags), never
 // taken from an encode. A decode error reads as kind * 1000 + offset: 1 Truncated,
 // 2 Invalid, 3 Utf8, 4 Duplicate, 5 Trailing, 6 Schema, 7 Value; 0 is success.
 fn nibble(x: u8) -> u8 {
@@ -173,12 +173,12 @@ fn mix_schema(mut s: codec.Schema) -> Result[(), Capacity] {
 }
 
 fn mixes() -> codec.Codec[Mix] {
-    codec.make(mix_encode, mix_decode, mix_schema, 34)
+    codec.make(mix_encode, mix_decode, mix_schema, 28)
 }
 
 // tag Some("a"), res Error("b"), m {"k": 5}, xs [-1], pair (9, true), by hand.
 fn mix_bytes() -> Bytes {
-    unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01")
+    unhex("01000000 0100000000000000 61 01000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01")
 }
 
 // The composite format by hand, then every prefix Truncated inside it. A put that drops
@@ -230,19 +230,19 @@ fn flips_are_refused_or_exact() -> bool {
     true
 }
 
-// Hand-made near misses of mix_bytes (tag at 0, res at 17, m at 34 with its key at 42,
-// xs at 52, the pair at 64): Option tag 2 at 0; Result tag 2 at 17; the key "k" again
-// in a two-entry map, at the second key (52); the bool 2 at 65; one byte past the end,
-// Trailing at 66; a list count no remaining bytes hold, Truncated at the count (52)
+// Hand-made near misses of mix_bytes (tag at 0, res at 13, m at 26 with its key at 34,
+// xs at 44, the pair at 56): Option tag 2 at 0; Result tag 2 at 13; the key "k" again
+// in a two-entry map, at the second key (44); the bool 2 at 57; one byte past the end,
+// Trailing at 58; a list count no remaining bytes hold, Truncated at the count (44)
 // before anything is admitted.
-// expect: run mix_near_misses() = (2000, 2017, 4052, 2065, 5066, 1052)
+// expect: run mix_near_misses() = (2000, 2013, 4044, 2057, 5058, 1044)
 fn mix_near_misses() -> (u64, u64, u64, u64, u64, u64) {
-    let a = outcome(mixes(), unhex("0200000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01"))
-    let b = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0200000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01"))
-    let c = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0200000000000000 0100000000000000 6b 05 0100000000000000 6b 06 0100000000000000 ffffffff 09 01"))
-    let d = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 02"))
-    let e = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01 00"))
-    let f = outcome(mixes(), unhex("0100000000000000 0100000000000000 61 0100000000000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 ffffffffffffff7f ffffffff 09 01"))
+    let a = outcome(mixes(), unhex("02000000 0100000000000000 61 01000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01"))
+    let b = outcome(mixes(), unhex("01000000 0100000000000000 61 02000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01"))
+    let c = outcome(mixes(), unhex("01000000 0100000000000000 61 01000000 0100000000000000 62 0200000000000000 0100000000000000 6b 05 0100000000000000 6b 06 0100000000000000 ffffffff 09 01"))
+    let d = outcome(mixes(), unhex("01000000 0100000000000000 61 01000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 02"))
+    let e = outcome(mixes(), unhex("01000000 0100000000000000 61 01000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 0100000000000000 ffffffff 09 01 00"))
+    let f = outcome(mixes(), unhex("01000000 0100000000000000 61 01000000 0100000000000000 62 0100000000000000 0100000000000000 6b 05 ffffffffffffff7f ffffffff 09 01"))
     (a, b, c, d, e, f)
 }
 
@@ -576,7 +576,7 @@ fn shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
 }
 
 fn shapes() -> codec.Codec[Shape] {
-    codec.make(shape_encode, shape_decode, shape_schema, 8)
+    codec.make(shape_encode, shape_decode, shape_schema, 4)
 }
 
 fn old_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
@@ -632,7 +632,7 @@ fn renamed_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
 }
 
 fn shape_schema_bytes(w: fn(mut codec.Schema) -> Result[(), Capacity]) -> Bytes {
-    result.unwrap(codec.schema(codec.make(shape_encode, shape_decode, w, 8)))
+    result.unwrap(codec.schema(codec.make(shape_encode, shape_decode, w, 4)))
 }
 
 fn shape_code(x: Shape) -> u64 {
@@ -658,16 +658,26 @@ fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema) -> Result[(
 // fails it.
 // expect: run variant_evolution() = (2, 2, 2000, 6032, 6061)
 fn variant_evolution() -> (u64, u64, u64, u64, u64) {
-    let circle = unhex("0100000000000000 000000000000f03f")
-    let rect = unhex("0200000000000000 0100000000000000 0200000000000000")
+    let circle = unhex("01000000 000000000000f03f")
+    let rect = unhex("02000000 0100000000000000 0200000000000000")
     let a = shape_through(shapes(), old_shape_schema, circle)
-    let cut = codec.make(shape_encode, cut_shape_decode, cut_shape_schema, 8)
+    let cut = codec.make(shape_encode, cut_shape_decode, cut_shape_schema, 4)
     let b = shape_through(cut, shape_schema, circle)
     let c = shape_through(cut, shape_schema, rect)
-    let reader_old = codec.make(shape_encode, shape_decode, old_shape_schema, 8)
+    let reader_old = codec.make(shape_encode, shape_decode, old_shape_schema, 4)
     let d = shape_through(reader_old, shape_schema, circle)
     let e = shape_through(shapes(), renamed_shape_schema, circle)
     (a, b, c, d, e)
+}
+
+// A tag is the variant's position as four little-endian bytes (SEM-10): Rect(1, 2) by
+// hand; tag 3 and a tag with only its high byte set, Invalid at the tag; a tag written
+// as a u64 reads as Dot and leaves four bytes, Trailing at 4; every prefix of Rect
+// Truncated. A u64 or one-byte tag, or a take that reads its low byte only, fails it.
+// expect: run tags_are_u32() = (true, 2000, 2000, 5004, true)
+fn tags_are_u32() -> (bool, u64, u64, u64, bool) {
+    let rect = unhex("02000000 0100000000000000 0200000000000000")
+    (enc(shapes(), Rect(1, 2)) == rect, outcome(shapes(), unhex("03000000")), outcome(shapes(), unhex("00000001")), outcome(shapes(), unhex("0000000000000000")), prefixes(shapes(), rect))
 }
 
 // (c) A generic type, a codec type when its parameter is: `type Pair[T] codec { left: T,
@@ -978,7 +988,7 @@ fn failure_schema(mut s: codec.Schema) -> Result[(), Capacity] {
 }
 
 fn failures() -> codec.Codec[Failure] {
-    codec.make(failure_encode, failure_decode, failure_schema, 24)
+    codec.make(failure_encode, failure_decode, failure_schema, 20)
 }
 
 // Failure(at: 3, why: Utf8(9)) is 3, tag 2, 9; the schema holds both definitions, the
@@ -986,8 +996,8 @@ fn failures() -> codec.Codec[Failure] {
 // expect: run foreign_codec_type() = (true, true, true)
 fn foreign_codec_type() -> (bool, bool, bool) {
     let x = Failure(at: 3, why: Utf8(9))
-    let a = enc(failures(), x) == unhex("0300000000000000 0200000000000000 0900000000000000")
-    let b = prefixes(failures(), unhex("0300000000000000 0600000000000000 0900000000000000"))
+    let a = enc(failures(), x) == unhex("0300000000000000 02000000 0900000000000000")
+    let b = prefixes(failures(), unhex("0300000000000000 06000000 0900000000000000"))
     let c = result.unwrap(codec.schema(failures())) == unhex("01 0200000000000000 0900000000000000 742e4661696c757265 0000000000000000 00 0200000000000000 00 0200000000000000 6174 06 00 0300000000000000 776879 13 0100000000000000 1500000000000000 7374642e636f6465632e4465636f64654572726f72 0000000000000000 01 0700000000000000 00 0900000000000000 5472756e6361746564 0100000000000000 06 00 0700000000000000 496e76616c6964 0100000000000000 06 00 0400000000000000 55746638 0100000000000000 06 00 0900000000000000 4475706c6963617465 0100000000000000 06 00 0800000000000000 547261696c696e67 0100000000000000 06 00 0600000000000000 536368656d61 0100000000000000 06 00 0500000000000000 56616c7565 0100000000000000 06 13 0000000000000000")
     (a, b, c)
 }

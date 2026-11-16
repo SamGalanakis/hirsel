@@ -15,7 +15,8 @@ from std_native import ROOT, wait_load
 BYTE_LAWS = ('model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'foreign', 'frames', 'follow', 'node_ids',
              'typed_indexes', 'schema_numbers', 'catalog_invalid', 'index_refusal',
              'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget',
-             'look', 'look_faults', 'changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal', 'assembly_indexed_recreate')
+             'look', 'look_faults', 'changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal',
+             'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover')
 NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS), 'test_reader_task', 'test_memory_identity', 'test_typed_snapshot_task', 'test_look_task'}
 
 
@@ -59,7 +60,7 @@ def main():
         library['file'] = str(adapted)
         manifest.write_text(json.dumps(corpus))
         if args.compiler is not None:
-            for control in ('look_put_refused', 'look_info_refused'):
+            for control in ('look_put_refused', 'look_info_refused', 'index_rows_escape_refused', 'index_rows_write_refused'):
                 negative = inputs(args.root.resolve())
                 negative['packages'][-1]['sources'].append(dict(
                     file=str(args.root.resolve() / ('core/programs/store/' + control + '.hirsel')),
@@ -71,8 +72,12 @@ def main():
                                          '--json'], capture_output=True, text=True)
                 report = json.loads(result.stdout)
                 ds = report.get('diagnostics', [])
+                expected_rule, expected_message = {
+                    'index_rows_escape_refused': ('LANG-13', 'scoped[view] fn results with anchors are reserved'),
+                    'index_rows_write_refused': ('OWN-10', 'a place of `tx` is viewed'),
+                }.get(control, ('OWN-5', '`tx` is not writable'))
                 good = (result.returncode == 1 and report.get('accepted') is False and len(ds) == 1
-                        and ds[0].get('rule') == 'OWN-5' and ds[0].get('message') == '`tx` is not writable'
+                        and ds[0].get('rule') == expected_rule and ds[0].get('message') == expected_message
                         and not report.get('incomplete') and not report.get('resources'))
                 rows.append(dict(engine='checker', law=control, passed=good, result=report))
                 print(f'checker {control}: {"PASS" if good else "FAIL"}', flush=True)

@@ -19,7 +19,11 @@ in memory (§7); reply retention belongs to the streams slice. `fetch` and `rang
 read through a shareable `Shape`; `put` and `delete` use a `Table`. `fetch` returns
 a fresh decoded value. `put` and `delete` maintain every registered index atomically, including when an extractor
 returns Capacity. A handle missing an index returns `Stale`. Dropping and
-recreating a name does not make the previous handle valid.
+recreating a name does not make the previous handle valid. Every read checks the
+handle's catalog key against the roots it reads. An old handle reads an older
+snapshot normally and returns `Stale(id)` against a recreated table; the new
+handle is stale against the older snapshot. Schema epochs constrain writes,
+while ids identify table and index incarnations and are never reused.
 
 `look(snapshot, body)` runs a view-Tx query under `isolate`, returning
 `Seen { value, version, reads }`, `Failed` or `Refused`. It publishes nothing and
@@ -33,18 +37,27 @@ between snapshots, including same-value rewrites. The output uses O(w) storage
 for w keys whose values differ, with w <= k.
 
 A range records its requested span when it is created and retains that version's
-roots. `Rows` can outlive the transaction and move to another task. `Shape` and
+roots. Reads are `Point(Bytes)` or `Span(Bytes, Bytes)` over physical data-tree
+keys, including the table or index id prefix, with half-open span bounds.
+`lookup` returns `IndexRows` scoped to its Tx. It records an index Span when
+created and a primary-key Point for each row returned by `next_indexed`.
+The checker refuses an escaping IndexRows or a write through its Tx while it
+lives; bodies collect results before writing. An unchanged encoded index key
+causes no index write. `range`, `scan` and `find` return sendable `Rows`, which
+can outlive the transaction and move to another task. `Shape` and
 `Index` share Readers and let snapshots be queried on reader tasks. `follow`
 returns a Latest root; publication follows the admitted head swap. A refused
 snapshot-record allocation leaves the follower behind until a later publication.
 Closing the writer leaves readers' last snapshots usable.
 
 The resident account is `62 + r8(key length) + r8(value length)` per live entry,
-conservative between checkpoints. An overwrite adds and an ordinary main-branch
-delete subtracts. Issued node-id ranges are logged before a map operation, so a
+exact after each memory commit on main without pins or other branches. An
+overwrite replaces the previous entry's charge and an ordinary main-branch
+delete subtracts. Accounting with retained roots is conservative between cuts.
+Issued node-id ranges are logged before a map operation, so a
 fault or Capacity cannot return issued ids to the allocator.
 
-The format is STORE-SPEC v2.4: a 16-byte frame head and seed-zero XXH3-64, bound to
+The contract follows STORE-SPEC v2.8. The format has a 16-byte frame head and seed-zero XXH3-64, bound to
 store identity, file role, sequence and byte offset, then head bytes 0–8 and the
 payload. S1 emits COMMIT bytes but has no files or background tasks. Its waiting
 APIs have immediate memory paths. Disk recovery and checkpoints belong to S2;
@@ -53,6 +66,7 @@ S5. There is no durability promise for a memory store.
 
 `//:core-store-s1` selects the package's evaluator and native laws, including
 Cranelift, LLVM development and LLVM release, with look write/info checker
-refusals and 32 seeded follower schedules in each configuration. `core/HOOK-ALLOWLIST` gates
+refusals, scoped IndexRows escape/write refusals and 32 seeded follower schedules
+in each configuration. `core/HOOK-ALLOWLIST` gates
 the library's core dependencies. The checksum's independent vectors are in
 `core/std/tests/check.hirsel`.

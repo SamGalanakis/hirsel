@@ -37,8 +37,9 @@ fn accounts() -> std.codec.Codec[Account] {
     std.codec.make(account_put, account_take, account_schema, 24)
 }
 
-
-fn bucket(a: Account) -> Result[u64, Capacity] { Ok(a.id % 4) }
+fn bucket(a: Account) -> Result[u64, Capacity] {
+    Ok(a.id % 4)
+}
 
 fn save(mut db: store.Db, t: store.Table[u64, Account], k: u64, balance: u64) -> u64 waits {
     let done = result.unwrap(store.run(mut db, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
@@ -46,28 +47,49 @@ fn save(mut db: store.Db, t: store.Table[u64, Account], k: u64, balance: u64) ->
         store.put(mut tx, t, k, a)?
         Ok(balance)
     }))
-    match take done { Committed(x) => x.value, _ => fail("unchanged-index put refused") }
+    match take done {
+        Committed(x) => x.value,
+        _ => fail("unchanged-index put refused")
+    }
 }
 
 pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let mode = option.unwrap(args.get(argv, 0))
-    let count: u64 = if mode == "0" { 0 } else if mode == "1" { 1 } else { 3 }
+    let count: u64 = if mode == "0" {
+        0
+    } else if mode == "1" {
+        1
+    } else {
+        3
+    }
     let mut db = store.memory(clock, random, store.defaults())
     result.unwrap(store.create_table(mut db, "accounts", std.codec.key_u64(), accounts()))
     let mut t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts()))
     for i in 0u64 .. count {
-        let name = if i == 0 { "i0" } else if i == 1 { "i1" } else { "i2" }
+        let name = if i == 0 {
+            "i0"
+        } else if i == 1 {
+            "i1"
+        } else {
+            "i2"
+        }
         result.unwrap(store.create_index(mut db, t, name, code.describe(bucket), std.codec.key_u64()))
         let _ = result.unwrap(store.index(db, mut t, name, code.describe(bucket), std.codec.key_u64()))
     }
-    for i in 0u64 .. 100000 { let _ = save(mut db, t, i, i) }
+    for i in 0u64 .. 100000 {
+        let _ = save(mut db, t, i, i)
+    }
     let mut gate = result.unwrap(host.open(dir, "gate", Read))
     let mut byte: Bytes = result.unwrap(list.with_capacity(1))
     result.unwrap(stdout.write(out, "READY\n"))
-    if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+    if result.unwrap(host.read(mut gate, mut byte)) != 1 {
+        return Error(Exit(status: 7))
+    }
     let start = host.mono_ns(clock)
     let mut sum: u64 = 0
-    for i in 0u64 .. 10000 { sum += save(mut db, t, i, i + 100000) }
+    for i in 0u64 .. 10000 {
+        sum += save(mut db, t, i, i + 100000)
+    }
     let elapsed = host.mono_ns(clock) - start
     let mut rendered = string.new()
     result.unwrap(string.push(mut rendered, "DONE "))
@@ -77,7 +99,9 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
     result.unwrap(string.push(mut rendered, "\n"))
     result.unwrap(stdout.write(out, rendered))
     list.clear(mut byte)
-    if result.unwrap(host.read(mut gate, mut byte)) != 1 { return Error(Exit(status: 7)) }
+    if result.unwrap(host.read(mut gate, mut byte)) != 1 {
+        return Error(Exit(status: 7))
+    }
     let snapshot = store.snapshot(db)
     let shape = store.shape(t)
     for i in 0u64 .. 10000 {

@@ -6,6 +6,7 @@ use hirsel_core_ir::{FuncId, Identity, Module, Param, Ty, eval, wf};
 use hirsel_core_resolve::{
     CorpusManifest, ModulePath, ModuleSource, NameIndex, PackageManifest, Site,
 };
+use hirsel_core_syntax::Span;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 

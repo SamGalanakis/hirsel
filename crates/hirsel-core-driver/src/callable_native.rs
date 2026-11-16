@@ -87,6 +87,28 @@ fn capture_first_use_branch_cranelift(){capture_first_use_branch(Backend::Cranel
 #[ignore="explicit native integration target"]
 fn capture_first_use_branch_llvm(){capture_first_use_branch(Backend::Llvm);}
 
+// Captures first used under a guard, pattern, `?`, isolate, finalized resource, `for`,
+// generic layout, stored, recursive, child-task, handle, String, Arc and region shape.
+fn capture_families(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/cases/body/callable-capture-families.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let mut options = native_options(backend, dir.path());
+    options.grant_mask = 1 << 9;
+    let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn capture_families_cranelift(){capture_families(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn capture_families_llvm(){capture_families(Backend::Llvm);}
+
 fn captured_callback(backend: Backend) {
     ordered_case(backend, include_str!("../../../core/front/cases/body/callable-captured-callback.hirsel"));
 }

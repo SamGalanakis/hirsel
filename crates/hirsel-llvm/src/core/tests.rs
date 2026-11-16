@@ -1012,17 +1012,15 @@ b0(v0: u64, v1: u64):
 b1():
  branch v5, b2(), b3()
 b2():
- v9: u64 = read a0
- v10: u64 = wrapping_add v8, v9
  dead s0
  propagate
 b3():
  dead s0
  propagate
 b4():
- v11: u64 = read a0
+ v9: u64 = read a0
  dead s0
- return v8, v11
+ return v8, v9
 }
 "#,
     )
@@ -1039,53 +1037,7 @@ b4():
 }
 
 #[test]
-fn message_raise_reads_a_correlated_cross_block_address() {
-    let source = include_str!("../../tests/core_runtime/callable.core");
-    let (prefix, body) = source.split_once("fn f3 = n3 g3 {").unwrap();
-    let prefix = prefix.replace("sig g3 = () -> ()", "sig g3 = (bool) -> ()");
-    let body = body
-        .replacen("b0:", "  addr a7 = s0 : t1\nb0(v9: bool):", 1)
-        .replacen("  address a0\n", "", 1)
-        .replace(
-            "  raise fail a0",
-            r#"  branch v9, b1(), b2()
-b1():
-  address a0
-  jump b2()
-b2():
-  branch v9, b3(), b4()
-b3():
-  raise fail a0
-b4():
-  address a7
-  drop a7 t1
-  dead s0
-  return"#,
-        );
-    let module = text::parse(&format!("{prefix}fn f3 = n3 g3 {{{body}")).unwrap();
-    wf::module(&module).unwrap();
-    agree_cases(
-        &module,
-        &[
-            Case {
-                function: FuncId(3),
-                args: vec![0],
-                limit: 256,
-                injection: None,
-            },
-            Case {
-                function: FuncId(3),
-                args: vec![1],
-                limit: 256,
-                injection: None,
-            },
-        ],
-        true,
-    );
-}
-
-#[test]
-fn local_homes_preserve_inactive_addresses_and_entry_back_edges() {
+fn local_homes_keep_ssa_addresses_unwritten_arms_and_entry_back_edges() {
     let module = text::parse(
         r#"core v1
 sig g0 = (u64) -> (u64)
@@ -1115,9 +1067,9 @@ fn f2 = n2 g1 {
  addr a0 = s0 : u64
 b0(v0: bool, v1: u64):
  live s0
+ address a0
  branch v0, b1(), b2()
 b1():
- address a0
  store a0, v1
  jump b2()
 b2():
@@ -1170,38 +1122,6 @@ b2():
             (FuncId(3), vec![0]),
             (FuncId(3), vec![4]),
         ],
-    );
-}
-
-#[test]
-fn scalar_values_keep_inactive_cross_block_paths_in_storage() {
-    let module = text::parse(
-        r#"
-core v1
-sig g0 = (bool, u64) -> (u64)
-inst n0 = tests@0/local_values [] []
-fn f0 = n0 g0 {
-b0(v0: bool, v1: u64):
- branch v0, b1(), b2()
-b1():
- v2: u64 = const 1
- v3: u64 = add v1, v2
- jump b2()
-b2():
- branch v0, b3(), b4()
-b3():
- return v3
-b4():
- v4: u64 = const 0
- return v4
-}
-"#,
-    )
-    .unwrap();
-    wf::module(&module).unwrap();
-    agree(
-        &module,
-        &[(FuncId(0), vec![0, 41]), (FuncId(0), vec![1, 41])],
     );
 }
 

@@ -174,7 +174,28 @@ fn well_formedness_rejects_producer_mistakes() {
             "b0(v0: i32, v1: i32):\n  v2: i64 = widen v0\n  v3: i64 = add v2, v1 fail b1\n  return v0\nb1:\n  return v0\n}\n",
             "binary operand types",
         ),
+        // Engines read a value or address as computed on the path taken. Each use is
+        // defined on every path to it, not just on some path that reaches it.
+        // b0 -> b2 skips b1, where v3 is defined.
+        (
+            "b0(v0: i32, v1: i32):\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  v3: i32 = add v0, v1 fail b3\n  jump b2\nb2:\n  return v3\nb3:\n  propagate\n}\n",
+            "b2: v3 is used on a path that does not define it",
+        ),
+        // b0 -> b2 skips b1, the only evaluation of a0 (the evaluator then reads 0x0)
+        (
+            "slot s0 = i32\naddr a0 = s0 : i32\nb0(v0: i32, v1: i32):\n  live s0\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  address a0\n  store a0, v0\n  jump b2\nb2:\n  v3: i32 = read a0\n  return v3\n}\n",
+            "b2: a0 is used on a path that does not define it",
+        ),
+        // a failing instruction defines no result on its failure edge
+        (
+            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  v3: i32 = add v2, v0 fail b2\n  propagate\nb2:\n  propagate\n}\n",
+            "b1: v2 is used on a path that does not define it",
+        ),
     ];
+    // An address evaluated on each arm before the join is defined on every path.
+    let joined = "slot s0 = i32\naddr a0 = s0 : i32\nb0(v0: i32, v1: i32):\n  live s0\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  address a0\n  store a0, v0\n  jump b3\nb2:\n  address a0\n  store a0, v1\n  jump b3\nb3:\n  v3: i32 = read a0\n  return v3\n}\n";
+    wf::module(&parse(&format!("{head}{joined}{tail}")).unwrap())
+        .expect("an address evaluated on both arms is defined at the join");
     for (body, why) in cases {
         let m = parse(&format!("{head}{body}{tail}")).unwrap();
         let err = wf::module(&m).expect_err(why);

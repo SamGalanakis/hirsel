@@ -2,9 +2,9 @@
 //! it on what they built; no product path does (we trust our own implementation).
 //! It checks references, single definition, arity, the operand typing each
 //! instruction states, that type rows have recipes, and that no failure path
-//! reaches a `return` (FAIL-14: nothing catches a failure), and that an address
-//! is used only where some evaluation of it can have run. It does not check
-//! dominance, drop-flag discipline or limit-scope balance.
+//! reaches a `return` (FAIL-14: nothing catches a failure), and that every value
+//! and address is defined on every path to each use. It does not check drop-flag
+//! discipline or limit-scope balance.
 
 use crate::*;
 
@@ -541,7 +541,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
         return Err(format!("v{v} defined {} times", c.defined[v]));
     }
     no_catch(b)?;
-    reaching_addresses(b)
+    available(b)
 }
 
 /// The blocks control leaves `bi` for: its instructions' failure blocks and its
@@ -576,127 +576,356 @@ fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
     out
 }
 
-/// The addresses an instruction uses, not counting the one an `address`
-/// instruction evaluates (its base address is a use).
-fn addresses_used(b: &Body, i: &Inst) -> Vec<AddressId> {
+/// What an instruction defines and uses, as names of [`available`]'s sets: value
+/// `v` is `v`, address `a` is `values + a`. An `address` instruction defines its
+/// address and uses its base and step operands.
+fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
+    let n = b.values.len();
+    let v = |v: ValueId| v.index();
+    let a = |a: AddressId| n + a.index();
+    let mut uses = vec![];
+    let mut defs = vec![];
     match *i {
-        Inst::Address { address, .. } => match b.addresses.get(address.index()).map(|a| a.base) {
-            Some(AddressBase::Address(x)) => vec![x],
-            _ => vec![],
-        },
-        Inst::Read { address, .. }
-        | Inst::Store { address, .. }
-        | Inst::Pointer { address, .. }
-        | Inst::Case { address, .. }
-        | Inst::SetCase { address, .. }
-        | Inst::Drop { address, .. }
-        | Inst::Mark { address, .. }
-        | Inst::Unmark { address, .. } => vec![address],
-        Inst::Grow { carrier, .. } => vec![carrier],
-        Inst::Copy { to, from, .. } => vec![to, from],
-        Inst::Call { call } => b
-            .calls
-            .get(call.index())
-            .and_then(|c| c.args.get(&b.pools.args))
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|a| match *a {
-                Arg::Address(x) => Some(x),
-                Arg::Value(_) => None,
-            })
-            .collect(),
-        Inst::Const { .. }
-        | Inst::ReadStatic { .. }
-        | Inst::FunctionRef { .. }
-        | Inst::Unary { .. }
-        | Inst::Binary { .. }
-        | Inst::Compare { .. }
-        | Inst::Convert { .. }
-        | Inst::IntArith { .. }
-        | Inst::MulAdd { .. }
-        | Inst::ScalarUnary { .. }
-        | Inst::StorageLive { .. }
-        | Inst::StorageDead { .. }
-        | Inst::UpdateMask { .. }
-        | Inst::Alloc { .. }
-        | Inst::Free { .. }
-        | Inst::RegionOpen { .. }
-        | Inst::RegionClose { .. }
-        | Inst::Trim { .. }
-        | Inst::LimitEnter { .. }
-        | Inst::LimitExit
-        | Inst::Share { .. }
-        | Inst::Release { .. }
-        | Inst::TryUnwrap { .. } => vec![],
-    }
-}
-
-/// An address is used only where its `address` instruction can have run: earlier
-/// in the use's block, or in a block from which control reaches the use's block.
-/// A block the entry does not reach is never run, and is not checked. Uses need
-/// not be dominated (crate docs, "Values, slots and addresses"), but a
-/// use no evaluation reaches reads an address that was never computed.
-fn reaching_addresses(b: &Body) -> R {
-    let mut evaluated: Vec<Vec<usize>> = vec![vec![]; b.addresses.len()];
-    for (bi, block) in b.blocks.iter().enumerate() {
-        for i in block.insts.get(&b.insts).unwrap_or_default() {
-            if let Inst::Address { address, .. } = *i {
-                evaluated[address.index()].push(bi);
-            }
+        Inst::Const { result, .. }
+        | Inst::ReadStatic { result, .. }
+        | Inst::FunctionRef { result, .. }
+        | Inst::RegionOpen { result } => defs.push(v(result)),
+        Inst::Unary {
+            result, operand, ..
         }
-    }
-    // reached[a]: the blocks some evaluation of `a` reaches through at least one edge.
-    let mut reached: Vec<Option<Vec<bool>>> = vec![None; b.addresses.len()];
-    let mut reaches = |a: AddressId, to: usize| -> bool {
-        reached[a.index()].get_or_insert_with(|| {
-            let mut seen = vec![false; b.blocks.len()];
-            let mut work: Vec<BlockId> = evaluated[a.index()]
-                .iter()
-                .flat_map(|&d| successors(b, d))
-                .collect();
-            while let Some(k) = work.pop() {
-                if !std::mem::replace(&mut seen[k.index()], true) {
-                    work.extend(successors(b, k.index()));
+        | Inst::ScalarUnary {
+            result, operand, ..
+        } => {
+            uses.push(v(operand));
+            defs.push(v(result));
+        }
+        Inst::Binary {
+            result,
+            left,
+            right,
+            ..
+        }
+        | Inst::Compare {
+            result,
+            left,
+            right,
+            ..
+        } => {
+            uses.extend([v(left), v(right)]);
+            defs.push(v(result));
+        }
+        Inst::Convert {
+            result,
+            flag,
+            operand,
+            ..
+        } => {
+            uses.push(v(operand));
+            defs.extend([result].into_iter().chain(flag).map(v));
+        }
+        Inst::IntArith {
+            result,
+            flag,
+            left,
+            right,
+            ..
+        } => {
+            uses.extend([v(left), v(right)]);
+            defs.extend([result].into_iter().chain(flag).map(v));
+        }
+        Inst::MulAdd {
+            result,
+            left,
+            right,
+            addend,
+        } => {
+            uses.extend([v(left), v(right), v(addend)]);
+            defs.push(v(result));
+        }
+        Inst::Address { address, .. } => {
+            if let Some(info) = b.addresses.get(address.index()) {
+                match info.base {
+                    AddressBase::Slot(_) => {}
+                    AddressBase::Value(x) => uses.push(v(x)),
+                    AddressBase::Address(x) => uses.push(a(x)),
+                }
+                for s in info.steps.get(&b.pools.steps).unwrap_or_default() {
+                    if let Step::Index(x) | Step::Element(x) | Step::Byte(x) = *s {
+                        uses.push(v(x));
+                    }
                 }
             }
-            seen
-        })[to]
-    };
-    let mut live = vec![false; b.blocks.len()];
-    let mut work = vec![BlockId(0)];
-    while let Some(k) = work.pop() {
-        if !std::mem::replace(&mut live[k.index()], true) {
-            work.extend(successors(b, k.index()));
+            defs.push(a(address));
+        }
+        Inst::Read {
+            result, address, ..
+        }
+        | Inst::Pointer { result, address }
+        | Inst::Case { result, address } => {
+            uses.push(a(address));
+            defs.push(v(result));
+        }
+        Inst::Store { address, value } => uses.extend([a(address), v(value)]),
+        Inst::StorageLive { .. } | Inst::StorageDead { .. } | Inst::LimitExit => {}
+        Inst::UpdateMask { result, mask, .. } => {
+            uses.push(v(mask));
+            defs.push(v(result));
+        }
+        Inst::Call { call } => {
+            if let Some(site) = b.calls.get(call.index()) {
+                if let Callee::Indirect(x) = site.callee {
+                    uses.push(v(x));
+                }
+                for arg in site.args.get(&b.pools.args).unwrap_or_default() {
+                    uses.push(match *arg {
+                        Arg::Value(x) => v(x),
+                        Arg::Address(x) => a(x),
+                    });
+                }
+                defs.extend(
+                    site.results
+                        .get(&b.pools.values)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|&x| v(x)),
+                );
+            }
+        }
+        Inst::Alloc {
+            result,
+            available,
+            region_entry,
+            place,
+            charge,
+            overflow,
+            size,
+            ..
+        } => {
+            if let AllocPlace::Like(x) | AllocPlace::Region(x) = place {
+                uses.push(v(x));
+            }
+            uses.extend([charge, size].into_iter().chain(overflow).map(v));
+            defs.extend([result, available].into_iter().chain(region_entry).map(v));
+        }
+        Inst::Free { block, charge } => uses.extend([v(block), v(charge)]),
+        Inst::Copy { to, from, bytes } => uses.extend([a(to), a(from), v(bytes)]),
+        Inst::Grow {
+            result,
+            available,
+            carrier,
+            charge,
+            overflow,
+            size,
+            capacity,
+            moved,
+            refund,
+            ..
+        } => {
+            uses.push(a(carrier));
+            uses.extend(
+                [charge, size, capacity, moved, refund]
+                    .into_iter()
+                    .chain(overflow)
+                    .map(v),
+            );
+            defs.extend([v(result), v(available)]);
+        }
+        Inst::SetCase { address, .. } | Inst::Drop { address, .. } => uses.push(a(address)),
+        Inst::RegionClose { region } => uses.push(v(region)),
+        Inst::Trim {
+            block,
+            region,
+            entry,
+            previous,
+            charge,
+        } => uses.extend([block, region, entry, previous, charge].map(v)),
+        Inst::LimitEnter {
+            admitted,
+            available,
+            bytes,
+        } => {
+            uses.push(v(bytes));
+            defs.extend([v(admitted), v(available)]);
+        }
+        Inst::Share { node, .. } | Inst::Release { node, .. } => uses.push(v(node)),
+        Inst::TryUnwrap { result, node, .. } => {
+            uses.push(v(node));
+            defs.push(v(result));
+        }
+        Inst::Mark { address, count, .. } | Inst::Unmark { address, count, .. } => {
+            uses.extend([a(address), v(count)])
         }
     }
-    for (bi, block) in b.blocks.iter().enumerate() {
-        if !live[bi] {
-            continue;
+    (uses, defs)
+}
+
+/// Every value and address is defined on every path to each of its uses: an
+/// instruction result or block parameter before a value is read, an `address`
+/// instruction before its address is (crate docs, "Values, slots and addresses").
+/// A failure edge leaves before its instruction, so nothing that instruction
+/// defines reaches its failure block. A block the entry does not reach is never
+/// run, and is not checked.
+fn available(b: &Body) -> R {
+    let names = b.values.len() + b.addresses.len();
+    let words = names.div_ceil(64);
+    let blocks = b.blocks.len();
+    type Set = Vec<u64>;
+    let set = |s: &mut Set, k: usize| s[k / 64] |= 1 << (k % 64);
+    let has = |s: &Set, k: usize| s[k / 64] >> (k % 64) & 1 == 1;
+    let operands: Vec<Vec<(Vec<usize>, Vec<usize>)>> = b
+        .blocks
+        .iter()
+        .map(|k| {
+            k.insts
+                .get(&b.insts)
+                .unwrap_or_default()
+                .iter()
+                .map(|i| operands(b, i))
+                .collect()
+        })
+        .collect();
+    let params = |bi: usize| -> Vec<usize> {
+        b.blocks[bi]
+            .params
+            .get(&b.pools.values)
+            .unwrap_or_default()
+            .iter()
+            .map(|v| v.index())
+            .collect()
+    };
+    // The edges out of `bi` from the state at its start: each target with the
+    // names defined on that edge.
+    let out = |bi: usize, start: &Set| -> Vec<(usize, Set)> {
+        let mut now = start.clone();
+        for p in params(bi) {
+            set(&mut now, p);
         }
-        let insts = block.insts.get(&b.insts).unwrap_or_default();
-        let mut here = std::collections::HashSet::new();
-        let mut check = |a: AddressId, here: &std::collections::HashSet<AddressId>| {
-            need(here.contains(&a) || reaches(a, bi), || {
-                format!("b{bi}: a{} is used where no evaluation of it reaches", a.0)
+        let mut edges = vec![];
+        let insts = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
+        for (k, i) in insts.iter().enumerate() {
+            if let Some(f) = i.fail(b) {
+                edges.push((f.index(), now.clone()));
+            }
+            for &d in &operands[bi][k].1 {
+                set(&mut now, d);
+            }
+        }
+        let edge = |e: &EdgeId| b.edges[e.index()].target.index();
+        let mut tail = |t: usize| edges.push((t, now.clone()));
+        match &b.terminators[bi] {
+            Terminator::Jump(e) => tail(edge(e)),
+            Terminator::Branch { yes, no, .. } => {
+                tail(edge(yes));
+                tail(edge(no));
+            }
+            Terminator::Switch {
+                arms, otherwise, ..
+            } => {
+                for arm in arms.get(&b.pools.arms).unwrap_or_default() {
+                    tail(edge(&arm.edge));
+                }
+                tail(edge(otherwise));
+            }
+            Terminator::Raise { cleanup, .. } => {
+                if let Some(c) = cleanup {
+                    tail(c.index());
+                }
+            }
+            Terminator::Return(_) | Terminator::Propagate | Terminator::Unreachable => {}
+        }
+        edges
+    };
+    // Must-availability: a block starts with what every edge into it carries.
+    let mut start: Vec<Option<Set>> = vec![None; blocks];
+    if blocks > 0 {
+        start[0] = Some(vec![0; words]);
+    }
+    let mut work = vec![0usize];
+    while let Some(bi) = work.pop() {
+        let Some(s) = start[bi].clone() else { continue };
+        for (t, carried) in out(bi, &s) {
+            let next = match &start[t] {
+                None => carried,
+                Some(old) => old.iter().zip(&carried).map(|(x, y)| x & y).collect(),
+            };
+            if t == 0 {
+                // The entry is entered once, with nothing defined.
+                continue;
+            }
+            if start[t].as_ref() != Some(&next) {
+                start[t] = Some(next);
+                work.push(t);
+            }
+        }
+    }
+    let name = |k: usize| {
+        if k < b.values.len() {
+            format!("v{k}")
+        } else {
+            format!("a{}", k - b.values.len())
+        }
+    };
+    for bi in 0..blocks {
+        let Some(mut now) = start[bi].clone() else {
+            continue;
+        };
+        for p in params(bi) {
+            set(&mut now, p);
+        }
+        let check = |now: &Set, k: usize| {
+            need(has(now, k), || {
+                format!(
+                    "b{bi}: {} is used on a path that does not define it",
+                    name(k)
+                )
             })
         };
-        let raised = match b.terminators[bi] {
-            Terminator::Raise {
-                cause: RaiseCause::Fail(a),
-                ..
-            } => Some(a),
-            _ => None,
-        };
-        for i in insts {
-            for a in addresses_used(b, i) {
-                check(a, &here)?;
+        for (uses, defs) in &operands[bi] {
+            for &u in uses {
+                check(&now, u)?;
             }
-            if let Inst::Address { address, .. } = *i {
-                here.insert(address);
+            for &d in defs {
+                set(&mut now, d);
             }
         }
-        if let Some(a) = raised {
-            check(a, &here)?;
+        let vals = |r: PoolRange<ValueId>| -> Vec<usize> {
+            r.get(&b.pools.values)
+                .unwrap_or_default()
+                .iter()
+                .map(|v| v.index())
+                .collect()
+        };
+        let edge_args = |e: &EdgeId| vals(b.edges[e.index()].args);
+        let tail: Vec<usize> = match &b.terminators[bi] {
+            Terminator::Jump(e) => edge_args(e),
+            Terminator::Branch { condition, yes, no } => [condition.index()]
+                .into_iter()
+                .chain(edge_args(yes))
+                .chain(edge_args(no))
+                .collect(),
+            Terminator::Switch {
+                value,
+                arms,
+                otherwise,
+            } => [value.index()]
+                .into_iter()
+                .chain(
+                    arms.get(&b.pools.arms)
+                        .unwrap_or_default()
+                        .iter()
+                        .flat_map(|arm| edge_args(&arm.edge)),
+                )
+                .chain(edge_args(otherwise))
+                .collect(),
+            Terminator::Raise { cause, .. } => match cause {
+                RaiseCause::Fail(a) => vec![b.values.len() + a.index()],
+                _ => vec![],
+            },
+            Terminator::Return(r) => vals(*r),
+            Terminator::Propagate | Terminator::Unreachable => vec![],
+        };
+        for u in tail {
+            check(&now, u)?;
         }
     }
     Ok(())

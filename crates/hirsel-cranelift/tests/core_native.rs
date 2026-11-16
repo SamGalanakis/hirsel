@@ -1334,25 +1334,25 @@ b3:
   store a5, v21
   address a4
   v9: ptr = pointer a4
-  jump b4(v0)
+  v22: bool = lt v0, v1
+  branch v22, b6, b8
 b4(v10: u64):
-  v11: bool = lt v10, v1
-  branch v11, b5, b6
-b5:
   v12: u64 = wrapping_mul v10, v4
   address a2
   store a2, v2
   v13: u64 = wrapping_add v10, v4
+  v11: bool = lt v13, v1
+  branch v11, b5, b7
+b5:
   jump b4(v13)
 b6:
-  v22: bool = lt v0, v1
-  branch v22, b7, b8
+  jump b4(v0)
 b7:
   v23: u8 = read a2
-  jump b9(v23)
+  jump b9(v23, v13)
 b8:
-  jump b9(v8)
-b9(v24: u8):
+  jump b9(v8, v0)
+b9(v24: u8, v34: u64):
   jump b10(v3, v3)
 b10(v16: u64, v17: u64):
   v25: bool = lt v16, v7
@@ -1372,7 +1372,7 @@ b12:
   v32: u8 = read a1
   v33: u8 = read a5
   dead s0
-  return v10, v17, v24, v32, v33
+  return v34, v17, v24, v32, v33
 }
 "#,
     )

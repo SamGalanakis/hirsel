@@ -791,8 +791,12 @@
 //! a stop.
 //! An address is a base (a slot, a pointer value or another address) and steps;
 //! `Inst::Address` evaluates it and runs its bounds checks, and later reads and
-//! stores use it. Uses need not be dominated by definitions in any sense stronger
-//! than the program's own control flow: emitters do not re-check.
+//! stores use it. Every reachable use of a value or address is defined on every
+//! path to it from the entry: earlier in its block, or on every incoming edge (a
+//! failure edge carries the state before its failing instruction). Engines read
+//! a value or address as computed on the path taken and do not re-check; an
+//! address evaluated on each arm before a join counts as defined at the join.
+//! A slot's contents have no such rule: initialization is its producer's.
 //!
 //! # Calling convention (FORM v0)
 //!

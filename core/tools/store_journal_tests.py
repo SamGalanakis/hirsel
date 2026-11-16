@@ -13,7 +13,7 @@ from store_tests import inputs
 from store_crash_tests import checked, run_crashes
 
 LAWS = ('end', 'payload', 'segment', 'apply', 'recovery', 'bootstrap', 'worker',
-        'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop')
+        'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel')
 TESTS = {'store@1/store/journal_test_' + name for name in LAWS if name not in ('frame_size_boundary', 'frame_oversize')}
 SCENARIOS = ('journal', 'journal-group', 'journal-rotate')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut')
@@ -34,6 +34,12 @@ def provider_checks(executable, engine, env):
         checked([str(executable), 'journal-cancel', str(cut)], env)
     rows.append(dict(cancellation_wait_entries=waits, passed=True))
     print(f'{engine}: {waits}/{waits} cancellation wait entries passed', flush=True)
+    # L24 (iv)(a): syncs held for one writer turn; every schedule must finish.
+    checked([str(executable), 'journal-ack', 'count'], env)
+    for seed in range(1, 33):
+        checked([str(executable), 'journal-ack', 'count', str(seed)], env)
+    rows.append(dict(scenario='journal-ack', schedules=33, passed=True))
+    print(f'{engine}: journal-ack held syncs passed 33 schedules', flush=True)
     for scenario in ('journal-group', 'journal-rotate'):
         hashes = set()
         for seed in range(1, 33):

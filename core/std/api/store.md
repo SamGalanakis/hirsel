@@ -80,6 +80,10 @@ the worker; a later cut can retry. Schema changes publish on the cut's ack.
 `close` waits for frames and cuts, joins both tasks, releases LOCK, and returns
 the first stored I/O error. It never requests a cut. Snapshots remain readable.
 
+The journal ack channel holds 3 × `group_commits` + 3 acks (`open` returns
+`Full` if it is refused), and every frame send drains it first, so the journal
+task's ack send never waits.
+
 `recorded(db, branch, version)` waits on a write barrier without consuming
 journal acks, skipping it only when every frame this Db has sent is acked. It
 returns a CALL section from live segments. Compaction is

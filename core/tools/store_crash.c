@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 extern void *store_crash_new(uint64_t);
@@ -83,8 +84,22 @@ static size_t schedule_choose(void *state,size_t runnable) {
     return (size_t)((schedule.rng>>33)%runnable);
 }
 
+/* journal-ack (L24 (iv)(a)): each Sync answers Until(now) twice, so it stays
+ * parked across exactly one scheduler turn of the other tasks. Counted in
+ * turns, not time: an expired Until re-runs wait at the next turn. */
+static struct { int enabled; uint64_t token[64], calls[64]; } hold;
 static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t token) {
-    (void)state; (void)request; (void)token; return (HirselCoreWait){0};
+    (void)state;
+    if(hold.enabled && request->operation==16) {
+        /* Tokens are unique per operation; concurrent syncs keep separate counts. */
+        uint64_t *calls=&hold.calls[token%64];
+        if(hold.token[token%64]!=token) {hold.token[token%64]=token; *calls=0;}
+        if((*calls)++<2) {
+            struct timespec now; clock_gettime(CLOCK_MONOTONIC,&now);
+            return (HirselCoreWait){1,(uint64_t)now.tv_sec*1000000000u+(uint64_t)now.tv_nsec};
+        }
+    }
+    return (HirselCoreWait){0};
 }
 static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) {
     (void)token;
@@ -147,6 +162,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     for(uint64_t phase=0;phase<3;phase++) {
         store_crash_phase(state,phase);
         cancellation.phase=phase;
+        hold.enabled=phase==1 && !strcmp(scenario,"journal-ack");
         const char *expected=store_crash_acked(state)?"new":"prefix";
         char floor[32];
         snprintf(floor,sizeof floor,"%llu",(unsigned long long)store_crash_floor(state));

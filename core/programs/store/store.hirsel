@@ -6632,7 +6632,9 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     capacity(result.capacity_only(list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, pending: None, refused_cut: None, cut_live: live, record_cut: (cut_head, cut_first), previous_record_cut: (cut_head, cut_first), send: take send, acks: take acks, worker: take worker))))?
     let group_count: u64 = int.widen(options.group_commits)
     let (frames, queued): (Sender[JournalMsg], Receiver[JournalMsg]) = capacity(channel.new(group_count * 2))?
-    let (journal_acks, journal_received): (Sender[Ack], Receiver[Ack]) = capacity(channel.new(128))?
+    // Y1: one ack per frame, at most 2g queued + g in the group + 1 held back
+    // by group_bytes + 1 sent after the last drain, plus the single Failed.
+    let (journal_acks, journal_received): (Sender[Ack], Receiver[Ack]) = capacity(channel.new(group_count * 3 + 3))?
     let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = capacity(channel.new(1))?
     let (written_send, written_receive): (Sender[WriteNotice], Receiver[WriteNotice]) = capacity(channel.new(2))?
     let written_worker = channel.sender(written_send)
@@ -8450,6 +8452,12 @@ pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args,
                 _ => Error(Exit(status: 32))
             }
         }
+        if scenario == "journal-ack" {
+            return match journal_ack_held(d, c, r, tasks) {
+                Ok(()) => { let _ = stdout.write(out, "DONE"); Ok(()) },
+                _ => Error(Exit(status: 32))
+            }
+        }
         match journal_crash_write(d, c, r, tasks, out, scenario) {
             Ok(()) => { let _ = stdout.write(out, "DONE"); Ok(()) },
             Error(Io(_)) => Ok(()),
@@ -8575,6 +8583,8 @@ fn journal_fixture_call(mut db: Db, large: bool, take revision: Option[Bytes]) -
     db.file_end += size
     db.frame_seq += 1
     let ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    // Y1: every Frame sender drains acks first, as run_on does at its start.
+    result.unwrap(journal_poll(mut db))
     if let Some(sender) = db.journal { result.unwrap(channel.send(sender, Frame(take raw, db.frame_seq))) }
     Ok(ticket)
 }
@@ -8624,6 +8634,63 @@ pub fn journal_law_recorded_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -
 @test
 fn journal_test_recorded_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if journal_law_recorded_barrier(d, c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+// L24 (iv)(b), Y1: the journal task's ack send never waits. group_commits = 1
+// and group_bytes = 1 make the frame queue 2 places and the ack channel 6.
+// Eight commits, each written and acked before the next (recorded's barrier
+// waits for the write; the journal syncs and acks before its next receive):
+// without the drain at the start of run the 7th ack finds 6/6 full and the
+// next barrier is never answered. A commit without a CALL section is None.
+// (iv)(a), syncs held across the writer's turns, is the provider scenario
+// journal-ack (journal_ack_held), because only the provider can hold a sync.
+fn journal_ack_options() -> Options {
+    let mut options = journal_crash_options()
+    options.group_commits = 1
+    options.group_bytes = 1
+    options.checkpoint_bytes = 1073741824
+    options
+}
+
+pub fn journal_law_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut db = result.unwrap(open(tasks, disk_test_directory(d), c, r, journal_ack_options()))
+    result.unwrap(create_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let branch = main_branch(db)
+    for k in 0u64 .. 8 {
+        match result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, k, k + 10) })) {
+            Committed(_) => {},
+            _ => return false
+        }
+        let head = db.head
+        match recorded(db, branch, head) { Ok(None) => {}, _ => return false }
+    }
+    result.unwrap(close(take db))
+    true
+}
+
+// L24 (iv)(a), Y1's counterexample: the provider holds every journal sync for
+// one writer turn, so f2 and f3 queue, the 4th commit's send waits, and the
+// acks of f1..f3 arrive with no drain between them. At capacity 2g the ack of
+// f3 finds 2/2 full, recorded's Barrier waits behind f4, and every task blocks.
+fn journal_ack_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, journal_ack_options())?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 4 {
+        let committed = run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, k, k + 10) })?
+        match take committed { Committed(_) => {}, _ => fail("journal-ack commit") }
+    }
+    let branch = main_branch(db)
+    let head = db.head
+    match recorded(db, branch, head)? { None => {}, Some(_) => fail("journal-ack record") }
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    close(take db)
+}
+
+@test
+fn journal_test_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_ack_channel(d, c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 fn journal_failure_notice(db: Db) -> Option[IoError] {

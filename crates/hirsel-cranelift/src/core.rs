@@ -118,14 +118,10 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
         ("is_pic", "true"),
         ("enable_verifier", "false"),
         ("opt_level", if options.optimize { "speed" } else { "none" }),
-        (
-            "regalloc_algorithm",
-            if options.optimize {
-                "backtracking"
-            } else {
-                "single_pass"
-            },
-        ),
+        // Step slow paths split otherwise sequential live ranges. The single-
+        // pass allocator gives each spilled value its own permanent stack home;
+        // backtracking reuses those homes across disjoint ranges in dev too.
+        ("regalloc_algorithm", "backtracking"),
     ]
     .into_iter()
     .chain([

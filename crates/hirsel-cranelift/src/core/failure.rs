@@ -52,7 +52,6 @@ impl Function<'_, '_, '_> {
                 results.push(zero);
             }
             results.push(self.b.ins().iconst(types::I8, 1));
-            self.step_flush();
             self.signature
                 .return_(&mut self.b, &results, self.result_storage);
             self.calls.results = results;
@@ -97,12 +96,8 @@ impl Function<'_, '_, '_> {
             addr,
             super::memory_layout::CAUSE_SITE as i32,
         );
-        self.step_flush();
-        let result = self
-            .calls
-            .raise(self.object, &mut self.b, self.context, addr);
-        self.step_reload();
-        result
+        self.calls
+            .raise(self.object, &mut self.b, self.context, addr)
     }
     pub fn record_string(&mut self, address: AddressId) -> Result<()> {
         let carrier = self.addr(address);

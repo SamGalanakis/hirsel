@@ -45,7 +45,6 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub glues: &'c drop::Glues,
     pub task_entries: &'c task_entry::Glues,
     pub context: Value,
-    pub step_var: Option<cranelift_frontend::Variable>,
     pub caller_site: Value,
     pub anchor: Option<Anchor>,
     pub srcloc: ir::SourceLoc,
@@ -208,11 +207,6 @@ pub(super) fn emit(
     let context = params[usize::from(signature.indirect)];
     let result_storage = signature.indirect.then(|| params[0]);
     let caller_site = *params.last().unwrap();
-    let step_var = body
-        .insts
-        .iter()
-        .any(|i| matches!(i, Inst::Step { .. }))
-        .then(|| b.declare_var(types::I64));
     let mut f = Function {
         b,
         object,
@@ -229,7 +223,6 @@ pub(super) fn emit(
         descriptors: tables.descriptors,
         signatures,
         context,
-        step_var,
         caller_site,
         anchor: None,
         srcloc: ir::SourceLoc::default(),
@@ -262,9 +255,6 @@ pub(super) fn emit(
     for i in order(body) {
         let block = &body.blocks[i];
         f.b.switch_to_block(f.blocks[i]);
-        if i == 0 {
-            f.step_reload();
-        }
         let fill = fills.get(i).copied().flatten();
         let original_index =
             if let Some(fill) = fill {
@@ -314,7 +304,6 @@ pub(super) fn emit(
         f.at_anchor(block.anchor, body.insts.len() as u32 + i as u32 + 1);
         match &body.terminators[i] {
             Terminator::Return(range) => {
-                f.step_flush();
                 let mut results = std::mem::take(&mut f.calls.results);
                 results.clear();
                 results.extend(
@@ -666,7 +655,6 @@ impl Function<'_, '_, '_> {
                     _ => self.site()?,
                 };
                 args.push(site);
-                self.step_flush();
                 let inst = match call.callee {
                     Callee::Direct(f) => {
                         let f = self.calls.reference(
@@ -687,7 +675,6 @@ impl Function<'_, '_, '_> {
                     }
                     Callee::Runtime(_) => unreachable!(),
                 };
-                self.step_reload();
                 self.calls.args = args;
                 let mut returned = [Value::from_u32(0); 2];
                 let len = self.b.inst_results(inst).len();

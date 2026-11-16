@@ -58,40 +58,26 @@ impl Function<'_, '_, '_> {
         results: &[Ty],
         args: &[Value],
     ) -> Result<calls::NativeValues> {
-        self.step_flush();
-        let values = self
-            .calls
-            .c(self.object, &mut self.b, name, params, results, args)?;
-        self.step_reload();
-        Ok(values)
-    }
-    pub fn step_flush(&mut self) {
-        if let Some(variable) = self.step_var {
-            let value = self.b.use_var(variable);
-            self.b.ins().store(
-                MemFlagsData::trusted(),
-                value,
-                self.context,
-                memory_layout::CONTEXT_STEPS as i32,
-            );
-        }
-    }
-    pub fn step_reload(&mut self) {
-        if let Some(variable) = self.step_var {
-            let value = self.b.ins().load(
-                types::I64,
-                MemFlagsData::trusted(),
-                self.context,
-                memory_layout::CONTEXT_STEPS as i32,
-            );
-            self.b.def_var(variable, value);
-        }
+        self.calls
+            .c(self.object, &mut self.b, name, params, results, args)
     }
     fn step(&mut self, fail: Option<BlockId>) -> Result<()> {
-        let variable = self.step_var.unwrap();
-        let before = self.b.use_var(variable);
+        // Keep the counter in its existing Context word. A function-long SSA
+        // window links every slow-path join; coalescing that chain retains
+        // quadratic range-list storage in the backtracking allocator's arena.
+        let before = self.b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            self.context,
+            memory_layout::CONTEXT_STEPS as i32,
+        );
         let after = self.b.ins().iadd_imm_s(before, -1);
-        self.b.def_var(variable, after);
+        self.b.ins().store(
+            MemFlagsData::trusted(),
+            after,
+            self.context,
+            memory_layout::CONTEXT_STEPS as i32,
+        );
         let exhausted = self
             .b
             .ins()

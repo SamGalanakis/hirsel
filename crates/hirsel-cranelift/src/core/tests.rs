@@ -22,6 +22,70 @@ impl profile::Observer for Code {
 }
 
 #[test]
+fn sequential_step_checks_reuse_the_native_frame() {
+    struct Frame(RefCell<u32>);
+    impl profile::Observer for Frame {
+        type Span = ();
+        fn enter(&self, _: &'static str) {}
+        fn define(
+            &self,
+            object: &mut ObjectModule,
+            function: cranelift_module::FuncId,
+            context: &mut cranelift_codegen::Context,
+        ) -> cranelift_module::ModuleResult<()> {
+            object.define_function(function, context)?;
+            if function.as_u32() == 0 {
+                *self.0.borrow_mut() = context
+                    .compiled_code()
+                    .unwrap()
+                    .buffer
+                    .frame_layout()
+                    .unwrap()
+                    .frame_to_fp_offset
+                    + 16;
+            }
+            Ok(())
+        }
+    }
+    use std::fmt::Write as _;
+    let mut source = String::from(
+        "core v1\nsig g0 = (u64) -> (u64)\n\
+         inst n0 = test@0/steps/serial [] []\nfn f0 = n0 g0 {\n\
+         b0(v0: u64):\n  v1: u64 = const 1\n",
+    );
+    let mut previous = 0;
+    for next in 2..514 {
+        writeln!(
+            source,
+            "  step\n  v{next}: u64 = wrapping_add v{previous}, v1"
+        )
+        .unwrap();
+        previous = next;
+    }
+    writeln!(source, "  return v{previous}\n}}").unwrap();
+    let input = text::parse(&source).unwrap();
+    let frame = Frame(RefCell::new(0));
+    emit_object_profiled(
+        &input,
+        &[],
+        &Options {
+            target: "x86_64-unknown-linux-gnu",
+            optimize: false,
+            debug_lines: false,
+        },
+        hirsel_core_ids::ContentHash([0x90; 32]),
+        &frame,
+    )
+    .unwrap();
+    // Only the accumulator, increment, Context, site and step word survive a
+    // check. Eight 8-byte spill homes, six saved registers, frame/return words
+    // and 16-byte call alignment fit in 144 bytes. Allow 256 for ABI scratch;
+    // the number of sequential checks must not multiply that storage.
+    let frame = *frame.0.borrow();
+    assert!(frame <= 256, "sequential Steps reserved {frame} bytes");
+}
+
+#[test]
 fn fixed_append_copy_does_not_spill_the_index_through_a_libc_call() {
     struct Calls(RefCell<usize>);
     impl profile::Observer for Calls {

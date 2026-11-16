@@ -64,6 +64,9 @@ pub struct Counters {
     /// Image file products and bodies read: one per module or body demanded.
     pub image_files: u64,
     pub image_bodies: u64,
+    /// Records of a shape's declared tables installed in place of
+    /// declaration (OPTION-L v3.2): one per request on the fast path.
+    pub declared_installs: u64,
 }
 
 /// One kind of work [`Counters`] counts.
@@ -82,8 +85,9 @@ pub(crate) enum Count {
     ImageSourceBytes,
     ImageFiles,
     ImageBodies,
+    DeclaredInstalls,
 }
-const COUNTS: usize = Count::ImageBodies as usize + 1;
+const COUNTS: usize = Count::DeclaredInstalls as usize + 1;
 static COUNTED: [std::sync::atomic::AtomicU64; COUNTS] =
     [const { std::sync::atomic::AtomicU64::new(0) }; COUNTS];
 
@@ -115,6 +119,7 @@ impl Counters {
             image_source_bytes: n(Count::ImageSourceBytes),
             image_files: n(Count::ImageFiles),
             image_bodies: n(Count::ImageBodies),
+            declared_installs: n(Count::DeclaredInstalls),
         }
     }
 }

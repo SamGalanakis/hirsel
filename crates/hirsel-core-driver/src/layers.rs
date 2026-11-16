@@ -3,8 +3,9 @@
 //! A store marks the shape of each successful complete request; the second
 //! such request with one shape writes the record and selects it. A refused,
 //! incomplete, resource-stopped or reachable-only request, and a request served
-//! by snapshot, write nothing. Nothing in the product installs a record yet:
-//! the request-sequence law installs it through [`Probe`].
+//! by snapshot, write nothing. A request whose shape the store selects installs
+//! the record in place of declaration, and counts it
+//! ([`crate::meter::Counters::declared_installs`]).
 use crate::store::Store;
 use hirsel_core_ids::ContentHash;
 use std::io;
@@ -53,17 +54,15 @@ impl Layer {
     }
 }
 
-/// The request-sequence law's view of one request: whether to install the
-/// selected record in place of declaration, and what came of it.
+/// The request-sequence law's view of one request: its shape when it
+/// declared, and, when `law` is set, its declared tables.
 #[cfg(test)]
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Probe {
-    pub(crate) install: bool,
     /// The law reads this request's tables. Reading them decodes every library
     /// row, so other tests leave it off.
     pub(crate) law: bool,
-    /// Whether the request installed; None when it declared nothing (snapshot).
-    pub(crate) installed: Option<bool>,
+    /// None when the request declared nothing (served by snapshot).
     pub(crate) shape: Option<ContentHash>,
     pub(crate) tables: Vec<(&'static str, Vec<String>)>,
 }

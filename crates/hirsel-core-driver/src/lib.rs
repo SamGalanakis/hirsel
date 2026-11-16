@@ -555,7 +555,6 @@ impl Driver {
         request.inputs.normalise();
         #[cfg(test)]
         {
-            self.layers.installed = None;
             self.layers.shape = None;
             self.layers.tables.clear();
         }
@@ -865,15 +864,14 @@ impl Driver {
             sources.iter().map(|s| s.1).collect::<Vec<bool>>(),
         ))?);
         let same_shape = prior.shape == Some(publication.shape);
-        // The record's selections are read after the declaration stage, outside
-        // the front's metered work; only the test-only install reads them first.
-        let layer;
+        // The fast path: the store's record of this shape's declared tables
+        // stands in for declaration.
+        let layer = layers::Layer::read(&store, publication.shape)?;
         let mut layer_record = None;
         {
-            #[cfg(test)]
-            let installed = match layers::Layer::read(&store, publication.shape)? {
-                selected if self.layers.install && selected.selected => store
-                    .get(selected.key)?
+            let installed = if layer.selected {
+                store
+                    .get(layer.key)?
                     .and_then(|bytes| decode::<hirsel_core_front::Declared>(&bytes))
                     .and_then(|record| {
                         Program::install(
@@ -883,14 +881,15 @@ impl Driver {
                             library.as_deref(),
                             record,
                         )
-                    }),
-                _ => None,
+                    })
+            } else {
+                None
             };
-            #[cfg(not(test))]
-            let installed = None;
+            if installed.is_some() {
+                meter::count(meter::Count::DeclaredInstalls, 1);
+            }
             #[cfg(test)]
             {
-                self.layers.installed = Some(installed.is_some());
                 self.layers.shape = Some(publication.shape);
             }
             let mut p = installed.unwrap_or_else(|| {
@@ -919,7 +918,6 @@ impl Driver {
                 }));
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
-            layer = layers::Layer::read(&store, publication.shape)?;
             if layer.wanted() && declarations_accepted && !reachable_only {
                 layer_record = p.declared().map(|d| encode(&d)).transpose()?;
             }

@@ -279,6 +279,9 @@ struct Answer {
     native: Option<serde_json::Value>,
     /// The declared-state record's part (crate::layers::Probe).
     layer: crate::layers::Probe,
+    /// Whether the request took the fast path, by the meter's
+    /// `declared_installs`; None when it declared nothing.
+    installed: Option<bool>,
 }
 fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) -> Answer {
     let check = serde_json::json!({
@@ -312,21 +315,18 @@ fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) ->
         root: Some(product.root),
         native,
         layer: Default::default(),
+        installed: None,
     }
 }
 /// Answer one request from the store at `store`. A core package product that
 /// is incomplete refuses the request with an error, and that error is its answer.
-/// With `install`, the store's declared-state record for the request's shape
-/// stands in for declaration.
 fn request(
     driver: &mut Driver,
     req: &Req,
     inputs: CorpusManifest,
     store: PathBuf,
     options: Option<NativeOptions>,
-    install: bool,
 ) -> Answer {
-    driver.layers.install = install;
     driver.layers.law = true;
     let products = store.with_extension("products");
     let request = CheckRequest {
@@ -351,14 +351,19 @@ fn request(
                     root: None,
                     native: None,
                     layer: std::mem::take(&mut driver.layers),
+                    installed: None,
                 };
             }
         }
     } else {
         driver.check(request, meter).unwrap()
     };
+    let layer = std::mem::take(&mut driver.layers);
     Answer {
-        layer: std::mem::take(&mut driver.layers),
+        installed: layer
+            .shape
+            .map(|_| meter.result.counters.declared_installs == 1),
+        layer,
         ..answer(&product, req, options.as_ref())
     }
 }
@@ -380,10 +385,11 @@ fn fault(store: &Path, fault: Fault) {
         }
     }
 }
-/// The declared-state record's law (OPTION-L v3.2). A primed request installs
-/// the store's record for its shape in place of declaration, and an installed
-/// program's tables equal an empty store's declared ones, table by table. A
-/// last request installs exactly when its recorded gate class is fast.
+/// The declared-state record's law (OPTION-L v3.2, fast path on). A primed
+/// request whose shape the store selects installs the record in place of
+/// declaration, and the meter counts it; an installed program's tables equal
+/// an empty store's declared ones, table by table. A last request (the third
+/// request of A, A', B) installs exactly when its recorded gate class is fast.
 #[derive(Default)]
 struct LayerLaw {
     /// Per table: the installed requests compared, and those unequal.
@@ -433,16 +439,14 @@ fn run_sequence(
             inputs.clone(),
             dir.path().join("resident"),
             options("resident", req),
-            true,
-        );
+                    );
         let disk_answer = request(
             &mut Driver::default(),
             req,
             inputs.clone(),
             dir.path().join("disk"),
             options("disk", req),
-            true,
-        );
+                    );
         if n == 0 {
             first_shape = resident_answer.layer.shape;
             continue;
@@ -454,10 +458,9 @@ fn run_sequence(
             inputs,
             fresh_store,
             options(&format!("fresh{n}"), req),
-            false,
-        );
+                    );
         for (path, primed) in [("resident", &resident_answer), ("disk", &disk_answer)] {
-            let installed = primed.layer.installed == Some(true);
+            let installed = primed.installed == Some(true);
             // An image-backed last request declares, installs, and its record's
             // rows sit above the library's.
             if req.product == Product::Libraries && n == seq.steps.len() {
@@ -466,7 +469,7 @@ fn run_sequence(
                     failures.push(format!(
                         "{} step {n} ({path} store): an image-backed request installed {:?}, library rows {:?}",
                         seq.name,
-                        primed.layer.installed,
+                        primed.installed,
                         primed.layer.tables.iter().find(|(t, _)| *t == "library")
                     ));
                 }
@@ -494,13 +497,13 @@ fn run_sequence(
                     "LAYER-SEQ {} recorded {:?} installed {:?} shape {} A's",
                     seq.name,
                     seq.gate,
-                    primed.layer.installed,
+                    primed.installed,
                     if primed.layer.shape == first_shape { "equal to" } else { "unlike" }
                 );
             }
             // A request the driver serves whole from its snapshot declares nothing.
             if n == seq.steps.len()
-                && primed.layer.installed.is_some()
+                && primed.installed.is_some()
                 && installed != (seq.gate == Gate::Fast)
             {
                 law.classes.push(format!(

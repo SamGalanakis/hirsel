@@ -216,10 +216,10 @@
         "image index": 203.79778742473042
       },
       "image_per_token": {
-        "records_opened": 0.002571068477804229,
-        "bytes_read": 10.533751015263968,
-        "digests": 0.002571068477804229,
-        "digest_bytes": 10.430908276151799,
+        "records_opened": 0.0026282033328665455,
+        "bytes_read": 10.772119871166502,
+        "digests": 0.0026282033328665455,
+        "digest_bytes": 10.666991737851841,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.03113849600896233,
@@ -1016,6 +1016,50 @@
         "merged_limit_digest_bytes": 360981
       },
       "baseline_revision": "616cda9735b6b726129d915405687ec5655513bd"
+    },
+    {
+      "reason": "The separator-sharing helpers key_ref, shared_min and pack_branch complete three additional std source bodies, and branch separator Arc[K] rows extend the demanded image closure. Only the four red suite-edit image growth cells receive their observation with the existing2percent/one-event margin. Instruction-stage ceilings and fixed language budget stay unchanged.",
+      "commit_range": "5cb8f233..dd6939cd7d8866d6189ba092796159be32a31994",
+      "completed_bodies_before": {
+        "m1": 446,
+        "std": 268
+      },
+      "completed_bodies_after": {
+        "m1": 449,
+        "std": 271
+      },
+      "changes": {
+        "suite-edit": {
+          "records_opened": {
+            "before": 0.002571068477804229,
+            "after": 0.0026282033328665455
+          },
+          "bytes_read": {
+            "before": 10.533751015263968,
+            "after": 10.772119871166502
+          },
+          "digests": {
+            "before": 0.002571068477804229,
+            "after": 0.0026282033328665455
+          },
+          "digest_bytes": {
+            "before": 10.430908276151799,
+            "after": 10.666991737851841
+          }
+        }
+      },
+      "observation": {
+        "local": {
+          "records_opened": 92,
+          "bytes_read": 377077,
+          "digests": 92,
+          "digest_bytes": 373397,
+          "tokens": 35705
+        }
+      },
+      "evidence": [
+        "std-ordered-map-998/separators/COST.md"
+      ]
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

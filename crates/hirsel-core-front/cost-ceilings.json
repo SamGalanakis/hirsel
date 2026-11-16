@@ -3,16 +3,16 @@
   "basis": "Qualified frozen/source-growth audit43d46518..4fcdeb12. Fixed-manifest population7082/3691->7263/3872lines,351/173->365/187complete bodies. Deque9+1, split cursors2, Mapclone2 new bodies each corpus; changed JSON source adds20lines. All named body-free increments are excluded from growth. Retain all concurrent growth/census histories. Fixed named anchor residual reduced for542fd0f2; raw60000andproduct rules unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 8835,
+      "code_lines": 8906,
       "check_lower_per_line": 18400,
       "whole_request_per_line": 33515.74,
       "whole_process_per_line": 33614.33
     },
     "std": {
-      "code_lines": 5445,
-      "check_lower_per_line": 14800,
-      "whole_request_per_line": 28200,
-      "whole_process_per_line": 28400
+      "code_lines": 5516,
+      "check_lower_per_line": 15600,
+      "whole_request_per_line": 29400,
+      "whole_process_per_line": 29600
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
@@ -96,19 +96,19 @@
   },
   "margin": "M1 growth observation+2%, std+5%, rounded up to100. Growth baseline is pre-anchor frozen work plus current compiler own-source minus frozen-source work. Named anchor residual is a fixed absolute instruction count, never part of the60000budget. Other body-free regressions remain red.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "1a423e99..omap-replaced-value",
+  "forecast_revision": "dd6939cd7d8866d6189ba092796159be32a31994",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 446,
-      "bodies": 446,
+      "complete_bodies": 449,
+      "bodies": 449,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 32475.26,
       "finished_process_per_line": 32475.26
     },
     "std": {
-      "complete_bodies": 268,
-      "bodies": 268,
+      "complete_bodies": 271,
+      "bodies": 271,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 27987.4,
@@ -6328,6 +6328,52 @@
       },
       "previous_m1_check_lower_per_line": 17900,
       "evidence": "std-ordered-map-998/store-copy/COST.md"
+    },
+    {
+      "from_revision": "5cb8f2339a0006038e858d8a65b83d22ce93d390",
+      "to_revision": "dd6939cd7d8866d6189ba092796159be32a31994",
+      "reason": "Separator sharing completes three additional source bodies: key_ref, shared_min and pack_branch. Only the three red std all-source cells receive the formatted-tree observation plus2percent rounded up to100. All M1/product ceilings, named anchors and fixed60000budget stay unchanged.",
+      "completed_bodies_before": {
+        "m1": [
+          446,
+          446
+        ],
+        "std": [
+          268,
+          268
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          449,
+          449
+        ],
+        "std": [
+          271,
+          271
+        ]
+      },
+      "measured_lines": {
+        "m1": 8906,
+        "std": 5516
+      },
+      "observations": {
+        "std_adjusted": {
+          "check_lower_per_line": 15255.88,
+          "whole_request_per_line": 28794.55,
+          "whole_process_per_line": 28988.04
+        },
+        "whole_process_forecast": {
+          "m1": 33237.55,
+          "std": 29164.53
+        }
+      },
+      "previous_std_ceilings": {
+        "check_lower_per_line": 14800,
+        "whole_request_per_line": 28200,
+        "whole_process_per_line": 28400
+      },
+      "evidence": "std-ordered-map-998/separators/COST.md"
     }
   ],
   "denominator_policy": "Fixed M1/core-std manifest closure, deterministic actual code lines. Print baseline and current counts when different. Source-line movement alone is expected source development, not a regression; empty corpus, missing counters, every numeric ceiling and the fixed finished-process budget still fail. Refresh recorded reference and forecast when supported work changes.",

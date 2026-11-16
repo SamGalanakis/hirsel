@@ -240,7 +240,8 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
 
 // Late argument promotion can expose a codec's function pointer only after the
 // ordinary inliner ran. Remember loop callbacks before constant propagation;
-// give their resolved, small bodies the loop-call preference before lifting fuel.
+// give their resolved bodies and newly exposed helpers one loop-call budget
+// before lifting fuel. The budget belongs to the whole expansion, including recursion.
 extern "C" void hirsel_llvm_mark_loop_callbacks(void *Raw) {
   auto &M = *static_cast<Module *>(Raw);
   for (Function &F : M) {
@@ -261,12 +262,21 @@ extern "C" void hirsel_llvm_inline_loop_callbacks(void *Raw) {
       if (C->getMetadata("hirsel.loop.callback")) Calls.push_back(C);
   for (CallInst *C : Calls) {
     C->setMetadata("hirsel.loop.callback", nullptr);
-    Function *Target = C->getCalledFunction();
-    if (!Target || Target->isDeclaration() || Target == C->getFunction() ||
-        Target->hasFnAttribute(Attribute::NoInline) ||
-        C->hasFnAttr(Attribute::NoInline) || Target->getInstructionCount() > 1024)
-      continue;
-    InlineFunctionInfo Info;
-    (void)InlineFunction(*C, Info, true);
+    unsigned Budget = 1024;
+    SmallVector<CallBase *, 8> Pending{C};
+    while (!Pending.empty()) {
+      CallBase *Call = Pending.pop_back_val();
+      Function *Target = Call->getCalledFunction();
+      if (!Target || Target->isDeclaration() || Target == Call->getFunction() ||
+          Target->hasFnAttribute(Attribute::NoInline) ||
+          Call->hasFnAttr(Attribute::NoInline) || Target->getInstructionCount() > Budget)
+        continue;
+      unsigned Cost = Target->getInstructionCount();
+      InlineFunctionInfo Info;
+      if (InlineFunction(*Call, Info, true).isSuccess()) {
+        Budget -= Cost;
+        Pending.append(Info.InlinedCallSites.begin(), Info.InlinedCallSites.end());
+      }
+    }
   }
 }

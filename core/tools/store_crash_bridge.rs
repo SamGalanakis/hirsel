@@ -91,23 +91,34 @@ impl Bridge {
         // The out-of-process witness records returned durability even when a
         // different task has just encountered the simulated filesystem cut.
         if op == 12 {
-                if self.phase == 1 {
-                    if &data[..len] == b"DONE" {
-                        self.acked = true;
-                    } else if &data[..len] == b"ARM" {
-                        self.armed = true;
-                    } else if let Some(version) = data[..len].strip_prefix(b"ACK ") {
-                        let version: u64 = std::str::from_utf8(version)
-                            .expect("ACK is ASCII").parse().expect("ACK version");
-                        assert!(version >= self.floor, "durability acknowledgments regressed");
-                        self.floor = version;
-                    }
+            if self.phase == 1 {
+                if &data[..len] == b"DONE" {
+                    self.acked = true;
+                } else if &data[..len] == b"ARM" {
+                    self.armed = true;
+                } else if let Some(version) = data[..len].strip_prefix(b"ACK ") {
+                    let version: u64 = std::str::from_utf8(version)
+                        .expect("ACK is ASCII")
+                        .parse()
+                        .expect("ACK version");
+                    assert!(
+                        version >= self.floor,
+                        "durability acknowledgments regressed"
+                    );
+                    self.floor = version;
                 }
-                return Outcome { written: len as u64, ..Outcome::default() };
+            }
+            return Outcome {
+                written: len as u64,
+                ..Outcome::default()
+            };
         }
         if op == 13 {
             eprint!("{}", String::from_utf8_lossy(&data[..len]));
-            return Outcome { written: len as u64, ..Outcome::default() };
+            return Outcome {
+                written: len as u64,
+                ..Outcome::default()
+            };
         }
         if self.crashed {
             return Self::error(5);
@@ -164,8 +175,11 @@ impl Bridge {
                 let file = self.files.get(&handle).expect("live provider descriptor");
                 let name = file.name.clone();
                 let cursor = file.cursor;
-                if self.phase == 1 && self.armed && self.sync_failure == 4
-                    && name.starts_with("j-") && !name.ends_with(".end")
+                if self.phase == 1
+                    && self.armed
+                    && self.sync_failure == 4
+                    && name.starts_with("j-")
+                    && !name.ends_with(".end")
                 {
                     self.failed_syncs += 1;
                     assert_eq!(self.failed_syncs, 1, "store retried a failed write");

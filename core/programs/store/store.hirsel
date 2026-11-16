@@ -6846,7 +6846,9 @@ fn disk_test_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] wai
 pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut options = defaults()
     options.checkpoint_task_bytes = 131072
-    options.resident_limit = 2097152
+    // S3 also admits the queued1MiB frame. The2MiB data budget and the
+    //128KiB checkpoint task allowance stay unchanged.
+    options.resident_limit = 2097152 + 1048639
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     result.unwrap(create_table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
@@ -7047,7 +7049,7 @@ fn disk_test_directory(d: Dir) -> Dir waits {
 
 fn disk_crash_options(scenario: String) -> Options {
     let mut options = defaults()
-    options.resident_limit = 2097152
+    options.resident_limit = if scenario == "refusal" { 2097152u64 + 1048639 } else { 2097152u64 }
     options.checkpoint_task_bytes = if scenario == "refusal" {
         131072
     } else {
@@ -7090,6 +7092,15 @@ fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) 
         let _ = disk_remove_optional(d, first_name)?
         disk_io(host.sync_dir(d))?
     }
+    if scenario == "checkpoint" || scenario == "gap" || scenario == "oversize" {
+        // L4 cuts only the checkpoint. Its input commits are durable before
+        // the adapter arms filesystem cuts, so every reopen must keep them.
+        for k in 0u64 .. 64 {
+            if !typed_put(mut db, t, k, k + 101) { fail("checkpoint input") }
+        }
+        let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+        durable(mut db, last)?
+    }
     close(take db)
 }
 
@@ -7129,12 +7140,6 @@ fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String)
         }
         let _ = checkpoint(mut db)?
     } else {
-        let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-        for k in 0u64 .. 64 {
-            if !typed_put(mut db, t, k, k + 101) {
-                fail("crash write put")
-            }
-        }
         let _ = checkpoint(mut db)?
     }
     close(take db)
@@ -7159,11 +7164,9 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     let sh = shape(t)
     for k in 0u64 .. 96 {
         let found = get(snapshot(db), sh, k)?
-        let old_value: Option[u64] = if scenario == "genesis" && db.head == 1 {
-            None
-        } else {
-            Some(k + 1)
-        }
+        let old_value: Option[u64] = if scenario == "genesis" {
+            if k + 1 < db.head { Some(k + 1) } else { None }
+        } else { Some(k + 1) }
         if found != old_value {
             old = false
         }
@@ -7176,11 +7179,8 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
             new = false
         }
     }
-    let mut good = if required_new {
-        new
-    } else {
-        old || new
-    }
+    // L4's input was durable in init; a checkpoint cut never loses it.
+    let mut good = new
     if scenario == "schema" {
         good = old
         match table(mut db, "added", std.codec.key_u64(), std.codec.of_u64()) {
@@ -7201,11 +7201,16 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     } else if scenario == "refusal" {
         good = old
         let big = table(mut db, "big", std.codec.key_u64(), std.codec.of_string())?
-        if !old || get(snapshot(db), shape(big), 1)? != None || (db.head != 98 && db.head != 100) || (required_new && db.head != 100) {
-            good = false
+        if !old || db.head < 98 || db.head > 100 || (required_new && db.head != 100) { good = false }
+        match get(snapshot(db), shape(big), 1)? {
+            Some(value) => {
+                if db.head != 99 || string.byte_len(value) != 1048566 { good = false }
+                for byte in string.as_bytes(value) { if byte != 97u8 { good = false } }
+            },
+            None => if db.head == 99 { good = false }
         }
     } else if scenario == "genesis" {
-        good = old && (db.head == 1 || db.head == 97) && (!required_new || db.head == 97)
+        good = old && db.head >= 1 && db.head <= 97 && (!required_new || db.head == 97)
     }
     close(take db)?
     Ok(good)

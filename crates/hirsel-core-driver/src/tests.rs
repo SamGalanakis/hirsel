@@ -2696,6 +2696,114 @@ fn resolution_edges_rebuild_like_fresh() {
     }
 }
 
+/// A body's lowering reads program inputs beyond the names it resolves, and its
+/// key holds each (`DefinitionKey`): MEM-17 finds an untwinned type's twin among
+/// every declaration (`twins`), and `codec.of[u64]` calls std's `of_u64` by a
+/// path it builds (`siblings`). Each edit, checked over the base's store,
+/// reports and publishes what an empty store does. Oracle: the fresh check,
+/// whose verdict is hand-derived (a rival twin of `Row` declared first takes
+/// `thaw`'s selection; std without `of_u64` builds no codec of u64). Red on a
+/// key without either field (`twins` or `siblings` None): the stored record of
+/// `thaw` or `c` was reused.
+#[test]
+fn program_inputs_rebuild_bodies_like_fresh() {
+    const ROW: &str = "type Row { n: u64 }\n";
+    const THAW: &str = "@twin(Row) stable type RowS { n: u64 }\nfn thaw(s: RowS) -> Result[Row, Capacity] { clone(s) }\n";
+    const CODEC: &str = "fn c() -> std.codec.Codec[u64] { std.codec.of() }\n";
+    let one = format!("{ROW}{THAW}");
+    let rival = format!("{ROW}@twin(Row) stable type RowT {{ n: u64 }}\n{THAW}");
+    let libraries = tempfile::tempdir().unwrap();
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    // A copy of core and std whose std has no `of_u64`.
+    let renamed = libraries.path().join("renamed");
+    let mut pending = vec![PathBuf::new()];
+    while let Some(at) = pending.pop() {
+        std::fs::create_dir_all(renamed.join(&at)).unwrap();
+        for top in ["core", "std"].iter().filter(|_| at.as_os_str().is_empty()) {
+            pending.push(PathBuf::from(top));
+        }
+        if at.as_os_str().is_empty() {
+            continue;
+        }
+        for entry in std::fs::read_dir(shipped.join(&at)).unwrap() {
+            let relative = at.join(entry.unwrap().file_name());
+            if shipped.join(&relative).is_dir() {
+                pending.push(relative);
+            } else {
+                let text = std::fs::read_to_string(shipped.join(&relative)).unwrap();
+                let text = text.replace("pub fn of_u64() ->", "pub fn of_u64_renamed() ->");
+                std::fs::write(renamed.join(&relative), text).unwrap();
+            }
+        }
+    }
+    let cases = [
+        (
+            "a rival twin arrives",
+            (&shipped, &one),
+            (&shipped, &rival),
+            false,
+        ),
+        (
+            "the rival twin leaves",
+            (&shipped, &rival),
+            (&shipped, &one),
+            true,
+        ),
+        (
+            "std's u64 maker leaves",
+            (&shipped, &CODEC.to_owned()),
+            (&renamed, &CODEC.to_owned()),
+            false,
+        ),
+        (
+            "std's u64 maker returns",
+            (&renamed, &CODEC.to_owned()),
+            (&shipped, &CODEC.to_owned()),
+            true,
+        ),
+    ];
+    for (case, base, edit, accepted) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("app");
+        std::fs::create_dir(&app).unwrap();
+        let check = |(root, source): (&PathBuf, &String), store: &str| {
+            std::fs::write(app.join("main.hirsel"), source).unwrap();
+            let mut request = CheckRequest::program(&app, root, &dir.path().join(store)).unwrap();
+            request.entry = None;
+            Driver::default()
+                .check(request, &mut Meter::new(false))
+                .unwrap()
+        };
+        check(base, "incremental");
+        let built = check(edit, "incremental");
+        let fresh = check(edit, "fresh");
+        assert_eq!(
+            fresh.accepted() && fresh.incomplete.is_empty(),
+            accepted,
+            "{case}: the fresh check: {:?} {:?}",
+            fresh.diagnostics,
+            fresh.incomplete
+        );
+        assert_eq!(
+            encode(&built.diagnostics).unwrap(),
+            encode(&fresh.diagnostics).unwrap(),
+            "{case}: diagnostics"
+        );
+        assert_eq!(
+            encode(&built.incomplete).unwrap(),
+            encode(&fresh.incomplete).unwrap(),
+            "{case}: incomplete"
+        );
+        let records = |p: &CheckProduct| -> BTreeMap<DefPath, ContentHash> {
+            p.definitions
+                .iter()
+                .map(|(k, d)| (k.clone(), d.record))
+                .collect()
+        };
+        assert_eq!(records(&built), records(&fresh), "{case}: products");
+    }
+}
+
 /// The `.hirsel` files under `dir` as modules named by their relative path;
 /// `tests/` modules only when `tests`. Core sources are signatures.
 fn corpus_files(dir: &Path, tests: bool) -> Vec<hirsel_core_resolve::ModuleSource> {

@@ -795,6 +795,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let error_ty = args[1];
         let error_id = self.place_row(error_ty, "a push error without a place is not built", n)?;
+        // `list.grow` is a sibling read of `list.push` (`crate::SIBLING_READS`).
         let (Some(capacity), Some(result_decl), Some(grow)) = (
             self.p.core_decl("Capacity"),
             self.p.core_decl("Result"),

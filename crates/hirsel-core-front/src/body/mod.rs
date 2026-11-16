@@ -70,7 +70,9 @@ mod types;
 mod writers;
 pub use key_glue::{GLUE_OPERATIONS, is_glue};
 use templates::{AllocationLayout, CallOperation, CopySize, GenericCall, NameRecipe};
-pub use templates::{GenericTemplate, NamePart, import_instance, materialize, materialize_glue};
+pub use templates::{
+    BUILTIN_CODEC_MAKERS, GenericTemplate, NamePart, import_instance, materialize, materialize_glue,
+};
 mod values;
 use types::*;
 pub(crate) use types::{float_bits, float_suffix, int_magnitude, int_suffix};

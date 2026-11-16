@@ -1039,6 +1039,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             return Some(self.emit_call(maker as usize, &args, vals, result, n));
         }
+        // A sibling read of `of` (`crate::SIBLING_READS`).
         let name = crate::decls::layout_name(&self.p.decls, &self.t, ty);
         let maker = templates::builtin_codec(&name).and_then(|maker| {
             let mut path = self.p.fns[f].path.clone();

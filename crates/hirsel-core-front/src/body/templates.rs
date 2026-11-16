@@ -438,27 +438,42 @@ pub(super) fn codec_maker(
     Ok(FuncId(module.functions.len() as u32 - 1))
 }
 
-/// std's maker of the built-in type whose row is named `name`: a scalar, `()`, String
-/// or DecodeError.
+/// std's maker of each built-in type, by the type's row name: a scalar, `()`, String
+/// or DecodeError. `of` and every maker are siblings in std's `codec` module.
+const BUILTIN_CODECS: [(&str, &str); 15] = [
+    ("()", "of_unit"),
+    ("bool", "of_bool"),
+    ("char", "of_char"),
+    ("u8", "of_u8"),
+    ("u16", "of_u16"),
+    ("u32", "of_u32"),
+    ("u64", "of_u64"),
+    ("i8", "of_i8"),
+    ("i16", "of_i16"),
+    ("i32", "of_i32"),
+    ("i64", "of_i64"),
+    ("f32", "of_f32"),
+    ("f64", "of_f64"),
+    ("core@1/core/String", "of_string"),
+    ("std@1/codec/DecodeError", "of_decode_error"),
+];
+/// The makers of [`BUILTIN_CODECS`], which a body naming `of` reads
+/// ([`crate::SIBLING_READS`]).
+pub const BUILTIN_CODEC_MAKERS: [&str; 15] = {
+    let mut makers = [""; 15];
+    let mut i = 0;
+    while i < makers.len() {
+        makers[i] = BUILTIN_CODECS[i].1;
+        i += 1;
+    }
+    makers
+};
+
+/// std's maker of the built-in type whose row is named `name`.
 pub(super) fn builtin_codec(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "()" => "of_unit",
-        "bool" => "of_bool",
-        "char" => "of_char",
-        "u8" => "of_u8",
-        "u16" => "of_u16",
-        "u32" => "of_u32",
-        "u64" => "of_u64",
-        "i8" => "of_i8",
-        "i16" => "of_i16",
-        "i32" => "of_i32",
-        "i64" => "of_i64",
-        "f32" => "of_f32",
-        "f64" => "of_f64",
-        "core@1/core/String" => "of_string",
-        "std@1/codec/DecodeError" => "of_decode_error",
-        _ => return None,
-    })
+    BUILTIN_CODECS
+        .iter()
+        .find_map(|&(row, maker)| (row == name).then_some(maker))
 }
 
 struct Substitution<'a> {

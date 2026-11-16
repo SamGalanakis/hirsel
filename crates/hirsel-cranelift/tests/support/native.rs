@@ -390,6 +390,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                     }
                 }
             }
+            Outcome::Stuck(waiting) => panic!("the evaluator's run is stuck: {waiting:?}"),
         }
         expected.push(report.used);
         if host_files {
@@ -1542,6 +1543,7 @@ fn cancelled(tasks: Tasks) -> u64 waits {
             stdout: Vec::new(),
             stderr: Vec::new(),
             sites: Vec::new(),
+            events: Vec::new(),
         };
         execute_reports(
             &module,

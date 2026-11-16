@@ -1,0 +1,17 @@
+// The child sends before it sleeps; the parent receives what was sent.
+type In:send { clock: Clock, tx: Sender[u64], out: Stdout }
+fn child(take s: In) waits {
+    let In(clock: clock, tx: tx, out: out) = take s
+    result.unwrap(channel.send(tx, 7u64))
+    let now = host.mono_ns(clock)
+    host.sleep_until(clock, now + 20_000_000u64)
+    result.unwrap(stdout.write(out, "s"))
+}
+pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, tx: take tx, out: out), child))
+    let v = result.unwrap(channel.receive(rx))
+    result.unwrap(stdout.write(out, "R"))
+    result.unwrap(task.join(take h))
+    if v == 7u64 { Ok(()) } else { Error(Exit(status: 5u8)) }
+}

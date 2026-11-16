@@ -1,0 +1,19 @@
+// The child publishes, then sleeps; the parent sleeps longer, then reads (CONC-13: the read sees 2).
+type In:send { clock: Clock, h: Latest[u64] }
+fn number(x: u64) -> u64 { x }
+fn child(take s: In) waits {
+    let In(clock: clock, h: h) = take s
+    latest.publish(h, result.unwrap(arc.new(2u64)))
+    let now = host.mono_ns(clock)
+    host.sleep_until(clock, now + 20_000_000u64)
+}
+pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let h = result.unwrap(latest.new(result.unwrap(arc.new(1u64))))
+    let t = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, h: latest.handle(h)), child))
+    let now = host.mono_ns(clock)
+    host.sleep_until(clock, now + 60_000_000u64)
+    let seen = number(latest.read(h))
+    if seen == 2u64 { result.unwrap(stdout.write(out, "2")) } else { result.unwrap(stdout.write(out, "1")) }
+    result.unwrap(task.join(take t))
+    Ok(())
+}

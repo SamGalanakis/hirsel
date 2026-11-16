@@ -136,7 +136,9 @@ fn evaluate() -> Result<Value, String> {
                 json!({"kind":"returned", "values":values})
             }
             eval::Outcome::Failed(causes) => json!({"kind":"failed", "causes":causes}),
+            eval::Outcome::Stuck(waiting) => json!({"kind":"stuck", "waiting":waiting}),
         }, "used":report.used, "stdout":report.stdout, "stderr":report.stderr,
+            "events": report.events.iter().map(|e| [u64::from(e.kind), e.task, e.object, e.value]).collect::<Vec<_>>(),
             "checked": {"loans": checked.loans}}),
         Err(fault) => {
             let message = fault

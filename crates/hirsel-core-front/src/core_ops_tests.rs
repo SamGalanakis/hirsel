@@ -513,34 +513,65 @@ fn f(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits {
         ),
     ];
     for (source, expected) in cases {
-        let (index, modules) = canonical(source);
-        let p = Program::declare(&index, &modules);
-        let mut emitter = Emitter::new();
-        let mut entry = None;
-        for (f, fd) in p
-            .fns
-            .iter()
-            .enumerate()
-            .filter(|(_, fd)| fd.path.0.package.name == "app")
-        {
-            let check = p.check_lower(f, &mut emitter);
-            assert!(
-                check.refusals.is_empty() && check.gaps.is_empty(),
-                "{check:?}"
-            );
-            if fd.path.0.name == "f" {
-                entry = check.function;
-            }
-        }
-        emitter.materialize_instances().unwrap();
-        wf::module(&emitter.module).unwrap();
-        let run = eval::run(&emitter.module, entry.unwrap(), &[1, 1, 1], 1 << 20);
+        let run = run_tasks(source, "f");
         assert_eq!(
             run.outcome,
             eval::Outcome::Returned(vec![expected]),
             "{source}"
         );
     }
+}
+
+/// The runtime rows whose waits need suspendable tasks run on the evaluator
+/// with native's expected output (core_ops_native `host_operations`): a sleep
+/// lets the runnable peer write first, a cancel reaches a sleeping child, and
+/// a failing parent cancels its sleeping child (CONC-7, CONC-8, FAIL-8).
+#[test]
+fn runtime_task_rows_run_on_the_evaluator() {
+    for (name, stdout) in [
+        ("sleep-peer", b"PS".as_slice()),
+        ("sleep-cancel", b"C"),
+        ("parent-failure", b"F"),
+    ] {
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../core/front/runtime/{name}.hirsel")),
+        )
+        .unwrap();
+        // `main` returns its Result through a place; the entry returns a word.
+        let source = source
+            + "\nfn ok(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits { match main(tasks, clock, out) { Ok(()) => 1u64, Error(_) => 0u64 } }\n";
+        let run = run_tasks(&source, "ok");
+        assert_eq!(run.outcome, eval::Outcome::Returned(vec![1]), "{name}");
+        assert_eq!(run.stdout, stdout, "{name}");
+    }
+}
+
+/// Check and lower an app source and run `entry(tasks, clock, out)` on the
+/// evaluator.
+fn run_tasks(source: &str, entry: &str) -> eval::Report {
+    let (index, modules) = canonical(source);
+    let p = Program::declare(&index, &modules);
+    let mut emitter = Emitter::new();
+    let mut function = None;
+    for (f, fd) in p
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|(_, fd)| fd.path.0.package.name == "app")
+    {
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        if fd.path.0.name == entry {
+            function = check.function;
+        }
+    }
+    emitter.materialize_instances().unwrap();
+    wf::module(&emitter.module).unwrap();
+    eval::run(&emitter.module, function.unwrap(), &[1, 1, 1], 1 << 20)
 }
 
 #[test]

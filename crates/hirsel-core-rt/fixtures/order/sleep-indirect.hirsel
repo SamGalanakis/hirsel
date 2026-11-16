@@ -1,0 +1,24 @@
+// The sleep is reached through a function value and through a closure literal.
+type In:send { clock: Clock, out: Stdout }
+fn nap(c: Clock) waits { let now = host.mono_ns(c); host.sleep_until(c, now + 20_000_000u64) }
+fn via(f: fn(Clock) waits, c: Clock) waits { f(c) }
+fn a(take x: In) waits {
+    let v = take x
+    via(nap, v.clock)
+    result.unwrap(stdout.write(v.out, "a"))
+}
+fn cc(take x: In) waits {
+    let v = take x
+    via(fn(k: Clock) waits { let now = host.mono_ns(k); host.sleep_until(k, now + 40_000_000u64) }, v.clock)
+    result.unwrap(stdout.write(v.out, "c"))
+}
+fn b(take out: Stdout) waits { result.unwrap(stdout.write(out, "b")) }
+pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let ha = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, out: out), a))
+    let hc = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, out: out), cc))
+    let hb = result.unwrap(task.spawn(tasks, bytes 4096, out, b))
+    result.unwrap(task.join(take ha))
+    result.unwrap(task.join(take hc))
+    result.unwrap(task.join(take hb))
+    Ok(())
+}

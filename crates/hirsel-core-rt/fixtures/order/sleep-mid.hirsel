@@ -1,0 +1,18 @@
+// A prints a, sleeps, prints c; B prints b; the parent prints P between spawns and joins.
+type In:send { clock: Clock, out: Stdout }
+fn a(take x: In) waits {
+    let v = take x
+    result.unwrap(stdout.write(v.out, "a"))
+    let now = host.mono_ns(v.clock)
+    host.sleep_until(v.clock, now + 20_000_000u64)
+    result.unwrap(stdout.write(v.out, "c"))
+}
+fn b(take out: Stdout) waits { result.unwrap(stdout.write(out, "b")) }
+pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let ha = result.unwrap(task.spawn(tasks, bytes 4096, In(clock: clock, out: out), a))
+    let hb = result.unwrap(task.spawn(tasks, bytes 4096, out, b))
+    result.unwrap(stdout.write(out, "P"))
+    result.unwrap(task.join(take ha))
+    result.unwrap(task.join(take hb))
+    Ok(())
+}

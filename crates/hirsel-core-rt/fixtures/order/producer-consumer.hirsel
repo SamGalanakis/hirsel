@@ -1,0 +1,22 @@
+// Producer and consumer over a channel of capacity 1: send blocks, receive blocks.
+type In:send { tx: Sender[u64], out: Stdout }
+fn producer(take x: In) waits {
+    let In(tx: tx, out: out) = take x
+    result.unwrap(stdout.write(out, "1"))
+    result.unwrap(channel.send(tx, 1u64))
+    result.unwrap(stdout.write(out, "2"))
+    result.unwrap(channel.send(tx, 2u64))
+    result.unwrap(stdout.write(out, "3"))
+    result.unwrap(channel.send(tx, 3u64))
+    result.unwrap(stdout.write(out, "e"))
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, In(tx: take tx, out: out), producer))
+    while let Ok(v) = channel.receive(rx) {
+        if v == 1u64 { result.unwrap(stdout.write(out, "a")) } else if v == 2u64 { result.unwrap(stdout.write(out, "b")) } else { result.unwrap(stdout.write(out, "c")) }
+    }
+    result.unwrap(stdout.write(out, "C"))
+    result.unwrap(task.join(take h))
+    Ok(())
+}

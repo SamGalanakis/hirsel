@@ -168,6 +168,13 @@ def discover(root, filters):
     return contracts
 
 
+# Task laws the evaluator cannot run yet, each with its owner. Delete a row when
+# its defect is fixed: the law then runs on the evaluator.
+EVALUATOR_BLOCKED = {
+    'tally:read_sees_flushes': 'core-ops-914: the lowered TryReceive row and its signature name different item types after instances materialize (wf "TryReceive through another signature")',
+}
+
+
 def host_parameter(case):
     for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks')]:
         if '(' + argument + ')' in case.call:
@@ -332,9 +339,16 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            engine=engine, profile=None if engine == 'evaluator' else 'release' if engine == 'llvm' else 'dev',
                            call=case.call, expected=case.expected, ran=False, passed=False, applicable=True,
                            cause=None, owner=None, native_only=False)
-                if engine == 'evaluator' and host_parameter(case)[0]:
+                # The evaluator models tasks and the clock (virtual time); a law
+                # whose entry takes another host capability runs natively only.
+                if engine == 'evaluator' and host_parameter(case)[0] and not host_parameter(case)[0].endswith((':Tasks', ':Clock')):
                     row.update(applicable=False, passed=None, native_only=True,
                                cause='native-only: entry takes a host capability')
+                    save_row(rows, row, output)
+                    continue
+                if engine == 'evaluator' and case.name in EVALUATOR_BLOCKED:
+                    row.update(applicable=False, passed=None, native_only=True,
+                               cause='native-only: ' + EVALUATOR_BLOCKED[case.name])
                     save_row(rows, row, output)
                     continue
                 if engine != 'evaluator' and case.evaluator_only:

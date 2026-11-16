@@ -396,6 +396,7 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
             stdout: vec![],
             stderr: vec![],
             sites: vec![],
+            events: vec![],
         }]),
     );
 }
@@ -491,6 +492,7 @@ fn string_literals_grow_and_clean_in_dev_and_speed() {
                         stdout: vec![],
                         stderr: vec![],
                         sites: vec![],
+                        events: vec![],
                     }]),
                 );
                 if counted_drop {
@@ -510,6 +512,7 @@ fn string_literals_grow_and_clean_in_dev_and_speed() {
                                 stdout: vec![],
                                 stderr: vec![],
                                 sites: vec![],
+                                events: vec![],
                             }]),
                         );
                     }
@@ -597,6 +600,7 @@ fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
             stdout: vec![],
             stderr: vec![],
             sites: vec![],
+            events: vec![],
         },
         eval::Report {
             outcome: Outcome::Returned(vec![13]),
@@ -607,6 +611,7 @@ fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
             stdout: vec![],
             stderr: vec![],
             sites: vec![],
+            events: vec![],
         },
     ];
     execute_reports(&module, &runs, false, 1000, None, Some(&reports));
@@ -668,6 +673,7 @@ fn nested_counted_sequences_clean_refused_prefixes_and_deep_chains() {
             stdout: vec![],
             stderr: vec![],
             sites: vec![],
+            events: vec![],
         }]),
     );
 }
@@ -1128,6 +1134,7 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
             stdout: vec![],
             stderr: vec![],
             sites: vec![],
+            events: vec![],
         })
         .collect();
     execute_reports(&module, &cases, false, 1000, None, Some(&expected));
@@ -1143,6 +1150,7 @@ fn joined_cause_views_use_core_layout() {
         stdout: vec![],
         stderr: vec![],
         sites: vec![],
+        events: vec![],
         trace: vec![7],
         admissions: eval::run(&module, FuncId(6), &[], 1000).admissions,
     };
@@ -1210,6 +1218,7 @@ fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
                     stdout: vec![],
                     stderr: vec![],
                     sites: vec![],
+                    events: vec![],
                 };
                 raw.push((vec![charge, overflow], injection, expected));
             }

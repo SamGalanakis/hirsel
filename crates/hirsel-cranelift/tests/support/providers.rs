@@ -26,6 +26,7 @@ fn expected(run: &Run, out: &mut Vec<u64>) {
                 _ => panic!("unexpected provider cause {s}"),
             }));
         }
+        Outcome::Stuck(waiting) => panic!("a provider fixture's run is stuck: {waiting:?}"),
     }
     out.extend([run.report.used, run.report.admissions as u64]);
     for bytes in [&run.report.stdout, &run.report.stderr] {
@@ -373,6 +374,7 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
                     stdout: vec![],
                     stderr: vec![],
                     sites: vec![],
+                    events: vec![],
                 },
                 matrix: Some((op, failing)),
             });

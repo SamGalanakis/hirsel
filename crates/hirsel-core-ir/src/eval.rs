@@ -16,12 +16,16 @@ use hirsel_core_layout::{
     compute, field_size, map_entry,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::{Arc, mpsc};
 
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     Returned(Vec<u64>),
     /// The run failed with this cause chain, primary cause first.
     Failed(Vec<String>),
+    /// Every task waits and nothing can wake one, so the run does not end (the
+    /// native scheduler parks forever). One line per waiting task, by task id.
+    Stuck(Vec<String>),
 }
 
 pub struct Report {
@@ -40,6 +44,8 @@ pub struct Report {
     /// the anchor of the raising operation, or of the call that reached it when
     /// that operation is core's or unanchored; `None` when no such anchor exists.
     pub sites: Vec<Option<Anchor>>,
+    /// The run's CONC-10 event list, in the native recorder's kinds and ids.
+    pub events: Vec<Event>,
 }
 
 /// What the run's oracle checks covered (crate docs, "Loans").
@@ -57,7 +63,9 @@ pub struct Checked {
 /// - `Args` is the run's argument table: each argument a run-owned `String`
 ///   carrier of capacity 0; the handle's value is not read.
 /// - `stdout` and `stderr` writes are captured whole: `written` is the length.
-/// - A clock read returns the number of clock reads before it, both clocks alike.
+/// - A clock read returns the number of clock reads so far, itself included,
+///   both clocks alike: the host clock has started before the run (a law that
+///   adds to a read relies on it), and a sleep jumps it to the deadline.
 /// - Directories hold flat names: a key is (`Dir` handle, path bytes). `open`
 ///   with `Read` needs a file (`NotFound`), `CreateNew` needs no entry (`Exists`),
 ///   `Write` truncates or creates, `Append` creates and writes at the end; a
@@ -240,6 +248,10 @@ struct Task {
     /// The anchor each running activation of the task is at, innermost last, and
     /// whether its function inherits its caller's site (SITES.md 6(b)).
     at: Vec<(Option<Anchor>, bool)>,
+    /// Its scheduler record: 0 for the root, `i + 1` for child `i`.
+    k: usize,
+    /// Cleanups running with cancellation shielded (CONC-8, CONC-9).
+    shield: u32,
 }
 struct Child {
     status: u8,
@@ -256,7 +268,15 @@ struct Child {
     /// Its causes, primary first, while no `Causes` holds them.
     chain: Vec<Cause>,
 }
+impl Machine<'_> {
+    fn next_id(&mut self) -> u64 {
+        let id = self.sched.next;
+        self.sched.next += 1;
+        id
+    }
+}
 struct Chan {
+    id: u64,
     item: TypeRef,
     cap: u64,
     queue: VecDeque<Vec<u8>>,
@@ -267,6 +287,7 @@ struct Chan {
 }
 /// A `Latest[T]` root: the current `Arc[T]` node, admitted at `LATEST_ROOT`.
 struct Latest {
+    id: u64,
     /// `Arc[T]`, whose drop releases the root's share at the last handle.
     item: TypeRef,
     root: u64,
@@ -314,8 +335,8 @@ struct Machine<'m> {
     loans: u64,
     /// The module's derived parameter facts, and each function's roles, filled on
     /// its first call.
-    facts: roles::Facts,
-    roles: Vec<Option<std::rc::Rc<[Option<roles::Role>]>>>,
+    facts: Arc<roles::Facts>,
+    roles: Vec<Option<Arc<[Option<roles::Role>]>>>,
     /// Per running activation: its roles, and by block the byte spans each role
     /// touched (`lo -> (hi, role)`, disjoint, a role's adjacent spans merged).
     footprints: Vec<Footprint>,
@@ -325,12 +346,151 @@ struct Machine<'m> {
     /// [`Nans::Scrambled`]: the count of NaNs stored so far, which picks the next one's
     /// pattern; None in the canonical placement.
     scrambled: Option<u64>,
+    sched: Sched,
+    /// Each task's thread link, held here only while that task runs.
+    links: Vec<Option<Link<'m>>>,
 }
 
 struct Footprint {
-    roles: std::rc::Rc<[Option<roles::Role>]>,
+    roles: Arc<[Option<roles::Role>]>,
     spans: HashMap<usize, BTreeMap<usize, (usize, roles::Role)>>,
 }
+
+// ---- tasks (CONC-3..10)
+//
+// Each task runs on its own thread, and exactly one thread runs at a time: the
+// `Machine` is a baton that moves by value to the task the scheduler picks and
+// back when that task waits or ends. The scheduler is the native default
+// scheduler's rule (hirsel-core-rt tasks.rs): a FIFO ready queue, a spawned child
+// readied at the tail while its parent continues, every wake readying each
+// blocked task newest first, and a poll queue that runs only when nothing else
+// is ready. So the event order is the native order by construction.
+
+/// The CONC-10 event kinds, numbered as the native runtime's poll recorder writes them.
+pub mod event {
+    pub const SPAWN: u8 = 0;
+    pub const END: u8 = 1;
+    pub const CANCEL: u8 = 2;
+    pub const CANCELLED: u8 = 3;
+    pub const JOIN: u8 = 4;
+    pub const PUBLISH: u8 = 5;
+    pub const RECEIVE: u8 = 6;
+    pub const TRY_SEND: u8 = 7;
+    pub const SENDERS: u8 = 8;
+    pub const CLOSE: u8 = 9;
+    pub const TRY_RECEIVE: u8 = 10;
+    pub const ARC_UNWRAP: u8 = 13;
+    pub const CHECK_CANCEL: u8 = 16;
+    pub const CAPACITY: u8 = 17;
+    pub const LATEST_PUBLISH: u8 = 18;
+    pub const LATEST_READ: u8 = 19;
+}
+use event::*;
+/// One CONC-10 event: its kind, the task that performed it, its object and value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Event {
+    pub kind: u8,
+    pub task: u64,
+    pub object: u64,
+    pub value: u64,
+}
+/// Polls a task may perform before a peer that is ready gets a turn (CONC-10's
+/// fairness; native `POLLS_PER_TURN`).
+const POLLS_PER_TURN: u32 = 64;
+/// Each task thread's stack, reserved and committed as it is used.
+const TASK_STACK: usize = 128 << 20;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum State {
+    Ready,
+    Running,
+    Blocked,
+    /// Parked in a provider operation's W (native `State::Provider`): only its
+    /// timer or a cancellation that takes effect wakes it, never `wake`.
+    Provider,
+    Ended,
+}
+/// What a blocked task waits for, by the object's id.
+#[derive(Clone, Copy, Debug)]
+enum Wait {
+    Join(u64),
+    Receive(u64),
+    Send(u64),
+    /// A sleep until this clock value.
+    Sleep(u64),
+}
+/// A task's scheduler record.
+struct Rec {
+    id: u64,
+    state: State,
+    /// A cancellation request not yet observed (CONC-7).
+    cancel: bool,
+    polls: u32,
+    waits: Option<Wait>,
+    /// While parked in a provider operation: whether a cancellation request may
+    /// take effect there (no shield, not finalizing; native `cancels_operation`).
+    cancellable: bool,
+    /// The operation it parked in failed Cancelled in W.
+    cancelled: bool,
+    /// A child not yet started: its task state, function and arguments.
+    start: Option<(Task, FuncId, Vec<u64>)>,
+}
+#[derive(Default)]
+struct Sched {
+    /// Index 0 is the root; child `i` (handle `TASK_BASE + i`) is `i + 1`.
+    tasks: Vec<Rec>,
+    ready: VecDeque<usize>,
+    /// Tasks that used up their polls, run only when `ready` is empty.
+    deferred: VecDeque<usize>,
+    /// Sleeping tasks by deadline, ties in arrival order (native `insert_timer`).
+    timers: Vec<(u64, usize)>,
+    /// Cancellation requests against tasks parked in a provider operation, taken
+    /// at the next turn (native `cancels`).
+    cancels: Vec<usize>,
+    /// The running task.
+    current: usize,
+    /// The next task or channel id: the root is 0 (native `Scheduler::id`).
+    next: u64,
+    events: Vec<Event>,
+}
+impl Sched {
+    /// One turn's wakes before its pop (native `take_wakes`): cancellations of
+    /// provider-parked tasks, then every expired timer in deadline order.
+    fn take_wakes(&mut self, now: u64) {
+        for k in std::mem::take(&mut self.cancels) {
+            let r = &mut self.tasks[k];
+            if r.state == State::Provider && r.cancel && r.cancellable {
+                r.cancelled = true;
+                r.state = State::Ready;
+                self.timers.retain(|&(_, j)| j != k);
+                self.ready.push_back(k);
+            }
+        }
+        let expired = self.timers.partition_point(|&(d, _)| d <= now);
+        for (_, k) in self.timers.drain(..expired) {
+            self.tasks[k].state = State::Ready;
+            self.ready.push_back(k);
+        }
+    }
+}
+/// A task thread's ends of its channels to the driver.
+struct Link<'m> {
+    resume: mpsc::Receiver<Resume<'m>>,
+    reply: mpsc::Sender<Reply<'m>>,
+}
+enum Resume<'m> {
+    Run(Box<Machine<'m>>),
+    /// The run is over while this task waits: unwind its thread.
+    Teardown,
+}
+enum Reply<'m> {
+    Parked(Box<Machine<'m>>),
+    /// A task ended; the root's end carries its result and chain.
+    Ended(Box<Machine<'m>>, Option<(X<Vec<u64>>, Vec<Cause>)>),
+    Panicked(Box<dyn std::any::Any + Send>),
+}
+/// The unwind payload of a torn-down task thread.
+struct Teardown;
 
 fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
     if let FieldTy::Array(e, n) = ty {
@@ -409,7 +569,7 @@ fn run_world(
         world: World::default(),
         frozen: Vec::new(),
         loans: 0,
-        facts: roles::Facts::new(m),
+        facts: Arc::new(roles::Facts::new(m)),
         roles: vec![None; m.functions.len()],
         footprints: Vec::new(),
         role_checks: 0,
@@ -419,6 +579,11 @@ fn run_world(
             .map(|f| crate::source::inherits_site(&m.instances[f.instance.index()]))
             .collect(),
         scrambled: (nans == Nans::Scrambled).then_some(0),
+        sched: Sched {
+            next: 1,
+            ..Sched::default()
+        },
+        links: vec![None],
     };
     for s in &m.statics {
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
@@ -445,7 +610,7 @@ fn run_world(
         }
     }
     // The root's primary cell is admitted with the run, outside its limit.
-    let mut task = Task {
+    let task = Task {
         limits: vec![0],
         chain: Vec::new(),
         cells: Vec::new(),
@@ -456,12 +621,22 @@ fn run_world(
         })],
         reserved: Vec::new(),
         at: Vec::new(),
+        k: 0,
+        shield: 0,
     };
-    let outcome = match mach.call(&mut task, f, args) {
-        Ok(r) => Outcome::Returned(r),
-        Err(_) => Outcome::Failed(task.chain.iter().map(|c| c.kind.into()).collect()),
-    };
-    let sites = task.chain.iter().map(|c| c.site).collect();
+    mach.sched.tasks.push(Rec {
+        id: 0,
+        state: State::Ready,
+        cancel: false,
+        polls: POLLS_PER_TURN,
+        waits: None,
+        cancellable: false,
+        cancelled: false,
+        start: Some((task, f, args.to_vec())),
+    });
+    mach.sched.ready.push_back(0);
+    let (mut mach, outcome, chain) = drive(mach);
+    let sites = chain.iter().map(|c| c.site).collect();
     let checked = Checked {
         loans: mach.loans,
         roles: mach.role_checks,
@@ -475,8 +650,139 @@ fn run_world(
         stdout: mach.world.stdout,
         stderr: mach.world.stderr,
         sites,
+        events: std::mem::take(&mut mach.sched.events),
     };
     (report, checked)
+}
+
+/// Run the root and every task it spawns to the root's end, by the native default
+/// scheduler's turns: pop the head of the ready queue (the poll queue when it is
+/// empty) and run that task until it waits, polls past its turn, or ends.
+fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
+    std::thread::scope(|scope| {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let mut resumes: Vec<Option<mpsc::Sender<Resume<'_>>>> = Vec::new();
+        let mut baton = Box::new(mach);
+        let teardown = |resumes: &mut Vec<Option<mpsc::Sender<Resume<'_>>>>,
+                        baton: &Machine<'_>| {
+            for (k, r) in resumes.iter_mut().enumerate() {
+                if let Some(r) = r.take()
+                    && baton.sched.tasks[k].state != State::Ended
+                {
+                    let _ = r.send(Resume::Teardown);
+                }
+            }
+        };
+        loop {
+            let now = baton.world.clock;
+            let s = &mut baton.sched;
+            s.take_wakes(now);
+            if s.ready.is_empty() {
+                std::mem::swap(&mut s.ready, &mut s.deferred);
+            }
+            if s.ready.is_empty()
+                && let Some(&(deadline, _)) = s.timers.first()
+            {
+                // Idle until the first deadline (native `idle`): virtual time
+                // jumps there.
+                baton.world.clock = baton.world.clock.max(deadline);
+                continue;
+            }
+            let Some(k) = s.ready.pop_front() else {
+                let waiting = s
+                    .tasks
+                    .iter()
+                    .filter(|r| r.state == State::Blocked)
+                    .map(|r| match r.waits.expect("a blocked task's wait") {
+                        Wait::Join(c) => format!("task {} joins task {c}", r.id),
+                        Wait::Receive(c) => format!("task {} receives on channel {c}", r.id),
+                        Wait::Send(c) => format!("task {} sends on channel {c}", r.id),
+                        Wait::Sleep(d) => format!("task {} sleeps until {d}", r.id),
+                    })
+                    .collect();
+                teardown(&mut resumes, &baton);
+                return (baton, Outcome::Stuck(waiting), Vec::new());
+            };
+            s.current = k;
+            s.tasks[k].state = State::Running;
+            if resumes.len() <= k {
+                resumes.resize_with(k + 1, || None);
+            }
+            if let Some((task, f, args)) = s.tasks[k].start.take() {
+                let (tx, rx) = mpsc::channel();
+                resumes[k] = Some(tx);
+                let link = Link {
+                    resume: rx,
+                    reply: reply_tx.clone(),
+                };
+                std::thread::Builder::new()
+                    .stack_size(TASK_STACK)
+                    .spawn_scoped(scope, move || task_thread(task, f, args, link))
+                    .expect("a task thread");
+            }
+            let resume = resumes[k].as_ref().expect("a started task");
+            resume.send(Resume::Run(baton)).expect("the task thread");
+            match reply_rx.recv().expect("a task's reply") {
+                Reply::Parked(b) => baton = b,
+                Reply::Ended(b, root) => {
+                    baton = b;
+                    resumes[k] = None;
+                    if let Some((result, chain)) = root {
+                        teardown(&mut resumes, &baton);
+                        let outcome = match result {
+                            Ok(r) => Outcome::Returned(r),
+                            Err(_) => {
+                                Outcome::Failed(chain.iter().map(|c| c.kind.into()).collect())
+                            }
+                        };
+                        return (baton, outcome, chain);
+                    }
+                }
+                Reply::Panicked(payload) => {
+                    // The panicking task's machine is gone with its stack; every
+                    // other task is parked and is unwound before the panic goes on.
+                    for r in resumes.iter_mut().enumerate().filter(|(j, _)| *j != k) {
+                        if let Some(r) = r.1.take() {
+                            let _ = r.send(Resume::Teardown);
+                        }
+                    }
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        }
+    })
+}
+
+/// A task thread: wait for the baton, run the task's body, hand the baton back.
+/// The thread's link sits in the baton while the task runs (`Machine::park`).
+fn task_thread<'m>(mut t: Task, f: FuncId, args: Vec<u64>, link: Link<'m>) {
+    let Ok(Resume::Run(mut mach)) = link.resume.recv() else {
+        return;
+    };
+    let (k, reply) = (t.k, link.reply.clone());
+    mach.links[k] = Some(link);
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = if k == 0 {
+            let r = mach.call(&mut t, f, &args);
+            // The root ends as every task does (native `start`): END, failed or not.
+            mach.event(END, 0, u64::from(r.is_err()));
+            Some((r, std::mem::take(&mut t.chain)))
+        } else {
+            mach.child_main(&mut t, f, &args);
+            None
+        };
+        mach.links[k] = None;
+        root
+    }));
+    match run {
+        Ok(root) => {
+            let _ = reply.send(Reply::Ended(mach, root));
+        }
+        Err(payload) if payload.is::<Teardown>() => {}
+        Err(payload) => {
+            let _ = reply.send(Reply::Panicked(payload));
+        }
+    }
 }
 
 fn ptr(blk: usize, off: u64) -> u64 {
@@ -497,6 +803,181 @@ fn cause(r: RaiseCause) -> &'static str {
     }
 }
 
+impl<'m> Machine<'m> {
+    /// What a parked task's slot holds while its baton runs elsewhere.
+    fn shell(&self) -> Machine<'m> {
+        Machine {
+            m: self.m,
+            recipes: Vec::new(),
+            mem: Vec::new(),
+            limits: Vec::new(),
+            peak_reserved: 0,
+            regions: Vec::new(),
+            children: Vec::new(),
+            chans: Vec::new(),
+            latests: Vec::new(),
+            causes: HashMap::new(),
+            arrays: Vec::new(),
+            trace: Vec::new(),
+            dests: 0,
+            admissions: 0,
+            injection: None,
+            world: World::default(),
+            frozen: Vec::new(),
+            loans: 0,
+            facts: self.facts.clone(),
+            roles: Vec::new(),
+            footprints: Vec::new(),
+            role_checks: 0,
+            inherits: Vec::new(),
+            scrambled: None,
+            sched: Sched::default(),
+            links: Vec::new(),
+        }
+    }
+
+    /// Switch to the scheduler. With a wait, the running task blocks until a wake
+    /// readies it (native `checkpoint(true)`); without one it goes to the poll
+    /// queue's tail (native `poll_turn`). It continues when the driver hands the
+    /// baton back; its frozen places and footprints stay with it meanwhile.
+    fn park(&mut self, wait: Option<Wait>) {
+        let k = self.sched.current;
+        match wait {
+            Some(Wait::Sleep(deadline)) => {
+                self.sched.tasks[k].state = State::Provider;
+                let s = &mut self.sched;
+                let at = s.timers.partition_point(|&(d, _)| d <= deadline);
+                s.timers.insert(at, (deadline, k));
+            }
+            Some(w) => {
+                let r = &mut self.sched.tasks[k];
+                r.state = State::Blocked;
+                r.waits = Some(w);
+            }
+            None => {
+                self.sched.tasks[k].state = State::Ready;
+                self.sched.deferred.push_back(k);
+            }
+        }
+        let link = self.links[k].take().expect("the running task's link");
+        let frozen = std::mem::take(&mut self.frozen);
+        let footprints = std::mem::take(&mut self.footprints);
+        let shell = self.shell();
+        let baton = std::mem::replace(self, shell);
+        link.reply
+            .send(Reply::Parked(Box::new(baton)))
+            .expect("the driver");
+        match link.resume.recv().expect("the driver") {
+            Resume::Run(baton) => *self = *baton,
+            Resume::Teardown => std::panic::resume_unwind(Box::new(Teardown)),
+        }
+        self.frozen = frozen;
+        self.footprints = footprints;
+        self.links[k] = Some(link);
+        self.sched.tasks[k].waits = None;
+    }
+}
+
+impl Machine<'_> {
+    /// Ready every blocked task, newest spawned first (native `wake`); each
+    /// checks again what it waits for when it runs.
+    fn wake(&mut self) {
+        for k in (0..self.sched.tasks.len()).rev() {
+            if self.sched.tasks[k].state == State::Blocked {
+                self.sched.tasks[k].state = State::Ready;
+                self.sched.ready.push_back(k);
+            }
+        }
+    }
+    /// Record an event of the running task (CONC-10). A poll uses one of the
+    /// task's polls; the last one gives a ready peer the turn (native `poll_event`).
+    fn event(&mut self, kind: u8, object: u64, value: u64) {
+        let k = self.sched.current;
+        let task = self.sched.tasks[k].id;
+        self.sched.events.push(Event {
+            kind,
+            task,
+            object,
+            value,
+        });
+        let poll = matches!(
+            (kind, value),
+            (TRY_SEND | TRY_RECEIVE, 1) | (ARC_UNWRAP | CHECK_CANCEL, 0)
+        ) || kind == CAPACITY;
+        if poll {
+            let r = &mut self.sched.tasks[k];
+            r.polls -= 1;
+            if r.polls == 0 {
+                r.polls = POLLS_PER_TURN;
+                if !self.sched.ready.is_empty() || !self.sched.deferred.is_empty() {
+                    self.park(None);
+                }
+            }
+        }
+    }
+    /// A cancellation point (CONC-7): a pending request takes effect unless the
+    /// task is in a finalizer or a shielded cleanup, and observing it fails the
+    /// operation with `Cancelled` (native `cancel_takes_effect`).
+    fn check_cancel(&mut self, t: &Task) -> X<()> {
+        let r = &mut self.sched.tasks[t.k];
+        if r.cancel && t.shield == 0 && t.obligations.len() == 1 {
+            r.cancel = false;
+            self.event(CANCELLED, 0, 0);
+            return Err(Stop::Cause("Cancelled"));
+        }
+        Ok(())
+    }
+    /// Request a child's cancellation (CONC-7) and wake every waiter, as native
+    /// `hirsel_core_cancel` does.
+    fn cancel(&mut self, i: usize) {
+        let r = &mut self.sched.tasks[i + 1];
+        r.cancel = true;
+        let id = r.id;
+        if r.state == State::Provider {
+            self.sched.cancels.push(i + 1);
+        }
+        self.event(CANCEL, id, 0);
+        self.wake();
+    }
+    /// A child's body: run it, keep its result or chain for the join, then END
+    /// and wake every waiter (native `start`).
+    fn child_main(&mut self, t: &mut Task, f: FuncId, args: &[u64]) {
+        let i = t.k - 1;
+        let returned = self.call(t, f, args);
+        let (rb, r) = (self.children[i].result, self.children[i].r);
+        if let (Ok(values), Carried::Value(ty)) = (&returned, self.m.types[r.index()].carried) {
+            self.store(rb, bytes_of(ty), values[0]);
+        }
+        self.end_limit(t.limits[0]);
+        let status = match t.chain.first().map(|c| c.kind) {
+            _ if returned.is_ok() => 0,
+            Some("Cancelled") => 2,
+            _ => 1,
+        };
+        let c = &mut self.children[i];
+        c.status = status;
+        c.cells = std::mem::take(&mut t.cells);
+        c.chain = std::mem::take(&mut t.chain);
+        c.primary = t.obligations[0];
+        let id = self.sched.tasks[t.k].id;
+        self.event(END, id, u64::from(status != 0));
+        self.sched.tasks[t.k].state = State::Ended;
+        self.wake();
+    }
+    /// The child task a handle names.
+    fn child(&self, handle: u64) -> usize {
+        handle.checked_sub(TASK_BASE).unwrap_or_else(|| {
+            panic!(
+                "a task handle that was never spawned ({handle:#x}): a refused \
+                 spawn's null handle reached the operation"
+            )
+        }) as usize
+    }
+    fn chan_id(&self, i: usize) -> u64 {
+        self.chans[i].id
+    }
+}
+
 impl Machine<'_> {
     // ---- memory
     /// Rc and Arc counts differ in atomicity only, which one task cannot observe;
@@ -511,16 +992,31 @@ impl Machine<'_> {
         (bytes, data, len, cap)
     }
     /// A provider row against [`World`]: an outcome `value, error, code, written`.
-    fn host(&mut self, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+    fn host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
         const NOT_FOUND: u64 = 1;
         const DENIED: u64 = 2;
         const EXISTS: u64 = 3;
         let ok = |value: u64, written: u64| vec![value, 0, 0, written];
         let error = |e: u64| vec![0, e, 0, 0];
         let file = |h: u64| (h - FILE_BASE) as usize;
+        // Every operation but a clock read is a cancellation point at entry
+        // (native provider `drive`, `cancellation_point`).
+        if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+            self.check_cancel(t)?;
+        }
         Ok(match op {
             HostOp::SleepUntil => {
-                self.world.clock = self.world.clock.max(a[1]);
+                // Ready if the deadline has passed, else park in W until its
+                // timer (os.rs `sleep_wait`); a cancellation that takes effect
+                // there fails the sleep Cancelled.
+                let deadline = a[1];
+                if deadline > self.world.clock {
+                    self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+                    self.park(Some(Wait::Sleep(deadline)));
+                    if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                        self.check_cancel(t)?;
+                    }
+                }
                 ok(0, 0)
             }
             HostOp::WallMs | HostOp::MonoNs => {
@@ -528,7 +1024,7 @@ impl Machine<'_> {
                 // hirsel-core-rt os::monotonic_ns): a read after a sleep to the
                 // maximum deadline stays there instead of wrapping (CONC-7).
                 self.world.clock = self.world.clock.saturating_add(1);
-                vec![self.world.clock - 1]
+                vec![self.world.clock]
             }
             HostOp::Stdout | HostOp::Stderr => {
                 let (bytes, ..) = self.carrier(a[1]);
@@ -890,6 +1386,7 @@ impl Machine<'_> {
             self.peak_reserved = self.peak_reserved.max(self.limits[0].used);
             Ok(())
         } else {
+            self.event(CAPACITY, n, room);
             Err(room)
         }
     }
@@ -907,7 +1404,9 @@ impl Machine<'_> {
     fn admit_charge(&mut self, l: usize, n: u64, overflowed: bool) -> Result<(), u64> {
         if overflowed {
             self.admissions += 1;
-            return Err(self.limits[l].cap - self.limits[l].used);
+            let room = self.limits[l].cap - self.limits[l].used;
+            self.event(CAPACITY, u64::MAX, room);
+            return Err(room);
         }
         self.admit(l, n)
     }
@@ -1100,8 +1599,16 @@ impl Machine<'_> {
                 failed
             }
             FieldTy::Handle(Handle::Task) => {
-                // CONC-8: the child has already ended; drop its result unjoined.
-                let i = (self.load(at, 8) - TASK_BASE) as usize;
+                // CONC-8: cancel the child and wait for its end with cancellation
+                // shielded, then clean its result or chain (native `abandon`).
+                let i = self.child(self.load(at, 8));
+                let id = self.sched.tasks[i + 1].id;
+                t.shield += 1;
+                self.cancel(i);
+                while self.sched.tasks[i + 1].state != State::Ended {
+                    self.park(Some(Wait::Join(id)));
+                }
+                self.event(JOIN, id, 2);
                 let (status, result, r) = {
                     let c = &self.children[i];
                     (c.status, c.result, c.r)
@@ -1116,6 +1623,7 @@ impl Machine<'_> {
                 for (l, n) in self.settle_child(i) {
                     self.refund(l, n);
                 }
+                t.shield -= 1;
                 failed
             }
             FieldTy::Seq(element) => {
@@ -1210,12 +1718,20 @@ impl Machine<'_> {
             FieldTy::Handle(Handle::Sender) => {
                 let i = ((self.load(at, 8) - CHAN_BASE) / 2) as usize;
                 self.chans[i].senders -= 1;
+                let (id, senders) = (self.chans[i].id, self.chans[i].senders);
+                self.event(SENDERS, id, senders);
+                if senders == 0 {
+                    self.event(CLOSE, id, 0);
+                    self.wake();
+                }
                 self.chan_freed(i);
                 false
             }
             FieldTy::Handle(Handle::Latest) => {
                 let i = (self.load(at, 8) - LATEST_BASE) as usize;
                 self.latests[i].handles -= 1;
+                let (id, handles) = (self.latests[i].id, self.latests[i].handles);
+                self.event(SENDERS, id, handles);
                 if self.latests[i].handles != 0 {
                     return false;
                 }
@@ -1232,6 +1748,9 @@ impl Machine<'_> {
             FieldTy::Handle(Handle::Receiver) => {
                 let i = ((self.load(at, 8) - CHAN_BASE) / 2) as usize;
                 self.chans[i].receiver = false;
+                t.shield += 1;
+                self.event(CLOSE, self.chans[i].id, 1);
+                self.wake();
                 let mut failed = false;
                 // CONC-9: last published first; a failure appends and the rest go on.
                 while let Some(bytes) = self.chans[i].queue.pop_back() {
@@ -1240,6 +1759,7 @@ impl Machine<'_> {
                     failed |= self.drop_value(t, tmp, self.chans[i].item);
                 }
                 self.chan_freed(i);
+                t.shield -= 1;
                 failed
             }
             other => panic!("cleanup of {other:?} is not modelled"),
@@ -1357,6 +1877,8 @@ impl Machine<'_> {
                 obligations: Vec::new(),
                 reserved: Vec::new(),
                 at: Vec::new(),
+                k: 0,
+                shield: 0,
             };
             assert!(
                 !self.drop_value(&mut scratch, node + 8, ty),
@@ -1365,6 +1887,22 @@ impl Machine<'_> {
             let charge = charge::counted(self.recipes[ty.index()].logical_size.expect("fixed"));
             self.free_as(node, charge, None, "a counted node");
         }
+    }
+    /// Put an item on channel `i` unless it is closed (2) or full (1): native
+    /// `publish`, which wakes every waiter on success.
+    fn publish(&mut self, i: usize, value: u64, item: TypeId) -> u64 {
+        if !self.chans[i].receiver {
+            return 2;
+        }
+        if self.chans[i].queue.len() as u64 == self.chans[i].cap {
+            return 1;
+        }
+        let n = self.held(TypeRef(item.0)) as usize;
+        let bytes = self.get(value, n).to_vec();
+        self.chans[i].queue.push_back(bytes);
+        self.event(PUBLISH, self.chan_id(i), 0);
+        self.wake();
+        0
     }
     fn chan_freed(&mut self, i: usize) {
         let c = &self.chans[i];
@@ -1403,6 +1941,8 @@ impl Machine<'_> {
                     })],
                     reserved: Vec::new(),
                     at: Vec::new(),
+                    k: 0,
+                    shield: 0,
                 };
                 let f = FuncId((a[2] - FN_BASE) as u32);
                 let xc = self.m.types[x.index()].carried;
@@ -1417,47 +1957,55 @@ impl Machine<'_> {
                     Carried::Value(t) => args.push(self.load(xb, bytes_of(t))),
                     Carried::Nothing => {}
                 }
-                let returned = self.call(&mut child, f, &args);
-                if let (Ok(values), Carried::Value(t)) = (&returned, rc) {
-                    self.store(rb, bytes_of(t), values[0]);
-                }
-                let ok = returned.is_ok();
-                self.end_limit(lim);
-                let status = match child.chain.first().map(|c| c.kind) {
-                    _ if ok => 0,
-                    Some("Cancelled") => 2,
-                    _ => 1,
-                };
-                let (cells, chain) = (child.cells, child.chain);
-                let primary = child.obligations[0];
+                let i = self.children.len();
                 self.children.push(Child {
-                    status,
+                    status: 0,
                     result: rb,
                     r,
                     charge,
                     n,
                     limit: cur,
                     joined: false,
-                    cells,
-                    chain,
-                    primary,
+                    cells: Vec::new(),
+                    chain: Vec::new(),
+                    primary: None,
                 });
-                vec![TASK_BASE + self.children.len() as u64 - 1, 0]
+                // CONC-3: the child is readied at the tail and the parent goes on.
+                child.k = i + 1;
+                let id = self.next_id();
+                self.sched.tasks.push(Rec {
+                    id,
+                    state: State::Ready,
+                    cancel: false,
+                    polls: POLLS_PER_TURN,
+                    waits: None,
+                    cancellable: false,
+                    cancelled: false,
+                    start: Some((child, f, args)),
+                });
+                self.links.push(None);
+                self.sched.ready.push_back(i + 1);
+                self.event(SPAWN, id, n);
+                vec![TASK_BASE + i as u64, 0]
             }
             RtOp::Join { r } => {
-                let i = a[0].checked_sub(TASK_BASE).unwrap_or_else(|| {
-                    panic!(
-                        "join of a task handle that was never spawned ({:#x}): a refused \
-                         spawn's null handle reached Join",
-                        a[0]
-                    )
-                }) as usize;
+                let i = self.child(a[0]);
+                let id = self.sched.tasks[i + 1].id;
+                // CONC-6: a cancellation point at entry and at each wait.
+                loop {
+                    self.check_cancel(t)?;
+                    if self.sched.tasks[i + 1].state == State::Ended {
+                        break;
+                    }
+                    self.park(Some(Wait::Join(id)));
+                }
                 let status = self.children[i].status;
                 if status == 0 {
                     let n = self.held(TypeRef(r.0)) as usize;
                     let bytes = self.get(self.children[i].result, n).to_vec();
                     self.put(a[1], &bytes);
                 }
+                self.event(JOIN, id, u64::from(status != 0));
                 let cells = self.settle_child(i);
                 if status == 0 {
                     vec![0, 0]
@@ -1468,7 +2016,16 @@ impl Machine<'_> {
             }
             RtOp::CauseNext => vec![self.load(a[0] + CELL_NEXT, 8)],
             RtOp::CauseValue => vec![a[0]],
-            RtOp::Cancel | RtOp::CheckCancel => vec![], // every child has already ended
+            RtOp::Cancel => {
+                let i = self.child(a[0]);
+                self.cancel(i);
+                vec![]
+            }
+            RtOp::CheckCancel => {
+                self.check_cancel(t)?;
+                self.event(CHECK_CANCEL, 0, 0);
+                vec![]
+            }
             // Isolation (crate docs): a reservation on entry, set aside with the
             // active chain; refunded when the body returns; on a caught failure the
             // chain becomes a `Causes`, and the reserved cell takes the place of the
@@ -1530,7 +2087,7 @@ impl Machine<'_> {
             }
             RtOp::ArgsLen => vec![self.world.args.len() as u64],
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
-            RtOp::Host(op) => self.host(op, a)?,
+            RtOp::Host(op) => self.host(t, op, a)?,
             RtOp::CompareBytes => {
                 let range = |p: u64, n: u64| match n {
                     0 => Vec::new(),
@@ -1555,7 +2112,10 @@ impl Machine<'_> {
                 match self.admit(cur, charge) {
                     Err(room) => vec![0, 0, room],
                     Ok(()) => {
+                        let id = self.next_id();
+                        self.event(SENDERS, id, 1);
                         self.chans.push(Chan {
+                            id,
                             item,
                             cap: a[0],
                             queue: VecDeque::new(),
@@ -1570,42 +2130,53 @@ impl Machine<'_> {
                 }
             }
             RtOp::ChannelSender => {
-                self.chans[((a[0] - CHAN_BASE) / 2) as usize].senders += 1;
+                let c = &mut self.chans[((a[0] - CHAN_BASE) / 2) as usize];
+                c.senders += 1;
+                let (id, senders) = (c.id, c.senders);
+                self.event(SENDERS, id, senders);
                 vec![a[0]]
             }
-            RtOp::Send { item } | RtOp::TrySend { item } => {
+            RtOp::Send { item } => {
                 let i = ((a[0] - CHAN_BASE) / 2) as usize;
-                let n = self.held(TypeRef(item.0)) as usize;
-                let status = if !self.chans[i].receiver {
-                    2
-                } else if self.chans[i].queue.len() as u64 == self.chans[i].cap {
-                    assert!(matches!(op, RtOp::TrySend { .. }), "send would wait");
-                    1
-                } else {
-                    let bytes = self.get(a[1], n).to_vec();
-                    self.chans[i].queue.push_back(bytes);
-                    0
-                };
-                match op {
-                    RtOp::Send { .. } => vec![u64::from(status == 0)],
-                    _ => vec![status],
+                // CONC-5: a cancellation point at entry and at each wait.
+                loop {
+                    self.check_cancel(t)?;
+                    match self.publish(i, a[1], item) {
+                        0 => break vec![1],
+                        2 => break vec![0],
+                        _ => self.park(Some(Wait::Send(self.chan_id(i)))),
+                    }
                 }
+            }
+            RtOp::TrySend { item } => {
+                let i = ((a[0] - CHAN_BASE) / 2) as usize;
+                let status = self.publish(i, a[1], item);
+                self.event(TRY_SEND, self.chan_id(i), status);
+                vec![status]
             }
             RtOp::Receive { .. } => {
                 let i = ((a[0] - CHAN_BASE) / 2) as usize;
-                match self.chans[i].queue.pop_front() {
-                    Some(bytes) => {
+                loop {
+                    self.check_cancel(t)?;
+                    if let Some(bytes) = self.chans[i].queue.pop_front() {
                         self.put(a[1], &bytes);
-                        vec![1]
+                        self.event(RECEIVE, self.chan_id(i), 0);
+                        self.wake();
+                        break vec![1];
                     }
-                    None if self.chans[i].senders == 0 => vec![0],
-                    None => panic!("receive would wait"),
+                    if self.chans[i].senders == 0 {
+                        break vec![0];
+                    }
+                    self.park(Some(Wait::Receive(self.chan_id(i))));
                 }
             }
             RtOp::LatestNew { item } => match self.admit(cur, charge::LATEST_ROOT) {
                 Err(room) => vec![0, room],
                 Ok(()) => {
+                    let id = self.next_id();
+                    self.event(SENDERS, id, 1);
                     self.latests.push(Latest {
+                        id,
                         item: TypeRef(item.0),
                         root: a[0],
                         handles: 1,
@@ -1615,24 +2186,37 @@ impl Machine<'_> {
                 }
             },
             RtOp::LatestHandle => {
-                self.latests[(a[0] - LATEST_BASE) as usize].handles += 1;
+                let l = &mut self.latests[(a[0] - LATEST_BASE) as usize];
+                l.handles += 1;
+                let (id, handles) = (l.id, l.handles);
+                self.event(SENDERS, id, handles);
                 vec![a[0]]
             }
             RtOp::LatestPublish => {
-                let root = &mut self.latests[(a[0] - LATEST_BASE) as usize].root;
-                vec![std::mem::replace(root, a[1])]
+                let l = &mut self.latests[(a[0] - LATEST_BASE) as usize];
+                let (id, old) = (l.id, std::mem::replace(&mut l.root, a[1]));
+                self.event(LATEST_PUBLISH, id, 0);
+                vec![old]
             }
-            RtOp::LatestRead => vec![self.latests[(a[0] - LATEST_BASE) as usize].root],
+            RtOp::LatestRead => {
+                let l = &self.latests[(a[0] - LATEST_BASE) as usize];
+                let (id, root) = (l.id, l.root);
+                self.event(LATEST_READ, id, 0);
+                vec![root]
+            }
             RtOp::TryReceive { .. } => {
                 let i = ((a[0] - CHAN_BASE) / 2) as usize;
-                match self.chans[i].queue.pop_front() {
+                let status = match self.chans[i].queue.pop_front() {
                     Some(bytes) => {
                         self.put(a[1], &bytes);
-                        vec![0]
+                        self.event(RECEIVE, self.chan_id(i), 0);
+                        0
                     }
-                    None if self.chans[i].senders == 0 => vec![2],
-                    None => vec![1],
-                }
+                    None if self.chans[i].senders == 0 => 2,
+                    None => 1,
+                };
+                self.event(TRY_RECEIVE, self.chan_id(i), status);
+                vec![status]
             }
         })
     }
@@ -2525,7 +3109,11 @@ impl Machine<'_> {
             }
             Inst::TryUnwrap { result, node, kind } => {
                 self.kind(vals[node.index()], kind);
-                vals[result.index()] = u64::from(self.load(vals[node.index()], 8) == 1);
+                let unique = self.load(vals[node.index()], 8) == 1;
+                vals[result.index()] = u64::from(unique);
+                if kind == Counted::Arc {
+                    self.event(ARC_UNWRAP, 0, u64::from(unique));
+                }
             }
         }
         Ok(())

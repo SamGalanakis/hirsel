@@ -1,0 +1,25 @@
+// The parent polls with try_receive while a child computes and then sends.
+type In:send { tx: Sender[u64], out: Stdout }
+fn work(take s: In) waits {
+    let In(tx: tx, out: out) = take s
+    let mut i: u64 = 0
+    let mut acc: u64 = 0
+    while i < 1000u64 { acc = acc + i; i += 1 }
+    result.unwrap(stdout.write(out, "w"))
+    result.unwrap(channel.send(tx, acc))
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, In(tx: take tx, out: out), work))
+    let mut polls: u64 = 0
+    let got = loop {
+        match channel.try_receive(rx) {
+            Ok(v) => break v,
+            Error(Empty) => { polls += 1 },
+            Error(Closed) => break 0u64
+        }
+    }
+    if polls == 64u64 { result.unwrap(stdout.write(out, "6")) } else if polls == 0u64 { result.unwrap(stdout.write(out, "0")) } else { result.unwrap(stdout.write(out, "n")) }
+    result.unwrap(task.join(take h))
+    if got == 499500u64 { Ok(()) } else { Error(Exit(status: 4u8)) }
+}

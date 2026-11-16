@@ -2,8 +2,8 @@
 """Gate the contract laws on native engines. By default every law a native engine
 can run, which is every law not marked `// test-backend: evaluator` (those stay
 with the evaluator gate). With --capabilities-only, just the laws whose entry
-takes a host capability (Dir, Stdout, Stderr, Clock), which the evaluator walker
-reports native-only, and the laws marked `// engine-fact:`, which an engine's
+takes a host capability (Dir, Stdout, Stderr, Clock, Tasks; the evaluator runs the
+Clock and Tasks ones too, the rest it reports native-only), and the laws marked `// engine-fact:`, which an engine's
 generated code relies on: land runs that set, and the sweep runs them all. The sets
 are the runner's own classification, so a new law joins without an edit. Dir
 laws need the host's openat2, so these targets execute on the invoking host."""

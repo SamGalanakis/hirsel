@@ -1,0 +1,27 @@
+// Three tasks hand a token round: root -> x -> y -> root, twice.
+type In:send { rx: Receiver[u64], tx: Sender[u64], out: Stdout, tag: u64 }
+fn hop(take s: In) waits {
+    let In(rx: rx, tx: tx, out: out, tag: tag) = take s
+    while let Ok(v) = channel.receive(rx) {
+        if tag == 1u64 { result.unwrap(stdout.write(out, "x")) } else { result.unwrap(stdout.write(out, "y")) }
+        result.unwrap(channel.send(tx, v + 1u64))
+    }
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (t0, r0): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (t1, r1): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (t2, r2): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let hx = result.unwrap(task.spawn(tasks, bytes 4096, In(rx: take r0, tx: take t1, out: out, tag: 1u64), hop))
+    let hy = result.unwrap(task.spawn(tasks, bytes 4096, In(rx: take r1, tx: take t2, out: out, tag: 2u64), hop))
+    result.unwrap(stdout.write(out, "r"))
+    result.unwrap(channel.send(t0, 0u64))
+    let a = result.unwrap(channel.receive(r2))
+    result.unwrap(stdout.write(out, "r"))
+    result.unwrap(channel.send(t0, a))
+    let b = result.unwrap(channel.receive(r2))
+    result.unwrap(stdout.write(out, "R"))
+    { let _ = take t0 }
+    result.unwrap(task.join(take hx))
+    result.unwrap(task.join(take hy))
+    if b == 4u64 { Ok(()) } else { Error(Exit(status: 3u8)) }
+}

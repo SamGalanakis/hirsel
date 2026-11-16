@@ -1,0 +1,24 @@
+// Cancel a child parked in receive: its join is Cancelled.
+type In:send { rx: Receiver[u64], out: Stdout }
+fn waiter(take s: In) waits {
+    let In(rx: rx, out: out) = take s
+    result.unwrap(stdout.write(out, "w"))
+    let _ = channel.receive(rx)
+    result.unwrap(stdout.write(out, "X"))
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (go, go_rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, In(rx: take rx, out: out), waiter))
+    let k = result.unwrap(task.spawn(tasks, bytes 4096, take go, fn(take g: Sender[u64]) waits { result.unwrap(channel.send(g, 1u64)) }))
+    let _ = result.unwrap(channel.receive(go_rx))
+    result.unwrap(stdout.write(out, "P"))
+    task.cancel(mut h)
+    match task.join(take h) {
+        Error(Cancelled(take causes)) => { let _ = take causes; result.unwrap(stdout.write(out, "C")) },
+        _ => result.unwrap(stdout.write(out, "?"))
+    }
+    result.unwrap(task.join(take k))
+    { let _ = take tx }
+    Ok(())
+}

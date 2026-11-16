@@ -399,6 +399,12 @@ impl Scheduler {
         // operation frame lives on the parked task's stack until it delivers.
         unsafe {
             debug_assert!(CURRENT.get().is_null());
+            // A request that may not take effect now changes nothing: no wait,
+            // no abort, no issue skipped. It stays pending for the task's next
+            // cancellation point (CONC-7, FAIL-11, CONC-8).
+            if wake == Wake::Cancel && !cancels_operation(task) {
+                return false;
+            }
             let op = (*task).operation;
             let p = (*op).provider;
             let (request, token) = ((*op).request, (*op).token);
@@ -409,9 +415,6 @@ impl Scheduler {
                 // the operation parks in I.
                 Phase::Runnable => false,
                 Phase::Entry | Phase::Waiting => {
-                    if wake == Wake::Cancel && !cancellable(task) {
-                        return false;
-                    }
                     let w = match (*op).entered.take() {
                         Some(w) => w,
                         None => (p.wait)(p.state, request, token),
@@ -456,10 +459,8 @@ impl Scheduler {
                             self.stepped(task, step);
                         }
                         Wake::Cancel => {
-                            if cancellable(task) {
-                                let outcome = (p.abort)(p.state, request, token, ABORT_CANCEL);
-                                self.runnable(task, Next::Deliver(outcome));
-                            }
+                            let outcome = (p.abort)(p.state, request, token, ABORT_CANCEL);
+                            self.runnable(task, Next::Deliver(outcome));
                         }
                         Wake::Timer => {
                             let outcome = (p.abort)(p.state, request, token, ABORT_DEADLINE);
@@ -497,7 +498,7 @@ impl Scheduler {
         // SAFETY: as wake_operation.
         unsafe {
             let op = (*task).operation;
-            if cancel_pending((*task).context) {
+            if cancels_operation(task) {
                 self.wake_operation(task, Wake::Cancel);
                 if (*op).phase == Phase::Runnable {
                     return;
@@ -555,25 +556,29 @@ enum Wake {
     Timer,
 }
 use crate::provider::{
-    ABORT_CANCEL, ABORT_DEADLINE, MONO_NS, STEP_DONE, STEP_PENDING, Step, WAIT_PARK, WAIT_READY,
-    WAIT_UNTIL, WALL_MS,
+    ABORT_CANCEL, ABORT_DEADLINE, STEP_DONE, STEP_PENDING, Step, WAIT_PARK, WAIT_READY, WAIT_UNTIL,
 };
-/// wall_ms and mono_ns are not cancellation points (CONC-7; REPLAY-SPEC section 3, C).
-unsafe fn cancellable(task: *mut Task) -> bool {
-    // SAFETY: the parked operation's request is pinned by its driver frame.
+/// Whether a cancellation request reaches this parked operation now: the one
+/// decision `take_wakes` (W and I) and `settle` ask, and `check_cancel` (the
+/// entry and every other cancellation point) asks for the task.
+unsafe fn cancels_operation(task: *mut Task) -> bool {
+    // SAFETY: a parked task's context and its operation's request are pinned
+    // and not running.
     unsafe {
-        let operation = (*(*(*task).operation).request).operation;
-        operation != WALL_MS && operation != MONO_NS
+        crate::provider::cancellation_point((*(*(*task).operation).request).operation)
+            && cancel_takes_effect(&*(*task).context)
     }
 }
-/// A request the task would observe at a cancellation point now.
-unsafe fn cancel_pending(context: *mut Context) -> bool {
-    // SAFETY: a parked task's context is pinned and not running.
-    unsafe {
-        (*context).cancel_requested.load(Ordering::Acquire)
-            && (*context).finalizing == 0
-            && (*context).cancel_shield == 0
-    }
+/// Whether a cancellation request takes effect on this task now. A finalizer
+/// and a shielded region observe none (CONC-7, tasks.md:129; FAIL-11,
+/// failure.md:173; CONC-8, tasks.md:140): under either the request stays
+/// pending and changes nothing, and it takes effect at the first cancellation
+/// point after both end. A deadline is not cancellation and is not shielded.
+#[inline(always)]
+fn cancel_takes_effect(context: &Context) -> bool {
+    context.cancel_requested.load(Ordering::Acquire)
+        && context.finalizing == 0
+        && context.cancel_shield == 0
 }
 
 /// Readiness tokens from `hirsel_core_ready`, which may run on any thread.
@@ -1077,10 +1082,7 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
     // SAFETY: the operation pins its exclusive, aligned task context. Pending
     // cancellation is the common false condition; shield/grant checks are cold.
     let current = unsafe { NonNull::new_unchecked(context).as_ref() };
-    if current.cancel_requested.load(Ordering::Acquire)
-        && current.finalizing == 0
-        && current.cancel_shield == 0
-    {
+    if cancel_takes_effect(current) {
         // SAFETY: this task exclusively owns the observed request and primary.
         unsafe { observe_cancel(context, site) };
         1

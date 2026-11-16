@@ -358,6 +358,65 @@ fn stream_operations_llvm() {
     stream_operations(Backend::Llvm);
 }
 
+/// A cancellation made while a child's finalizer is parked in a provider
+/// operation interrupts nothing (FAIL-11, failure.md:173; CONC-7,
+/// tasks.md:129): the finalizer finishes, the join succeeds. Every native
+/// engine, LLVM optimized too.
+fn finalizer_cancel(backend: Backend, optimize: bool) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(include_str!("finalizer_cancel.hirsel"), dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let options = NativeOptions {
+        backend,
+        optimize,
+        debug_lines: false,
+        target: TARGET.into(),
+        runtime: root
+            .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
+        link: crate::native::Link::Driver(
+            PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+        ),
+        store: dir.path().join("native"),
+        output: dir.path().join("program"),
+        root_limit: 1_048_576,
+        instance_limit: 64,
+        directories: vec![],
+        grant_mask: ["Clock", "Stdout", "Tasks"]
+            .into_iter()
+            .fold(0, |mask, kind| mask | 1 << crate::native::grant_kind(kind).unwrap()),
+        logical_charge_report: None,
+    };
+    let built = product.build(&entry, &options).unwrap();
+    let output = Command::new(built.executable).output().unwrap();
+    assert_eq!(
+        (output.status.code(), output.stdout.as_slice()),
+        (Some(0), b"BDJ".as_slice()),
+        "{:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn finalizer_cancel_cranelift() {
+    finalizer_cancel(Backend::Cranelift, false);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn finalizer_cancel_llvm() {
+    finalizer_cancel(Backend::Llvm, false);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn finalizer_cancel_llvm_release() {
+    finalizer_cancel(Backend::Llvm, true);
+}
+
 fn host_operations(backend: Backend) {
     crate::openat2_required::require();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

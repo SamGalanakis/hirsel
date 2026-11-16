@@ -1,0 +1,23 @@
+// A finalizer is shielded (FAIL-11, CONC-7): the parent's cancellation, made
+// while the child's finalizer is parked in a sleep, interrupts nothing. The
+// finalizer writes B, sleeps, writes D; the join succeeds: BDJ.
+resource type Delayed { clock: Clock, out: Stdout }
+    drop(v) {
+        result.unwrap(stdout.write(v.out, "B"));
+        host.sleep_until(v.clock, host.mono_ns(v.clock) + 20000000u64);
+        result.unwrap(stdout.write(v.out, "D"))
+    }
+type Input: send { clock: Clock, out: Stdout }
+fn child(take x: Input) {
+    let v = take x;
+    let d = result.unwrap(Delayed(clock: v.clock, out: v.out));
+}
+pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, Input(clock: clock, out: out), child))
+    host.sleep_until(clock, host.mono_ns(clock) + 2000000u64)
+    task.cancel(mut h)
+    match task.join(take h) {
+        Ok(()) => { result.unwrap(stdout.write(out, "J")); Ok(()) },
+        _ => Error(Exit(status: 7))
+    }
+}

@@ -1172,3 +1172,280 @@ fn s0_direct_entry_wait_matches_the_scheduler_switch() {
         }
     }
 }
+
+// ---- shields: a finalizer or shielded region observes no cancellation ----
+
+/// How a shielded job is shielded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shield {
+    /// A shielded region (CONC-8, tasks.md:140).
+    Region,
+    /// A finalizer (FAIL-11, failure.md:173; CONC-7, tasks.md:129).
+    Finalizer,
+    /// A region inside a region; the inner one ends between the operations.
+    Nested,
+}
+/// When the parent requests the child's cancellation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum When {
+    /// Before the child runs, so before its shield starts.
+    Before,
+    /// While the first shielded operation is parked (in W or I).
+    Parked,
+    /// After the operation's resume answered Done, before its deliver.
+    Delivering,
+    /// The parent drops its handle while the child's operation is parked:
+    /// failure cleanup, which cancels and waits shielded (CONC-8).
+    Dropped,
+}
+#[derive(Clone, Copy)]
+struct ShieldJob {
+    rec: *mut Rec,
+    shield: Shield,
+    operations: u64,
+}
+/// The first cancellation point after the shield.
+const AFTER: u64 = 10;
+/// Operations at sites 1..=operations under the shield, then one at AFTER and
+/// a check_cancel. Fails when either observed the request.
+unsafe extern "C" fn shielded_job(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: the job is copied into the task; its Rec outlives the run.
+    unsafe {
+        let job = input.cast::<ShieldJob>().read();
+        let provider = (*job.rec).provider();
+        let depth = if job.shield == Shield::Finalizer {
+            &raw mut (*context).finalizing
+        } else {
+            &raw mut (*context).cancel_shield
+        };
+        *depth += 1;
+        for site in 1..=job.operations {
+            let inner = job.shield == Shield::Nested && site == 1;
+            if inner {
+                (*context).cancel_shield += 1;
+            }
+            let mut req = request(READ, site);
+            let outcome = hirsel_core_host(context, &provider, &mut req);
+            (*job.rec).results.push((site, outcome, 0));
+            if inner {
+                (*context).cancel_shield -= 1;
+            }
+        }
+        *depth -= 1;
+        let mut req = request(READ, AFTER);
+        let outcome = hirsel_core_host(context, &provider, &mut req);
+        let check = hirsel_core_check_cancel(context, AFTER + 1000);
+        (*job.rec).results.push((AFTER, outcome, check));
+        u8::from(outcome.status != 0 || check != 0)
+    }
+}
+thread_local! {
+    static SHIELD_CASE: std::cell::Cell<(Shield, u64, When)> =
+        const { std::cell::Cell::new((Shield::Region, 1, When::Parked)) };
+    static SHIELD_TARGET: std::cell::Cell<*mut Task> = const { std::cell::Cell::new(ptr::null_mut()) };
+}
+/// The peer of When::Delivering: its operation is readied just before the
+/// shielded one, so it runs at the turn that took both readies, after the
+/// shielded operation's resume answered Done and before its deliver, and
+/// requests the cancellation then.
+unsafe extern "C" fn canceller(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: as job; the target outlives this peer, which the parent joins first.
+    unsafe {
+        let job = input.cast::<Job>().read();
+        let provider = (*job.rec).provider();
+        let mut req = request(READ, job.site);
+        hirsel_core_host(context, &provider, &mut req);
+        let rec = &*job.rec;
+        assert_eq!(
+            (rec.count(1, Cb::Resume), rec.count(1, Cb::Deliver)),
+            (1, 0),
+            "between Done and deliver"
+        );
+        hirsel_core_cancel(context, SHIELD_TARGET.get());
+        0
+    }
+}
+const SHIELD_WAKE_NS: u64 = 20_000_000;
+/// W: the first wait of a shielded operation is Until 20 ms on, then Ready.
+fn shield_w_wait(_: &mut Rec, site: u64, _: u64, nth: usize) -> Wait {
+    if site < AFTER && nth == 0 {
+        Wait {
+            kind: WAIT_UNTIL,
+            deadline_ns: crate::os::monotonic_ns() + SHIELD_WAKE_NS,
+        }
+    } else {
+        Wait::default()
+    }
+}
+/// I: issue is Pending and another thread readies it 20 ms on.
+fn shield_i_issue(_: &mut Rec, _: u64, token: u64, _: usize) -> Step {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_nanos(SHIELD_WAKE_NS));
+        hirsel_core_ready(token);
+    });
+    pending(0)
+}
+/// I with the step's own deadline 20 ms on.
+fn shield_deadline_issue(_: &mut Rec, _: u64, _: u64, _: usize) -> Step {
+    pending(crate::os::monotonic_ns() + SHIELD_WAKE_NS)
+}
+unsafe fn shield_parent(context: *mut Context, rec: *mut Rec) {
+    // SAFETY: the parent owns the child's handle; Rec outlives the run.
+    unsafe {
+        let (shield, operations, when) = SHIELD_CASE.get();
+        let mut job = ShieldJob {
+            rec,
+            shield,
+            operations,
+        };
+        let layout = TaskLayout {
+            input: ValueLayout {
+                bytes: size_of::<ShieldJob>(),
+                align: 8,
+                logical: 0,
+                drop: inert,
+            },
+            result: ValueLayout {
+                bytes: 0,
+                align: 8,
+                logical: 0,
+                drop: inert,
+            },
+        };
+        let task = hirsel_core_spawn(
+            context,
+            64,
+            (&mut job as *mut ShieldJob).cast(),
+            shielded_job,
+            layout,
+        )
+        .task;
+        assert!(!task.is_null());
+        if when == When::Before {
+            hirsel_core_cancel(context, task);
+        }
+        // The first shielded operation parks, in W after its wait or in I
+        // after its issue.
+        while (*rec).count(1, Cb::Wait) == 0 {
+            tick(context);
+        }
+        assert_eq!((*rec).count(1, Cb::Deliver), 0);
+        let parked = (*rec).calls.len();
+        match when {
+            When::Before => {}
+            When::Parked => {
+                hirsel_core_cancel(context, task);
+                tick(context);
+                // The request changed nothing: no wait, no abort, no issue
+                // skipped.
+                assert_eq!((*rec).calls.len(), parked, "{:?}", (*rec).calls);
+            }
+            When::Delivering => {
+                let mut peer = Job {
+                    rec,
+                    site: 50,
+                    operation: READ,
+                };
+                let peer = hirsel_core_spawn(
+                    context,
+                    64,
+                    (&mut peer as *mut Job).cast(),
+                    canceller,
+                    job_layout(),
+                )
+                .task;
+                while (*rec).count(50, Cb::Issue) == 0 {
+                    tick(context);
+                }
+                SHIELD_TARGET.set(task);
+                hirsel_core_ready((*rec).token(50));
+                hirsel_core_ready((*rec).token(1));
+                assert!(!join(context, peer));
+            }
+            When::Dropped => {
+                assert_eq!(hirsel_core_task_drop(context, task), 0);
+                return;
+            }
+        }
+        assert!(join(context, task), "the point after the shield fails");
+    }
+}
+/// A cancellation request does not reach an operation that a finalizer or a
+/// shielded region is parked in (CONC-7, tasks.md:129; FAIL-11,
+/// failure.md:173; CONC-8, tasks.md:140): whether made before the shield,
+/// while the operation is in W or I, between its Done and its deliver, or by a
+/// failing parent dropping the handle, it wakes nothing, aborts nothing and
+/// skips no issue; every shielded operation, of one or two, under a nested
+/// shield too, delivers its own outcome. The operation's own deadline is not
+/// cancellation: it still times out. The request takes effect at the first
+/// cancellation point after the shield, which fails Cancelled with no provider
+/// call, exactly once (the check after it sees nothing).
+#[test]
+fn s0_a_shield_holds_a_cancellation_until_after_it() {
+    let w = (
+        shield_w_wait as Answer<Wait>,
+        done0 as Answer<Step>,
+        never as Answer<Step>,
+    );
+    let i = (
+        ready as Answer<Wait>,
+        shield_i_issue as Answer<Step>,
+        done0 as Answer<Step>,
+    );
+    let held = (
+        ready as Answer<Wait>,
+        pending_forever as Answer<Step>,
+        done0 as Answer<Step>,
+    );
+    let deadline = (
+        ready as Answer<Wait>,
+        shield_deadline_issue as Answer<Step>,
+        never as Answer<Step>,
+    );
+    let mut cases = vec![];
+    for phase in ["W", "I"] {
+        let answers = if phase == "W" { w } else { i };
+        for (shield, operations) in [
+            (Shield::Region, 1),
+            (Shield::Finalizer, 1),
+            (Shield::Finalizer, 2),
+            (Shield::Nested, 2),
+        ] {
+            for when in [When::Before, When::Parked] {
+                cases.push((phase, answers, shield, operations, when));
+            }
+        }
+        for operations in [1, 2] {
+            cases.push((phase, answers, Shield::Finalizer, operations, When::Dropped));
+        }
+    }
+    for shield in [Shield::Region, Shield::Finalizer] {
+        cases.push(("I", held, shield, 1, When::Delivering));
+        cases.push(("deadline", deadline, shield, 1, When::Parked));
+    }
+    for (phase, (wait, issue, resume), shield, operations, when) in cases {
+        let case = format!("{phase} {shield:?} x{operations} {when:?}");
+        SHIELD_CASE.set((shield, operations, when));
+        let mut rec = Rec::new(wait, issue, resume);
+        run(&mut rec, false, shield_parent);
+        for site in 1..=operations {
+            let (outcome, _) = rec.result(site);
+            assert_eq!(rec.count(site, Cb::Abort(ABORT_CANCEL)), 0, "{case}");
+            assert_eq!(rec.count(site, Cb::Issue), 1, "{case}");
+            assert_eq!(rec.count(site, Cb::Deliver), 1, "{case}");
+            if phase == "deadline" {
+                assert_eq!(rec.count(site, Cb::Abort(ABORT_DEADLINE)), 1, "{case}");
+                assert_eq!((outcome.status, outcome.value), (0, TIMED_OUT), "{case}");
+            } else {
+                assert_eq!((outcome.status, outcome.value), (0, site), "{case}");
+            }
+        }
+        let (after, check) = rec.result(AFTER);
+        assert_eq!((after.status, check), (1, 0), "{case}: Cancelled, once");
+        assert_eq!(
+            rec.calls.iter().filter(|c| c.site == AFTER).count(),
+            0,
+            "{case}"
+        );
+    }
+}

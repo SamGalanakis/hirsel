@@ -91,6 +91,12 @@ pub const WAIT_UNTIL: u8 = 1;
 pub const WAIT_PARK: u8 = 2;
 pub const STEP_DONE: u8 = 0;
 pub const STEP_PENDING: u8 = 1;
+/// Whether an operation of this kind is a cancellation point: every `waits`
+/// operation except the clock reads (CONC-7; REPLAY-SPEC section 3, C).
+#[inline(always)]
+pub(crate) fn cancellation_point(operation: u8) -> bool {
+    operation != WALL_MS && operation != MONO_NS
+}
 pub const ABORT_CANCEL: u8 = 1;
 pub const ABORT_DEADLINE: u8 = 2;
 
@@ -165,7 +171,7 @@ pub(crate) unsafe fn drive(
     unsafe {
         let site = (*request).site;
         let operation = (*request).operation;
-        if operation != WALL_MS && operation != MONO_NS {
+        if cancellation_point(operation) {
             if crate::tasks::check_cancel(context, site) != 0 {
                 return CANCELLED;
             }

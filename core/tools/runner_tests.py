@@ -54,9 +54,9 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 # exactly once, however often that position is re-sent. The evaluator's count comes from
 # its event log; natively, core/tools/runner_count.c is linked into the case's test
 # executable as its event sink and fails the run on any other count.
-# L7 adds32648 sends by the hung body and one marker by the other session's
+# L7 adds32658 sends by the hung body and one marker by the other session's
 # compute body; the marker precedes the head's exhaustion slice (kind21).
-COUNTS = {'calls_runs_once': (7, 1), 'calls_deadline_hung': (7, 32649)}
+COUNTS = {'calls_runs_once': (7, 1), 'calls_deadline_hung': (7, 32659)}
 
 
 def counted(name, report):
@@ -71,10 +71,10 @@ def counted(name, report):
         for at, e in enumerate(events):
             if e[0] == 7:
                 sends.setdefault(e[2], []).append((at, e[1]))
-        if sorted(map(len, sends.values())) != [1, 32648]:
+        if sorted(map(len, sends.values())) != [1, 32658]:
             return False
         marker = next(v[0] for v in sends.values() if len(v) == 1)
-        body = next(v for v in sends.values() if len(v) == 32648)
+        body = next(v for v in sends.values() if len(v) == 32658)
         slices = [(at, e[1]) for at, e in enumerate(events) if e[0] == 21]
         return (len(slices) == 1 and marker[0] < slices[0][0]
                 and marker[1] != slices[0][1] == body[0][1])
@@ -388,7 +388,7 @@ def counting_cc(args, root, work, name):
     support = work / f'count_{name}.o'
     subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
-                    *(['-DHUNG_BODY_SENDS=32648'] if name == 'calls_deadline_hung' else []),
+                    *(['-DHUNG_BODY_SENDS=32658'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '

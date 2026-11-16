@@ -76,11 +76,11 @@ fn flood(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
     Ok(k)
 }
 
-// L7/deadline_hung: s=65536, e=241 pre-loop calls/latches. First send is
-// Step242; send k is Step241+2*k-1, so exactly32648 TRY_SEND events.
-// Source tally: Tx/snapshots13, runner adapters5, decode7, this prelude3,
-// put/checks18, key encoding59, row reads32, write bookkeeping33,
-// ordered-map updates69, value encoding2. No core bodies or glue Steps.
+// L7/deadline_hung: s=65536, e=220 pre-loop calls/latches. First send is
+// Step221; send k is Step220+2*k-1, so exactly32658 TRY_SEND events.
+// Source tally: Tx/snapshots/retaining16, runner adapters5, decode7,
+// this prelude3, put/checks18, key encoding60, row reads32,
+// write bookkeeping33, ordered-map updates44, value encoding2.
 // core/tools/runner_tests.py and runner_count.c enforce this independent oracle.
 fn hung(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)

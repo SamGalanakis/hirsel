@@ -748,6 +748,16 @@ def first_party(meta: dict) -> str:
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/std_schedule.c"]')))
+    # RUNNER-SPEC v2.2 R0: the runner's laws on the evaluator, their twins and the task
+    # cases on Cranelift and LLVM, and the standing mutants on the evaluator.
+    out.append("\n" + call("hirsel_script_test", name="core-runner-r0", script="core/tools/runner_tests.py", full=False,
+                            host=True,
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-runner-r0/hirsel",
+                                  "--evaluator", "buck-out/tmp/cargo-bin-exe/core-runner-r0/hirsel-core-contract-eval"],
+                            bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
+                                      "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py"]')))
     # The laws land-core-evaluator reports native-only (an entry taking Dir, Stdout,
     # Stderr or Clock), on both engines; on the invoking host for the Dir laws' openat2.
     # Land runs the capability laws on both engines; the sweep runs every law, one engine per target.

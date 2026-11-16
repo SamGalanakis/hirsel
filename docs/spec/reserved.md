@@ -115,17 +115,25 @@ type's values are still built only through code its owner wrote.
 **R13.** Selected entry descriptors carry a versioned nominal path and signature and a
 semantic code and runtime-contract identity; a generic identity includes its type, size,
 dictionary and generator dependencies, never backend addresses or clone numbers. An entry
-is made by library code at registration, never declared:
-`runner.register[A: codec, R: codec](mut r, f: StaticFn[fn(take A) -> Result[R, Capacity]])`
-keys it by `f`'s identity bytes together with the schema fingerprints of `A` and `R`, so a
-changed codec schema changes the key, and its call path is one generic adapter that decodes
-an `A`, calls `f`, encodes the `R` and turns `Capacity` into the request's fault. There is
-no `derive wire` form and no hand-written adapter: the key and the adapter come from the
-one `f`, and the `codec` bounds exclude `mut` parameters, view results and capabilities.
-Requests resolve only to registered entries; an ID grants no code execution authority and
-serializes no closure captures. *v1:* PROG-5, PROG-6, PROG-9, SEM-8: closed named functions
-without type parameters have identity bytes; runners are not in v1, and hook D lists what
-`register` needs; the revision is later.
+is made by library code at registration, never declared: module `runner` of package
+`store` registers a top-level non-generic function `f` by its `StaticFn` with `compute`
+(`fn(take A) -> Result[R, Capacity]`), `transact` (`fn(mut Tx, H, take A) -> Result[R,
+E]`), `query` (`fn(Tx, H, take A) -> Result[Cover, Capacity]`) or `granted` (`fn(G, take
+A) -> Result[R, Capacity] waits`), each with `A`, `R` and `E` bounded `codec`, where `H:
+send` is the place's handles (its Tables and Indexes), passed by view and built at open by
+the place's `handles(mut db: Db) -> Result[H, store.Error] waits`. The key is `f`'s
+identity bytes with the schema fingerprints of `A` and `R`, so a changed codec schema
+changes the key; a key already registered is refused and the registry is unchanged. Each
+kind has one generic adapter that decodes an `A` inside the call's byte bound, calls `f`,
+and encodes the result. There is no `derive wire` form and no hand-written adapter. A
+place's entries are exactly those its capability-free `place(mut r: Registry[G, H])`
+registers; the server runs it to serve and the SDK generator runs it, bounded, to read
+`runner.describe`; no other export list exists. Every task that runs entries runs `place`
+itself, because an owning closure is never shareable. Requests resolve only to registered
+entries; an ID grants no code execution authority and serializes no closure captures.
+*v1:* PROG-5, PROG-6, PROG-9, SEM-8: closed named functions without type parameters have
+identity bytes; the runner is a library over v1, not a language form; the code revision
+(hook D) is later.
 
 **R14.** "Callable and erased-value signatures carry independent invocation-allocation and
 cleanup-allocation summaries; omission conservatively permits allocation. `noalloc_drop`

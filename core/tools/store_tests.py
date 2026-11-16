@@ -4,13 +4,15 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import tempfile
 
 from std_native import ROOT, wait_load
 
 
-BYTE_LAWS = ('model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'foreign', 'frames')
+BYTE_LAWS = ('model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'foreign', 'frames', 'follow', 'node_ids')
 NATIVE_TESTS = {*('test_' + name for name in BYTE_LAWS), 'test_reader_task', 'test_memory_identity'}
 
 
@@ -81,6 +83,35 @@ def main():
                         and len(tests) == len(NATIVE_TESTS) and all(t.get('passed') for t in tests))
                 rows.append(dict(engine=engine, passed=good, result=report))
                 print(f'{engine}: {sum(bool(t.get("passed")) for t in tests)}/{len(NATIVE_TESTS)} passed', flush=True)
+                # Only the concurrent law runs under seeded scheduling. Repeating
+                # the serial laws would have no alternative event streams.
+                cc = args.cc or (Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
+                                 if 'LLVM_SYS_231_PREFIX' in os.environ else Path(shutil.which('cc')))
+                support = work / 'schedule.o'
+                subprocess.run([str(cc), '-c', '-fPIC', str(args.root / 'core/tools/std_schedule.c'),
+                                '-I' + str(args.root / 'crates/hirsel-core-rt/include'), '-DSEEDS=32',
+                                '-o', str(support)], check=True)
+                wrapper = work / 'scheduled-cc'
+                wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
+                                   + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
+                wrapper.chmod(0o755)
+                scheduled = list(command)
+                if '--cc' in scheduled:
+                    at = scheduled.index('--cc')
+                    del scheduled[at:at + 2]
+                scheduled[scheduled.index('--filter') + 1] = 'store@1/store/follow_schedules'
+                scheduled += ['--cc', str(wrapper)]
+                result = subprocess.run(scheduled, capture_output=True, text=True)
+                try:
+                    report = json.loads(result.stdout)
+                except ValueError:
+                    report = {'stdout': result.stdout, 'stderr': result.stderr}
+                tests = report.get('tests', [])
+                good = (result.returncode == 0 and len(tests) == 1
+                        and tests[0].get('definition') == 'store@1/store/follow_schedules'
+                        and tests[0].get('passed'))
+                rows.append(dict(engine=engine, schedules=32, passed=good, result=report))
+                print(f'{engine}: follow across 32 schedules {"PASS" if good else "FAIL"}', flush=True)
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
     failures = [row for row in rows if not row['passed']]

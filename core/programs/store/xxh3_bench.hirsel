@@ -1,0 +1,57 @@
+// R9 comparator, only the long-input path used by a 4-KiB node.
+// Adapted from xxhash-rust 0.8.15 const_xxh3.rs:173-254 and xxh3_common.rs.
+// No SIMD, hardware intrinsic or core checksum operation is used.
+const SECRET: Inline[u64,24] = [0xbe4ba423396cfeb8u64,0x1cad21f72c81017cu64,0xdb979083e96dd4deu64,0x1f67b3b7a4a44072u64,0x78e5c0cc4ee679cbu64,0x2172ffcc7dd05a82u64,0x8e2443f7744608b8u64,0x4c263a81e69035e0u64,0xcb00c391bb52283cu64,0xa32e531b8b65d088u64,0x4ef90da297486471u64,0xd8acdea946ef1938u64,0x3f349ce33f76faa8u64,0x1d4f0bc7c7bbdcf9u64,0x3159b4cd4be0518au64,0x647378d9c97e9fc8u64,0xc3ebd33483acc5eau64,0xeb6313faffa081c5u64,0x49daf0b751dd0d17u64,0x9e68d429265516d3u64,0xfca1477d58be162bu64,0xce31d07ad1b8f88fu64,0x280416958f3acb45u64,0x7e404bbbcafbd7afu64]
+fn seeded_word(i: u64, seed: u64) -> u64 {
+    if i % 2 == 0 { int.wrapping_add(SECRET[i], seed) } else { int.wrapping_sub(SECRET[i], seed) }
+}
+fn secret(at: u64, seed: u64) -> u64 {
+    let shift = (at % 8) * 8
+    let low = seeded_word(at / 8, seed) >> shift
+    if shift == 0 { low } else { low | (seeded_word(at / 8 + 1, seed) << (64 - shift)) }
+}
+fn stripe(mut acc: Inline[u64,8], image: Bytes, at: u64, sec: u64, seed: u64) {
+    for i in 0u64 .. 8 {
+        let data = list.word_le(image, at + i * 8)
+        let keyed = data ^ secret(sec + i * 8, seed)
+        acc[i ^ 1] = int.wrapping_add(acc[i ^ 1], data)
+        let product = (keyed & 0xffffffffu64) * (keyed >> 32)
+        acc[i] = int.wrapping_add(acc[i], product)
+    }
+}
+fn hash(image: Bytes, seed: u64) -> u64 {
+    let mut acc: Inline[u64,8] = [0xC2B2AE3Du64,0x9E3779B185EBCA87u64,0xC2B2AE3D27D4EB4Fu64,
+        0x165667B19E3779F9u64,0x85EBCA77C2B2AE63u64,0x85EBCA77u64,0x27D4EB2F165667C5u64,0x9E3779B1u64]
+    for block in 0u64 .. 3 {
+        for i in 0u64 .. 16 { stripe(mut acc, image, block * 1024 + i * 64, i * 8, seed) }
+        for i in 0u64 .. 8 {
+            let x = (acc[i] ^ (acc[i] >> 47)) ^ secret(128 + i * 8, seed)
+            acc[i] = int.wrapping_mul(x, 0x9E3779B1u64)
+        }
+    }
+    for i in 0u64 .. 15 { stripe(mut acc, image, 3072 + i * 64, i * 8, seed) }
+    stripe(mut acc, image, 4032, 121, seed)
+    let mut sum = int.wrapping_mul(4096u64, 0x9E3779B185EBCA87u64)
+    for i in 0u64 .. 4 {
+        let (hi, low) = int.mul_wide(acc[i * 2] ^ secret(11 + i * 16, seed), acc[i * 2 + 1] ^ secret(19 + i * 16, seed))
+        sum = int.wrapping_add(sum, hi ^ low)
+    }
+    sum = int.wrapping_mul(sum ^ (sum >> 37), 0x165667919E3779F9u64)
+    sum ^ (sum >> 32)
+}
+pub fn main(argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let argument = option.unwrap(args.get(argv, 0))
+    let loops: u64 = result.unwrap(int.parse(argument))
+    let mut image: Bytes = result.unwrap(list.with_capacity(4096))
+    for i in 0u64 .. 4096 {
+        result.unwrap(list.push(mut image, int.truncate(i * 17 + 3)))
+    }
+    let mut sum: u64 = 0
+    for _ in 0u64 .. loops {
+        sum = hash(image, sum)
+    }
+    let mut rendered = string.new()
+    result.unwrap(string.push_u64(mut rendered, sum))
+    result.unwrap(string.push(mut rendered, "\n"))
+    match stdout.write(out, rendered) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 8)) }
+}

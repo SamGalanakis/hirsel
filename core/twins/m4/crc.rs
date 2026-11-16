@@ -1,6 +1,7 @@
 //! R9 matched byte-table CRC-32C. No hardware acceleration or slicing table.
 //! The bit recurrence builds the table at compile time, independently of Hirsel's literals.
-use std::hint::black_box;
+// Parity review: std-seed-api-889, followups.md 2026-11-16.
+// Carry the CRC between calls so neither compiler can hoist a repeated check.
 
 const fn table() -> [u32; 256] {
     let mut t = [0; 256];
@@ -19,8 +20,8 @@ const fn table() -> [u32; 256] {
 }
 const CRC: [u32; 256] = table();
 
-fn crc32c(b: &[u8]) -> u32 {
-    let mut c = u32::MAX;
+fn crc32c_append(prefix: u32, b: &[u8]) -> u32 {
+    let mut c = prefix ^ u32::MAX;
     for &x in b {
         c = CRC[((c ^ u32::from(x)) & 255) as usize] ^ (c >> 8);
     }
@@ -30,9 +31,9 @@ fn crc32c(b: &[u8]) -> u32 {
 fn main() {
     let loops: u64 = std::env::args().nth(1).unwrap().parse().unwrap();
     let image: Vec<u8> = (0u64..4096).map(|i| (i * 17 + 3) as u8).collect();
-    let mut sum = 0u64;
+    let mut c = 0u32;
     for _ in 0..loops {
-        sum = sum.wrapping_add(u64::from(crc32c(black_box(&image))));
+        c = crc32c_append(c, &image);
     }
-    println!("{sum}");
+    println!("{c}");
 }

@@ -737,7 +737,7 @@ def first_party(meta: dict) -> str:
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/std_schedule.c"]')))
     # The laws land-core-evaluator reports native-only (an entry taking Dir, Stdout,
     # Stderr or Clock), on both engines; on the invoking host for the Dir laws' openat2.
     # Land runs the capability laws on both engines; the sweep runs every law, one engine per target.

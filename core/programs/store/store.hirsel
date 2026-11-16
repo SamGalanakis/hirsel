@@ -41,6 +41,7 @@ pub opaque type Db {
     at: u64,
     resident: u64,
     ceiling: u64,
+    following: Option[Latest[Snapshot]],
     journal: Option[Sender[Bytes]],
     pending: Option[Bytes],
     journal_task: Option[Task[()]],
@@ -99,7 +100,7 @@ pub fn memory(c: Clock, r: Random, o: Options) -> Db {
 }
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
     Db(store: id, clock: c, roots: empty_roots(), next_node: 0, head: 0, at: 0,
-        resident: 0, ceiling: o.resident_limit, journal: None, pending: None, journal_task: None, checkpoint_task: None)
+        resident: 0, ceiling: o.resident_limit, following: None, journal: None, pending: None, journal_task: None, checkpoint_task: None)
 }
 pub fn identity(db: Db) -> StoreId { db.store }
 pub fn main_branch(db: Db) -> Branch { Branch(store: db.store, id: 0) }
@@ -107,6 +108,27 @@ pub fn snapshot(db: Db) -> Snapshot {
     Snapshot(store: db.store, open: 0, branch: 0, head: db.head, roots: share_roots(db.roots))
 }
 pub fn version(s: Snapshot) -> u64 { s.head }
+pub fn follow(mut db: Db, b: Branch) -> Result[Latest[Snapshot], Error] {
+    if !same(b.store, db.store) { return Error(Foreign) }
+    if b.id != 0 { return Error(Missing("branch")) }
+    if let Some(h) = db.following { return Ok(latest.handle(h)) }
+    let root = match arc.new(snapshot(db)) {
+        Ok(take root) => take root, Error((c, _)) => return Error(Full(c))
+    }
+    let h = match latest.new(take root) {
+        Ok(take h) => take h, Error((c, _)) => return Error(Full(c))
+    }
+    db.following = Some(latest.handle(h))
+    Ok(take h)
+}
+fn publish(db: Db) {
+    if let Some(h) = db.following {
+        match arc.new(snapshot(db)) {
+            Ok(take root) => latest.publish(h, take root),
+            Error(_) => {}
+        }
+    }
+}
 pub fn info(tx: Tx) -> CallInfo { tx.info }
 pub fn run[R, A](mut db: Db, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let b = main_branch(db)
@@ -163,6 +185,7 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
                     db.resident = live
                     db.head += 1
                     db.at = ci.at
+                    publish(db)
                     Ok(Committed(Done(value: take value,
                         ticket: Ticket(store: db.store, open: 0, mark: Journal(db.head)),
                         info: ci, reads: take seen)))
@@ -200,9 +223,19 @@ fn physical(id: u32, key: Bytes) -> Result[Bytes, Error] {
 fn round8(n: u64) -> u64 { ((n + 7) / 8) * 8 }
 fn entry(key: Bytes, val: Bytes) -> u64 { 62 + round8(list.len(key)) + round8(list.len(val)) }
 fn refused(mut tx: Tx, c: Capacity) -> Error { tx.refusal = Some(c); Full(c) }
-fn remember_ids(mut tx: Tx) -> Result[(), Error] {
-    match log.append(tx.issued, tx.ids) {
-        Ok(()) => Ok(()), Error((c, _)) => Error(refused(mut tx, c))
+fn reserve_ids(mut tx: Tx) -> Result[u64, Error] {
+    // Record a range before the map can issue an id. Logging after the map
+    // would lose its high-water mark if the log append itself were refused.
+    // Insert uses <= 2h+1 ids. Remove uses <= 3h, including discarded merge
+    // intermediates. Gaps are permitted; 4h+1 covers both operations.
+    let h = match std.omap.root(tx.roots.data) {
+        None => 0u64, Some(n) => std.omap.node_level(n) + 1
+    }
+    let start = tx.ids
+    let end = start + 4 * h + 1
+    match log.append(tx.issued, end) {
+        Ok(()) => { tx.ids = end; Ok(start) },
+        Error((c, _)) => Error(refused(mut tx, c))
     }
 }
 fn record(tx: Tx, take read: Read) -> Result[(), Error] {
@@ -223,10 +256,8 @@ fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
     let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 9 + list.len(p) + list.len(val))
     let saved_key = copied(p)?
     if frame > 16777216 { return Error(Limit(Transaction)) }
-    let mut ids = tx.ids
+    let mut ids = reserve_ids(mut tx)?
     let updated = std.omap.insert(mut ids, tx.roots.data, take p, copied(val)?)
-    tx.ids = ids
-    remember_ids(mut tx)?
     match take updated {
         Error((c, _)) => Error(refused(mut tx, c)),
         Ok(take data) => {
@@ -249,10 +280,8 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
     }
     let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 5 + list.len(p))
     if frame > 16777216 { return Error(Limit(Transaction)) }
-    let mut ids = tx.ids
+    let mut ids = reserve_ids(mut tx)?
     let updated = std.omap.remove(mut ids, tx.roots.data, p)
-    tx.ids = ids
-    remember_ids(mut tx)?
     match take updated {
         Error(c) => Error(refused(mut tx, c)),
         Ok(take data) => {
@@ -596,3 +625,90 @@ fn test_memory_identity(c: Clock, r: Random) -> Result[(), ()] {
     let b = memory(c, r, defaults())
     if !same(identity(a), identity(b)) && version(snapshot(a)) == 0 { Ok(()) } else { Error(()) }
 }
+
+// L2 following: publish only admitted roots; handles survive the writer.
+// Wrong implementation caught: publish before admission or miss a successful swap.
+pub fn law_follow(c: Clock) -> bool {
+    let mut db = test_db(c, 86)
+    let h = result.unwrap(follow(mut db, Branch(store: StoreId(hi: 1, lo: 2), id: 0)))
+    let initial = latest.read(h)
+    if version(initial) != 0 || !put_one(mut db, 1, 10) { return false }
+    let first = latest.read(h)
+    if version(first) != 1 || value_at(first, 1) != 10 || version(initial) != 0 { return false }
+    if put_one(mut db, 2, 20) { return false }
+    let after_refusal = latest.read(h)
+    if version(after_refusal) != 1 || value_at(after_refusal, 2) != 0 { return false }
+    let second = result.unwrap(follow(mut db, Branch(store: StoreId(hi: 1, lo: 2), id: 0)))
+    let removed = execute(mut db, 2, fn(mut tx: Tx) -> Result[bool, Error] { delete_bytes(mut tx, 1, key_word(1)) })
+    match take removed { Ok(Committed(_)) => {}, _ => return false }
+    let final_root = latest.read(second)
+    version(final_root) == 2 && value_at(final_root, 1) == 0 && value_at(first, 1) == 10
+}
+@test
+fn test_follow(c: Clock) -> Result[(), ()] { if law_follow(c) { Ok(()) } else { Error(()) } }
+
+type FollowingReader: send { current: Latest[Snapshot], done: Receiver[()] }
+fn read_following(take reader: FollowingReader) -> bool waits {
+    let mut previous: u64 = 0
+    for _ in 0u64 .. 64 {
+        result.unwrap(channel.receive(reader.done))
+        let s = latest.read(reader.current)
+        let v = version(s)
+        if v < previous || value_at(s, 1) != v { return false }
+        previous = v
+    }
+    let final_root = latest.read(reader.current)
+    version(final_root) == 64 && value_at(final_root, 1) == 64
+}
+// L2 under W4: every read is an admitted version; after the writer's completion
+// event the reader sees its last publish. Wrong implementation: missed publication.
+@test
+fn follow_schedules(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    let mut db = test_db(c, 1073741824)
+    let h = result.unwrap(follow(mut db, Branch(store: StoreId(hi: 1, lo: 2), id: 0)))
+    let (send, receive): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let (send2, receive2): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1))
+    let payload = FollowingReader(current: latest.handle(h), done: take receive)
+    let payload2 = FollowingReader(current: take h, done: take receive2)
+    let reader = result.unwrap(task.spawn(tasks, bytes 1048576, take payload,
+        fn(take r: FollowingReader) -> bool waits { read_following(take r) }))
+    let reader2 = result.unwrap(task.spawn(tasks, bytes 1048576, take payload2,
+        fn(take r: FollowingReader) -> bool waits { read_following(take r) }))
+    for v in 1u64 .. 65 {
+        if !put_one(mut db, 1, v) { return Error(()) }
+        result.unwrap(channel.send(send, ()))
+        result.unwrap(channel.send(send2, ()))
+    }
+    let a = result.unwrap(task.join(take reader))
+    let b = result.unwrap(task.join(take reader2))
+    if a && b { Ok(()) } else { Error(()) }
+}
+
+// Capacity after reserving ids and a body fault both consume their id ranges.
+// Wrong implementation caught: returning the writer counter to its old value.
+pub fn law_node_ids(c: Clock) -> bool {
+    let mut db = test_db(c, 1073741824)
+    let failed = execute(mut db, 1, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(1), key_word(10))?
+        fail("node id fault")
+    })
+    match take failed { Ok(Failed(_)) => {}, _ => return false }
+    let after_fault = db.next_node
+    if after_fault == 0 || db.head != 0 { return false }
+    let capacity_result = result.unwrap(bound bytes 512 {
+        execute(mut db, 2, fn(mut tx: Tx) -> Result[(), Error] {
+            for k in 0u64 .. 100 { put_bytes(mut tx, 1, key_word(k), key_word(k))? }
+            Ok(())
+        })
+    })
+    match take capacity_result { Ok(Refused(_)) => {}, _ => return false }
+    let after_capacity = db.next_node
+    if after_capacity <= after_fault || db.head != 0 { return false }
+    if !put_one(mut db, 2, 20) { return false }
+    match std.omap.root(db.roots.data) {
+        Some(n) => std.omap.node_id(n) > after_capacity,
+        None => false
+    }
+}
+@test
+fn test_node_ids(c: Clock) -> Result[(), ()] { if law_node_ids(c) { Ok(()) } else { Error(()) } }

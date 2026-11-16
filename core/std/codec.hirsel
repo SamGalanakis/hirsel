@@ -25,13 +25,13 @@ pub type Stop = Bad(DecodeError) | Full(Capacity)
 pub opaque type Codec[T] {
     encoder: fn(T, mut Bytes) -> Result[(), Capacity],
     decoder: fn(Bytes, mut u64) -> Result[T, Stop],
-    describer: fn(mut Schema) -> Result[(), Capacity],
+    describer: fn(mut Schema, Codec[T]) -> Result[(), Capacity],
     smallest: u64
 }
 
 /// A codec from its parts; a generated codec calls this once per type.
 /// Ex: `codec.make(row_encode, row_decode, row_schema, 9)`
-pub fn make[T](e: fn(T, mut Bytes) -> Result[(), Capacity], d: fn(Bytes, mut u64) -> Result[T, Stop], w: fn(mut Schema) -> Result[(), Capacity], n: u64) -> Codec[T] {
+pub fn make[T](e: fn(T, mut Bytes) -> Result[(), Capacity], d: fn(Bytes, mut u64) -> Result[T, Stop], w: fn(mut Schema, Codec[T]) -> Result[(), Capacity], n: u64) -> Codec[T] {
     Codec(encoder: e, decoder: d, describer: w, smallest: n)
 }
 
@@ -504,61 +504,118 @@ pub fn take_via[T, R, E](b: Bytes, mut at: u64, c: Codec[R], from: fn(take R) ->
     }
 }
 
+// A built-in codec's describer: its scalar's schema.
+fn describe_unit(mut s: Schema, _c: Codec[()]) -> Result[(), Capacity] {
+    schema_unit(mut s)
+}
+
+fn describe_bool(mut s: Schema, _c: Codec[bool]) -> Result[(), Capacity] {
+    schema_bool(mut s)
+}
+
+fn describe_char(mut s: Schema, _c: Codec[char]) -> Result[(), Capacity] {
+    schema_char(mut s)
+}
+
+fn describe_u8(mut s: Schema, _c: Codec[u8]) -> Result[(), Capacity] {
+    schema_u8(mut s)
+}
+
+fn describe_u16(mut s: Schema, _c: Codec[u16]) -> Result[(), Capacity] {
+    schema_u16(mut s)
+}
+
+fn describe_u32(mut s: Schema, _c: Codec[u32]) -> Result[(), Capacity] {
+    schema_u32(mut s)
+}
+
+fn describe_u64(mut s: Schema, _c: Codec[u64]) -> Result[(), Capacity] {
+    schema_u64(mut s)
+}
+
+fn describe_i8(mut s: Schema, _c: Codec[i8]) -> Result[(), Capacity] {
+    schema_i8(mut s)
+}
+
+fn describe_i16(mut s: Schema, _c: Codec[i16]) -> Result[(), Capacity] {
+    schema_i16(mut s)
+}
+
+fn describe_i32(mut s: Schema, _c: Codec[i32]) -> Result[(), Capacity] {
+    schema_i32(mut s)
+}
+
+fn describe_i64(mut s: Schema, _c: Codec[i64]) -> Result[(), Capacity] {
+    schema_i64(mut s)
+}
+
+fn describe_f32(mut s: Schema, _c: Codec[f32]) -> Result[(), Capacity] {
+    schema_f32(mut s)
+}
+
+fn describe_f64(mut s: Schema, _c: Codec[f64]) -> Result[(), Capacity] {
+    schema_f64(mut s)
+}
+
+fn describe_string(mut s: Schema, _c: Codec[String]) -> Result[(), Capacity] {
+    schema_string(mut s)
+}
+
 // The built-in codecs: core.md's codec rows. `of` resolves to these at scalar types.
 pub fn of_unit() -> Codec[()] {
-    Codec(encoder: put_unit, decoder: take_unit, describer: schema_unit, smallest: 0)
+    Codec(encoder: put_unit, decoder: take_unit, describer: describe_unit, smallest: 0)
 }
 
 pub fn of_bool() -> Codec[bool] {
-    Codec(encoder: put_bool, decoder: take_bool, describer: schema_bool, smallest: 1)
+    Codec(encoder: put_bool, decoder: take_bool, describer: describe_bool, smallest: 1)
 }
 
 pub fn of_char() -> Codec[char] {
-    Codec(encoder: put_char, decoder: take_char, describer: schema_char, smallest: 4)
+    Codec(encoder: put_char, decoder: take_char, describer: describe_char, smallest: 4)
 }
 
 pub fn of_u8() -> Codec[u8] {
-    Codec(encoder: put_u8, decoder: take_u8, describer: schema_u8, smallest: 1)
+    Codec(encoder: put_u8, decoder: take_u8, describer: describe_u8, smallest: 1)
 }
 
 pub fn of_u16() -> Codec[u16] {
-    Codec(encoder: put_u16, decoder: take_u16, describer: schema_u16, smallest: 2)
+    Codec(encoder: put_u16, decoder: take_u16, describer: describe_u16, smallest: 2)
 }
 
 pub fn of_u32() -> Codec[u32] {
-    Codec(encoder: put_u32, decoder: take_u32, describer: schema_u32, smallest: 4)
+    Codec(encoder: put_u32, decoder: take_u32, describer: describe_u32, smallest: 4)
 }
 
 pub fn of_u64() -> Codec[u64] {
-    Codec(encoder: put_u64, decoder: take_u64, describer: schema_u64, smallest: 8)
+    Codec(encoder: put_u64, decoder: take_u64, describer: describe_u64, smallest: 8)
 }
 
 pub fn of_i8() -> Codec[i8] {
-    Codec(encoder: put_i8, decoder: take_i8, describer: schema_i8, smallest: 1)
+    Codec(encoder: put_i8, decoder: take_i8, describer: describe_i8, smallest: 1)
 }
 
 pub fn of_i16() -> Codec[i16] {
-    Codec(encoder: put_i16, decoder: take_i16, describer: schema_i16, smallest: 2)
+    Codec(encoder: put_i16, decoder: take_i16, describer: describe_i16, smallest: 2)
 }
 
 pub fn of_i32() -> Codec[i32] {
-    Codec(encoder: put_i32, decoder: take_i32, describer: schema_i32, smallest: 4)
+    Codec(encoder: put_i32, decoder: take_i32, describer: describe_i32, smallest: 4)
 }
 
 pub fn of_i64() -> Codec[i64] {
-    Codec(encoder: put_i64, decoder: take_i64, describer: schema_i64, smallest: 8)
+    Codec(encoder: put_i64, decoder: take_i64, describer: describe_i64, smallest: 8)
 }
 
 pub fn of_f32() -> Codec[f32] {
-    Codec(encoder: put_f32, decoder: take_f32, describer: schema_f32, smallest: 4)
+    Codec(encoder: put_f32, decoder: take_f32, describer: describe_f32, smallest: 4)
 }
 
 pub fn of_f64() -> Codec[f64] {
-    Codec(encoder: put_f64, decoder: take_f64, describer: schema_f64, smallest: 8)
+    Codec(encoder: put_f64, decoder: take_f64, describer: describe_f64, smallest: 8)
 }
 
 pub fn of_string() -> Codec[String] {
-    Codec(encoder: put_string, decoder: take_string, describer: schema_string, smallest: 8)
+    Codec(encoder: put_string, decoder: take_string, describer: describe_string, smallest: 8)
 }
 
 /// DecodeError's codec, as the derive writes a sum's: a store can keep a refusal.
@@ -619,7 +676,7 @@ fn decode_error_decode(b: Bytes, mut at: u64) -> Result[DecodeError, Stop] {
     }
 }
 
-fn decode_error_schema(mut s: Schema) -> Result[(), Capacity] {
+fn decode_error_schema(mut s: Schema, _c: Codec[DecodeError]) -> Result[(), Capacity] {
     define(mut s, "std.codec.DecodeError", 0)?
     if sum(mut s, 7)? {
         return Ok(())
@@ -648,9 +705,9 @@ fn decode_error_schema(mut s: Schema) -> Result[(), Capacity] {
 // value, 16 Option and its type, 17 Result, its ok and error types, 18 a tuple (a u64
 // arity, then the components), 19 a definition (its u64 index). A definition is its
 // nominal path, its type arguments (a u64 count, then each), a kind byte and a body:
-// 0 record (a u64 entry count, then per entry 0, name, type for a field or 1, name for a
-// removed one), 1 sum (a u64 variant count, then per variant 0, name, a u64 field count
-// and the field types, or 1, name for a removed one), 2 via (the type it is written as).
+// 0 record (a u64 entry count, then per entry 0 for a field or 1 for a removed one, its
+// name and type), 1 sum (a u64 variant count, then per variant 0, or 1 for a removed one,
+// its name, a u64 field count and the field types), 2 via (the type it is written as).
 // A name is a u64 byte count and UTF-8. Definitions are numbered in the order a
 // depth-first walk from the root first meets them, so a type has one schema; defaults
 // are the reader's, never in the bytes.
@@ -736,29 +793,29 @@ pub fn schema_string(mut s: Schema) -> Result[(), Capacity] {
 
 /// The type c writes, in place: a field's, an element's, a type argument's.
 pub fn schema_of[T](mut s: Schema, c: Codec[T]) -> Result[(), Capacity] {
-    (c.describer)(mut s)
+    (c.describer)(mut s, c)
 }
 
 pub fn schema_list[T](mut s: Schema, c: Codec[T]) -> Result[(), Capacity] {
     opcode(mut s, 14)?
-    (c.describer)(mut s)
+    (c.describer)(mut s, c)
 }
 
 pub fn schema_map[K: key, V](mut s: Schema, ck: Codec[K], cv: Codec[V]) -> Result[(), Capacity] {
     opcode(mut s, 15)?
-    (ck.describer)(mut s)?
-    (cv.describer)(mut s)
+    (ck.describer)(mut s, ck)?
+    (cv.describer)(mut s, cv)
 }
 
 pub fn schema_option[T](mut s: Schema, c: Codec[T]) -> Result[(), Capacity] {
     opcode(mut s, 16)?
-    (c.describer)(mut s)
+    (c.describer)(mut s, c)
 }
 
 pub fn schema_result[T, E](mut s: Schema, ct: Codec[T], ce: Codec[E]) -> Result[(), Capacity] {
     opcode(mut s, 17)?
-    (ct.describer)(mut s)?
-    (ce.describer)(mut s)
+    (ct.describer)(mut s, ct)?
+    (ce.describer)(mut s, ce)
 }
 
 /// A tuple of n components; schema_of each follows.
@@ -778,7 +835,7 @@ pub fn define(mut s: Schema, path: String, arguments: u64) -> Result[(), Capacit
 
 /// One type argument of the definition begun by `define`.
 pub fn argument[T](mut s: Schema, c: Codec[T]) -> Result[(), Capacity] {
-    (c.describer)(mut s)
+    (c.describer)(mut s, c)
 }
 
 /// A record of n entries (fields and removed fields). Ok(true) when the definition is
@@ -874,7 +931,7 @@ pub fn field(mut s: Schema, path: String) -> Result[(), Capacity] {
 /// the field. Writes the type too.
 pub fn field_default[F](mut s: Schema, path: String, c: Codec[F], v: F) -> Result[(), Capacity] {
     field(mut s, path)?
-    (c.describer)(mut s)?
+    (c.describer)(mut s, c)?
     let def = s.open[list.len(s.open) - 1]
     let mut value: Bytes = list.new()
     (c.encoder)(v, mut value)?
@@ -885,10 +942,18 @@ pub fn field_default[F](mut s: Schema, path: String, c: Codec[F], v: F) -> Resul
     }
 }
 
-/// A removed field or variant: its name stays, so it cannot be reused.
-pub fn removed(mut s: Schema, path: String) -> Result[(), Capacity] {
+/// A removed field of the record being defined, where the field was; its type follows
+/// (a `schema_` call), resolved against a writer's field of that name (SEM-10).
+pub fn removed_field(mut s: Schema, path: String) -> Result[(), Capacity] {
     opcode(mut s, 1)?
     name(mut s, path)
+}
+
+/// A removed variant of the sum being defined, with n fields; schema_of each follows.
+pub fn removed_variant(mut s: Schema, path: String, n: u64) -> Result[(), Capacity] {
+    opcode(mut s, 1)?
+    name(mut s, path)?
+    list.put_word_le(mut s.cur, n)
 }
 
 /// A live variant of the sum being defined, with n fields; schema_of each follows.
@@ -918,7 +983,7 @@ fn builder() -> Schema {
 
 fn built[T](c: Codec[T]) -> Result[Schema, Capacity] {
     let mut s = builder()
-    (c.describer)(mut s)?
+    (c.describer)(mut s, c)?
     Ok(take s)
 }
 
@@ -1086,25 +1151,22 @@ fn def_end(b: Bytes, at: u64, end: u64, defs: u64) -> Result[u64, u64] {
         if i >= end || b[i] > 1 {
             return Error(i)
         }
-        let live = b[i] == 0
         let Some(after) = name_end(b, i + 1, end) else {
             return Error(i)
         }
         i = after
-        if live {
-            if kind == 0 {
+        if kind == 0 {
+            i = type_end(b, i, end, defs)?
+        } else {
+            if end - i < 8 {
+                return Error(i)
+            }
+            let fields = list.word_le(b, i)
+            i += 8
+            let mut f: u64 = 0
+            while f < fields {
                 i = type_end(b, i, end, defs)?
-            } else {
-                if end - i < 8 {
-                    return Error(i)
-                }
-                let fields = list.word_le(b, i)
-                i += 8
-                let mut f: u64 = 0
-                while f < fields {
-                    i = type_end(b, i, end, defs)?
-                    f += 1
-                }
+                f += 1
             }
         }
         k += 1
@@ -1184,17 +1246,15 @@ fn entries(b: Bytes, k: u64, mut out: List[(bool, u64, u64)]) -> Result[(), Capa
             Ok(()) => {}
             Error((f, _)) => return Error(f)
         }
-        if live {
-            if b[k] == 0 {
+        if b[k] == 0 {
+            i = skip(b, i)
+        } else {
+            let fields = list.word_le(b, i)
+            i += 8
+            let mut f: u64 = 0
+            while f < fields {
                 i = skip(b, i)
-            } else {
-                let fields = list.word_le(b, i)
-                i += 8
-                let mut f: u64 = 0
-                while f < fields {
-                    i = skip(b, i)
-                    f += 1
-                }
+                f += 1
             }
         }
         e += 1
@@ -1331,7 +1391,8 @@ fn full_map(r: Result[(), (Capacity, ((u64, u64), u64))]) -> Result[(), Capacity
 }
 
 // Writer fields in the writer's order, each to a reader position or dropped (a field the
-// reader removed, still checked); then the reader's fields from the writer or a default.
+// reader removed, still checked and resolved against the tombstone's type); a writer's
+// tombstone is a field it lacks. Then the reader's fields from the writer or a default.
 // Identity (1): the same fields in the same order, copied as they come; otherwise (0)
 // the record's fields are relinked in the reader's order when it ends.
 fn record_node(mut p: Plan, wd: u64, rd: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u64, u64)]) -> Result[Result[u64, u64], Capacity] {
@@ -1354,13 +1415,11 @@ fn record_node(mut p: Plan, wd: u64, rd: u64, ws: List[(bool, u64, u64)], rs: Li
     let mut identity = wn == rn
     let mut j: u64 = 0
     for (live, name_at, type_at) in ws {
-        let q = find(p.all, rs, name_at)
+        // A writer's tombstone writes nothing and is a field the writer lacks.
         if !live {
-            if q != SKIP && rs[q].0 {
-                return Ok(Error(name_at - 1))
-            }
             continue
         }
+        let q = find(p.all, rs, name_at)
         if q == SKIP {
             return Ok(Error(name_at - 1))
         }
@@ -1377,7 +1436,7 @@ fn record_node(mut p: Plan, wd: u64, rd: u64, ws: List[(bool, u64, u64)], rs: Li
             identity = false
             emit(mut p, SKIP)?
             emit(mut p, 0)?
-            task(mut p, type_at, type_at, slot)?
+            task(mut p, type_at, rs[q].2, slot)?
         }
         j += 1
     }
@@ -1388,7 +1447,7 @@ fn record_node(mut p: Plan, wd: u64, rd: u64, ws: List[(bool, u64, u64)], rs: Li
             continue
         }
         let k = find(p.all, ws, name_at)
-        if k != SKIP {
+        if k != SKIP && ws[k].0 {
             emit(mut p, live_position(ws, k))?
         } else {
             identity = false
@@ -1468,12 +1527,20 @@ fn sum_node(mut p: Plan, wk: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u6
         }
         let here = list.len(p.ops)
         let _ = list.set(mut p.ops, index + 2 + t, here)
-        if live && rlive {
+        if live {
+            // Matched by a live variant or a tombstone, its types resolve against the
+            // reader's; a value holding a variant the reader removed is Schema at the
+            // writer's entry for it.
             let m = list.word_le(p.all, fields_at)
             if m != list.word_le(p.all, rfields) {
                 return Ok(Error(name_at - 1))
             }
-            emit(mut p, 0)?
+            if rlive {
+                emit(mut p, 0)?
+            } else {
+                emit(mut p, 1)?
+                emit(mut p, name_at - 1)?
+            }
             emit(mut p, m)?
             let base = list.len(p.ops)
             let mut cw = fields_at + 8
@@ -1486,10 +1553,6 @@ fn sum_node(mut p: Plan, wk: u64, ws: List[(bool, u64, u64)], rs: List[(bool, u6
                 cr = skip(p.all, cr)
                 k += 1
             }
-        } else if live {
-            // The reader removed it: a value holding it is Schema at the writer's entry.
-            emit(mut p, 1)?
-            emit(mut p, name_at - 1)?
         } else {
             // The writer removed it, so no value of the writer's holds it.
             emit(mut p, 2)?

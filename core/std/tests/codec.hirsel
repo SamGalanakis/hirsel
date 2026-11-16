@@ -151,7 +151,7 @@ fn mix_decode(b: Bytes, mut at: u64) -> Result[Mix, codec.Stop] {
     Ok(Mix(tag: take tag, res: take res, m: take m, xs: take xs, pair: (p0, p1)))
 }
 
-fn mix_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn mix_schema(mut s: codec.Schema, c: codec.Codec[Mix]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Mix", 0)?
     if codec.record(mut s, 5)? {
         return Ok(())
@@ -269,7 +269,7 @@ fn row_decode(b: Bytes, mut at: u64) -> Result[Row, codec.Stop] {
     Ok(Row(id: id, name: take name, score: score))
 }
 
-fn row_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn row_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 3)? {
         return Ok(())
@@ -293,7 +293,7 @@ fn v1_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
     codec.put_string(x.name, mut out)
 }
 
-fn v1_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn v1_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
@@ -316,7 +316,7 @@ fn swapped_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
     codec.put_u64(x.id, mut out)
 }
 
-fn swapped_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn swapped_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
@@ -340,7 +340,7 @@ fn noted_encode(x: Row, mut out: Bytes) -> Result[(), Capacity] {
     codec.put_string(x.name, mut out)
 }
 
-fn noted_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn noted_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 3)? {
         return Ok(())
@@ -362,14 +362,50 @@ fn rows_noted() -> codec.Codec[Row] {
 // A type with a tombstone: `type Row codec { id: u64, removed note: String,
 // name: String, score: i64 = 7 }`. The encode and decode are row's; only the schema
 // keeps the removed name.
-fn tomb_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn tomb_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 4)? {
         return Ok(())
     }
     codec.field(mut s, "id")?
     codec.schema_u64(mut s)?
-    codec.removed(mut s, "note")?
+    codec.removed_field(mut s, "note")?
+    codec.schema_string(mut s)?
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.field_default(mut s, "score", codec.of_i64(), 7)?
+    codec.close(mut s)
+    Ok(())
+}
+
+// The tombstone with another type: `removed note: u64`.
+fn tomb_u64_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 4)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.removed_field(mut s, "note")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "name")?
+    codec.schema_string(mut s)?
+    codec.field_default(mut s, "score", codec.of_i64(), 7)?
+    codec.close(mut s)
+    Ok(())
+}
+
+// The name freed and the field back: `{ id: u64, note: String, name: String, score: i64
+// = 7 }`, note with no default.
+fn renoted_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Row", 0)?
+    if codec.record(mut s, 4)? {
+        return Ok(())
+    }
+    codec.field(mut s, "id")?
+    codec.schema_u64(mut s)?
+    codec.field(mut s, "note")?
+    codec.schema_string(mut s)?
     codec.field(mut s, "name")?
     codec.schema_string(mut s)?
     codec.field_default(mut s, "score", codec.of_i64(), 7)?
@@ -383,7 +419,7 @@ fn rows_tomb() -> codec.Codec[Row] {
 
 // Writers no evolution admits: id retyped to i64; a field `extra: bool` the reader
 // lacks; name missing with no default.
-fn retyped_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn retyped_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
@@ -396,7 +432,7 @@ fn retyped_schema(mut s: codec.Schema) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn extra_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn extra_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 3)? {
         return Ok(())
@@ -411,7 +447,7 @@ fn extra_schema(mut s: codec.Schema) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn short_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn short_schema(mut s: codec.Schema, c: codec.Codec[Row]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Row", 0)?
     if codec.record(mut s, 1)? {
         return Ok(())
@@ -422,7 +458,7 @@ fn short_schema(mut s: codec.Schema) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn schema_bytes(w: fn(mut codec.Schema) -> Result[(), Capacity]) -> Bytes {
+fn schema_bytes(w: fn(mut codec.Schema, codec.Codec[Row]) -> Result[(), Capacity]) -> Bytes {
     result.unwrap(codec.schema(codec.make(row_encode, row_decode, w, 24)))
 }
 
@@ -466,11 +502,12 @@ fn schema_by_hand() -> bool {
     schema_bytes(v1_schema) == unhex("01 0100000000000000 0500000000000000 742e526f77 0000000000000000 00 0200000000000000 00 0200000000000000 6964 06 00 0400000000000000 6e616d65 0d 13 0000000000000000")
 }
 
-// A tombstone is in the schema (1, then the name) where its field was; so it is in the
-// fingerprint, and a schema that forgot it would let the name be reused.
+// A tombstone is in the schema (1, the name, its type) where its field was; so it is in
+// the fingerprint, a schema that forgot it would let the name be reused, and its type
+// is there to resolve a writer's field against.
 // expect: run tombstone_in_schema() = true
 fn tombstone_in_schema() -> bool {
-    schema_bytes(tomb_schema) == unhex("01 0100000000000000 0500000000000000 742e526f77 0000000000000000 00 0400000000000000 00 0200000000000000 6964 06 01 0400000000000000 6e6f7465 00 0400000000000000 6e616d65 0d 00 0500000000000000 73636f7265 0a 13 0000000000000000")
+    schema_bytes(tomb_schema) == unhex("01 0100000000000000 0500000000000000 742e526f77 0000000000000000 00 0400000000000000 00 0200000000000000 6964 06 01 0400000000000000 6e6f7465 0d 00 0400000000000000 6e616d65 0d 00 0500000000000000 73636f7265 0a 13 0000000000000000")
 }
 
 // CRC-64-AVRO (the Avro specification's Rabin fingerprint; reference values from its
@@ -501,18 +538,22 @@ fn evolution_reads_old_rows() -> ((u64, u64, i64), (u64, u64, i64), (u64, u64, i
 
 // Evolution no rule admits is Schema at the writer's schema: id retyped, at its type
 // (offset 50); a writer field the reader lacks, at its entry (65); a reader field with
-// no default the writer lacks, at the writer's definition (9); a tombstoned name live
-// again, at the writer's tombstone entry (51); bytes that are no schema, at the
-// definition count (1). Offsets by hand from schema_by_hand's layout.
-// expect: run evolution_refused() = (6050, 6065, 6009, 6051, 6001)
-fn evolution_refused() -> (u64, u64, u64, u64, u64) {
+// no default the writer lacks, at the writer's definition (9), also when the writer's
+// tombstone is all it has of the field (a writer's tombstone is a field it lacks); bytes
+// that are no schema, at the definition count (1); a writer's note against the reader's
+// tombstone `removed note: u64`, at the writer's note type (64). Offsets by hand from
+// schema_by_hand's layout. A resolver that refused a re-added name outright, or skipped a
+// removed field without resolving its type against the tombstone's, fails it.
+// expect: run evolution_refused() = (6050, 6065, 6009, 6009, 6001, 6064)
+fn evolution_refused() -> (u64, u64, u64, u64, u64, u64) {
     let none = unhex("")
     let a = refusal(rows(), schema_bytes(retyped_schema), none)
     let b = refusal(rows(), schema_bytes(extra_schema), none)
     let c = refusal(rows(), schema_bytes(short_schema), none)
-    let d = refusal(rows_noted(), schema_bytes(tomb_schema), none)
+    let d = refusal(codec.make(row_encode, row_decode, renoted_schema, 24), schema_bytes(tomb_schema), none)
     let e = refusal(rows(), unhex("01 05"), none)
-    (a, b, c, d, e)
+    let f = refusal(codec.make(row_encode, row_decode, tomb_u64_schema, 24), schema_bytes(noted_schema), none)
+    (a, b, c, d, e, f)
 }
 
 // Through resolution, the writer's bytes are checked as decode checks them, at offsets
@@ -560,7 +601,7 @@ fn shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.Stop] {
     }
 }
 
-fn shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 3)? {
         return Ok(())
@@ -579,7 +620,7 @@ fn shapes() -> codec.Codec[Shape] {
     codec.make(shape_encode, shape_decode, shape_schema, 4)
 }
 
-fn old_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn old_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 2)? {
         return Ok(())
@@ -606,7 +647,7 @@ fn cut_shape_decode(b: Bytes, mut at: u64) -> Result[Shape, codec.Stop] {
     }
 }
 
-fn cut_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn cut_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 3)? {
         return Ok(())
@@ -614,12 +655,29 @@ fn cut_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
     codec.variant(mut s, "Dot", 0)?
     codec.variant(mut s, "Circle", 1)?
     codec.schema_f64(mut s)?
-    codec.removed(mut s, "Rect")?
+    codec.removed_variant(mut s, "Rect", 2)?
+    codec.schema_u64(mut s)?
+    codec.schema_u64(mut s)?
     codec.close(mut s)
     Ok(())
 }
 
-fn renamed_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn cut_i64_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
+    codec.define(mut s, "t.Shape", 0)?
+    if codec.sum(mut s, 3)? {
+        return Ok(())
+    }
+    codec.variant(mut s, "Dot", 0)?
+    codec.variant(mut s, "Circle", 1)?
+    codec.schema_f64(mut s)?
+    codec.removed_variant(mut s, "Rect", 2)?
+    codec.schema_u64(mut s)?
+    codec.schema_i64(mut s)?
+    codec.close(mut s)
+    Ok(())
+}
+
+fn renamed_shape_schema(mut s: codec.Schema, c: codec.Codec[Shape]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Shape", 0)?
     if codec.sum(mut s, 2)? {
         return Ok(())
@@ -631,7 +689,7 @@ fn renamed_shape_schema(mut s: codec.Schema) -> Result[(), Capacity] {
     Ok(())
 }
 
-fn shape_schema_bytes(w: fn(mut codec.Schema) -> Result[(), Capacity]) -> Bytes {
+fn shape_schema_bytes(w: fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), Capacity]) -> Bytes {
     result.unwrap(codec.schema(codec.make(shape_encode, shape_decode, w, 4)))
 }
 
@@ -643,7 +701,7 @@ fn shape_code(x: Shape) -> u64 {
     }
 }
 
-fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema) -> Result[(), Capacity], b: Bytes) -> u64 {
+fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema, codec.Codec[Shape]) -> Result[(), Capacity], b: Bytes) -> u64 {
     match through(reader, shape_schema_bytes(w), b) {
         Ok(x) => shape_code(x),
         Error(k) => k
@@ -659,8 +717,10 @@ fn shape_through(reader: codec.Codec[Shape], w: fn(mut codec.Schema) -> Result[(
 // at the writer's entry for it (61). A resolver that matched variants by position only,
 // let a removed tag through, called a held removed variant malformed bytes, or refused a
 // writer's tombstone against a live variant, fails it.
-// expect: run variant_evolution() = (2, 2, 6085, 2, 2000, 6032, 6061)
-fn variant_evolution() -> (u64, u64, u64, u64, u64, u64, u64) {
+// A reader tombstone `removed Rect(u64, i64)` against the writer's Rect is Schema at the
+// writer's second payload type (107): a tombstone's types resolve.
+// expect: run variant_evolution() = (2, 2, 6085, 2, 2000, 6032, 6061, 6107)
+fn variant_evolution() -> (u64, u64, u64, u64, u64, u64, u64, u64) {
     let circle = unhex("01000000 000000000000f03f")
     let rect = unhex("02000000 0100000000000000 0200000000000000")
     let a = shape_through(shapes(), old_shape_schema, circle)
@@ -672,7 +732,8 @@ fn variant_evolution() -> (u64, u64, u64, u64, u64, u64, u64) {
     let reader_old = codec.make(shape_encode, shape_decode, old_shape_schema, 4)
     let f = shape_through(reader_old, shape_schema, circle)
     let g = shape_through(shapes(), renamed_shape_schema, circle)
-    (a, b, c, d, e, f, g)
+    let h = shape_through(codec.make(shape_encode, cut_shape_decode, cut_i64_shape_schema, 4), shape_schema, circle)
+    (a, b, c, d, e, f, g, h)
 }
 
 // A tag is the variant's position as four little-endian bytes (SEM-10): Rect(1, 2) by
@@ -726,7 +787,7 @@ fn pair_u64_decode(b: Bytes, mut at: u64) -> Result[Pair[u64], codec.Stop] {
     pair_decode_with(b, mut at, codec.of_u64())
 }
 
-fn pair_u64_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn pair_u64_schema(mut s: codec.Schema, c: codec.Codec[Pair[u64]]) -> Result[(), Capacity] {
     pair_schema_with(mut s, codec.of_u64())
 }
 
@@ -742,7 +803,7 @@ fn pair_string_decode(b: Bytes, mut at: u64) -> Result[Pair[String], codec.Stop]
     pair_decode_with(b, mut at, codec.of_string())
 }
 
-fn pair_string_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn pair_string_schema(mut s: codec.Schema, c: codec.Codec[Pair[String]]) -> Result[(), Capacity] {
     pair_schema_with(mut s, codec.of_string())
 }
 
@@ -808,7 +869,7 @@ fn tree_decode(b: Bytes, mut at: u64) -> Result[Tree, codec.Stop] {
     }
 }
 
-fn tree_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Tree", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
@@ -831,7 +892,7 @@ fn swapped_tree_encode(x: Tree, mut out: Bytes) -> Result[(), Capacity] {
     codec.put_u64(x.label, mut out)
 }
 
-fn swapped_tree_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn swapped_tree_schema(mut s: codec.Schema, c: codec.Codec[Tree]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Tree", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
@@ -979,7 +1040,7 @@ fn failure_decode(b: Bytes, mut at: u64) -> Result[Failure, codec.Stop] {
     Ok(Failure(at: offset, why: take why))
 }
 
-fn failure_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn failure_schema(mut s: codec.Schema, c: codec.Codec[Failure]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Failure", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
@@ -1043,7 +1104,7 @@ fn range_wire_decode(b: Bytes, mut at: u64) -> Result[RangeWire, codec.Stop] {
     Ok(RangeWire(lo: lo, hi: hi))
 }
 
-fn range_wire_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn range_wire_schema(mut s: codec.Schema, c: codec.Codec[RangeWire]) -> Result[(), Capacity] {
     codec.define(mut s, "t.RangeWire", 0)?
     if codec.record(mut s, 2)? {
         return Ok(())
@@ -1068,7 +1129,7 @@ fn range_decode(b: Bytes, mut at: u64) -> Result[Range, codec.Stop] {
     codec.take_via(b, mut at, range_wires(), check)
 }
 
-fn range_schema(mut s: codec.Schema) -> Result[(), Capacity] {
+fn range_schema(mut s: codec.Schema, c: codec.Codec[Range]) -> Result[(), Capacity] {
     codec.define(mut s, "t.Range", 0)?
     if codec.via(mut s)? {
         return Ok(())

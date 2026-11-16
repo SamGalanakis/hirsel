@@ -17,6 +17,8 @@ def main():
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
     parser.add_argument('--only', choices=['forest', 'function'])
+    # The combined core gate asks every harness for serial bodies; accept exactly that.
+    parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = parser.parse_args()
     core = dict(name='core', version='1')
     core_package = dict(package=core, dependencies=[], sources=[

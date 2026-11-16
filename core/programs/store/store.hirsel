@@ -8201,7 +8201,10 @@ pub fn recorded(db: Db, b: Branch, wanted: u64) -> Result[Option[CallRecord], Er
     if b.id != 0 { return Error(Missing("branch")) }
     if list.len(db.disk) == 0 { return Ok(None) }
     if wanted > db.head || wanted <= db.disk[0].record_cut.0 { return Ok(None) }
-    if wanted > db.journaled {
+    // Z1: skip the barrier exactly when every frame this Db has sent is acked,
+    // so it is written (X1 step 0's condition); never compare a version with
+    // `journaled`, which counts frames.
+    if !covered(db, Journal(db.frame_seq)) {
         if let Some(sender) = db.journal { let _ = channel.send(sender, Barrier) }
         if let Some(receiver) = db.written {
             match result.unwrap(channel.receive(receiver)) {

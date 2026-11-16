@@ -81,7 +81,8 @@ the worker; a later cut can retry. Schema changes publish on the cut's ack.
 the first stored I/O error. It never requests a cut. Snapshots remain readable.
 
 `recorded(db, branch, version)` waits on a write barrier without consuming
-journal acks. It returns a CALL section from live segments. Compaction is
+journal acks, skipping it only when every frame this Db has sent is acked. It
+returns a CALL section from live segments. Compaction is
 measured by the latest cut this Db has taken, with the previous cut restored
 when a refusal is learned. A covering cut or memory mode gives None. A journal
 failure is retained on the write-notice channel, so repeated calls return the

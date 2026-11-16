@@ -468,7 +468,12 @@ fn copied(raw: Bytes) -> Result[Bytes, Error] {
 }
 
 fn prefix(id: u32) -> Result[Bytes, Error] {
-    let mut p: Bytes = capacity(list.with_capacity(4))?
+    prefixed(id, 0)
+}
+
+// The 4-byte big-endian id, in a buffer with room for `rest` more bytes.
+fn prefixed(id: u32, rest: u64) -> Result[Bytes, Error] {
+    let mut p: Bytes = capacity(list.with_capacity(4 + rest))?
     for i in 0u64 .. 4 {
         let byte: u8 = int.truncate(id >> int.truncate((3 - i) * 8))
         capacity(result.capacity_only(list.push(mut p, byte)))?
@@ -476,8 +481,9 @@ fn prefix(id: u32) -> Result[Bytes, Error] {
     Ok(take p)
 }
 
+// One allocation: the key is appended into the prefix's spare capacity.
 fn physical(id: u32, key: Bytes) -> Result[Bytes, Error] {
-    let mut p = prefix(id)?
+    let mut p = prefixed(id, list.len(key))?
     capacity(list.append(mut p, key))?
     Ok(take p)
 }

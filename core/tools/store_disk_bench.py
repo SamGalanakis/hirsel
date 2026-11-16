@@ -80,7 +80,7 @@ def main():
                             row.update(pack_bytes=int(extra[1]), new_nodes=int(extra[2]), account=int(extra[3]))
                         else:
                             row['complete'] = False
-                            row['censored'] = 'post-phase store validation did not finish'
+                            row['censored'] = row['censored'] or 'post-phase store validation did not finish'
                         rows.append(row)
                         (out / (tag + '-sample.json')).write_text(json.dumps(row, indent=2) + '\n')
                         print(tag, json.dumps(row), flush=True)

@@ -12,8 +12,8 @@ from store_tests import inputs
 from store_crash_tests import run_crashes
 
 LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact',
-        'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal')
-NATIVE_TESTS = {'store@1/store/disk_test_' + name for name in LAWS}
+        'draft_refusal', 'worker_refusal', 'opening', 'db', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound')
+NATIVE_TESTS = {'store@1/store/disk_test_' + name for name in LAWS if name != 'pack_bound'}
 
 
 def main():
@@ -72,6 +72,22 @@ def main():
                         and {t['definition'] for t in tests} == NATIVE_TESTS and all(t.get('passed') for t in tests))
                 rows.append(dict(engine=engine, passed=good, result=report))
                 print(f'{engine}: {sum(bool(t.get("passed")) for t in tests)}/{len(NATIVE_TESTS)} passed', flush=True)
+                # New L25 case keeps36MiB of rows plus a40MiB pack and the
+                # default262MiB child reservation; other laws retain64MiB.
+                large = list(command)
+                large[large.index('--filter') + 1] = 'store@1/store/disk_pack_bound'
+                large[large.index('--limit') + 1] = str(512 * 1024 * 1024)
+                result = subprocess.run(large, capture_output=True, text=True)
+                try:
+                    report = json.loads(result.stdout)
+                except ValueError:
+                    report = {'stdout': result.stdout, 'stderr': result.stderr}
+                tests = report.get('tests', [])
+                good = (result.returncode == 0 and len(tests) == 1
+                        and tests[0].get('definition') == 'store@1/store/disk_pack_bound'
+                        and tests[0].get('passed'))
+                rows.append(dict(engine=engine, law='pack_bound', passed=good, result=report))
+                print(f'{engine} pack_bound: {"PASS" if good else "FAIL"}', flush=True)
                 try:
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
                                        args.cc, manifest, work, engine)

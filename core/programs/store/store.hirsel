@@ -4222,7 +4222,7 @@ fn test_stored_size(c: Clock) -> Result[(), ()] waits {
     if law_stored_size(c) { Ok(()) } else { Error(()) }
 }
 
-// S2 disk format and recovery. STORE-SPEC v2.11, with v2.5 pack naming.
+// S2 disk format and recovery. STORE-SPEC v2.12, with v2.5 pack naming.
 type DiskContext {
     store: StoreId,
     role: u8,
@@ -4613,15 +4613,33 @@ fn disk_manifest_bytes(id: StoreId, m: DiskManifest) -> Result[Bytes, Capacity] 
 
 fn disk_read_manifest(file: String, raw: Bytes) -> Result[(StoreId, DiskManifest), Error] {
     let header = disk_read_header(file, raw, 1, None, None)?
-    let frame = disk_read_frame(file, header.context, raw, 72)?
-    if frame.kind != 0x0030 || frame.end != list.len(raw) {
-        return Error(disk_fault(file, 72, Malformed))
+    let mut at: u64 = 72
+    let mut room: u64 = 0
+    let mut found: Option[DiskManifest] = None
+    while at < list.len(raw) {
+        let frame = disk_read_frame(file, header.context, raw, at)?
+        if frame.kind == 0x0030 {
+            if let Some(_) = found { return Error(disk_fault(file, at, Malformed)) }
+            let manifest = disk_manifest_payload(file, raw, header, frame, at)?
+            found = Some(take manifest)
+        } else {
+            room = int.saturating_add(room, frame.end - at)
+            if room > 1048576 { return Error(disk_fault(file, at, Malformed)) }
+        }
+        at = frame.end
     }
+    match take found {
+        Some(take m) => Ok((header.context.store, take m)),
+        None => Error(disk_fault(file, 72, Malformed))
+    }
+}
+
+fn disk_manifest_payload(file: String, raw: Bytes, header: DiskHeader, frame: DiskFrame, offset: u64) -> Result[DiskManifest, Error] {
     let payload = list.slice(raw, 0, frame.end)
     let mut at: u64 = frame.payload
     let generation = disk_number(file, payload, mut at, 8)?
     if generation != header.context.seq {
-        return Error(disk_fault(file, 72, Header))
+        return Error(disk_fault(file, offset, Header))
     }
     let keys = disk_number(file, payload, mut at, 4)?
     let values = disk_number(file, payload, mut at, 4)?
@@ -4694,7 +4712,7 @@ fn disk_read_manifest(file: String, raw: Bytes) -> Result[(StoreId, DiskManifest
     if at != list.len(payload) {
         return Error(disk_fault(file, at, Malformed))
     }
-    Ok((header.context.store, DiskManifest(generation: generation, next_node: next_node, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, packs: take packs, retired: take retired, branches: take branches, pins: take pins)))
+    Ok(DiskManifest(generation: generation, next_node: next_node, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, packs: take packs, retired: take retired, branches: take branches, pins: take pins))
 }
 
 fn disk_genesis_fixture() -> DiskManifest {
@@ -4764,7 +4782,45 @@ pub fn disk_law_manifest() -> bool {
     let extra_frame = result.unwrap(disk_seal(ctx, 72, 0x0030, 1, extra))
     let mut overlong = result.unwrap(copied(header_view))
     result.unwrap(list.append(mut overlong, extra_frame))
-    disk_corrupt(disk_read_manifest("MANIFEST", overlong))
+    if !disk_corrupt(disk_read_manifest("MANIFEST", overlong)) { return false }
+    // V1/L11: unknown frames may precede or follow the one MANIFEST.
+    let empty: Bytes = list.new()
+    let skipped = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
+    let shifted = result.unwrap(disk_seal(ctx, 72 + list.len(skipped), 0x0030, 1, payload_view))
+    let mut before = result.unwrap(copied(header_view))
+    result.unwrap(list.append(mut before, skipped))
+    result.unwrap(list.append(mut before, shifted))
+    let before_manifest = result.unwrap(disk_read_manifest("MANIFEST", before))
+    if before_manifest.1.generation != 1 || before_manifest.1.branches[0].name != "main" { return false }
+    let trailer = result.unwrap(disk_seal(ctx, list.len(raw), 0x7ffe, 0, empty))
+    let mut after = result.unwrap(copied(raw))
+    result.unwrap(list.append(mut after, trailer))
+    let after_manifest = result.unwrap(disk_read_manifest("MANIFEST", after))
+    if after_manifest.1.generation != 1 || after_manifest.1.branches[0].roots.data != 0 { return false }
+    let authority = result.unwrap(disk_seal(ctx, list.len(raw), 0x0050, 1, empty))
+    let mut required = result.unwrap(copied(raw))
+    result.unwrap(list.append(mut required, authority))
+    match disk_read_manifest("MANIFEST", required) {
+        Error(Unsupported(0x0050)) => {},
+        _ => return false
+    }
+    let duplicate = result.unwrap(disk_seal(ctx, list.len(raw), 0x0030, 1, payload_view))
+    let mut twice = result.unwrap(copied(raw))
+    result.unwrap(list.append(mut twice, duplicate))
+    if !disk_corrupt(disk_read_manifest("MANIFEST", twice)) || !disk_corrupt(disk_read_manifest("MANIFEST", header_view)) { return false }
+    //16*(head16+payload65520) is exactly UNKNOWN_ROOM; one more head is over.
+    let mut chunk: Bytes = result.unwrap(list.with_capacity(65520))
+    result.unwrap(list.fill(mut chunk, 65520, 0u8))
+    let mut room_file = result.unwrap(copied(raw))
+    for _ in 0u64 .. 16 {
+        let unknown = result.unwrap(disk_seal(ctx, list.len(room_file), 0x7ffe, 0, chunk))
+        result.unwrap(list.append(mut room_file, unknown))
+    }
+    let at_room = result.unwrap(disk_read_manifest("MANIFEST", room_file))
+    if at_room.1.generation != 1 { return false }
+    let over_room = result.unwrap(disk_seal(ctx, list.len(room_file), 0x7ffe, 0, empty))
+    result.unwrap(list.append(mut room_file, over_room))
+    disk_corrupt(disk_read_manifest("MANIFEST", room_file))
 }
 
 @test
@@ -5420,6 +5476,56 @@ fn disk_test_packs(d: Dir, c: Clock) -> Result[(), ()] waits {
     }
 }
 
+// V2/L25:36 full values make two large leaves and their branch in one
+// 40MiB pack. Its >33,686,116 bytes remain readable with pack_bytes512.
+pub fn disk_law_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.pack_bytes = 41943040
+    options.resident_limit = 134217728
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    let t = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    let base = db.resident
+    let mut raw: Bytes = result.unwrap(list.with_capacity(1048566))
+    result.unwrap(list.fill(mut raw, 1048566, 97u8))
+    let text = result.unwrap(string.from_utf8(take raw))
+    for k in 0u64 .. 36 {
+        let saved = result.unwrap(run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, t, k, text)
+        }))
+        if let Committed(_) = saved {} else { return false }
+    }
+    let cut = result.unwrap(checkpoint(mut db))
+    result.unwrap(durable(mut db, cut))
+    let encoded = result.unwrap(disk_read_file(d, "MANIFEST", 68157528))
+    let pair = result.unwrap(disk_read_manifest("MANIFEST", encoded))
+    let mut large_pack = false
+    for pack in pair.1.packs {
+        let path = result.unwrap(disk_path("p-", pack.seq, ""))
+        let bytes_in_pack = result.unwrap(disk_read_file(d, path, 41943040))
+        if list.len(bytes_in_pack) > 33686116 { large_pack = true }
+    }
+    if !large_pack { return false }
+    result.unwrap(close(take db))
+    options.pack_bytes = 512
+    options.create = false
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    if reopened.resident != base + 36 * (62 + 16 + 1048576) { return false }
+    for k in 0u64 .. 36 {
+        match result.unwrap(get(snapshot(reopened), shape(t), k)) {
+            Some(take value) => if value != text { return false },
+            None => return false
+        }
+    }
+    result.unwrap(close(take reopened))
+    true
+}
+
+@test
+fn disk_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_pack_bound(disk_test_directory(d), c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
 type DiskRawNode {
     payload: Bytes,
     pack: u64,
@@ -5433,17 +5539,14 @@ type DiskLoaded {
     graph: DiskGraph
 }
 
-fn disk_load_pack(d: Dir, id: StoreId, pack: DiskPack, cap: u64, next_node: u64, mut raw_nodes: Map[u64, DiskRawNode], mut ids: List[u64], mut stats: DiskIndex[DiskPackState]) -> Result[(), Error] waits {
+fn disk_load_pack(d: Dir, id: StoreId, pack: DiskPack, next_node: u64, mut raw_nodes: Map[u64, DiskRawNode], mut ids: List[u64], mut stats: DiskIndex[DiskPackState]) -> Result[(), Error] waits {
     let path = capacity(disk_path("p-", pack.seq, ""))?
-    let limit = if cap < 33686116 {
-        33686116u64
-    } else {
-        cap
-    }
+    let limit = int.saturating_add(1048648u64, int.saturating_mul(int.widen(pack.nodes), 33686044u64))
     let raw = disk_read_file(d, path, limit)?
     let header = disk_read_header(path, raw, 3, Some(pack.seq), Some(id))?
     let mut at: u64 = 72
     let mut count: u64 = 0
+    let mut room: u64 = 0
     let mut pack_ids: List[u64] = list.new()
     while at < list.len(raw) {
         let frame = disk_read_frame(path, header.context, raw, at)?
@@ -5462,6 +5565,9 @@ fn disk_load_pack(d: Dir, id: StoreId, pack: DiskPack, cap: u64, next_node: u64,
             capacity(result.capacity_only(list.push(mut ids, node_id)))?
             capacity(result.capacity_only(list.push(mut pack_ids, node_id)))?
             count += 1
+        } else {
+            room = int.saturating_add(room, frame.end - at)
+            if room > 1048576 { return Error(disk_fault(path, at, Malformed)) }
         }
         at = frame.end
     }
@@ -5502,20 +5608,39 @@ fn disk_track_roots(mut graph: DiskGraph, all: List[Roots]) -> Result[List[Arc[s
     Ok(take fresh)
 }
 
-fn disk_load(d: Dir, cap: u64, ceiling: u64) -> Result[DiskLoaded, Error] waits {
-    let raw = disk_read_file(d, "MANIFEST", 67108952)?
-    disk_load_manifest(d, raw, cap, ceiling)
+fn disk_load(d: Dir, ceiling: u64) -> Result[DiskLoaded, Error] waits {
+    let raw = disk_read_file(d, "MANIFEST", 68157528)?
+    disk_load_manifest(d, raw, ceiling)
 }
 
-fn disk_load_manifest(d: Dir, raw: Bytes, cap: u64, ceiling: u64) -> Result[DiskLoaded, Error] waits {
+fn disk_load_manifest(d: Dir, raw: Bytes, ceiling: u64) -> Result[DiskLoaded, Error] waits {
+    let preload = disk_decode_manifest(d, raw)?
+    disk_finish_load(take preload, ceiling)
+}
+
+type DiskDecoded: send {
+    store: StoreId,
+    manifest: DiskManifest,
+    roots: Roots,
+    all: List[Roots],
+    ids: List[u64],
+    locations: Map[u64, (u64, u64)],
+    stats: DiskIndex[DiskPackState]
+}
+
+fn disk_decode_manifest(d: Dir, raw: Bytes) -> Result[DiskDecoded, Error] waits {
     let parsed = disk_read_manifest("MANIFEST", raw)?
     let (id, take manifest) = take parsed
+    disk_decode_packs(d, id, take manifest)
+}
+
+fn disk_decode_packs(d: Dir, id: StoreId, take manifest: DiskManifest) -> Result[DiskDecoded, Error] waits {
     // Only listed packs are opened. Leftovers beyond a naming gap are inert.
     let mut raw_nodes: Map[u64, DiskRawNode] = map.new()
     let mut ids: List[u64] = list.new()
     let mut stats: DiskIndex[DiskPackState] = disk_index()
     for pack in manifest.packs {
-        disk_load_pack(d, id, pack, cap, manifest.next_node, mut raw_nodes, mut ids, mut stats)?
+        disk_load_pack(d, id, pack, manifest.next_node, mut raw_nodes, mut ids, mut stats)?
     }
     list.sort(mut ids, fn(a: u64, b: u64) -> Order {
         std.order.compare(a, b)
@@ -5531,6 +5656,8 @@ fn disk_load_manifest(d: Dir, raw: Bytes, cap: u64, ceiling: u64) -> Result[Disk
         capacity(result.capacity_only(map.insert(mut nodes, node_id, take node)))?
         capacity(result.capacity_only(map.insert(mut locations, node_id, (row.pack, row.size))))?
     }
+    // remove released the payloads, but the empty Map still owns its buckets.
+    let _ = take raw_nodes
     let mut all: List[Roots] = list.new()
     for branch in manifest.branches {
         let roots = disk_attach_roots(nodes, branch.roots)?
@@ -5540,7 +5667,19 @@ fn disk_load_manifest(d: Dir, raw: Bytes, cap: u64, ceiling: u64) -> Result[Disk
         let roots = disk_attach_roots(nodes, pin.roots)?
         capacity(result.capacity_only(list.push(mut all, take roots)))?
     }
+    // The attached Arc roots now retain every live child. The temporary id
+    // index need not overlap construction of the persistent checkpoint table.
+    let _ = take nodes
     let main_roots = share_roots(all[0])
+    Ok(DiskDecoded(store: id, manifest: take manifest, roots: take main_roots, all: take all,
+                   ids: take ids, locations: take locations, stats: take stats))
+}
+
+// Open decodes rows on its caller. Only the persistent per-node account is
+// constructed under the checkpoint task's reserved allowance (Q1a, section3.4).
+fn disk_finish_load(take preload: DiskDecoded, ceiling: u64) -> Result[DiskLoaded, Error] {
+    let DiskDecoded(store: id, manifest: take manifest, roots: take main_roots, all: take all,
+                    ids: take ids, locations: take locations, stats: take stats) = take preload
     let mut graph = disk_graph()
     let _ = capacity(disk_track_roots(mut graph, all))?
     graph.pack_stats = take stats
@@ -5579,6 +5718,30 @@ fn disk_root_ids(roots: Roots) -> DiskRoots {
     DiskRoots(data: data, streams: streams, catalog: catalog)
 }
 
+fn disk_insert_skipped_node_frame(d: Dir, id: StoreId, pack: DiskPack) waits {
+    let path = result.unwrap(disk_path("p-", pack.seq, ""))
+    let raw = result.unwrap(disk_read_file(d, path, 8192))
+    let ctx = DiskContext(store: id, role: 3, seq: pack.seq)
+    let mut rewritten = result.unwrap(copied(list.slice(raw, 0, 72)))
+    let mut at: u64 = 72
+    let mut count: u64 = 0
+    while at < list.len(raw) {
+        let frame = result.unwrap(disk_read_frame(path, ctx, raw, at))
+        let payload = list.slice(raw, frame.payload, frame.end)
+        let fresh = result.unwrap(disk_seal(ctx, list.len(rewritten), frame.kind, frame.flags, payload))
+        result.unwrap(list.append(mut rewritten, fresh))
+        if count == 0 {
+            let empty: Bytes = list.new()
+            let skipped = result.unwrap(disk_seal(ctx, list.len(rewritten), 0x7ffe, 0, empty))
+            result.unwrap(list.append(mut rewritten, skipped))
+        }
+        count += 1
+        at = frame.end
+    }
+    if count < 2 { fail("L11 requires two NODEs") }
+    result.unwrap(disk_write_synced(d, path, rewritten))
+}
+
 // L4/L6/L12: load only named packs, rebuild all node ids before attaching
 // roots, check the independently known40 rows and3440-byte account. A valid
 // header-only orphan after a naming gap cannot contribute any state.
@@ -5591,7 +5754,7 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
     }
     let mut graph = disk_graph()
     let nodes = result.unwrap(disk_track(mut graph, db.roots))
-    let output = result.unwrap(disk_write_nodes(d, db.store, 1, 512, mut graph, nodes))
+    let output = result.unwrap(disk_write_nodes(d, db.store, 1, 4096, mut graph, nodes))
     let (take packs, next_pack) = take output
     let mut manifest = disk_genesis_fixture()
     manifest.next_node = db.next_node + 1
@@ -5601,10 +5764,11 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
     let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 40, at: 0, roots: disk_root_ids(db.roots))
     let _ = list.set(mut manifest.branches, 0, take branch)
     result.unwrap(disk_publish_manifest(d, db.store, manifest))
+    disk_insert_skipped_node_frame(d, db.store, manifest.packs[0])
     let orphan = result.unwrap(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: next_pack + 1), 0))
     let orphan_path = result.unwrap(disk_path("p-", next_pack + 1, ""))
     result.unwrap(disk_write_synced(d, orphan_path, orphan))
-    let loaded = result.unwrap(disk_load(d, 512, 40 * 86))
+    let loaded = result.unwrap(disk_load(d, 40 * 86))
     if !same(loaded.store, db.store) || loaded.manifest.branches[0].version != 40 || loaded.graph.live != 40 * 86 {
         return false
     }
@@ -5617,7 +5781,7 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
             None => return false
         }
     }
-    match disk_load(d, 512, 40 * 86 - 1) {
+    match disk_load(d, 40 * 86 - 1) {
         Error(Full(cause)) => if cause.requested != 3440 || cause.available != 3439 {
             return false
         },
@@ -5628,7 +5792,7 @@ pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
     let changed = raw[88] ^ 1u8
     let _ = list.set(mut raw, 88, changed)
     result.unwrap(disk_write_synced(d, path, raw))
-    disk_corrupt(disk_load(d, 512, 1073741824))
+    disk_corrupt(disk_load(d, 1073741824))
 }
 
 @test
@@ -5723,7 +5887,7 @@ pub fn disk_law_compact(d: Dir, c: Clock) -> bool waits {
     let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 160, at: 0, roots: disk_root_ids(db.roots))
     let _ = list.set(mut manifest.branches, 0, take branch)
     result.unwrap(disk_publish_manifest(d, db.store, manifest))
-    let loaded = result.unwrap(disk_load(d, 4096, 96 * 86))
+    let loaded = result.unwrap(disk_load(d, 96 * 86))
     for k in 0u64 .. 96 {
         let key = result.unwrap(physical(1, key_word(k)))
         let expected = if k < 64 {
@@ -5954,7 +6118,7 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
         Saved(2, 8256) => {},
         _ => return false
     }
-    let saved = result.unwrap(disk_load(d, 512, 8256))
+    let saved = result.unwrap(disk_load(d, 8256))
     let next_pack = saved.manifest.next_pack
     // The retry retains this changed sibling of the oversized row's leaf.
     // Installing counts from the refused draft would mark it already known
@@ -5976,7 +6140,7 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
         NoRoom(3, _) => {},
         _ => return false
     }
-    let after_refusal = result.unwrap(disk_load(d, 512, 8256))
+    let after_refusal = result.unwrap(disk_load(d, 8256))
     if after_refusal.manifest.generation != 2 || after_refusal.manifest.next_pack != next_pack || after_refusal.manifest.branches[0].version != 96 {
         return false
     }
@@ -5999,7 +6163,7 @@ pub fn disk_law_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> bool waits {
         Ok(()) => {},
         _ => return false
     }
-    let reopened = result.unwrap(disk_load(d, 512, 8170))
+    let reopened = result.unwrap(disk_load(d, 8170))
     if reopened.manifest.generation != 3 || reopened.manifest.branches[0].version != 99 || reopened.graph.live != 95 * 86 {
         return false
     }
@@ -6171,17 +6335,23 @@ type DiskStartup: send {
 
 type DiskBootstrap: send {
     d: Dir,
-    random: Random,
+    startup: DiskStartup,
+    preload: DiskDecoded,
     options: Options,
     ready: Sender[Result[DiskStartup, Error]],
     receive: Receiver[DiskCut],
     send: Sender[DiskCutAck]
 }
 
-fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskState), Error] waits {
-    let raw = disk_read_file(d, "MANIFEST", 67108952)
+fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskDecoded), Error] waits {
+    let raw = disk_read_file(d, "MANIFEST", 68157528)
     let loaded = match take raw {
-        Ok(take existing) => disk_load_manifest(d, existing, options.pack_bytes, options.resident_limit)?,
+        Ok(take existing) => {
+            let manifest_bytes = disk_read_manifest("MANIFEST", existing)?
+            let (id, take manifest) = take manifest_bytes
+            disk_cleanup(d, manifest)?
+            disk_decode_packs(d, id, take manifest)?
+        },
         Error(Io(NotFound)) => {
             if !options.create {
                 return Error(NotFound)
@@ -6191,11 +6361,14 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskS
             let (take segment, take end_file) = disk_new_segment(d, id, 1, 0)?
             disk_publish_manifest(d, id, manifest)?
             let startup = DiskStartup(store: id, roots: empty_roots(), live: 0, head: 0, at: 0, next_node: 0, next_table: 1, generation: 1, seq: 1, segment: take segment, end_file: take end_file)
-            return Ok((take startup, DiskState(store: id, manifest: take manifest, graph: disk_graph())))
+            let mut all: List[Roots] = list.new()
+            capacity(result.capacity_only(list.push(mut all, empty_roots())))?
+            let preload = DiskDecoded(store: id, manifest: take manifest, roots: empty_roots(), all: take all,
+                                      ids: list.new(), locations: map.new(), stats: disk_index())
+            return Ok((take startup, take preload))
         },
         Error(take e) => return Error(take e)
     }
-    disk_cleanup(d, loaded.manifest)?
     let tail = disk_last_segment(d, loaded.store, loaded.manifest.first_live)?
     let seq = tail.0 + 1
     let (take segment, take end_file) = disk_new_segment(d, loaded.store, seq, tail.1)?
@@ -6203,20 +6376,24 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskS
         let main = loaded.manifest.branches[0];
         (main.version, main.at)
     }
-    let startup = DiskStartup(store: loaded.store, roots: share_roots(loaded.roots), live: loaded.graph.live, head: pair.0, at: pair.1, next_node: loaded.manifest.next_node - 1, next_table: loaded.manifest.next_table, generation: loaded.manifest.generation, seq: seq, segment: take segment, end_file: take end_file)
-    let DiskLoaded(store: id, manifest: take manifest, roots: _, graph: take graph) = take loaded
-    Ok((take startup, DiskState(store: id, manifest: take manifest, graph: take graph)))
+    let startup = DiskStartup(store: loaded.store, roots: share_roots(loaded.roots), live: 0, head: pair.0, at: pair.1, next_node: loaded.manifest.next_node - 1, next_table: loaded.manifest.next_table, generation: loaded.manifest.generation, seq: seq, segment: take segment, end_file: take end_file)
+    Ok((take startup, take loaded))
 }
 
 fn disk_bootstrap(take input: DiskBootstrap) -> Result[(), Error] waits {
-    let DiskBootstrap(d: d, random: r, options: options, ready: take ready, receive: take receive, send: take send) = take input
-    let started = disk_start(d, r, options)
-    match take started {
+    let DiskBootstrap(d: d, startup: take initial, preload: take preload, options: options,
+                      ready: take ready, receive: take receive, send: take send) = take input
+    let assembled = disk_finish_load(take preload, options.resident_limit)
+    match take assembled {
         Error(take e) => {
             let _ = channel.send(ready, Error(take e));
             Ok(())
         },
-        Ok((take startup, take state)) => {
+        Ok(take loaded) => {
+            let mut startup = take initial
+            startup.live = loaded.graph.live
+            let DiskLoaded(store: id, manifest: take manifest, roots: _, graph: take graph) = take loaded
+            let state = DiskState(store: id, manifest: take manifest, graph: take graph)
             if let Error(_) = channel.send(ready, Ok(take startup)) {
                 return Ok(())
             }
@@ -6242,7 +6419,10 @@ fn disk_session(tasks: Tasks, d: Dir, r: Random, options: Options) -> Result[Dis
     let (send, receive): (Sender[DiskCut], Receiver[DiskCut]) = capacity(channel.new(1))?
     let (acks, received): (Sender[DiskCutAck], Receiver[DiskCutAck]) = capacity(channel.new(1))?
     let (ready, waiting): (Sender[Result[DiskStartup, Error]], Receiver[Result[DiskStartup, Error]]) = capacity(channel.new(1))?
-    let input = DiskBootstrap(d: d, random: r, options: options, ready: take ready, receive: take receive, send: take acks)
+    let prepared = disk_start(d, r, options)?
+    let (take initial, take preload) = take prepared
+    let input = DiskBootstrap(d: d, startup: take initial, preload: take preload, options: options,
+                              ready: take ready, receive: take receive, send: take acks)
     let worker = match task.spawn(tasks, bytes options.checkpoint_task_bytes, take input, disk_bootstrap) {
         Ok(take worker) => take worker,
         Error((c, _)) => return Error(Full(c))
@@ -6297,7 +6477,22 @@ pub fn disk_law_opening(d: Dir, r: Random, tasks: Tasks) -> bool waits {
     let fourth = result.unwrap(disk_session(tasks, d, r, options))
     let good = fourth.startup.seq == 4 && same(fourth.startup.store, id)
     result.unwrap(disk_session_close(take fourth))
-    good
+    if !good { return false }
+    // Step3 runs even when the first listed pack is corrupt. The old
+    // load-before-cleanup order leaves these two files behind on failure.
+    let mut damaged = disk_genesis_fixture()
+    damaged.next_pack = 2
+    result.unwrap(list.push(mut damaged.packs, DiskPack(seq: 1, nodes: 1)))
+    result.unwrap(disk_publish_manifest(d, id, damaged))
+    let empty: Bytes = list.new()
+    result.unwrap(disk_write_synced(d, "p-1", empty))
+    result.unwrap(disk_write_synced(d, "p-2", empty))
+    result.unwrap(disk_write_synced(d, "MANIFEST.tmp", empty))
+    match disk_session(tasks, d, r, options) {
+        Error(Corrupt(_)) => {},
+        _ => return false
+    }
+    !result.unwrap(disk_exists(d, "p-2")) && !result.unwrap(disk_exists(d, "MANIFEST.tmp"))
 }
 
 @test
@@ -6578,7 +6773,7 @@ pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if let Some(_) = db.poison {
         return false
     }
-    let unchanged = result.unwrap(disk_load(d, 512, 2097152))
+    let unchanged = result.unwrap(disk_load(d, 2097152))
     if unchanged.manifest.generation != 2 || unchanged.manifest.branches[0].version != 1 {
         return false
     }
@@ -6657,7 +6852,7 @@ pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
                 if db.head != 513 || db.resident != 142 + 512 * 94 || db.checkpointed != 2 || std.omap.len(db.roots.catalog) != 1 || std.omap.len(db.roots.data) != 512 {
                     return false
                 }
-                let persisted = result.unwrap(disk_load(child, 512, 1048576))
+                let persisted = result.unwrap(disk_load(child, 1048576))
                 if persisted.manifest.generation != 2 || persisted.manifest.branches[0].version != 1 || std.omap.len(persisted.roots.catalog) != 1 || std.omap.len(persisted.roots.data) != 0 {
                     return false
                 }
@@ -6779,7 +6974,7 @@ fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) 
     }
     let _ = checkpoint(mut db)?
     if scenario == "gap" {
-        let loaded = disk_load(d, options.pack_bytes, options.resident_limit)?
+        let loaded = disk_load(d, options.resident_limit)?
         let seq = loaded.manifest.next_pack
         let first_name = capacity(disk_path("p-", seq, ""))?
         let second_name = capacity(disk_path("p-", seq + 1, ""))?

@@ -28,8 +28,8 @@ impl CheckProduct {
         if let Some(prior) = prior {
             let request: BTreeSet<ModuleId> = self.files.iter().map(|f| f.module).collect();
             for &i in recorded {
-                let path = &prior.paths[i as usize];
-                match prior.places[i as usize] {
+                let path = prior.path(i as usize);
+                match prior.place(i as usize) {
                     Some((module, file_offset)) if same_files || !request.contains(&module) => rows
                         .push(SourceRow {
                             path,

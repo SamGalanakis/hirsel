@@ -295,14 +295,14 @@ impl CheckProduct {
             {
                 // An unchanged instance: its table entry, by M2 rule 1.
                 let prior = expand.prior.unwrap();
-                let entry = &prior.instances[i];
+                let entry = prior.entry(i);
                 observe(key, "table");
                 resolver.add_closures(prior.closures_of(entry));
                 instances.table.insert(key.clone(), i as u32);
                 return Ok(entry
                     .children
                     .iter()
-                    .map(|&c| prior.instances[c as usize].identity.clone())
+                    .map(|&c| prior.entry(c as usize).identity.clone())
                     .collect());
             }
             let input = |message: String| InstanceStop::Input {

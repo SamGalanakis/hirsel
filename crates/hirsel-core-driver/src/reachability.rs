@@ -101,8 +101,7 @@ impl Reached<'_> {
                 .map(|(p, _)| p.clone())
                 .collect(),
             Reached::Record(reach) => reach
-                .graph
-                .iter()
+                .nodes()
                 .filter(|n| n.body)
                 .map(|n| reach.row_path(n.row as usize).clone())
                 .collect(),
@@ -116,8 +115,7 @@ impl Reached<'_> {
                 .map(|((p, _), _)| p.clone())
                 .collect(),
             Reached::Record(reach) => reach
-                .graph
-                .iter()
+                .nodes()
                 .filter(|n| n.unavailable)
                 .map(|n| reach.row_path(n.row as usize).clone())
                 .collect(),
@@ -160,24 +158,39 @@ impl CheckProduct {
             };
             let loaded = crate::reach::load(&records.store, selection)?;
             let record_bytes = loaded.as_ref().map_or(0, |(_, n)| *n);
-            let constants = self.own_constants()?;
             let prior = loaded.map(|(r, _)| r);
-            let changed = prior.as_ref().map(|p| p.changed(self)).unwrap_or_default();
-            let entry_live = prior
-                .as_ref()
-                .is_some_and(|p| p.row(entry).is_some_and(|i| !changed[i]));
             let clean = self.diagnostics.is_empty()
                 && self.incomplete.is_empty()
                 && self.resources.is_empty();
-            let hit = prior.as_ref().is_some_and(|prior| {
-                clean
-                    && damaged.is_empty()
-                    && prior.constants == constants
-                    && !changed.contains(&true)
+            // A record written by a request with this product snapshot holds
+            // this request's every row and constant: nothing is compared.
+            let same_snapshot = prior.as_ref().is_some_and(|p| {
+                self.snapshot != ContentHash::default() && p.head.snapshot == self.snapshot
             });
+            let (hit, entry_live, changed, constants) = match &prior {
+                Some(prior) if same_snapshot && clean && damaged.is_empty() => {
+                    (true, prior.row(entry).is_some(), vec![], prior.constants())
+                }
+                _ => {
+                    let constants = self.own_constants()?;
+                    let changed = prior.as_ref().map(|p| p.changed(self)).unwrap_or_default();
+                    let entry_live = prior
+                        .as_ref()
+                        .is_some_and(|p| p.row(entry).is_some_and(|i| !changed[i]));
+                    let hit = prior.as_ref().is_some_and(|prior| {
+                        clean
+                            && damaged.is_empty()
+                            && prior.constants() == constants
+                            && !changed.contains(&true)
+                    });
+                    (hit, entry_live, changed, constants)
+                }
+            };
             if let (true, Some(held)) = (hit, &prior) {
                 let (bodies, declarations) = held.counts();
-                let instances = held.instances.iter().map(|e| e.identity.clone()).collect();
+                let instances = (0..held.len())
+                    .map(|i| held.entry(i).identity.clone())
+                    .collect();
                 let materialized = crate::instances::InstanceSet::default();
                 return Ok(Reachable {
                     bodies,
@@ -188,9 +201,9 @@ impl CheckProduct {
                     first_stops: vec![],
                     instances: Ok(instances),
                     counters: crate::reach::ReachCounters {
-                        expanded: held.instances.len() as u64,
+                        expanded: held.len() as u64,
                         record_bytes: record_bytes as u64,
-                        vector: held.rows.len() as u64,
+                        vector: held.rows() as u64,
                         ..Default::default()
                     },
                     materialized,
@@ -202,6 +215,8 @@ impl CheckProduct {
                         hit: true,
                         entry_live,
                         constants,
+                        // A hit keeps the record's sections; its build
+                        // writes them under a new head when the head moved.
                         draft: None,
                     }),
                 });
@@ -375,7 +390,7 @@ impl CheckProduct {
         // roots and of each node's edges.
         let mut reuse = None;
         if let (Some((Some(prior), changed, _)), Ok(reached)) = (prior, &instances)
-            && prior.constants == constants
+            && prior.constants() == constants
         {
             let definitions: BTreeSet<&DefPath> = reached
                 .iter()
@@ -385,7 +400,7 @@ impl CheckProduct {
             if definitions == prior.definitions() {
                 let mut rows = crate::reach::WalkRows::new(self);
                 let mut same = true;
-                for node in &prior.graph {
+                for node in prior.nodes() {
                     if changed[node.row as usize] {
                         let path = prior.row_path(node.row as usize);
                         let live = self.expand(
@@ -395,7 +410,7 @@ impl CheckProduct {
                             image_directory.as_deref(),
                             false,
                         )?;
-                        if live != (prior.edges(node), node.unavailable) {
+                        if live != (prior.edges(&node), node.unavailable) {
                             same = false;
                             break;
                         }

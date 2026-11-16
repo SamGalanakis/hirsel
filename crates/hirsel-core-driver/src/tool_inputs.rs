@@ -247,6 +247,10 @@ pub(crate) struct Toolchain {
     /// The runtime archive alone: objects are emitted in process against its
     /// ABI, so a different C driver or linker relinks them but compiles none.
     pub(crate) runtime: ContentHash,
+    /// The digest of the (name, value) pairs a capture's child tools run
+    /// under ([`CAPTURE_VARIABLES`]), and nothing else of the environment:
+    /// an installation's link takes none.
+    pub(crate) environment: ContentHash,
 }
 
 /// One cached record of every toolchain input. Stat signatures avoid
@@ -342,6 +346,7 @@ fn installed_toolchain(
             [crate::encode(&(identity, &archive.content))?.as_slice()],
         ),
         runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.content.0.as_slice()]),
+        environment: tool_environment(&[]),
     };
     let recipe = LinkRecipe {
         schema: LINK_RECIPE_SCHEMA,
@@ -360,7 +365,7 @@ fn driver_toolchain(
     target: &str,
     runtime: &Path,
 ) -> io::Result<(Toolchain, LinkRecipe)> {
-    let (recipe, key) = capture_keyed_link_recipe(cc, target, false, &search())?;
+    let (recipe, key, environment) = capture_keyed_link_recipe(cc, target, false, &search())?;
     let root = recipe_directory(cc)?;
     let path = root.join(format!("toolchain-{target}-{key}.json"));
     let mut paths = vec![cc.canonicalize()?, runtime.to_owned()];
@@ -404,6 +409,7 @@ fn driver_toolchain(
     let toolchain = Toolchain {
         image: identity,
         runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.0.as_slice()]),
+        environment,
     };
     // A moved stat over equal bytes is a change to the record: rewrite it so
     // the next request reads nothing. An unchanged record is not rewritten.
@@ -507,7 +513,7 @@ fn capture_link_recipe(
     force: bool,
     search: &OsStr,
 ) -> io::Result<LinkRecipe> {
-    capture_keyed_link_recipe(cc, target, force, search).map(|(recipe, _)| recipe)
+    capture_keyed_link_recipe(cc, target, force, search).map(|(recipe, ..)| recipe)
 }
 
 /// Capture the link editor command once beside the selected toolchain, with
@@ -519,13 +525,13 @@ fn capture_keyed_link_recipe(
     target: &str,
     force: bool,
     search: &OsStr,
-) -> io::Result<(LinkRecipe, String)> {
+) -> io::Result<(LinkRecipe, String, ContentHash)> {
     let driver = cc.to_owned();
     let driver_key = driver_file_key(&driver)?;
     let environment = CaptureEnvironment::new(search)?;
     let file_key = environment.key(&driver_key)?;
     capture_link_recipe_with(cc, target, force, &environment, &file_key, &driver_key)
-        .map(|r| (r, file_key))
+        .map(|r| (r, file_key, environment.digest()))
 }
 
 /// The variables a capture's child tools run under; nothing else is
@@ -575,13 +581,22 @@ impl CaptureEnvironment {
         })
     }
 
-    fn key(&self, driver_key: &str) -> io::Result<String> {
+    fn pairs(&self) -> Vec<(&'static str, &[u8])> {
         use std::os::unix::ffi::OsStrExt;
-        let variables = self
-            .variables
+        self.variables
             .iter()
             .map(|(name, value)| (*name, value.as_bytes()))
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    /// The listed (name, value) pairs alone: what a request record takes
+    /// from the environment. The directory and umask key the capture file.
+    fn digest(&self) -> ContentHash {
+        tool_environment(&self.pairs())
+    }
+
+    fn key(&self, driver_key: &str) -> io::Result<String> {
+        let variables = self.pairs();
         let hash = ContentHash::of_parts(
             "hirsel.link-driver-environment.v1",
             [
@@ -597,6 +612,18 @@ impl CaptureEnvironment {
         command.envs(self.variables.iter().map(|(name, value)| (name, value)));
         command
     }
+}
+
+/// `hirsel.tool-environment.v1` over the listed (name, value) pairs.
+fn tool_environment(pairs: &[(&str, &[u8])]) -> ContentHash {
+    let mut bytes = Vec::new();
+    for (name, value) in pairs {
+        for part in [name.as_bytes(), value] {
+            bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(part);
+        }
+    }
+    ContentHash::of_parts("hirsel.tool-environment.v1", [&bytes[..]])
 }
 
 /// This process's umask, as the kernel reports it; a child inherits it.

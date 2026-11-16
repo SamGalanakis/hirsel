@@ -33,7 +33,7 @@ const BODY_HEADER: usize = 28;
 const IR: &str = "hirsel.core-ir.v1";
 // Codec bound bits and the codec contextual symbol change declaration products.
 const VERSION: u32 = 34;
-const HEADER: usize = 12;
+pub(crate) const HEADER: usize = 12;
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;
 /// A body's two checksums and its address.
@@ -48,6 +48,23 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     /// Every file this thread published: each is a create, write and rename.
     pub(crate) static WRITES: std::cell::RefCell<Vec<Durable>> = const { std::cell::RefCell::new(vec![]) };
+}
+/// Test crash points: a store root whose writer dies after its next `n`
+/// renames. Every later publish into it fails before its rename and leaves
+/// its temporary, as a killed writer's would.
+#[cfg(test)]
+pub(crate) static CRASH: std::sync::Mutex<Vec<(PathBuf, usize)>> = std::sync::Mutex::new(vec![]);
+#[cfg(test)]
+fn crashed(root: &Path) -> bool {
+    let mut crash = CRASH.lock().unwrap();
+    match crash.iter_mut().find(|(r, _)| r == root) {
+        Some((_, 0)) => true,
+        Some((_, n)) => {
+            *n -= 1;
+            false
+        }
+        None => false,
+    }
 }
 #[cfg(test)]
 thread_local! {
@@ -353,6 +370,11 @@ impl Store {
     /// through: it names the published inode whatever is renamed over `path`.
     fn publish_held(&self, path: &Path, bytes: &[u8]) -> io::Result<File> {
         let mut temporary = self.temporary()?;
+        #[cfg(test)]
+        if crashed(&self.root) {
+            temporary.file.write_all(bytes)?;
+            return Err(io::Error::other("the test writer crashed"));
+        }
         let result = temporary
             .file
             .write_all(bytes)

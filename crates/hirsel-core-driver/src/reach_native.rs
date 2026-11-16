@@ -1,4 +1,4 @@
-// The reach record (hirsel.core-reach.v2). Law: a build in a primed store is
+// The reach record (hirsel.core-reach.v3). Law: a build in a primed store is
 // the build of the same sources and options into an empty store: the same
 // executable bytes and exit status. On a no-change request it walks nothing
 // (no instance on the M2 path, no object checked, no link); on a one-body edit
@@ -29,16 +29,22 @@ fn reach_steps(name: &str, backend: Backend, core: &Path, steps: &[Step]) {
     for (n, step) in steps.iter().enumerate() {
         let product = record_check(step.app, core, dir.path(), "store");
         let (built, bytes, status) = reach_build(&product, &options);
+        let fresh_store = dir.path().join(format!("fresh-native{n}"));
         let fresh = reach_build(
             &record_check(step.app, core, dir.path(), &format!("fresh{n}")),
             &NativeOptions {
-                store: dir.path().join(format!("fresh-native{n}")),
+                store: fresh_store.clone(),
                 output: dir.path().join(format!("fresh-program{n}")),
                 ..native_options(backend, dir.path())
             },
         );
         assert_eq!(status, Some(step.exit), "{name} step {n}: exit");
         assert!(bytes == fresh.1, "{name} step {n}: the primed store's executable is a fresh store's");
+        // A record written from a prior one (patched) is the fresh record.
+        assert!(
+            same_records(&options.store, &fresh_store),
+            "{name} step {n}: the primed store's reach record is a fresh store's"
+        );
         if let Some((compiled, path)) = step.work {
             assert_eq!(built.compiled, compiled, "{name} step {n}: compiled");
             if matches!(backend, Backend::Cranelift) {
@@ -55,6 +61,16 @@ fn reach_steps(name: &str, backend: Backend, core: &Path, steps: &[Step]) {
                 "{name} step {n}: a no-change request walks and checks nothing"
             );
         }
+        // The first build without a record, over the stored objects.
+        for (path, _) in reach_records(&options.store) {
+            std::fs::remove_file(path).unwrap();
+        }
+        let (_, unrecorded, _) = reach_build(&product, &options);
+        assert!(unrecorded == bytes, "{name} step {n}: a build without a record");
+        assert!(
+            same_records(&options.store, &fresh_store),
+            "{name} step {n}: a record written without a prior is a fresh store's"
+        );
     }
 }
 macro_rules! step {
@@ -185,10 +201,10 @@ fn reach_two_images_and_a_shadowing_name() {
 }
 
 /// The reach records a native store holds: files named by an address whose
-/// checked record decodes as one.
-fn reach_records(root: &Path) -> Vec<PathBuf> {
+/// checked record reads as one, with their payloads.
+fn reach_records(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let store = Store::new(root).unwrap();
-    std::fs::read_dir(root)
+    let mut records: Vec<_> = std::fs::read_dir(root)
         .unwrap()
         .filter_map(|e| {
             let path = e.ok()?.path();
@@ -197,10 +213,21 @@ fn reach_records(root: &Path) -> Vec<PathBuf> {
                 .map(|i| u8::from_str_radix(name.get(i * 2..i * 2 + 2)?, 16).ok())
                 .collect::<Option<Vec<u8>>>()?;
             let record = store.get(ContentHash(bytes.try_into().ok()?)).ok()??;
-            crate::reach::decode_record(&record)
-                .map(|_| path)
+            crate::reach::Reach::read(record.clone()).map(|_| (path, record))
         })
-        .collect()
+        .collect();
+    records.sort();
+    records
+}
+/// Each reach record of the `fresh` store is in `primed` under its name,
+/// byte for byte.
+fn same_records(primed: &Path, fresh: &Path) -> bool {
+    let primed = reach_records(primed);
+    reach_records(fresh).iter().all(|(path, bytes)| {
+        primed
+            .iter()
+            .any(|(p, b)| p.file_name() == path.file_name() && b == bytes)
+    })
 }
 const REACH_APP: &str = "fn get(x: u8) -> u8 { x + 1u8 }\nfn base() -> u8 { 5u8 }\npub fn main() -> Result[(), Exit] { Error(Exit(status: get(base()))) }\n";
 
@@ -217,7 +244,7 @@ fn reach_damaged_record_walks_again() {
         let (_, first, _) = reach_build(&product, &options);
         let records = reach_records(&options.store);
         assert_eq!(records.len(), 1, "{how:?}: one reach record");
-        damage(&records[0], how);
+        damage(&records[0].0, how);
         let (built, bytes, status) = reach_build(&product, &options);
         assert_eq!(status, Some(6), "{how:?}");
         assert!(bytes == first, "{how:?}: the first build's executable");
@@ -513,6 +540,137 @@ fn reach_code_identity_dispatch_follows_the_function_table() {
             assert_eq!(expected.0, Some(0), "{case}: {}", String::from_utf8_lossy(&expected.1));
             assert_eq!(ran, expected, "{case}: what the program reports");
             assert!(primed == fresh, "{case}: the primed store's executable is a fresh store's");
+        }
+    }
+}
+
+/// A flipped byte in any section of the reach record is a miss: the build
+/// walks again, equals the first, and writes the record afresh. A section
+/// with no bytes has its head length flipped. Land target: core-driver-native.
+#[test]
+#[ignore = "explicit native integration target"]
+fn reach_flipped_section_byte_is_a_miss() {
+    let core = core_sources();
+    let dir = tempfile::tempdir().unwrap();
+    let options = native_options(Backend::Cranelift, dir.path());
+    let product = record_check(REACH_APP, &core, dir.path(), "store");
+    let (_, first, _) = reach_build(&product, &options);
+    let [(path, record)] = &reach_records(&options.store)[..] else {
+        panic!("one reach record");
+    };
+    let sections = crate::reach::Reach::read(record.clone()).unwrap().sections();
+    for (i, (offset, len)) in sections.into_iter().enumerate() {
+        let at = match len {
+            0 => crate::reach::HEAD_SECTIONS + i * 8 + 4,
+            _ => offset + len / 2,
+        };
+        let mut file = std::fs::read(path).unwrap();
+        file[crate::store::HEADER + at] ^= 0x10;
+        std::fs::write(path, &file).unwrap();
+        let (built, bytes, status) = reach_build(&product, &options);
+        assert_eq!(status, Some(6), "section {i}");
+        assert!(bytes == first, "section {i}: the first build's executable");
+        assert!(built.reach.instance_path > 0, "section {i}: the flipped record is not used");
+        assert!(reach_records(&options.store) == [(path.clone(), record.clone())], "section {i}: the record afresh");
+    }
+}
+
+/// A record exists only for an accepted, complete walk whose executable is
+/// stored: a walk refused at its instance limit publishes none, and an
+/// output that cannot be written after the link leaves the record, which the
+/// next build then uses as a hit. Oracle: a fresh store's record bytes.
+/// Land target: core-driver-native.
+#[test]
+#[ignore = "explicit native integration target"]
+fn reach_record_only_for_a_complete_walk_and_kept_past_an_output_failure() {
+    let core = core_sources();
+    let dir = tempfile::tempdir().unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let product = record_check(REACH_APP, &core, dir.path(), "store");
+    let options = native_options(Backend::Cranelift, dir.path());
+    let refused = NativeOptions { instance_limit: 0, ..native_options(Backend::Cranelift, dir.path()) };
+    assert!(product.build(&entry, &refused).is_err(), "the walk is refused at its limit");
+    assert!(reach_records(&options.store).is_empty(), "a refused walk publishes no record");
+    let blocked = dir.path().join("not-a-directory");
+    std::fs::write(&blocked, b"").unwrap();
+    let unwritable = NativeOptions { output: blocked.join("program"), ..native_options(Backend::Cranelift, dir.path()) };
+    assert!(product.build(&entry, &unwritable).is_err(), "the output cannot be written");
+    let fresh_store = dir.path().join("fresh-native");
+    let (_, fresh, _) = reach_build(
+        &record_check(REACH_APP, &core, dir.path(), "fresh"),
+        &NativeOptions {
+            store: fresh_store.clone(),
+            output: dir.path().join("fresh-program"),
+            ..native_options(Backend::Cranelift, dir.path())
+        },
+    );
+    assert!(same_records(&options.store, &fresh_store), "the output failure kept the fresh record");
+    let (built, bytes, status) = reach_build(&product, &options);
+    assert_eq!(status, Some(6));
+    assert!(bytes == fresh, "a fresh store's executable");
+    assert_eq!(
+        (built.reach.instance_path, built.compiled, built.linked),
+        (0, 0, false),
+        "the kept record and executable are a hit"
+    );
+}
+
+/// Copy a native store's files, its temporaries excluded.
+fn copy_store(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::copy(&path, to.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+}
+
+/// An edit's writer dies after each of its renames in turn: whatever it left
+/// (objects, debug rows, instance records, the reach record), the next build
+/// is a fresh store's and writes the fresh record. Land target:
+/// core-driver-native.
+#[test]
+#[ignore = "explicit native integration target"]
+fn reach_writer_crash_after_each_rename_then_builds_fresh() {
+    let core = core_sources();
+    let edited = REACH_APP.replace("5u8", "6u8");
+    let dir = tempfile::tempdir().unwrap();
+    let base = native_options(Backend::Cranelift, dir.path());
+    reach_build(&record_check(REACH_APP, &core, dir.path(), "store"), &base);
+    let fresh_store = dir.path().join("fresh-native");
+    let (_, fresh, _) = reach_build(
+        &record_check(&edited, &core, dir.path(), "fresh"),
+        &NativeOptions {
+            store: fresh_store.clone(),
+            output: dir.path().join("fresh-program"),
+            ..native_options(Backend::Cranelift, dir.path())
+        },
+    );
+    let product = record_check(&edited, &core, dir.path(), "store");
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for k in 0.. {
+        let options = NativeOptions {
+            store: dir.path().join(format!("crash-{k}")),
+            output: dir.path().join(format!("crash-program-{k}")),
+            ..native_options(Backend::Cranelift, dir.path())
+        };
+        copy_store(&base.store, &options.store);
+        crate::store::CRASH.lock().unwrap().push((options.store.clone(), k));
+        let crashed = product.build(&entry, &options).is_err();
+        let left = {
+            let mut crash = crate::store::CRASH.lock().unwrap();
+            let at = crash.iter().position(|(r, _)| *r == options.store).unwrap();
+            crash.remove(at).1
+        };
+        assert!(!crashed || left == 0, "crash after {k} renames: only the crash fails the build");
+        let (_, bytes, status) = reach_build(&product, &options);
+        assert_eq!(status, Some(7), "crash after {k} renames");
+        assert!(bytes == fresh, "crash after {k} renames: a fresh store's executable");
+        assert!(same_records(&options.store, &fresh_store), "crash after {k} renames: the fresh record");
+        if left > 0 {
+            assert!(k > 0, "the edit renames something");
+            break;
         }
     }
 }

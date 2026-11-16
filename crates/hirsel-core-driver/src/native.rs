@@ -499,7 +499,7 @@ impl CheckProduct {
                 let expanded = expansions.next().flatten().or(hit.then_some(k as u32));
                 if let Some(i) = expanded {
                     let prior = prior.expect("an expanded instance has its record");
-                    let e = &prior.instances[i as usize];
+                    let e = prior.entry(i as usize);
                     objects.push(ObjectProduct::stored(
                         instance.clone(),
                         records.store(e.location),
@@ -516,7 +516,7 @@ impl CheckProduct {
                             e.debug,
                             e.children
                                 .iter()
-                                .map(|&c| (Some(c), &prior.instances[c as usize].identity)),
+                                .map(|&c| (Some(c), &prior.entry(c as usize).identity)),
                             prior.items(e).cloned().collect(),
                             prior.closures_of(e),
                         );
@@ -729,7 +729,7 @@ impl CheckProduct {
         for (k, instance) in instances.iter().enumerate() {
             let expanded = expansions.next().flatten().or(hit.then_some(k as u32));
             match expanded {
-                Some(i) => recorded_items.extend(&prior.unwrap().instances[i as usize].items),
+                Some(i) => recorded_items.extend(&prior.unwrap().entry(i as usize).items),
                 None => items.extend(reached.materialized.items(instance)?),
             }
         }
@@ -738,8 +738,8 @@ impl CheckProduct {
         let files = reach
             .map(|_| crate::reach::files_digest(self))
             .transpose()?;
-        let same_files = prior.is_some_and(|p| Some(p.files) == files);
-        let recorded = prior.filter(|_| hit && same_files).map(|p| p.sources);
+        let same_files = prior.is_some_and(|p| Some(p.head.files) == files);
+        let recorded = prior.filter(|_| hit && same_files).map(|p| p.head.sources);
         let rows = || self.link_rows(prior, &recorded_items, &items, same_files);
         let source_rows = match recorded {
             Some(_) => None,
@@ -756,16 +756,16 @@ impl CheckProduct {
             (Some(reach), Some(prior))
                 if reach.entry_live
                     && prior
-                        .entry
+                        .link()
                         .cleanup
                         .as_ref()
                         .is_none_or(|c| !damaged.contains(&c.identity)) =>
             {
                 let cleanup =
-                    prior.entry.cleanup.as_ref().map(|c| {
+                    prior.link().cleanup.as_ref().map(|c| {
                         ObjectProduct::stored(c.identity.clone(), &store, c.object, c.debug)
                     });
-                (prior.entry.clone(), cleanup)
+                (prior.link().clone(), cleanup)
             }
             _ => {
                 let (abi, cleanup) = self.bind_entry_native(entry, options, inputs, damaged)?;
@@ -781,23 +781,55 @@ impl CheckProduct {
             }
         };
         objects.extend(cleanup);
-        let mut counters = reached.counters;
-        if let (Some(reach), Some(table)) = (reach, &table)
-            && let Some(draft) = &reach.draft
-        {
-            counters.record_bytes = crate::reach::publish(
-                &store,
-                reach.selection,
-                prior,
-                &reach.constants,
-                draft,
-                &table.entries,
-                &table.closures,
-                &link,
-                (sources, files.expect("a record is drafted with its reach")),
-                source_rows.as_deref().unwrap_or_default(),
-            )? as u64;
-        }
+        let counters = reached.counters;
+        // The record is published once the executable is stored: a walk's
+        // draft with its table, or a hit's sections under its current head.
+        let record = |executable: ContentHash| -> io::Result<u64> {
+            let Some(reach) = reach else {
+                return Ok(0);
+            };
+            let content = match (&reach.draft, &table) {
+                (Some(draft), Some(table)) => crate::reach::Content::Drafted {
+                    constants: &reach.constants,
+                    draft,
+                    instances: &table.entries,
+                    closures: &table.closures,
+                    entry: &link,
+                    places: source_rows.as_deref().unwrap_or_default(),
+                },
+                _ if reach.hit => crate::reach::Content::Held {
+                    places: source_rows.as_deref(),
+                },
+                _ => return Ok(0),
+            };
+            let records = inputs
+                .records
+                .as_ref()
+                .expect("a reach record has its records");
+            // A request without a snapshot keeps a hit's: the record's rows
+            // are live under it either way.
+            let snapshot = match (self.snapshot, prior) {
+                (s, Some(prior)) if s == ContentHash::default() && reach.hit => prior.head.snapshot,
+                (s, _) => s,
+            };
+            let head = crate::reach::Head {
+                snapshot,
+                sources,
+                files: files.expect("a record is drafted with its reach"),
+                verified: self.root,
+                executable,
+                environment: records.digest,
+                toolchain: inputs.toolchain.image,
+                recipe: inputs.recipe.identity,
+                tools: inputs.toolchain.environment,
+                policy: key(
+                    "hirsel.core-entry-policy.v1",
+                    &crate::native_entry::policy(options),
+                )?,
+                instance_limit: options.instance_limit as u64,
+            };
+            Ok(crate::reach::publish(&store, reach.selection, prior, &head, content)? as u64)
+        };
         let entry_plan = crate::native_entry::Plan::new(
             Identity::plain(entry.clone()).symbol(),
             &link.abi,
@@ -822,6 +854,7 @@ impl CheckProduct {
             inputs.toolchain.image,
             inputs.recipe.clone(),
             counters,
+            record,
         )
     }
     /// The entry's declaration part, bound by check.
@@ -1319,6 +1352,7 @@ fn link_objects(
     toolchain: ContentHash,
     recipe: crate::tool_inputs::LinkRecipe,
     mut counters: crate::reach::ReachCounters,
+    record: impl FnOnce(ContentHash) -> io::Result<u64>,
 ) -> Result<Linked, NativeStop> {
     // Development links use lld's cheap string-merging mode. Release keeps
     // the linker default; this spelling is part of the executable key below.
@@ -1501,6 +1535,12 @@ fn link_objects(
         publish(&store, link_key, &bytes)?;
         (bytes, true)
     };
+    // The reach record names the stored executable; an output failure
+    // below leaves both reusable.
+    match record(link_key)? {
+        0 => {}
+        written => counters.record_bytes = written,
+    }
     if let Some(parent) = options
         .output
         .parent()

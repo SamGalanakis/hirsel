@@ -1,6 +1,16 @@
 {
   "packages": [
     {
+      "package": {"name": "reclib", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}],
+      "sources": [{"file": "core/front/cases/body/type-recursion-finite.hirsel", "modules": ["main"], "signatures": false}]
+    },
+    {
+      "package": {"name": "recursion", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "reclib", "version": "1"}],
+      "sources": [{"file": "core/programs/m2b/recursive_types/main.hirsel", "modules": ["main"], "signatures": false}]
+    },
+    {
       "package": {"name": "mutprobe4", "version": "1"},
       "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
       "sources": [{"file": "core/programs/m2b/static_mut/transaction.hirsel", "modules": ["main"], "signatures": false}]
@@ -110,6 +120,7 @@
     }
   ],
   "entries": [
+    {"workload": "recursive_types", "package": {"name": "recursion", "version": "1"}, "module": "main", "definition": "main"},
     {"workload": "static_mut", "package": {"name": "staticmut", "version": "1"}, "module": "main", "definition": "main"},
     {"workload": "table", "package": {"name": "table", "version": "1"}, "module": "main"},
     {"workload": "tx", "package": {"name": "tx", "version": "1"}, "module": "main"},

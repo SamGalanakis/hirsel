@@ -13,6 +13,7 @@ hirsel_guard::install!();
 mod body;
 pub mod codec_decls;
 mod constants;
+mod recursion_decls;
 pub use constants::{ConstData, ConstValue, Constant};
 mod decls;
 mod defaults;
@@ -319,6 +320,7 @@ impl<'a> Program<'a> {
         };
         p.register();
         p.lower_headers();
+        p.check_recursive_instances();
         p.register_constants();
         p.summarize();
         p.evaluate_constants();

@@ -1,0 +1,102 @@
+pub type Tree[T] {
+    label: T,
+    kids: List[Tree[T]]
+}
+
+pub type Swap[A, B] {
+    a: A,
+    b: B,
+    kids: List[Swap[B, A]]
+}
+
+pub type Rotate[A, B, C] {
+    a: A,
+    b: B,
+    c: C,
+    kids: List[Rotate[B, C, A]]
+}
+
+pub type Reset[A] {
+    child: List[Bar[List[A]]]
+}
+
+pub type Bar[X] {
+    child: List[Reset[u64]]
+}
+
+type First[A, B] = A
+
+pub type Project[A, B] {
+    kids: List[Project[First[A, B], u64]]
+}
+
+type Plain {
+    kids: List[Plain]
+}
+
+type Forest {
+    trees: List[Tree[u64]],
+    plain: List[Plain]
+}
+
+pub fn swap_round_trip() -> u64 {
+    let leaf: Swap[bool, u64] = Swap(a: true, b: 7u64, kids: list.new())
+    let mut kids: List[Swap[bool, u64]] = list.new()
+    result.unwrap(list.push(mut kids, take leaf))
+    let mut root: Swap[u64, bool] = Swap(a: 4u64, b: false, kids: take kids)
+    let popped_leaf = option.unwrap(list.pop(mut root.kids))
+    if popped_leaf.a {
+        root.a * 10u64 + popped_leaf.b
+    } else {
+        0u64
+    }
+}
+
+pub fn rotate_round_trip() -> u64 {
+    let last: Rotate[bool, u64, u8] = Rotate(a: true, b: 7u64, c: 3u8, kids: list.new())
+    let mut xs: List[Rotate[bool, u64, u8]] = list.new()
+    result.unwrap(list.push(mut xs, take last))
+    let middle: Rotate[u8, bool, u64] = Rotate(a: 2u8, b: true, c: 5u64, kids: take xs)
+    let mut ys: List[Rotate[u8, bool, u64]] = list.new()
+    result.unwrap(list.push(mut ys, take middle))
+    let mut root: Rotate[u64, u8, bool] = Rotate(a: 4u64, b: 1u8, c: false, kids: take ys)
+    let mut popped_middle = option.unwrap(list.pop(mut root.kids))
+    let popped_last = option.unwrap(list.pop(mut popped_middle.kids))
+    if popped_middle.b && popped_last.a {
+        root.a * 100u64 + popped_middle.c * 10u64 + popped_last.b
+    } else {
+        0u64
+    }
+}
+
+pub fn reset_round_trip() -> u64 {
+    let bar: Bar[List[bool]] = Bar(child: list.new())
+    let mut xs: List[Bar[List[bool]]] = list.new()
+    result.unwrap(list.push(mut xs, take bar))
+    let root: Reset[bool] = Reset(child: take xs)
+    list.len(root.child)
+}
+
+pub fn projection() -> u64 {
+    let root: Project[bool, String] = Project(kids: list.new())
+    list.len(root.kids)
+}
+
+// expect: run swap_round_trip() = 47
+// expect: run rotate_round_trip() = 457
+// expect: run reset_round_trip() = 1
+// expect: run projection() = 0
+pub type Closed[T] {
+    label: T,
+    kids: List[Closed[u64]]
+}
+
+pub fn closed_reset() -> u64 {
+    let root: Closed[bool] = Closed(label: true, kids: list.new())
+    if root.label {
+        1u64
+    } else {
+        0u64
+    }
+}
+// expect: run closed_reset() = 1

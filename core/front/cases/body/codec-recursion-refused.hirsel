@@ -24,7 +24,6 @@ type Forest: codec {
 type Plain: codec {
     kids: List[Plain]
 }
-// expect: refuse SEM-10 at 1:40
-// expect: refuse SEM-10 at 9:5
-// expect: refuse SEM-10 at 13:5
-// expect: refuse SEM-10 at 17:5
+// expect: refuse LANG-12 at 1:40
+// expect: refuse LANG-12 at 13:5
+// expect: refuse LANG-12 at 17:5

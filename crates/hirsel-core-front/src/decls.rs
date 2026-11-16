@@ -301,7 +301,7 @@ pub struct Summary {
     /// The layout recipe of a declaration with no parameters, when its fields map onto
     /// the layout crate's field types.
     pub recipe: Option<Recipe>,
-    /// Part of an inline containment cycle (refused once, OWN-2).
+    /// Part of an invalid recursive definition, already refused (OWN-2 or LANG-12).
     pub cycle: bool,
 }
 

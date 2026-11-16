@@ -1,0 +1,23 @@
+pub fn case_swap_round_trip() -> u64 {
+    reclib.main.swap_round_trip()
+}
+
+pub fn case_rotate_round_trip() -> u64 {
+    reclib.main.rotate_round_trip()
+}
+
+pub fn case_reset_round_trip() -> u64 {
+    reclib.main.reset_round_trip()
+}
+
+pub fn case_projection() -> u64 {
+    reclib.main.projection()
+}
+
+pub fn case_closed_reset() -> u64 {
+    reclib.main.closed_reset()
+}
+
+pub fn main(argv: Args, out: Stdout) -> Result[(), Exit] {
+    Ok(())
+}

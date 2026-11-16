@@ -625,7 +625,12 @@ def first_party(meta: dict) -> str:
                                 bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                           "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m2b/**", "core/corpus/m2b/**", "crates/hirsel-core-rt/include/**"]) + ["core/front/cases/body/callable-generic-fit.hirsel", "core/front/cases/body/callable-static-mut.hirsel"]')))
+                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m2b/**", "core/corpus/m2b/**", "crates/hirsel-core-rt/include/**"]) + ["core/front/cases/body/callable-generic-fit.hirsel", "core/front/cases/body/callable-static-mut.hirsel", "core/front/cases/body/type-recursion-finite.hirsel"]')))
+    out.append("\n" + call("hirsel_script_test", name="core-recursive-instances", script="core/tools/recursive_instances.py", full=False, host=True, production=True,
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-recursive-instances/hirsel"],
+                            bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                            data=Raw('glob(["core/core/**"]) + ["tools/capped"]')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost", script="crates/hirsel-core-front/check-cost.py", full=False, host=True, production=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel", "--request-compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core-request-cost"],
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "hirsel-core-request-cost": "//:hirsel-core-driver-bin-hirsel-core-request-cost"},

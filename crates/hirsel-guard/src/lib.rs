@@ -27,6 +27,25 @@ mod thread;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU8, Ordering};
 
+thread_local! {
+    static MEMORY_CONTEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Name the function being instantiated if its compilation reaches the memory limit.
+/// The label is diagnostic context only; no budget or outcome is changed.
+pub fn with_instance_context<R>(name: String, work: impl FnOnce() -> R) -> R {
+    struct Restore(String);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MEMORY_CONTEXT.with(|context| {
+                context.replace(std::mem::take(&mut self.0));
+            });
+        }
+    }
+    let _restore = Restore(MEMORY_CONTEXT.with(|context| context.replace(name)));
+    work()
+}
+
 /// The limit without `HIRSEL_MEMORY_LIMIT`: 4 GiB.
 pub const DEFAULT_LIMIT: u64 = 4 << 30;
 /// Exit status of a process that reached its limit (sysexits' `EX_OSERR`).
@@ -511,6 +530,14 @@ fn exhausted(size: usize) -> ! {
             .number(kib >> 10)
             .text(b"M");
     }
+    let _ = MEMORY_CONTEXT.try_with(|context| {
+        if let Ok(name) = context.try_borrow()
+            && !name.is_empty()
+        {
+            line.text(b" while instantiating function ")
+                .text(name.as_bytes());
+        }
+    });
     line.text(
         b". Under Buck2 the limit is the test's measured reservation \
               (tools/buck2/test_sizes.bzl); report the program that grew rather than raising it.\n",

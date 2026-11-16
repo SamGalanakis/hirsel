@@ -1237,6 +1237,38 @@ fn generic_static_mut_calls_keep_direct_call_loans() {
 }
 
 #[test]
+fn recursive_type_instances_are_finite() {
+    let mut failures = vec![];
+    for case in [
+        "codec-recursion-refused",
+        "type-recursion-growing",
+        "type-recursion-finite",
+    ] {
+        failures.extend(run_case(&root().join(format!("cases/body/{case}.hirsel"))));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let source =
+        std::fs::read_to_string(root().join("cases/body/type-recursion-finite.hirsel")).unwrap();
+    let (index, modules) = program_inputs(&source);
+    let p = Program::declare(&index, &modules);
+    let mut e = Emitter::new();
+    for f in 0..p.fns.len() {
+        let _ = p.check_lower(f, &mut e);
+    }
+    e.materialize_instances().unwrap();
+    let names: Vec<_> = e.module.types.iter().map(|s| s.name.as_str()).collect();
+    for name in [
+        "app@1/main/Swap[u64, bool]",
+        "app@1/main/Swap[bool, u64]",
+        "app@1/main/Rotate[u64, u8, bool]",
+        "app@1/main/Rotate[u8, bool, u64]",
+        "app@1/main/Rotate[bool, u64, u8]",
+    ] {
+        assert!(names.contains(&name), "missing instance {name}: {names:?}");
+    }
+}
+
+#[test]
 fn codec_typed_static_registration() {
     let mut failures = run_case(&root().join("cases/body/callable-codec-register.hirsel"));
     failures.extend(run_case(

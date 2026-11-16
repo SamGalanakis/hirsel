@@ -1,0 +1,29 @@
+type Nest[T] = Leaf(T) | Deeper(List[Nest[(T, T)]])
+type Forest { nests: List[Nest[u64]] }
+type Foo[A, B] { kids: List[Foo[List[A], B]] }
+type Even[T] { odd: List[Odd[T]] }
+type Odd[T] { even: List[Even[(T, u64)]] }
+type TupleGrowth[T] { child: List[TupleGrowth[(T, bool)]] }
+type OptionGrowth[T] { child: List[OptionGrowth[Option[T]]] }
+type KeyGrowth[T] { child: Map[StaticFn[fn(KeyGrowth[List[T]]) -> u64], u64] }
+type ValueGrowth[T] { child: Map[u64, ValueGrowth[List[T]]] }
+type FunctionGrowth[T] { child: fn() -> FunctionGrowth[(T, T)] }
+type Wrap[X] { value: X }
+type Wrapped[T] { child: List[Wrap[Wrapped[List[T]]]] }
+type Twice[X] = (X, X)
+type AliasGrowth[T] { child: List[AliasGrowth[Twice[T]]] }
+type FunctionArgument[T] { child: List[FunctionArgument[fn() -> T]] }
+type Removed[T]: codec { removed old: List[Removed[(T, T)]], n: u64 }
+// expect: refuse LANG-12 at 1:33
+// expect: refuse LANG-12 at 3:18
+// expect: refuse LANG-12 at 4:16
+// expect: refuse LANG-12 at 5:15
+// expect: refuse LANG-12 at 6:23
+// expect: refuse LANG-12 at 7:24
+// expect: refuse LANG-12 at 8:21
+// expect: refuse LANG-12 at 9:23
+// expect: refuse LANG-12 at 10:26
+// expect: refuse LANG-12 at 12:19
+// expect: refuse LANG-12 at 14:23
+// expect: refuse LANG-12 at 15:28
+// expect: refuse LANG-12 at 16:26

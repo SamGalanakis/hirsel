@@ -1,0 +1,27 @@
+[
+  {
+    "name": "swap_round_trip",
+    "value": 47,
+    "used": 0
+  },
+  {
+    "name": "rotate_round_trip",
+    "value": 457,
+    "used": 0
+  },
+  {
+    "name": "reset_round_trip",
+    "value": 1,
+    "used": 0
+  },
+  {
+    "name": "projection",
+    "value": 0,
+    "used": 0
+  },
+  {
+    "name": "closed_reset",
+    "value": 1,
+    "used": 0
+  }
+]

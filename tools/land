@@ -89,7 +89,7 @@ CORE_ACCEPTANCE = (
     '//:land-core-library-modes', '//:core-llvm-aarch64-front',
     '//:core-llvm-aarch64-runtime', '//:core-llvm-aarch64-abi', '//:core-llvm-aarch64-failure',
     '//:core-llvm-native', '//:core-driver-provider-m3', '//:core-m2b', '//:core-m2b-host', '//:core-store-s1',
-    '//:test-core-m1-runner', '//:core-check-cost-unit', '//:core-front-cost', '//:core-bookkeeping-stop', '//:core-memory-report', '//:core-closed-pipe', '//:core-store-no-sync',
+    '//:test-core-m1-runner', '//:core-recursive-instances', '//:core-check-cost-unit', '//:core-front-cost', '//:core-bookkeeping-stop', '//:core-memory-report', '//:core-closed-pipe', '//:core-store-no-sync',
     '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
     '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64',
     '//:core-aarch64-provider', '//:land-core-evaluator', '//:land-core-native-capabilities',

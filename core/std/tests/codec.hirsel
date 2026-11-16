@@ -91,6 +91,30 @@ fn format_scalars() -> bool {
     enc(codec.of_u16(), u) == unhex("3412") && enc(codec.of_i64(), i) == unhex("feffffffffffffff") && enc(codec.of_f32(), f) == unhex("0000803f") && enc(codec.of_f64(), g) == unhex("000000000000e0bf") && enc(codec.of_char(), 'é') == unhex("e9000000") && enc(codec.of_bool(), true) == unhex("01") && enc(codec.of_unit(), ()) == unhex("") && enc(codec.of_string(), "hé") == unhex("0300000000000000 68c3a9") && enc(codec.of_i8(), small) == unhex("ff") && enc(codec.of_u32(), w) == unhex("07000000")
 }
 
+// The hand-picked codec a and b agree: the same bytes for x, the same schema and the same
+// least.
+fn same_codec[T](a: codec.Codec[T], b: codec.Codec[T], x: T) -> bool {
+    enc(a, x) == enc(b, x) && result.unwrap(codec.schema(a)) == result.unwrap(codec.schema(b)) && codec.least(a) == codec.least(b)
+}
+
+// `of` from inside a generic body, where only the instance knows T.
+fn generic_of[T: codec]() -> codec.Codec[T] {
+    codec.of()
+}
+
+// `of` picks std's maker of each built-in type, whether the call's expected type closes T
+// or T is a generic body's parameter: a scalar of another width or signedness, or String's
+// maker at another type, writes other bytes or another schema.
+// expect: run of_builtins() = true
+fn of_builtins() -> bool {
+    let (a, b, c, d): (u8, u16, u32, u64) = (0x81, 0x8182, 0x81828384, 0x8182838485868788)
+    let (e, f, g, h): (i8, i16, i32, i64) = (-2, -3, -4, -5)
+    let (x, y): (f32, f64) = (1.5, -0.25)
+    let direct = same_codec(codec.of_u8(), codec.of(), a) && same_codec(codec.of_u16(), codec.of(), b) && same_codec(codec.of_u32(), codec.of(), c) && same_codec(codec.of_u64(), codec.of(), d) && same_codec(codec.of_i8(), codec.of(), e) && same_codec(codec.of_i16(), codec.of(), f) && same_codec(codec.of_i32(), codec.of(), g) && same_codec(codec.of_i64(), codec.of(), h) && same_codec(codec.of_f32(), codec.of(), x) && same_codec(codec.of_f64(), codec.of(), y) && same_codec(codec.of_bool(), codec.of(), true) && same_codec(codec.of_char(), codec.of(), 'é') && same_codec(codec.of_unit(), codec.of(), ()) && same_codec(codec.of_string(), codec.of(), "hé")
+    let generic = same_codec(codec.of_u8(), generic_of(), a) && same_codec(codec.of_u16(), generic_of(), b) && same_codec(codec.of_u32(), generic_of(), c) && same_codec(codec.of_u64(), generic_of(), d) && same_codec(codec.of_i8(), generic_of(), e) && same_codec(codec.of_i16(), generic_of(), f) && same_codec(codec.of_i32(), generic_of(), g) && same_codec(codec.of_i64(), generic_of(), h) && same_codec(codec.of_f32(), generic_of(), x) && same_codec(codec.of_f64(), generic_of(), y) && same_codec(codec.of_bool(), generic_of(), true) && same_codec(codec.of_char(), generic_of(), 'é') && same_codec(codec.of_unit(), generic_of(), ()) && same_codec(codec.of_string(), generic_of(), "hé")
+    direct && generic
+}
+
 // The extremes of each width come back, and every prefix of them is Truncated.
 // expect: run scalars_round_trip() = true
 fn scalars_round_trip() -> bool {

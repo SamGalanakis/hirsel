@@ -69,7 +69,7 @@ mod temporaries;
 mod types;
 mod writers;
 pub use key_glue::{GLUE_OPERATIONS, is_glue};
-use templates::{AllocationLayout, CopySize, GenericCall, NameRecipe};
+use templates::{AllocationLayout, CallOperation, CopySize, GenericCall, NameRecipe};
 pub use templates::{GenericTemplate, NamePart, import_instance, materialize, materialize_glue};
 mod values;
 use types::*;

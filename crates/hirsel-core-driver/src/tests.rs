@@ -3082,3 +3082,42 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
         .collect();
     assert_eq!(ranges, ["!{i64 0, i64 2049638230412172401}"], "{ir}");
 }
+
+/// LANG-12 at `std.codec.of()`: a closed type without `codec`, and a generic body's
+/// parameter that does not declare it, are refused at the call that fixes T, not
+/// resolved to a maker nor left as a gap. The call is rewritten to T's codec, so a
+/// rewrite placed before the bound check would accept or gap instead.
+#[test]
+fn codec_of_without_the_bound_is_refused_at_the_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    let source = "type Plain { n: u64 }\n\
+                  fn closed() -> std.codec.Codec[Plain] { std.codec.of() }\n\
+                  fn open[T]() -> std.codec.Codec[T] { std.codec.of() }\n";
+    std::fs::write(app.join("main.hirsel"), source).unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let mut request = CheckRequest::program(&app, &root, &dir.path().join("store")).unwrap();
+    request.entry = None;
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    let mut sites: Vec<_> = product
+        .machine_diagnostics()
+        .unwrap()
+        .into_iter()
+        .map(|d| {
+            (
+                d.rule.to_string(),
+                d.primary.span.start as usize,
+                d.primary.span.end as usize,
+            )
+        })
+        .collect();
+    sites.sort();
+    let calls: Vec<_> = source
+        .match_indices("std.codec.of()")
+        .map(|(at, call)| ("LANG-12".to_string(), at, at + call.len()))
+        .collect();
+    assert_eq!(sites, calls);
+}

@@ -375,6 +375,17 @@ impl<'a> Program<'a> {
             Def::Fn(_) => None,
         }
     }
+    /// The row of the function `path` names, in this program or its library.
+    pub fn function_id(&self, path: &DefPath) -> Option<usize> {
+        match self
+            .by_path
+            .get(path)
+            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
+        {
+            Def::Fn(f) => Some(*f as usize),
+            Def::Type(_) => None,
+        }
+    }
     pub fn function(&self, path: &DefPath) -> Option<&FnDecl> {
         match self
             .by_path

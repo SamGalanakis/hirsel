@@ -112,6 +112,22 @@ pub fn module(m: &Module) -> R {
         need(f.signature.index() < m.signatures.len(), || {
             format!("f{i}: unknown signature")
         })?;
+        // `std.codec.of` is resolved by its type argument to that type's codec maker
+        // before any instance is built: only a template's rows name it, at a rigid
+        // argument (`$i`) or as its own body's call (crate docs, "Instances").
+        let k = &m.instances[f.instance.index()];
+        let closed = !k.arguments.is_empty()
+            && k.arguments.iter().all(|t| {
+                m.types
+                    .get(t.index())
+                    .is_some_and(|t| !t.name.contains('$'))
+            });
+        let of = k.definition.package_is("std", "1")
+            && k.definition.0.modules == ["codec"]
+            && k.definition.0.name == "of";
+        need(!(of && closed), || {
+            format!("f{i}: `std.codec.of` is never an instance")
+        })?;
         if let Some(b) = &f.body {
             body(m, &m.signatures[f.signature.index()], b).map_err(|e| format!("f{i}: {e}"))?;
             need(

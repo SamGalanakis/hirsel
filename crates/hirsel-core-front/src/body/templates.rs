@@ -143,8 +143,16 @@ impl NameRecipe {
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GenericCall {
-    pub operation: Option<(key_glue::KeyOp, TypeId)>,
+    pub operation: Option<CallOperation>,
     pub dictionaries: Vec<NameRecipe>,
+}
+/// A generic body's call whose callee is chosen by its instance's type arguments.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub enum CallOperation {
+    /// Key glue `op` at the row: derived where it is materialised, or inline.
+    Key(key_glue::KeyOp, TypeId),
+    /// `std.codec.of[T]()` at T's row: the call is of T's codec maker ([`codec_maker`]).
+    CodecOf(TypeId),
 }
 
 /// The instance `identity` of the generic body `function` of `source`, whose type
@@ -392,6 +400,66 @@ fn import_hook(module: &mut Module, rows: &[TypeId], hook: &ClosureHook) -> Func
     FuncId(module.functions.len() as u32 - 1)
 }
 
+/// The codec maker `of[T]()` calls at T's closed row `ty` (EXPANSION 9.1), as a row of
+/// `module` with `signature`, `of`'s at T and every maker's: `() -> Codec[T]`. A
+/// built-in type's is std's `of_X` beside `of` (`of` names that package); any other
+/// type has none, which a checked program never asks for, since `of` requires the
+/// `codec` bound.
+pub(super) fn codec_maker(
+    module: &mut Module,
+    of: &DefPath,
+    ty: TypeId,
+    signature: SigId,
+) -> Result<FuncId, String> {
+    let name = &module.types[ty.index()].name;
+    let Some(maker) = builtin_codec(name) else {
+        return Err(format!("{name} has no codec maker"));
+    };
+    let mut definition = of.clone();
+    definition.0.name = maker.into();
+    let key = InstanceKey {
+        definition,
+        arguments: vec![],
+        dictionaries: vec![],
+    };
+    if let Some(row) = module
+        .functions
+        .iter()
+        .position(|f| module.instances[f.instance.index()] == key)
+    {
+        return Ok(FuncId(row as u32));
+    }
+    let instance = InstanceId(module.instances.len() as u32);
+    module.instances.push(key);
+    module.functions.push(Function {
+        instance,
+        signature,
+        body: None,
+    });
+    Ok(FuncId(module.functions.len() as u32 - 1))
+}
+
+/// std's maker of the built-in type whose row is named `name`: a scalar, `()` or String.
+pub(super) fn builtin_codec(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "()" => "of_unit",
+        "bool" => "of_bool",
+        "char" => "of_char",
+        "u8" => "of_u8",
+        "u16" => "of_u16",
+        "u32" => "of_u32",
+        "u64" => "of_u64",
+        "i8" => "of_i8",
+        "i16" => "of_i16",
+        "i32" => "of_i32",
+        "i64" => "of_i64",
+        "f32" => "of_f32",
+        "f64" => "of_f64",
+        "core@1/core/String" => "of_string",
+        _ => return None,
+    })
+}
+
 struct Substitution<'a> {
     module: &'a mut Module,
     rows: &'a mut Names,
@@ -568,14 +636,31 @@ impl Substitution<'_> {
                 .map(|name| name.render(&self.names))
                 .collect(),
         };
-        if let Some((op, ty)) = call.operation {
-            self.signature(function.signature);
-            let ty = self.ty(ty);
-            if !key_glue::inline_scalar(self.module, ty, op) {
-                let row = key_glue::glue_row(self.module, ty, op);
-                self.functions.insert(old, row);
-                return row;
+        match call.operation {
+            Some(CallOperation::Key(op, ty)) => {
+                self.signature(function.signature);
+                let ty = self.ty(ty);
+                if !key_glue::inline_scalar(self.module, ty, op) {
+                    let row = key_glue::glue_row(self.module, ty, op);
+                    self.functions.insert(old, row);
+                    return row;
+                }
             }
+            Some(CallOperation::CodecOf(ty)) => {
+                let signature = self.signature(function.signature);
+                let ty = self.ty(ty);
+                return match codec_maker(self.module, &key.definition, ty, signature) {
+                    Ok(row) => {
+                        self.functions.insert(old, row);
+                        row
+                    }
+                    Err(error) => {
+                        self.error = Some(error);
+                        old
+                    }
+                };
+            }
+            None => {}
         }
         if let Some(id) = self
             .module

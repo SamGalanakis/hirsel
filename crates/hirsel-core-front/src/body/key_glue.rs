@@ -204,7 +204,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .entry(function)
                     .or_insert_with(|| GenericCall {
                         dictionaries: vec![],
-                        operation: Some((op, id)),
+                        operation: Some(super::templates::CallOperation::Key(op, id)),
                     });
                 function
             } else {

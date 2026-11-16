@@ -930,6 +930,14 @@
 //! instance count past the compiler's resource limit), never as a language error
 //! and never by a depth rule in the language.
 //!
+//! `std.codec.of[T]` is never an instance and has no evaluator meaning. The checker
+//! resolves each call by its type argument to that type's codec maker, which has the
+//! signature `() -> Codec[T]` that `of` has (SEM-10): a call at a closed T is lowered
+//! to the maker directly, and a call in a generic body at its parameter is the
+//! template's rigid row `std.codec.of[$i]`, which becomes the maker's row when an
+//! instance substitutes T. Well-formedness refuses a function row of `std.codec.of`
+//! whose type argument is closed.
+//!
 //! An instance's signature is the closed signature of its substituted types (FORM
 //! #64): a parameter of a type argument is carried the way that type is carried in a
 //! closed function. Each type row publishes how ([`Carried`], text `value s`,

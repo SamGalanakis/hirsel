@@ -1012,6 +1012,40 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Ok(row)
     }
 
+    /// A call of `std.codec.of` (SEM-10, EXPANSION 9.1) whose T is closed or structural:
+    /// a call of T's codec maker. At a type parameter it is None, and the call stays a
+    /// call of `of`'s instance row, which substitution replaces by the instance's maker.
+    fn codec_of(
+        &mut self,
+        f: usize,
+        types: &[TyId],
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<Option<ValueId>> {
+        if !is_codec_of(&self.p.fns[f].path) {
+            return None;
+        }
+        let mut ty = types[0];
+        while let TyKind::Anchored(x, _) | TyKind::View(x) = *self.t.kind(ty) {
+            ty = x;
+        }
+        if let TyKind::Param(_) = self.t.kind(ty) {
+            return None;
+        }
+        let name = crate::decls::layout_name(&self.p.decls, &self.t, ty);
+        let maker = templates::builtin_codec(&name).and_then(|maker| {
+            let mut path = self.p.fns[f].path.clone();
+            path.0.name = maker.into();
+            self.p.function_id(&path)
+        });
+        let Some(maker) = maker else {
+            self.gap(n, "the codec of this type is not built");
+            return Some(None);
+        };
+        Some(self.emit_call(maker, &[], vals, result, n))
+    }
+
     pub(super) fn emit_call(
         &mut self,
         f: usize,
@@ -1022,6 +1056,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         if !self.live() {
             return None;
+        }
+        if let Some(value) = self.codec_of(f, types, vals, result, n) {
+            return value;
         }
         if let Some(value) = self.core_operation(f, types, vals, result, n) {
             return value;
@@ -1045,6 +1082,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         if !self.live() {
             return None;
+        }
+        let g = &self.p.fns[f];
+        if is_codec_of(&g.path) {
+            // `of` at a type parameter P: the instance's P chooses the maker (9.1).
+            let Some(row) = self.e.type_row(self.p, &mut self.t, types[0]) else {
+                self.gap(n, "codec type layout is not built");
+                return None;
+            };
+            if let Some(call) = self.e.generic_calls.get_mut(&func) {
+                call.operation = Some(CallOperation::CodecOf(row));
+            }
         }
         let g = &self.p.fns[f];
         if !g.generics.is_empty() && g.body.is_none() && g.path.package_is("core", "1") {
@@ -1986,4 +2034,9 @@ fn contained(
         TyKind::View(x) | TyKind::Anchored(x, _) => contained(decls, t, *x, i, inside),
         _ => false,
     }
+}
+
+/// Whether `path` is `std.codec.of`, whose calls name a maker per instance.
+pub(super) fn is_codec_of(path: &DefPath) -> bool {
+    path.0.package.name == "std" && path.0.modules == ["codec"] && path.0.name == "of"
 }

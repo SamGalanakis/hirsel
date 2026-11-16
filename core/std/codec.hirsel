@@ -560,6 +560,14 @@ fn describe_string(mut s: Schema, _c: Codec[String]) -> Result[(), Capacity] {
     schema_string(mut s)
 }
 
+/// T's codec. The checker resolves each call by the instance's T (SEM-10): to the built-in
+/// codec below for a scalar, `()` and String, and to the codec it generated from T's
+/// declaration for a nominal type. No instance of `of` is ever built, so this body, which
+/// only states the signature in checked Hirsel, never runs.
+pub fn of[T: codec]() -> Codec[T] {
+    of()
+}
+
 // The built-in codecs: core.md's codec rows. `of` resolves to these at scalar types.
 pub fn of_unit() -> Codec[()] {
     Codec(encoder: put_unit, decoder: take_unit, describer: describe_unit, smallest: 0)

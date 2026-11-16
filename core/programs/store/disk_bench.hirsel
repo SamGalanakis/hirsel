@@ -26,7 +26,7 @@ fn disk_bench_next_pack(d: Dir) -> u64 waits { disk_bench_manifest(d).next_pack 
 
 pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let mode = option.unwrap(args.get(argv, 0))
-    let with_index = option.unwrap(args.get(argv, 1)) == "1"
+    let indexed = option.unwrap(args.get(argv, 1)) == "1"
     let million = mode == "R8-load" || mode == "R8-open"
     let n: u64 = if million { 1000000 } else { 100000 }
     let child = disk_test_directory(d)
@@ -36,7 +36,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
     result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), dictionary)))
     let mut t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
-    if with_index {
+    if indexed {
         result.unwrap(create_index(mut db, t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
         let _ = result.unwrap(index(db, mut t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
     }
@@ -44,7 +44,8 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     for k in 0u64 .. n { disk_bench_put(mut db, t, k, k) }
     let first = result.unwrap(checkpoint(mut db))
     result.unwrap(durable(mut db, first))
-    let per_row: u64 = if with_index { 204 } else { 118 }
+    // 62 + r8(12-byte key) + r8(30-byte value: schema 2, id 8, balance 8, owner u32 count 4 + 8); an index entry adds 86.
+    let per_row: u64 = if indexed { 196 } else { 110 }
     if db.resident != catalog_cost + n * per_row { fail("disk bench account") }
     let first_pack = disk_bench_next_pack(child)
     if mode == "R6" {
@@ -74,8 +75,8 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
         result.unwrap(durable(mut holder[0], cut))
     }
     let elapsed = host.mono_ns(c) - started
-    let count = std.omap.len(holder[0].roots.data)
-    let expected_count = if with_index { 2 * n } else { n }
+    let count = std.omap.len(holder[0].heads[0].roots.data)
+    let expected_count = if indexed { 2 * n } else { n }
     if count != expected_count { fail("disk bench row count") }
     let mut rendered = string.new()
     result.unwrap(string.push(mut rendered, "DONE "))

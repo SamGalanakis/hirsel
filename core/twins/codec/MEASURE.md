@@ -1,7 +1,7 @@
 # std.codec against a hand-written Rust codec of the same format
 
 Sources:
-- Hirsel side: `core/twins/codec/codec.hirsel`, which uses `std.codec`. Its codecs are the code the derive generates: `make` with put/take functions per field and `put_list`/`take_list` over a codec.
+- Hirsel side: `core/twins/codec/codec.hirsel`, which uses `std.codec`. `Account` declares `codec`, so its codec is the derived one (put/take per field); the list codecs are `make` over `put_list`/`take_list`. The numbers below were taken with the hand-written Account codec, the same text the derive emits.
 - Rust twin: `core/twins/codec/codec.rs`, the same bytes through a `Codec` trait (monomorphised, `Vec::extend_from_slice`), with the same decode checks (bounds, the count against the bytes left, UTF-8, canonical NaN).
 
 `codec WORK MODE N R`: WORK 0 is N rows `{id: u64, owner: String, balance: i64}`, 1 is N f64s, 2 is N strings, each one List; MODE 0 builds and encodes once, 1 also encodes R times, 2 also decodes R times. Both sides print the same checksum.

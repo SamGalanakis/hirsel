@@ -1,45 +1,13 @@
 // R1–R3. The READY/DONE gate is std.omap's phase-measurement protocol.
-pub type Account: send {
+pub type Account: send + codec {
     id: u64,
-    owner: String,
-    balance: i64
-}
-
-fn account_put(a: Account, mut b: Bytes) -> Result[(), Capacity] {
-    std.codec.put_u64(a.id, mut b)?
-    std.codec.put_i64(a.balance, mut b)?
-    std.codec.put_string(a.owner, mut b)
-}
-
-fn account_take(b: Bytes, mut at: u64) -> Result[Account, std.codec.Stop] {
-    let id = std.codec.take_u64(b, mut at)?
-    let balance = std.codec.take_i64(b, mut at)?
-    let owner = std.codec.take_string(b, mut at)?
-    Ok(Account(id: id, owner: take owner, balance: balance))
-}
-
-fn account_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Account]) -> Result[(), Capacity] {
-    std.codec.define(mut s, "store.bench.Account", 0)?
-    if std.codec.record(mut s, 3)? {
-        return Ok(())
-    }
-    std.codec.field(mut s, "id")?;
-    std.codec.schema_u64(mut s)?
-    std.codec.field(mut s, "balance")?;
-    std.codec.schema_i64(mut s)?
-    std.codec.field(mut s, "owner")?;
-    std.codec.schema_string(mut s)?
-    std.codec.close(mut s)
-    Ok(())
-}
-
-fn accounts() -> std.codec.Codec[Account] {
-    std.codec.make(account_put, account_take, account_schema, 24)
+    balance: i64,
+    owner: String
 }
 
 fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
     let done = result.unwrap(store.run(mut db, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
-        let a = Account(id: i, owner: result.unwrap(string.from("owner000")), balance: int.narrow(i))
+        let a = Account(id: i, balance: int.narrow(i), owner: result.unwrap(string.from("owner000")))
         store.put(mut tx, t, i, a)?
         let back = option.unwrap(store.fetch(tx, store.shape(t), i)?)
         if back.id != i || back.balance != int.narrow(i) || back.owner != "owner000" {
@@ -83,8 +51,9 @@ fn reader(take r: Reader) -> u64 {
 pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let mode = option.unwrap(args.get(argv, 0))
     let mut db = store.memory(clock, random, store.defaults())
-    result.unwrap(store.create_table(mut db, "accounts", std.codec.key_u64(), accounts()))
-    let t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts()))
+    let accounts: std.codec.Codec[Account] = std.codec.of()
+    result.unwrap(store.create_table(mut db, "accounts", std.codec.key_u64(), accounts))
+    let t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts))
     if mode != "R1" {
         for i in 0u64 .. 100000 {
             let _ = insert(mut db, t, i)

@@ -22,21 +22,18 @@ pub struct ParsedModule {
 }
 use crate::{ModuleId, ModulePath, NameIndex};
 /// How the codec derive (EXPANSION section 0) names std's codec module from module
-/// `modules` of `package`, whose dependencies are `dependencies`: `codec` inside std,
-/// `std.codec` where std is a dependency. None where no derive runs: std's codec module
-/// itself, whose codecs are written by hand, and a package without std.
+/// `modules` of `package`, whose dependencies are `dependencies`: bare inside std's codec
+/// module, `codec.` elsewhere in std, `std.codec.` where std is a dependency. None in a
+/// package without std.
 pub fn codec_derive(
     package: &PackageId,
     dependencies: &[PackageId],
     modules: &[String],
 ) -> Option<Derive> {
     let codec = if package.name == "std" {
-        if modules == ["codec"] {
-            return None;
-        }
-        "codec"
+        if modules == ["codec"] { "" } else { "codec." }
     } else if dependencies.iter().any(|d| d.name == "std") {
-        "std.codec"
+        "std.codec."
     } else {
         return None;
     };

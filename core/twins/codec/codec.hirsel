@@ -2,54 +2,23 @@
 // setup builds n values and encodes them once; encode re-encodes them r times; decode
 // decodes the one encoding r times. A mode's cost less setup's is r passes. The check
 // reads only the count and the last value, so a decode pass costs the decode alone.
-pub type Account {
+pub type Account: codec {
     id: u64,
     owner: String,
     balance: i64
 }
 
-fn account_encode(x: Account, mut out: Bytes) -> Result[(), Capacity] {
-    std.codec.put_u64(x.id, mut out)?
-    std.codec.put_string(x.owner, mut out)?
-    std.codec.put_i64(x.balance, mut out)
-}
-
-fn account_decode(b: Bytes, mut at: u64) -> Result[Account, std.codec.Stop] {
-    let id = std.codec.take_u64(b, mut at)?
-    let owner = std.codec.take_string(b, mut at)?
-    let balance = std.codec.take_i64(b, mut at)?
-    Ok(Account(id: id, owner: take owner, balance: balance))
-}
-
-fn account_schema(mut s: std.codec.Schema, c: std.codec.Codec[Account]) -> Result[(), Capacity] {
-    std.codec.define(mut s, "bench.Account", 0)?
-    if std.codec.record(mut s, 3)? {
-        return Ok(())
-    }
-    std.codec.field(mut s, "id")?
-    std.codec.schema_u64(mut s)?
-    std.codec.field(mut s, "owner")?
-    std.codec.schema_string(mut s)?
-    std.codec.field(mut s, "balance")?
-    std.codec.schema_i64(mut s)?
-    std.codec.close(mut s)
-    Ok(())
-}
-
-fn accounts() -> std.codec.Codec[Account] {
-    std.codec.make(account_encode, account_decode, account_schema, 24)
-}
-
 fn rows_encode(x: List[Account], mut out: Bytes) -> Result[(), Capacity] {
-    std.codec.put_list(x, accounts(), mut out)
+    std.codec.put_list(x, std.codec.of(), mut out)
 }
 
 fn rows_decode(b: Bytes, mut at: u64) -> Result[List[Account], std.codec.Stop] {
-    std.codec.take_list(b, mut at, accounts())
+    std.codec.take_list(b, mut at, std.codec.of())
 }
 
 fn rows_schema(mut s: std.codec.Schema, c: std.codec.Codec[List[Account]]) -> Result[(), Capacity] {
-    std.codec.schema_list(mut s, accounts())
+    let a: std.codec.Codec[Account] = std.codec.of()
+    std.codec.schema_list(mut s, a)
 }
 
 fn rows() -> std.codec.Codec[List[Account]] {

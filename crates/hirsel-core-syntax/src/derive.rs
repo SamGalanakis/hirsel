@@ -12,9 +12,9 @@ use crate::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-/// What a package's generated text calls std's codec module (`codec` inside std,
-/// `std.codec` in a package that depends on std), and the module's PROG-1 path, which
-/// prefixes each definition's schema path.
+/// The prefix a package's generated text puts before std's codec names (empty inside
+/// std's codec module, `codec.` elsewhere in std, `std.codec.` in a package that depends
+/// on std), and the module's PROG-1 path, which prefixes each definition's schema path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Derive {
     pub codec: String,
@@ -647,7 +647,7 @@ impl<'a> Machine<'a> {
         if shapes.iter().any(|v| v.removed) {
             s += "let start$ = at$\n";
         }
-        let _ = writeln!(s, "let tag$ = {c}.take_tag(b$, mut at$, {})?", shapes.len());
+        let _ = writeln!(s, "let tag$ = {c}take_tag(b$, mut at$, {})?", shapes.len());
         let mut branches = vec![];
         for v in 0..shapes.len() {
             branches.push(if shapes[v].removed {
@@ -699,10 +699,10 @@ impl<'a> Machine<'a> {
         let c = w.c;
         let mut s = String::new();
         if !self.frame(r).is_empty() {
-            let _ = writeln!(s, "{c}.full(list.push(mut r{r}$, {}))?", tuple(&values));
+            let _ = writeln!(s, "{c}full(list.push(mut r{r}$, {}))?", tuple(&values));
         }
         if self.tagged() {
-            let _ = writeln!(s, "{c}.full(list.push(mut ts$, {r}u64))?");
+            let _ = writeln!(s, "{c}full(list.push(mut ts$, {r}u64))?");
         }
         if self.multi() {
             let _ = writeln!(s, "next$ = {}", self.step(r).edge.unwrap().1);
@@ -717,7 +717,7 @@ impl<'a> Machine<'a> {
             None => {
                 let g: &'a Group<'a> = self.g;
                 let o = w.of(&g.members[m].1);
-                format!("{}.least({o})", w.c)
+                format!("{}least({o})", w.c)
             }
         }
     }
@@ -756,7 +756,7 @@ impl<'a> Machine<'a> {
                     let push = self.push(w, r, saved(k), jump);
                     let _ = write!(
                         s,
-                        "if {c}.take_tag(b$, mut at$, 2)? != 0 {{\n{}}}\nlet {pre}{k}$: {text} = None\n",
+                        "if {c}take_tag(b$, mut at$, 2)? != 0 {{\n{}}}\nlet {pre}{k}$: {text} = None\n",
                         indent(&push)
                     );
                 }
@@ -765,12 +765,12 @@ impl<'a> Machine<'a> {
                     let mut values = saved(k);
                     values.extend([format!("take {pre}k{k}$"), format!("{pre}n{k}$")]);
                     let push = format!(
-                        "let {pre}k{k}$: {text} = {c}.room({pre}n{k}$)?\n{}",
+                        "let {pre}k{k}$: {text} = {c}room({pre}n{k}$)?\n{}",
                         self.push(w, r, values, jump)
                     );
                     let _ = write!(
                         s,
-                        "let {pre}n{k}$ = {c}.take_count(b$, mut at$, {least})?\nif {pre}n{k}$ > 0 {{\n{}}}\nlet {pre}{k}$: {text} = list.new()\n",
+                        "let {pre}n{k}$ = {c}take_count(b$, mut at$, {least})?\nif {pre}n{k}$ > 0 {{\n{}}}\nlet {pre}{k}$: {text} = list.new()\n",
                         indent(&push)
                     );
                 }
@@ -784,12 +784,12 @@ impl<'a> Machine<'a> {
                         format!("take {pre}q{k}$"),
                     ]);
                     let push = format!(
-                        "let {pre}q{k}$ = {c}.take_with(b$, mut at$, {ck})?\n{}",
+                        "let {pre}q{k}$ = {c}take_with(b$, mut at$, {ck})?\n{}",
                         self.push(w, r, values, jump)
                     );
                     let _ = write!(
                         s,
-                        "let {pre}n{k}$ = {c}.take_count(b$, mut at$, {c}.least({ck}) + {least})?\n\
+                        "let {pre}n{k}$ = {c}take_count(b$, mut at$, {c}least({ck}) + {least})?\n\
                          let mut {pre}m{k}$: {text} = map.new()\n\
                          if let Error(f$) = map.reserve(mut {pre}m{k}$, {pre}n{k}$) {{\n    return Error(Full(f$))\n}}\n\
                          if {pre}n{k}$ > 0 {{\n{}}}\nlet {pre}{k}$ = take {pre}m{k}$\n",
@@ -862,7 +862,7 @@ impl<'a> Machine<'a> {
                 let push = self.push(w, r, values, "break");
                 let _ = write!(
                     s,
-                    "let mut bx$ = take bk$\n{c}.full(list.push(mut bx$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
+                    "let mut bx$ = take bk$\n{c}full(list.push(mut bx$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
                     indent(&push)
                 );
             }
@@ -871,13 +871,13 @@ impl<'a> Machine<'a> {
                 let mut values = saved();
                 values.extend(["take bx$".into(), "bl$ - 1".into(), "take bn$".into()]);
                 let push = format!(
-                    "let key_at$ = at$\nlet bn$ = {c}.take_with(b$, mut at$, {ck})?\n\
+                    "let key_at$ = at$\nlet bn$ = {c}take_with(b$, mut at$, {ck})?\n\
                      if map.contains(bx$, bn$) {{\n    return Error(Bad(Duplicate(key_at$)))\n}}\n{}",
                     self.push(w, r, values, "break")
                 );
                 let _ = write!(
                     s,
-                    "let mut bx$ = take bm$\n{c}.full(map.insert(mut bx$, take bq$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
+                    "let mut bx$ = take bm$\n{c}full(map.insert(mut bx$, take bq$, take x$))?\nif bl$ > 1 {{\n{}}}\nlet b{k}$ = take bx$\n",
                     indent(&push)
                 );
             }
@@ -939,7 +939,7 @@ impl<'a> Gen<'a> {
         self.lets
             .entry(t)
             .or_insert_with(|| {
-                writeln!(text, "    let c${n}: {c}.Codec[{t}] = {c}.of()").unwrap();
+                writeln!(text, "    let c${n}: {c}Codec[{t}] = {c}of()").unwrap();
                 format!("c${n}")
             })
             .clone()
@@ -953,50 +953,50 @@ impl<'a> Gen<'a> {
     fn put(&mut self, ty: &Ty<'a>, v: &str) -> String {
         let c = self.c;
         match *ty {
-            Ty::Scalar(x, _) => format!("{c}.put_{x}({v}, mut out$)"),
-            Ty::List(e) => format!("{c}.put_list({v}, {}, mut out$)", self.of(e)),
-            Ty::Option(e) => format!("{c}.put_option({v}, {}, mut out$)", self.of(e)),
-            Ty::Map(k, w) => format!("{c}.put_map({v}, {}, {}, mut out$)", self.of(k), self.of(w)),
+            Ty::Scalar(x, _) => format!("{c}put_{x}({v}, mut out$)"),
+            Ty::List(e) => format!("{c}put_list({v}, {}, mut out$)", self.of(e)),
+            Ty::Option(e) => format!("{c}put_option({v}, {}, mut out$)", self.of(e)),
+            Ty::Map(k, w) => format!("{c}put_map({v}, {}, {}, mut out$)", self.of(k), self.of(w)),
             Ty::Result(t, e) => format!(
-                "{c}.put_result({v}, {}, {}, mut out$)",
+                "{c}put_result({v}, {}, {}, mut out$)",
                 self.of(t),
                 self.of(e)
             ),
-            Ty::With(t) => format!("{c}.put_with({v}, {}, mut out$)", self.of(t)),
+            Ty::With(t) => format!("{c}put_with({v}, {}, mut out$)", self.of(t)),
         }
     }
     fn take(&mut self, ty: &Ty<'a>) -> String {
         let c = self.c;
         match *ty {
-            Ty::Scalar(x, _) => format!("{c}.take_{x}(b$, mut at$)?"),
-            Ty::List(e) => format!("{c}.take_list(b$, mut at$, {})?", self.of(e)),
-            Ty::Option(e) => format!("{c}.take_option(b$, mut at$, {})?", self.of(e)),
-            Ty::Map(k, w) => format!("{c}.take_map(b$, mut at$, {}, {})?", self.of(k), self.of(w)),
+            Ty::Scalar(x, _) => format!("{c}take_{x}(b$, mut at$)?"),
+            Ty::List(e) => format!("{c}take_list(b$, mut at$, {})?", self.of(e)),
+            Ty::Option(e) => format!("{c}take_option(b$, mut at$, {})?", self.of(e)),
+            Ty::Map(k, w) => format!("{c}take_map(b$, mut at$, {}, {})?", self.of(k), self.of(w)),
             Ty::Result(t, e) => format!(
-                "{c}.take_result(b$, mut at$, {}, {})?",
+                "{c}take_result(b$, mut at$, {}, {})?",
                 self.of(t),
                 self.of(e)
             ),
-            Ty::With(t) => format!("{c}.take_with(b$, mut at$, {})?", self.of(t)),
+            Ty::With(t) => format!("{c}take_with(b$, mut at$, {})?", self.of(t)),
         }
     }
     fn schema(&mut self, ty: &Ty<'a>) -> String {
         let c = self.c;
         match *ty {
-            Ty::Scalar(x, _) => format!("    {c}.schema_{x}(mut s$)?\n"),
-            Ty::List(e) => format!("    {c}.schema_list(mut s$, {})?\n", self.of(e)),
-            Ty::Option(e) => format!("    {c}.schema_option(mut s$, {})?\n", self.of(e)),
+            Ty::Scalar(x, _) => format!("    {c}schema_{x}(mut s$)?\n"),
+            Ty::List(e) => format!("    {c}schema_list(mut s$, {})?\n", self.of(e)),
+            Ty::Option(e) => format!("    {c}schema_option(mut s$, {})?\n", self.of(e)),
             Ty::Map(k, w) => format!(
-                "    {c}.schema_map(mut s$, {}, {})?\n",
+                "    {c}schema_map(mut s$, {}, {})?\n",
                 self.of(k),
                 self.of(w)
             ),
             Ty::Result(t, e) => format!(
-                "    {c}.schema_result(mut s$, {}, {})?\n",
+                "    {c}schema_result(mut s$, {}, {})?\n",
                 self.of(t),
                 self.of(e)
             ),
-            Ty::With(t) => format!("    {c}.schema_of(mut s$, {})?\n", self.of(t)),
+            Ty::With(t) => format!("    {c}schema_of(mut s$, {})?\n", self.of(t)),
         }
     }
     /// The fewest bytes a value of `ty` encodes to: a constant, or a `least` call.
@@ -1009,7 +1009,7 @@ impl<'a> Gen<'a> {
                 let c = self.of(t);
                 Least {
                     fixed: 0,
-                    calls: vec![format!("{}.least({c})", self.c)],
+                    calls: vec![format!("{}least({c})", self.c)],
                 }
             }
         }
@@ -1037,7 +1037,7 @@ impl<'a> Gen<'a> {
         let body = match (&decl.via, &decl.body) {
             (Some(v), _) => {
                 let r = self.of(v.wire);
-                format!("    {c}.put_with({}(x$), {r}, mut out$)\n", v.to)
+                format!("    {c}put_with({}(x$), {r}, mut out$)\n", v.to)
             }
             (None, Body::Record(entries)) => self.record_encode(entries),
             (None, Body::Sum(variants)) => self.sum_encode(variants),
@@ -1049,25 +1049,24 @@ impl<'a> Gen<'a> {
         let body = match (&decl.via, self.group, &decl.body) {
             (Some(v), ..) => {
                 let r = self.of(v.wire);
-                format!("    {c}.take_via(b$, mut at$, {r}, {})\n", v.from)
+                format!("    {c}take_via(b$, mut at$, {r}, {})\n", v.from)
             }
             (None, Some((g, at)), _) => Machine::new(g, at).decode(&mut self),
             (None, None, Body::Record(entries)) => self.record_decode(entries),
             (None, None, Body::Sum(variants)) => self.sum_decode(variants),
         };
-        let header = format!(
-            "fn {name}$decode{generics}(b$: Bytes, mut at$: u64) -> Result[{ty}, {c}.Stop]"
-        );
+        let header =
+            format!("fn {name}$decode{generics}(b$: Bytes, mut at$: u64) -> Result[{ty}, {c}Stop]");
         self.function(out, &header, &body);
         let body = self.schema_body();
         let header = format!(
-            "fn {name}$schema{generics}(mut s$: {c}.Schema, c$: {c}.Codec[{ty}]) -> Result[(), Capacity]"
+            "fn {name}$schema{generics}(mut s$: {c}Schema, c$: {c}Codec[{ty}]) -> Result[(), Capacity]"
         );
         self.function(out, &header, &body);
         let (lets, least) = self.least_body();
-        let header = format!("fn {name}$codec{generics}() -> {c}.Codec[{ty}]");
+        let header = format!("fn {name}$codec{generics}() -> {c}Codec[{ty}]");
         let body =
-            format!("{lets}    {c}.make({name}$encode, {name}$decode, {name}$schema, {least})\n");
+            format!("{lets}    {c}make({name}$encode, {name}$decode, {name}$schema, {least})\n");
         self.function(out, &header, &body);
     }
     fn record_encode(&mut self, entries: &'a [Entry<'a>]) -> String {
@@ -1091,7 +1090,7 @@ impl<'a> Gen<'a> {
         let c = self.c;
         let mut arms = String::new();
         for (tag, v) in variants.iter().enumerate().filter(|(_, v)| !v.removed) {
-            let mut steps = vec![format!("{c}.put_tag({tag}, mut out$)")];
+            let mut steps = vec![format!("{c}put_tag({tag}, mut out$)")];
             let binds: Vec<_> = v
                 .payload
                 .iter()
@@ -1129,7 +1128,7 @@ impl<'a> Gen<'a> {
         }
         let _ = writeln!(
             body,
-            "    let tag$ = {c}.take_tag(b$, mut at$, {})?",
+            "    let tag$ = {c}take_tag(b$, mut at$, {})?",
             variants.len()
         );
         let last = variants.len().saturating_sub(1);
@@ -1163,21 +1162,21 @@ impl<'a> Gen<'a> {
     fn schema_body(&mut self) -> String {
         let (c, decl) = (self.c, self.decl);
         let mut s = format!(
-            "    {c}.define(mut s$, \"{}\", {})?\n",
+            "    {c}define(mut s$, \"{}\", {})?\n",
             self.path,
             self.decl.generics.len()
         );
         for (p, _) in &decl.generics {
             let a = self.of(p);
-            let _ = writeln!(s, "    {c}.argument(mut s$, {a})?");
+            let _ = writeln!(s, "    {c}argument(mut s$, {a})?");
         }
         if let Some(v) = &decl.via {
             let r = self.of(v.wire);
             let _ = writeln!(
                 s,
-                "    if {c}.via(mut s$)? {{\n        return Ok(())\n    }}\n    {c}.schema_of(mut s$, {r})?"
+                "    if {c}via(mut s$)? {{\n        return Ok(())\n    }}\n    {c}schema_of(mut s$, {r})?"
             );
-            let _ = write!(s, "    {c}.close(mut s$)\n    Ok(())\n");
+            let _ = write!(s, "    {c}close(mut s$)\n    Ok(())\n");
             return s;
         }
         let (kind, n) = match &decl.body {
@@ -1186,26 +1185,26 @@ impl<'a> Gen<'a> {
         };
         let _ = writeln!(
             s,
-            "    if {c}.{kind}(mut s$, {n})? {{\n        return Ok(())\n    }}"
+            "    if {c}{kind}(mut s$, {n})? {{\n        return Ok(())\n    }}"
         );
         match &decl.body {
             Body::Record(entries) => {
                 for e in entries {
                     match (e.removed, e.default) {
                         (true, _) => {
-                            let _ = writeln!(s, "    {c}.removed_field(mut s$, \"{}\")?", e.name);
+                            let _ = writeln!(s, "    {c}removed_field(mut s$, \"{}\")?", e.name);
                             s += &self.schema(&e.ty);
                         }
                         (false, Some(v)) => {
                             let f = self.of(e.text);
                             let _ = writeln!(
                                 s,
-                                "    {c}.field_default(mut s$, \"{}\", {f}, {v})?",
+                                "    {c}field_default(mut s$, \"{}\", {f}, {v})?",
                                 e.name
                             );
                         }
                         (false, None) => {
-                            let _ = writeln!(s, "    {c}.field(mut s$, \"{}\")?", e.name);
+                            let _ = writeln!(s, "    {c}field(mut s$, \"{}\")?", e.name);
                             s += &self.schema(&e.ty);
                         }
                     }
@@ -1220,7 +1219,7 @@ impl<'a> Gen<'a> {
                     };
                     let _ = writeln!(
                         s,
-                        "    {c}.{call}(mut s$, \"{}\", {})?",
+                        "    {c}{call}(mut s$, \"{}\", {})?",
                         v.name,
                         v.payload.len()
                     );
@@ -1230,7 +1229,7 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        let _ = write!(s, "    {c}.close(mut s$)\n    Ok(())\n");
+        let _ = write!(s, "    {c}close(mut s$)\n    Ok(())\n");
         s
     }
     /// The maker's LEAST: the sum over a record's live fields; for a sum, 4 plus the least
@@ -1239,7 +1238,7 @@ impl<'a> Gen<'a> {
         let decl = self.decl;
         if let Some(v) = &decl.via {
             let r = self.of(v.wire);
-            return (String::new(), format!("{}.least({r})", self.c));
+            return (String::new(), format!("{}least({r})", self.c));
         }
         match &decl.body {
             Body::Record(entries) => {

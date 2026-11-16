@@ -521,6 +521,11 @@ fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
 }
 
 fn put_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
+    let _ = replace_physical(mut tx, take p, take val)?
+    Ok(())
+}
+
+fn replace_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[Option[std.omap.Replaced[Bytes, Arc[Bytes]]], Error] {
     if list.len(p) > 4096 {
         return Error(Limit(Key))
     }
@@ -528,14 +533,6 @@ fn put_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error]
         return Error(Limit(Value))
     }
     let charge = entry(p, val)
-    let old_charge = if tx.retain_old {
-        0u64
-    } else {
-        match std.omap.get(tx.roots.data, p) {
-            Some(old) => entry(p, old),
-            None => 0
-        }
-    }
     let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 9 + list.len(p) + list.len(val))
     let saved_key = copied(p)?
     if frame - 16 > 16777280 {
@@ -547,14 +544,20 @@ fn put_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error]
     let updated = std.omap.insert(mut ids, tx.roots.data, take p, take shared_value)
     match take updated {
         Error((c, _)) => Error(refused(mut tx, c)),
-        Ok((take data, _)) => {
+        Ok((take data, take replaced)) => {
+            let old_charge = if tx.retain_old { 0u64 } else {
+                match replaced {
+                    Some(old) => entry(saved_key, std.omap.replaced_value(old)),
+                    None => 0
+                }
+            }
             record_op(mut tx, take saved_key, Some(take saved_value))?
             tx.roots.data = take data
             // Main without a retained durable root subtracts the replaced entry (I4).
             tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
             tx.frame_bytes = frame
             tx.wrote = true
-            Ok(())
+            Ok(take replaced)
         }
     }
 }
@@ -1422,11 +1425,13 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     writable(tx, t)?
     let key = encode_key(t.key, k)?
     let p = physical(t.id, key)?
-    let previous: Option[V] = if list.len(t.indexes) == 0 {
-        None
-    } else {
-        match std.omap.get(tx.roots.data, p) {
-            Some(old) => Some(row_value(t.readers, t.id, old)?),
+    let mut raw: Bytes = list.new()
+    capacity(le(mut raw, int.widen(t.readers.current), 2))?
+    capacity(std.codec.encode(t.readers.codec, v, mut raw))?
+    let replaced = replace_physical(mut tx, take p, take raw)?
+    let previous: Option[V] = if list.len(t.indexes) == 0 { None } else {
+        match replaced {
+            Some(old) => Some(row_value(t.readers, t.id, std.omap.replaced_value(old))?),
             None => None
         }
     }
@@ -1448,10 +1453,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
             put_bytes(mut tx, ix.id, new_key, empty)?
         }
     }
-    let mut raw: Bytes = list.new()
-    capacity(le(mut raw, int.widen(t.readers.current), 2))?
-    capacity(std.codec.encode(t.readers.codec, v, mut raw))?
-    put_physical(mut tx, take p, take raw)
+    Ok(())
 }
 
 fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {

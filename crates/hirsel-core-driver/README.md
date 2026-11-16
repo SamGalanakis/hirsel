@@ -263,6 +263,10 @@ gap to be closed later.
   3. a file clock set back so that a later edit repeats an earlier timestamp
      exactly;
   4. an input changed during the request that reads it.
+  An identity that does not rest on times would mean hashing every tool on every
+  request: about 230 MB (libLLVM and ld.lld), 615 M instructions against a
+  no-change request's 56 M. Hashing once per boot costs the same after each boot
+  and still misses a rollback within it.
 - **Libraries that LLVM itself loads are not keyed.** The libLLVM the compiler
   opens is part of every LLVM object key. Anything that library loads in turn
   (its own shared-library dependencies, plugins) is not. If one of those changes

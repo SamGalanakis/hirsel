@@ -1540,6 +1540,7 @@ mod tests {
         use RecipeInputs::{Changed, Current, Restated};
         let tick = (1_700_000_000, 4_000_000);
         let later = (1_700_000_001, 4_000_000);
+        let earlier = (1_699_999_999, 4_000_000);
         let future = (4_102_444_800, 0); // 2100-01-01, ahead of any clock here
         let ms = 1_000_000;
         let mut results = vec![];
@@ -1599,6 +1600,28 @@ mod tests {
                     ..step(WINDOW - 1, tick, b"first", Current, 1)
                 },
                 step(WINDOW + 20 * ms, tick, b"later", Changed, 1),
+            ],
+        ));
+        results.push(stat_trust(
+            "a clock set back: an edit stamped before the settled stat",
+            tick,
+            b"first",
+            vec![
+                step(WINDOW, tick, b"first", Restated, 1),
+                step(WINDOW + ms, earlier, b"later", Changed, 1),
+            ],
+        ));
+        // By contract (README, "Tool inputs"): an edit that repeats the settled
+        // stat exactly is trusted unread. Closing it means hashing every tool on
+        // every request: about 230 MB, 615 M instructions against a no-change
+        // request's 56 M.
+        results.push(stat_trust(
+            "by contract: an edit repeating the settled stat exactly",
+            tick,
+            b"first",
+            vec![
+                step(WINDOW, tick, b"first", Restated, 1),
+                step(WINDOW + ms, tick, b"later", Current, 0),
             ],
         ));
         let failed: Vec<String> = results.into_iter().filter_map(Result::err).collect();

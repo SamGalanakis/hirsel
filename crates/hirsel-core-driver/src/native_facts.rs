@@ -195,6 +195,34 @@ mod tests {
         assert_same(&b, &fresh(&after, &recorded));
         assert_ne!(keys.0, keys.1);
     }
+    /// Valid facts selections under each other's keys: each key's facts are
+    /// still its own fresh derivation (a selection names its key).
+    #[test]
+    fn facts_selected_under_each_others_keys_are_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let caller = module(true, false);
+        let (blind, escaping) = (module(false, false), module(false, true));
+        let (before, after) = ([&caller, &blind], [&caller, &escaping]);
+        let recorded = core_facts();
+        let a = key(&identities(&before), &recorded_ids(&recorded)).unwrap();
+        let b = key(&identities(&after), &recorded_ids(&recorded)).unwrap();
+        get(&store, a, &before, &recorded).unwrap();
+        get(&store, b, &after, &recorded).unwrap();
+        let name = |key| dir.path().join(format!("facts-{}", native::selection(key)));
+        let swap = dir.path().join("swap");
+        std::fs::rename(name(a), &swap).unwrap();
+        std::fs::rename(name(b), name(a)).unwrap();
+        std::fs::rename(&swap, name(b)).unwrap();
+        assert_same(
+            &get(&store, a, &before, &recorded).unwrap(),
+            &fresh(&before, &recorded),
+        );
+        assert_same(
+            &get(&store, b, &after, &recorded).unwrap(),
+            &fresh(&after, &recorded),
+        );
+    }
     #[test]
     fn recorded_summary_identity_changes_consumed_declaration_facts() {
         let dir = tempfile::tempdir().unwrap();

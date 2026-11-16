@@ -243,7 +243,8 @@ fn damaged_disk_bytes_are_a_miss() {
     assert_eq!(store.put(payload).unwrap(), key);
     assert_eq!(std::fs::read(store.path(key)).unwrap(), record);
     let mut selection = key.0.to_vec();
-    selection.extend(XxHash3_64::oneshot(&key.0).to_le_bytes());
+    selection.extend(b"live");
+    selection.extend(XxHash3_64::oneshot(&selection).to_le_bytes());
     store.select("live", key).unwrap();
     assert_eq!(std::fs::read(dir.path().join("live")).unwrap(), selection);
     let object = b"\x7fELF object bytes".as_slice();

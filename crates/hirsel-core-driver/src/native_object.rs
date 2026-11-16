@@ -155,6 +155,47 @@ pub(crate) fn load_debug(
 mod tests {
     use super::*;
     use hirsel_core_ir::source::*;
+    /// Valid object and instance selections under each other's keys are
+    /// misses: a selection names the key it was made under.
+    #[test]
+    fn records_selected_under_each_others_keys_are_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let (a, b) = (ContentHash::of_bytes(b"a"), ContentHash::of_bytes(b"b"));
+        let object = |bytes: &[u8]| NativeObject {
+            bytes: bytes.to_vec(),
+            debug: None,
+        };
+        let swap = |a, b| {
+            let name = |key| dir.path().join(native::selection(key));
+            let held = dir.path().join("swap");
+            std::fs::rename(name(a), &held).unwrap();
+            std::fs::rename(name(b), name(a)).unwrap();
+            std::fs::rename(&held, name(b)).unwrap();
+        };
+        publish(&store, a, &object(b"object a")).unwrap();
+        publish(&store, b, &object(b"object b")).unwrap();
+        swap(a, b);
+        assert!(load(&store, a).unwrap().is_none(), "object a");
+        assert!(load(&store, b).unwrap().is_none(), "object b");
+        let (c, d) = (ContentHash::of_bytes(b"c"), ContentHash::of_bytes(b"d"));
+        let instance = |name: &str| Instance {
+            schema: INSTANCE_SCHEMA,
+            identity: hirsel_core_ir::Identity::plain(hirsel_core_ids::DefPath::core(name)),
+            own: None,
+            env: ContentHash::of_bytes(b"env"),
+            object: Default::default(),
+            debug: None,
+            children: vec![],
+            items: vec![],
+            closures: vec![],
+        };
+        publish_instance(&store, c, &object(b"instance c"), instance("c")).unwrap();
+        publish_instance(&store, d, &object(b"instance d"), instance("d")).unwrap();
+        swap(c, d);
+        assert!(load_instance(&store, c).unwrap().is_none(), "instance c");
+        assert!(load_instance(&store, d).unwrap().is_none(), "instance d");
+    }
     #[test]
     fn native_object_caches_unchanged_code_and_optional_rows_atomically() {
         let dir = tempfile::tempdir().unwrap();

@@ -36,7 +36,8 @@ const HEADER: usize = 12;
 const TRAILER: usize = 48;
 /// A body's two checksums and its address.
 const BODY_TRAILER: usize = 48;
-/// A selection: the selected address and its checksum.
+/// A selection's fixed part: the selected address and the checksum of the
+/// address and the selection's name, which the file holds between them.
 const SELECTION: usize = 40;
 /// Temporaries, beside the records on the same filesystem (`Store::new`).
 const TMP: &str = "tmp";
@@ -622,15 +623,24 @@ impl Store {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        if bytes.len() != SELECTION || word(&bytes, 32) != checksum(&bytes[..32]) {
+        let end = 32 + name.len();
+        if bytes.len() != SELECTION + name.len()
+            || &bytes[32..end] != name.as_bytes()
+            || word(&bytes, end) != checksum(&bytes[..end])
+        {
             return Ok(None);
         }
         Ok(Some(ContentHash(bytes[..32].try_into().unwrap())))
     }
-    pub(crate) fn select(&self, name: &str, key: ContentHash) -> io::Result<()> {
-        let mut bytes = [0u8; SELECTION];
-        bytes[..32].copy_from_slice(&key.0);
-        bytes[32..].copy_from_slice(&checksum(&key.0).to_le_bytes());
+    /// Select `address` under `name`. The file holds its own name, so a
+    /// selection moved or copied under another name (another key's) is a
+    /// miss, never a hit of the record selected for that other key.
+    pub(crate) fn select(&self, name: &str, address: ContentHash) -> io::Result<()> {
+        let mut bytes = Vec::with_capacity(SELECTION + name.len());
+        bytes.extend_from_slice(&address.0);
+        bytes.extend_from_slice(name.as_bytes());
+        let check = checksum(&bytes);
+        bytes.extend_from_slice(&check.to_le_bytes());
         self.publish(&self.root.join(name), &bytes)?;
         wrote("selection");
         Ok(())

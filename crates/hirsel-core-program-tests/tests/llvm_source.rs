@@ -769,6 +769,21 @@ fn probe(s: u64) -> u64 {
 fn fallible_step_regions_refund_partial_work_and_check_strided_remainders() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
     let source = r#"
+fn purebits(s: u64, n: u64) -> u64 {
+    match (bound steps s {
+        let mut crc: u32 = 0xffffffff
+        for i in 0u64 .. n {
+            let byte: u32 = int.truncate(i)
+            crc = crc ^ byte
+            for _ in 0u32 .. 8u32 {
+                crc = if crc & 1u32 != 0u32 {
+                    (crc >> 1u32) ^ 0xedb88320u32
+                } else { crc >> 1u32 }
+            }
+        }
+        crc
+    }) { Ok(word) => 10000000000u64 + int.widen(word), Error(e) => e.steps }
+}
 fn probe(s: u64) -> u64 {
     match (bound steps s {
         let first = result.unwrap(isolate(fn() -> u64 {
@@ -828,6 +843,48 @@ fn strided(s: u64, stride: u64) -> u64 {
     let (module, names) =
         hirsel_core_program_tests::SourceProgram::lower_with_core(source, None, &root);
     let mut cases = Vec::new();
+    // One scalar conversion, eight inner latches and one outer latch per
+    // trip. Exercise exact bounds and both sides of the 65536-Step slice.
+    for n in [0u64, 1, 8, 6554] {
+        let mut crc = u32::MAX;
+        for i in 0..n {
+            crc ^= i as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb88320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        let total = n * 10;
+        for s in [
+            0,
+            total.saturating_sub(1),
+            total,
+            total + 1,
+            65535,
+            65536,
+            65537,
+        ] {
+            let want = if s < total {
+                s
+            } else {
+                10_000_000_000 + u64::from(crc)
+            };
+            assert_eq!(
+                eval::run(&module, names["purebits"], &[s, n], 1_000_000).outcome,
+                eval::Outcome::Returned(vec![want]),
+                "purebits s={s}, n={n}",
+            );
+            cases.push(Case {
+                function: names["purebits"],
+                args: vec![s, n],
+                limit: 1_000_000,
+                injection: None,
+            });
+        }
+    }
     for s in 0..=64 {
         cases.push(Case {
             function: names["probe"],
@@ -949,6 +1006,7 @@ fn strided(s: u64, stride: u64) -> u64 {
         })
         .collect::<Vec<_>>();
     let exports = [
+        "purebits",
         "probe",
         "strided",
         "resetting",

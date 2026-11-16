@@ -12,6 +12,7 @@ pub(super) struct Loop {
     yes: EdgeId,
     no: EdgeId,
     cost: u64,
+    exact: bool,
     constant: Option<(u64, u64)>,
     stride: Stride,
     inclusive: bool,
@@ -447,6 +448,61 @@ fn path_cost(
     state.insert(block, Some(cost));
     Some(cost)
 }
+// A fixed-cost, non-failing trip needs no progress value or refund. Keeping
+// that value out of the loop also preserves LLVM's loop idiom recognition.
+fn exact_cost(
+    module: &Module,
+    body: &Body,
+    constants: &[Option<u64>],
+    header: usize,
+    block: usize,
+    state: &mut BTreeMap<usize, Option<u64>>,
+    known: &BTreeMap<usize, Loop>,
+) -> Option<u64> {
+    if block == header {
+        return Some(0);
+    }
+    if let Some(child) = known.get(&block) {
+        if !child.exact {
+            return None;
+        }
+        let (_, trips) = child.constant?;
+        let after = body.edges[child.no.index()].target.index();
+        let tail = exact_cost(module, body, constants, header, after, state, known)?;
+        return child.cost.checked_mul(trips)?.checked_add(tail);
+    }
+    if let Some(cost) = state.get(&block) {
+        return *cost;
+    }
+    state.insert(block, None);
+    let insts = body.blocks[block].insts.get(&body.insts)?;
+    if !insts.iter().all(|i| pure(module, body, constants, i, true)) {
+        return None;
+    }
+    let mut successors = next(body, block)?.into_iter();
+    let first = exact_cost(
+        module,
+        body,
+        constants,
+        header,
+        successors.next()?,
+        state,
+        known,
+    )?;
+    for successor in successors {
+        if exact_cost(module, body, constants, header, successor, state, known)? != first {
+            return None;
+        }
+    }
+    let cost = first.checked_add(
+        insts
+            .iter()
+            .filter(|i| matches!(i, Inst::Step { .. }))
+            .count() as u64,
+    )?;
+    state.insert(block, Some(cost));
+    Some(cost)
+}
 pub(super) fn loops(
     module: &Module,
     body: &Body,
@@ -648,6 +704,15 @@ pub(super) fn loops(
             } else {
                 None
             };
+            let exact = exact_cost(
+                module,
+                body,
+                constants,
+                header,
+                entry,
+                &mut BTreeMap::new(),
+                &known,
+            ) == Some(cost);
             known.insert(
                 header,
                 Loop {
@@ -658,6 +723,7 @@ pub(super) fn loops(
                     yes,
                     no,
                     cost,
+                    exact,
                     constant,
                     stride,
                     inclusive,
@@ -774,7 +840,9 @@ impl FunctionEmitter<'_> {
         let charge = self.bin(Binary::Mul, &Type::I64, &trips, &int(plan.cost));
         let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
         self.store_steps(&after, &counter);
-        self.reserve_progress(window, &charge);
+        if !plan.exact {
+            self.reserve_progress(window, &charge);
+        }
         self.br(version_label(
             number,
             self.body.blocks.len(),
@@ -796,7 +864,9 @@ impl FunctionEmitter<'_> {
         let charge = self.bin(Binary::Mul, &Type::I64, &quota, &int(plan.cost));
         let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
         self.store_steps(&after, &counter);
-        self.reserve_progress(window, &charge);
+        if !plan.exact {
+            self.reserve_progress(window, &charge);
+        }
         self.br(version_label(
             number,
             self.body.blocks.len(),
@@ -818,7 +888,7 @@ impl FunctionEmitter<'_> {
                 .map(|&b| (b, version_label(number, self.body.blocks.len(), b, full)))
                 .collect();
             self.unchecked_steps = true;
-            self.precharge = Some(Precharge::Window {
+            self.precharge = (!plan.exact).then_some(Precharge::Window {
                 spent: Value::Local(window.spent),
                 charged: Value::Local(window.charged),
             });

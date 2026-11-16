@@ -3,9 +3,9 @@
   "finished_budget_per_line": 60000,
   "corpora": {
     "m1": {
-      "check_lower_per_line": 18400,
-      "whole_request_per_line": 33515.74,
-      "whole_process_per_line": 33614.33
+      "check_lower_per_line": 18300,
+      "whole_request_per_line": 33400,
+      "whole_process_per_line": 33500
     },
     "std": {
       "check_lower_per_line": 15600,
@@ -23,28 +23,28 @@
           "marginal_per_line": 53300
         },
         "generics-idiomatic": {
-          "marginal_per_line": 59000
+          "marginal_per_line": 58500
         },
         "generics-matched": {
-          "marginal_per_line": 59000
+          "marginal_per_line": 58500
         },
         "lru-idiomatic": {
-          "marginal_per_line": 49800
+          "marginal_per_line": 48900
         },
         "lru-matched": {
-          "marginal_per_line": 49800
+          "marginal_per_line": 48900
         },
         "files-idiomatic": {
-          "marginal_per_line": 62500
+          "marginal_per_line": 62000
         },
         "files-matched": {
-          "marginal_per_line": 62500
+          "marginal_per_line": 62000
         },
         "json-idiomatic": {
-          "marginal_per_line": 42900
+          "marginal_per_line": 42100
         },
         "json-matched": {
-          "marginal_per_line": 42900
+          "marginal_per_line": 42100
         },
         "pipeline-idiomatic": {
           "marginal_per_line": 52700
@@ -53,22 +53,22 @@
           "marginal_per_line": 52700
         },
         "request-scratch-idiomatic": {
-          "marginal_per_line": 55600
+          "marginal_per_line": 55000
         },
         "request-scratch-matched": {
-          "marginal_per_line": 55600
+          "marginal_per_line": 55000
         },
         "rope-idiomatic": {
-          "marginal_per_line": 52700
+          "marginal_per_line": 51700
         },
         "rope-matched": {
-          "marginal_per_line": 52700
+          "marginal_per_line": 51700
         },
         "versions-idiomatic": {
-          "marginal_per_line": 51500
+          "marginal_per_line": 50400
         },
         "versions-matched": {
-          "marginal_per_line": 51500
+          "marginal_per_line": 50400
         }
       }
     }

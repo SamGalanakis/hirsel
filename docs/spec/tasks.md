@@ -214,25 +214,29 @@ fn bump(mut a: Arc[Hits]) { a.n += 1 }                   // refused: OWN-12, not
 ### CONC-13: Latest
 
 `Latest[T]`, for `T: shareable + send`, is a handle to a root that holds one `Arc[T]`.
-`latest.new(take a: Arc[T]) -> Result[Latest[T], (Capacity, Arc[T])]` admits the root, 16
+`latest.new(take a: Arc[T]) -> Result[Latest[T], (Capacity, Arc[T])]` admits the root, 32
 bytes, from the current limit, to which it stays charged
 ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), and returns its first handle;
 on `Capacity` the error owns `a`. A handle is a `send` resource, mechanical
 ([MEM-24](budgets.md#mem-24-logical-charges)) and neither `shareable` nor stable, so no
 `Arc` holds one. `latest.handle(h)` adds a handle, admits nothing and cannot fail; a handle
-count past `2^64 − 1` is a run stop ([FAIL-15](failure.md#fail-15-run-stops)).
+count past `2^64 − 1` is the run stop `LatestHandles`
+([FAIL-15](failure.md#fail-15-run-stops)).
 `latest.publish(h, take a)` makes `a` the root's `Arc` and releases the share the root
 held, and `latest.read(h) -> Arc[T]` returns a new share of the root's `Arc`
 ([MEM-16](memory.md#mem-16-counting)). Neither waits, fails or admits, and neither is a
-cancellation point, so a cancelled task never leaves one half done. Each is an event
-(CONC-10): a `read` returns what the last `publish` before it in the event order put in
+cancellation point, so a cancelled task never leaves one half done. Each is an event of its own kind
+(CONC-10); the share a `read` makes and the release of the `Arc` a `publish` replaces are
+the ordinary `Arc` share and release events ([MEM-15](memory.md#mem-15-arc)), right after
+it; and `new`, `handle` and the cleaning of a handle each change the handle count, an event
+of the same kind as a change of a channel's sender count. A `read` returns what the last `publish` before it in the event order put in
 the root, or what `new` did. No operation hands out a view of the root, so a `publish`
 never changes what a reader holds: a version lives while any share of it does, and its
 last release, in whichever task, frees it and refunds it to the limit that created it
 (CONC-11). Cleaning the last handle releases the root's share and refunds the root; a
 task's cleanup cleans the handles it owns, as it cleans every resource.
 
-```hirsel unbuilt
+```hirsel
 type Config: shareable + send { routes: List[String] }
 fn reload(h: Latest[Config], take c: Config) -> Result[(), Capacity] {
   match arc.new(take c) { Ok(take a) => { latest.publish(h, take a); Ok(()) }, Error((e, _)) => Error(e) }

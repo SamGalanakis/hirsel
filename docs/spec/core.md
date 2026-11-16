@@ -21,7 +21,7 @@ there with no body is built in, so its summary is the one the table below gives 
 | `heap` | [heap](../../core/core/heap.hirsel) | Deques and heaps, MEM-24 |
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
-| `latest` | not yet in the core source | CONC-13 |
+| `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `args`, `host`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [host](../../core/core/host.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5 |

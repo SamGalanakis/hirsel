@@ -116,7 +116,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | task | 256 + its result's size + 32 for its primary cause cell + its reserved limit `n` |
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |
 | channel | capacity × item size + 64 |
-| `Latest` root | 16 |
+| `Latest` root | 32 |
 | `log.new` node | 24 |
 | a log's entries | as `List[E]` storage |
 | `isolate` | 32 for its cause cell, from the current limit (inside a finalizer, its grant); refunded when `body` returns, and when a caught failure leaves the current obligation's cell unused ([FAIL-16](failure.md#fail-16-isolation)) |

@@ -78,6 +78,15 @@ pub struct NativeOptions {
     pub grant_mask: u64,
     /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
     pub logical_charge_report: Option<PathBuf>,
+    /// The toolchain this request already observed for its request record's
+    /// key: the build links with it rather than observing again, so the
+    /// executable is the one the key names.
+    pub(crate) observed: Option<
+        Arc<(
+            crate::tool_inputs::Toolchain,
+            crate::tool_inputs::LinkRecipe,
+        )>,
+    >,
 }
 impl NativeOptions {
     /// A request's options before its flags: the development engine
@@ -104,6 +113,7 @@ impl NativeOptions {
             directories: vec![],
             grant_mask: 0,
             logical_charge_report: None,
+            observed: None,
         }
     }
 }
@@ -118,6 +128,12 @@ pub enum NativeStop {
     },
     Link(String),
     Input(io::Error),
+    /// The build succeeded and its executable is stored; writing it to the
+    /// requested output failed.
+    Output {
+        product: Box<BuildProduct>,
+        error: io::Error,
+    },
 }
 impl fmt::Display for NativeStop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -131,6 +147,7 @@ impl fmt::Display for NativeStop {
             } => write!(f, "emit {definition}: {message}"),
             Self::Link(s) => write!(f, "link: {s}"),
             Self::Input(e) => write!(f, "input: {e}"),
+            Self::Output { error, .. } => f.write_str(&output_stop(error)),
         }
     }
 }
@@ -201,7 +218,7 @@ impl ObjectProduct {
         }
     }
 }
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct BuildProduct {
     /// Native implementation copies, never semantic type instances.
     pub private_variants: usize,
@@ -335,8 +352,10 @@ pub(crate) fn native_inputs(
     product: &CheckProduct,
     options: &NativeOptions,
 ) -> io::Result<NativeInputs> {
-    let (toolchain, recipe) =
-        crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?;
+    let (toolchain, recipe) = match &options.observed {
+        Some(observed) => observed.as_ref().clone(),
+        None => crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?,
+    };
     // LLVM development objects keep the v4 key, and LLVM release reads full IR.
     let records = if matches!(options.backend, Backend::Cranelift) && !options.optimize {
         let env = environment(options, toolchain.runtime)?;
@@ -835,14 +854,7 @@ impl CheckProduct {
                 .records
                 .as_ref()
                 .expect("a reach record has its records");
-            // A request without a snapshot keeps a hit's: the record's rows
-            // are live under it either way.
-            let snapshot = match (self.snapshot, prior) {
-                (s, Some(prior)) if s == ContentHash::default() && reach.hit => prior.head.snapshot,
-                (s, _) => s,
-            };
             let head = crate::reach::Head {
-                snapshot,
                 sources,
                 files: files.expect("a record is drafted with its reach"),
                 verified: self.root,
@@ -1597,17 +1609,7 @@ fn link_objects(
         0 => {}
         written => counters.record_bytes = written,
     }
-    if let Some(parent) = options
-        .output
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Copy from integrity-checked bytes even on a hit; a damaged materialized file
-    // is never trusted as the executable cache product.
-    crate::executable::write(&options.output, &bytes, 0o755)?;
-    Ok(Linked::Built(BuildProduct {
+    let product = BuildProduct {
         private_variants: objects.iter().map(|o| o.private_variants).sum(),
         executable: options.output.clone(),
         identity: link_key,
@@ -1617,7 +1619,27 @@ fn link_objects(
         observation_mode: options.logical_charge_report.is_some(),
         debug_lines: options.debug_lines,
         reach: counters,
-    }))
+    };
+    // Copy from integrity-checked bytes even on a hit; a damaged materialized file
+    // is never trusted as the executable cache product.
+    match deliver(&options.output, &bytes) {
+        Ok(()) => Ok(Linked::Built(product)),
+        Err(error) => Err(NativeStop::Output {
+            product: Box::new(product),
+            error,
+        }),
+    }
+}
+/// How a request reports that writing its executable to the output failed.
+pub(crate) fn output_stop(error: &io::Error) -> String {
+    format!("output: {error}")
+}
+/// Write a checked executable's `bytes` to `output`, its directory made.
+pub(crate) fn deliver(output: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::executable::write(output, bytes, 0o755)
 }
 
 #[cfg(test)]
@@ -1693,6 +1715,7 @@ mod tests {
             directories: vec![],
             grant_mask: 0,
             logical_charge_report: None,
+            observed: None,
         }
     }
     fn exercise(backend: Backend) {

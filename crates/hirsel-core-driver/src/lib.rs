@@ -28,6 +28,8 @@ mod layers;
 mod link_closure;
 mod reach;
 mod reachability;
+pub mod request;
+mod request_record;
 mod revision;
 mod test_run;
 mod tool_inputs;
@@ -437,8 +439,6 @@ impl CheckProduct {
 
 #[derive(Default)]
 pub struct Driver {
-    pub published: Option<Arc<CheckProduct>>,
-    store: Option<PathBuf>,
     #[cfg(test)]
     pub(crate) layers: layers::Probe,
 }
@@ -541,18 +541,33 @@ impl Driver {
         request: CheckRequest,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
+        self.check_recorded(request, meter, None)?.product()
+    }
+    /// Check `request`, answered from its request record when `record` names
+    /// one that holds its answer.
+    pub(crate) fn check_recorded(
+        &mut self,
+        request: CheckRequest,
+        meter: &mut Meter,
+        record: Option<&request_record::Request>,
+    ) -> io::Result<Checked> {
         if meter.enabled() {
-            hirsel_core_ids::published::catch_io(|| self.check_inner::<true>(request, meter))
+            hirsel_core_ids::published::catch_io(|| {
+                self.check_inner::<true>(request, meter, record)
+            })
         } else {
-            hirsel_core_ids::published::catch_io(|| self.check_inner::<false>(request, meter))
+            hirsel_core_ids::published::catch_io(|| {
+                self.check_inner::<false>(request, meter, record)
+            })
         }
     }
     fn check_inner<const MEASURE: bool>(
         &mut self,
         mut request: CheckRequest,
         meter: &mut Meter,
-    ) -> io::Result<Arc<CheckProduct>> {
-        request.inputs.normalise();
+        record: Option<&request_record::Request>,
+    ) -> io::Result<Checked> {
+        request.inputs.normalise(request.manifest.as_deref());
         #[cfg(test)]
         {
             self.layers.shape = None;
@@ -576,7 +591,7 @@ impl Driver {
                 let name = request
                     .manifest
                     .as_deref()
-                    .map(|root| manifest_name(root, &s.file))
+                    .map(|root| hirsel_core_resolve::manifest_name(root, &s.file))
                     .transpose()?;
                 sources.push((
                     ModulePath {
@@ -621,18 +636,21 @@ impl Driver {
         ))?);
         let store = Store::new(&request.store)?;
         meter.finish("load/request identity and store");
-        let same_store = self.store.as_ref() == Some(&request.store);
-        if let Some(old) = self
-            .published
-            .as_ref()
-            .filter(|p| p.snapshot == snapshot && same_store)
-        {
-            let mut reused = old.as_ref().clone();
-            reused.rechecked.clear();
-            let reused = Arc::new(reused);
-            self.published = Some(Arc::clone(&reused));
-            meter.finish("snapshot reuse");
-            return Ok(reused);
+        let record = record.map(|record| (record, record.key(snapshot)));
+        if let Some((record, key)) = record {
+            let names = || {
+                sources
+                    .iter()
+                    .map(|s| request_record::file_name(s.4.as_deref(), &s.0))
+                    .collect()
+            };
+            match request_record::lookup(&store, key, record, names)? {
+                Ok(hit) => {
+                    meter.finish("request record/hit");
+                    return Ok(Checked::Hit(hit));
+                }
+                Err(miss) => meter.finish(miss.stage()),
+            }
         }
         let prior = check_index::ProgramIndex::open(&store)?;
         let mut publication = check_index::Publication::new();
@@ -981,21 +999,11 @@ impl Driver {
                     }
                 };
                 let key_hash = check_index::key_hash(&key)?;
-                // A resident product's record lives in the store it was published to.
-                let resident = self
-                    .published
-                    .as_ref()
-                    .filter(|_| same_store)
-                    .and_then(|p| p.definitions.get(&fd.path))
-                    .filter(|d| d.key == key)
-                    .cloned();
                 // The copies of a duplicate definition (LANG-7) share one
                 // name, whose key hashes one copy's text: each is checked on
                 // every request.
                 let cached = if duplicated.contains(&fd.path) {
                     None
-                } else if resident.is_some() {
-                    resident
                 } else if let Some(product) = recorded {
                     Some(Arc::new(product))
                 } else {
@@ -1153,8 +1161,6 @@ impl Driver {
         }
         meter.finish("publish/declared layer");
         let result = Arc::new(result);
-        self.published = Some(Arc::clone(&result));
-        self.store = Some(request.store.clone());
         meter.finish("publish/commit and Arc move");
         drop(index);
         drop(resolutions);
@@ -1162,7 +1168,23 @@ impl Driver {
         drop(prior);
         drop(request);
         meter.finish("publish/scratch cleanup");
-        Ok(result)
+        Ok(Checked::Product(result, record.map(|(_, key)| key)))
+    }
+}
+/// A request's check: its product with the key of its request record, or
+/// the record's answer.
+pub(crate) enum Checked {
+    Product(Arc<CheckProduct>, Option<ContentHash>),
+    Hit(request_record::Hit),
+}
+impl Checked {
+    fn product(self) -> io::Result<Arc<CheckProduct>> {
+        match self {
+            Self::Product(product, _) => Ok(product),
+            Self::Hit(_) => Err(io::Error::other(
+                "internal error: a request record answered a request that names none",
+            )),
+        }
     }
 }
 fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
@@ -1218,30 +1240,6 @@ fn recorded_definition(
     };
     Ok(DefinitionProduct::from_head(&head, record, decode, source)
         .filter(|product| product.definition == *path))
-}
-/// What a diagnostic and a native site call `file`, listed by the manifest in
-/// `root`: its path relative to `root`, by components, `/`-separated. Both
-/// are made absolute first, so a relative manifest entry and a relative
-/// manifest directory agree; a file outside `root` climbs with `..`.
-fn manifest_name(root: &Path, file: &Path) -> io::Result<String> {
-    use std::path::Component;
-    let (root, file) = (std::path::absolute(root)?, std::path::absolute(file)?);
-    let normal = |p: &Path| -> Vec<String> {
-        let mut out: Vec<String> = vec![];
-        for c in p.components() {
-            match c {
-                Component::ParentDir => drop(out.pop()),
-                Component::Normal(s) => out.push(s.to_string_lossy().into_owned()),
-                _ => {}
-            }
-        }
-        out
-    };
-    let (root, file) = (normal(&root), normal(&file));
-    let shared = root.iter().zip(&file).take_while(|(a, b)| a == b).count();
-    let mut parts = vec![".."; root.len() - shared];
-    parts.extend(file[shared..].iter().map(String::as_str));
-    Ok(parts.join("/"))
 }
 /// The file record: namespace map and anchor map (item ordinal, line base).
 fn file_record(

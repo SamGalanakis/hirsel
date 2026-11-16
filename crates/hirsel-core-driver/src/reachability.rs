@@ -188,30 +188,17 @@ impl CheckProduct {
             let clean = self.diagnostics.is_empty()
                 && self.incomplete.is_empty()
                 && self.resources.is_empty();
-            // A record written by a request with this product snapshot holds
-            // this request's every row and constant: nothing is compared.
-            let same_snapshot = prior.as_ref().is_some_and(|p| {
-                self.snapshot != ContentHash::default() && p.head.snapshot == self.snapshot
+            let constants = self.own_constants()?;
+            let changed = prior.as_ref().map(|p| p.changed(self)).unwrap_or_default();
+            let entry_live = prior
+                .as_ref()
+                .is_some_and(|p| p.row(entry).is_some_and(|i| !changed[i]));
+            let hit = prior.as_ref().is_some_and(|prior| {
+                clean
+                    && damaged.is_empty()
+                    && prior.constants() == constants
+                    && !changed.contains(&true)
             });
-            let (hit, entry_live, changed, constants) = match &prior {
-                Some(prior) if same_snapshot && clean && damaged.is_empty() => {
-                    (true, prior.row(entry).is_some(), vec![], prior.constants())
-                }
-                _ => {
-                    let constants = self.own_constants()?;
-                    let changed = prior.as_ref().map(|p| p.changed(self)).unwrap_or_default();
-                    let entry_live = prior
-                        .as_ref()
-                        .is_some_and(|p| p.row(entry).is_some_and(|i| !changed[i]));
-                    let hit = prior.as_ref().is_some_and(|prior| {
-                        clean
-                            && damaged.is_empty()
-                            && prior.constants() == constants
-                            && !changed.contains(&true)
-                    });
-                    (hit, entry_live, changed, constants)
-                }
-            };
             if let (true, Some(held)) = (hit, &prior) {
                 let (bodies, declarations) = held.counts();
                 let instances = (0..held.len())

@@ -189,8 +189,13 @@ fn app(files: &[(&'static str, &'static str, &'static str)]) -> Vec<Pkg> {
     ]
 }
 
+/// The checkout, absolute: a request runs from its own working directory,
+/// and Buck gives a relative `CARGO_MANIFEST_DIR`.
 fn checkout() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap()
 }
 /// Write `req`'s sources under `root`, removing the previous request's files it
 /// no longer has, and return its manifest.
@@ -1949,4 +1954,430 @@ fn request_sequences_build_as_an_empty_store() {
         .filter(|s| s.steps.iter().any(|r| r.build))
         .collect();
     run_sequences(natives, Some(Backend::Cranelift), &[]);
+}
+
+// The process leg (S3; STEP-C 2.1 replay law). A request is the `hirsel`
+// executable's: a child of this test binary runs `crate::request::main` with
+// the request's arguments, and its stdout, stderr, exit status and output
+// file are compared with the same request against an empty store. Work
+// counters are not answers and are left out (REPORT D2): the text line's
+// checked-definitions count. Each step also says whether the request
+// record must answer it, read from its `--metrics` stages, so a case cannot
+// pass by never hitting.
+mod process {
+use super::*;
+
+/// What a step's request is: its command, its app sources, the checkout it
+/// runs in, and the request's own arguments and environment.
+#[derive(Clone)]
+struct Step {
+    command: &'static str,
+    /// (file, module, text) of the one app package over core.
+    files: Vec<(&'static str, &'static str, String)>,
+    /// The checkout directory under the case's root.
+    dir: &'static str,
+    args: Vec<String>,
+    env: Vec<(&'static str, Option<&'static str>)>,
+    /// Must the request record answer this step from the primed store?
+    hit: bool,
+    /// Done to the case's root before the primed request.
+    before: Option<fn(&Path)>,
+    /// Run the primed request through a copy of this test binary.
+    copied: bool,
+    /// The output path under the run directory.
+    output: &'static str,
+    /// The exit status the empty store's request must have: 0 unless the
+    /// case is about a failure, so no step passes by failing for an
+    /// unrelated cause in both stores.
+    exit: i32,
+    /// App files the manifest names by a path relative to the request's
+    /// working directory; the rest it names absolutely.
+    relative: &'static [&'static str],
+}
+struct Case {
+    name: &'static str,
+    steps: Vec<Step>,
+}
+#[derive(Debug, PartialEq)]
+struct Ran {
+    exit: Option<i32>,
+    stdout: String,
+    stderr: String,
+    /// The output file's bytes' hash, when the request names one and it exists.
+    output: Option<ContentHash>,
+}
+const CHILD_MARK: &str = "\u{1}request-child\n";
+/// The child: run the request in `REQUEST_CHILD_ARGS` as `hirsel` does.
+#[test]
+#[ignore = "explicit native integration target"]
+fn request_child() {
+    let Some(args) = std::env::var_os("REQUEST_CHILD_ARGS") else {
+        return;
+    };
+    let args: Vec<String> = serde_json::from_str(args.to_str().unwrap()).unwrap();
+    use std::io::Write;
+    std::io::stdout().write_all(CHILD_MARK.as_bytes()).unwrap();
+    std::io::stdout().flush().unwrap();
+    std::io::stderr().write_all(CHILD_MARK.as_bytes()).unwrap();
+    crate::request::main(args)
+}
+fn step(command: &'static str, files: &[(&'static str, &'static str, &str)]) -> Step {
+    Step {
+        command,
+        files: files.iter().map(|(f, m, t)| (*f, *m, (*t).to_owned())).collect(),
+        dir: "src",
+        args: vec![],
+        env: vec![],
+        hit: false,
+        before: None,
+        copied: false,
+        output: "out/program",
+        exit: 0,
+        relative: &[],
+    }
+}
+fn hit(step: Step) -> Step {
+    Step { hit: true, ..step }
+}
+/// Write `step`'s checkout: core's sources copied in, the app's files, and
+/// the manifest `inputs.json` beside them, so every file name the request
+/// prints is inside the checkout.
+fn checkout_for(root: &Path, step: &Step) -> PathBuf {
+    let dir = root.join(step.dir);
+    let core = dir.join("core");
+    if !core.exists() {
+        std::fs::create_dir_all(&core).unwrap();
+        for entry in std::fs::read_dir(checkout().join("core/core")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "hirsel") {
+                std::fs::copy(&path, core.join(path.file_name().unwrap())).unwrap();
+            }
+        }
+    }
+    let app = dir.join("app");
+    if app.exists() {
+        std::fs::remove_dir_all(&app).unwrap();
+    }
+    std::fs::create_dir_all(&app).unwrap();
+    let mut sources = vec![];
+    for (file, module, text) in &step.files {
+        std::fs::write(app.join(file), text).unwrap();
+        sources.push(hirsel_core_resolve::ModuleSource {
+            file: if step.relative.contains(file) {
+                Path::new(step.dir).join("app").join(file)
+            } else {
+                app.join(file)
+            },
+            modules: module.split('/').map(str::to_owned).collect(),
+            signatures: false,
+        });
+    }
+    let manifest = CorpusManifest {
+        core: package("core"),
+        packages: vec![
+            PackageProduct::bundled_manifest(&core),
+            PackageManifest {
+                package: package_id("app"),
+                dependencies: vec![package("core")],
+                sources,
+            },
+        ],
+    };
+    let inputs = dir.join("inputs.json");
+    std::fs::write(&inputs, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    inputs
+}
+fn native_args(root: &Path, output: &str) -> Vec<String> {
+    let repo = checkout();
+    vec![
+        "--entry".into(),
+        "app@1/main/main".into(),
+        "--source-core".into(),
+        "--runtime".into(),
+        repo.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive"))
+            .display()
+            .to_string(),
+        "--cc".into(),
+        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap())
+            .join("bin/clang")
+            .display()
+            .to_string(),
+        "-o".into(),
+        root.join(output).display().to_string(),
+    ]
+}
+/// Run `step` against the store `store`, from a run directory `run` that
+/// holds its output file and metrics; return what it answered and whether
+/// the request record answered it.
+fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (Ran, String) {
+    let inputs = checkout_for(root, step);
+    std::fs::create_dir_all(run.join("out")).unwrap();
+    let metrics = run.join("metrics.json");
+    let _ = std::fs::remove_file(&metrics);
+    let mut args = vec![
+        step.command.to_owned(),
+        "--inputs".into(),
+        inputs.display().to_string(),
+        "--store".into(),
+        store.display().to_string(),
+        "--metrics".into(),
+        metrics.display().to_string(),
+    ];
+    if step.command != "check" {
+        args.extend(native_args(run, step.output));
+    }
+    args.extend(
+        step.args
+            .iter()
+            .map(|arg| arg.replace("<root>", &root.display().to_string())),
+    );
+    let mut child = Command::new(exe);
+    child
+        .args(["--exact", "native::tests::process::request_child", "--ignored", "--nocapture", "--test-threads=1"])
+        .env("REQUEST_CHILD_ARGS", serde_json::to_string(&args).unwrap())
+        .current_dir(root);
+    for (name, value) in &step.env {
+        match value {
+            Some(value) => child.env(name, value),
+            None => child.env_remove(name),
+        };
+    }
+    let out = child.output().unwrap();
+    let after = |bytes: &[u8]| {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let text = match text.find(CHILD_MARK) {
+            Some(at) => text[at + CHILD_MARK.len()..].to_owned(),
+            None => panic!("request child did not start: {text}"),
+        };
+        let text = text
+            .replace(&store.display().to_string(), "<store>")
+            .replace(&run.display().to_string(), "<run>");
+        // A memory refusal's allocation size and resident peak are this
+        // process's measurements, not the request's answer.
+        text.lines()
+            .map(|line| match line.split_once(" reached (HIRSEL_MEMORY_LIMIT)") {
+                Some((head, _)) => format!("{head} reached"),
+                None => line.to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    // The checked-definitions count is work, not an answer (REPORT D2).
+    let stdout = after(&out.stdout)
+        .lines()
+        .map(|line| match line.rsplit_once(", ") {
+            Some((head, tail)) if tail.ends_with(" checked definitions") => format!("{head}, _"),
+            _ => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = std::fs::read(run.join(step.output))
+        .ok()
+        .map(|bytes| ContentHash::of_bytes(&bytes));
+    // The request record's stages, in the order the request ran them.
+    let metrics = std::fs::read_to_string(&metrics).unwrap_or_default();
+    let record = metrics
+        .split('"')
+        .filter(|name| name.starts_with("request record/"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    (
+        Ran {
+            exit: out.status.code(),
+            stdout,
+            stderr: after(&out.stderr),
+            output,
+        },
+        record,
+    )
+}
+/// Each case's steps against one primed store, each compared with the same
+/// step against an empty store; returns the failures.
+fn run_case(case: &Case) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let exe = std::env::current_exe().unwrap();
+    let copy = root.join("copied-driver");
+    let primed_store = root.join("primed-store");
+    let mut failures = vec![];
+    let mut before = String::new();
+    for (n, step) in case.steps.iter().enumerate() {
+        if let Some(before) = step.before {
+            before(root);
+        }
+        if step.copied && !copy.exists() {
+            std::fs::copy(&exe, &copy).unwrap();
+        }
+        let primed_run = root.join("primed-run");
+        let _ = std::fs::remove_dir_all(primed_run.join("out"));
+        let (primed, record) = run_step(
+            root,
+            step,
+            &primed_store,
+            &primed_run,
+            if step.copied { &copy } else { &exe },
+        );
+        let fresh_run = root.join(format!("fresh-run{n}"));
+        let (fresh, _) = run_step(root, step, &root.join(format!("fresh-store{n}")), &fresh_run, &exe);
+        if primed != fresh {
+            failures.push(format!(
+                "{} step {n}: primed {primed:#?}\n  fresh {fresh:#?}",
+                case.name
+            ));
+        }
+        if fresh.exit != Some(step.exit) {
+            failures.push(format!(
+                "{} step {n}: the empty store's request exited {:?}, the case needs {:?}",
+                case.name, fresh.exit, step.exit
+            ));
+        }
+        let hit = record.split(", ").any(|stage| stage == "request record/hit");
+        if hit != step.hit {
+            failures.push(format!(
+                "{} step {n}: the request record {} it ({record}; the step before: {before}), the case says it {}",
+                case.name,
+                if hit { "answered" } else { "did not answer" },
+                if step.hit { "must" } else { "must not" }
+            ));
+        }
+        before = record;
+    }
+    failures
+}
+
+const MAIN: &str = "pub fn main()->Result[(),Exit]{Error(Exit(status:7u8))}";
+const MAIN_B: &str = "pub fn main()->Result[(),Exit]{Error(Exit(status:9u8))}";
+const MAIN_BAD: &str = "pub fn main()->Result[(),Exit]{Error(Exit(status:nope))}";
+/// A memory limit the harness starts under and checking core does not
+/// (measured: 8M refuses the check, 12M passes it).
+const LOW_LIMIT: &str = "8M";
+fn with(step: Step, change: impl FnOnce(&mut Step)) -> Step {
+    let mut step = step;
+    change(&mut step);
+    step
+}
+/// Remove, from the primed store, the file whose bytes are the executable the
+/// last primed step wrote.
+fn delete_stored_executable(root: &Path) {
+    for path in stored_executable(root) {
+        std::fs::remove_file(path).unwrap();
+    }
+}
+fn damage_stored_executable(root: &Path) {
+    for path in stored_executable(root) {
+        let mut bytes = std::fs::read(&path).unwrap();
+        // The payload's last byte, which the frame's checksum covers.
+        let last = bytes.len() - 49;
+        bytes[last] ^= 1;
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+fn stored_executable(root: &Path) -> Vec<PathBuf> {
+    // A build that wrote nothing leaves nothing to find; the case's
+    // comparison reports that build.
+    let Ok(program) = std::fs::read(root.join("primed-run/out/program")) else {
+        return vec![];
+    };
+    let mut found = vec![];
+    let mut dirs = vec![root.join("primed-store")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if std::fs::read(&path).is_ok_and(|bytes| {
+                // A keyed frame: 12 header bytes, the payload, 48 trailer bytes.
+                bytes.len() == program.len() + 60 && bytes[12..12 + program.len()] == program
+            }) {
+                found.push(path);
+            }
+        }
+    }
+    assert!(!found.is_empty(), "the primed store holds no copy of the executable");
+    found
+}
+fn opt(step: Step, args: &[&str]) -> Step {
+    with(step, |s| s.args.extend(args.iter().map(|a| (*a).to_owned())))
+}
+/// A C driver that runs the pinned clang with a different build-id style.
+fn other_cc(root: &Path) {
+    let clang = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
+    let cc = root.join("other-cc");
+    crate::executable::write(
+        &cc,
+        format!("#!/bin/sh\nexec {} -Wl,--build-id=md5 \"$@\"\n", clang.display()).as_bytes(),
+        0o755,
+    )
+    .unwrap();
+}
+fn cases() -> Vec<Case> {
+    let check = |text: &str| step("check", &[("main.hirsel", "main", text)]);
+    let build = |text: &str| step("build", &[("main.hirsel", "main", text)]);
+    let llvm = |step: Step| opt(step, &["--backend", "llvm"]);
+    let low = |step: Step| with(step, |s| s.env = vec![("HIRSEL_MEMORY_LIMIT", Some(LOW_LIMIT))]);
+    let refused = |step: Step| with(low(step), |s| s.exit = hirsel_guard::EXIT_STATUS);
+    // A check that reports a diagnostic exits 1.
+    let diagnosed = |step: Step| Step { exit: 1, ..step };
+    // An output path that is a directory: the build exits 2 writing it.
+    let unwritable = |step: Step| Step { output: "out", exit: 2, ..step };
+    // Two files of one module, the second with a diagnostic; `relative`
+    // names a1 by a working-directory path, which sorts after a2's absolute
+    // one, though the manifest-relative names sort a1 first.
+    let two = |relative: &'static [&'static str]| {
+        with(
+            step(
+                "check",
+                &[
+                    ("a1.hirsel", "a", "pub fn f()->u8{7u8}"),
+                    ("a2.hirsel", "a", "pub fn g()->u8{nope}"),
+                    ("main.hirsel", "main", "pub fn main()->Result[(),Exit]{Error(Exit(status:a.f()))}"),
+                ],
+            ),
+            |s| s.relative = relative,
+        )
+    };
+    vec![
+        Case { name: "check edit, revert, no change", steps: vec![check(MAIN), hit(check(MAIN)), check(MAIN_B), hit(check(MAIN))] },
+        Case { name: "check diagnostics, moved checkout", steps: vec![diagnosed(check(MAIN_BAD)), hit(diagnosed(check(MAIN_BAD))), hit(with(diagnosed(check(MAIN_BAD)), |s| s.dir = "moved"))] },
+        Case { name: "build edit, revert, no change, moved", steps: vec![build(MAIN), hit(build(MAIN)), build(MAIN_B), hit(build(MAIN)), hit(with(build(MAIN), |s| s.dir = "moved"))] },
+        Case { name: "commands and variants answer apart", steps: vec![check(MAIN), build(MAIN), hit(check(MAIN)), Step { exit: 7, ..step("run", &[("main.hirsel", "main", MAIN)]) }, hit(build(MAIN))] },
+        // A record made under a higher memory limit must not answer a lower one.
+        Case { name: "memory limit, success then refusal", steps: vec![check(MAIN), refused(check(MAIN)), hit(check(MAIN))] },
+        Case { name: "memory limit, refusal then success", steps: vec![refused(check(MAIN)), check(MAIN), hit(check(MAIN))] },
+        // D3: the output is a directory, so writing the executable fails after
+        // the build stored it.
+        Case { name: "output failure, then retry", steps: vec![unwritable(build(MAIN)), hit(build(MAIN)), hit(unwritable(build(MAIN)))] },
+        Case { name: "stored executable deleted", steps: vec![build(MAIN), with(build(MAIN), |s| s.before = Some(delete_stored_executable)), hit(build(MAIN))] },
+        Case { name: "stored executable damaged", steps: vec![build(MAIN), with(build(MAIN), |s| s.before = Some(damage_stored_executable)), hit(build(MAIN))] },
+        Case { name: "LLVM facts toggle", steps: vec![llvm(build(MAIN)), with(llvm(build(MAIN)), |s| s.env = vec![(hirsel_llvm_lazy::core::NO_FACTS_VARIABLE, Some("1"))]), hit(llvm(build(MAIN)))] },
+        // Each native option that changes the executable, after the last.
+        Case { name: "native options answer apart", steps: vec![
+            build(MAIN),
+            llvm(build(MAIN)),
+            opt(build(MAIN), &["--release"]),
+            opt(build(MAIN), &["--debug-lines", "on"]),
+            opt(build(MAIN), &["--limit", "1048576"]),
+            opt(build(MAIN), &["--dir", "."]),
+            opt(build(MAIN), &["--grant", "Clock"]),
+            hit(build(MAIN)),
+        ] },
+        // A C driver that links differently: another toolchain.
+        Case { name: "toolchain answers apart", steps: vec![
+            build(MAIN),
+            with(opt(build(MAIN), &["--cc", "<root>/other-cc"]), |s| s.before = Some(other_cc)),
+            hit(build(MAIN)),
+            hit(opt(build(MAIN), &["--cc", "<root>/other-cc"])),
+        ] },
+        Case { name: "copied driver", steps: vec![build(MAIN), hit(with(build(MAIN), |s| s.copied = true))] },
+        // R1: two files of one module, their paths spelled two ways.
+        Case { name: "two-file module respelled", steps: vec![diagnosed(two(&["a1.hirsel"])), hit(diagnosed(two(&[]))), hit(diagnosed(two(&["a1.hirsel"])))] },
+    ]
+}
+/// The process leg: every case, each step against its empty store.
+#[test]
+#[ignore = "explicit native integration target"]
+fn request_records_answer_as_an_empty_store() {
+    let failures: Vec<String> = cases().iter().flat_map(run_case).collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
 }

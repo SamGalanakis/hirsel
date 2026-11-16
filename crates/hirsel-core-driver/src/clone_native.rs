@@ -20,7 +20,6 @@ const CLONE_PROBE: &str = "pub type Probe[T] { value: T }\nclone[T](p: Probe[T])
 fn clone_body_keys_preserve_type_identity_across_edits_and_reordering() {
     let dir = tempfile::tempdir().unwrap();
     let path = DefPath::from_full("core@1/probe/Probe.$clone").unwrap();
-    let main = DefPath::from_full("app@1/main/main").unwrap();
     let mut driver = Driver::default();
     let first = driver.check(clone_request(CLONE_PROBE, dir.path()), &mut Meter::new(false)).unwrap();
     assert!(first.accepted(), "{:?} {:?}", first.diagnostics, first.incomplete);
@@ -30,7 +29,6 @@ fn clone_body_keys_preserve_type_identity_across_edits_and_reordering() {
     let edited = driver.check(clone_request(&changed, dir.path()), &mut Meter::new(false)).unwrap();
     assert!(edited.accepted(), "{:?} {:?}", edited.diagnostics, edited.incomplete);
     assert_eq!(edited.rechecked, [path.clone()]);
-    assert!(Arc::ptr_eq(&first.definitions[&main], &edited.definitions[&main]));
     let lines: Vec<_> = changed.lines().collect();
     let reordered = format!("{}\n{}\n{}\n", lines[2], lines[0], lines[1]);
     let reordered = Driver::default().check(clone_request(&reordered, dir.path()), &mut Meter::new(false)).unwrap();

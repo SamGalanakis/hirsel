@@ -41,28 +41,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_or_else(|| defaults.to_vec(), |names| names.split(',').collect());
     for name in roots {
         let entry = DefPath::from_full(&format!("hot@1/loops/{name}")).unwrap();
-        let options = NativeOptions {
-            backend: if args.iter().any(|s| s == "cranelift") {
-                Backend::Cranelift
-            } else {
-                Backend::Llvm
-            },
-            optimize: true,
-            debug_lines: false,
-            target: "x86_64-unknown-linux-gnu".into(),
-            runtime: PathBuf::from(&args[2]),
-            link: hirsel_core_driver::Link::Driver(PathBuf::from(&args[3])),
-            store: out.join("native"),
-            output: out.join("unused"),
-            root_limit: 1 << 30,
-            instance_limit: 65536,
-            directories: vec![],
-            grant_mask: 0,
-            logical_charge_report: args
-                .get(5)
-                .filter(|mode| mode.as_str() == "observe-charge")
-                .map(|_| out.join("logical-charge.json")),
+        let mut options = NativeOptions::development(
+            "x86_64-unknown-linux-gnu".into(),
+            PathBuf::from(&args[2]),
+            hirsel_core_driver::Link::Driver(PathBuf::from(&args[3])),
+            out.join("native"),
+            out.join("unused"),
+        );
+        options.backend = if args.iter().any(|s| s == "cranelift") {
+            Backend::Cranelift
+        } else {
+            Backend::Llvm
         };
+        options.optimize = true;
+        options.root_limit = 1 << 30;
+        options.logical_charge_report = args
+            .get(5)
+            .filter(|mode| mode.as_str() == "observe-charge")
+            .map(|_| out.join("logical-charge.json"));
         let objects = checked.emit_reachable(&entry, &options)?;
         let mut paths = vec![];
         for (i, obj) in objects.iter().enumerate() {

@@ -399,7 +399,7 @@ fn names(product: &CheckProduct) -> Vec<&str> {
 }
 
 #[test]
-fn warm_and_body_edits_reuse_signature_readers_in_memory_and_on_disk() {
+fn warm_and_body_edits_reuse_signature_readers_on_disk() {
     let dir = tempfile::tempdir().unwrap();
     let mut driver = Driver::default();
     let a = "fn callee() -> u64 { 1 }\nfn caller() -> u64 { callee() }\nfn independent() -> u64 { 42 }\n";
@@ -431,13 +431,6 @@ fn warm_and_body_edits_reuse_signature_readers_in_memory_and_on_disk() {
         .outcome,
         eval::Outcome::Returned(vec![2])
     );
-    let old_caller = first
-        .definitions
-        .values()
-        .find(|d| d.definition.0.name == "caller")
-        .unwrap();
-    let new_caller = edit.definitions.get(&old_caller.definition).unwrap();
-    assert!(Arc::ptr_eq(old_caller, new_caller));
     let disk_warm = Driver::default()
         .check(request(&b, dir.path()), &mut Meter::new(false))
         .unwrap();
@@ -611,20 +604,14 @@ fn prog1_prog6_transitive_type_reads_and_discovery_order_have_stable_results() {
 }
 
 #[test]
-fn resident_results_are_trusted_and_damaged_disk_results_recompute() {
+fn damaged_disk_results_recompute() {
     let dir = tempfile::tempdir().unwrap();
-    let mut driver = Driver::default();
     let source = "fn answer() -> u64 { 42 }\n";
-    let first = driver
+    let first = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
         .unwrap();
     let store = Store::new(&dir.path().join("store")).unwrap();
     std::fs::write(store.path(first.root), b"damaged").unwrap();
-    let resident = driver
-        .check(request(source, dir.path()), &mut Meter::new(false))
-        .unwrap();
-    assert!(resident.accepted());
-    assert!(resident.rechecked.is_empty());
     let disk = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
         .unwrap();

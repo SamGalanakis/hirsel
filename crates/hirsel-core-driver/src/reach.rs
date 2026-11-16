@@ -16,8 +16,8 @@
 //!
 //! The record is one keyed frame of fixed sections (see [`Section`]): a head
 //! ([`Head`]) readable alone, then offset tables, read in place. A request
-//! with the head's snapshot holds every row and constant of the record, so a
-//! no-change request reads the head and compares nothing. The bytes are a
+//! the request record answers never reads it; any other compares its rows
+//! and constants against the live product. The bytes are a
 //! function of the content, written in canonical order from the current
 //! request, so a patched record is a fresh one byte for byte.
 //!
@@ -34,7 +34,7 @@ use hirsel_core_ir::{Closure, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
-pub(crate) const REACH_SCHEMA: u32 = 8;
+pub(crate) const REACH_SCHEMA: u32 = 9;
 
 /// One consulted definition's row: its index identity, the request's body
 /// record for it, and its header when the request owns that header. An image
@@ -162,7 +162,7 @@ const PLACE: usize = 16;
 const HEAD: usize = HEAD_SECTIONS + SECTIONS * 8;
 /// Where the head's section table starts.
 pub(crate) const HEAD_SECTIONS: usize = 4 + HEAD_HASHES * 32 + 8;
-const HEAD_HASHES: usize = 11;
+const HEAD_HASHES: usize = 10;
 
 /// What a record was built from and what it built, readable without its
 /// sections. Its build acceptance is its existence: only an accepted,
@@ -173,9 +173,6 @@ const HEAD_HASHES: usize = 11;
 /// and the limit, and the head holds them all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Head {
-    /// The product snapshot of the request that wrote it: a request with this
-    /// snapshot has every row and constant of the record live.
-    pub snapshot: ContentHash,
     /// [`sources_digest`] of the instances' items.
     pub sources: ContentHash,
     /// [`files_digest`] of the request that wrote it: a hit whose request
@@ -203,7 +200,6 @@ pub(crate) struct Head {
 impl Head {
     fn hashes(&self) -> [ContentHash; HEAD_HASHES] {
         [
-            self.snapshot,
             self.sources,
             self.files,
             self.verified,
@@ -227,17 +223,16 @@ impl Head {
         let hash = |i: usize| ContentHash(bytes[4 + i * 32..4 + (i + 1) * 32].try_into().unwrap());
         let limit = 4 + HEAD_HASHES * 32;
         Head {
-            snapshot: hash(0),
-            sources: hash(1),
-            files: hash(2),
-            verified: hash(3),
-            executable: hash(4),
-            environment: hash(5),
-            toolchain: hash(6),
-            recipe: hash(7),
-            tools: hash(8),
-            policy: hash(9),
-            revision: hash(10),
+            sources: hash(0),
+            files: hash(1),
+            verified: hash(2),
+            executable: hash(3),
+            environment: hash(4),
+            toolchain: hash(5),
+            recipe: hash(6),
+            tools: hash(7),
+            policy: hash(8),
+            revision: hash(9),
             instance_limit: u64::from_le_bytes(bytes[limit..limit + 8].try_into().unwrap()),
         }
     }
@@ -707,7 +702,7 @@ pub(crate) struct Use {
     pub entry_live: bool,
     pub constants: Vec<DefPath>,
     /// The new record's walk part: when the walk was accepted and complete,
-    /// or for a hit written by a request of another snapshot.
+    /// or for a hit whose head moved.
     pub draft: Option<Draft>,
 }
 

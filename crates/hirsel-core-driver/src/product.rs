@@ -126,7 +126,7 @@ impl PackageProduct {
     /// Source-owned package producers use this explicit identity once per package
     /// revision. The installed consumer passes only the resulting cache key/image.
     pub fn sources(mut inputs: CorpusManifest, root: &Path, meter: &mut Meter) -> io::Result<Self> {
-        inputs.normalise();
+        inputs.normalise(None);
         let mut stamps = Vec::new();
         for package in &inputs.packages {
             for source in &package.sources {
@@ -220,7 +220,8 @@ impl Driver {
         root: &Path,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
-        self.check_package_product(request, root, meter, false, true)
+        self.check_package_product(request, root, meter, (false, true), None)?
+            .product()
     }
     pub fn check_reachable_with_product(
         &mut self,
@@ -228,7 +229,8 @@ impl Driver {
         root: &Path,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
-        self.check_package_product(request, root, meter, true, true)
+        self.check_package_product(request, root, meter, (true, true), None)?
+            .product()
     }
     pub fn check_with_core_product(
         &mut self,
@@ -236,7 +238,8 @@ impl Driver {
         root: &Path,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
-        self.check_package_product(request, root, meter, false, false)
+        self.check_package_product(request, root, meter, (false, false), None)?
+            .product()
     }
     pub fn check_reachable_with_core_product(
         &mut self,
@@ -244,21 +247,24 @@ impl Driver {
         root: &Path,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
-        self.check_package_product(request, root, meter, true, false)
+        self.check_package_product(request, root, meter, (true, false), None)?
+            .product()
     }
-    fn check_package_product(
+    /// Check `request` over a package product of its core (and, with
+    /// `include_std`, std); `reachable` checks the entry's closure alone.
+    pub(crate) fn check_package_product(
         &mut self,
         mut request: CheckRequest,
         root: &Path,
         meter: &mut Meter,
-        reachable: bool,
-        include_std: bool,
-    ) -> io::Result<Arc<CheckProduct>> {
+        (reachable, include_std): (bool, bool),
+        record: Option<&crate::request_record::Request>,
+    ) -> io::Result<crate::Checked> {
         if reachable && let LibraryInput::Image(image) = &request.library {
             request.library = LibraryInput::ReachableImage(Arc::clone(image));
         }
         if !matches!(request.library, LibraryInput::Sources) {
-            return self.check(request, meter);
+            return self.check_recorded(request, meter, record);
         }
         let Some(core) = request
             .inputs
@@ -266,7 +272,7 @@ impl Driver {
             .iter()
             .find(|p| p.package == request.inputs.core)
         else {
-            return self.check(request, meter);
+            return self.check_recorded(request, meter, record);
         };
         let is_bundled = matches_bundle(core, "core", bundled::SOURCES, &[]);
         let std = include_std
@@ -306,7 +312,7 @@ impl Driver {
         } else {
             LibraryInput::Image(product.image)
         };
-        self.check(request, meter)
+        self.check_recorded(request, meter, record)
     }
 }
 

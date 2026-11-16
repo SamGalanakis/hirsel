@@ -2,7 +2,7 @@
 use crate::*;
 use hirsel_core_ids::PackageId;
 use hirsel_core_syntax::{ParseMode, ParseOutput, Symbols, TokenKind, lex};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CorpusManifest {
     pub core: PackageId,
@@ -50,22 +50,31 @@ pub struct CorpusReport {
 }
 impl CorpusManifest {
     /// The one traversal order of a request's sources: packages by identity,
-    /// each package's dependencies sorted, its sources by module, then file,
-    /// then mode. Files of one module are traversed in this order, so it
-    /// decides what they mean together (which twin pairs with which); every
-    /// producer that checks, images or keys sources normalises first, and
-    /// path-free stamps are taken after it.
-    pub fn normalise(&mut self) {
+    /// each package's dependencies sorted, its sources by module, then name,
+    /// then mode. A source's name is its path relative to the manifest in
+    /// `root` (what a request's key holds), else its path, so the order is
+    /// the same however the manifest spells the paths. Files of one module
+    /// are traversed in this order, so it decides what they mean together
+    /// (which twin pairs with which); every producer that checks, images or
+    /// keys sources normalises first, and path-free stamps are taken after it.
+    pub fn normalise(&mut self, root: Option<&Path>) {
         self.packages.sort_by(|a, b| a.package.cmp(&b.package));
+        let name = |file: &Path| root.and_then(|root| manifest_name(root, file).ok());
         for p in &mut self.packages {
             p.dependencies.sort();
             p.sources.sort_by(|a, b| {
-                (&a.modules, &a.file, a.signatures).cmp(&(&b.modules, &b.file, b.signatures))
+                a.modules.cmp(&b.modules).then_with(|| {
+                    (name(&a.file), &a.file, a.signatures).cmp(&(
+                        name(&b.file),
+                        &b.file,
+                        b.signatures,
+                    ))
+                })
             });
         }
     }
     pub fn load(mut self) -> std::io::Result<Corpus> {
-        self.normalise();
+        self.normalise(None);
         let mut sources = vec![];
         for package in &self.packages {
             for source in &package.sources {
@@ -324,4 +333,28 @@ pub fn code_lines(text: &str) -> usize {
         cursor = end;
     }
     count
+}
+/// What a diagnostic and a native site call `file`, listed by the manifest in
+/// `root`: its path relative to `root`, by components, `/`-separated. Both
+/// are made absolute first, so a relative manifest entry and a relative
+/// manifest directory agree; a file outside `root` climbs with `..`.
+pub fn manifest_name(root: &Path, file: &Path) -> std::io::Result<String> {
+    use std::path::Component;
+    let (root, file) = (std::path::absolute(root)?, std::path::absolute(file)?);
+    let normal = |p: &Path| -> Vec<String> {
+        let mut out: Vec<String> = vec![];
+        for c in p.components() {
+            match c {
+                Component::ParentDir => drop(out.pop()),
+                Component::Normal(s) => out.push(s.to_string_lossy().into_owned()),
+                _ => {}
+            }
+        }
+        out
+    };
+    let (root, file) = (normal(&root), normal(&file));
+    let shared = root.iter().zip(&file).take_while(|(a, b)| a == b).count();
+    let mut parts = vec![".."; root.len() - shared];
+    parts.extend(file[shared..].iter().map(String::as_str));
+    Ok(parts.join("/"))
 }

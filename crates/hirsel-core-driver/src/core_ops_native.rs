@@ -94,6 +94,7 @@ fn core_operations(backend: Backend) {
             directories: vec![],
             grant_mask: 1 << 9,
             logical_charge_report: None,
+            observed: None,
         };
         let built = match product.build(&entry, &options) {
             Ok(built) => built,
@@ -175,6 +176,7 @@ fn counted_operations(backend: Backend) {
             directories: vec![],
             grant_mask: 0,
             logical_charge_report: None,
+            observed: None,
         };
         let built = match product.build(&entry, &options) {
             Ok(built) => built,
@@ -244,6 +246,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             directories: vec![],
             grant_mask: 0,
             logical_charge_report: None,
+            observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
         let result = Command::new(built.executable).args(argv).output().unwrap();
@@ -321,6 +324,7 @@ fn stream_operations(backend: Backend) {
             directories: vec![],
             grant_mask: (1 << 4) | (1 << 5) | (1 << 9),
             logical_charge_report: None,
+            observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
         let mut command = Command::new(built.executable);
@@ -391,6 +395,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
             .into_iter()
             .fold(0, |mask, kind| mask | 1 << crate::native::grant_kind(kind).unwrap()),
         logical_charge_report: None,
+        observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
     let output = Command::new(built.executable).output().unwrap();
@@ -477,6 +482,7 @@ fn host_operations(backend: Backend) {
             directories: vec![grant.to_str().unwrap().into()],
             grant_mask: (1 << 2) | (1 << 4) | (1 << 9),
             logical_charge_report: None,
+            observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
         let output = Command::new(built.executable).output().unwrap();
@@ -580,6 +586,7 @@ pub fn proof_clone_run() -> u64 {
         directories: vec![],
         grant_mask: 0,
         logical_charge_report: None,
+        observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
     let output = Command::new(built.executable).output().unwrap();

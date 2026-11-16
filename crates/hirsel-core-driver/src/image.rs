@@ -311,7 +311,7 @@ impl Driver {
         }
         request.library = LibraryInput::Produce;
         let mut inputs = request.inputs.clone();
-        inputs.normalise();
+        inputs.normalise(None);
         let store_path = request.store.clone();
         let product = self.check(request, meter)?;
         let Some(library) = product.library.clone() else {

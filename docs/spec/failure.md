@@ -23,7 +23,7 @@ raised it:
 | `Fail(text)` | `fail(msg)`, which has type `Never` |
 | `Cancelled` | a cancellation point that observes cancellation ([CONC-7](tasks.md#conc-7-cancellation-points)) |
 | `Capacity` | an allocation beyond a finalizer's grant ([MEM-27](budgets.md#mem-27-finalizer-grants)) |
-| `TapeEnded` | an operation on a tape's substitute after the tape ended ([CAP-9](capabilities.md#cap-9-tapes)) |
+| `Tape` | a provider operation whose tape refuses it before issue ([CAP-9](capabilities.md#cap-9-tapes)); provisional |
 
 `Capacity` outside a finalizer is an error, never a failure.
 
@@ -262,7 +262,7 @@ recovery boundary and undoes nothing:
   its place, so the code after `isolate` has an unused cell to fail into; when it did not,
   every caught cause having gone into resources' cells, the reserved cell is refunded. A
   failure is caught whatever its primary cause other than `Cancelled`: `Overflow`,
-  `Bounds`, `Division`, `Unwrap`, `Fail`, `TapeEnded` or a finalizer's `Capacity`
+  `Bounds`, `Division`, `Unwrap`, `Fail`, `Tape` or a finalizer's `Capacity`
   ([MEM-27](budgets.md#mem-27-finalizer-grants)).
 - A failure whose primary cause is `Cancelled` is not caught: after the same cleanup the
   reserved cell is refunded, the chain set aside is restored with the failure's causes

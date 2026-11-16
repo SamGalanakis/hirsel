@@ -180,16 +180,21 @@ code that takes the capability runs unchanged on either.
 - Replaying, the tape performs nothing: it checks each issue against the recording before
   any effect, delivers the recorded result and never reaches the source's provider, so a
   replay has no host effect. An issue that differs from the recording, in its operation, its
-  object or its argument, is a divergence and has no effect.
-- `tape.open` refuses, before anything runs, a recording whose code identity
-  ([PROG-9](programs.md#prog-9-code-descriptors)), argument or limit differs from the
-  opener's. How a code revision is compared waits on hook D ([reserved](reserved.md)).
+  object or its argument, is a divergence: it has no effect, and the tape refuses it.
+- `tape.open` refuses, before anything runs, a recording made by another build, whose build
+  identity, which covers every byte of the code that runs, differs from the opener's, and
+  one whose argument or limit differs.
 - `tape.end(take t)` waits until every operation on the tape that is in progress has
-  delivered, then seals the tape. After `end`, or once the tape is dropped, every operation
-  on a substitute or on a handle made through it fails with cause `TapeEnded`
-  ([FAIL-2](failure.md#fail-2-causes)) before its issue and never reaches the source;
-  cleaning such a handle closes the handle behind it, if there is one, and records nothing.
-  A dropped tape keeps what it recorded but is not sealed, as if the run had ended there.
+  delivered, then seals the tape. After `end`, or once the tape is dropped, the tape refuses
+  every operation on a substitute or on a handle made through it, which never reaches the
+  source; cleaning such a handle closes the handle behind it, if there is one, and records
+  nothing. A dropped tape keeps what it recorded but is not sealed, as if the run had ended
+  there.
+
+An operation its tape refuses fails before its issue with cause `Tape`
+([FAIL-2](failure.md#fail-2-causes)), which carries no reason: the reason is in the tape's
+verdict and in the printed cause. A refusal is sticky: once a tape refuses one operation it
+refuses every later one, so a replay that reaches the same point fails the same way.
 
 `tape.port(mut t)` returns a `Port` and its `PortEnd`, a way out of code that holds only
 substitutes that carries bytes and nothing else: `port.call(p, request, mut reply)` is a

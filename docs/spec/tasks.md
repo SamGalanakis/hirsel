@@ -122,12 +122,12 @@ a pending request only at a **cancellation point**: the entry of every core `wai
 operation (`send`, `receive`, `join` and the waiting provider operations of
 [CAP-5](capabilities.md#cap-5-provider-operations)), each moment such an operation would
 wait, and `task.check_cancel()`. At an entry, a pending request is observed before anything
-else is done. A provider operation that has been issued delivers exactly one result
-([CAP-8](capabilities.md#cap-8-the-replay-point)). After its issue a request reaches it only
-through its provider: while the operation is still in progress the provider ends it at once
-with a result of its type, and the request stays pending for the task's next cancellation
-point. The host provider completes every operation at its issue, so no host operation is in
-progress after it.
+else is done. A provider operation that has been issued completes and delivers a result
+([CAP-8](capabilities.md#cap-8-the-replay-point)). Cancellation reaches it at issue, and,
+while it waits in progress for readiness, through its provider's abort, whose result is the
+operation's `Aborted` error; the request stays pending and is observed at the next
+cancellation point. An operation that does not wait after issue is reached only at issue,
+and no host operation of v1 waits after issue.
 A user function declared `waits` is not itself a cancellation point. Observing it is a failure with cause `Cancelled`
 ([FAIL-2](failure.md#fail-2-causes)), which runs the task's cleanup. Pure code is never
 interrupted, and no engine inserts a yield or a check. A **shield**, a finalizer

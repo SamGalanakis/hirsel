@@ -74,6 +74,7 @@ impl Checked {
         let product = Driver::default()
             .check(
                 CheckRequest {
+                    manifest: None,
                     inputs,
                     store: files.path().join("store"),
                     library: LibraryInput::Sources,

@@ -2165,3 +2165,62 @@ fn derived_via_tuple() -> (bool, bool, bool) {
     let want = unhex("01 0100000000000000 1300000000000000 7374642e74657374732e636f6465632e445074 0000000000000000 02 12 0200000000000000 06 0d 13 0000000000000000")
     (enc(c, DPt(w: (5, "a"))) == b, again(c, b), result.unwrap(codec.schema(c)) == want)
 }
+
+// A group of generic members at one parameter: a node holds a forest of nodes.
+type DGNode[T]: codec {
+    v: T,
+    kids: DGForest[T]
+}
+
+type DGForest[T]: codec {
+    trees: List[DGNode[T]]
+}
+
+// "a" over ["b"]: the String, the forest's count, the child, its empty forest; every
+// prefix is Truncated; least 16 (String 8 + forest 8), the forest's 8. At u64, 1 over [2];
+// its schema by hand: DGNode[u64] is definition 0 (one argument, u64), its kids field
+// definition 1 (DGForest[u64]), whose List element is definition 0 again.
+// expect: run derived_generic_group() = (true, true, true, (16, 8), true, true)
+fn derived_generic_group() -> (bool, bool, bool, (u64, u64), bool, bool) {
+    let c: codec.Codec[DGNode[String]] = codec.of()
+    let f: codec.Codec[DGForest[String]] = codec.of()
+    let b = unhex("0100000000000000 61 0100000000000000 0100000000000000 62 0000000000000000")
+    let mut ks: List[DGNode[String]] = list.new()
+    result.unwrap(list.push(mut ks, DGNode(v: "b", kids: DGForest(trees: list.new()))))
+    let x = DGNode(v: "a", kids: DGForest(trees: take ks))
+    let u: codec.Codec[DGNode[u64]] = codec.of()
+    let ub = unhex("0100000000000000 0100000000000000 0200000000000000 0000000000000000")
+    let node = "1600000000000000 7374642e74657374732e636f6465632e 44474e6f6465 0100000000000000 06 00 0200000000000000 00 0100000000000000 76 06 00 0400000000000000 6b696473 13 0100000000000000"
+    let forest = "1800000000000000 7374642e74657374732e636f6465632e 4447466f72657374 0100000000000000 06 00 0100000000000000 00 0500000000000000 7472656573 0e 13 0000000000000000"
+    let mut want = unhex("01 0200000000000000")
+    result.unwrap(list.append(mut want, unhex(node)))
+    result.unwrap(list.append(mut want, unhex(forest)))
+    result.unwrap(list.append(mut want, unhex("13 0000000000000000")))
+    (enc(c, x) == b, again(c, b), prefixes(c, b), (codec.least(c), codec.least(f)), again(u, ub) && prefixes(u, ub), result.unwrap(codec.schema(u)) == want)
+}
+
+// A group reached through a Result's Ok and through its Error.
+type DRNode: codec {
+    v: u64,
+    next: List[DRLink]
+}
+
+type DRLink: codec = Fwd(Result[DRNode, String]) | Back(Result[u8, DRNode])
+
+// 1 over [Fwd(Ok(2 over [])), Fwd(Error("e")), Back(Ok(7)), Back(Error(3 over []))], by
+// hand (tags u32); every prefix is Truncated; least 16 and 8 (a tag and a Result's tag);
+// a Result tag 2 after Fwd's is Invalid at 20.
+// expect: run derived_result_group() = (true, true, true, (16, 8), 2020)
+fn derived_result_group() -> (bool, bool, bool, (u64, u64), u64) {
+    let c: codec.Codec[DRNode] = codec.of()
+    let l: codec.Codec[DRLink] = codec.of()
+    let b = unhex("0100000000000000 0400000000000000 00000000 00000000 0200000000000000 0000000000000000 00000000 01000000 0100000000000000 65 01000000 00000000 07 01000000 01000000 0300000000000000 0000000000000000")
+    let mut ls: List[DRLink] = list.new()
+    result.unwrap(list.push(mut ls, Fwd(Ok(DRNode(v: 2, next: list.new())))))
+    result.unwrap(list.push(mut ls, Fwd(Error("e"))))
+    result.unwrap(list.push(mut ls, Back(Ok(7))))
+    result.unwrap(list.push(mut ls, Back(Error(DRNode(v: 3, next: list.new())))))
+    let x = DRNode(v: 1, next: take ls)
+    let bad = unhex("0100000000000000 0100000000000000 00000000 02000000")
+    (enc(c, x) == b, again(c, b), prefixes(c, b), (codec.least(c), codec.least(l)), outcome(c, bad))
+}

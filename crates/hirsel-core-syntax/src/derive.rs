@@ -335,11 +335,13 @@ fn reaches(
 }
 
 /// A recursive group whose decode the frame loop writes: its members reach each other
-/// only through a field or payload that is a member itself, or a List, Option or Map
-/// value of one, at the member's own parameters. A generic member is the group's only
-/// member. Anything else (a member inside a tuple, Result, a map key or another generic
-/// type, a List of Lists, or reached at other arguments: the polymorphic recursion the
-/// checker refuses) leaves the group underived.
+/// only through a field or payload that is a member itself, a List, Option or Map value
+/// of one, or one side of a Result whose other side holds no member, at the member's own
+/// parameters. Every member declares the same parameters, so each member's decode,
+/// generic over them, can build every member. Anything else (a member inside a tuple, on
+/// both sides of a Result, a map key or another generic type, a List of Lists, or reached
+/// at other arguments: the polymorphic recursion the checker refuses) leaves the group
+/// underived.
 struct Group<'a> {
     /// Each member and its type text, `D` or `D[P1, ..]`.
     members: Vec<(&'a Decl<'a>, String)>,
@@ -368,11 +370,15 @@ enum Edge<'a> {
     List,
     /// A map's value, keyed by this type.
     Map(&'a str),
+    /// A Result's Ok, beside this Error type.
+    Ok(&'a str),
+    /// A Result's Error, beside this Ok type.
+    Error(&'a str),
 }
 impl<'a> Group<'a> {
     fn new(members: Vec<&'a Decl<'a>>) -> Option<Self> {
         if members.iter().any(|m| m.via.is_some())
-            || members.len() > 1 && members.iter().any(|m| !m.generics.is_empty())
+            || members.iter().any(|m| m.generics != members[0].generics)
         {
             return None;
         }
@@ -414,6 +420,8 @@ impl<'a> Group<'a> {
                     Ty::List(e) => (Edge::List, member(e).ok()??),
                     Ty::Option(e) => (Edge::Option, member(e).ok()??),
                     Ty::Map(k, e) if !named(k) => (Edge::Map(k), member(e).ok()??),
+                    Ty::Result(t, e) if !named(e) => (Edge::Ok(e), member(t).ok()??),
+                    Ty::Result(t, e) if !named(t) => (Edge::Error(t), member(e).ok()??),
                     _ => return None,
                 })
             };
@@ -469,7 +477,7 @@ impl<'a> Group<'a> {
         }
         let step = |s: &Step| match (s.edge, s.ty) {
             (Some((Edge::Direct, n)), _) => self.least(n, depth + 1),
-            (Some((Edge::Option, _)), _) => Some(4),
+            (Some((Edge::Option | Edge::Ok(_) | Edge::Error(_), _)), _) => Some(4),
             (Some(_), _) => Some(8),
             (None, Ty::Scalar(_, n)) => Some(*n),
             (None, Ty::List(_) | Ty::Map(..)) => Some(8),
@@ -750,6 +758,19 @@ impl<'a> Machine<'a> {
                         indent(&push)
                     );
                 }
+                Edge::Ok(other) | Edge::Error(other) => {
+                    let push = self.push(w, r, saved(k), jump);
+                    let (at, side) = match edge {
+                        Edge::Ok(_) => ("== 0", "Error"),
+                        _ => ("!= 0", "Ok"),
+                    };
+                    let plain = w.take(&Ty::With(other));
+                    let _ = write!(
+                        s,
+                        "if {c}take_tag(b$, mut at$, 2)? {at} {{\n{}}}\nlet {pre}{k}$: {text} = {side}({plain})\n",
+                        indent(&push)
+                    );
+                }
                 Edge::List => {
                     let least = self.least(w, child);
                     let mut values = saved(k);
@@ -845,6 +866,12 @@ impl<'a> Machine<'a> {
             }
             Edge::Option => {
                 let _ = writeln!(s, "let b{k}$: {} = Some(take x$)", step.text);
+            }
+            Edge::Ok(_) => {
+                let _ = writeln!(s, "let b{k}$: {} = Ok(take x$)", step.text);
+            }
+            Edge::Error(_) => {
+                let _ = writeln!(s, "let b{k}$: {} = Error(take x$)", step.text);
             }
             Edge::List => {
                 let mut values = saved();

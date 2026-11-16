@@ -2605,6 +2605,26 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
 }
 
 #[test]
+fn unresolved_closure_patterns_do_not_emit_or_use_undeclared_binders() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn nested() { let f = scoped fn(o: Option[(u64, u64)]) -> u64 { match o { Some((x, _)) => x } } }\nfn captured(x: Missing) -> u64 { match x { Some(y) => { let f = scoped fn() -> u64 { y }; f() } } }\nfn flags(a: bool) -> u64 { 0u64 }\nfn missing_args(a: List[u64], b: List[u64]) -> u64 { flags(a == b) }\nfn peek(h: Missing) -> u64 { flags(h) }\n";
+    for _ in 0..2 {
+        let product = Driver::default()
+            .check(request(source, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        assert!(!product.accepted());
+        assert!(product.diagnostics.iter().any(|r| r.rule == "LANG-7"));
+        assert!(
+            product
+                .definitions
+                .values()
+                .filter(|d| d.definition.0.name != "flags")
+                .all(|d| d.check.function.is_none())
+        );
+    }
+}
+
+#[test]
 fn unresolved_bodies_keep_secondary_diagnostics_on_cold_and_cached_requests() {
     let dir = tempfile::tempdir().unwrap();
     let source = "type Choice = Yes | No(u64)\nfn pattern(x: Choice) -> u64 { match x { Yes => 1u64, Missing(_) => 0u64 } }\n";

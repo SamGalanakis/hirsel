@@ -1228,7 +1228,7 @@ struct Cx<'c, 'a, 'e> {
     pending: Option<(AddressBase, TypeId)>,
     out: CoreCheck,
     capture_frame: Option<closures::CaptureFrame>,
-    /// An enclosing closure context has already reported a refusal of this item.
+    /// Resolution or an enclosing closure has already refused this item.
     inherited_refusal: bool,
     has_callback_parameters: bool,
     frame_level: u32,
@@ -1246,6 +1246,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let fd = &p.fns[f];
         let item = p.item(fd.at);
         let info = &p.items[fd.at.module as usize][fd.at.item as usize];
+        let refused = !info.resolution.diagnostics.is_empty();
         let binder_at = info
             .resolution
             .binders
@@ -1273,7 +1274,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             cur: None,
             open: vec![],
             open_anchors: vec![],
-            broken: false,
+            // Keep checking independent constructs without emitting through
+            // unresolved types, patterns or captures.
+            broken: refused,
             node: item.root,
             halted: None,
             vars: vec![None; info.resolution.binders.len()],
@@ -1350,7 +1353,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             pending: None,
             out: CoreCheck::default(),
             capture_frame: None,
-            inherited_refusal: false,
+            inherited_refusal: refused,
             has_callback_parameters: false,
             frame_level: 0,
             descriptors: closures::Descriptors::default(),

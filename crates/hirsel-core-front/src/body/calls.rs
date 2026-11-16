@@ -1380,9 +1380,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return if g.path.0.modules == ["int"] {
                 self.generic_numeric(f, tys, vals, n)
             } else {
-                if self.live() {
-                    self.gap(n, "a float operation on a type parameter is not built");
-                }
+                // This implementation gap is independent of earlier refusals
+                // and does not require live emission to be reported.
+                self.gap(n, "a float operation on a type parameter is not built");
                 None
             };
         }

@@ -5422,6 +5422,10 @@ fn disk_track_roots(mut graph: DiskGraph, all: List[Roots]) -> Result[List[Arc[s
 
 fn disk_load(d: Dir, cap: u64, ceiling: u64) -> Result[DiskLoaded, Error] waits {
     let raw = disk_read_file(d, "MANIFEST", 67108952)?
+    disk_load_manifest(d, raw, cap, ceiling)
+}
+
+fn disk_load_manifest(d: Dir, raw: Bytes, cap: u64, ceiling: u64) -> Result[DiskLoaded, Error] waits {
     let parsed = disk_read_manifest("MANIFEST", raw)?
     let (id, take manifest) = take parsed
     // Only listed packs are opened. Leftovers beyond a naming gap are inert.
@@ -5927,5 +5931,203 @@ fn disk_test_worker_refusal(d: Dir, c: Clock, tasks: Tasks) -> Result[(), ()] wa
         Ok(())
     } else {
         Error(())
+    }
+}
+
+fn disk_manifest_empty() -> Result[DiskManifest, Capacity] {
+    let mut branches: List[DiskBranch] = list.new()
+    result.capacity_only(list.push(mut branches, DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: DiskRoots(data: 0, streams: 0, catalog: 0))))?
+    Ok(DiskManifest(generation: 1, next_node: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, packs: list.new(), retired: list.new(), branches: take branches, pins: list.new()))
+}
+
+fn disk_identity(r: Random) -> Result[StoreId, Capacity] {
+    let mut raw: Bytes = list.with_capacity(16)?
+    host.random(r, mut raw)
+    Ok(StoreId(hi: list.word_le(raw, 0), lo: list.word_le(raw, 8)))
+}
+
+fn disk_read_synced(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] waits {
+    let mut file = disk_io(host.open(d, path, Read))?
+    disk_io(host.sync(mut file))?
+    let mut raw: Bytes = list.new()
+    loop {
+        let size = list.len(raw)
+        let room = if size < limit {
+            if limit - size < 16384 {
+                limit - size
+            } else {
+                16384u64
+            }
+        } else {
+            1u64
+        }
+        let mut chunk: Bytes = capacity(list.with_capacity(room))?
+        let count = disk_io(host.read(mut file, mut chunk))?
+        if count == 0 {
+            break
+        }
+        if size == limit {
+            return Error(disk_fault(path, size, Malformed))
+        }
+        capacity(list.append(mut raw, chunk))?
+    }
+    disk_io(host.close(take file))?
+    Ok(take raw)
+}
+
+fn disk_end(d: Dir, id: StoreId, seq: u64) -> Result[Option[u64], Error] waits {
+    let path = capacity(disk_path("j-", seq, ".end"))?
+    let raw = match disk_read_file(d, path, 96) {
+        Ok(take raw) => take raw,
+        Error(Io(NotFound)) => return Ok(None),
+        Error(Corrupt(_)) => return Ok(None),
+        Error(take e) => return Error(take e)
+    }
+    let header = match disk_read_header(path, raw, 4, Some(seq), Some(id)) {
+        Ok(h) => h,
+        Error(Full(c)) => return Error(Full(c)),
+        Error(_) => return Ok(None)
+    }
+    let frame = match disk_read_frame(path, header.context, raw, 72) {
+        Ok(f) => f,
+        Error(Full(c)) => return Error(Full(c)),
+        Error(_) => return Ok(None)
+    }
+    if frame.kind != 0x0012 || frame.end != 96 || list.len(raw) != 96 {
+        return Ok(None)
+    }
+    Ok(Some(read_le(raw, frame.payload, 8)))
+}
+
+fn disk_exists(d: Dir, path: String) -> Result[bool, Error] waits {
+    match host.open(d, path, Read) {
+        Ok(take file) => {
+            disk_io(host.close(take file))?;
+            Ok(true)
+        },
+        Error(NotFound) => Ok(false),
+        Error(e) => Error(Io(e))
+    }
+}
+
+// S2 has only HEADERs in journal segments. S3 adds COMMIT replay to this walk;
+// it never interprets a nonempty journal as an empty one in this slice.
+fn disk_last_segment(d: Dir, id: StoreId, first: u64) -> Result[(u64, u64), Error] waits {
+    let mut seq = first
+    let mut previous: u64 = 0
+    loop {
+        let path = capacity(disk_path("j-", seq, ""))?
+        let raw = match disk_read_synced(d, path, 72) {
+            Ok(take raw) => take raw,
+            Error(Io(NotFound)) => {
+                if seq == first {
+                    return Error(disk_fault(path, 0, Header))
+                }
+                return Ok((seq - 1, previous))
+            },
+            Error(take e) => return Error(take e)
+        }
+        let header = disk_read_header(path, raw, 2, Some(seq), Some(id))
+        match take header {
+            Ok(h) => {
+                if seq != first && h.prev_end != previous {
+                    return Error(disk_fault(path, 0, Header))
+                }
+            },
+            Error(Corrupt(_)) => {
+                let following_path = capacity(disk_path("j-", seq + 1, ""))?
+                if disk_exists(d, following_path)? {
+                    return Error(disk_fault(path, 0, Header))
+                }
+                if let Some(_) = disk_end(d, id, seq)? {
+                    return Error(disk_fault(path, 0, Header))
+                }
+                if seq == first {
+                    return Error(disk_fault(path, 0, Header))
+                }
+                return Ok((seq - 1, previous))
+            },
+            Error(take e) => return Error(take e)
+        }
+        if let Some(end) = disk_end(d, id, seq)? {
+            if end > list.len(raw) {
+                return Error(disk_fault(path, list.len(raw), Truncated))
+            }
+            if end != 72 {
+                return Error(disk_fault(path, end, Malformed))
+            }
+        }
+        previous = 72
+        seq += 1
+    }
+}
+
+type DiskStartup: send {
+    store: StoreId,
+    roots: Roots,
+    head: u64,
+    at: u64,
+    next_node: u64,
+    next_table: u32,
+    generation: u64,
+    seq: u64,
+    segment: HostFile,
+    end_file: HostFile
+}
+
+type DiskBootstrap: send {
+    d: Dir,
+    random: Random,
+    options: Options,
+    ready: Sender[Result[DiskStartup, Error]],
+    receive: Receiver[DiskCut],
+    send: Sender[DiskCutAck]
+}
+
+fn disk_start(d: Dir, r: Random, options: Options) -> Result[(DiskStartup, DiskState), Error] waits {
+    let raw = disk_read_file(d, "MANIFEST", 67108952)
+    let loaded = match take raw {
+        Ok(take existing) => disk_load_manifest(d, existing, options.pack_bytes, options.resident_limit)?,
+        Error(Io(NotFound)) => {
+            if !options.create {
+                return Error(NotFound)
+            }
+            let id = capacity(disk_identity(r))?
+            let manifest = capacity(disk_manifest_empty())?
+            let (take segment, take end_file) = disk_new_segment(d, id, 1, 0)?
+            disk_publish_manifest(d, id, manifest)?
+            let startup = DiskStartup(store: id, roots: empty_roots(), head: 0, at: 0, next_node: 0, next_table: 1, generation: 1, seq: 1, segment: take segment, end_file: take end_file)
+            return Ok((take startup, DiskState(store: id, manifest: take manifest, graph: disk_graph())))
+        },
+        Error(take e) => return Error(take e)
+    }
+    disk_cleanup(d, loaded.manifest)?
+    let tail = disk_last_segment(d, loaded.store, loaded.manifest.first_live)?
+    let seq = tail.0 + 1
+    let (take segment, take end_file) = disk_new_segment(d, loaded.store, seq, tail.1)?
+    let pair = {
+        let main = loaded.manifest.branches[0];
+        (main.version, main.at)
+    }
+    let startup = DiskStartup(store: loaded.store, roots: share_roots(loaded.roots), head: pair.0, at: pair.1, next_node: loaded.manifest.next_node - 1, next_table: loaded.manifest.next_table, generation: loaded.manifest.generation, seq: seq, segment: take segment, end_file: take end_file)
+    let DiskLoaded(store: id, manifest: take manifest, roots: _, graph: take graph) = take loaded
+    Ok((take startup, DiskState(store: id, manifest: take manifest, graph: take graph)))
+}
+
+fn disk_bootstrap(take input: DiskBootstrap) -> Result[(), Error] waits {
+    let DiskBootstrap(d: d, random: r, options: options, ready: take ready, receive: take receive, send: take send) = take input
+    let started = disk_start(d, r, options)
+    match take started {
+        Error(take e) => {
+            let _ = channel.send(ready, Error(take e));
+            Ok(())
+        },
+        Ok((take startup, take state)) => {
+            if let Error(_) = channel.send(ready, Ok(take startup)) {
+                return Ok(())
+            }
+            let worker = DiskWorker(d: d, state: take state, cap: options.pack_bytes, receive: take receive, send: take send)
+            disk_worker(take worker)
+        }
     }
 }

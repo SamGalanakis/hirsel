@@ -137,9 +137,17 @@ enum State {
     Provider,
     Ended,
 }
+/// The first byte is the emitted Arc gate (TASK_ARC_GATE), which generated
+/// code reaches through `Context::events`.
+#[repr(C)]
 pub struct Task {
+    /// Nonzero while an Arc new, share or release hook has work. Without a
+    /// sink the only work is delivering this task's refunds (MEM-20), so this
+    /// is the task's refund notification flag. With a sink every hook records,
+    /// so it stays set and `recorded_refunds` is the notification flag.
+    pub(crate) arc_gate: AtomicBool,
+    recorded_refunds: AtomicBool,
     refunds: Option<crate::limit::RefundSubscription>,
-    refund_pending: AtomicBool,
     polls_left: u32,
     context: *mut Context,
     owned_context: Option<Context>,
@@ -179,8 +187,22 @@ struct Scheduler {
     /// Cancellation requests for tasks parked in a provider operation, in
     /// request order, taken at the next scheduler turn.
     cancels: Vec<*mut Task>,
+    /// Tasks in State::Blocked. Only `checkpoint(true)` blocks a task and only
+    /// `wake` unblocks, readying every one, so a wake with none is a no-op.
+    blocked: usize,
 }
 const HOST_STACK_BYTES: usize = 64 << 10;
+impl Task {
+    /// The flag foreign refund publication sets for this task (see `arc_gate`).
+    #[inline(always)]
+    fn refund_flag(&self, recording: bool) -> &AtomicBool {
+        if recording {
+            &self.recorded_refunds
+        } else {
+            &self.arc_gate
+        }
+    }
+}
 impl Scheduler {
     fn id(&mut self) -> u64 {
         let next = self.next;
@@ -241,7 +263,17 @@ impl Scheduler {
             task
         }
     }
+    #[inline(always)]
     unsafe fn wake(&mut self) {
+        if self.blocked != 0 {
+            // SAFETY: forwarded caller contract.
+            unsafe { self.wake_blocked() }
+        }
+    }
+    /// Ready every blocked task, in creation-list order.
+    #[inline(never)]
+    unsafe fn wake_blocked(&mut self) {
+        self.blocked = 0;
         let mut task = self.all;
         // SAFETY: no task is executing while these single-worker links change.
         unsafe {
@@ -1044,12 +1076,23 @@ pub(crate) fn event(kind: u8, object: u64, value: u64) {
         return;
     }
     // SAFETY: current pins its scheduler; callback cannot suspend or re-enter.
+    unsafe { event_for(task_pointer, kind, object, value) }
+}
+/// # Safety
+/// Task is the running task, so it pins its scheduler and sink.
+#[inline(always)]
+unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) {
+    // SAFETY: current pins its scheduler; callback cannot suspend or re-enter.
     unsafe {
         let task = NonNull::new_unchecked(task_pointer).as_ref();
-        if task.refund_pending.load(Ordering::Acquire) {
+        let run = NonNull::new_unchecked(task.run).as_ref();
+        // Without a sink the gate is the refund flag, so a quiet event reads
+        // one byte; with one the gate stays set and the flag is separate.
+        if task.arc_gate.load(Ordering::Acquire)
+            && (run.provider.event.is_none() || task.recorded_refunds.load(Ordering::Acquire))
+        {
             drain_refunds(task_pointer);
         }
-        let run = NonNull::new_unchecked(task.run).as_ref();
         if let Some(event) = run.provider.event {
             event(
                 run.provider.state,
@@ -1069,28 +1112,8 @@ pub(crate) fn event(kind: u8, object: u64, value: u64) {
 /// Context's immutable event word is nonzero and pins its current Task/run.
 #[inline(always)]
 pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, value: u64) {
-    // SAFETY: the emitted gate proves the run has this immutable event sink.
-    unsafe {
-        let context = NonNull::new_unchecked(context.cast_mut()).as_ref();
-        let task_pointer = context.events as *mut Task;
-        let task = NonNull::new_unchecked(task_pointer).as_ref();
-        if task.refund_pending.load(Ordering::Acquire) {
-            drain_refunds(task_pointer);
-        }
-        let run = NonNull::new_unchecked(task.run).as_ref();
-        if let Some(sink) = run.provider.event {
-            sink(
-                run.provider.state,
-                Event {
-                    kind,
-                    task: task.id,
-                    object,
-                    value,
-                },
-            );
-        }
-        poll_event(task_pointer, kind, value);
-    }
+    // SAFETY: the emitted gate proves the word is this running task.
+    unsafe { event_for((*context).events as *mut Task, kind, object, value) }
 }
 /// Empty event paths read only the pinned task flag; all mailbox traversal,
 /// locking and flag reset belong to this cold, non-suspending path.
@@ -1189,6 +1212,7 @@ pub unsafe fn checkpoint(blocked: bool) {
         let run = (*task).run;
         if blocked {
             (*task).state = State::Blocked;
+            (*run).blocked += 1;
         } else {
             (*run).ready(task);
         }
@@ -1196,6 +1220,22 @@ pub unsafe fn checkpoint(blocked: bool) {
     }
 }
 
+/// `event` then `wake`, reading the current task once: a channel change that
+/// can unblock peers records its event and then readies every blocked task.
+#[inline(always)]
+pub(crate) fn event_then_wake(kind: u8, object: u64, value: u64) {
+    let task = CURRENT.get();
+    if task.is_null() {
+        return;
+    }
+    // SAFETY: the active task exclusively accesses its scheduler between
+    // switches; the sink callback cannot suspend or re-enter.
+    unsafe {
+        event_for(task, kind, object, value);
+        (*(*task).run).wake();
+    }
+}
+#[inline]
 pub(crate) fn wake() {
     let task = CURRENT.get();
     if task.is_null() {
@@ -1298,6 +1338,7 @@ pub unsafe fn run_root(
         provider,
         readies: Readies::new(),
         cancels: Vec::new(),
+        blocked: 0,
     };
     let registered = Registered(run.readies.clone());
     WAITERS
@@ -1311,7 +1352,8 @@ pub unsafe fn run_root(
         drop: no_drop,
     };
     let mut root = Box::new(Task {
-        refund_pending: AtomicBool::new(false),
+        arc_gate: AtomicBool::new(run.provider.event.is_some()),
+        recorded_refunds: AtomicBool::new(false),
         refunds: None,
         polls_left: POLLS_PER_TURN,
         context,
@@ -1345,11 +1387,9 @@ pub unsafe fn run_root(
     unsafe {
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
-        root.refunds = Some(
-            (*context)
-                .current
-                .subscribe_refunds(NonNull::from(&root.refund_pending)),
-        );
+        root.refunds = Some((*context).current.subscribe_refunds(NonNull::from(
+            root.refund_flag(run.provider.event.is_some()),
+        )));
         (*context).events = root_pointer.expose_provenance();
         root.sp = root
             .stack
@@ -1426,7 +1466,8 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         let id = (*run).id();
         let child_context = abi::task_child(context, &mut record, bytes, id);
         let task = Box::new(Task {
-            refund_pending: AtomicBool::new(false),
+            arc_gate: AtomicBool::new((*run).provider.event.is_some()),
+            recorded_refunds: AtomicBool::new(false),
             refunds: None,
             polls_left: POLLS_PER_TURN,
             context: ptr::null_mut(),
@@ -1452,11 +1493,9 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
         let task = Box::into_raw(task);
         (*task).context = (*task).owned_context.as_mut().unwrap();
-        (*task).refunds = Some(
-            (*(*task).context)
-                .current
-                .subscribe_refunds(NonNull::from(&(*task).refund_pending)),
-        );
+        (*task).refunds = Some((*(*task).context).current.subscribe_refunds(NonNull::from(
+            (*task).refund_flag((*run).provider.event.is_some()),
+        )));
         (*(*task).context).events = if (*(*task).context).events != 0 {
             task.expose_provenance()
         } else {

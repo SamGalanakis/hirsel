@@ -16,6 +16,7 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 /* Frozen 64-bit emitter layouts; offsets in bytes, no atomic local accounting. */
 #define HIRSEL_CORE_CONTEXT_CURRENT_LIMIT 0
 #define HIRSEL_CORE_CONTEXT_EVENTS 8
+#define HIRSEL_CORE_TASK_ARC_GATE 0
 #define HIRSEL_CORE_LIMIT_AVAILABLE 0
 #define HIRSEL_CORE_LIMIT_OUTSTANDING 8
 #define HIRSEL_CORE_REGION_CURSOR 0
@@ -100,7 +101,10 @@ typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; }
 void hirsel_core_release_static_last(HirselCoreContext *, void *, const HirselCoreStaticDescriptor *);
 void hirsel_core_release_static_own_enqueue(HirselCoreWorklist *, void *, const HirselCoreStaticDescriptor *);
 void hirsel_core_release_static_enqueue(HirselCoreWorklist *, void *, bool atomic, const HirselCoreStaticDescriptor *);
-/* Inline Arc completion hooks: call only when ctx[CONTEXT_EVENTS] != 0.
+/* Inline Arc completion hooks. With task = ctx[CONTEXT_EVENTS] != 0, call
+   unwrapped always, and initialized/shared/released only when the acquire
+   byte task[TASK_ARC_GATE] is nonzero: set while recording, otherwise exactly
+   while the task has a refund to deliver.
    The event word/sink are immutable during a run. No TLS read on the taken path.
    No status/admission/suspension/count mutation.
    Scheduler owns the event turn across mutation and hook; release precedes glue. */

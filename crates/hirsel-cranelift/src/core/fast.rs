@@ -446,7 +446,22 @@ pub(super) fn arc_event(
         memory_layout::CONTEXT_EVENTS as i32,
     );
     let empty = b.ins().icmp_imm_s(IntCC::Equal, events, 0);
-    b.ins().brif(empty, done, &[], call, &[]);
+    if name == "hirsel_core_arc_unwrapped" {
+        // An unwrap may poll, so every scheduled run calls its hook.
+        b.ins().brif(empty, done, &[], call, &[]);
+    } else {
+        // New, share and release have work only while the Task's gate byte
+        // is set: the runtime keeps it set while recording and otherwise
+        // exactly while a refund is pending (MEM-20).
+        let gate = b.create_block();
+        b.ins().brif(empty, done, &[], gate, &[]);
+        b.switch_to_block(gate);
+        let at = b
+            .ins()
+            .iadd_imm(events, memory_layout::TASK_ARC_GATE as i64);
+        let work = b.ins().atomic_load(types::I8, Flags::trusted(), at);
+        b.ins().brif(work, call, &[], done, &[]);
+    }
     b.switch_to_block(call);
     // These four frozen hooks take context and at most one event operand.
     let mut params = [P; 2];

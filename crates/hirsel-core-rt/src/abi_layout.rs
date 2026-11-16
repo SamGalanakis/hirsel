@@ -16,6 +16,7 @@ pub const PROCESS_CONFIG_GRANTS: i32 = 24;
 pub const MAIN_RESULT_KIND: i32 = 0;
 pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
+pub const TASK_ARC_GATE: usize = 0;
 pub const LIMIT_AVAILABLE: usize = 0;
 pub const LIMIT_OUTSTANDING: usize = 8;
 pub const REGION_CURSOR: usize = 0;
@@ -56,10 +57,13 @@ pub const fn own_prefix(kind: u8) -> usize {
 // terminal blocks PLAIN8, resources their separate prefix. STATIC's tag 3 is
 // deliberately outside OWN_ORDINARY_MAX_TAG: 2 identifies a resource, not graph.
 
-// Arc count mutations are inline under the scheduler's event turn.
-// If context[CONTEXT_EVENTS] != 0, call the context-first cold hook
-// hirsel_core_arc_initialized/shared/released/unwrapped after the operation,
-// with released before last-release glue. These constants identify trace events.
+// Arc count mutations are inline under the scheduler's event turn. After the
+// operation, with released before last-release glue, call the context-first
+// cold hook when task = context[CONTEXT_EVENTS] != 0: hirsel_core_arc_unwrapped
+// always (it may poll), hirsel_core_arc_initialized/shared/released only when
+// the acquire byte task[TASK_ARC_GATE] is nonzero. The runtime keeps that byte
+// set while the run records, and otherwise exactly while the task has a refund
+// to deliver (MEM-20). These constants identify trace events.
 pub const ARC_EVENT_NEW: u8 = 10;
 pub const ARC_EVENT_SHARE: u8 = 11;
 pub const ARC_EVENT_RELEASE: u8 = 12;

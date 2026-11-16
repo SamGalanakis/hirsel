@@ -110,6 +110,20 @@ pub unsafe extern "C" fn hirsel_core_channel_sender(channel: *mut Channel) -> *m
         channel
     }
 }
+/// Move one item. Word-sized items, the common case, skip the libc call.
+/// # Safety
+/// Both ranges hold `bytes` bytes and do not overlap.
+#[inline(always)]
+unsafe fn copy_item(from: *const u8, to: *mut u8, bytes: usize) {
+    // SAFETY: caller contract; the 8-byte arm copies exactly `bytes`.
+    unsafe {
+        if bytes == 8 {
+            ptr::copy_nonoverlapping(from, to, 8);
+        } else {
+            ptr::copy_nonoverlapping(from, to, bytes);
+        }
+    }
+}
 unsafe fn publish(channel: *mut Channel, value: *mut u8) -> u8 {
     // SAFETY: current task pins a sender and transfers value only after room exists.
     unsafe {
@@ -125,14 +139,13 @@ unsafe fn publish(channel: *mut Channel, value: *mut u8) -> u8 {
         } else {
             (*channel).head + (*channel).len
         };
-        ptr::copy_nonoverlapping(
+        copy_item(
             value,
             (*channel).storage.as_ptr().add(at * (*channel).item.bytes),
             (*channel).item.bytes,
         );
         (*channel).len += 1;
-        tasks::event(tasks::PUBLISH, (*channel).id, 0);
-        tasks::wake();
+        tasks::event_then_wake(tasks::PUBLISH, (*channel).id, 0);
         0
     }
 }
@@ -205,7 +218,7 @@ pub unsafe extern "C" fn hirsel_core_receive(
                 };
             }
             if (*channel).len != 0 {
-                ptr::copy_nonoverlapping(
+                copy_item(
                     (*channel)
                         .storage
                         .as_ptr()
@@ -218,8 +231,7 @@ pub unsafe extern "C" fn hirsel_core_receive(
                     (*channel).head = 0;
                 }
                 (*channel).len -= 1;
-                tasks::event(tasks::RECEIVE, (*channel).id, 0);
-                tasks::wake();
+                tasks::event_then_wake(tasks::RECEIVE, (*channel).id, 0);
                 return Transfer {
                     transferred: true,
                     status: 0,
@@ -247,7 +259,7 @@ pub unsafe extern "C" fn hirsel_core_try_receive(
     // SAFETY: receiver pins the channel and destination for this call.
     unsafe {
         let status = if (*channel).len != 0 {
-            ptr::copy_nonoverlapping(
+            copy_item(
                 (*channel)
                     .storage
                     .as_ptr()
@@ -277,8 +289,7 @@ pub unsafe extern "C" fn hirsel_core_sender_drop(channel: *mut Channel) {
         (*channel).senders -= 1;
         tasks::event(tasks::SENDERS, (*channel).id, (*channel).senders);
         if (*channel).senders == 0 {
-            tasks::event(tasks::CLOSE, (*channel).id, 0);
-            tasks::wake();
+            tasks::event_then_wake(tasks::CLOSE, (*channel).id, 0);
         }
         if (*channel).senders == 0 && (*channel).receiver == Receiver::Gone {
             drop(Box::from_raw(channel));
@@ -298,8 +309,7 @@ pub unsafe extern "C" fn hirsel_core_receiver_drop(
     unsafe {
         (*context).cancel_shield += 1;
         (*channel).receiver = Receiver::Cleaning;
-        tasks::event(tasks::CLOSE, (*channel).id, 1);
-        tasks::wake();
+        tasks::event_then_wake(tasks::CLOSE, (*channel).id, 1);
         let mut failed = 0;
         while (*channel).len != 0 {
             (*channel).len -= 1;

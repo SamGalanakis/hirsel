@@ -82,10 +82,15 @@
 //! still surrounds every Arc operation. Arc initialization stores an aligned
 //! atomic u64 value 1 before publication; Rc initialization stores ordinary u64 1.
 //! The immutable u64 event word is at context+CONTEXT_EVENTS (8). Zero means
-//! no sink; otherwise it is the pinned Task pointer used by the context-first
-//! hooks. After each inline Arc operation, test events != 0 and call
-//! arc_initialized/shared/released/unwrapped(context, ...) on the cold side.
-//! Without a sink no hook is called. The root sets the word before execution;
+//! no scheduler; otherwise it is the pinned Task pointer used by the
+//! context-first hooks. After each inline Arc operation, test events != 0 and
+//! call arc_unwrapped(context, unique) on the cold side, and
+//! arc_initialized/shared/released(context, ...) only when the Task's
+//! acquire-loaded TASK_ARC_GATE byte is nonzero. Without a sink those three
+//! hooks only deliver the owner's pending refunds (MEM-20), which must reach
+//! the task's next event, so the byte is set while the run records and
+//! otherwise exactly while a refund is pending. An unwrap may poll.
+//! The root sets the word before execution;
 //! each child inherits recording and installs its own pointer before publication.
 //! It cannot change until that task's run ends. Hooks never read task TLS.
 //! These hooks return unit, admit/allocate nothing and never mutate a count;

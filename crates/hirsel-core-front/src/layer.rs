@@ -441,6 +441,16 @@ impl<'a> Program<'a> {
                     self.has_test_functions, self.alias_state, self.library_modules
                 )],
             ),
+            (
+                "library",
+                vec![
+                    self.types.own_start().to_string(),
+                    self.decls.base_len().to_string(),
+                    self.fns.base_len().to_string(),
+                    self.constants.base_len().to_string(),
+                    self.by_definition.base_len().to_string(),
+                ],
+            ),
             ("refusals", rows(self.refusals.iter())),
             ("gaps", rows(self.gaps.iter())),
             ("resource_refusals", rows(self.resource_refusals.iter())),

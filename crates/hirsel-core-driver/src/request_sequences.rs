@@ -41,9 +41,18 @@ struct Req {
     link: Option<&'static str>,
     /// A change to the native options of a build.
     native: Option<fn(&mut NativeOptions)>,
-    /// Core is checked through a package product cache kept beside the store,
-    /// as `check --core-product` does.
-    core_product: bool,
+    /// Where the libraries come from.
+    product: Product,
+}
+/// The libraries of a request: checked from source, or installed from a
+/// package product cache kept beside the store.
+#[derive(Clone, Copy, PartialEq)]
+enum Product {
+    Sources,
+    /// Core from its product, as `check --core-product` does.
+    Core,
+    /// Core and std from the bundled libraries' image.
+    Libraries,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Fault {
@@ -111,13 +120,23 @@ fn check(packages: Vec<Pkg>) -> Req {
         dir: "src",
         link: None,
         native: None,
-        core_product: false,
+        product: Product::Sources,
     }
 }
 fn build(packages: Vec<Pkg>) -> Req {
     Req {
         entry: Some("app@1/main/main"),
         build: true,
+        ..check(packages)
+    }
+}
+/// An app over core and std, both installed from the libraries' image.
+fn libraries(files: &[(&'static str, &'static str, &'static str)]) -> Req {
+    let mut packages = app(files);
+    packages.insert(1, std_pkg());
+    packages[2].deps = &["core", "std"];
+    Req {
+        product: Product::Libraries,
         ..check(packages)
     }
 }
@@ -317,12 +336,17 @@ fn request(
         entry: req.entry.map(|e| DefPath::from_full(e).unwrap()),
     };
     let meter = &mut Meter::new(false);
-    let product = if req.core_product {
-        match driver.check_with_core_product(request, &products, meter) {
+    let product = if req.product != Product::Sources {
+        let checked = if req.product == Product::Core {
+            driver.check_with_core_product(request, &products, meter)
+        } else {
+            driver.check_with_product(request, &products, meter)
+        };
+        match checked {
             Ok(product) => product,
             Err(refused) => {
                 return Answer {
-                    check: serde_json::json!({ "core_product": refused.to_string() }),
+                    check: serde_json::json!({ "product": refused.to_string() }),
                     root: None,
                     native: None,
                     layer: std::mem::take(&mut driver.layers),
@@ -433,6 +457,19 @@ fn run_sequence(
         );
         for (path, primed) in [("resident", &resident_answer), ("disk", &disk_answer)] {
             let installed = primed.layer.installed == Some(true);
+            // An image-backed last request declares, installs, and its record's
+            // rows sit above the library's.
+            if req.product == Product::Libraries && n == seq.steps.len() {
+                let above = primed.layer.tables.iter().find(|(t, _)| *t == "library").is_some_and(|(_, base)| base.iter().all(|b| b != "0"));
+                if !installed || !above {
+                    failures.push(format!(
+                        "{} step {n} ({path} store): an image-backed request installed {:?}, library rows {:?}",
+                        seq.name,
+                        primed.layer.installed,
+                        primed.layer.tables.iter().find(|(t, _)| *t == "library")
+                    ));
+                }
+            }
             if installed {
                 for ((table, rows), (_, fresh_rows)) in
                     primed.layer.tables.iter().zip(&fresh.layer.tables)
@@ -1576,7 +1613,7 @@ fn tuple_sequences() -> Vec<Seq> {
             })
             .collect();
         Req {
-            core_product: true,
+            product: Product::Core,
             ..check(vec![
                 core(sources),
                 pkg(
@@ -1726,6 +1763,11 @@ fn layer_sequences() -> Vec<Seq> {
         seq("header_respaced", vec![
             check(app(&[("a.hirsel", "a", "pub type T{x:u8}\npub fn f(x:u8)->u8{x}"), ("b.hirsel", "b", "fn use(t:a.T)->u8{a.f(t.x)}")])),
             check(app(&[("a.hirsel", "a", "pub type T{ x : u8 }\npub fn f( x : u8 ) -> u8 {x}"), ("b.hirsel", "b", "fn use(t:a.T)->u8{a.f(t.x)}")]))]),
+        // Core and std from an image: the record's rows sit above the
+        // library's (own_start() > 0) and name its types and definitions.
+        seq("image_body_edit", vec![
+            libraries(&[("a.hirsel", "a", "pub type T:codec {x:u8, xs:List[u8]}\npub fn total(t:T)->u64{list.len(t.xs)}"), ("b.hirsel", "b", "fn use(t:a.T)->u64{a.total(t)}\nfn low(a:u8,b:u8)->u8{std.order.min(a,b)}")]),
+            libraries(&[("a.hirsel", "a", "pub type T:codec {x:u8, xs:List[u8]}\npub fn total(t:T)->u64{list.len(t.xs)+1u64}"), ("b.hirsel", "b", "fn use(t:a.T)->u64{a.total(t)}\nfn low(a:u8,b:u8)->u8{std.order.max(a,b)}")])]),
         seq("finalizer_body_edit", vec![
             check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")])),
             check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){let _=0u8}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")]))]),
@@ -1813,6 +1855,7 @@ const GATES: &[(&str, Gate)] = &[
     ("header_type_before_function", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("header_type_before_function_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("holds_transitive", Gate::Fallback),
+    ("image_body_edit", Gate::Fast),
     ("implicit_capacity", Gate::Fallback),
     ("index_builtin", Gate::Fallback),
     ("index_duplicate", Gate::Fallback),

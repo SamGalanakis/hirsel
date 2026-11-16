@@ -68,16 +68,16 @@
         "body keys/new": 71.3457498949727,
         "body keys/for_body": 10.175045511833076,
         "body keys": 81.51799467861645,
-        "image read": 10.78000280072819,
-        "image digest": 3.65214955888531,
+        "image read": 10.575549642907156,
+        "image digest": 3.5765298977734212,
         "image index": 176.0901834476964
       },
       "image_per_token": {
-        "records_opened": 0.0026853381879288615,
-        "bytes_read": 11.015057274891472,
-        "digests": 0.0026853381879288615,
-        "digest_bytes": 10.907643747374317,
-        "index_calls": 0.9952606077580171,
+        "records_opened": 0.0026282033328665455,
+        "bytes_read": 10.786746394062456,
+        "digests": 0.0026282033328665455,
+        "digest_bytes": 10.681618260747793,
+        "index_calls": 0.9951749054754236,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.02362526256826775,
         "nodes_decoded": 5.601456378658451e-05

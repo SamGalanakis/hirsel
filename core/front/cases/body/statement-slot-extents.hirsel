@@ -1,0 +1,99 @@
+// LANG-6: slots of one type that are never needed at once share a home in the IR
+// engines see (hirsel_core_ir::extent::share_slots), so a later statement's temporary
+// may take an earlier one's storage; a temporary a `let` view reaches is needed while
+// the view is read, so nothing may take its storage until then
+// (native-model-fault-1023, N13). Values by hand: held = 11*100 + 5*10 + 1,
+// looped = 7*10 + 3 (three temporaries of n 1), caught = Dup's 1000000000 + 1 + 2.
+// A closure's environment is a slot whose address outlives its statement: g keeps a
+// pointer to f's and f's is never named again. kept = 3 * 10 + (20 + 300) + 3 * 1000
+// = 3350; were k's environment given f's home, k's would replace f's, g would add to
+// b, and kept would be 22 * 10 + 322 + 1000 = 1542.
+// expect: accept
+// expect: run held() = 1151
+// expect: run looped() = 73
+// expect: run caught() = 1000000003
+// expect: run kept() = 3350
+type P {
+    xs: List[u64],
+    n: u64
+}
+
+fn mk(x: u64) -> P {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, x))
+    P(xs: take xs, n: 1)
+}
+
+fn held() -> u64 {
+    let v = mk(11).xs
+    let w = mk(5).xs[0]
+    let z = mk(100).n
+    v[0] * 100 + w * 10 + z
+}
+
+fn looped() -> u64 {
+    let v = mk(7).xs
+    let mut s: u64 = 0
+    let mut i: u64 = 0
+    while i < 3 {
+        s += mk(i).n
+        i += 1
+    }
+    v[0] * 10 + s
+}
+
+type Reg {
+    n: u64
+}
+
+type RegErr = Room(u64) | Dup(u64)
+
+fn add(mut r: Reg, k: u64) -> Result[(), RegErr] {
+    if k == 1000000000 {
+        return Error(Dup(k))
+    }
+    r.n += k
+    Ok(())
+}
+
+fn chain(mut r: Reg) -> Result[(), RegErr] {
+    add(mut r, 1)?
+    add(mut r, 2)?
+    add(mut r, 1000000000)?
+    add(mut r, 4)?
+    Ok(())
+}
+
+fn caught() -> u64 {
+    let mut r = Reg(n: 0)
+    match chain(mut r) {
+        Ok(_) => 0,
+        Error(Dup(k)) => k + r.n,
+        Error(Room(_)) => 1,
+    }
+}
+
+fn kept() -> u64 {
+    let mut a: u64 = 1
+    let mut b: u64 = 20
+    let f = scoped fn(x: u64) -> u64 {
+        a += x;
+        a
+    }
+    let g = scoped fn(x: u64) -> u64 {
+        f(x) * 10
+    }
+    let k = scoped fn(x: u64) -> u64 {
+        b += x;
+        b
+    }
+    g(2) + k(300) + a * 1000
+}
+
+pub fn main() -> Result[(), Exit] {
+    if held() == 1151 && looped() == 73 && caught() == 1000000003 && kept() == 3350 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

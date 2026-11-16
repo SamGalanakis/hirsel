@@ -807,6 +807,17 @@
 //! branch on the flag. Engines give no meaning to an unwritten home (Cranelift reads
 //! the stack's old bytes, LLVM an undefined value, the evaluator 0).
 //!
+//! No use of a slot follows its `StorageDead` on any path unless a `StorageLive`
+//! begins it again (wf, [`extent`]); a `StorageLive` after a
+//! `StorageDead` begins the slot unwritten again. Engines give each slot its own
+//! home. Before an engine sees a body the driver runs [`extent::share_slots`] on a
+//! copy: slots of one type that are never needed at the same point, and whose
+//! address never leaves the body, become one slot, so a frame holds what is needed
+//! at once rather than every slot a body names. A shared slot keeps its members'
+//! `StorageLive`s and drops their `StorageDead`s; no write is removed, so every
+//! read still follows a write of its own place. Stored bodies, instance records and
+//! object keys are the unshared IR.
+//!
 //! # Calling convention (FORM v0)
 //!
 //! A function with signature `(p0, ..., pn) -> (r0, ..., rm) dest t` is called
@@ -998,6 +1009,7 @@ hirsel_guard::install!();
 /// behaviour cases.
 #[cfg(any(test, feature = "eval"))]
 pub mod eval;
+pub mod extent;
 pub mod failure;
 mod ir;
 pub mod roles;

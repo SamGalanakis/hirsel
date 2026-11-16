@@ -558,7 +558,19 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
     }
     no_catch(b)?;
     available(b)?;
-    written(m, b)
+    written(m, b)?;
+    ended(b)
+}
+
+/// No slot is used where it may have ended: on every path to a use of a slot (an
+/// address based on it, or a pointer this body made from one), its last
+/// `StorageLive` or `StorageDead` is not a `StorageDead` (crate docs, "Values,
+/// slots and addresses").
+fn ended(b: &Body) -> R {
+    match crate::extent::use_after_end(b) {
+        Some(((bi, _), s)) => Err(format!("b{bi}: s{s} is used after its storage ends")),
+        None => Ok(()),
+    }
 }
 
 /// The blocks control leaves `bi` for: its instructions' failure blocks and its
@@ -593,190 +605,6 @@ fn successors(b: &Body, bi: usize) -> Vec<BlockId> {
     out
 }
 
-/// What an instruction defines and uses, as names of [`available`]'s sets: value
-/// `v` is `v`, address `a` is `values + a`. An `address` instruction defines its
-/// address and uses its base and step operands.
-fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
-    let n = b.values.len();
-    let v = |v: ValueId| v.index();
-    let a = |a: AddressId| n + a.index();
-    let mut uses = vec![];
-    let mut defs = vec![];
-    match *i {
-        Inst::Const { result, .. }
-        | Inst::ReadStatic { result, .. }
-        | Inst::FunctionRef { result, .. }
-        | Inst::DescriptorRef { result, .. }
-        | Inst::RegionOpen { result } => defs.push(v(result)),
-        Inst::Unary {
-            result, operand, ..
-        }
-        | Inst::ScalarUnary {
-            result, operand, ..
-        } => {
-            uses.push(v(operand));
-            defs.push(v(result));
-        }
-        Inst::Binary {
-            result,
-            left,
-            right,
-            ..
-        }
-        | Inst::Compare {
-            result,
-            left,
-            right,
-            ..
-        } => {
-            uses.extend([v(left), v(right)]);
-            defs.push(v(result));
-        }
-        Inst::Convert {
-            result,
-            flag,
-            operand,
-            ..
-        } => {
-            uses.push(v(operand));
-            defs.extend([result].into_iter().chain(flag).map(v));
-        }
-        Inst::IntArith {
-            result,
-            flag,
-            left,
-            right,
-            ..
-        } => {
-            uses.extend([v(left), v(right)]);
-            defs.extend([result].into_iter().chain(flag).map(v));
-        }
-        Inst::MulAdd {
-            result,
-            left,
-            right,
-            addend,
-        } => {
-            uses.extend([v(left), v(right), v(addend)]);
-            defs.push(v(result));
-        }
-        Inst::Address { address, .. } => {
-            if let Some(info) = b.addresses.get(address.index()) {
-                match info.base {
-                    AddressBase::Slot(_) => {}
-                    AddressBase::Value(x) => uses.push(v(x)),
-                    AddressBase::Address(x) => uses.push(a(x)),
-                }
-                for s in info.steps.get(&b.pools.steps).unwrap_or_default() {
-                    if let Step::Index(x) | Step::Element(x) | Step::Byte(x) = *s {
-                        uses.push(v(x));
-                    }
-                }
-            }
-            defs.push(a(address));
-        }
-        Inst::Read {
-            result, address, ..
-        }
-        | Inst::Pointer { result, address }
-        | Inst::Case { result, address } => {
-            uses.push(a(address));
-            defs.push(v(result));
-        }
-        Inst::Store { address, value } => uses.extend([a(address), v(value)]),
-        Inst::StorageLive { .. } | Inst::StorageDead { .. } | Inst::LimitExit => {}
-        Inst::UpdateMask { result, mask, .. } => {
-            uses.push(v(mask));
-            defs.push(v(result));
-        }
-        Inst::Call { call } => {
-            if let Some(site) = b.calls.get(call.index()) {
-                if let Callee::Indirect(x) = site.callee {
-                    uses.push(v(x));
-                }
-                for arg in site.args.get(&b.pools.args).unwrap_or_default() {
-                    uses.push(match *arg {
-                        Arg::Value(x) => v(x),
-                        Arg::Address(x) => a(x),
-                    });
-                }
-                defs.extend(
-                    site.results
-                        .get(&b.pools.values)
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|&x| v(x)),
-                );
-            }
-        }
-        Inst::Alloc {
-            result,
-            available,
-            region_entry,
-            place,
-            charge,
-            overflow,
-            size,
-            ..
-        } => {
-            if let AllocPlace::Like(x) | AllocPlace::Region(x) = place {
-                uses.push(v(x));
-            }
-            uses.extend([charge, size].into_iter().chain(overflow).map(v));
-            defs.extend([result, available].into_iter().chain(region_entry).map(v));
-        }
-        Inst::Free { block, charge } => uses.extend([v(block), v(charge)]),
-        Inst::Copy { to, from, bytes } => uses.extend([a(to), a(from), v(bytes)]),
-        Inst::Grow {
-            result,
-            available,
-            carrier,
-            charge,
-            overflow,
-            size,
-            capacity,
-            moved,
-            refund,
-            ..
-        } => {
-            uses.push(a(carrier));
-            uses.extend(
-                [charge, size, capacity, moved, refund]
-                    .into_iter()
-                    .chain(overflow)
-                    .map(v),
-            );
-            defs.extend([v(result), v(available)]);
-        }
-        Inst::SetCase { address, .. } | Inst::Drop { address, .. } => uses.push(a(address)),
-        Inst::RegionClose { region } => uses.push(v(region)),
-        Inst::Trim {
-            block,
-            region,
-            entry,
-            previous,
-            charge,
-        } => uses.extend([block, region, entry, previous, charge].map(v)),
-        Inst::LimitEnter {
-            admitted,
-            available,
-            bytes,
-        } => {
-            uses.push(v(bytes));
-            defs.extend([v(admitted), v(available)]);
-        }
-        Inst::Share { node, .. } | Inst::Release { node, .. } => uses.push(v(node)),
-        Inst::TryUnwrap { result, node, .. } => {
-            uses.push(v(node));
-            defs.push(v(result));
-        }
-        Inst::Mark { address, count, .. } | Inst::Unmark { address, count, .. } => {
-            uses.extend([a(address), v(count)])
-        }
-    }
-    (uses, defs)
-}
-
 /// Every value and address is defined on every path to each of its uses: an
 /// instruction result or block parameter before a value is read, an `address`
 /// instruction before its address is (crate docs, "Values, slots and addresses").
@@ -798,7 +626,7 @@ fn available(b: &Body) -> R {
                 .get(&b.insts)
                 .unwrap_or_default()
                 .iter()
-                .map(|i| operands(b, i))
+                .map(|i| crate::extent::operands(b, i))
                 .collect()
         })
         .collect();
@@ -906,42 +734,7 @@ fn available(b: &Body) -> R {
                 set(&mut now, d);
             }
         }
-        let vals = |r: PoolRange<ValueId>| -> Vec<usize> {
-            r.get(&b.pools.values)
-                .unwrap_or_default()
-                .iter()
-                .map(|v| v.index())
-                .collect()
-        };
-        let edge_args = |e: &EdgeId| vals(b.edges[e.index()].args);
-        let tail: Vec<usize> = match &b.terminators[bi] {
-            Terminator::Jump(e) => edge_args(e),
-            Terminator::Branch { condition, yes, no } => [condition.index()]
-                .into_iter()
-                .chain(edge_args(yes))
-                .chain(edge_args(no))
-                .collect(),
-            Terminator::Switch {
-                value,
-                arms,
-                otherwise,
-            } => [value.index()]
-                .into_iter()
-                .chain(
-                    arms.get(&b.pools.arms)
-                        .unwrap_or_default()
-                        .iter()
-                        .flat_map(|arm| edge_args(&arm.edge)),
-                )
-                .chain(edge_args(otherwise))
-                .collect(),
-            Terminator::Raise { cause, .. } => match cause {
-                RaiseCause::Fail(a) => vec![b.values.len() + a.index()],
-                _ => vec![],
-            },
-            Terminator::Return(r) => vals(*r),
-            Terminator::Propagate | Terminator::Unreachable => vec![],
-        };
+        let tail = crate::extent::terminator_uses(b, bi);
         for u in tail {
             check(&now, u)?;
         }

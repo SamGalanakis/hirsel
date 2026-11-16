@@ -110,6 +110,22 @@ fn direct_calls_agree_with_their_callee_by_signature_value() {
     assert!(e.contains("direct call through another signature"), "{e}");
 }
 
+/// Bug: two slots share a home and the `dead` of one still ends it, so the other,
+/// reached without its own `live` on that path, is used after the home's end.
+/// Law: a body well formed before `share_slots` is well formed after it. s1 is
+/// begun on b1; s0 is begun and ended on b2; both reach b3, which writes and reads
+/// s1. Their needed ranges never meet, so they share a home, and on b2 -> b3 s0's
+/// `dead` precedes s1's write.
+#[test]
+fn shared_slots_keep_every_use_inside_its_storage() {
+    let text = "core v1\nsig g0 = (i32, i32) -> (i32)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {\n  slot s0 = i32\n  slot s1 = i32\n  addr a0 = s0 : i32\n  addr a1 = s1 : i32\nb0(v0: i32, v1: i32):\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  live s1\n  jump b3\nb2:\n  live s0\n  address a0\n  store a0, v0\n  v3: i32 = read a0\n  dead s0\n  jump b3\nb3:\n  address a1\n  store a1, v1\n  v4: i32 = read a1\n  dead s1\n  return v4\n}\n";
+    let mut m = parse(text).unwrap();
+    wf::module(&m).expect("the unshared body is well formed");
+    let signatures = m.signatures.clone();
+    crate::extent::share_slots(m.functions[0].body.as_mut().unwrap(), &signatures);
+    wf::module(&m).expect("sharing keeps it well formed");
+}
+
 #[test]
 fn well_formedness_rejects_producer_mistakes() {
     let head = "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (u64) -> (ptr)\nsig g2 = (u64) -> never\nsig g3 = () -> (ptr)\ninst n0 = p@0/m/f [] []\ninst n1 = p@0/m/stop [] []\nfn f0 = n0 g0 {\n";
@@ -230,6 +246,12 @@ fn well_formedness_rejects_producer_mistakes() {
         (
             unguarded.as_str(),
             "b4: s0 is read on a path that does not write it",
+        ),
+        // `dead` ends a slot's storage on every path through it: engines may give the
+        // home to another slot from there. b0 -> b1 ends s0 before b2 writes it.
+        (
+            "slot s0 = i32\naddr a0 = s0 : i32\nb0(v0: i32, v1: i32):\n  live s0\n  address a0\n  v2: bool = lt v0, v1\n  branch v2, b1, b2\nb1:\n  dead s0\n  jump b2\nb2:\n  store a0, v1\n  v3: i32 = read a0\n  return v3\n}\n",
+            "b2: s0 is used after its storage ends",
         ),
     ];
     // An address evaluated on each arm before the join is defined on every path.

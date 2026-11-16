@@ -1367,6 +1367,52 @@ fn ordered_compact_cranelift() {
 fn ordered_compact_llvm() {
     ordered_compact(Backend::Llvm);
 }
+/// LANG-6 (native-model-fault-1023, N13): slots never needed at once share a home
+/// (hirsel_core_ir::extent::share_slots), so a straight-line body's frame is bounded
+/// by what is needed at once, not by its length. Each `?` call's result slot was a
+/// home of its own (108 KB at 3,000 calls on Cranelift, 192 KB on LLVM), past the
+/// 64 KiB task stack: `run stop: Stack`. The sum is n(n-1)/2.
+fn straight_line_calls(backend: Backend) {
+    for n in [3000u64, 10000] {
+        let mut source = String::from(
+            "type Reg { n: u64 }\ntype RegErr = Room(u64) | Dup(u64)\nfn add(mut r: Reg, k: u64) -> Result[(), RegErr] {\n    if k == 1000000000 { return Error(Dup(k)) }\n    r.n += k\n    Ok(())\n}\nfn place(mut r: Reg) -> Result[(), RegErr] {\n",
+        );
+        for i in 0..n {
+            source.push_str(&format!("    add(mut r, {i})?\n"));
+        }
+        source.push_str(&format!(
+            "    Ok(())\n}}\npub fn main() -> Result[(), Exit] {{\n    let mut r = Reg(n: 0)\n    match place(mut r) {{ Ok(_) => {{}}, Error(_) => return Error(Exit(status: 2)) }}\n    if r.n == {} {{ Ok(()) }} else {{ Error(Exit(status: 1)) }}\n}}\n",
+            n * (n - 1) / 2
+        ));
+        ordered_case(backend, &source);
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn straight_line_calls_cranelift() {
+    straight_line_calls(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn straight_line_calls_llvm() {
+    straight_line_calls(Backend::Llvm);
+}
+/// A temporary a `let` view reaches keeps its storage while the view is read, and a
+/// closure environment whose address outlives its statement is never shared (the
+/// corpus case's values).
+fn statement_slot_extents(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/statement-slot-extents.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn statement_slot_extents_cranelift() {
+    statement_slot_extents(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn statement_slot_extents_llvm() {
+    statement_slot_extents(Backend::Llvm);
+}
 fn ordered_case(backend: Backend, source: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();

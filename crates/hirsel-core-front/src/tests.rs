@@ -380,6 +380,24 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     } else if all_emitted {
         failures.extend(split_facts(module));
     }
+    // Bug: two slots share a home while one is still needed (an address taken and
+    // kept, a value read after another slot's write). Law: the module engines see,
+    // its slots shared (hirsel_core_ir::extent::share_slots), is well formed and
+    // gives every run below its expected value.
+    let mut shared = module.clone();
+    let Module {
+        functions: bodies,
+        signatures,
+        ..
+    } = &mut shared;
+    for body in bodies.iter_mut().filter_map(|f| f.body.as_mut()) {
+        hirsel_core_ir::extent::share_slots(body, signatures);
+    }
+    if all_emitted && let Err(e) = wf::module(&shared) {
+        failures.push(format!(
+            "CoreIR with shared slots is not well formed: {e:?}"
+        ));
+    }
     for line in source.lines() {
         let Some(e) = line.trim().strip_prefix("// expect: ") else {
             continue;
@@ -515,6 +533,10 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                     format!("{line}:{column}")
                 };
                 failures.extend(run_expect(module, &functions, call, want, &site));
+                failures.extend(
+                    run_expect(&shared, &functions, call, want, &site)
+                        .map(|f| format!("with shared slots: {f}")),
+                );
             }
             _ => failures.push(format!("unreadable expectation `{e}`")),
         }

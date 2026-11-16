@@ -250,6 +250,19 @@ fn emit_unit(
     options: &NativeOptions,
     object_key: ContentHash,
 ) -> Result<hirsel_core_ir::source::NativeObject, String> {
+    // Slots whose needed ranges never meet share a home before any engine sees
+    // the module (hirsel_core_ir::extent). Stored bodies and this object's key are
+    // the unmerged IR; the compiler identity in every key names this step.
+    let mut shared = module.clone();
+    let Module {
+        functions,
+        signatures,
+        ..
+    } = &mut shared;
+    for body in functions.iter_mut().filter_map(|f| f.body.as_mut()) {
+        hirsel_core_ir::extent::share_slots(body, signatures);
+    }
+    let module = &shared;
     match options.backend {
         Backend::Cranelift => hirsel_cranelift::core::emit_object_with_charge_observation(
             module,

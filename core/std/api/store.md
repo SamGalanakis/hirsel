@@ -19,8 +19,9 @@ equality. A key schema change is `Schema`; an unknown row schema number is
 `run` and `run_on` execute the callback under `isolate`. A successful body publishes
 one set of roots after resident admission. A memory store encodes no COMMIT;
 a store with a journal encodes it before admission. An abort, fault or
-refusal publishes nothing. An abort returns `Undone { value, ticket: None }`
-in memory (§7); reply retention belongs to the streams slice. `fetch` and `range`
+refusal publishes nothing. An abort with no reply writes returns `Undone {
+value, ticket: None }`; an abort that wrote a reply keeps it (F2, below).
+`fetch` and `range`
 read through a shareable `Shape`; `put` and `delete` use a `Table`. `fetch` returns
 a fresh decoded value. `put` and `delete` maintain every registered index atomically, including when an extractor
 returns Capacity. A handle missing an index returns `Stale`. Dropping and
@@ -98,8 +99,39 @@ supplies CallInfo and the stream operation supplies position. `revision` is the
 32 bytes `code.revision` gave for the entry that ran, or None when the program
 has no revisions. It is written as a u32 length of 0 or 32, any other length is
 `Corrupt(Malformed)`, and a Some that is not 32 bytes is `Missing("revision")`
-before anything commits. Public stream producers
-belong to S5.
+before anything commits.
+
+Streams (§1.8, L13) live in the streams root, keyed by stream bytes; a value is
+the position as u64 LE, a state byte (1 Admitted, 2 Replied) and the reply.
+`admit(mut db, stream, p)` answers `Admission`: a new stream admits position 0
+only and is otherwise `Rejected(0)`; `latest + 1` commits `Admitted(p)` only
+once `latest` has its reply; `p == latest` replied is `Duplicate(reply)`;
+unreplied, it is `Abandoned` with the ticket this open committed it under, or,
+when another open admitted it, commits Admitted again and answers `Abandoned`
+with the new ticket. Anything else is `Rejected(latest)`. An admit over
+`resident_limit` is `Full`. `reply(mut tx, stream, p, r)` is `Missing("reply")`
+unless the stream is Admitted at `p`. `record(mut tx, call)` adds the CALL
+section once (`Exists("call")` after that) and is `Missing("reply")` unless
+this Tx replied on the call's stream. Each stream op adds `9 + key + value`
+COMMIT bytes and a CALL `17 + key + args + stream + revision`; a frame with
+only stream ops has no data head. A body that returns Error after a reply
+commits its reply writes and CALL on the base data and catalog (F2) and
+answers `Undone { value, ticket: Some(t) }`; past the admission bound it is
+`Refused` and keeps nothing. The I4 settle re-encodes every section.
+
+Scopes (§1.4, L14): `KeyScope` names the keys a Tx may touch on one store.
+`scope(t, access)` covers a table, `scope_keys(t, lo, hi, access)` a key
+range of it; `Access` is `ReadOnly` or `ReadWrite`. `union(a, b)` keeps both
+scopes' entries (`Foreign` across stores); a key is writable when any entry
+holding it is `ReadWrite`. `narrow(mut tx, within, body)` runs `body` under
+`within` and restores the scope after; `within` must have each entry inside
+one entry of the current scope with equal or greater access, else
+`OutOfScope`, and another store's scope is `Foreign`. A `fetch`, `put` or
+`delete` of a key outside the scope, or a write to a ReadOnly key, is
+`OutOfScope`, as is a `range` whose span the scope does not cover and a
+`lookup` on a table the scope has no entry for. Index rows are in scope when
+their primary key is; `next_indexed` is `OutOfScope` at the first row outside.
+A run starts with every key of its store in scope.
 
 Branches and pins (§1.9, §1.12) are named heads of one open. `fork(mut db, name,
 from)` makes a branch at a Snapshot of this open; `branch(db, name)` finds one.

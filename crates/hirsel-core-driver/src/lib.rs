@@ -519,16 +519,7 @@ impl Driver {
         mut request: CheckRequest,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
-        request
-            .inputs
-            .packages
-            .sort_by(|a, b| a.package.cmp(&b.package));
-        for p in &mut request.inputs.packages {
-            p.dependencies.sort();
-            p.sources.sort_by(|a, b| {
-                (&a.modules, &a.file, a.signatures).cmp(&(&b.modules, &b.file, b.signatures))
-            });
-        }
+        request.inputs.normalise();
         // Read source bytes exactly once. The source digest is reused by file publication.
         let mut sources = vec![];
         let mut bytes_total = 0;

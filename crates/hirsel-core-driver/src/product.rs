@@ -126,11 +126,7 @@ impl PackageProduct {
     /// Source-owned package producers use this explicit identity once per package
     /// revision. The installed consumer passes only the resulting cache key/image.
     pub fn sources(mut inputs: CorpusManifest, root: &Path, meter: &mut Meter) -> io::Result<Self> {
-        inputs.packages.sort_by(|a, b| a.package.cmp(&b.package));
-        for package in &mut inputs.packages {
-            package.dependencies.sort();
-            package.sources.sort_by(|a, b| a.modules.cmp(&b.modules));
-        }
+        inputs.normalise();
         let mut stamps = Vec::new();
         for package in &inputs.packages {
             for source in &package.sources {
@@ -147,7 +143,13 @@ impl PackageProduct {
             .iter()
             .map(|p| (&p.package, &p.dependencies))
             .collect();
-        let digest = ContentHash::of_bytes(&encode(&(&inputs.core, dependencies, stamps))?);
+        // v2: stamps follow the driver's traversal. A v1 record was keyed by
+        // module order alone and could name a different traversal; it is never
+        // selected under this name.
+        let digest = ContentHash::of_parts(
+            "hirsel.package-sources.v2",
+            [&encode(&(&inputs.core, dependencies, stamps))?[..]],
+        );
         let directory = cache_path(root, digest)?;
         if let Some(image) = CoreImage::open(&directory)?
             && image.source_stamp == digest
@@ -424,6 +426,54 @@ mod tests {
                 }],
             }],
         }
+    }
+    /// One module's files are traversed in (module, file) order, and that order
+    /// decides which twin pairs with which. A package record is keyed by that
+    /// traversal: the same bytes renamed to traverse in another order are another
+    /// request, refused fresh and never served from the first order's record.
+    #[test]
+    fn a_package_record_is_keyed_by_its_source_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let texts = [
+            "pub type A{n:u64}",
+            "@twin(A) pub type C{n:u64}",
+            "@twin(A) pub type B{n:u64}",
+            "@twin(Q) pub type P{x:A}",
+            "pub type Q{x:B}",
+        ];
+        // Enumerated A,C,B,P,Q both times; the file names alone set the traversal.
+        let manifest = |label: &str, names: [usize; 5]| CorpusManifest {
+            core: package("core"),
+            packages: vec![PackageManifest {
+                package: package("core"),
+                dependencies: vec![],
+                sources: texts
+                    .iter()
+                    .zip(names)
+                    .map(|(text, name)| {
+                        let file = dir.path().join(format!("{label}-{name}.hirsel"));
+                        std::fs::write(&file, text).unwrap();
+                        ModuleSource {
+                            file,
+                            modules: vec!["ordering".into()],
+                            signatures: false,
+                        }
+                    })
+                    .collect(),
+            }],
+        };
+        let product = |inputs, cache: &str| {
+            PackageProduct::sources(inputs, &dir.path().join(cache), &mut Meter::new(false))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        };
+        // Q,P,B,C,A: accepted and published.
+        product(manifest("a", [4, 3, 2, 1, 0]), "kept").unwrap();
+        // A,C,B,P,Q: refused, whether or not the first order's record is present.
+        let primed = product(manifest("b", [0, 1, 2, 3, 4]), "kept");
+        let fresh = product(manifest("b", [0, 1, 2, 3, 4]), "fresh");
+        assert!(fresh.is_err(), "the A,C,B,P,Q traversal is refused fresh");
+        assert_eq!(primed, fresh);
     }
     /// An image is a function of its sources and request: one library imaged
     /// under two checkout paths gives the same root and byte-equal records.

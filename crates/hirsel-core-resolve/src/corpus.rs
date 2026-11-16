@@ -49,7 +49,23 @@ pub struct CorpusReport {
     pub code_lines: usize,
 }
 impl CorpusManifest {
-    pub fn load(self) -> std::io::Result<Corpus> {
+    /// The one traversal order of a request's sources: packages by identity,
+    /// each package's dependencies sorted, its sources by module, then file,
+    /// then mode. Files of one module are traversed in this order, so it
+    /// decides what they mean together (which twin pairs with which); every
+    /// producer that checks, images or keys sources normalises first, and
+    /// path-free stamps are taken after it.
+    pub fn normalise(&mut self) {
+        self.packages.sort_by(|a, b| a.package.cmp(&b.package));
+        for p in &mut self.packages {
+            p.dependencies.sort();
+            p.sources.sort_by(|a, b| {
+                (&a.modules, &a.file, a.signatures).cmp(&(&b.modules, &b.file, b.signatures))
+            });
+        }
+    }
+    pub fn load(mut self) -> std::io::Result<Corpus> {
+        self.normalise();
         let mut sources = vec![];
         for package in &self.packages {
             for source in &package.sources {

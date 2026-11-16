@@ -302,13 +302,7 @@ impl Driver {
         }
         request.library = LibraryInput::Produce;
         let mut inputs = request.inputs.clone();
-        inputs.packages.sort_by(|a, b| a.package.cmp(&b.package));
-        for p in &mut inputs.packages {
-            p.dependencies.sort();
-            p.sources.sort_by(|a, b| {
-                (&a.modules, &a.file, a.signatures).cmp(&(&b.modules, &b.file, b.signatures))
-            });
-        }
+        inputs.normalise();
         let store_path = request.store.clone();
         let product = self.check(request, meter)?;
         let Some(library) = product.library.clone() else {

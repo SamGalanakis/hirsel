@@ -469,7 +469,13 @@ pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket)
 pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
     journal_poll(mut db)?
     healthy(db)?
-    let i = branch_index(db, b)?
+    // AA1: a branch that is not live (deleted, or adopted and so deleted) is
+    // no fork of main at main's version, so it is Diverged like any other.
+    let i = match branch_index(db, b) {
+        Ok(found) => found,
+        Error(Missing(_)) => return Error(Diverged(b.id)),
+        Error(take e) => return Error(take e)
+    }
     if i == 0 || db.heads[i].parent != 0 || db.heads[0].head != db.heads[i].forked_at {
         return Error(Diverged(b.id))
     }
@@ -4158,6 +4164,7 @@ pub fn law_branches(c: Clock) -> bool waits {
     if version(main_now) != 3 || result.unwrap(get(main_now, sh, 2)) != Some(300u64) || result.unwrap(get(main_now, sh, 1)) != Some(100u64) { return false }
     if let Some(_) = branch(db, "d") { return false }
     match snapshot_of(db, dd) { Error(Missing(_)) => {}, _ => return false }
+    match adopt(mut db, dd) { Error(Diverged(id)) => if id != 3 { return false }, _ => return false }
     // (d) one more main commit after the fork.
     let arg5 = snapshot(db)
     let (e, _) = result.unwrap(fork(mut db, "e", arg5))

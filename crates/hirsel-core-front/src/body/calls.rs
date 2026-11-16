@@ -1040,13 +1040,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return Some(self.emit_call(maker as usize, &args, vals, result, n));
         }
         // A core List, Map, Option or Result's maker is std's `of_list` and the rest at
-        // its arguments.
+        // its arguments, when theirs are built.
         if let TyKind::Adt(d, args) = self.t.kind(ty).clone()
             && let Some(&(_, maker)) = self.p.structural_codecs().iter().find(|(x, _)| *x == d)
         {
+            if !self.codec_built(ty) {
+                self.gap(n, "the codec of this type is not built");
+                return Some(None);
+            }
             return Some(self.emit_call(maker as usize, &args, vals, result, n));
         }
-        // A sibling read of `of` (`crate::SIBLING_READS`).
         // A tuple's maker is the one the front derives, its row's codec hook.
         if let TyKind::Tuple(_) = self.t.kind(ty) {
             let Some(row) = self.e.type_row(self.p, &mut self.t, ty) else {
@@ -1063,6 +1066,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             });
         }
+        // A sibling read of `of` (`crate::SIBLING_READS`).
         let name = crate::decls::layout_name(&self.p.decls, &self.t, ty);
         let maker = templates::builtin_codec(&name).and_then(|maker| {
             let mut path = self.p.fns[f].path.clone();

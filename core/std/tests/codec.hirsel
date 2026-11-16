@@ -2224,3 +2224,22 @@ fn derived_result_group() -> (bool, bool, bool, (u64, u64), u64) {
     let bad = unhex("0100000000000000 0100000000000000 00000000 02000000")
     (enc(c, x) == b, again(c, b), prefixes(c, b), (codec.least(c), codec.least(l)), outcome(c, bad))
 }
+
+fn tuple_option[T: codec](take x: T, b: Bytes) -> bool {
+    let c: codec.Codec[Option[(T, u64)]] = codec.of()
+    let none: Option[(T, u64)] = None
+    enc(c, Some((take x, 7u64))) == b && again(c, b) && enc(c, none) == unhex("00000000")
+}
+
+// A structural type holding a tuple: List[(u64, String)] [(5, "a")] is the count, then the
+// tuple; every prefix is Truncated; its schema is List (14) of the tuple (18, arity 2, u64,
+// String); least 8. Option[(T, u64)] through a generic body at String: tag 1, "a", 7.
+// expect: run structural_tuple() = (true, true, true, 8, true)
+fn structural_tuple() -> (bool, bool, bool, u64, bool) {
+    let c: codec.Codec[List[(u64, String)]] = codec.of()
+    let b = unhex("0100000000000000 0500000000000000 0100000000000000 61")
+    let mut xs: List[(u64, String)] = list.new()
+    result.unwrap(list.push(mut xs, (5u64, "a")))
+    let schema = result.unwrap(codec.schema(c)) == unhex("01 0000000000000000 0e 12 0200000000000000 06 0d")
+    (enc(c, xs) == b && again(c, b), prefixes(c, b), schema, codec.least(c), tuple_option("a", unhex("01000000 0100000000000000 61 0700000000000000")))
+}

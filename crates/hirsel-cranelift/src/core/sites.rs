@@ -54,6 +54,17 @@ impl Constants {
 }
 
 impl Function<'_, '_, '_> {
+    /// The address of the executable's key, `hirsel_build_identity`, which the
+    /// driver's entry object defines (REPLAY-SPEC v2.1 R1). Only `tape.open`
+    /// reads it, so a program that opens no tape never references it.
+    pub(super) fn build_identity(&mut self) -> Result<Value> {
+        let data = self
+            .object
+            .declare_data("hirsel_build_identity", Linkage::Import, false, false)
+            .map_err(error)?;
+        let global = self.object.declare_data_in_func(data, self.b.func);
+        Ok(self.b.ins().symbol_value(types::I64, global))
+    }
     pub fn at_anchor(&mut self, anchor: Option<Anchor>, index: u32) {
         self.anchor = anchor;
         self.srcloc = if self.debug && anchor.is_some() {

@@ -296,6 +296,7 @@ impl<T: TyRead> Shapes<'_, T> {
                         | Role::Receiver
                         | Role::Task
                         | Role::HostFile
+                        | Role::Tape
                         | Role::Latest
                         | Role::Causes),
                     ) => {
@@ -305,6 +306,7 @@ impl<T: TyRead> Shapes<'_, T> {
                             Role::Task => Handle::Task,
                             Role::Latest => Handle::Latest,
                             Role::HostFile => Handle::HostFile,
+                            Role::Tape => Handle::Tape,
                             _ => Handle::Causes,
                         };
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
@@ -567,6 +569,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),
                 Some(Role::Latest) => FieldTy::Handle(Handle::Latest),
                 Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
+                Some(Role::Tape) => FieldTy::Handle(Handle::Tape),
                 Some(Role::Causes) => FieldTy::Handle(Handle::Causes),
                 Some(Role::Text) => {
                     if compact {

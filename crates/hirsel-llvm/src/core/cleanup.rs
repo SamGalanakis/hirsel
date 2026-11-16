@@ -380,9 +380,16 @@ impl FunctionEmitter<'_> {
             | FieldTy::Borrow
             | FieldTy::View(_)
             | FieldTy::Locator(_) => None,
-            FieldTy::Handle(hirsel_core_layout::Handle::HostFile) => {
+            FieldTy::Handle(
+                h @ (hirsel_core_layout::Handle::HostFile | hirsel_core_layout::Handle::Tape),
+            ) => {
                 let handle = self.load(&Type::I64, p, 1);
-                self.runtime_void("hirsel_core_hostfile_drop", &[ptr(CONTEXT), word(handle)]);
+                let name = if *h == hirsel_core_layout::Handle::Tape {
+                    "hirsel_core_tape_drop"
+                } else {
+                    "hirsel_core_hostfile_drop"
+                };
+                self.runtime_void(name, &[ptr(CONTEXT), word(handle)]);
                 None
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Causes) => {

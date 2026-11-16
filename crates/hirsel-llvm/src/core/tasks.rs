@@ -125,6 +125,7 @@ impl FunctionEmitter<'_> {
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
+                | RtOp::TapeGrant
         ) {
             self.site_word()
         } else {
@@ -143,6 +144,46 @@ impl FunctionEmitter<'_> {
                 self.native_call("hirsel_core_isolate_catch", &[P, K], &[ptr(CONTEXT)])
             }
             RtOp::DestId => self.native_call("hirsel_core_dest_id", &[U], &[]),
+            RtOp::TapeOpen => {
+                let revision = self.build_identity();
+                self.native_call(
+                    "hirsel_core_tape_open",
+                    &[U, U],
+                    &[
+                        ptr(CONTEXT),
+                        u(&args[0]),
+                        p(&args[1]),
+                        zeroext(Type::I8, args[2].clone()),
+                        p(&args[3]),
+                        p(&args[4]),
+                        u(&args[5]),
+                        u(&args[6]),
+                        u(&args[7]),
+                        p(&revision),
+                    ],
+                )
+            }
+            RtOp::TapeEnd => self.native_call(
+                "hirsel_core_tape_end",
+                &[U],
+                &[
+                    ptr(CONTEXT),
+                    u(&args[0]),
+                    zeroext(Type::I8, args[1].clone()),
+                    p(&args[2]),
+                ],
+            ),
+            RtOp::TapeGrant => self.native_call(
+                "hirsel_core_tape_grant",
+                &[U, K],
+                &[
+                    ptr(CONTEXT),
+                    u(&args[0]),
+                    zeroext(Type::I8, args[1].clone()),
+                    u(&args[2]),
+                    word(at.clone()),
+                ],
+            ),
             RtOp::ArgsLen => {
                 self.native_call("hirsel_core_args_len", &[U], &[ptr(CONTEXT), u(&args[0])])
             }

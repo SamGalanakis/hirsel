@@ -92,6 +92,8 @@ pub opaque type Tasks
 
 pub opaque resource type HostFile
 
+pub opaque resource type Tape
+
 pub type OpenMode = Read | Write | Append | CreateNew
 
 pub type Capacity {

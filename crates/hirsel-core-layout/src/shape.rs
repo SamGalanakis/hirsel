@@ -157,7 +157,7 @@ impl Width {
 
 /// A runtime-owned handle kind: an opaque pointer whose cleanup is a run-time call.
 /// Logical sizes per core's built-in types: a task handle, a capability, a
-/// `Causes` chain and a `HostFile` 8, a sender or receiver 24.
+/// `Causes` chain, a `HostFile` and a `Tape` 8, a sender or receiver 24.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Handle {
     Task,
@@ -171,6 +171,9 @@ pub enum Handle {
     /// A host file (CAP-5): a mechanical resource with no cause cell; cleaning it
     /// closes the file through its provider and ignores the outcome (MEM-24).
     HostFile,
+    /// A tape (CAP-9): a mechanical resource like a HostFile; cleaning it writes
+    /// its buffered frames and nothing else (REPLAY-SPEC section 8).
+    Tape,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

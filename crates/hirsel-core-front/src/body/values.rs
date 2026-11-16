@@ -979,12 +979,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.halt();
                     (ERROR, None)
                 }
-                // LANG-7: with no expected type a variant names the one visible type
-                // that declares it; its type arguments come from its payloads alone
+                // LANG-7: with no expected type a record the current module declares
+                // is built by its name, so a case added to core or a dependency never
+                // takes it over; otherwise a variant names the one visible type that
+                // declares it; its type arguments come from its payloads alone
                 // (LANG-12, Q33).
                 _ => {
                     let from = p.modules[self.at.module as usize].id;
                     let text = p.index.symbols.text(name);
+                    let own = p.index.constructor_candidates(from, name).find_map(|id| {
+                        let Some(Def::Type(d)) = p.by_definition[id.0 as usize] else {
+                            return None;
+                        };
+                        let decl = &p.decls[d.index()];
+                        match &decl.body {
+                            DeclBody::Record(fs) if decl.site.module == from => Some((d, fs)),
+                            _ => None,
+                        }
+                    });
+                    if let Some((d, fields)) = own {
+                        let want = want.filter(|w| w.payload != 0);
+                        return self.construct(n, d, None, fields, true, args, want);
+                    }
                     let mut found = None;
                     for id in p.index.constructor_candidates(from, name) {
                         let Some(Def::Type(d)) = p.by_definition[id.0 as usize] else {

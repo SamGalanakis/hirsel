@@ -15,6 +15,7 @@
 //! The tape's state lives in a process slot table (section 8). Ending or
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
+pub mod abi;
 pub mod format;
 #[cfg(test)]
 mod tests;
@@ -123,6 +124,33 @@ pub const REFUSED: Outcome = Outcome {
     written: 0,
     status: STATUS_REFUSED,
 };
+
+thread_local! {
+    /// The reason of the latest refusal on this thread (a run's tasks share
+    /// one): the printed `Tape` cause renders it (D-B4).
+    static LAST: std::cell::Cell<Option<Fault>> = const { std::cell::Cell::new(None) };
+}
+/// Refuse with `f`, keeping it as the reason a printed `Tape` cause names.
+pub(crate) fn refuse(f: Fault) -> Fault {
+    LAST.set(Some(f));
+    f
+}
+/// The reason of the latest refusal on this thread.
+pub(crate) fn last_fault() -> Option<Fault> {
+    LAST.get()
+}
+impl std::fmt::Display for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fault::Diverged(d) => write!(f, "diverged at {}, {:?}", d.at, d.kind),
+            Fault::Truncated(at) => write!(f, "truncated at {at}"),
+            Fault::Damaged(k) => write!(f, "block {k} damaged"),
+            Fault::Corrupt => f.write_str("corrupt"),
+            Fault::Io(e) => write!(f, "tape write failed ({}, {})", e.tag, e.code),
+            Fault::Ended => f.write_str("ended"),
+        }
+    }
+}
 
 /// The inner (provider, provider-local handle) an object designates.
 #[derive(Clone, Copy)]
@@ -408,37 +436,20 @@ fn clock(op: u8) -> bool {
     matches!(op, WALL_MS | MONO_NS)
 }
 
-unsafe extern "C" {
-    /// The executable's key, defined by the driver in every linked program's
-    /// entry object (REPLAY-SPEC v2.1 R1). There is no fallback: a program
-    /// without it does not link.
-    safe static hirsel_build_identity: [u8; 32];
-}
-
 impl Tape {
-    /// Open a tape at `name` in the Dir `dir` (its provider and handle).
+    /// Open a tape at `name` in the Dir `dir` (its provider and handle), as
+    /// the executable whose key is `revision`: the generated `tape.open` passes
+    /// the entry object's `hirsel_build_identity` (REPLAY-SPEC v2.1 R1), so a
+    /// program that never opens a tape never references it.
     /// Record creates the file (CreateNew) and writes block 0 from `header`;
     /// Replay reads it and refuses, in this order, a changed identity,
     /// revision, argument (when `expect` passes one), or limit or charge
-    /// policy. `header.revision` is not the caller's: open fills it from the
-    /// running executable (v2.3 R10's interim producer).
+    /// policy. `header.revision` is not the caller's: open fills it from
+    /// `revision` (v2.3 R10's interim producer).
     /// Returns the tape and the stored argument.
     /// # Safety
     /// Called in a task of the run that owns `dir`'s provider.
     pub unsafe fn open(
-        dir: (Provider, u64),
-        name: &[u8],
-        mode: Mode,
-        header: &Header,
-        expect: &Expect,
-    ) -> Result<(Tape, Vec<u8>), OpenError> {
-        // SAFETY: forwarded.
-        unsafe { Self::open_built(hirsel_build_identity, dir, name, mode, header, expect) }
-    }
-    /// `open` as an executable whose revision is `revision`.
-    /// # Safety
-    /// As `open`.
-    pub(crate) unsafe fn open_built(
         revision: [u8; 32],
         dir: (Provider, u64),
         name: &[u8],
@@ -564,12 +575,12 @@ impl Tape {
     ) -> Result<(Provider, u64, Vec<u8>), Fault> {
         let mut s = self.cell.state.lock().unwrap();
         if s.generation != self.generation {
-            return Err(Fault::Ended);
+            return Err(refuse(Fault::Ended));
         }
         let generation = s.generation;
         let live = s.live.as_mut().unwrap();
         if let Some(f) = live.fault {
-            return Err(f);
+            return Err(refuse(f));
         }
         let stored = match live.mode {
             Mode::Record => {
@@ -580,7 +591,7 @@ impl Tape {
                 };
                 // SAFETY: called in a task of the tape's run.
                 if let Err(e) = unsafe { rec.frame(&frame) } {
-                    live.fault = Some(Fault::Io(e));
+                    live.fault = Some(refuse(Fault::Io(e)));
                     return Err(Fault::Io(e));
                 }
                 args.unwrap_or_default()
@@ -593,7 +604,7 @@ impl Tape {
                     Ok(_) => Err(rep.diverged(Mismatch::Op)),
                     Err(f) => Err(f),
                 };
-                stored.inspect_err(|&f| live.fault = Some(f))?
+                stored.inspect_err(|&f| live.fault = Some(refuse(f)))?
             }
         };
         let inner = match live.mode {
@@ -789,11 +800,13 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Outcome {
             // SAFETY: the inner file is still the run's; nothing records it.
             let _ = unsafe { sink(inner, request(CLOSE, 0, 0, &[], empty_buffer())) };
         }
+        refuse(Fault::Ended);
         return REFUSED;
     }
     let generation = s.generation;
     let live = s.live.as_mut().unwrap();
-    if live.fault.is_some() {
+    if let Some(f) = live.fault {
+        refuse(f);
         return REFUSED;
     }
     let ordinal = ordinal_of(h);
@@ -882,7 +895,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Outcome {
             match unsafe { replay(live, generation, ordinal, r, &args) } {
                 Ok(o) => o,
                 Err(f) => {
-                    live.fault = Some(f);
+                    live.fault = Some(refuse(f));
                     REFUSED
                 }
             }

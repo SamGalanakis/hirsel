@@ -66,11 +66,11 @@ pub struct Ending {
     pub outcome: Args,
 }
 impl Ending {
-    /// A Run tape's `Returned`: the exit status as u32 LE.
-    pub fn exit(status: u32) -> Self {
+    /// `Returned`: a Call's returned bytes, or a Run's exit status as u32 LE.
+    pub fn returned(bytes: &[u8]) -> Self {
         Self {
             kind: END_RETURNED,
-            outcome: Args::of(&status.to_le_bytes()),
+            outcome: Args::of(bytes),
         }
     }
     /// `Failed` or `Cancelled`: `varint count`, then per cause, primary

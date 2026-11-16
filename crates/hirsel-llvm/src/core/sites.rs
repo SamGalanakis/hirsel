@@ -51,6 +51,23 @@ impl FunctionEmitter<'_> {
         }
     }
 
+    /// The address of the executable's key, `hirsel_build_identity`, which the
+    /// driver's entry object defines (REPLAY-SPEC v2.1 R1). Only `tape.open`
+    /// reads it, so a program that opens no tape never references it.
+    pub(super) fn build_identity(&mut self) -> Value {
+        self.items.global(Global {
+            name: "hirsel_build_identity".into(),
+            linkage: Linkage::External,
+            constant: true,
+            externally_initialized: false,
+            ty: Type::I8,
+            init: None,
+            align: 1,
+            absolute_symbol: false,
+        });
+        Value::global("hirsel_build_identity")
+    }
+
     fn absolute_symbol(&mut self, name: String) {
         self.items.global(Global {
             name: name.into(),

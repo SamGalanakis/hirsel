@@ -40,6 +40,11 @@ pub(crate) enum Kernel {
     CodeRevision,
     CodeCallable,
     CodeDescribe,
+    TapeOpen,
+    /// `true` ends with returned Bytes, `false` with a Causes chain and its kind.
+    TapeEnd(bool),
+    /// The substitute of a capability of this `entry` kind.
+    TapeGrant(u8),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,6 +151,19 @@ operations! {
     ("host", "remove_tree", Lane::Runtime(Kernel::Host(HostOp::RemoveTree)), "B", "core-ops-914", false),
     ("host", "wall_ms", Lane::Runtime(Kernel::Host(HostOp::WallMs)), "B", "core-ops-914", false),
     ("host", "mono_ns", Lane::Runtime(Kernel::Host(HostOp::MonoNs)), "B", "core-ops-914", false),
+    ("tape", "open", Lane::PendingCode, "C", "tape-build-1037", false),
+    ("tape", "end", Lane::PendingCode, "C", "tape-build-1037", false),
+    ("tape", "open_raw", Lane::Runtime(Kernel::TapeOpen), "B", "tape-build-1037", true),
+    ("tape", "end_returned", Lane::Runtime(Kernel::TapeEnd(true)), "B", "tape-build-1037", true),
+    ("tape", "end_causes", Lane::Runtime(Kernel::TapeEnd(false)), "B", "tape-build-1037", true),
+    ("tape", "clock", Lane::Runtime(Kernel::TapeGrant(2)), "B", "tape-build-1037", false),
+    ("tape", "dir", Lane::Runtime(Kernel::TapeGrant(0)), "B", "tape-build-1037", false),
+    ("tape", "stdout", Lane::Runtime(Kernel::TapeGrant(4)), "B", "tape-build-1037", false),
+    ("tape", "stderr", Lane::Runtime(Kernel::TapeGrant(5)), "B", "tape-build-1037", false),
+    ("tape", "args", Lane::Runtime(Kernel::TapeGrant(10)), "B", "tape-build-1037", false),
+    ("tape", "io_error", Lane::PendingCode, "C", "tape-build-1037", true),
+    ("tape", "open_error", Lane::PendingCode, "C", "tape-build-1037", true),
+    ("tape", "ending", Lane::PendingCode, "C", "tape-build-1037", true),
     ("indexed", "get", Lane::Language, "A", "core-check-895", false),
     ("int", "wrapping_add", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "wrapping_sub", Lane::Numeric, "A", "core-check-index-912", false),
@@ -695,6 +713,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::CodeRevision => self.runtime_code_revision(vals[0]?, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
             Kernel::CodeDescribe => self.runtime_code_describe(result, n),
+            Kernel::TapeOpen => self.runtime_tape_open(f, vals, result, n),
+            Kernel::TapeEnd(returned) => {
+                let tape = self.runtime_key(vals[0]?, n);
+                // END consumes the Tape on every path: the runtime takes its key.
+                self.consume(vals[0], n);
+                let (kind, operand) = if returned {
+                    (self.konst(Ty::Scalar(Scalar::U8), 0, n)?, vals[1]?)
+                } else {
+                    (vals[1]?, self.runtime_handle(vals[2]?, n))
+                };
+                let [code, ..] = self.runtime_row(
+                    RtOp::TapeEnd,
+                    &[Arg::Value(tape), Arg::Value(kind), Arg::Value(operand)],
+                    n,
+                )?;
+                Some(code)
+            }
+            Kernel::TapeGrant(kind) => {
+                let tape = self.runtime_key(vals[0]?, n);
+                let kind = self.konst(Ty::Scalar(Scalar::U8), u64::from(kind), n)?;
+                let [value, ..] = self.runtime_row(
+                    RtOp::TapeGrant,
+                    &[Arg::Value(tape), Arg::Value(kind), Arg::Value(vals[1]?)],
+                    n,
+                )?;
+                Some(value)
+            }
         }
     }
 
@@ -1380,7 +1425,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
     fn ambient(k: Kernel) -> bool {
         match k {
-            Kernel::Stream(_) | Kernel::Host(_) | Kernel::ArgsLen | Kernel::ArgsGet => true,
+            Kernel::Stream(_)
+            | Kernel::Host(_)
+            | Kernel::ArgsLen
+            | Kernel::ArgsGet
+            | Kernel::TapeOpen
+            | Kernel::TapeEnd(_)
+            | Kernel::TapeGrant(_) => true,
             Kernel::CarrierMove
             | Kernel::CarrierView
             | Kernel::StringShorten
@@ -1461,6 +1512,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 | "core-check-callables-913"
                 | "std-seed-api-889"
                 | "core-collections-918"
+                | "tape-build-1037"
         ));
         if entry.private {
             assert!(
@@ -1473,7 +1525,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     || entry.module == "list"
                         && (entry.name.starts_with("slots_")
                             || matches!(entry.name, "Hole" | "grow"))
-                    || matches!(entry.module, "deque" | "heap")
+                    || matches!(entry.module, "deque" | "heap" | "tape")
             );
         }
     }
@@ -2491,10 +2543,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::Unlock
                 | HostOp::Sync
         );
-        // HostFile's entire carrier is the opaque u64 key, not provider metadata.
         let handle = if file {
-            let at = self.address(AddressBase::Value(vals[0]?), &[], PlaceTy::Value(u64t), n);
-            self.read_bits(at, u64t, n)
+            self.runtime_key(vals[0]?, n)
         } else {
             vals[0]?
         };
@@ -2511,28 +2561,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             HostOp::Open => {
                 args[1] = Arg::Value(vals[1]?);
-                let ty = self.p.fns[f].params[2].ty;
-                let id = self.runtime_type(ty, n)?;
-                let at = self.address(AddressBase::Value(vals[2]?), &[], PlaceTy::Declared(id), n);
-                let tag = self.value(Ty::Scalar(Scalar::U32));
-                self.inst(
-                    Inst::Case {
-                        result: tag,
-                        address: at,
-                    },
-                    n,
-                );
-                let mode = self.value(Ty::Scalar(Scalar::U8));
-                self.inst(
-                    Inst::Convert {
-                        result: mode,
-                        flag: None,
-                        operand: tag,
-                        mode: ConvertMode::Truncate,
-                    },
-                    n,
-                );
-                args[2] = Arg::Value(mode);
+                args[2] = Arg::Value(self.runtime_mode(f, 2, vals[2]?, n)?);
                 3
             }
             HostOp::Read
@@ -2596,6 +2625,76 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                 }
             },
+        )
+    }
+
+    /// A HostFile's or Tape's entire carrier is the opaque u64 key into the run's
+    /// registry, not provider metadata.
+    fn runtime_key(&mut self, value: ValueId, n: NodeId) -> ValueId {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let at = self.address(AddressBase::Value(value), &[], PlaceTy::Value(u64t), n);
+        self.read_bits(at, u64t, n)
+    }
+
+    /// A fieldless enum operand (`OpenMode`, `tape.Mode`) passes its case as a u8.
+    fn runtime_mode(
+        &mut self,
+        f: usize,
+        param: usize,
+        value: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = self.runtime_type(self.p.fns[f].params[param].ty, n)?;
+        let at = self.address(AddressBase::Value(value), &[], PlaceTy::Declared(id), n);
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: at,
+            },
+            n,
+        );
+        let mode = self.value(Ty::Scalar(Scalar::U8));
+        self.inst(
+            Inst::Convert {
+                result: mode,
+                flag: None,
+                operand: tag,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        Some(mode)
+    }
+
+    /// `tape.open_raw`: Ok carries the Tape's key, Error the runtime's open word.
+    fn runtime_tape_open(
+        &mut self,
+        f: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let mode = self.runtime_mode(f, 2, vals[2]?, n)?;
+        let mut args = [Arg::Value(mode); 8];
+        for i in [0, 1, 3, 4, 5, 6, 7] {
+            args[i] = Arg::Value(vals[i]?);
+        }
+        let [tape, code, ..] = self.runtime_row(RtOp::TapeOpen, &args, n)?;
+        let ok = self.runtime_compare(u64t, code, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                if let Some(to) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                {
+                    cx.runtime_store(to, &[], u64t, tape, n);
+                }
+            },
+            |cx, to, ty| cx.runtime_case_payload(to, 1, ty, Some(code), n),
         )
     }
 }

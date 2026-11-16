@@ -51,7 +51,7 @@ impl Function<'_, '_, '_> {
         Ok(storage)
     }
     pub fn runtime_call(&mut self, op: RtOp, call: &CallSite) -> Result<()> {
-        let mut args = [Value::from_u32(0); 4];
+        let mut args = [Value::from_u32(0); 8];
         for (i, arg) in call
             .args
             .get(&self.body.pools.args)
@@ -71,7 +71,8 @@ impl Function<'_, '_, '_> {
             | RtOp::Join { .. }
             | RtOp::ChannelNew { .. }
             | RtOp::Send { .. }
-            | RtOp::Receive { .. } => self.site()?,
+            | RtOp::Receive { .. }
+            | RtOp::TapeGrant => self.site()?,
             _ => self.b.ins().iconst(types::I64, 0),
         };
         let n = match op {
@@ -95,6 +96,49 @@ impl Function<'_, '_, '_> {
             }
             RtOp::DestId => {
                 outputs[0] = self.c_call("hirsel_core_dest_id", &[], &[U], &[])?[0];
+                1
+            }
+            RtOp::TapeOpen => {
+                let revision = self.build_identity()?;
+                let values = self.c_call(
+                    "hirsel_core_tape_open",
+                    &[P, U, P, K, P, P, U, U, U, P],
+                    &[U, U],
+                    &[
+                        self.context,
+                        args[0],
+                        args[1],
+                        args[2],
+                        args[3],
+                        args[4],
+                        args[5],
+                        args[6],
+                        args[7],
+                        revision,
+                    ],
+                )?;
+                outputs[0] = values[0];
+                outputs[1] = values[1];
+                2
+            }
+            RtOp::TapeEnd => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_tape_end",
+                    &[P, U, K, P],
+                    &[U],
+                    &[self.context, args[0], args[1], args[2]],
+                )?[0];
+                1
+            }
+            RtOp::TapeGrant => {
+                let values = self.c_call(
+                    "hirsel_core_tape_grant",
+                    &[P, U, K, U, U],
+                    &[U, K],
+                    &[self.context, args[0], args[1], args[2], site],
+                )?;
+                self.call_failure(values[1], call.fail)?;
+                outputs[0] = values[0];
                 1
             }
             RtOp::ArgsLen => {
@@ -181,7 +225,7 @@ impl Function<'_, '_, '_> {
                     "hirsel_core_compare_bytes",
                     &[P, U, P, U],
                     &[Ty::Scalar(Scalar::I8)],
-                    &args,
+                    &args[..4],
                 )?[0];
                 1
             }

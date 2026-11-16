@@ -152,25 +152,23 @@ unsafe fn diagnostic(config: &Config, bytes: &[u8]) {
 /// # Safety
 /// Args is the run's live configuration; the returned view stays pinned by it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_args_len(context: *const Context, _args: u64) -> u64 {
+pub unsafe extern "C" fn hirsel_core_args_len(context: *const Context, args: u64) -> u64 {
     // SAFETY: the run owns immutable argument descriptors.
-    unsafe { (*(*context).run).args_len as u64 }
+    unsafe { crate::host_file::args(context, args).len() as u64 }
 }
 /// # Safety
 /// Same as args_len. Index is user input and is checked before address arithmetic.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_args_get(
     context: *const Context,
-    _args: u64,
+    args: u64,
     index: u64,
 ) -> *const crate::provider::Buffer {
-    // SAFETY: configuration is live; only a checked index reads its argument table.
+    // SAFETY: the run pins the vector; only a checked index reads it.
     unsafe {
-        let config = &*(*context).run;
-        if index >= config.args_len as u64 {
-            return std::ptr::null();
-        }
-        config.args.add(index as usize)
+        crate::host_file::args(context, args)
+            .get(index as usize)
+            .map_or(std::ptr::null(), |b| b as *const _)
     }
 }
 

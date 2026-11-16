@@ -193,6 +193,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/tape.hirsel",
+          "modules": [
+            "tape"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/task.hirsel",
           "modules": [
             "task"

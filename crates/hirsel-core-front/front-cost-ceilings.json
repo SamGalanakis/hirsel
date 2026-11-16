@@ -11,23 +11,23 @@
   },
   "corpora": {
     "m1": {
-      "source_bytes": 332990,
-      "tokens": 69215,
+      "source_bytes": 389815,
+      "tokens": 81956,
       "observation": {
-        "source_bytes": 332990,
-        "tokens": 69215,
+        "source_bytes": 389815,
+        "tokens": 81956,
         "costs": {
-          "parse": 28822805,
-          "index": 510931,
-          "resolve": 10720112,
-          "input counts": 586539,
-          "declarations": 10689794,
-          "body keys/new": 5707299,
-          "body keys/for_body": 13053611,
-          "body keys": 18760910,
+          "parse": 34374463,
+          "index": 583430,
+          "resolve": 12786199,
+          "input counts": 692899,
+          "declarations": 12754196,
+          "body keys/new": 6896886,
+          "body keys/for_body": 15468751,
+          "body keys": 22365637,
+          "image index": 0,
           "image read": 0,
-          "image digest": 0,
-          "image index": 0
+          "image digest": 0
         },
         "image_access": {
           "records_opened": 0,
@@ -36,40 +36,28 @@
           "digest_bytes": 0,
           "read_instructions": 0,
           "digest_instructions": 0,
-          "counter_refusal": null,
           "index_instructions": 0,
           "index_calls": 0,
           "key_probes": 0,
           "row_demands": 0,
-          "nodes_decoded": 0
+          "nodes_decoded": 0,
+          "counter_refusal": null
         },
-        "image_index_diagnostic": {
-          "instructions": 0,
-          "counts": {
-            "records_opened": 0,
-            "bytes_read": 0,
-            "digests": 0,
-            "digest_bytes": 0,
-            "index_calls": 0,
-            "key_probes": 0,
-            "row_demands": 0,
-            "nodes_decoded": 0
-          },
-          "basis": "e4b65f6c + F2, two-tool core-front-cost qualification, /tmp/core-check-cost-915-F-rebase-front.log; read/digest remain ordinary-mode observations"
-        }
+        "linker_sha256": "489d53bcce4038f070453dbcf4eb251d1492e5e7bd04787ced7f79ef4529833d",
+        "compiler_sha256": "e02b2040a0b1ae5ad3cfc350cf415da8a13fb981c250eb03b9e5278d6f20e9ee"
       },
       "instructions_per_token": {
-        "parse": 424.75274290255004,
-        "index": 7.530159647475259,
-        "resolve": 157.90948213615226,
-        "input counts": 8.639745719858412,
-        "declarations": 158.42967070915935,
-        "body keys/new": 84.10749115076212,
-        "body keys/for_body": 192.36726143177057,
-        "body keys": 276.4747525825327,
+        "parse": 427.8149250817512,
+        "index": 7.261213333984089,
+        "resolve": 159.13416955439504,
+        "input counts": 8.624139782322223,
+        "declarations": 158.73517497193617,
+        "body keys/new": 85.837522573088,
+        "body keys/for_body": 192.52037678754454,
+        "body keys": 278.3566791937137,
+        "image index": 0.0,
         "image read": 0.0,
-        "image digest": 0.0,
-        "image index": 0.0
+        "image digest": 0.0
       },
       "image_per_token": {
         "records_opened": 0.0,
@@ -83,23 +71,23 @@
       }
     },
     "std": {
-      "source_bytes": 221547,
-      "tokens": 37363,
+      "source_bytes": 263097,
+      "tokens": 47902,
       "observation": {
-        "source_bytes": 221547,
-        "tokens": 37363,
+        "source_bytes": 263097,
+        "tokens": 47902,
         "costs": {
-          "parse": 16959515,
-          "index": 370454,
-          "resolve": 5403253,
-          "input counts": 323140,
-          "declarations": 7823704,
-          "body keys/new": 3645741,
-          "body keys/for_body": 6473827,
-          "body keys": 10119568,
+          "parse": 21188119,
+          "index": 423842,
+          "resolve": 7085523,
+          "input counts": 410851,
+          "declarations": 9603830,
+          "body keys/new": 4709402,
+          "body keys/for_body": 8434843,
+          "body keys": 13144245,
+          "image index": 0,
           "image read": 0,
-          "image digest": 0,
-          "image index": 0
+          "image digest": 0
         },
         "image_access": {
           "records_opened": 0,
@@ -108,40 +96,28 @@
           "digest_bytes": 0,
           "read_instructions": 0,
           "digest_instructions": 0,
-          "counter_refusal": null,
           "index_instructions": 0,
           "index_calls": 0,
           "key_probes": 0,
           "row_demands": 0,
-          "nodes_decoded": 0
+          "nodes_decoded": 0,
+          "counter_refusal": null
         },
-        "image_index_diagnostic": {
-          "instructions": 0,
-          "counts": {
-            "records_opened": 0,
-            "bytes_read": 0,
-            "digests": 0,
-            "digest_bytes": 0,
-            "index_calls": 0,
-            "key_probes": 0,
-            "row_demands": 0,
-            "nodes_decoded": 0
-          },
-          "basis": "aad289e7 (main 2143aaae + M1 std list of 16 files), //:core-front-cost, /tmp/905-frontcost-1.log; std image work all zero"
-        }
+        "linker_sha256": "489d53bcce4038f070453dbcf4eb251d1492e5e7bd04787ced7f79ef4529833d",
+        "compiler_sha256": "e02b2040a0b1ae5ad3cfc350cf415da8a13fb981c250eb03b9e5278d6f20e9ee"
       },
       "instructions_per_token": {
-        "parse": 462.9928003639965,
-        "index": 10.114284184888794,
-        "resolve": 147.50956828948424,
-        "input counts": 8.824237882397023,
-        "declarations": 213.58563284532826,
-        "body keys/new": 99.52894574846773,
-        "body keys/for_body": 176.73634344137247,
-        "body keys": 276.26261274522926,
+        "parse": 451.1690534841969,
+        "index": 9.026762974406079,
+        "resolve": 150.87679011314768,
+        "input counts": 8.749112771909315,
+        "declarations": 204.50085591415808,
+        "body keys/new": 100.27973779800426,
+        "body keys/for_body": 179.60836708279405,
+        "body keys": 279.8881048807983,
+        "image index": 0.0,
         "image read": 0.0,
-        "image digest": 0.0,
-        "image index": 0.0
+        "image digest": 0.0
       },
       "image_per_token": {
         "records_opened": 0.0,
@@ -216,10 +192,10 @@
         "image index": 203.79778742473042
       },
       "image_per_token": {
-        "records_opened": 0.0026282033328665455,
-        "bytes_read": 10.772119871166502,
-        "digests": 0.0026282033328665455,
-        "digest_bytes": 10.666991737851841,
+        "records_opened": 0.0026853381879288615,
+        "bytes_read": 11.015057274891472,
+        "digests": 0.0026853381879288615,
+        "digest_bytes": 10.907643747374317,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.03113849600896233,
@@ -1060,6 +1036,167 @@
       "evidence": [
         "std-ordered-map-998/separators/COST.md"
       ]
+    },
+    {
+      "reason": "REPLAY-SPEC v2.3 core (tape-build-1037) on 1b0cf083: core gains the tape module and core.hirsel the cause case and resource type `Tape`. Measured on one machine with the same front-cost.py, base then candidate: suite-edit's edit opens 94 records (base 92) and reads 385581 bytes (base 377077). Which records the candidate adds is not isolated (the own-record typer rule cannot be switched off without the suite failing to compile); followups names it. Only the red suite-edit image cells take the observation with the existing 2 percent / one-event margin; every stage cell is unchanged.",
+      "changes": {
+        "suite-edit": {
+          "records_opened": {
+            "before": 0.0026282033328665455,
+            "after": 0.0026853381879288615
+          },
+          "bytes_read": {
+            "before": 10.772119871166502,
+            "after": 11.015057274891472
+          },
+          "digests": {
+            "before": 0.0026282033328665455,
+            "after": 0.0026853381879288615
+          },
+          "digest_bytes": {
+            "before": 10.666991737851841,
+            "after": 10.907643747374317
+          }
+        }
+      },
+      "observation": {
+        "local": {
+          "records_opened": 94,
+          "bytes_read": 385581,
+          "digests": 94,
+          "digest_bytes": 381821,
+          "tokens": 35705
+        },
+        "base_local": {
+          "records_opened": 92,
+          "bytes_read": 377077,
+          "digests": 92,
+          "digest_bytes": 373397,
+          "tokens": 35705
+        }
+      },
+      "baseline_revision": "1b0cf083a437699cd53ff6aacdb0efbc53789f93",
+      "evidence": [
+        "tape-build-1037/evidence/front-cost-1b0cf083.log",
+        "tape-build-1037/evidence/front-cost-base-1b0cf083.log"
+      ]
+    },
+    {
+      "reason": "Population change, not a code change: core gains its tape module (REPLAY-SPEC v2.3, tape-build-1037), and the M1 manifest lists every core file the product bundles, so the m1 and std corpora (each with core) are new populations. Every m1 and std cell is re-set from one measurement of that population by front-cost.py's baseline (2% margin rounded up to 100 instructions); image cells stay zero. No suite-edit stage cell changed.",
+      "baseline_revision": "1b0cf083a437699cd53ff6aacdb0efbc53789f93",
+      "evidence": "tape-build-1037/evidence/front-cost-1b0cf083.log",
+      "m1_population": {
+        "before": {
+          "source_bytes": 332990,
+          "tokens": 69215
+        },
+        "after": {
+          "source_bytes": 389815,
+          "tokens": 81956
+        }
+      },
+      "m1_limits": {
+        "parse": {
+          "before": 424.75274290255004,
+          "after": 427.8149250817512
+        },
+        "index": {
+          "before": 7.530159647475259,
+          "after": 7.261213333984089
+        },
+        "resolve": {
+          "before": 157.90948213615226,
+          "after": 159.13416955439504
+        },
+        "input counts": {
+          "before": 8.639745719858412,
+          "after": 8.624139782322223
+        },
+        "declarations": {
+          "before": 158.42967070915935,
+          "after": 158.73517497193617
+        },
+        "body keys/new": {
+          "before": 84.10749115076212,
+          "after": 85.837522573088
+        },
+        "body keys/for_body": {
+          "before": 192.36726143177057,
+          "after": 192.52037678754454
+        },
+        "body keys": {
+          "before": 276.4747525825327,
+          "after": 278.3566791937137
+        },
+        "image index": {
+          "before": 0.0,
+          "after": 0.0
+        },
+        "image read": {
+          "before": 0.0,
+          "after": 0.0
+        },
+        "image digest": {
+          "before": 0.0,
+          "after": 0.0
+        }
+      },
+      "std_population": {
+        "before": {
+          "source_bytes": 221547,
+          "tokens": 37363
+        },
+        "after": {
+          "source_bytes": 263097,
+          "tokens": 47902
+        }
+      },
+      "std_limits": {
+        "parse": {
+          "before": 462.9928003639965,
+          "after": 451.1690534841969
+        },
+        "index": {
+          "before": 10.114284184888794,
+          "after": 9.026762974406079
+        },
+        "resolve": {
+          "before": 147.50956828948424,
+          "after": 150.87679011314768
+        },
+        "input counts": {
+          "before": 8.824237882397023,
+          "after": 8.749112771909315
+        },
+        "declarations": {
+          "before": 213.58563284532826,
+          "after": 204.50085591415808
+        },
+        "body keys/new": {
+          "before": 99.52894574846773,
+          "after": 100.27973779800426
+        },
+        "body keys/for_body": {
+          "before": 176.73634344137247,
+          "after": 179.60836708279405
+        },
+        "body keys": {
+          "before": 276.26261274522926,
+          "after": 279.8881048807983
+        },
+        "image index": {
+          "before": 0.0,
+          "after": 0.0
+        },
+        "image read": {
+          "before": 0.0,
+          "after": 0.0
+        },
+        "image digest": {
+          "before": 0.0,
+          "after": 0.0
+        }
+      }
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

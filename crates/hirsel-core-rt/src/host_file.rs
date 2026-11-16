@@ -9,13 +9,52 @@ struct File {
     handle: u64,
 }
 pub(crate) const DYNAMIC_GRANT: u64 = 1 << 63;
+/// A substitute Args vector (tape.rs): pinned for the run, so its views stay
+/// valid after the tape ends.
+struct Vector {
+    _bytes: Vec<Vec<u8>>,
+    views: Vec<Buffer>,
+}
 #[derive(Default)]
 pub(crate) struct Files {
     next: u64,
     live: BTreeMap<u64, File>,
     grants: BTreeMap<u64, Box<File>>,
+    tapes: BTreeMap<u64, crate::tape::Tape>,
+    vectors: BTreeMap<u64, Vector>,
 }
 impl Files {
+    pub(crate) fn tape(&mut self, tape: crate::tape::Tape) -> u64 {
+        let id = self.id();
+        self.tapes.insert(id, tape);
+        id
+    }
+    pub(crate) fn tape_ref(&self, key: u64) -> &crate::tape::Tape {
+        &self.tapes[&key]
+    }
+    pub(crate) fn untape(&mut self, key: u64) -> crate::tape::Tape {
+        self.tapes.remove(&key).unwrap()
+    }
+    /// Pin a substitute Args vector and return its handle.
+    pub(crate) fn vector(&mut self, bytes: Vec<Vec<u8>>) -> u64 {
+        let id = DYNAMIC_GRANT | self.id();
+        let views = bytes
+            .iter()
+            .map(|b| Buffer {
+                data: b.as_ptr().cast_mut(),
+                len: b.len(),
+                capacity: 0,
+            })
+            .collect();
+        self.vectors.insert(
+            id,
+            Vector {
+                _bytes: bytes,
+                views,
+            },
+        );
+        id
+    }
     fn id(&mut self) -> u64 {
         self.next = self
             .next
@@ -43,6 +82,11 @@ impl Files {
         self.grants[&handle].handle
     }
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
+        // A tape still open writes its buffered frames through its Dir's
+        // provider, which outlives this teardown (section 8: as a crash).
+        while let Some((_, tape)) = self.tapes.pop_last() {
+            drop(tape);
+        }
         while let Some((_, file)) = self.live.pop_last() {
             // SAFETY: removed sole ownership before calling the pinned provider.
             unsafe { close(context, file) };
@@ -160,5 +204,25 @@ pub unsafe extern "C" fn hirsel_core_hostfile_drop(context: *mut Context, file: 
     unsafe {
         let owned = (*(*context).host_files).live.remove(&file).unwrap();
         close(context, owned);
+    }
+}
+
+/// The argument vector `args` designates: a substitute's (tape/abi.rs), or
+/// the run's own.
+/// # Safety
+/// A live run context; `args` is a live Args operand of the run.
+pub(crate) unsafe fn args<'a>(context: *const Context, args: u64) -> &'a [Buffer] {
+    // SAFETY: the run pins its argument table and every substitute vector.
+    unsafe {
+        if args & DYNAMIC_GRANT != 0 {
+            &(&(*(*context).host_files).vectors)[&args].views
+        } else {
+            let run = &*(*context).run;
+            if run.args_len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(run.args, run.args_len)
+            }
+        }
     }
 }

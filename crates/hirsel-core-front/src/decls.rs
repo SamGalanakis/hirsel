@@ -163,6 +163,7 @@ pub enum Role {
     Sender,
     Receiver,
     HostFile,
+    Tape,
     FixedSpan,
     SeqSpan,
     IndexedSpan,
@@ -200,6 +201,7 @@ impl Role {
             "Sender" => Role::Sender,
             "Receiver" => Role::Receiver,
             "HostFile" => Role::HostFile,
+            "Tape" => Role::Tape,
             "FixedSpan" => Role::FixedSpan,
             "SeqSpan" => Role::SeqSpan,
             "IndexedSpan" => Role::IndexedSpan,
@@ -244,9 +246,12 @@ impl Role {
             | Role::Child
             | Role::Link
             | Role::StaticFn => Kind::Plain,
-            Role::Task | Role::Sender | Role::Receiver | Role::HostFile | Role::Latest => {
-                Kind::Resource
-            }
+            Role::Task
+            | Role::Sender
+            | Role::Receiver
+            | Role::HostFile
+            | Role::Tape
+            | Role::Latest => Kind::Resource,
         }
     }
 }
@@ -2092,7 +2097,12 @@ impl Program<'_> {
             let mut h = match decl.role {
                 Some(Role::Capability) => H_CAPABILITY,
                 Some(
-                    Role::Task | Role::Sender | Role::Receiver | Role::HostFile | Role::Latest,
+                    Role::Task
+                    | Role::Sender
+                    | Role::Receiver
+                    | Role::HostFile
+                    | Role::Tape
+                    | Role::Latest,
                 ) => H_RESOURCE,
                 Some(Role::View | Role::Region | Role::Dest | Role::Writer) => H_SCOPED,
                 Some(
@@ -2810,7 +2820,9 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     Some(Role::Rc) => SHAREABLE | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),
-                    Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest) => SEND,
+                    Some(
+                        Role::Sender | Role::Receiver | Role::HostFile | Role::Tape | Role::Latest,
+                    ) => SEND,
                     Some(Role::Map) => meet(args) & (SHAREABLE | SEND | CODEC),
                     Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
                     Some(_) => 0,

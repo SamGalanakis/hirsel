@@ -640,14 +640,16 @@ impl Glue<'_, '_, '_> {
                     + 16;
                 self.free_buffer(p, cap, logical)?;
             }
-            FieldTy::Handle(hirsel_core_layout::Handle::HostFile) => {
+            FieldTy::Handle(
+                h @ (hirsel_core_layout::Handle::HostFile | hirsel_core_layout::Handle::Tape),
+            ) => {
                 let handle = self.load(at, 0);
-                self.call(
-                    "hirsel_core_hostfile_drop",
-                    &[P, U],
-                    &[],
-                    &[self.ctx, handle],
-                )?;
+                let name = if *h == hirsel_core_layout::Handle::Tape {
+                    "hirsel_core_tape_drop"
+                } else {
+                    "hirsel_core_hostfile_drop"
+                };
+                self.call(name, &[P, U], &[], &[self.ctx, handle])?;
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Causes) => {
                 let p = self.load(at, 0);

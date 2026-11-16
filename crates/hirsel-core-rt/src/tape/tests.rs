@@ -5,9 +5,7 @@ use super::*;
 use crate::os::OsProvider;
 use std::cell::Cell as Shared;
 
-/// The test binary is the "executable": its key is BUILD.
-#[unsafe(no_mangle)]
-static hirsel_build_identity: [u8; 32] = BUILD;
+/// The revision of the "executable" the tests open tapes as.
 const BUILD: [u8; 32] = {
     let mut b = [0; 32];
     let mut i = 0;
@@ -418,8 +416,17 @@ fn ending() -> Ending {
 fn record(read: usize) -> (Box<Store>, Vec<Ob>) {
     let mut store = Box::<Store>::default();
     let mut world = World::new(read);
-    let (tape, arg) =
-        unsafe { Tape::open(store.dir(), b"t", Mode::Record, &header(BUILD), &expect()) }.unwrap();
+    let (tape, arg) = unsafe {
+        Tape::open(
+            BUILD,
+            store.dir(),
+            b"t",
+            Mode::Record,
+            &header(BUILD),
+            &expect(),
+        )
+    }
+    .unwrap();
     assert_eq!(arg, b"arg");
     let (obs, fault) = scripted_run(&tape, world.provider(), read, Variant::Same);
     assert_eq!(fault, None);
@@ -438,8 +445,16 @@ fn replay(
 ) -> Result<(Vec<Ob>, Option<Fault>, Result<(), Fault>), OpenError> {
     let mut store = Store::with(bytes);
     let host = Counted::new(None);
-    let (tape, _) =
-        unsafe { Tape::open(store.dir(), b"t", Mode::Replay, &header(BUILD), &expect()) }?;
+    let (tape, _) = unsafe {
+        Tape::open(
+            BUILD,
+            store.dir(),
+            b"t",
+            Mode::Replay,
+            &header(BUILD),
+            &expect(),
+        )
+    }?;
     let (obs, fault) = scripted_run(&tape, host.provider(), read, variant);
     let verdict = tape.end(ending);
     assert_eq!(
@@ -748,7 +763,7 @@ fn identical_operations_with_a_changed_result_diverge_at_end() {
         at: 20,
         kind: Mismatch::Outcome,
     }));
-    let returned = Ending::exit(0);
+    let returned = Ending::returned(&0u32.to_le_bytes());
     let reordered = Ending::causes(END_FAILED, [(0, None), (4, Some(&b"no data"[..]))]);
     let cancelled = Ending::causes(END_CANCELLED, [(4, Some(&b"no data"[..])), (0, None)]);
     for changed in [returned, reordered, cancelled] {
@@ -781,7 +796,7 @@ fn a_changed_failure_text_diverges_at_end() {
 fn open_refuses_a_changed_code_revision_arg_limit_or_policy() {
     let open = |build: [u8; 32], e: &Expect| {
         let mut store = Store::with(HAND);
-        unsafe { Tape::open_built(build, store.dir(), b"t", Mode::Replay, &header(BUILD), e) }.map(
+        unsafe { Tape::open(build, store.dir(), b"t", Mode::Replay, &header(BUILD), e) }.map(
             |(t, arg)| {
                 drop(t);
                 arg
@@ -875,8 +890,17 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
     let mut store = Box::<Store>::default();
     let mut world = World::new(100);
     let host = Counted::new(Some(world.provider()));
-    let (tape, _) =
-        unsafe { Tape::open(store.dir(), b"t", Mode::Record, &header(BUILD), &expect()) }.unwrap();
+    let (tape, _) = unsafe {
+        Tape::open(
+            BUILD,
+            store.dir(),
+            b"t",
+            Mode::Record,
+            &header(BUILD),
+            &expect(),
+        )
+    }
+    .unwrap();
     let clock = tape
         .on_tape(crate::entry::CLOCK, (host.provider(), 0))
         .unwrap();
@@ -909,6 +933,7 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
     let next_host = Counted::new(Some(world.provider()));
     let (next, _) = unsafe {
         Tape::open(
+            BUILD,
             next_store.dir(),
             b"t",
             Mode::Record,
@@ -930,8 +955,17 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
     // Replay of that tape: the same, and cleanup has nothing to close.
     let mut store = Store::with(&sealed);
     let refuse = Counted::new(None);
-    let (tape, _) =
-        unsafe { Tape::open(store.dir(), b"t", Mode::Replay, &header(BUILD), &expect()) }.unwrap();
+    let (tape, _) = unsafe {
+        Tape::open(
+            BUILD,
+            store.dir(),
+            b"t",
+            Mode::Replay,
+            &header(BUILD),
+            &expect(),
+        )
+    }
+    .unwrap();
     let clock = tape
         .on_tape(crate::entry::CLOCK, (refuse.provider(), 0))
         .unwrap();
@@ -954,8 +988,17 @@ fn after_end_every_operation_fails_before_issue_and_cleanup_closes_the_inner_fil
 fn a_dropped_tape_keeps_its_frames_and_has_no_end() {
     let mut store = Box::<Store>::default();
     let mut world = World::new(100);
-    let (tape, _) =
-        unsafe { Tape::open(store.dir(), b"t", Mode::Record, &header(BUILD), &expect()) }.unwrap();
+    let (tape, _) = unsafe {
+        Tape::open(
+            BUILD,
+            store.dir(),
+            b"t",
+            Mode::Record,
+            &header(BUILD),
+            &expect(),
+        )
+    }
+    .unwrap();
     let (recorded, _) = scripted_run(&tape, world.provider(), 100, Variant::Same);
     drop(tape);
     let (obs, fault, verdict) = replay(store.file(), 100, Variant::Same, &ending()).unwrap();
@@ -1026,6 +1069,7 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     };
     let (tape, _) = unsafe {
         Tape::open(
+            BUILD,
             (os.provider(), sd),
             b"t",
             Mode::Record,
@@ -1051,6 +1095,7 @@ fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
     let refuse = Counted::new(None);
     let (tape, _) = unsafe {
         Tape::open(
+            BUILD,
             (os.provider(), sd),
             b"t",
             Mode::Replay,

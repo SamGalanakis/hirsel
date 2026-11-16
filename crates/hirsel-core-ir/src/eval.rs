@@ -147,6 +147,9 @@ fn site_word(site: Option<Anchor>) -> u64 {
 }
 const CAUSE_KIND_START: u64 = 1 << 63;
 
+/// The evaluator's gap for every tape row (D-B3): a run stop by name.
+const NO_TAPE: &str = "tape.open: no tape provider on the evaluator (S2)";
+
 /// Why an instruction stopped: a new cause, or a callee's failure already chained.
 #[derive(Debug)]
 enum Stop {
@@ -1841,6 +1844,9 @@ impl Machine<'_> {
                 }
                 failed
             }
+            // The evaluator has no tape provider (REPLAY-SPEC S2), so no Tape
+            // reaches a drop.
+            FieldTy::Handle(Handle::Tape) => panic!("{NO_TAPE}"),
             // The provider closes the file and ignores the outcome (core.md,
             // MEM-24); the trace records the close by its handle.
             FieldTy::Handle(Handle::HostFile) => {
@@ -2371,6 +2377,7 @@ impl Machine<'_> {
                 vec![self.dests]
             }
             RtOp::ArgsLen => vec![self.world.args.len() as u64],
+            RtOp::TapeOpen | RtOp::TapeEnd | RtOp::TapeGrant => panic!("{NO_TAPE}"),
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
             RtOp::Host(op) => self.host(t, op, a)?,
             RtOp::CompareBytes => {

@@ -67,12 +67,17 @@ def compare(row, ceiling):
 
 
 def baseline(row):
-    # 2%, rounded up to 100 instructions (counts to whole units), before
-    # conversion to a token-normalised ceiling. Never absorb another stage's red.
+    # Instructions use a 2% margin rounded up to 100 instructions. Counts are
+    # whole events, so the normalized ceiling must leave one whole event above
+    # the observation when that is larger than the percentage margin. Keep the
+    # resulting count fractional until comparison; rounding it up would admit
+    # two events for small observations and hide a two-event regression.
     return dict(source_bytes=row['source_bytes'], tokens=row['tokens'], observation=row,
                 instructions_per_token={k: math.ceil(v * 1.02 / 100) * 100 / row['tokens']
                                         for k, v in row['costs'].items()},
-                image_per_token={k: math.ceil(row['image_access'][k] * 1.02) / row['tokens'] for k in COUNTS})
+                image_per_token={k: max(row['image_access'][k] * 1.02,
+                                       row['image_access'][k] + 1) / row['tokens']
+                                 for k in COUNTS})
 
 
 def print_row(name, row):

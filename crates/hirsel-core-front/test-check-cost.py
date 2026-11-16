@@ -31,7 +31,7 @@ class FrontStageCeiling(unittest.TestCase):
         row = self.row()
         row['image_access'] = {name: 0 for name in FRONT['COUNTS']}
         ceiling = FRONT['baseline'](row)
-        row['image_access']['bytes_read'] = 1
+        row['image_access']['bytes_read'] = 2
         self.assertIn('image bytes_read', FRONT['compare'](row, ceiling)[0])
         metrics = dict(source_bytes=500, tokens=100, counter_refusal=None,
                        stages=[dict(name=name, instructions=10000) for name in
@@ -51,6 +51,19 @@ class FrontStageCeiling(unittest.TestCase):
         del metrics['substages'][1]
         with self.assertRaisesRegex(ValueError, 'missing body key'):
             FRONT['front'](metrics)
+
+    def test_integer_image_margin_admits_one_event_but_catches_two(self):
+        row = self.row()
+        row['image_access']['records_opened'] = 69
+        ceiling = FRONT['baseline'](row)
+        self.assertEqual(FRONT['compare'](row, ceiling), [])
+        row['image_access']['records_opened'] += 1
+        self.assertEqual(FRONT['compare'](row, ceiling), [])
+        row['image_access']['records_opened'] += 1
+        failures = FRONT['compare'](row, ceiling)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('image records_opened', failures[0])
+        self.assertAlmostEqual(ceiling['image_per_token']['records_opened'], 70.38 / 100)
 
 
 class PinnedRequestToolchain(unittest.TestCase):

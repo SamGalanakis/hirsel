@@ -174,9 +174,9 @@
           "image index": 10862165
         },
         "image_access": {
-          "records_opened": 63,
+          "records_opened": 69,
           "bytes_read": 252716,
-          "digests": 63,
+          "digests": 69,
           "digest_bytes": 250700,
           "read_instructions": 827105,
           "digest_instructions": 665321,
@@ -216,9 +216,9 @@
         "image index": 203.79778742473042
       },
       "image_per_token": {
-        "records_opened": 0.0019044951687438734,
+        "records_opened": 0.001971152499649909,
         "bytes_read": 7.849460859823554,
-        "digests": 0.0019044951687438734,
+        "digests": 0.001971152499649909,
         "digest_bytes": 7.771740652569668,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
@@ -762,6 +762,31 @@
       "evidence": [
         "/tmp/std-ordered-map-998-land.log",
         "std-ordered-map-998/front-cost-reproduce.log"
+      ]
+    },
+    {
+      "reason": "Integer image-event ceilings admit one whole event above the observation while retaining the 2% normalized margin; seeded two-event regressions remain red. Land observation from 6b87c486 suite-edit measured 69 records and 69 digests. Instruction ceilings and all byte/non-count cells unchanged.",
+      "revision": "6b87c486..core-check-cost-915/integer-image-margin",
+      "observation": {
+        "records_opened": 69,
+        "digests": 69,
+        "tokens": 35705
+      },
+      "changes": {
+        "suite-edit": {
+          "records_opened": {
+            "before": 0.0019044951687438734,
+            "after": 0.001971152499649909
+          },
+          "digests": {
+            "before": 0.0019044951687438734,
+            "after": 0.001971152499649909
+          }
+        }
+      },
+      "evidence": [
+        "/tmp/spec-v1-880-land78.log",
+        "/tmp/core-check-callables-913-s5c-land.log"
       ]
     }
   ],

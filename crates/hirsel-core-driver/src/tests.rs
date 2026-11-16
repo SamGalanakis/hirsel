@@ -1004,8 +1004,11 @@ fn entry_waits_policy_is_an_explicit_cached_request_input() {
     assert!(library.diagnostics.iter().any(|d| d.rule == "LANG-8"));
 }
 
+/// A request given an image declares over the image's declarations whether
+/// its program reads them or not (OPTION-L L2), so a damaged declaration
+/// section refuses both, never answers over a silently missing library.
 #[test]
-fn an_unused_image_declaration_section_is_not_decoded() {
+fn a_damaged_image_declaration_section_refuses_every_request_given_the_image() {
     let dir = tempfile::tempdir().unwrap();
     let (_, image) = Driver::default()
         .produce_image(
@@ -1021,25 +1024,19 @@ fn an_unused_image_declaration_section_is_not_decoded() {
     )
     .unwrap();
     let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
-    let app = tempfile::tempdir().unwrap();
-    let mut req = request("fn scalar() -> u64 { 42 }\n", app.path());
-    req.library = LibraryInput::Image(Arc::clone(&opened));
-    assert!(
-        Driver::default()
-            .check(req, &mut Meter::new(false))
-            .unwrap()
-            .accepted()
-    );
-    let mut req = request("fn caller() -> u64 { lib.answer() }\n", app.path());
-    req.library = LibraryInput::Image(opened);
-    assert!(
-        Driver::default()
-            .check(req, &mut Meter::new(false))
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("cache miss")
-    );
+    for source in [
+        "fn scalar() -> u64 { 42 }\n",
+        "fn caller() -> u64 { lib.answer() }\n",
+    ] {
+        let app = tempfile::tempdir().unwrap();
+        let mut req = request(source, app.path());
+        req.library = LibraryInput::Image(Arc::clone(&opened));
+        let refused = Driver::default().check(req, &mut Meter::new(false)).err();
+        assert!(
+            refused.is_some_and(|e| e.to_string().contains("cache miss")),
+            "{source}"
+        );
+    }
 }
 
 #[test]

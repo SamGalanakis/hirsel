@@ -830,40 +830,11 @@ impl Driver {
                 }
             }
         }
-        let reads_library = image_directory.as_ref().is_some_and(|image| {
-            modules.iter().zip(&resolutions).any(|(m, rows)| {
-                // Region/limit scopes and string carriers name core types
-                // implicitly; they need the same published declarations.
-                m.syntax.tree.nodes.iter().any(|n| {
-                    matches!(
-                        n.kind,
-                        hirsel_core_syntax::NodeKind::Region | hirsel_core_syntax::NodeKind::Bound
-                    ) || n.token.is_some_and(|t| {
-                        matches!(
-                            m.syntax.tree.tokens[t.0 as usize].kind,
-                            hirsel_core_syntax::TokenKind::String
-                                | hirsel_core_syntax::TokenKind::Bytes
-                        )
-                    })
-                }) || rows.iter().any(|r| {
-                    r.names.iter().any(|n| match n.target {
-                        hirsel_core_resolve::Target::Definition(d) => {
-                            (d.0 as usize) < image.index.definitions.len()
-                        }
-                        hirsel_core_resolve::Target::ContextualConstructor { name } => index
-                            .constructor_candidates(m.id, name)
-                            .any(|d| (d.0 as usize) < image.index.definitions.len()),
-                        _ => false,
-                    })
-                })
-            })
-        });
         meter.finish("resolve");
-        let library = if reads_library {
-            image.as_ref().map(|i| i.declarations()).transpose()?
-        } else {
-            None
-        };
+        // Declaration stands on the image's declarations whenever an image is
+        // given, read or not, so the gate's shape holds every declaration
+        // input (OPTION-L L2): a body edit cannot move the library base.
+        let library = image.as_ref().map(|i| i.declarations()).transpose()?;
         meter.finish("package declarations demand");
         let mut keys = if MEASURE {
             meter.measure("body keys/new", || {
@@ -892,7 +863,8 @@ impl Driver {
         // key its record holds: no closure walk and no lookup rows.
         let same_shape = prior.shape == Some(publication.shape);
         // The fast path: the store's record of this shape's declared tables
-        // stands in for declaration.
+        // stands in for declaration. A missing, damaged or unbinding record
+        // is damage, and the request declares as if no record were selected.
         let mut layer_record = None;
         {
             let installed = if layer.selected {

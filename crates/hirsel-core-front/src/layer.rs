@@ -335,8 +335,10 @@ impl<'a> Program<'a> {
     }
 
     /// The program `record` declares, over this request's parse and resolution,
-    /// without running declaration. None when a handle does not bind in this
-    /// parse or a row count disagrees with the index: the caller declares.
+    /// without running declaration. The record's shape holds every declaration
+    /// input, so a sound record always binds; None means damage (a handle that
+    /// does not bind, a row count unlike the index), and the caller declares,
+    /// as for a record that fails its store check.
     pub fn install(
         index: &'a NameIndex,
         modules: &'a [ModuleInput],

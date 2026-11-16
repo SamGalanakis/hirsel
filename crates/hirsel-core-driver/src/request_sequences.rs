@@ -408,7 +408,7 @@ struct LayerLaw {
     tables: std::collections::BTreeMap<&'static str, (usize, usize)>,
     /// Last requests whose logged class disagrees with the recorded one.
     classes: Vec<String>,
-    /// Requests logged Fast whose install refused, or logged Fallback that
+    /// Requests logged Fast that did not install, or logged Fallback that
     /// installed: (sequence, step, store).
     refused: Vec<String>,
 }
@@ -476,16 +476,15 @@ fn run_sequence(
                     );
         for (path, primed) in [("resident", &resident_answer), ("disk", &disk_answer)] {
             let installed = primed.installed == Some(true);
-            // A last request whose program reads the image in every step
-            // installs, and its record's rows sit above the library's.
-            if OVER_LIBRARY.contains(&seq.name) && n == seq.steps.len() {
-                let above = primed.layer.tables.iter().find(|(t, _)| *t == "library").is_some_and(|(_, base)| base.iter().all(|b| b != "0"));
-                if !installed || !above {
+            // A request given the image declares over the image's
+            // declarations whether its program reads them or not, so an
+            // installed record's rows sit above the library's.
+            if installed && req.product == Product::Libraries {
+                let library = primed.layer.tables.iter().find(|(t, _)| *t == "library");
+                if !library.is_some_and(|(_, base)| base.iter().all(|b| b != "0")) {
                     failures.push(format!(
-                        "{} step {n} ({path} store): an image-backed request installed {:?}, library rows {:?}",
-                        seq.name,
-                        primed.installed,
-                        primed.layer.tables.iter().find(|(t, _)| *t == "library")
+                        "{} step {n} ({path} store): an image-backed request installed rows on library base {library:?}",
+                        seq.name
                     ));
                 }
             }
@@ -545,15 +544,9 @@ fn run_sequence(
     (failures, roots)
 }
 /// Every sequence of `seqs` keeps the law; the steps whose roots differ are
-/// exactly `unequal_roots` (name, step, store).
-/// The requests whose install disagrees with their logged class are exactly
-/// `gate_refusals`.
-fn run_sequences(
-    seqs: Vec<Seq>,
-    backend: Option<Backend>,
-    unequal_roots: &[&str],
-    gate_refusals: &[&str],
-) {
+/// exactly `unequal_roots` (name, step, store). Every request installs exactly
+/// when its gate logs Fast.
+fn run_sequences(seqs: Vec<Seq>, backend: Option<Backend>, unequal_roots: &[&str]) {
     let (mut failures, mut roots) = (vec![], vec![]);
     let mut law = LayerLaw::default();
     for seq in &seqs {
@@ -586,10 +579,10 @@ fn run_sequences(
         "last requests whose logged class disagrees with the recorded one:\n{}",
         law.classes.join("\n")
     );
-    law.refused.sort();
-    assert_eq!(
-        law.refused, gate_refusals,
-        "requests whose install disagrees with their logged class"
+    assert!(
+        law.refused.is_empty(),
+        "requests whose install disagrees with their logged class:\n{}",
+        law.refused.join("\n")
     );
 }
 
@@ -1806,9 +1799,8 @@ fn layer_sequences() -> Vec<Seq> {
         seq("image_body_edit", vec![
             libraries(&[("a.hirsel", "a", "pub type T:codec {x:u8, xs:List[u8]}\npub fn total(t:T)->u64{list.len(t.xs)}"), ("b.hirsel", "b", "fn use(t:a.T)->u64{a.total(t)}\nfn low(a:u8,b:u8)->u8{std.order.min(a,b)}")]),
             libraries(&[("a.hirsel", "a", "pub type T:codec {x:u8, xs:List[u8]}\npub fn total(t:T)->u64{list.len(t.xs)+1u64}"), ("b.hirsel", "b", "fn use(t:a.T)->u64{a.total(t)}\nfn low(a:u8,b:u8)->u8{std.order.max(a,b)}")])]),
-        // Whether declaration reads the image follows from resolution,
-        // bodies included, which the shape does not hold: a body edit that
-        // drops or adds the program's only read of the image.
+        // A body edit that drops or adds the program's only read of the
+        // image keeps the shape, so declaration must not depend on the read.
         seq("image_library_read_dropped", vec![
             libraries(&[("a.hirsel", "a", "pub fn f(){let _=std.order.min(1u8,2u8)}"), ("b.hirsel", "b", "fn g(){}")]),
             libraries(&[("a.hirsel", "a", "pub fn f(){}"), ("b.hirsel", "b", "fn g(){}")])]),
@@ -1833,22 +1825,6 @@ fn sequences() -> Vec<Seq> {
 /// Steps whose check root differs from an empty store's while their answers
 /// agree, with the cause.
 const UNEQUAL_ROOTS: &[&str] = &[];
-
-/// Sequences over the libraries' image whose every request reads it: the last
-/// request installs a record whose rows sit above the image's.
-const OVER_LIBRARY: &[&str] = &["image_body_edit"];
-
-/// Requests the gate logs Fast whose install refuses, so they declare (L2).
-/// Whether declaration reads the image follows from resolution, bodies
-/// included, which the shape does not hold: a body edit that drops or adds the
-/// program's only read of the image keeps the shape, and the record's rows sit
-/// on the other library base, which install refuses.
-const GATE_REFUSALS: &[&str] = &[
-    "image_library_read_added step 2 (disk store)",
-    "image_library_read_added step 2 (resident store)",
-    "image_library_read_dropped step 2 (disk store)",
-    "image_library_read_dropped step 2 (resident store)",
-];
 
 /// Each sequence's predicted gate class (see [`Gate`]), sorted by name. Unmarked
 /// rows are l-body-review-1039's settled column (programs/*-v3.md, NEW-SEQUENCES.md).
@@ -2000,7 +1976,7 @@ fn request_sequences_answer_as_an_empty_store() {
         .filter(|n| !names.contains(n))
         .collect();
     assert!(stale.is_empty(), "gate classes of no sequence: {stale:?}");
-    run_sequences(seqs, None, UNEQUAL_ROOTS, GATE_REFUSALS);
+    run_sequences(seqs, None, UNEQUAL_ROOTS);
 }
 #[test]
 #[ignore = "explicit native integration target"]
@@ -2009,7 +1985,7 @@ fn request_sequences_build_as_an_empty_store() {
         .into_iter()
         .filter(|s| s.steps.iter().any(|r| r.build))
         .collect();
-    run_sequences(natives, Some(Backend::Cranelift), &[], &[]);
+    run_sequences(natives, Some(Backend::Cranelift), &[]);
 }
 
 // The process leg (S3; STEP-C 2.1 replay law). A request is the `hirsel`

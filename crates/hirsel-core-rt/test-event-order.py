@@ -125,6 +125,12 @@ def main():
             if count != int(sends.group(1)):
                 failures.append(f'{fixture.stem}: evaluator try-send count {count}, expected {sends.group(1)}')
                 continue
+        slices = re.search(r'// hand-derived step slices: (\d+)', text)
+        if slices:
+            count = sum(e[0] == KIND['STEP_SLICE'] for e in report['events'])
+            if count != int(slices.group(1)):
+                failures.append(f'{fixture.stem}: evaluator step-slice count {count}, expected {slices.group(1)}')
+                continue
         fixture_linker = linker
         if '// provider: pending stdout' in text:
             provider_recorder = folder / 'recorder.o'
@@ -185,7 +191,7 @@ def main():
                 failures.append(f'{fixture.stem}/{backend}: events differ at {at}: evaluator {got[at:at + 4]}, native {expected[at:at + 4]}')
             else:
                 print(f'{fixture.stem}/{backend}: {len(got)} events equal, {outcome}', flush=True)
-            if stopped:
+            if stopped or slices:
                 replay = subprocess.run([str(folder / backend)], capture_output=True, timeout=30,
                                         env=dict(env, HIRSEL_POLL_REPLAY='1'))
                 if (replay.returncode, replay.stdout, replay.stderr) != (native.returncode, native.stdout, native.stderr):

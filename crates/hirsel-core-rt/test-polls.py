@@ -27,7 +27,7 @@ def main():
     parser.add_argument('--runtime', required=True, type=Path)
     parser.add_argument('--before', type=Path)
     parser.add_argument('--out', required=True, type=Path)
-    parser.add_argument('--only', nargs='+', default=['full', 'check', 'arc', 'capacity', 'latest', 'latest-order'])
+    parser.add_argument('--only', nargs='+', default=['full', 'check', 'arc', 'capacity', 'latest', 'latest-order', 'steps'])
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     wrapper = args.out / 'cc'
@@ -69,6 +69,8 @@ def main():
                 raise RuntimeError(f'{kind}/{engine}: build {build.returncode}: {build.stdout[-3000:]!r} {build.stderr!r}')
             trace = folder / 'trace'
             env = dict(os.environ, HIRSEL_POLL_TRACE=str(trace))
+            if kind == 'steps':
+                env['HIRSEL_POLL_FIRST'] = '1'
             record = subprocess.run([str(binary)], capture_output=True, env=env, timeout=5)
             replay = subprocess.run([str(binary)], capture_output=True, env=dict(env, HIRSEL_POLL_REPLAY='1'), timeout=5)
             plain = subprocess.run([str(binary)], capture_output=True, timeout=5)
@@ -80,6 +82,15 @@ def main():
             assert bool(cancels) == (kind in ('full', 'check')), (kind, cancels)
             row = dict(kind=kind, engine=engine, recorded=True, replayed=True, unrecorded=True,
                        events=len(events), cancelled=cancels)
+            if kind == 'steps':
+                slices = [e for e in events if int(e[1]) == KIND['STEP_SLICE']]
+                assert len(slices) == 2, (engine, slices)
+                children = {e[3] for e in events if int(e[1]) == KIND['SPAWN']}
+                assert len(children) == 1 and {e[2] for e in slices} == {'0', *children}, (engine, slices)
+                assert all(e[3:] == ['0', '65536'] for e in slices), slices
+                assert sum(int(e[1]) == KIND['TRY_SEND'] for e in events) == 43690, events[-10:]
+                row['step_slices'] = 2
+                row['step_sends'] = 43690
             if kind == 'latest':
                 # CONC-13: publish and read are ordered events that record no
                 # value, and replay holds under a second schedule.

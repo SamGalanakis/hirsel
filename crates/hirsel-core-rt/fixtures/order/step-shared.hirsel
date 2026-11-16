@@ -1,0 +1,24 @@
+// hand-derived step slices: 2
+// hand-derived try-send: 43690
+// S5: both tasks share131072 Steps. The root spends2 on spawn/unwrap,
+// the child1 on entry. Each trip takes send, receive and latch:3 Steps.
+// Root's65536th Step is receive21845; child's is latch21845. Each has
+// exactly one slice, and the two loops publish43690 messages in total.
+// Every send/receive succeeds, so only the slices schedule either loop.
+type Pair: send { tx: Sender[u64], rx: Receiver[u64] }
+fn spin(take p: Pair) {
+    loop { let _ = channel.try_send(p.tx, 0u64); let _ = channel.try_receive(p.rx) }
+}
+pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
+    let (peer_tx, peer_rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
+    let peer = Pair(tx: take peer_tx, rx: take peer_rx)
+    let stopped = bound steps 131072 {
+        let child = result.unwrap(task.spawn(tasks, bytes 4096, take peer, spin))
+        loop { let _ = channel.try_send(tx, 0u64); let _ = channel.try_receive(rx) }
+    }
+    match stopped {
+        Error(e) => if e.steps == 131072 { Ok(()) } else { Error(Exit(status: 1)) },
+        _ => Error(Exit(status: 2)),
+    }
+}

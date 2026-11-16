@@ -25,9 +25,11 @@ pub const CAPACITY: u8 = 17;
 pub const LATEST_PUBLISH: u8 = 18;
 pub const LATEST_READ: u8 = 19;
 pub const TRY_RECEIVE: u8 = 20;
+/// MEM-30: the 65,536th taken source Step under a bound, before scheduling.
+pub const STEP_SLICE: u8 = 21;
 
 /// Every kind by its header name.
-pub const ALL: [(&str, u8); 21] = [
+pub const ALL: [(&str, u8); 22] = [
     ("SPAWN", SPAWN),
     ("END", END),
     ("CANCEL", CANCEL),
@@ -49,6 +51,7 @@ pub const ALL: [(&str, u8); 21] = [
     ("LATEST_PUBLISH", LATEST_PUBLISH),
     ("LATEST_READ", LATEST_READ),
     ("TRY_RECEIVE", TRY_RECEIVE),
+    ("STEP_SLICE", STEP_SLICE),
 ];
 
 const _: () = {

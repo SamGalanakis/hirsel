@@ -1,4 +1,5 @@
 // hand-derived stdout: BA
+// hand-derived step slices: 1
 // Slices yield at the 65,536th taken step, even when that exactly uses the bound.
 // The unbounded child writes B before the parent's A. No operation in the loop
 // can yield on its own, and entering/leaving the scope takes no step.

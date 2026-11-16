@@ -3382,6 +3382,7 @@ impl Machine<'_> {
                     t.slice_steps += 1;
                     if t.slice_steps == 65_536 {
                         t.slice_steps = 0;
+                        self.event(hirsel_core_layout::event::STEP_SLICE, 0, 65_536);
                         self.park_turn(None, false);
                     }
                 }

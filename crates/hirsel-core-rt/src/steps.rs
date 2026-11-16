@@ -146,6 +146,7 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
         }
         if (*context).step_slice == SLICE {
             (*context).step_slice = 0;
+            crate::tasks::event(hirsel_core_layout::event::STEP_SLICE, 0, SLICE);
             crate::tasks::checkpoint(false);
         }
         resume(&mut *context);

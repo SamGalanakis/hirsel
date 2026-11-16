@@ -1,0 +1,63 @@
+// The Hirsel side of the tally twin (tally.rs): four tasks each add 1 N times through
+// their own std.tally handle; finish folds the four partials and main prints the total.
+// The measurement substitutes N.
+const N: u64 = 250000
+
+type AppError = Io(WriteError) | Mem(Capacity) | Issue(std.tally.HandleError) | Join(JoinError)
+
+fn sum(take a: u64, take b: u64) -> u64 {
+    a + b
+}
+
+fn worker(take h0: std.tally.Handle[u64]) {
+    let mut h = take h0
+    let mut i: u64 = 0
+    while i < N {
+        std.tally.add(mut h, 1)
+        i += 1
+    }
+}
+
+fn start(tasks: Tasks, mut t: std.tally.Tally[u64]) -> Result[Task[()], AppError] {
+    let h = match std.tally.handle(mut t) {
+        Ok(take h) => take h,
+        Error(e) => return Error(Issue(e)),
+    }
+    match task.spawn(tasks, bytes 4096, take h, worker) {
+        Ok(take spawned) => Ok(take spawned),
+        Error((refused, _)) => Error(Mem(refused)),
+    }
+}
+
+fn joined(take t: Task[()]) -> Result[(), AppError] waits {
+    match task.join(take t) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(Join(e)),
+    }
+}
+
+pub fn main(out: Stdout, tasks: Tasks) -> Result[(), AppError] waits {
+    let mut t: std.tally.Tally[u64] = match std.tally.new(4, 0u64, sum) {
+        Ok(take t) => take t,
+        Error(c) => return Error(Mem(c)),
+    }
+    let a = start(tasks, mut t)?
+    let b = start(tasks, mut t)?
+    let c = start(tasks, mut t)?
+    let d = start(tasks, mut t)?
+    joined(take a)?
+    joined(take b)?
+    joined(take c)?
+    joined(take d)?
+    let mut line = string.new()
+    if let Error(refused) = string.push_u64(mut line, std.tally.finish(take t)) {
+        return Error(Mem(refused))
+    }
+    if let Error(refused) = string.push(mut line, "\n") {
+        return Error(Mem(refused))
+    }
+    match stdout.write(out, line) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(Io(e)),
+    }
+}

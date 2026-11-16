@@ -1,0 +1,166 @@
+// Module `tally`: counting and folding across tasks without shared state (Java LongAdder,
+// OTP counters, Linux per-CPU counters), library code over `channel` alone. Design: API.md,
+// "Tally"; study: atomics-moonshot-1009 section 3.1.
+//
+// An owner `Tally[T]` issues handles. Each handle is a `send` resource moved into a task; it
+// folds its own adds into a local partial (no event, no shared state, not a cancellation
+// point). Its cleanup sends `(index, partial)` once over the owner's channel. `finish`
+// drops the owner's sender, receives until every handle is cleaned, and folds `zero` then
+// the partials in handle order (issue order). The partition of adds among handles and the
+// order of adds within a handle are fixed by each task's program, so the result is the
+// same under every schedule, also for a combine that is neither associative nor
+// commutative (a float sum, a concatenation).
+//
+// Representation: the channel holds max(capacity, 1) items, admitted at `new` (CONC-4), so
+// each handle's one cleanup message fits and a cleanup never waits unless `flush`es have
+// filled the queue. `slots` holds one Option[T] per issued handle (capacity reserved at
+// `new`); the owner merges a handle's messages into its slot in that handle's send order.
+//
+// Rules a caller sees:
+// - A handle dropped by a failing or cancelled task is cleaned there (FAIL-8): its partial
+//   is delivered. Only a combine that fails inside `add` loses that handle's partial
+//   (the add took it); the task fails with that failure.
+// - `finish` waits for every issued handle: a handle leaked into a long-lived child delays
+//   `finish` until that child ends (no task outlives its spawner, so the wait is bounded).
+// - `flush` and `read` are events (CONC-10 sends and receives); `add` and `index` are not.
+pub opaque type Tally[T: send] {
+    tx: Sender[(u64, T)],
+    rx: Receiver[(u64, T)],
+    slots: List[Option[T]],
+    cap: u64,
+    zero: T,
+    combine: fn(take T, take T) -> T
+}
+
+/// A handle's local partial, its index and its way back to the owner. `send`; 56 bytes
+/// plus size(T) and its cause cell (MEM-24). Its finalizer sends `(index, partial)` once
+/// when the partial is not empty, waiting only while flushes fill the owner's queue.
+pub opaque resource type Handle[T: send]: send {
+    tx: Sender[(u64, T)],
+    index: u64,
+    local: Option[T],
+    combine: fn(take T, take T) -> T
+} drop(h) {
+    if let Some(take p) = replace(mut h.local, None) {
+        let _ = channel.send(h.tx, (h.index, take p))
+    }
+}
+
+/// Why `handle` refused. Exhausted: `capacity` handles were already issued.
+/// Capacity(c): the handle's block was refused. The tally is unchanged either way.
+pub type HandleError = Exhausted | Capacity(Capacity)
+
+/// An owner for up to n handles whose partials fold with combine, starting from zero.
+/// `channel.new(max(n, 1))` and `list.with_capacity(n)`. Fails: Error(c), nothing kept.
+/// Alloc: the channel's charge for max(n, 1) items of (u64, T), and n x size(Option[T]).
+/// Ex: `let mut hits = std.tally.new(64, 0u64, fn(take a: u64, take b: u64) -> u64 { a + b })?`
+pub fn new[T: send](n: u64, take zero: T, combine: fn(take T, take T) -> T) -> Result[Tally[T], Capacity] {
+    let (tx, rx): (Sender[(u64, T)], Receiver[(u64, T)]) = channel.new(if n == 0 {
+        1
+    } else {
+        n
+    })?
+    let slots: List[Option[T]] = list.with_capacity(n)?
+    Ok(Tally(tx: take tx, rx: take rx, slots: take slots, cap: n, zero: take zero, combine: combine))
+}
+
+/// Issues the next handle; its index is the number issued before it.
+/// Fails: Error(Exhausted) after n handles; Error(Capacity(c)) when its block is refused.
+/// Alloc: the handle's block, current limit. Cost: O(1), no event.
+/// Ex: `task.spawn(tasks, bytes 4096, std.tally.handle(mut hits)?, count)`
+pub fn handle[T: send](mut t: Tally[T]) -> Result[Handle[T], HandleError] {
+    let next = list.len(t.slots)
+    if next == t.cap {
+        return Error(Exhausted)
+    }
+    if let Error((c, _)) = list.push(mut t.slots, None) {
+        return Error(Capacity(c))
+    }
+    match Handle(tx: channel.sender(t.tx), index: next, local: None, combine: t.combine) {
+        Ok(take h) => Ok(take h),
+        Error((c, _)) => {
+            let _ = list.pop(mut t.slots)
+            Error(Capacity(c))
+        }
+    }
+}
+
+/// The handle's index: unique among the owner's handles and fixed by the owner's program
+/// order, so `(std.tally.index(h), local_seq)` is a deterministic id. Cost: O(1).
+pub fn index[T: send](h: Handle[T]) -> u64 {
+    h.index
+}
+
+/// Folds x into the handle's partial: x itself when it is empty, else combine(partial, x).
+/// Not an event and not a cancellation point. Fails: whatever combine fails with; the
+/// handle's partial is then lost. Cost: one combine call. Ex: `std.tally.add(mut h, 1)`
+pub fn add[T: send](mut h: Handle[T], take x: T) {
+    let f = h.combine
+    let next = match replace(mut h.local, None) {
+        None => take x,
+        Some(take acc) => f(take acc, take x),
+    }
+    h.local = Some(take next)
+}
+
+/// Sends the partial so far to the owner and empties it, so a later `read` sees it. An
+/// event (`channel.send`); waits while the owner's queue is full, until the owner reads
+/// or finishes. A dropped owner discards it. Flushing does not change what `finish`
+/// returns for an associative combine; otherwise the result is combine(slot, flushed
+/// part) at each flush, still the same under every schedule.
+pub fn flush[T: send](mut h: Handle[T]) waits {
+    if let Some(take p) = replace(mut h.local, None) {
+        let _ = channel.send(h.tx, (h.index, take p))
+    }
+}
+
+/// zero folded with what has arrived so far, in handle order: a live reading of flushed
+/// and cleaned partials. Events: one `channel.try_receive` per pending message plus one.
+/// The value depends on the schedule. Ex: `let seen = std.tally.read(mut hits)`
+pub fn read[T: plain](mut t: Tally[T]) -> T {
+    while let Ok((i, p)) = channel.try_receive(t.rx) {
+        merge(mut t.slots, i, p, t.combine)
+    }
+    let f = t.combine
+    let mut acc = t.zero
+    for s in t.slots {
+        if let Some(p) = s {
+            acc = f(acc, p)
+        }
+    }
+    acc
+}
+
+/// Drops the owner's sender, receives every handle's partial until all are cleaned, and
+/// returns zero folded with the partials in handle order. The same value under every
+/// schedule. Waits for every issued handle. Events: one receive per message plus one.
+/// Ex: `let total = std.tally.finish(take hits)`
+pub fn finish[T: send](take t: Tally[T]) -> T waits {
+    let Tally(tx: take tx, rx: take rx, slots: take slots0, cap: _, zero: take zero, combine: f) = take t
+    {
+        let closed = take tx
+    }
+    let mut slots = take slots0
+    while let Ok((i, take p)) = channel.receive(rx) {
+        merge(mut slots, i, take p, f)
+    }
+    let mut acc = take zero
+    let n = list.len(slots)
+    for i in 0 .. n {
+        if let Some(take p) = list.set(mut slots, i, None) {
+            let next = f(take acc, take p)
+            acc = take next
+        }
+    }
+    acc
+}
+
+// One handle's messages arrive in its send order, so each slot folds its handle's parts
+// in program order.
+fn merge[T: send](mut slots: List[Option[T]], i: u64, take p: T, f: fn(take T, take T) -> T) {
+    let next = match list.set(mut slots, i, None) {
+        None => take p,
+        Some(take acc) => f(take acc, take p),
+    }
+    let _ = list.set(mut slots, i, Some(take next))
+}

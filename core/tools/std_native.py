@@ -38,6 +38,9 @@ class Contract:
     # `// engine-fact: <fact>` before the law: an engine states <fact> to its code
     # generator on the strength of this law, so land runs it natively on every engine.
     engine_fact: str | None = None
+    # `// schedule: seeds N [max_events M]` before the law: the native run repeats the
+    # law under N seeded schedules (core/tools/std_schedule.c).
+    schedule: tuple[int, int | None] | None = None
 
     @property
     def name(self):
@@ -116,7 +119,13 @@ def discover(root, filters):
         first_write = None
         host_op = 0
         engine_fact = None
+        schedule = None
         for line, text in enumerate(source.splitlines(), 1):
+            if text.startswith("// schedule: "):
+                words = text.removeprefix("// schedule: ").split()
+                if len(words) not in (2, 4) or words[0] != 'seeds' or words[2:3] not in ([], ['max_events']):
+                    raise ValueError(f'{file}:{line}: unreadable schedule line')
+                schedule = (int(words[1]), int(words[3]) if len(words) == 4 else None)
             if text.startswith("// engine-fact: "):
                 engine_fact = text.removeprefix("// engine-fact: ").strip()
             if text.startswith("// expect: stdout "):
@@ -140,13 +149,14 @@ def discover(root, filters):
             if expected.startswith('fault '):
                 if not isinstance(json.loads(expected.removeprefix('fault ')), str):
                     raise ValueError(f'{file}:{line}: fault oracle must be an exact JSON string')
-            if evaluator_only and (not call.endswith('()') or first_write is not None):
+            if evaluator_only and (not call.endswith('()') or first_write is not None or schedule):
                 raise ValueError(f'{file}:{line}: evaluator-only laws take no host arguments')
             name = call.split('(')[0]
             header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, file.relative_to(root).parts[1], evaluator_only, engine_fact)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, file.relative_to(root).parts[1], evaluator_only, engine_fact, schedule)
+            schedule = None
             stdout = stderr = b""
             first_write = None
             host_op = 0
@@ -385,21 +395,31 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if '(tasks)' in case.call:
                     command.extend(['--grant', 'Tasks'])
                 linker = cc
+                scripts = []
                 if case.first_write is not None:
+                    scripts.append(('std_host.c', [f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}'],
+                                    'hirsel_core_host_op'))
+                if case.schedule:
+                    seeds, most = case.schedule
+                    scripts.append(('std_schedule.c', [f'-DSEEDS={seeds}'] + ([f'-DMAX_EVENTS={most}u'] if most is not None else []),
+                                    'hirsel_core_os_run_with_sources'))
+                if scripts:
                     (scratch / 'bin').mkdir()
                     linker = scratch / 'bin/scripted-cc'
                     actual = str(cc or Path(shutil.which('cc')))
-                    # A prebuilt object: the direct-link recipe keeps an existing support
+                    # Prebuilt objects: the direct-link recipe keeps an existing support
                     # object for every C driver, while an appended source is recovered only
                     # from clang's -cc1 lines, never gcc's (the aarch64 cross driver).
-                    support = scratch / 'std_host.o'
-                    built = subprocess.run([actual, '-c', '-fPIC', str(root / 'core/tools/std_host.c'),
-                                            '-I' + str(root / 'crates/hirsel-core-rt/include'),
-                                            f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}',
-                                            '-o', str(support)], capture_output=True)
-                    if built.returncode:
-                        raise RuntimeError(f'std_host.c: {built.stderr.decode()}')
-                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_host_op\n')
+                    extra = []
+                    for source, defines, wrapped in scripts:
+                        support = scratch / source.replace('.c', '.o')
+                        built = subprocess.run([actual, '-c', '-fPIC', str(root / 'core/tools' / source),
+                                                '-I' + str(root / 'crates/hirsel-core-rt/include'),
+                                                *defines, '-o', str(support)], capture_output=True)
+                        if built.returncode:
+                            raise RuntimeError(f'{source}: {built.stderr.decode()}')
+                        extra += [shlex.quote(str(support)), '-Wl,--wrap=' + wrapped]
+                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + ' '.join(extra) + '\n')
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])

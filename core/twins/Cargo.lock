@@ -45,3 +45,7 @@ version = "0.1.0"
 [[package]]
 name = "m4"
 version = "0.1.0"
+
+[[package]]
+name = "tally"
+version = "0.1.0"

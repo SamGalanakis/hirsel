@@ -659,7 +659,7 @@ def first_party(meta: dict) -> str:
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/aarch64.py", full=False,
             args=arguments, bin_exes=binaries, production=True, native_tools=True, host=True,
             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"},
-            data=Raw('glob(["core/core/**", "core/std/**", "core/front/runtime/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/aarch64.py", "core/tools/front_native.py", "core/tools/m1.py", "core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c"]')))
+            data=Raw('glob(["core/core/**", "core/std/**", "core/front/runtime/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/aarch64.py", "core/tools/front_native.py", "core/tools/m1.py", "core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c"]')))
     # The smoke target's name, which main's tools/land lists while this change is in its batch.
     out.append("\n" + call("hirsel_test_suite", name="land-core-llvm-aarch64", tests=[":core-llvm-aarch64-front"]))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-observed", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
@@ -740,7 +740,7 @@ def first_party(meta: dict) -> str:
                                 host=True, args=selection + ["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel"],
                                 bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                                data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c"]')))
+                                data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py", full=False,
                             data=["core/tools/measurement_artifacts.py", "core/tools/std_native.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-core-sweep", script="tools/tests/core_sweep.py", full=False,

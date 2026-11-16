@@ -26,7 +26,7 @@ named cases, and `--backend evaluator` runs host-free cases on the test evaluato
 of `len * size(T)` bytes; a comparator failure preserves every element in unspecified
 order, and Capacity leaves the list unchanged. The Deque ring uses uninhabited slots,
 and the Heap uses hole sifts over one List. Their modules are in `core/core`, with no
-std copies or re-exports. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, omap, set, pool, dir,
+std copies or re-exports. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, omap, set, pool, tally, dir,
 file) are reached from another package through the package name: `std.order.compare`,
 `std.set.Set[u64]`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
 written bare (`Held(f)`, `NotUtf8`).
@@ -71,7 +71,8 @@ the seed's, read through one name. No extension declares a core member's name.
 | result | yes | 2 | map_err, capacity_only |
 | set |  | 6 | new, len, contains, insert, remove, entries |
 | string | yes | 15 | with_capacity, is_boundary, push_i64, push_uint, repeat, clear, find, starts_with, ends_with, split_once, next_split, next_line, strip_prefix, strip_suffix, trim_ascii |
-| **total** | **7 of 17** | **128** | |
+| tally |  | 7 | new, handle, index, add, flush, read, finish |
+| **total** | **7 of 18** | **135** | |
 
 **Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
 and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that
@@ -123,3 +124,37 @@ The decoder must provide the documented shape. On Capacity they return their
 input lists. `from_root(take optional_root)` publishes them in O(1). Loading is
 eager and bottom-up, O(n) nodes plus payload bytes. There are no disk, codec or
 unloaded-child operations in omap.
+
+## Tally
+
+`std.tally.Tally[T: send]` counts and folds across tasks with no shared state; it is
+the library form that takes the place of atomics for counting (atomics-moonshot-1009,
+section 3.1; Java's LongAdder, OTP `counters` and Linux per-CPU counters are its
+prior art). `new(n, take zero, combine)` opens one channel of max(n, 1) items, admitted
+at creation, and reserves n slots. `handle(mut t)` issues a `send` resource
+`Handle[T]` with the next index (0, 1, ... in the owner's program order); after n
+handles it returns `Error(Exhausted)`, and a refused handle block returns
+`Error(Capacity(c))`, leaving the tally unchanged either way. `index(h)` reads that
+index, which with a local sequence makes a deterministic id with no event.
+
+`add(mut h, take x)` folds x into the handle's own partial (x itself when the partial
+is empty, else `combine(partial, x)`). It is neither an event nor a cancellation point
+and touches nothing another task can see. A handle's cleanup sends `(index, partial)`
+once, so a handle dropped by a failing or cancelled task delivers its partial (FAIL-8).
+Only a combine that fails inside `add` loses that handle's partial, with the task.
+`finish(take t) -> T waits` drops the owner's sender, receives until every handle is
+cleaned and folds `zero` then the partials in handle order. The partition of adds among
+handles and the order of adds within each are fixed by the programs, so the result is
+the same under every schedule, also for a combine that is neither associative nor
+commutative (a float sum, a concatenation). `finish` waits for every issued handle: a
+handle moved into a long-lived child delays it until that child ends.
+
+`flush(mut h) waits` sends the partial so far and empties it; it is an event, and one
+handle's parts fold into its slot in send order. `read(mut t)` (T: plain) drains what
+has arrived with `try_receive` and returns zero folded with the slots so far; its value
+depends on the schedule. Each handle's cleanup always fits the queue; a flush or a
+cleanup waits only when flushes have filled it while the owner is not reading or
+finishing, so an owner that joins a flushing task before reading can wait forever.
+The scripted-schedule laws are in `tests/tally.hirsel` (`// schedule: seeds N`, run
+by `core/tools/std_schedule.c`); the evaluator has no tasks, so it runs only the
+single-task laws.

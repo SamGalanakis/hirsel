@@ -34,6 +34,15 @@ arbitrary byte suffixes, including partial UTF-8 scalars, without timing races.
 "// host: remove_tree_prefix a" removes exactly child a, then fails; remaining
 children stay intact. These scripts exist only in the native test link.
 
+A task law can run under scripted schedules:
+
+    // schedule: seeds 32 max_events 64
+    // expect: run law(tasks) = true
+
+core/tools/std_schedule.c wraps the OS entry and runs the law once per seed 1..N with a
+seeded scheduler choice; every run must meet the oracle. It refuses a law whose seeds
+all produced one event stream, and, with max_events, any run with more events.
+
 Private-state tests may use this FIRST LINE:
 
     // test-of: std.pool

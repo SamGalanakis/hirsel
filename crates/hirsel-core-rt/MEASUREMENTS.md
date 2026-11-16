@@ -172,3 +172,22 @@ System allocation remains the default, using native malloc/free and posix_memali
 Task-local paged payer slots replace synchronized funding references. Outstanding bytes retain slots; structural pins remain only for handles, union edges and zero-charge blocks. Regions aggregate by payer run and a writer keeps its trim token and previous charge. Remote refunds use prepaid mailboxes, drained before payer execution resumes. The provider must serialize foreign-payer growth and received finalizer grants with exclusive payer execution custody; these memory functions do not implement a scheduler.
 
 Reproduce with `python3 crates/hirsel-core-rt/measure.py --out <new-directory>`. Raw samples, environment and logs are in `/workspace/code/hirsel-briefs/core-memory-900/rewrite-endstate/`; the old baseline remains in `measurement/`. The driver compiles the unchanged charge-policy module directly, excluding unrelated shape-serialization dependencies. Build starts wait for load <=32; every compile and sample uses tools/capped at 2 GiB and one CPU. Final C ABI smoke passes against both allocator archives.
+
+## Provider operations
+
+Release build (`--target-platforms //tools/buck2:release`, runtime `hirsel-core-rt-archives`), `perf stat -e instructions:u`, median of five on CPU 4, a0e660e5 against 61c29695 (before the four-state provider ABI). The Hirsel programs are review 1025's (`/workspace/code/hirsel-briefs/provider-abi-review-1025/programs`), built with the release compiler on each side.
+
+| program | engine | 61c29695 | a0e660e5 | change |
+|---|---|---:|---:|---:|
+| hello | Cranelift | 264,492 | 264,485 | 0.00% |
+| hello | LLVM | 264,407 | 264,413 | 0.00% |
+| sleep | Cranelift | 266,663 | 265,902 | -0.29% |
+| sleep | LLVM | 266,536 | 265,915 | -0.23% |
+| 100,000 `mono_ns` | Cranelift | 47,464,180 | 43,364,098 | -8.6% |
+| 100,000 `mono_ns` | LLVM | 46,364,091 | 42,264,054 | -8.8% |
+| 10,000 small writes | Cranelift | 5,156,665 | 5,136,703 | -0.39% |
+| 10,000 small writes | LLVM | 4,686,556 | 4,666,615 | -0.43% |
+| 10,000 small writes, OS provider (C) | either | 3,376,444 | 3,518,110 | +4.2% |
+| 10,000 small writes, forwarding wrapper (C) | either | 3,416,445 | 3,758,110 | +10.0% |
+
+The two C rows are `measure/provider-wrap-writes.c`; they run no generated code, so they are the same for both engines. A provider whose `wait` and `deliver` are the OS provider's own runs the operation body with direct calls; every other provider, the wrapper here, calls through pointers and pays the identity check: +6 instructions per write against the pointer-only body (3,698,246), while the OS provider saves 12 (3,638,111 before). That trade was accepted on 2026-11-16 (review 1025 F2). **Line: the wrapper row stays at or under 3,776,900 (+0.5%).** `python3 crates/hirsel-core-rt/measure-provider.py --runtime <archive>` measures both C rows and exits 1 over the line.

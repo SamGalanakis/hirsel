@@ -716,8 +716,38 @@ pub(crate) unsafe fn provider_operation(
         }
         #[cfg(test)]
         FIRST_WAITS.set((FIRST_WAITS.get().0 + 1, FIRST_WAITS.get().1));
+        // Identity may select a call form, never behaviour: this branch selects
+        // nothing but which `Calls` the one body `operation` is instantiated
+        // with, so a provider that forwards to the OS provider is
+        // indistinguishable from it (REPLAY-SPEC section 3, as amended by the
+        // orchestrator's 2026-11-16 ruling on review 1025 F2).
+        if own_callbacks(
+            ptr::fn_addr_eq(provider.wait, crate::os::WAIT)
+                && ptr::fn_addr_eq(provider.deliver, crate::provider::DELIVER),
+        ) {
+            operation::<OsCalls>(context, task, provider, request, token, issued)
+        } else {
+            operation::<PointerCalls>(context, task, provider, request, token, issued)
+        }
+    }
+}
+/// The fast path of `provider_operation` with a scheduler: one body for every
+/// provider, generic only over how it calls `wait` and `deliver`.
+/// # Safety
+/// As `provider_operation`; `task` is the current task.
+#[inline(always)]
+unsafe fn operation<C: Calls>(
+    context: *mut Context,
+    task: *mut Task,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    token: u64,
+    issued: Option<&mut Option<crate::provider::Outcome>>,
+) -> crate::provider::Outcome {
+    // SAFETY: provider contract; request pinned by the caller through delivery.
+    unsafe {
         CURRENT.set(ptr::null_mut());
-        let wait = (provider.wait)(provider.state, request, token);
+        let wait = C::wait(provider, request, token);
         CURRENT.set(task);
         if wait.kind != WAIT_READY {
             let start = Start::Entry(Some(wait));
@@ -731,8 +761,89 @@ pub(crate) unsafe fn provider_operation(
         if let Some(issued) = issued {
             *issued = Some(step.outcome);
         }
-        (provider.deliver)(provider.state, request, step.outcome)
+        C::deliver(provider, request, step.outcome)
     }
+}
+/// How `operation` calls a provider's `wait` and `deliver`. A form may contain
+/// nothing but the call: the same function, with the same arguments.
+trait Calls {
+    /// # Safety
+    /// The provider's `wait` contract.
+    unsafe fn wait(
+        provider: &crate::provider::Provider,
+        request: *mut crate::provider::Request,
+        token: u64,
+    ) -> crate::provider::Wait;
+    /// # Safety
+    /// The provider's `deliver` contract.
+    unsafe fn deliver(
+        provider: &crate::provider::Provider,
+        request: *mut crate::provider::Request,
+        outcome: crate::provider::Outcome,
+    ) -> crate::provider::Outcome;
+}
+/// Through the provider's function pointers.
+struct PointerCalls;
+impl Calls for PointerCalls {
+    #[inline(always)]
+    unsafe fn wait(
+        provider: &crate::provider::Provider,
+        request: *mut crate::provider::Request,
+        token: u64,
+    ) -> crate::provider::Wait {
+        // SAFETY: forwarded.
+        unsafe { (provider.wait)(provider.state, request, token) }
+    }
+    #[inline(always)]
+    unsafe fn deliver(
+        provider: &crate::provider::Provider,
+        request: *mut crate::provider::Request,
+        outcome: crate::provider::Outcome,
+    ) -> crate::provider::Outcome {
+        // SAFETY: forwarded.
+        unsafe { (provider.deliver)(provider.state, request, outcome) }
+    }
+}
+/// Directly, for a provider whose `wait` and `deliver` are the OS provider's
+/// own, so they inline.
+struct OsCalls;
+impl Calls for OsCalls {
+    #[inline(always)]
+    unsafe fn wait(
+        provider: &crate::provider::Provider,
+        request: *mut crate::provider::Request,
+        token: u64,
+    ) -> crate::provider::Wait {
+        // SAFETY: forwarded; `provider.wait` is this function.
+        unsafe { crate::os::wait(provider.state, request, token) }
+    }
+    #[inline(always)]
+    unsafe fn deliver(
+        provider: &crate::provider::Provider,
+        request: *mut crate::provider::Request,
+        outcome: crate::provider::Outcome,
+    ) -> crate::provider::Outcome {
+        // SAFETY: forwarded; `provider.deliver` is this function.
+        unsafe { crate::provider::deliver(provider.state, request, outcome) }
+    }
+}
+/// Whether `provider_operation` calls the OS provider's own callbacks directly
+/// (`OsCalls`). Test builds can force the pointer calls (`OS_DIRECT`) and count
+/// the direct operations (`OS_DIRECT_CALLS`);
+/// `provider_s0_tests::s0_os_callbacks_by_identity_match_the_pointer_calls`
+/// compares both forms with a forwarding wrapper.
+#[inline(always)]
+fn own_callbacks(identical: bool) -> bool {
+    #[cfg(test)]
+    {
+        let direct = identical && OS_DIRECT.get();
+        if direct {
+            OS_DIRECT_CALLS.set(OS_DIRECT_CALLS.get() + 1);
+        }
+        direct
+    }
+    #[cfg(not(test))]
+    identical
 }
 /// An operation that does not finish at once: it parks, or has no scheduler.
 /// The provider is copied before the first park.
@@ -841,6 +952,14 @@ thread_local! { pub(crate) static SCHEDULER_ENTRY: Local<bool> = const { Local::
 /// the switch), so the comparison sees which path each of its halves took.
 #[cfg(test)]
 thread_local! { pub(crate) static FIRST_WAITS: Local<(usize, usize)> = const { Local::new((0, 0)) }; }
+/// Test-only: false calls the OS provider's own callbacks through their
+/// pointers too; the direct calls taken are counted, so a comparison sees
+/// which form each of its runs used.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OS_DIRECT: Local<bool> = const { Local::new(true) };
+    pub(crate) static OS_DIRECT_CALLS: Local<usize> = const { Local::new(0) };
+}
 unsafe fn park_operation(task: *mut Task) {
     // SAFETY: the active task switches to its scheduler, which reads the
     // operation before any other task runs.

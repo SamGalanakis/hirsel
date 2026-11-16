@@ -190,10 +190,18 @@ pub(crate) unsafe fn drive(
     }
 }
 
+/// `deliver` as a provider callback, for recognising the OS provider's own.
+pub(crate) const DELIVER: unsafe extern "C" fn(*mut u8, *mut Request, Outcome) -> Outcome = deliver;
 /// Delivery for the OS provider. Recorders replace it to capture result bytes.
 /// # Safety
 /// Same borrowed request and state contract as Provider::deliver.
-pub unsafe extern "C" fn deliver(_: *mut u8, _: *mut Request, result: Outcome) -> Outcome {
+pub unsafe extern "C" fn deliver(_: *mut u8, _request: *mut Request, result: Outcome) -> Outcome {
+    #[cfg(test)]
+    crate::os::probe::note(
+        crate::os::probe::DELIVER,
+        _request,
+        crate::os::probe::answer(&result),
+    );
     result
 }
 

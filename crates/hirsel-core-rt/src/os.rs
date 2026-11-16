@@ -352,6 +352,8 @@ pub(crate) fn monotonic_ns() -> u64 {
     monotonic_clock_ns().unwrap_or(u64::MAX)
 }
 
+/// `wait` as a provider callback, for recognising the OS provider's own.
+pub(crate) const WAIT: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait = wait;
 /// SLEEP_UNTIL waits until its deadline (program mono_ns, from `epoch`), given to
 /// the scheduler as host CLOCK_MONOTONIC; it is Ready once the deadline has
 /// passed. Every other operation is Ready at once.
@@ -359,13 +361,17 @@ pub(crate) fn monotonic_ns() -> u64 {
 /// State is the run's live OsProvider; request meets the provider ABI contract.
 pub unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, _: u64) -> Wait {
     // SAFETY: pinned request and provider state.
-    unsafe {
+    let wait = unsafe {
         let request = &*request;
         if request.operation != SLEEP_UNTIL || request.buffer.len < 8 {
-            return Wait::default();
+            Wait::default()
+        } else {
+            sleep_wait(state, request)
         }
-        sleep_wait(state, request)
-    }
+    };
+    #[cfg(test)]
+    probe::note(probe::WAIT, request, u64::from(wait.kind));
+    wait
 }
 /// # Safety
 /// As `wait`, for a SLEEP_UNTIL request with an eight-byte deadline.
@@ -391,10 +397,43 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
 /// # Safety
 /// As `wait`.
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, _: u64) -> Step {
+    let outcome = unsafe { crate::tasks::host_operation(state, request, issue_on_stack) };
+    #[cfg(test)]
+    probe::note(probe::ISSUE, request, probe::answer(&outcome));
     Step {
         kind: STEP_DONE,
-        outcome: unsafe { crate::tasks::host_operation(state, request, issue_on_stack) },
+        outcome,
         deadline_ns: 0,
+    }
+}
+/// Test-only: when a test switches it on, the OS provider's `wait`, `issue` and
+/// `deliver` note each call, so a test can compare how they were called.
+#[cfg(test)]
+pub(crate) mod probe {
+    use super::{Outcome, Request};
+    use std::cell::RefCell;
+    pub(crate) const WAIT: u8 = 0;
+    pub(crate) const ISSUE: u8 = 1;
+    pub(crate) const DELIVER: u8 = 2;
+    /// One callback: which, the request's operation and site, whether a task
+    /// was current, and its answer (a wait's kind; an outcome's status, error
+    /// and count written).
+    pub(crate) type Call = (u8, u8, u64, bool, u64);
+    thread_local! { pub(crate) static CALLS: RefCell<Option<Vec<Call>>> = const { RefCell::new(None) }; }
+    pub(crate) fn answer(outcome: &Outcome) -> u64 {
+        u64::from(outcome.status)
+            | u64::from(outcome.error.tag) << 8
+            | u64::from(outcome.error.code) << 16
+            | outcome.written << 48
+    }
+    pub(crate) fn note(callback: u8, request: *const Request, answer: u64) {
+        CALLS.with_borrow_mut(|calls| {
+            if let Some(calls) = calls {
+                // SAFETY: the callback's pinned request.
+                let (operation, site) = unsafe { ((*request).operation, (*request).site) };
+                calls.push((callback, operation, site, crate::tasks::in_task(), answer));
+            }
+        });
     }
 }
 /// The OS provider never answers Pending, so the scheduler never resumes or

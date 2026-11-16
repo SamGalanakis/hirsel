@@ -1463,3 +1463,308 @@ fn s0_a_shield_holds_a_cancellation_until_after_it() {
         );
     }
 }
+
+// ---- the OS provider's own callbacks: by identity, by pointer, forwarded ----
+
+/// One step of an OS-provider job.
+#[derive(Clone, Copy)]
+enum OsStep {
+    Out(&'static [u8]),
+    Clock(u8),
+    /// SLEEP_UNTIL this many nanoseconds after a MONO_NS read; 0 is a deadline
+    /// already past.
+    Sleep(u64),
+    /// Open a file named for the job's site, write these bytes, close it.
+    File(&'static [u8]),
+}
+#[derive(Clone, Copy)]
+struct OsJob {
+    site: u64,
+    steps: &'static [OsStep],
+}
+/// A job's operation as the program sees it: site, operation, status, error
+/// tag and code, count written, and the value (zero for the clock reads).
+type OsResult = (u64, u8, u8, u8, u32, u64, u64);
+thread_local! {
+    /// The provider the jobs call, the granted directory, and their results.
+    static OS_RUN: std::cell::Cell<(*const Provider, u64, *mut Vec<OsResult>)> =
+        const { std::cell::Cell::new((ptr::null(), 0, ptr::null_mut())) };
+}
+unsafe extern "C" fn os_job(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: the job is copied into the task; the run pins provider and results.
+    unsafe {
+        let job = input.cast::<OsJob>().read();
+        let (provider, directory, results) = OS_RUN.get();
+        let mut failed = false;
+        let mut op = |mut request: Request| {
+            let outcome = hirsel_core_host(context, provider, &mut request);
+            let op = request.operation;
+            let clock = op == crate::provider::MONO_NS || op == crate::provider::WALL_MS;
+            let value = if clock { 0 } else { outcome.value };
+            let e = outcome.error;
+            (*results).push((
+                job.site,
+                op,
+                outcome.status,
+                e.tag,
+                e.code,
+                outcome.written,
+                value,
+            ));
+            failed |= outcome.status != 0;
+            outcome
+        };
+        let bytes = |mut request: Request, data: &[u8]| {
+            request.buffer = Buffer {
+                data: data.as_ptr().cast_mut(),
+                len: data.len(),
+                capacity: data.len(),
+            };
+            request
+        };
+        for step in job.steps {
+            match *step {
+                OsStep::Out(data) => {
+                    op(bytes(request(crate::provider::STDOUT, job.site), data));
+                }
+                OsStep::Clock(operation) => {
+                    op(request(operation, job.site));
+                }
+                OsStep::Sleep(after) => {
+                    let deadline = if after == 0 {
+                        0
+                    } else {
+                        op(request(crate::provider::MONO_NS, job.site)).value + after
+                    };
+                    let deadline = deadline.to_ne_bytes();
+                    op(bytes(
+                        request(crate::provider::SLEEP_UNTIL, job.site),
+                        &deadline,
+                    ));
+                }
+                OsStep::File(data) => {
+                    let name = format!("f{}", job.site);
+                    let mut open = request(crate::provider::OPEN, job.site);
+                    (open.mode, open.handle) = (1, directory);
+                    (open.path, open.path_len) = (name.as_ptr(), name.len());
+                    let opened = op(open);
+                    assert_eq!(opened.status, 0, "open {name}");
+                    let file = opened.value;
+                    let mut write = bytes(request(crate::provider::WRITE, job.site), data);
+                    write.handle = file;
+                    op(write);
+                    let mut close = request(crate::provider::CLOSE, job.site);
+                    close.handle = file;
+                    op(close);
+                }
+            }
+        }
+        u8::from(failed)
+    }
+}
+unsafe fn spawn_os(context: *mut Context, site: u64, steps: &'static [OsStep]) -> *mut Task {
+    let mut input = OsJob { site, steps };
+    let value = |bytes| ValueLayout {
+        bytes,
+        align: 8,
+        logical: 0,
+        drop: inert,
+    };
+    let layout = TaskLayout {
+        input: value(size_of::<OsJob>()),
+        result: value(0),
+    };
+    // SAFETY: the job is copied into the child.
+    let task = unsafe {
+        let input = (&mut input as *mut OsJob).cast();
+        hirsel_core_spawn(context, 64, input, os_job, layout).task
+    };
+    assert!(!task.is_null());
+    task
+}
+const OS_ONCE: u64 = 1;
+const OS_LATER: u64 = 2;
+const OS_CANCELLED: u64 = 3;
+/// Every OS operation kind the jobs reach, with sleeps already due, due
+/// later (Until, then a second wait) and cancelled while waiting.
+unsafe fn os_root(context: *mut Context, _: *mut Rec) {
+    use crate::provider::{MONO_NS, WALL_MS};
+    const ONCE: &[OsStep] = &[
+        OsStep::Out(b"ab"),
+        OsStep::Clock(MONO_NS),
+        OsStep::Out(b"cd"),
+        OsStep::Sleep(0),
+        OsStep::Clock(WALL_MS),
+        OsStep::Out(b"ef"),
+    ];
+    const LATER: &[OsStep] = &[
+        OsStep::Sleep(2_000_000),
+        OsStep::Out(b"gh"),
+        OsStep::File(b"file"),
+    ];
+    const CANCELLED: &[OsStep] = &[OsStep::Sleep(3_600_000_000_000)];
+    // SAFETY: the root owns every handle it spawns.
+    unsafe {
+        let once = spawn_os(context, OS_ONCE, ONCE);
+        let later = spawn_os(context, OS_LATER, LATER);
+        let cancelled = spawn_os(context, OS_CANCELLED, CANCELLED);
+        tick(context);
+        tick(context);
+        hirsel_core_cancel(context, cancelled);
+        assert!(!join(context, once));
+        assert!(!join(context, later));
+        assert!(join(context, cancelled));
+    }
+}
+/// A provider that forwards every callback to the one it wraps.
+unsafe fn inner<'a>(state: *mut u8) -> &'a Provider {
+    // SAFETY: the wrapper's state is the wrapped provider, pinned for the run.
+    unsafe { &*state.cast::<Provider>() }
+}
+unsafe extern "C" fn fw_wait(state: *mut u8, request: *mut Request, token: u64) -> Wait {
+    // SAFETY: forwarded.
+    unsafe { (inner(state).wait)(inner(state).state, request, token) }
+}
+unsafe extern "C" fn fw_issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
+    // SAFETY: forwarded.
+    unsafe { (inner(state).issue)(inner(state).state, request, token) }
+}
+unsafe extern "C" fn fw_resume(state: *mut u8, request: *mut Request, token: u64) -> Step {
+    // SAFETY: forwarded.
+    unsafe { (inner(state).resume)(inner(state).state, request, token) }
+}
+unsafe extern "C" fn fw_abort(
+    state: *mut u8,
+    request: *mut Request,
+    token: u64,
+    why: u8,
+) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe { (inner(state).abort)(inner(state).state, request, token, why) }
+}
+unsafe extern "C" fn fw_deliver(
+    state: *mut u8,
+    request: *mut Request,
+    outcome: Outcome,
+) -> Outcome {
+    // SAFETY: forwarded.
+    unsafe { (inner(state).deliver)(inner(state).state, request, outcome) }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OsForm {
+    /// The OS provider, its own callbacks called directly.
+    Direct,
+    /// The OS provider, every callback called through its pointer.
+    Pointer,
+    /// A forwarding wrapper over the OS provider.
+    Wrapper,
+}
+/// What one run of `os_root` showed: the OS callbacks as called, the jobs'
+/// results, the scheduler's events (kind, task), stdout and the file written.
+#[derive(Debug, PartialEq, Eq)]
+struct OsSeen {
+    calls: Vec<crate::os::probe::Call>,
+    results: Vec<OsResult>,
+    events: Vec<(u8, u64)>,
+    stdout: Vec<u8>,
+    file: Vec<u8>,
+}
+fn os_case(form: OsForm) -> (OsSeen, usize) {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "hirsel-s0-os-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let mut os = Box::new(crate::os::OsProvider::new(
+        std::fs::File::create(root.join("stdout")).unwrap().into(),
+        std::fs::File::create(root.join("stderr")).unwrap().into(),
+    ));
+    let directory = os.grant(&root).unwrap();
+    let mut own = os.provider();
+    let wrapper = Provider {
+        state: (&mut own as *mut Provider).cast(),
+        wait: fw_wait,
+        issue: fw_issue,
+        resume: fw_resume,
+        abort: fw_abort,
+        deliver: fw_deliver,
+    };
+    let provider: *const Provider = if form == OsForm::Wrapper {
+        &wrapper
+    } else {
+        &own
+    };
+    let mut results = vec![];
+    OS_RUN.set((provider, directory, &mut results));
+    OS_DIRECT.set(form != OsForm::Pointer);
+    OS_DIRECT_CALLS.set(0);
+    crate::os::probe::CALLS.set(Some(vec![]));
+    let mut rec = Rec::new(ready, done0, never);
+    run(&mut rec, false, os_root);
+    let calls = crate::os::probe::CALLS.take().unwrap();
+    let direct = OS_DIRECT_CALLS.get();
+    OS_DIRECT.set(true);
+    OS_RUN.set((ptr::null(), 0, ptr::null_mut()));
+    drop(os);
+    let seen = OsSeen {
+        calls,
+        results,
+        events: rec.log.iter().map(|e| (e.kind, e.task)).collect(),
+        stdout: std::fs::read(root.join("stdout")).unwrap(),
+        file: std::fs::read(root.join(format!("f{OS_LATER}"))).unwrap(),
+    };
+    std::fs::remove_dir_all(&root).unwrap();
+    (seen, direct)
+}
+/// The OS provider's own `wait` and `deliver` are selected by identity and
+/// called directly; that may change the call form only. The same jobs run with
+/// the direct calls, with every callback through its pointer, and through a
+/// forwarding wrapper: the callbacks are called alike (order, operation, site,
+/// task current or not, answer), and the results, the scheduler's events and
+/// the bytes written are the same. The oracle for each run is section 3: wait
+/// outside any task, issue and deliver in it; a sleep due later waits Until,
+/// then Ready, then issues and delivers once; a sleep cancelled in W waits
+/// again at the cancellation and is never issued. The count of direct calls shows which form each run took.
+#[test]
+fn s0_os_callbacks_by_identity_match_the_pointer_calls() {
+    use crate::os::probe::{DELIVER, ISSUE, WAIT};
+    use crate::provider::SLEEP_UNTIL;
+    let (direct, direct_calls) = os_case(OsForm::Direct);
+    for &(callback, operation, site, in_task, answer) in &direct.calls {
+        assert_eq!(in_task, callback != WAIT, "{callback} {operation} {site}");
+        if callback == WAIT && operation != SLEEP_UNTIL {
+            assert_eq!(answer, u64::from(crate::provider::WAIT_READY));
+        }
+    }
+    let sleeps = |site| {
+        direct
+            .calls
+            .iter()
+            .filter(|c| c.1 == SLEEP_UNTIL && c.2 == site)
+            .map(|c| (c.0, c.4))
+            .collect::<Vec<_>>()
+    };
+    let until = u64::from(WAIT_UNTIL);
+    assert_eq!(
+        sleeps(OS_LATER),
+        [(WAIT, until), (WAIT, 0), (ISSUE, 0), (DELIVER, 0)]
+    );
+    // Section 3 step 3: the cancellation request is a wake, and `wait` runs
+    // again at it; the operation then fails Cancelled, never issued.
+    assert_eq!(sleeps(OS_CANCELLED), [(WAIT, until), (WAIT, until)]);
+    assert_eq!(sleeps(OS_ONCE), [(WAIT, 0), (ISSUE, 0), (DELIVER, 0)]);
+    let issued = direct.calls.iter().filter(|c| c.0 == ISSUE).count();
+    let delivered = direct.calls.iter().filter(|c| c.0 == DELIVER).count();
+    assert_eq!((issued, delivered), (direct.results.len() - 1, issued));
+    assert_eq!(direct.stdout, b"abcdefgh");
+    assert_eq!(direct.file, b"file");
+    assert!(direct_calls > 0, "the identity selected the direct calls");
+    let (pointer, pointer_calls) = os_case(OsForm::Pointer);
+    assert_eq!(pointer_calls, 0, "the switch forced the pointer calls");
+    assert_eq!(pointer, direct);
+    let (wrapper, wrapper_calls) = os_case(OsForm::Wrapper);
+    assert_eq!(wrapper_calls, 0, "a wrapper is never the OS provider");
+    assert_eq!(wrapper, direct);
+}

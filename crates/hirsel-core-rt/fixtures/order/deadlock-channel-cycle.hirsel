@@ -1,0 +1,15 @@
+// expect: Deadlock
+// Root waits for the child, which waits for root to send first.
+type Ends:send { tx: Sender[u64], rx: Receiver[u64] }
+fn child(take e: Ends) waits {
+    let Ends(tx: tx, rx: rx) = take e
+    result.unwrap(channel.send(tx, result.unwrap(channel.receive(rx))))
+}
+pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
+    let (tx0, rx0): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx1, rx1): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, Ends(tx: take tx0, rx: take rx1), child))
+    result.unwrap(channel.send(tx1, result.unwrap(channel.receive(rx0))))
+    result.unwrap(task.join(take h))
+    Ok(())
+}

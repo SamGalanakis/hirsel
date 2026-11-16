@@ -28,10 +28,18 @@ uint8_t __wrap_hirsel_core_run(const HirselCoreProcessConfig *input,HirselCoreEn
     if(!file) return __real_hirsel_core_run(input,entry);
     replay=getenv("HIRSEL_POLL_REPLAY")!=NULL;
     trace=fopen(file,replay ? "r" : "w"); if(!trace) abort();
+    setvbuf(trace,NULL,_IONBF,0);
     HirselCoreProcessConfig cfg=*input;
     cfg.scheduler=(HirselCoreSchedulerProvider){.event=event,.choose=choose};
+#ifdef PENDING_STDOUT
+    extern void pending_stdout(HirselCoreProcessConfig *);
+    pending_stdout(&cfg);
+#endif
     uint8_t result=__real_hirsel_core_run(&cfg,entry);
     if(replay) { int c; do {c=fgetc(trace);} while(c=='\n' || c==' '); if(c!=EOF) abort(); }
+#ifdef PENDING_STDOUT
+    free((void *)cfg.capabilities);
+#endif
     fclose(trace);
     return result;
 }

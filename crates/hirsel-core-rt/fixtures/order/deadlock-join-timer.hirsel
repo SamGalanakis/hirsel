@@ -1,0 +1,17 @@
+// expect: returned
+// The root joins the receiver while a timer will send its input.
+type Timer:send { tx: Sender[u64], clock: Clock }
+fn child(take rx: Receiver[u64]) waits { let _ = channel.receive(rx) }
+fn timer(take t: Timer) waits {
+    let Timer(tx: tx, clock: clock) = take t
+    host.sleep_until(clock, host.mono_ns(clock) + 20_000_000u64)
+    result.unwrap(channel.send(tx, 7u64))
+}
+pub fn main(tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, take rx, child))
+    let t = result.unwrap(task.spawn(tasks, bytes 4096, Timer(tx: take tx, clock: clock), timer))
+    result.unwrap(task.join(take h))
+    result.unwrap(task.join(take t))
+    Ok(())
+}

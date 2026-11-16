@@ -1,0 +1,24 @@
+// expect: returned stdout=7
+// A timer breaks the channel cycle: the third task sends the first token.
+type Timer:send { tx: Sender[u64], clock: Clock }
+type Ends:send { tx: Sender[u64], rx: Receiver[u64] }
+fn relay(take e: Ends) waits {
+    let Ends(tx: tx, rx: rx) = take e
+    result.unwrap(channel.send(tx, result.unwrap(channel.receive(rx))))
+}
+fn timer(take t: Timer) waits {
+    let Timer(tx: tx, clock: clock) = take t
+    host.sleep_until(clock, host.mono_ns(clock) + 20_000_000u64)
+    result.unwrap(channel.send(tx, 7u64))
+}
+pub fn main(tasks: Tasks, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let (tx0, rx0): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (tx1, rx1): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let seed = channel.sender(tx1)
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, Ends(tx: take tx0, rx: take rx1), relay))
+    let t = result.unwrap(task.spawn(tasks, bytes 4096, Timer(tx: take seed, clock: clock), timer))
+    if result.unwrap(channel.receive(rx0)) == 7u64 { result.unwrap(stdout.write(out, "7")) }
+    result.unwrap(task.join(take h))
+    result.unwrap(task.join(take t))
+    Ok(())
+}

@@ -391,7 +391,20 @@ impl Scheduler {
             Some(deadline) => std::thread::park_timeout(Duration::from_nanos(
                 deadline.saturating_sub(crate::os::monotonic_ns()),
             )),
-            None => std::thread::park(),
+            None => {
+                let mut task = self.all;
+                // SAFETY: idle owns the task list and no task is running.
+                let provider = unsafe {
+                    while !task.is_null() && (*task).state != State::Provider {
+                        task = (*task).all;
+                    }
+                    !task.is_null()
+                };
+                if self.head.is_null() && self.deferred.is_null() && !provider {
+                    crate::process::stop(b"Deadlock");
+                }
+                std::thread::park();
+            }
         }
     }
 

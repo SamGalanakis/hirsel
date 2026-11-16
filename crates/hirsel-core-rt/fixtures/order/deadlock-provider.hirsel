@@ -1,0 +1,6 @@
+// expect: returned stdout=P
+// provider: pending stdout
+pub fn main(out: Stdout) -> Result[(), Exit] waits {
+    result.unwrap(stdout.write(out, "P"))
+    Ok(())
+}

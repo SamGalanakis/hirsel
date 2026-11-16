@@ -26,7 +26,11 @@ fn expected(run: &Run, out: &mut Vec<u64>) {
                 _ => panic!("unexpected provider cause {s}"),
             }));
         }
-        Outcome::Stuck(waiting) => panic!("a provider fixture's run is stuck: {waiting:?}"),
+        Outcome::Stopped(name) => {
+            out.extend([2, name.len() as u64]);
+            out.extend(name.bytes().map(u64::from));
+            return;
+        }
     }
     out.extend([run.report.used, run.report.admissions as u64]);
     for bytes in [&run.report.stdout, &run.report.stderr] {
@@ -49,7 +53,8 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
     )
     .unwrap();
     fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
-    let mut source = include_str!("providers.c").to_owned();
+    let mut source = String::from("#include <unistd.h>\n#include <sys/wait.h>\n");
+    source.push_str(include_str!("providers.c"));
     declare_functions(&mut source, module);
     let mut main =
         String::from("int main(void) { HirselCoreProvider provider={&world,world_wait,issue,world_resume,world_abort,deliver};\n");
@@ -189,7 +194,14 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             )
             .unwrap();
         }
-        writeln!(main,"HirselCoreProcessConfig cfg={{.root_limit=1000000,.args=argv,.args_len={},.provider=&provider,.diagnostic=diagnostic,.capabilities=grants,.capabilities_len=1}}; require(hirsel_core_run(&cfg,entry{i})==0); }}",run.argv.len()).unwrap();
+        if matches!(run.report.outcome, Outcome::Stopped(_)) {
+            begin_stop(&mut main);
+        }
+        writeln!(main,"HirselCoreProcessConfig cfg={{.root_limit=1000000,.args=argv,.args_len={},.provider=&provider,.diagnostic=diagnostic,.capabilities=grants,.capabilities_len=1}}; require(hirsel_core_run(&cfg,entry{i})==0);",run.argv.len()).unwrap();
+        if matches!(run.report.outcome, Outcome::Stopped(_)) {
+            end_stop(&mut main);
+        }
+        main.push_str("}\n");
     }
     main.push_str("return 0; }\n");
     source.push_str(&main);

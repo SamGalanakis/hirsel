@@ -192,8 +192,9 @@ at a moment it would wait (CONC-7); a polling task is not waiting, so the tasks 
 for reach their events. Fairness limits which orders the scheduler may choose; a replay
 follows the recorded order. A task that runs forever with neither a poll nor a wait waits
 for nobody and may keep every other task from running; it is a program error: the run
-does not end, and which events other tasks perform meanwhile is not specified. Under a step
-bound neither happens: its slice ends let other tasks run, and the bound stops the code
+does not end, and which events other tasks perform meanwhile is not specified.
+This is about computing forever; a run whose tasks all wait stops with `Deadlock` (FAIL-15).
+Under a step bound neither happens: its slice ends let other tasks run, and the bound stops the code
 ([MEM-30](budgets.md#mem-30-step-bounds)). Each `Full`
 below is a poll, so the parent that drains the gate runs while the child polls:
 

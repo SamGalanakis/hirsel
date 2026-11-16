@@ -24,9 +24,8 @@ pub enum Outcome {
     Returned(Vec<u64>),
     /// The run failed with this cause chain, primary cause first.
     Failed(Vec<String>),
-    /// Every task waits and nothing can wake one, so the run does not end (the
-    /// native scheduler parks forever). One line per waiting task, by task id.
-    Stuck(Vec<String>),
+    /// FAIL-15: the run ends every task without cleanup or a cause chain.
+    Stopped(&'static str),
 }
 
 pub struct Report {
@@ -537,12 +536,10 @@ enum State {
     Provider,
     Ended,
 }
-/// What a blocked task waits for, by the object's id.
+/// A task wait or a provider deadline.
 #[derive(Clone, Copy, Debug)]
 enum Wait {
-    Join(u64),
-    Receive(u64),
-    Send(u64),
+    Task,
     /// A sleep until this clock value.
     Sleep(u64),
 }
@@ -553,7 +550,6 @@ struct Rec {
     /// A cancellation request not yet observed (CONC-7).
     cancel: bool,
     polls: u32,
-    waits: Option<Wait>,
     /// While parked in a provider operation: whether a cancellation request may
     /// take effect there (no shield, not finalizing; native `cancels_operation`).
     cancellable: bool,
@@ -851,7 +847,6 @@ fn run_world(
         state: State::Ready,
         cancel: false,
         polls: POLLS_PER_TURN,
-        waits: None,
         cancellable: false,
         cancelled: false,
         start: Some((task, f, args.to_vec())),
@@ -919,19 +914,12 @@ fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
                 continue;
             }
             let Some(k) = s.ready.pop_front() else {
-                let waiting = s
-                    .tasks
-                    .iter()
-                    .filter(|r| r.state == State::Blocked)
-                    .map(|r| match r.waits.expect("a blocked task's wait") {
-                        Wait::Join(c) => format!("task {} joins task {c}", r.id),
-                        Wait::Receive(c) => format!("task {} receives on channel {c}", r.id),
-                        Wait::Send(c) => format!("task {} sends on channel {c}", r.id),
-                        Wait::Sleep(d) => format!("task {} sleeps until {d}", r.id),
-                    })
-                    .collect();
+                baton
+                    .world
+                    .stderr
+                    .extend_from_slice(b"run stop: Deadlock\n");
                 teardown(&mut resumes, &baton);
-                return (baton, Outcome::Stuck(waiting), Vec::new());
+                return (baton, Outcome::Stopped("Deadlock"), Vec::new());
             };
             s.current = k;
             s.tasks[k].state = State::Running;
@@ -1080,11 +1068,7 @@ impl<'m> Machine<'m> {
                 let at = s.timers.partition_point(|&(d, _)| d <= deadline);
                 s.timers.insert(at, (deadline, k));
             }
-            Some(w) => {
-                let r = &mut self.sched.tasks[k];
-                r.state = State::Blocked;
-                r.waits = Some(w);
-            }
+            Some(Wait::Task) => self.sched.tasks[k].state = State::Blocked,
             None => {
                 self.sched.tasks[k].state = State::Ready;
                 self.sched.deferred.push_back(k);
@@ -1105,7 +1089,6 @@ impl<'m> Machine<'m> {
         self.frozen = frozen;
         self.footprints = footprints;
         self.links[k] = Some(link);
-        self.sched.tasks[k].waits = None;
     }
 }
 
@@ -1886,7 +1869,7 @@ impl Machine<'_> {
                 t.shield += 1;
                 self.cancel(i);
                 while self.sched.tasks[i + 1].state != State::Ended {
-                    self.park(Some(Wait::Join(id)));
+                    self.park(Some(Wait::Task));
                 }
                 self.event(JOIN, id, 2);
                 let (status, result, r) = {
@@ -2279,7 +2262,6 @@ impl Machine<'_> {
                     state: State::Ready,
                     cancel: false,
                     polls: POLLS_PER_TURN,
-                    waits: None,
                     cancellable: false,
                     cancelled: false,
                     start: Some((child, f, args)),
@@ -2299,7 +2281,7 @@ impl Machine<'_> {
                     if self.sched.tasks[i + 1].state == State::Ended {
                         break;
                     }
-                    self.park(Some(Wait::Join(id)));
+                    self.park(Some(Wait::Task));
                 }
                 let status = self.children[i].status;
                 if status == 0 {
@@ -2446,7 +2428,7 @@ impl Machine<'_> {
                     match self.publish(i, a[1], item) {
                         0 => break vec![1],
                         2 => break vec![0],
-                        _ => self.park(Some(Wait::Send(self.chan_id(i)))),
+                        _ => self.park(Some(Wait::Task)),
                     }
                 }
             }
@@ -2466,7 +2448,7 @@ impl Machine<'_> {
                     if self.chans[i].senders == 0 {
                         break vec![0];
                     }
-                    self.park(Some(Wait::Receive(self.chan_id(i))));
+                    self.park(Some(Wait::Task));
                 }
             }
             RtOp::LatestNew { item } => match self.admit(cur, charge::LATEST_ROOT) {

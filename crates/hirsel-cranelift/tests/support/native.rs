@@ -244,7 +244,7 @@ fn execute_cases_with_bindings(
     )
     .unwrap();
     fs::write(scratch.0.join("input.o"), artifact.bytes).unwrap();
-    let mut source = String::from("#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n");
+    let mut source = String::from("#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n#include <sys/wait.h>\n");
     source.push_str(bindings);
     source.push_str(include_str!(
         "../../../hirsel-core-rt/include/hirsel_core_rt.h"
@@ -390,10 +390,18 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                     }
                 }
             }
-            Outcome::Stuck(waiting) => panic!("the evaluator's run is stuck: {waiting:?}"),
+            Outcome::Stopped(name) => {
+                expected.extend([2, name.len() as u64]);
+                expected.extend(name.bytes().map(u64::from));
+            }
         }
-        expected.push(report.used);
+        if !matches!(report.outcome, Outcome::Stopped(_)) {
+            expected.push(report.used);
+        }
         if host_files {
+            if matches!(report.outcome, Outcome::Stopped(_)) {
+                begin_stop(&mut process_calls);
+            }
             writeln!(source, "static uint8_t fixture{i}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {{ hirsel_core_test_reset_limit(ctx,UINT64_C({limit}));").unwrap();
             // The scalar sample ABI erases which input word is an opaque handle.
             // Seed the authored input keys through real OPEN/registry operations;
@@ -406,6 +414,9 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             )
             .unwrap();
         } else {
+            if matches!(report.outcome, Outcome::Stopped(_)) {
+                begin_stop(&mut source);
+            }
             source.push_str("{\n");
             writeln!(source, "HirselCoreContext *ctx = hirsel_core_test_context_new(UINT64_C({limit})); traces=0;").unwrap();
         }
@@ -517,6 +528,16 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                 source.push_str("memcpy(returned_place, &value, sizeof value);\n");
             }
         }
+        if matches!(report.outcome, Outcome::Stopped(_)) {
+            if host_files {
+                source.push_str("return 111; }\n");
+                end_stop(&mut process_calls);
+            } else {
+                source.push_str("}\n");
+                end_stop(&mut source);
+            }
+            continue;
+        }
         if via_storage {
             let status_offset = result_offsets[s.results.len()];
             writeln!(source, "uint64_t status = 0; memcpy(&status, returned_place + {status_offset}, sizeof(uint8_t));").unwrap();
@@ -603,6 +624,12 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
     // retained charge, the drop trace, and admission attempts.
     fn take_report<'a>(words: &mut &'a [u64]) -> Option<&'a [u64]> {
         let count = usize::try_from(*words.get(1)?).ok()?;
+        if *words.first()? == 2 {
+            let end = count.checked_add(2)?;
+            let report = words.get(..end)?;
+            *words = &words[end..];
+            return Some(report);
+        }
         let payload = count.checked_mul(if *words.first()? == 0 { 1 } else { 7 })?;
         let trace_at = payload.checked_add(3)?;
         let trace = usize::try_from(*words.get(trace_at)?).ok()?;
@@ -636,6 +663,13 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         failures.join("\n"),
         text::print(module)
     );
+}
+
+fn begin_stop(source: &mut String) {
+    source.push_str("{ int stop_pipe[2]; if(pipe(stop_pipe)) __builtin_abort(); fflush(stdout); pid_t child=fork(); if(child<0) __builtin_abort(); if(!child) { close(stop_pipe[0]); if(dup2(stop_pipe[1],2)<0) _exit(111); close(stop_pipe[1]);\n");
+}
+fn end_stop(source: &mut String) {
+    source.push_str("_exit(111); } close(stop_pipe[1]); char message[256]; size_t length=0; ssize_t n; while((n=read(stop_pipe[0],message+length,sizeof(message)-length))>0) length+=(size_t)n; close(stop_pipe[0]); int status; if(waitpid(child,&status,0)!=child || !WIFEXITED(status) || WEXITSTATUS(status)!=102 || length<11 || memcmp(message,\"run stop: \",10) || message[length-1]!='\\n') __builtin_abort(); uint64_t tag=2,count=length-11; fwrite(&tag,8,1,stdout); fwrite(&count,8,1,stdout); for(size_t j=10;j+1<length;j++){ uint64_t b=(unsigned char)message[j]; fwrite(&b,8,1,stdout); } }\n");
 }
 
 fn link_program(scratch: &Scratch, source: &str) -> PathBuf {

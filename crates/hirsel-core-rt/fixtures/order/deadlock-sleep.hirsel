@@ -1,0 +1,6 @@
+// expect: returned
+// The only live task has a pending timer, so it can complete.
+pub fn main(clock: Clock) -> Result[(), Exit] waits {
+    host.sleep_until(clock, host.mono_ns(clock) + 20_000_000u64)
+    Ok(())
+}

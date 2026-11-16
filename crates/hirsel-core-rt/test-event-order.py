@@ -13,8 +13,8 @@ Normalisation, and why each part is engine-local rather than semantic:
 - CAPACITY's object is the requested charge, a value; it is kept as is.
 - Task and object ids are renamed by first appearance.
 
-A run where every task waits is not compared: the evaluator reports it as Stuck,
-a diagnostic with no specified result. None of these fixtures is such a run.
+FAIL-15 fixtures state their hand-derived outcome in an `expect:` comment. These
+also run on LLVM, including the named Deadlock stop and its recorded replay.
 """
 import argparse
 import json
@@ -67,6 +67,7 @@ def main():
     parser.add_argument('--cc', type=Path, default=(Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang')
                         if 'LLVM_SYS_231_PREFIX' in os.environ else Path('clang'))
     parser.add_argument('--only', nargs='+')
+    parser.add_argument('--backend', nargs='+', choices=['cranelift', 'llvm'])
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = parser.parse_args()
     work = Path(tempfile.mkdtemp(prefix='event-order-'))
@@ -106,38 +107,70 @@ def main():
             ran = subprocess.run([str(args.evaluator), str(ordinary.parent / 'inputs.json'),
                                   'app@1/main/evaluator_main'], capture_output=True, timeout=120)
         report = json.loads(ran.stdout)
-        if report.get('outcome', {}).get('kind') != 'returned' or report['outcome'].get('values') != [1]:
+        oracle = re.search(r'// expect: (Deadlock|returned)(?: stdout=(\S*))?', text)
+        stopped = oracle is not None and oracle.group(1) == 'Deadlock'
+        outcome = {'kind': 'stopped', 'name': 'Deadlock'} if stopped else {'kind': 'returned', 'values': [1]}
+        if report.get('outcome') != outcome:
             failures.append(f'{fixture.stem}: evaluator {report.get("outcome")}')
             continue
-        command = [str(args.compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', 'app@1/main/main',
-                   '--backend', 'cranelift', '--runtime', str(args.runtime), '--store', str(work / 'store'),
-                   '--cc', str(linker), '--json', '-o', str(folder / 'program')]
-        for grant in ('Tasks', 'Clock', 'Stdout'):
-            if re.search(rf':\s*{grant}\b', header):
-                command += ['--grant', grant]
-        while os.getloadavg()[0] > 32:
-            time.sleep(10)
-        built = subprocess.run(command, capture_output=True, cwd=ROOT)
-        if built.returncode:
-            failures.append(f'{fixture.stem}: build {built.returncode}: {built.stdout[-2000:]!r} {built.stderr[-2000:]!r}')
-            continue
-        trace = folder / 'trace'
-        native = subprocess.run([str(folder / 'program')], capture_output=True, timeout=30,
-                                env=dict(os.environ, HIRSEL_POLL_TRACE=str(trace), HIRSEL_POLL_FIRST='1'))
-        if native.returncode:
-            failures.append(f'{fixture.stem}: native exit {native.returncode} {native.stderr!r}')
-            continue
-        expected = normalized([tuple(int(w) for w in line.split()[1:]) for line in trace.read_text().splitlines()
-                               if line.startswith('E ')])
-        got = normalized([tuple(e) for e in report['events']])
-        stdout = bytes(report['stdout'])
-        if stdout != native.stdout:
-            failures.append(f'{fixture.stem}: stdout evaluator {stdout!r}, native {native.stdout!r}')
-        elif got != expected:
-            at = next((i for i, (a, b) in enumerate(zip(got, expected)) if a != b), min(len(got), len(expected)))
-            failures.append(f'{fixture.stem}: events differ at {at}: evaluator {got[at:at + 4]}, native {expected[at:at + 4]}')
-        else:
-            print(f'{fixture.stem}: {len(got)} events equal', flush=True)
+        fixture_linker = linker
+        if '// provider: pending stdout' in text:
+            provider_recorder = folder / 'recorder.o'
+            provider = folder / 'provider.o'
+            for src, obj, flags in [(RECORDER, provider_recorder, ['-DPENDING_STDOUT']),
+                                    (fixture.with_suffix('.c'), provider, [])]:
+                subprocess.run([str(args.cc), '-c', '-fPIC', str(src), '-I', str(ROOT / 'crates/hirsel-core-rt/include'),
+                                '-o', str(obj), *flags], check=True)
+            fixture_linker = folder / 'cc'
+            fixture_linker.write_text(f'#!/bin/sh\nexec {shlex.quote(str(args.cc))} "$@" '
+                                      f'{shlex.quote(str(provider_recorder))} {shlex.quote(str(provider))} '
+                                      '-lpthread -Wl,--wrap=hirsel_core_run\n')
+            fixture_linker.chmod(0o755)
+        for backend in args.backend or (('cranelift', 'llvm') if oracle else ('cranelift',)):
+            command = [str(args.compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', 'app@1/main/main',
+                       '--backend', backend, '--runtime', str(args.runtime), '--store', str(work / 'store'),
+                       '--cc', str(fixture_linker), '--json', '-o', str(folder / backend)]
+            for grant in ('Tasks', 'Clock', 'Stdout'):
+                if re.search(rf':\s*{grant}\b', header):
+                    command += ['--grant', grant]
+            while os.getloadavg()[0] > 32:
+                time.sleep(10)
+            built = subprocess.run(command, capture_output=True, cwd=ROOT)
+            if built.returncode:
+                failures.append(f'{fixture.stem}/{backend}: build {built.returncode}: {built.stdout[-2000:]!r} {built.stderr[-2000:]!r}')
+                continue
+            trace = folder / f'{backend}.trace'
+            env = dict(os.environ, HIRSEL_POLL_TRACE=str(trace), HIRSEL_POLL_FIRST='1')
+            try:
+                native = subprocess.run([str(folder / backend)], capture_output=True, timeout=30, env=env)
+            except subprocess.TimeoutExpired:
+                failures.append(f'{fixture.stem}/{backend}: run did not end')
+                continue
+            code = 102 if stopped else 0
+            stderr = b'run stop: Deadlock\n' if stopped else b''
+            if native.returncode != code or native.stderr != stderr:
+                failures.append(f'{fixture.stem}/{backend}: native exit {native.returncode} {native.stderr!r}')
+                continue
+            expected = normalized([tuple(int(w) for w in line.split()[1:]) for line in trace.read_text().splitlines()
+                                   if line.startswith('E ')])
+            got = normalized([tuple(e) for e in report['events']])
+            stdout = bytes(report['stdout'])
+            if oracle and stdout != (oracle.group(2) or '').encode():
+                failures.append(f'{fixture.stem}: stdout {stdout!r}, expected {oracle.group(2)!r}')
+            elif stdout != native.stdout or bytes(report['stderr']) != native.stderr:
+                failures.append(f'{fixture.stem}/{backend}: output evaluator {stdout!r}, native {native.stdout!r}')
+            elif got != expected:
+                at = next((i for i, (a, b) in enumerate(zip(got, expected)) if a != b), min(len(got), len(expected)))
+                failures.append(f'{fixture.stem}/{backend}: events differ at {at}: evaluator {got[at:at + 4]}, native {expected[at:at + 4]}')
+            else:
+                print(f'{fixture.stem}/{backend}: {len(got)} events equal, {outcome}', flush=True)
+            if stopped:
+                replay = subprocess.run([str(folder / backend)], capture_output=True, timeout=30,
+                                        env=dict(env, HIRSEL_POLL_REPLAY='1'))
+                if (replay.returncode, replay.stdout, replay.stderr) != (native.returncode, native.stdout, native.stderr):
+                    failures.append(f'{fixture.stem}/{backend}: replay differs: {replay}')
+                else:
+                    print(f'{fixture.stem}/{backend}: replay agrees', flush=True)
     for failure in failures:
         print('FAIL', failure, flush=True)
     print(f'event order: {len(fixtures) - len(failures)} equal, {len(failures)} differ', flush=True)

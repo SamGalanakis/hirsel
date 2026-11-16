@@ -353,6 +353,9 @@ struct Limit {
     parent: Option<usize>,
     forward: Option<usize>,
     grant: bool,
+    /// The scheduler index of the task whose admissions it serves (MEM-20): a refund
+    /// from another task reaches it at that task's next event.
+    owner: usize,
 }
 /// A cause cell an obligation holds unused (FAIL-10): the limit and amount it
 /// refunds to, and whether it is a resource's own cell, which its block's free
@@ -554,6 +557,9 @@ struct Rec {
     cancelled: bool,
     /// A child not yet started: its task state, function and arguments.
     start: Option<(Task, FuncId, Vec<u64>)>,
+    /// Refunds from other tasks to limits it owns, applied at its next event
+    /// (MEM-20; native `drain_refunds` in `tasks::event`).
+    refunds: Vec<(usize, u64)>,
 }
 #[derive(Default)]
 struct Sched {
@@ -675,6 +681,7 @@ fn run_world(
             parent: None,
             forward: None,
             grant: false,
+            owner: 0,
         }],
         regions: Vec::new(),
         children: Vec::new(),
@@ -753,9 +760,17 @@ fn run_world(
         cancellable: false,
         cancelled: false,
         start: Some((task, f, args.to_vec())),
+        refunds: Vec::new(),
     });
     mach.sched.ready.push_back(0);
     let (mut mach, outcome, chain) = drive(mach);
+    // Refunds still pending when the run ends count toward its final use.
+    for k in 0..mach.sched.tasks.len() {
+        for (l, n) in std::mem::take(&mut mach.sched.tasks[k].refunds) {
+            let l = mach.find(l);
+            mach.limits[l].used -= n;
+        }
+    }
     let sites = chain.iter().map(|c| c.site).collect();
     let checked = Checked {
         loans: mach.loans,
@@ -1012,6 +1027,7 @@ impl Machine<'_> {
     /// Record an event of the running task (CONC-10). A poll uses one of the
     /// task's polls; the last one gives a ready peer the turn (native `poll_event`).
     fn event(&mut self, kind: u8, object: u64, value: u64) {
+        self.drain_refunds();
         let k = self.sched.current;
         let task = self.sched.tasks[k].id;
         self.sched.events.push(Event {
@@ -1526,22 +1542,56 @@ impl Machine<'_> {
         }
         self.admit(l, n)
     }
+    /// MEM-20: a refund to a limit the running task owns applies at once; one to
+    /// another task's limit waits for that task's next event, so its admissions see
+    /// exactly the refunds the event order puts before their task's latest event.
     fn refund(&mut self, l: usize, n: u64) {
         let l = self.find(l);
-        self.limits[l].used -= n;
+        let owner = self.limits[l].owner;
+        if owner == self.sched.current || owner >= self.sched.tasks.len() {
+            self.limits[l].used -= n;
+        } else {
+            self.sched.tasks[owner].refunds.push((l, n));
+        }
     }
-    fn open_limit(&mut self, cap: u64, parent: usize, grant: bool) -> usize {
+    /// Apply the running task's pending refunds, each to the live limit its record
+    /// now leads to (native `drain_refunds`).
+    fn drain_refunds(&mut self) {
+        let k = self.sched.current;
+        if k < self.sched.tasks.len() && !self.sched.tasks[k].refunds.is_empty() {
+            for (l, n) in std::mem::take(&mut self.sched.tasks[k].refunds) {
+                self.refund(l, n);
+            }
+        }
+    }
+    /// Apply every pending refund whose record leads to `l`, before `l` ends.
+    fn settle(&mut self, l: usize) {
+        for k in 0..self.sched.tasks.len() {
+            let pending = std::mem::take(&mut self.sched.tasks[k].refunds);
+            for (r, n) in pending {
+                if self.find(r) == l {
+                    self.limits[l].used -= n;
+                } else {
+                    self.sched.tasks[k].refunds.push((r, n));
+                }
+            }
+        }
+    }
+    fn open_limit(&mut self, cap: u64, parent: usize, grant: bool, owner: usize) -> usize {
         self.limits.push(Limit {
             cap,
             used: 0,
             parent: Some(parent),
             forward: None,
             grant,
+            owner,
         });
         self.limits.len() - 1
     }
     /// MEM-20: refund the unused part to the parent and forward the record to it.
+    /// Refunds still pending for `l` land in it first (native `drain_locked` at retire).
     fn end_limit(&mut self, l: usize) {
+        self.settle(l);
         let p = self.find(self.limits[l].parent.expect("not the root"));
         let unused = self.limits[l].cap - self.limits[l].used;
         self.limits[p].used -= unused;
@@ -1895,7 +1945,12 @@ impl Machine<'_> {
         let mut failed = false;
         if let Some(f) = self.shape(ty).finalizer {
             let grant = self.mem[b].res.as_ref().expect("a resource block").grant;
-            let g = self.open_limit(grant, self.mem[b].limit.expect("charged"), true);
+            let g = self.open_limit(
+                grant,
+                self.mem[b].limit.expect("charged"),
+                true,
+                self.sched.current,
+            );
             t.limits.push(g);
             t.obligations.push(Some(Cell {
                 limit: self.mem[b].limit.expect("charged"),
@@ -2052,7 +2107,8 @@ impl Machine<'_> {
                 if let Err(room) = self.admit(cur, charge) {
                     return Ok(vec![0, room]); // x stays the caller's
                 }
-                let lim = self.open_limit(n, cur, false);
+                // The child's limit serves the child, the next scheduler record.
+                let lim = self.open_limit(n, cur, false, self.sched.tasks.len());
                 let xb = self.block(self.held(x), None, 0, None);
                 let bytes = self.get(a[1], self.held(x) as usize).to_vec();
                 self.put(xb, &bytes);
@@ -2110,6 +2166,7 @@ impl Machine<'_> {
                     cancellable: false,
                     cancelled: false,
                     start: Some((child, f, args)),
+                    refunds: Vec::new(),
                 });
                 self.links.push(None);
                 self.sched.ready.push_back(i + 1);
@@ -3080,7 +3137,7 @@ impl Machine<'_> {
                     Err(room) => (0, room),
                 };
                 if ok == 1 {
-                    let l = self.open_limit(n, cur, false);
+                    let l = self.open_limit(n, cur, false, self.sched.current);
                     t.limits.push(l);
                 }
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);

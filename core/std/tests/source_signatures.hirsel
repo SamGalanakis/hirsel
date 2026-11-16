@@ -1,0 +1,168 @@
+// A later source body must use the
+// logical result convention even when the same instance was already sealed.
+// 2 < 9, so the second comparison is Less and check returns 1.
+// expect: run check() = 1
+pub fn check() -> u64 {
+    let _ = compare(9u64, 2u64)
+    match later() {
+        Less => 1,
+        Equal => 2,
+        Greater => 3
+    }
+}
+
+fn later() -> Order {
+    compare(2u64, 9u64)
+}
+
+fn compare[T: ordered](a: T, b: T) -> Order {
+    if a < b {
+        Less
+    } else if a > b {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+// Both source row caches must retain the same source convention.
+// expect: run check_plain_result() = 1
+pub fn check_plain_result() -> u64 {
+    let _ = plain_choice()
+    match plain_later() {
+        Less => 1,
+        Equal => 2,
+        Greater => 3
+    }
+}
+
+fn plain_later() -> Order {
+    plain_choice()
+}
+
+fn plain_choice() -> Order {
+    Less
+}
+
+type Small = Four | Six | Seven | Nine
+
+// Here the result is already scalar; only the declared argument changes carriage.
+// expect: run check_generic_argument() = 7
+pub fn check_generic_argument() -> u64 {
+    let x = Seven
+    let _ = generic_argument(x, 0u8)
+    generic_later(x)
+}
+
+fn generic_later(x: Small) -> u64 {
+    generic_argument(x, 0u8)
+}
+
+fn generic_argument[T](x: Small, unused: T) -> u64 {
+    match x {
+        Four => 4,
+        Six => 6,
+        Seven => 7,
+        Nine => 9
+    }
+}
+
+// expect: run check_plain_argument() = 9
+pub fn check_plain_argument() -> u64 {
+    let x = Nine
+    let _ = plain_argument(x)
+    plain_argument_later(x)
+}
+
+fn plain_argument_later(x: Small) -> u64 {
+    plain_argument(x)
+}
+
+fn plain_argument(x: Small) -> u64 {
+    match x {
+        Four => 4,
+        Six => 6,
+        Seven => 7,
+        Nine => 9
+    }
+}
+
+// An adapter already built and sealed by check_adapter_result is reused below.
+// expect: run check_adapter_result() = 1
+pub fn check_adapter_result() -> u64 {
+    let f: scoped fn() -> Order = plain_choice
+    let _ = f()
+    adapter_result_later()
+}
+
+fn adapter_result_later() -> u64 {
+    let f: scoped fn() -> Order = plain_choice
+    match f() {
+        Less => 1,
+        Equal => 2,
+        Greater => 3
+    }
+}
+
+// expect: run check_adapter_argument() = 6
+pub fn check_adapter_argument() -> u64 {
+    let f: scoped fn(Small) -> u64 = plain_argument
+    let _ = f(Four)
+    adapter_argument_later()
+}
+
+fn adapter_argument_later() -> u64 {
+    let f: scoped fn(Small) -> u64 = plain_argument
+    f(Six)
+}
+
+// The closed inner[u8] row is first created while materializing outside[u8],
+// before materialized_later is checked as a source body.
+// expect: run check_materialized() = 2
+pub fn check_materialized() -> u64 {
+    outside(0u8)
+}
+
+fn outside[T](x: T) -> u64 {
+    let _ = inner(x)
+    materialized_later()
+}
+
+fn inner[T](unused: T) -> Order {
+    Equal
+}
+
+fn materialized_later() -> u64 {
+    match inner(1u8) {
+        Less => 1,
+        Equal => 2,
+        Greater => 3
+    }
+}
+
+// Concrete numeric calls remain unchanged across the same assembly boundary.
+// expect: run check_numeric() = 5
+pub fn check_numeric() -> u64 {
+    let _ = int.wrapping_add(2u64, 3u64)
+    numeric_later()
+}
+
+fn numeric_later() -> u64 {
+    int.wrapping_add(2u64, 3u64)
+}
+
+// The generic source snapshot retains function references in source convention.
+// expect: run check_template_adapter() = 1
+pub fn check_template_adapter() -> u64 {
+    let _ = plain_choice()
+    template_adapter(0u8)
+}
+
+fn template_adapter[T](unused: T) -> u64 {
+    let f: scoped fn() -> Order = plain_choice
+    match f() {
+        Less => 1,
+        Equal => 2,
+        Greater => 3
+    }
+}

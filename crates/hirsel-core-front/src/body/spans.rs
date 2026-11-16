@@ -463,7 +463,7 @@ impl Cx<'_, '_, '_> {
     ) -> Option<()> {
         let (id, function, _) = self.key_function(key_glue::KeyOp::Encode, elem, n)?;
         let from = self.address(AddressBase::Value(x), &[], PlaceTy::Declared(id), n);
-        let signature = self.e.module.functions[function.index()].signature;
+        let signature = self.e.source_signature(function);
         let args = PoolRange::push(
             &mut self.b.pools.args,
             [Arg::Address(from), Arg::Value(blob), Arg::Value(at)],

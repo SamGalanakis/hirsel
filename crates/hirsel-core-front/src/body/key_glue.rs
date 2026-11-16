@@ -126,7 +126,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if matches!(rep, Rep::None) {
                 continue;
             }
-            let signature = self.e.module.functions[function.index()].signature;
+            let signature = self.e.source_signature(function);
             if let Param::Value(word) = self.e.module.signatures[signature.index()].params[i] {
                 // A place-held value carried as its word (FORM #78) is loaded whole.
                 let value = if let Rep::Place(_) = rep {
@@ -147,7 +147,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Declared(id), n);
             self.key_args.push(Arg::Address(at));
         }
-        let signature = self.e.module.functions[function.index()].signature;
+        let signature = self.e.source_signature(function);
         let result = self.value(self.e.module.signatures[signature.index()].results[0]);
         let args = PoolRange::push(&mut self.b.pools.args, self.key_args.iter().copied());
         let results = PoolRange::push(&mut self.b.pools.values, [result]);

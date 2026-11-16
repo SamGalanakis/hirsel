@@ -27,3 +27,10 @@ disagree. An engine's land that makes it agree removes that engine from the mark
 its NOT-BUILT row in the same commit; the walker fails until it does.
 
 Every case is checked against the one core package, `core/core/`, as every program is.
+
+The standing `hirsel-core-front-unittest` / `tests::corpus` well-formedness sweep
+seals after each source body, then materializes and checks the assembled module.
+`call-after-sealed-generic-result.hirsel` exercises calls after an earlier seal,
+including scalar-carried declared arguments and results, both source caches,
+scoped adapters and rows first created during materialization. This state is
+required in a wf sweep alongside the driver's fresh-per-definition products.

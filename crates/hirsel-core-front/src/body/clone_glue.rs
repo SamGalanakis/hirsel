@@ -1213,7 +1213,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             PlaceTy::Declared(id),
             n,
         );
-        let signature = self.e.module.functions[function.index()].signature;
+        let signature = self.e.source_signature(function);
         let requested = self.value(Ty::Scalar(Scalar::U64));
         let available = self.value(Ty::Scalar(Scalar::U64));
         let args = PoolRange::push(
@@ -1308,7 +1308,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let to = self.new_slot(PlaceTy::Declared(rid), n);
         let from = self.address(AddressBase::Value(at), &[], PlaceTy::Declared(id), n);
-        let signature = self.e.module.functions[function.index()].signature;
+        let signature = self.e.source_signature(function);
         let block = self.value(Ty::Ptr);
         let requested = self.value(Ty::Scalar(Scalar::U64));
         let available = self.value(Ty::Scalar(Scalar::U64));

@@ -55,7 +55,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             dest,
             never: result == NEVER,
         };
-        if let Some(&row) = self.e.sigs.get(&(signature.clone(), abi.clone())) {
+        if let Some(&row) = self
+            .e
+            .source_signatures
+            .signatures
+            .get(&(signature.clone(), abi.clone()))
+        {
             *buffer = signature.params;
             Ok(row)
         } else {
@@ -155,7 +160,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        if self.e.module.signatures[self.e.module.functions[raw.index()].signature.index()]
+        if self.e.module.signatures[self.e.source_signature(raw).index()]
             == self.e.module.signatures[signature.index()]
             && item.map_or(
                 self.e.module.functions[raw.index()].body.is_some()
@@ -201,7 +206,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &child.fd.path,
             child.e.module.signatures[signature.index()].clone(),
         );
-        child.e.module.functions[row.index()].signature = signature;
+        child.e.install_source_signature(row, signature);
         child.func = Some(row);
         let sig = &child.e.module.signatures[signature.index()];
         let entry = sig
@@ -298,7 +303,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let signature = self.e.module.functions[target.index()].signature;
+        let signature = self.e.source_signature(target);
         let dest = self.e.module.signatures[signature.index()]
             .dest
             .map(|id| self.new_slot(PlaceTy::Declared(id), n));

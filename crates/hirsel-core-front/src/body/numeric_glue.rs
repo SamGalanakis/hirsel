@@ -148,7 +148,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             args[i + 1] = Arg::Address(address);
         }
-        let signature = self.e.module.functions[abi.function.index()].signature;
+        let signature = self.e.source_signature(abi.function);
         let args = PoolRange::push(
             &mut self.b.pools.args,
             args[..vals.len() + 1].iter().copied(),

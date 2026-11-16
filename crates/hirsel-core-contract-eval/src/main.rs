@@ -82,11 +82,12 @@ fn evaluate() -> Result<Value, String> {
                 // The driver retains each checked definition's immutable IR.
                 // Test assembly consumes generic source bodies; keep that same
                 // source available when a later demand introduces another instance.
-                templates.insert(row, body.clone());
+                templates.insert(row, (body.clone(), emitter.source_signature(row)));
             }
         }
-        for (&row, body) in &templates {
+        for (&row, (body, signature)) in &templates {
             emitter.module.functions[row.index()].body = Some(body.clone());
+            emitter.module.functions[row.index()].signature = *signature;
         }
         emitter.materialize_instances()?;
         for row in &emitter.module.functions {

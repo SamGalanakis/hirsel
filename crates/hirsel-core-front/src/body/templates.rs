@@ -892,8 +892,9 @@ impl Emitter {
     /// product at a time, using the same `materialize` transformation.
     pub fn materialize_instances(&mut self) -> Result<(), String> {
         use std::collections::HashSet;
-        for (&source, body) in &self.template_bodies {
+        for (&source, (body, signature)) in &self.template_bodies {
             self.module.functions[source.index()].body = Some(body.clone());
+            self.module.functions[source.index()].signature = *signature;
         }
         self.seal();
         // A row may carry a clone hook even when this program never clones it.
@@ -972,7 +973,8 @@ impl Emitter {
         }
         for (source, _) in self.templates.values() {
             if let Some(body) = &self.module.functions[source.index()].body {
-                self.template_bodies.insert(*source, body.clone());
+                self.template_bodies
+                    .insert(*source, (body.clone(), self.source_signature(*source)));
             }
             self.module.functions[source.index()].body = None;
         }

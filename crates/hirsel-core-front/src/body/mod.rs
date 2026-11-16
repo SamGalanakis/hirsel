@@ -118,6 +118,43 @@ pub struct CoreCheck {
     pub template: Option<GenericTemplate>,
 }
 
+/// Source conventions survive physical sealing. Generated fixed-ABI glue has the
+/// same source and physical convention, recorded unchanged here.
+#[derive(Default)]
+pub(super) struct SourceSignatures {
+    functions: Vec<Option<SigId>>,
+    signatures: HashMap<(Signature, scalar_abi::SignatureAbi), SigId>,
+    abis: std::collections::BTreeMap<SigId, scalar_abi::SignatureAbi>,
+}
+impl SourceSignatures {
+    fn get(&self, function: FuncId) -> Option<SigId> {
+        self.functions.get(function.index()).copied().flatten()
+    }
+    fn remember(&mut self, function: FuncId, signature: SigId) {
+        self.functions
+            .resize(self.functions.len().max(function.index() + 1), None);
+        self.functions[function.index()] = Some(signature);
+    }
+    fn intern(
+        &mut self,
+        module: &mut Module,
+        sig: Signature,
+        abi: scalar_abi::SignatureAbi,
+    ) -> SigId {
+        let key = (sig, abi);
+        if let Some(&id) = self.signatures.get(&key) {
+            return id;
+        }
+        let id = SigId(module.signatures.len() as u32);
+        module.signatures.push(key.0.clone());
+        if key.1.result || key.1.params.iter().any(|x| *x) {
+            self.abis.insert(id, key.1.clone());
+        }
+        self.signatures.insert(key, id);
+        id
+    }
+}
+
 /// The module being emitted: one row per instance, made on first mention, so a call
 /// can name a function whose body is checked later.
 #[derive(Default)]
@@ -127,14 +164,13 @@ pub struct Emitter {
     callable_adapters: HashMap<(FuncId, SigId), FuncId>,
     #[cfg(test)]
     pub(crate) callable_signature_builds: usize,
-    sigs: HashMap<(Signature, scalar_abi::SignatureAbi), SigId>,
-    signature_abis: std::collections::BTreeMap<SigId, scalar_abi::SignatureAbi>,
+    source_signatures: SourceSignatures,
     /// Rows of generic templates (nested ones included): [`Emitter::seal`] leaves them
     /// to the instances that fill them.
     generic_rows: std::collections::BTreeSet<FuncId>,
     items: HashMap<DefPath, ItemId>,
     /// Per non-generic definition of the program, its function row once mentioned.
-    rows: HashMap<usize, (FuncId, SigId)>,
+    rows: HashMap<usize, FuncId>,
     /// The row interner shared by source shapes and materialized templates.
     types: crate::layout::ShapeNames,
     /// The recipes of `module.types`, recomputed when rows were added.
@@ -148,7 +184,7 @@ pub struct Emitter {
     /// The driver keeps each checked definition's product available while later
     /// demands are assembled; the test helper must do the same for nested templates.
     #[cfg(any(test, feature = "test-assembly"))]
-    template_bodies: HashMap<FuncId, Body>,
+    template_bodies: HashMap<FuncId, (Body, SigId)>,
     /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
     runs: Vec<[Option<bool>; 2]>,
     /// `module.statics` rows by their bytes.
@@ -217,7 +253,7 @@ impl Emitter {
     pub fn seal(&mut self) {
         scalar_abi::seal(
             &mut self.module,
-            &self.signature_abis,
+            &self.source_signatures.abis,
             &self.generic_rows,
             &self.generic_names,
         );
@@ -226,17 +262,17 @@ impl Emitter {
         self.sig_abi(s, scalar_abi::SignatureAbi::default())
     }
     fn sig_abi(&mut self, s: Signature, abi: scalar_abi::SignatureAbi) -> SigId {
-        let key = (s, abi);
-        if let Some(&id) = self.sigs.get(&key) {
-            return id;
-        }
-        let id = SigId(self.module.signatures.len() as u32);
-        self.module.signatures.push(key.0.clone());
-        if key.1.result || key.1.params.iter().any(|x| *x) {
-            self.signature_abis.insert(id, key.1.clone());
-        }
-        self.sigs.insert(key, id);
-        id
+        self.source_signatures.intern(&mut self.module, s, abi)
+    }
+    /// A source body is emitted in this convention; `seal` alone converts it.
+    pub fn source_signature(&self, function: FuncId) -> SigId {
+        self.source_signatures
+            .get(function)
+            .expect("a source-emission function has its source signature")
+    }
+    fn install_source_signature(&mut self, function: FuncId, signature: SigId) {
+        self.source_signatures.remember(function, signature);
+        self.module.functions[function.index()].signature = signature;
     }
     /// The read-only static row holding `bytes`, shared by equal literals.
     fn static_bytes(&mut self, bytes: &[u8]) -> hirsel_core_ir::StaticId {
@@ -262,8 +298,8 @@ impl Emitter {
     }
     /// The function row and signature of the program's definition `f`.
     fn row(&mut self, p: &Program, f: usize) -> Result<(FuncId, SigId), &'static str> {
-        if let Some(row) = self.rows.get(&f) {
-            return Ok(*row);
+        if let Some(&function) = self.rows.get(&f) {
+            return Ok((function, self.source_signature(function)));
         }
         let (sig, abi) = self.signature_recipe(p, f)?;
         let key = InstanceKey {
@@ -272,8 +308,8 @@ impl Emitter {
             dictionaries: vec![],
         };
         let func = self.add_function_abi(key, sig, abi);
-        let row = (func, self.module.functions[func.index()].signature);
-        self.rows.insert(f, row);
+        let row = (func, self.source_signature(func));
+        self.rows.insert(f, func);
         Ok(row)
     }
     /// A closed generic call row. Source checking is definition-local; a row names
@@ -342,7 +378,13 @@ impl Emitter {
             dictionaries,
         };
         if let Some(&function) = self.funcs.get(&key) {
-            return Ok((function, self.module.functions[function.index()].signature));
+            if let Some(signature) = self.source_signatures.get(function) {
+                return Ok((function, signature));
+            }
+            let (signature, abi) = self.signature_inst(p, t, f, signed)?;
+            let signature = self.sig_abi(signature, abi);
+            self.source_signatures.remember(function, signature);
+            return Ok((function, signature));
         }
         let (signature, abi) = self.signature_inst(p, t, f, signed)?;
         let function = self.add_function_abi(key, signature, abi);
@@ -366,7 +408,7 @@ impl Emitter {
                 },
             );
         }
-        Ok((function, self.module.functions[function.index()].signature))
+        Ok((function, self.source_signature(function)))
     }
 
     /// Gives the row of `ty`, a List, Map, Option or Result that holds a parameter and no
@@ -411,6 +453,10 @@ impl Emitter {
     fn glue(&mut self, ty: TypeId, op: key_glue::KeyOp) -> Result<FuncId, &'static str> {
         key_glue::derivable(&self.module, ty, op)?;
         let glue = key_glue::glue_row(&mut self.module, ty, op);
+        // Glue's constructor emits its fixed convention directly. It has no
+        // source-parameter/result carriage for seal to convert.
+        self.source_signatures
+            .remember(glue, self.module.functions[glue.index()].signature);
         let key = &self.module.instances[self.module.functions[glue.index()].instance.index()];
         if !self.funcs.contains_key(key) {
             self.funcs.insert(key.clone(), glue);
@@ -425,6 +471,10 @@ impl Emitter {
     ) -> FuncId {
         crate::cost_scope!("instance row request", format!("{key:?}"));
         if let Some(&f) = self.funcs.get(&key) {
+            if self.source_signatures.get(f).is_none() {
+                let signature = self.sig_abi(sig, abi);
+                self.source_signatures.remember(f, signature);
+            }
             return f;
         }
         let signature = self.sig_abi(sig, abi);
@@ -436,6 +486,7 @@ impl Emitter {
             signature,
             body: None,
         });
+        self.source_signatures.remember(f, signature);
         self.funcs.insert(key, f);
         f
     }
@@ -537,7 +588,7 @@ impl Emitter {
     /// The function row of the program's finalizer or clone body `f`, at its hook
     /// signature (FAIL-11, MEM-17, FORM).
     fn hook_row(&mut self, p: &Program, f: usize) -> FuncId {
-        if let Some((func, _)) = self.rows.get(&f) {
+        if let Some(func) = self.rows.get(&f) {
             return *func;
         }
         let sig = if p.fns[f].clone_of.is_some() {
@@ -546,8 +597,7 @@ impl Emitter {
             finalizer_signature()
         };
         let func = self.function(&p.fns[f].path, sig);
-        let row = (func, self.module.functions[func.index()].signature);
-        self.rows.insert(f, row);
+        self.rows.insert(f, func);
         func
     }
     /// The recipe of row `id`, or None when the table's layout is refused, in which case
@@ -2236,7 +2286,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             }
             self.e.module.functions[f.index()].body = Some(std::mem::take(&mut self.b));
             if let Some(sig) = self.emitted {
-                self.e.module.functions[f.index()].signature = sig;
+                self.e.install_source_signature(f, sig);
             }
             self.out.function = Some(f);
             if !self.fd.generics.is_empty() {
@@ -2248,17 +2298,17 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 }
                 let body = self.e.module.functions[f.index()].body.as_ref().unwrap();
                 let mut signatures = std::collections::BTreeMap::new();
-                let ids = std::iter::once(self.e.module.functions[f.index()].signature)
+                let ids = std::iter::once(self.e.source_signature(f))
                     .chain(body.calls.iter().map(|c| c.signature))
                     .chain(body.insts.iter().filter_map(|i| match i {
                         Inst::FunctionRef { function, .. }
                         | Inst::DescriptorRef { function, .. } => {
-                            Some(self.e.module.functions[function.index()].signature)
+                            Some(self.e.source_signature(*function))
                         }
                         _ => None,
                     }));
                 for id in ids {
-                    if let Some(abi) = self.e.signature_abis.get(&id) {
+                    if let Some(abi) = self.e.source_signatures.abis.get(&id) {
                         signatures.entry(id).or_insert_with(|| abi.clone());
                     }
                 }

@@ -1044,7 +1044,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 &child.fd.path,
                 child.e.module.signatures[signature.index()].clone(),
             );
-            child.e.module.functions[f.index()].signature = signature;
+            child.e.install_source_signature(f, signature);
             (f, signature)
         });
         child.run_row(row, body);

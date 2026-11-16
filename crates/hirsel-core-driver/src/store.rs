@@ -50,6 +50,12 @@ thread_local! {
     pub(crate) static WRITES: std::cell::RefCell<Vec<Durable>> = const { std::cell::RefCell::new(vec![]) };
 }
 #[cfg(test)]
+thread_local! {
+    /// Sweep the store once between this thread's next temporary's create
+    /// and its lock: the window another opener's sweep can fall into.
+    static SWEEP_BEFORE_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum Durable {
     Record,
@@ -282,7 +288,8 @@ impl Store {
         ))
     }
     /// Create `make(path)` under `tmp` and lock what `open(path)` returns,
-    /// retrying when a concurrent sweep removed it before the lock.
+    /// retrying when a concurrent sweep removed it before the lock: a sweep
+    /// may remove it before `open` finds it, or before the lock holds it.
     fn locked<T>(
         &self,
         make: impl Fn(&Path) -> io::Result<T>,
@@ -297,7 +304,14 @@ impl Store {
                 }
                 made => made?,
             };
-            let file = open(&path, &made)?;
+            #[cfg(test)]
+            if SWEEP_BEFORE_LOCK.take() {
+                self.sweep()?;
+            }
+            let file = match open(&path, &made) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                file => file?,
+            };
             lock(&file, libc::LOCK_EX)?;
             if still_named(&path, &file)? {
                 return Ok((path, made, file));
@@ -703,5 +717,24 @@ mod tests {
         drop(scratch);
         Store::new(dir.path()).unwrap();
         assert_eq!(left(), Vec::<String>::new());
+    }
+
+    /// Law: a sweep that falls between a temporary's create and its lock
+    /// (another opener of the store) never fails the writer: it gets a live
+    /// temporary, file or scratch directory, which a later sweep keeps.
+    /// Bug: the scratch directory, reopened by path, was gone (NotFound);
+    /// seen as `parallel_builds_launch_at_once` failing in a shared store.
+    /// Land target: hirsel-core-driver unittest.
+    #[test]
+    fn a_sweep_before_the_lock_leaves_the_writer_a_live_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        super::SWEEP_BEFORE_LOCK.set(true);
+        let scratch = store.scratch().unwrap();
+        super::SWEEP_BEFORE_LOCK.set(true);
+        let file = store.temporary().unwrap();
+        Store::new(dir.path()).unwrap();
+        assert!(scratch.path().is_dir(), "the scratch directory is live");
+        assert!(file.path.is_file(), "the temporary is live");
     }
 }

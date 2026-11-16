@@ -9,7 +9,7 @@
 static uint64_t events[256], last_releases;
 static void event(void *state, HirselCoreEvent value) {
     (void)state; events[value.kind]++;
-    if (value.kind == HIRSEL_CORE_ARC_EVENT_RELEASE && value.value == 1) last_releases++;
+    if (value.kind == HIRSEL_CORE_EVENT_ARC_RELEASE && value.value == 1) last_releases++;
 }
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *source,
                                              const HirselCoreView *names,
@@ -27,9 +27,11 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *source,
     uint8_t status = hirsel_core_run(&cfg, entry);
     hirsel_core_os_process_free(opened.process);
     /* 64 initial +256*33 new nodes, two shares/version, every holder released. */
-    assert(events[10] == 8512 && events[11] == 512 && events[12] == 9024 && events[13] == 0);
+    assert(events[HIRSEL_CORE_EVENT_ARC_NEW] == 8512 && events[HIRSEL_CORE_EVENT_ARC_SHARE] == 512 &&
+           events[HIRSEL_CORE_EVENT_ARC_RELEASE] == 9024 && events[HIRSEL_CORE_EVENT_ARC_UNWRAP] == 0);
     assert(last_releases == 8512);
     fprintf(stderr, "Arc events new=%" PRIu64 " share=%" PRIu64 " release=%" PRIu64 " last=%" PRIu64 "\n",
-            events[10], events[11], events[12], last_releases);
+            events[HIRSEL_CORE_EVENT_ARC_NEW], events[HIRSEL_CORE_EVENT_ARC_SHARE],
+            events[HIRSEL_CORE_EVENT_ARC_RELEASE], last_releases);
     return status;
 }

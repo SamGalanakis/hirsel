@@ -1059,14 +1059,14 @@ extern uint64_t hirsel_core_test_available(const HirselCoreContext*);
 extern uint8_t hirsel_core_test_run_events(HirselCoreContext*,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t,HirselCoreSchedulerProvider);
 static uint64_t kinds[6],values[6],count;
 static void event(void *state,HirselCoreEvent e) {{
- if(e.kind>=10 && e.kind<=13) {{ if(count==6 || e.task!=0 || e.object!=0) abort(); kinds[count]=e.kind;values[count++]=e.value; }}
+ if(e.kind>=HIRSEL_CORE_EVENT_ARC_NEW && e.kind<=HIRSEL_CORE_EVENT_ARC_UNWRAP) {{ if(count==6 || e.task!=0 || e.object!=0) abort(); kinds[count]=e.kind;values[count++]=e.value; }}
 }}
 static uint8_t body(HirselCoreContext *ctx,void *out,void *in) {{ *(struct R*)out={function}(ctx,0);return 0; }}
 int main(void) {{
  HirselCoreContext *ctx=hirsel_core_test_context_new(1000);
  HirselCoreSchedulerProvider provider={{0,event,0}};struct R out;
  if(hirsel_core_test_run_events(ctx,body,0,&out,0,sizeof out,provider) || out.status || !out.value)return 2;
- if(count!=6 || kinds[0]!=10 || values[0]!=1 || kinds[1]!=11 || values[1]!=2 || kinds[2]!=13 || values[2]!=0 || kinds[3]!=12 || values[3]!=0 || kinds[4]!=13 || values[4]!=1 || kinds[5]!=12 || values[5]!=1)return 3;
+ if(count!=6 || kinds[0]!=HIRSEL_CORE_EVENT_ARC_NEW || values[0]!=1 || kinds[1]!=HIRSEL_CORE_EVENT_ARC_SHARE || values[1]!=2 || kinds[2]!=HIRSEL_CORE_EVENT_ARC_UNWRAP || values[2]!=0 || kinds[3]!=HIRSEL_CORE_EVENT_ARC_RELEASE || values[3]!=0 || kinds[4]!=HIRSEL_CORE_EVENT_ARC_UNWRAP || values[4]!=1 || kinds[5]!=HIRSEL_CORE_EVENT_ARC_RELEASE || values[5]!=1)return 3;
  if(hirsel_core_test_available(ctx)!=1000)return 4;
  hirsel_core_context_free(ctx);return 0;
 }}

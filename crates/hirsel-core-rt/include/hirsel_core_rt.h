@@ -108,8 +108,6 @@ void hirsel_core_release_static_enqueue(HirselCoreWorklist *, void *, bool atomi
    The event word/sink are immutable during a run. No TLS read on the taken path.
    No status/admission/suspension/count mutation.
    Scheduler owns the event turn across mutation and hook; release precedes glue. */
-enum { HIRSEL_CORE_ARC_EVENT_NEW=10, HIRSEL_CORE_ARC_EVENT_SHARE=11,
-       HIRSEL_CORE_ARC_EVENT_RELEASE=12, HIRSEL_CORE_ARC_EVENT_UNWRAP=13 };
 void hirsel_core_arc_initialized(const HirselCoreContext *);
 void hirsel_core_arc_shared(const HirselCoreContext *, const void *node); /* loads completed new count */
 void hirsel_core_arc_released(const HirselCoreContext *, bool last);

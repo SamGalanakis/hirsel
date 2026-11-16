@@ -7,11 +7,12 @@ FIFO rule. The same program runs on the evaluator (hirsel-core-contract-eval). T
 stdout and their CONC-10 event lists must be equal.
 
 Normalisation, and why each part is engine-local rather than semantic:
-- Arc and ledger events (ARC_NEW/SHARE/RELEASE 10-12, REFUND 14, CHARGE 15) are
-  dropped: the evaluator inlines allocation differently, and CONC-13's Arc order
-  has its own exact check in test-polls.py.
-- CANCELLED (3) and CHECK_CANCEL (16) carry a source site, numbered per engine.
-- SPAWN (0) carries the child's frame size, which is a layout fact.
+- Arc and ledger events (ARC_NEW/SHARE/RELEASE, REFUND, CHARGE) are dropped: the
+  evaluator inlines allocation differently, and CONC-13's Arc order has its own
+  exact check in test-polls.py.
+- CANCELLED and CHECK_CANCEL carry a source site, numbered per engine.
+- SPAWN carries the child's frame size, which is a layout fact.
+Kind numbers come from the published header.
 - Task and object ids are renamed by first appearance.
 
 A run where every task waits is not compared: the evaluator reports it as Stuck,
@@ -31,9 +32,11 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / 'fixtures/order'
 RECORDER = Path(__file__).resolve().parent / 'fixtures/polls/recorder.c'
-DROPPED = {10, 11, 12, 14, 15}
-SITED = {3, 16}
-SPAWN = 0
+KIND = {name: int(n) for name, n in re.findall(
+    r'HIRSEL_CORE_EVENT_(\w+)=(\d+)', (ROOT / 'crates/hirsel-core-rt/include/hirsel_core_rt_host.h').read_text())}
+DROPPED = {KIND[k] for k in ('ARC_NEW', 'ARC_SHARE', 'ARC_RELEASE', 'REFUND', 'CHARGE')}
+SITED = {KIND['CANCELLED'], KIND['CHECK_CANCEL']}
+SPAWN = KIND['SPAWN']
 
 
 def normalized(events):
@@ -46,7 +49,7 @@ def normalized(events):
         elif kind == SPAWN:
             value = 'frame'
         task = names.setdefault(('id', task), len(names))
-        if kind not in SITED and kind != 17:  # CAPACITY's object is the capacity
+        if kind not in SITED and kind != KIND['CAPACITY']:  # its object is the request
             obj = names.setdefault(('id', obj), len(names))
         out.append((kind, task, obj, value))
     return out

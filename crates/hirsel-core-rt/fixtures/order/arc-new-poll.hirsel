@@ -1,0 +1,22 @@
+// CONC-10: only no-effect polls (a try form that finds Full or Empty, a refused
+// try_unwrap, a check with no request, a refused admission) use a task's 64-poll
+// allowance. Arc creation is effectful, so the root keeps the turn through 64 of them:
+// the ready child has not run, its try_send has not published, and the root's
+// try_receive finds Empty. Hand-derived stdout: "rc"; main fails if the child ran first.
+type Out:send { tx: Sender[u64], out: Stdout }
+fn child(take x: Out) -> u64 waits {
+    let Out(tx: tx, out: out) = take x
+    result.unwrap(channel.try_send(tx, 1u64))
+    result.unwrap(stdout.write(out, "c"))
+    0u64
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (tx, rx): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, Out(tx: take tx, out: out), child))
+    let mut i = 0u64
+    while i < 64u64 { let a = result.unwrap(arc.new(i)); i += 1 }
+    let early = match channel.try_receive(rx) { Ok(_) => true, _ => false }
+    result.unwrap(stdout.write(out, "r"))
+    let _ = task.join(take h)
+    if early { Error(Exit(status: 3u8)) } else { Ok(()) }
+}

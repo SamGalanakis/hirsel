@@ -63,11 +63,7 @@ pub const fn own_prefix(kind: u8) -> usize {
 // always (it may poll), hirsel_core_arc_initialized/shared/released only when
 // the acquire byte task[TASK_ARC_GATE] is nonzero. The runtime keeps that byte
 // set while the run records, and otherwise exactly while the task has a refund
-// to deliver (MEM-20). These constants identify trace events.
-pub const ARC_EVENT_NEW: u8 = 10;
-pub const ARC_EVENT_SHARE: u8 = 11;
-pub const ARC_EVENT_RELEASE: u8 = 12;
-pub const ARC_EVENT_UNWRAP: u8 = 13;
+// to deliver (MEM-20). Their trace kinds are hirsel_core_layout::event's ARC_*.
 
 // General own free/refund: load the raw payer word at payload-OWN_PAYER_BACK
 // and compare it directly with context[CONTEXT_CURRENT_LIMIT]. On equality and

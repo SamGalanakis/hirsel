@@ -40,7 +40,7 @@ uint8_t hirsel_core_receiver_drop(HirselCoreContext *, HirselCoreChannel *);
 /* CONC-13 Latest[T]: one swappable Arc holder. new admits the root (null keeps
    node with the caller); read returns the root's node for the caller to share;
    publish installs node and returns the old holder for the caller to release.
-   Events: SENDERS 8 for the handle count, LATEST_PUBLISH 18, LATEST_READ 19
+   Events: SENDERS for the handle count, LATEST_PUBLISH, LATEST_READ
    (value 0). None waits, fails or observes cancellation. */
 typedef struct HirselCoreLatest HirselCoreLatest;
 typedef struct { HirselCoreLatest *latest; uint64_t available; } HirselCoreLatestNew;
@@ -49,9 +49,9 @@ HirselCoreLatest *hirsel_core_latest_handle(HirselCoreLatest *);
 void *hirsel_core_latest_publish(HirselCoreLatest *, void *node);
 void *hirsel_core_latest_read(HirselCoreLatest *);
 void hirsel_core_latest_drop(HirselCoreContext *, HirselCoreLatest *);
-/* Scheduler event additions: CHARGE 15 (effectful foreign growth),
-   CHECK_CANCEL 16 (no request), CAPACITY 17 (requested, available).
-   Only Full, no-request check, failed Arc unwrap and Capacity count as polls. */
+/* Scheduler events include CHARGE (effectful foreign growth), CHECK_CANCEL
+   (no request) and CAPACITY (requested, available). Only Full, Empty, no-request
+   check, failed Arc unwrap and Capacity count as polls. */
 /* Event dispatch after an emitted Arc update/test. These do not change counts,
    admit storage or return a failure status. release_last follows the last event. */
 #endif

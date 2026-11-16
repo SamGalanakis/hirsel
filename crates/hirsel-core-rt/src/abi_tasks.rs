@@ -75,7 +75,7 @@ pub(crate) fn payer_lease<R>(operation: impl FnOnce() -> R) -> R {
     operation()
 }
 
-/// Poll events: CHECK_CANCEL=16, CAPACITY=17 (CHARGE retains 15). A Capacity
+/// Poll events: CHECK_CANCEL and CAPACITY. A Capacity
 /// snapshot is recorded before the scheduling turn, admits nothing and observes
 /// no cancellation. The cold hook is shared by normal and scope admission.
 /// Owning-task events alone publish foreign refunds (MEM-20); task_resume only

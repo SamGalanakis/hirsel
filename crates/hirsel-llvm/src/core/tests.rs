@@ -468,7 +468,7 @@ extern void hirsel_core_test_reset_limit(HirselCoreContext *, uint64_t);
 static HirselCoreEvent arc_events[4096]; static size_t arc_count;
 static void record_event(void *state, HirselCoreEvent e) {
     (void)state;
-    if (e.kind>=10 && e.kind<=13) { assert(arc_count<4096); arc_events[arc_count++]=e; }
+    if (e.kind>=HIRSEL_CORE_EVENT_ARC_NEW && e.kind<=HIRSEL_CORE_EVENT_ARC_UNWRAP) { assert(arc_count<4096); arc_events[arc_count++]=e; }
 }
 static size_t file_closes, file_deliveries;
 static HirselCoreHostOutcome file_legacy_issue(void *state, HirselCoreHostRequest *r) {

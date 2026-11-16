@@ -4,12 +4,16 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import shutil
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / 'fixtures/polls'
+# CONC-10 event kinds as the published header numbers them.
+KIND = {name: int(n) for name, n in re.findall(
+    r'HIRSEL_CORE_EVENT_(\w+)=(\d+)', (ROOT / 'crates/hirsel-core-rt/include/hirsel_core_rt_host.h').read_text())}
 
 
 def low_load():
@@ -77,9 +81,9 @@ def main():
             row = dict(kind=kind, engine=engine, recorded=True, replayed=True, unrecorded=True,
                        events=len(events), cancelled=cancels)
             if kind == 'latest':
-                # CONC-13: publish (18) and read (19) are ordered events that
-                # record no value, and replay holds under a second schedule.
-                latest = [e for e in events if e[1] in ('18', '19')]
+                # CONC-13: publish and read are ordered events that record no
+                # value, and replay holds under a second schedule.
+                latest = [e for e in events if int(e[1]) in (KIND['LATEST_PUBLISH'], KIND['LATEST_READ'])]
                 assert latest and all(e[-1] == '0' for e in latest), latest
                 first = folder / 'trace-first'
                 env = dict(os.environ, HIRSEL_POLL_TRACE=str(first), HIRSEL_POLL_FIRST='1')
@@ -90,13 +94,14 @@ def main():
                 row['schedules'] = 2
             if kind == 'latest-order':
                 # CONC-13 by hand, kinds as the published ABI names them
-                # (hirsel_core_rt.h, hirsel_core_rt_tasks.h): every read and
+                # (hirsel_core_rt_host.h, hirsel_core_rt_tasks.h): every read and
                 # publish is its own kind; the read's share and the publish's
                 # release of the replaced Arc come right after it; new, handle
                 # and each handle's cleanup move the handle count; the last
                 # handle's cleanup releases the root's last share. Values: Arc
                 # share = count after, release = 1 if last, handle count after.
-                SENDERS, ARC_NEW, ARC_SHARE, ARC_RELEASE, PUBLISH, READ, END = 8, 10, 11, 12, 18, 19, 1
+                SENDERS, ARC_NEW, ARC_SHARE, ARC_RELEASE, PUBLISH, READ, END = (KIND[k] for k in (
+                    'SENDERS', 'ARC_NEW', 'ARC_SHARE', 'ARC_RELEASE', 'LATEST_PUBLISH', 'LATEST_READ', 'END'))
                 arc, root = '0', events[1][3]
                 expected = [(ARC_NEW, arc, 1), (SENDERS, root, 1),                   # arc.new(1), latest.new
                             (READ, root, 0), (ARC_SHARE, arc, 2),                    # r1 = read
@@ -138,7 +143,7 @@ def main():
             lines = []
             for line in (args.out / f'{kind}-{engine}/trace').read_text().splitlines():
                 parts = line.split()
-                if parts[:2] == ['E', '3'] or parts[:2] == ['E', '16']:
+                if parts[0] == 'E' and int(parts[1]) in (KIND['CANCELLED'], KIND['CHECK_CANCEL']):
                     parts[-1] = 'site'
                 lines.append(parts)
             return lines

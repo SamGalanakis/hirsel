@@ -76,30 +76,13 @@ impl Drop for Storage {
     }
 }
 
-pub const SPAWN: u8 = 0;
-pub const END: u8 = 1;
-pub const CANCEL: u8 = 2;
-pub const CANCELLED: u8 = 3;
-pub const JOIN: u8 = 4;
-pub const PUBLISH: u8 = 5;
-pub const RECEIVE: u8 = 6;
-pub const TRY_SEND: u8 = 7;
-pub const TRY_RECEIVE: u8 = 10;
-pub const SENDERS: u8 = 8;
-pub const CLOSE: u8 = 9;
-pub const ARC_NEW: u8 = crate::abi_layout::ARC_EVENT_NEW;
-pub const ARC_SHARE: u8 = crate::abi_layout::ARC_EVENT_SHARE;
-pub const ARC_RELEASE: u8 = crate::abi_layout::ARC_EVENT_RELEASE;
-pub const ARC_UNWRAP: u8 = crate::abi_layout::ARC_EVENT_UNWRAP;
-pub const REFUND: u8 = 14;
-pub const CHECK_CANCEL: u8 = 16;
-pub const CAPACITY: u8 = 17;
-/// CONC-13: a `Latest` root replaced, or read. Neither records a value.
-pub const LATEST_PUBLISH: u8 = 18;
-pub const LATEST_READ: u8 = 19;
+pub use hirsel_core_layout::event::{
+    ARC_NEW, ARC_RELEASE, ARC_SHARE, ARC_UNWRAP, CANCEL, CANCELLED, CAPACITY, CHARGE, CHECK_CANCEL,
+    CLOSE, END, JOIN, LATEST_PUBLISH, LATEST_READ, PUBLISH, RECEIVE, REFUND, SENDERS, SPAWN,
+    TRY_RECEIVE, TRY_SEND,
+};
 /// Only no-effect polls count; effectful operations never consume this allowance.
 pub(crate) const POLLS_PER_TURN: u32 = 64;
-pub const CHARGE: u8 = 15;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
@@ -1130,10 +1113,7 @@ unsafe fn drain_refunds(task: *mut Task) {
 /// before scheduling; never observe cancellation or change that result here.
 #[inline(always)]
 unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
-    if ((kind == TRY_SEND || kind == TRY_RECEIVE) && value == 1)
-        || ((kind == ARC_UNWRAP || kind == CHECK_CANCEL) && value == 0)
-        || kind == CAPACITY
-    {
+    if hirsel_core_layout::event::is_poll(kind, value) {
         // SAFETY: the active task exclusively owns its counter and event turn.
         unsafe {
             let state = NonNull::new_unchecked(task).as_mut();

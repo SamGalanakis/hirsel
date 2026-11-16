@@ -260,7 +260,7 @@ static uint8_t s0_case(void) {
     CHECK(0); return 1;
 }
 static void diagnostic(void *state,const uint8_t *data,size_t len) {if(crash_mode() && s.crashed)return;(void)state;CHECK(write(2,data,len)==(ssize_t)len);}
-static void event(void *state,HirselCoreEvent e) {(void)state;if(e.kind==3)s.cancels++;}
+static void event(void *state,HirselCoreEvent e) {(void)state;if(e.kind==HIRSEL_CORE_EVENT_CANCELLED)s.cancels++;}
 static uint8_t entry(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {s.root=ctx;return s.entry(ctx,cfg,out);}
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry main) {
     (void)names;(void)sources;CHECK(input->args_len==1 && input->parameters_len==4);

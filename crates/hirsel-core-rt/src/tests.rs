@@ -539,3 +539,27 @@ fn leaf_buffer_growth_preserves_plain_prefix_and_original_payer() {
     drop(grown);
     assert_eq!(context.available(), 128);
 }
+
+/// C readers (recorders, harnesses, provider shims) take event kinds from the
+/// header; a kind added, renumbered or doubled on one side only would make them
+/// read one kind as another (as TRY_RECEIVE once read as ARC_NEW).
+#[test]
+fn the_header_numbers_every_event_kind_as_the_table_does() {
+    let header = include_str!("../include/hirsel_core_rt_host.h");
+    let mut published: Vec<(&str, u8)> = header
+        .split("HIRSEL_CORE_EVENT_")
+        .skip(1)
+        .map(|entry| {
+            let (name, rest) = entry.split_once('=').expect("NAME=number");
+            let digits = rest.trim_start();
+            let end = digits
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(digits.len());
+            (name, digits[..end].parse().expect("a kind number"))
+        })
+        .collect();
+    let mut table = hirsel_core_layout::event::ALL.to_vec();
+    published.sort();
+    table.sort();
+    assert_eq!(published, table);
+}

@@ -503,26 +503,9 @@ struct Footprint {
 // blocked task newest first, and a poll queue that runs only when nothing else
 // is ready. So the event order is the native order by construction.
 
-/// The CONC-10 event kinds, numbered as the native runtime's poll recorder writes them.
-pub mod event {
-    pub const SPAWN: u8 = 0;
-    pub const END: u8 = 1;
-    pub const CANCEL: u8 = 2;
-    pub const CANCELLED: u8 = 3;
-    pub const JOIN: u8 = 4;
-    pub const PUBLISH: u8 = 5;
-    pub const RECEIVE: u8 = 6;
-    pub const TRY_SEND: u8 = 7;
-    pub const SENDERS: u8 = 8;
-    pub const CLOSE: u8 = 9;
-    pub const TRY_RECEIVE: u8 = 10;
-    pub const ARC_UNWRAP: u8 = 13;
-    pub const CHECK_CANCEL: u8 = 16;
-    pub const CAPACITY: u8 = 17;
-    pub const LATEST_PUBLISH: u8 = 18;
-    pub const LATEST_READ: u8 = 19;
-}
 use event::*;
+/// The CONC-10 event kinds, numbered as the native runtime's poll recorder writes them.
+pub use hirsel_core_layout::event;
 /// One CONC-10 event: its kind, the task that performed it, its object and value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
@@ -1037,11 +1020,7 @@ impl Machine<'_> {
             object,
             value,
         });
-        let poll = matches!(
-            (kind, value),
-            (TRY_SEND | TRY_RECEIVE, 1) | (ARC_UNWRAP | CHECK_CANCEL, 0)
-        ) || kind == CAPACITY;
-        if poll {
+        if is_poll(kind, value) {
             let r = &mut self.sched.tasks[k];
             r.polls -= 1;
             if r.polls == 0 {

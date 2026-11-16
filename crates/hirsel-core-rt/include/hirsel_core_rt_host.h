@@ -71,6 +71,19 @@ void hirsel_core_hostfile_drop(HirselCoreContext *, HirselCoreHostFile);
 typedef struct { const uint8_t *data; size_t len; } HirselCoreView;
 typedef struct { uint8_t kind, exit; } HirselCoreMainResult;
 typedef struct { uint8_t kind; uint64_t task, object, value; } HirselCoreEvent;
+/* CONC-10 event kinds, one number each: hirsel_core_layout::event, which a runtime
+   test compares with this table. */
+enum {
+    HIRSEL_CORE_EVENT_SPAWN=0, HIRSEL_CORE_EVENT_END=1, HIRSEL_CORE_EVENT_CANCEL=2,
+    HIRSEL_CORE_EVENT_CANCELLED=3, HIRSEL_CORE_EVENT_JOIN=4, HIRSEL_CORE_EVENT_PUBLISH=5,
+    HIRSEL_CORE_EVENT_RECEIVE=6, HIRSEL_CORE_EVENT_TRY_SEND=7, HIRSEL_CORE_EVENT_SENDERS=8,
+    HIRSEL_CORE_EVENT_CLOSE=9, HIRSEL_CORE_EVENT_ARC_NEW=10, HIRSEL_CORE_EVENT_ARC_SHARE=11,
+    HIRSEL_CORE_EVENT_ARC_RELEASE=12, HIRSEL_CORE_EVENT_ARC_UNWRAP=13,
+    HIRSEL_CORE_EVENT_REFUND=14, HIRSEL_CORE_EVENT_CHARGE=15,
+    HIRSEL_CORE_EVENT_CHECK_CANCEL=16, HIRSEL_CORE_EVENT_CAPACITY=17,
+    HIRSEL_CORE_EVENT_LATEST_PUBLISH=18, HIRSEL_CORE_EVENT_LATEST_READ=19,
+    HIRSEL_CORE_EVENT_TRY_RECEIVE=20
+};
 typedef struct {
     void *state;
     void (*event)(void *, HirselCoreEvent);

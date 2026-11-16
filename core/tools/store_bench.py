@@ -23,6 +23,7 @@ def main():
     p.add_argument('--prepare', action='store_true')
     p.add_argument('--measure', action='store_true')
     p.add_argument('--profile', action='store_true')
+    p.add_argument('--only-language', action='append', choices=['hirsel', 'rust'])
     args = p.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -73,6 +74,8 @@ def main():
             for mode in EXPECTED:
                 languages = ['hirsel'] if args.profile else ['hirsel', 'rust']
                 for language in languages:
+                    if args.only_language and language not in args.only_language:
+                        continue
                     argv = [out / (language + '-' + profile), mode]
                     if language == 'rust':
                         argv.append(host / 'gate')

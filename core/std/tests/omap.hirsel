@@ -628,3 +628,95 @@ fn split_boundary_entries() -> bool {
     }
     true
 }
+
+fn byte_key(i: u64) -> Bytes {
+    let mut out: Bytes = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut out, int.narrow(i)))
+    out
+}
+
+fn byte_equal(m: omap.OMap[Bytes, Bytes], xs: List[(u64, u64)]) -> bool {
+    if omap.len(m) != list.len(xs) {
+        return false
+    }
+    let mut rows = result.unwrap(omap.range(m, Unbounded, Unbounded))
+    for pair in xs {
+        let (k, v) = option.unwrap(result.unwrap(omap.next(mut rows)))
+        if list.len(k) != 1 || list.len(v) != 1 || k[0] != int.narrow(pair.0) || v[0] != int.narrow(pair.1) {
+            return false
+        }
+        let found = option.unwrap(omap.get(m, byte_key(pair.0)))
+        if list.len(found) != 1 || found[0] != int.narrow(pair.1) {
+            return false
+        }
+    }
+    if let Some(_) = result.unwrap(omap.next(mut rows)) {
+        return false
+    }
+    true
+}
+
+fn reload_bytes(n: Arc[omap.Node[Bytes, Bytes]]) -> Arc[omap.Node[Bytes, Bytes]] {
+    let mut ks: List[Bytes] = result.unwrap(list.with_capacity(omap.node_count(n)))
+    let mut vs: List[Bytes] = result.unwrap(list.with_capacity(omap.node_count(n)))
+    let mut children: List[Arc[omap.Node[Bytes, Bytes]]] = result.unwrap(list.with_capacity(omap.node_count(n)))
+    for i in 0u64 .. omap.node_count(n) {
+        let key: Result[Bytes, Capacity] = clone(option.unwrap(omap.node_key(n, i)))
+        result.unwrap(list.push(mut ks, result.unwrap(take key)))
+        if omap.node_level(n) == 0 {
+            let value: Result[Bytes, Capacity] = clone(option.unwrap(omap.node_value(n, i)))
+            result.unwrap(list.push(mut vs, result.unwrap(take value)))
+        } else {
+            if let Some(_) = omap.node_value(n, i) {
+                fail("branch exposes a value")
+            }
+            result.unwrap(list.push(mut children, reload_bytes(option.unwrap(omap.node_child(n, i)))))
+        }
+    }
+    if omap.node_level(n) == 0 {
+        result.unwrap(omap.leaf(omap.node_id(n), take ks, take vs))
+    } else {
+        result.unwrap(omap.branch(omap.node_id(n), take ks, take children))
+    }
+}
+
+// Owned byte payloads are shared across split, overwrite and remove paths.
+// Every held version stays equal to its model; decoded views reconstruct it.
+// expect: run shared_byte_versions() = true
+fn shared_byte_versions() -> bool {
+    let mut ids: u64 = 0
+    let mut m: omap.OMap[Bytes, Bytes] = omap.new()
+    let mut xs: List[(u64, u64)] = list.new()
+    let mut held: List[omap.OMap[Bytes, Bytes]] = result.unwrap(list.with_capacity(9))
+    let mut models: List[List[(u64, u64)]] = result.unwrap(list.with_capacity(9))
+    for i in 0u64 .. 80 {
+        m = result.unwrap(omap.insert(mut ids, m, byte_key(i), byte_key(i)))
+        xs = model(xs, i, i, false)
+    }
+    for step in 0u64 .. 64 {
+        if step % 8 == 0 {
+            result.unwrap(list.push(mut held, omap.snapshot(m)))
+            let copied_model: Result[List[(u64, u64)], Capacity] = clone(xs)
+            result.unwrap(list.push(mut models, result.unwrap(take copied_model)))
+        }
+        let k = (step * 47) % 96
+        let deleting = step % 3 == 0
+        m = if deleting {
+            result.unwrap(omap.remove(mut ids, m, byte_key(k)))
+        } else {
+            result.unwrap(omap.insert(mut ids, m, byte_key(k), byte_key(step + 100)))
+        }
+        xs = model(xs, k, step + 100, deleting)
+        if !byte_equal(m, xs) {
+            return false
+        }
+        for i in 0u64 .. list.len(held) {
+            if !byte_equal(held[i], models[i]) {
+                return false
+            }
+        }
+    }
+    let h = option.unwrap(omap.root(m))
+    let restored = omap.from_root(Some(reload_bytes(h)))
+    byte_equal(restored, xs) && omap.node_id(option.unwrap(omap.root(restored))) == omap.node_id(h)
+}

@@ -8318,6 +8318,16 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
 fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, journal_crash_options())?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if scenario == "poison-cut" {
+        result.unwrap(stdout.write(out, "ARM"))
+        let pending = run(mut db, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, t, 0, 10) })?
+        match take pending { Committed(_) => {}, _ => fail("cut input refused") }
+        let next_path = capacity(disk_path("j-", db.file_seq + 1, ""))?
+        if !journal_is_poisoned(checkpoint(mut db)) { fail("cut missed prior sync failure") }
+        if disk_exists(d, next_path)? { fail("cut created successor after prior failure") }
+        if !journal_is_poisoned(close(take db)) { fail("cut close lost first error") }
+        return Ok(())
+    }
     if scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" {
         if !journal_poison_write(mut db, t, out, scenario) { fail("poison contract") }
         if !journal_is_poisoned(close(take db)) { fail("poison close lost first error") }
@@ -8346,7 +8356,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let sh = shape(t)
     let head = db.head
-    let last = if scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else { 7u64 }
+    let last = if scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" { 2u64 } else { 7u64 }
     if head < 1 || head > last || head < minimum { return Ok(false) }
     for k in 0u64 .. 6 {
         let expected = if k + 1 < head { Some(k + 10) } else { None }

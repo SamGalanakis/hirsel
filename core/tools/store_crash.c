@@ -130,7 +130,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     cancellation.enabled=!strcmp(scenario,"journal-cancel");
     cancellation.target=cut; cancellation.entry=entry;
     int uncut=!strcmp(raw_cut,"count");
-    uint8_t failure=!strcmp(scenario,"poison-segment")?1:
+    uint8_t failure=(!strcmp(scenario,"poison-segment") || !strcmp(scenario,"poison-cut"))?1:
         !strcmp(scenario,"poison-end")?2:!strcmp(scenario,"poison-pack")?3:
         !strcmp(scenario,"poison-write")?4:0;
     if(failure || cancellation.enabled) cut=UINT64_MAX;

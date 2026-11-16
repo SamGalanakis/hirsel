@@ -1792,9 +1792,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match (var.binding, rep) {
             (Binding::Slot(Some(a)), _) => Some(self.pointer(a, n)),
             (Binding::Value(Some(p)), Rep::Place(_)) => Some(p),
+            // An immutable value has no place: each literal that views it gets its own
+            // copy, written here, where it dominates that literal. Rebinding the
+            // variable to this copy would let a literal in a sibling arm read a place
+            // its path never wrote.
             (Binding::Value(value), _) => {
                 let address = self.slot(var.ty, value, n)?;
-                self.vars[slot as usize].as_mut().unwrap().binding = Binding::Slot(Some(address));
                 Some(self.pointer(address, n))
             }
             _ => None,

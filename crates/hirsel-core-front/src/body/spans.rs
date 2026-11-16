@@ -326,11 +326,12 @@ impl Cx<'_, '_, '_> {
         let region = self.get_word(AddressBase::Value(b), 8, Ty::Ptr, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let empty = self.test(CompareOp::Eq, blob, null, n);
+        // `moved` reads `zero` on the path through `some` too, so it is defined here.
+        let zero = self.konst(u64t, 0, n)?;
         let sized = self.new_block(&[u64t, u64t]);
         let (none, some) = (self.new_block(&[]), self.new_block(&[]));
         self.branch(empty, none, some, n);
         self.start(none);
-        let zero = self.konst(u64t, 0, n)?;
         self.jump(sized, &[zero, zero], n);
         self.start(some);
         let cap = self.get_word(AddressBase::Value(blob), 0, u64t, n)?;

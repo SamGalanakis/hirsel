@@ -8,12 +8,16 @@
 // owning (by-value scalar captures): f(1) = 4 + 1 = 5, f(0) = 3; 8.
 // owning_record (by-value record capture): f(1) = 4 + 1 = 5, f(0) = 3; 8.
 // nested: g(1) = 5, g(0) = 3; 8.
+// sibling (two literals in sibling arms view the same immutable locals x = a + 1,
+// y = a + 2): pick(false, 4) = 5 * 3 + 6 = 21, pick(true, 4) = 5 * 2 + 6 = 16,
+// pick(false, 6) = 7 * 3 + 8 = 29; 66.
 // expect: run arm() = 14
 // expect: run joined() = 16
 // expect: run looped() = 19
 // expect: run owning() = 8
 // expect: run owning_record() = 8
 // expect: run nested() = 8
+// expect: run sibling() = 66
 type Pair {
     a: u64,
     b: u64
@@ -101,8 +105,30 @@ fn nested() -> u64 {
     f(1)
 }
 
+fn apply_view(f: scoped[view] fn(u64) -> u64) -> u64 {
+    f(1)
+}
+
+fn pick(c: bool, a: u64) -> u64 {
+    let x = a + 1
+    let y = a + 2
+    if c {
+        apply_view(fn(k: u64) -> u64 {
+            x * 2 * k + y
+        })
+    } else {
+        apply_view(fn(k: u64) -> u64 {
+            x * 3 * k + y
+        })
+    }
+}
+
+fn sibling() -> u64 {
+    pick(false, 4) + pick(true, 4) + pick(false, 6)
+}
+
 pub fn main() -> Result[(), Exit] {
-    if arm() == 14 && joined() == 16 && looped() == 19 && owning() == 8 && owning_record() == 8 && nested() == 8 {
+    if arm() == 14 && joined() == 16 && looped() == 19 && owning() == 8 && owning_record() == 8 && nested() == 8 && sibling() == 66 {
         Ok(())
     } else {
         Error(Exit(status: 1))

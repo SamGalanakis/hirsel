@@ -336,9 +336,9 @@ pub(super) struct Window {
     charged: Local,
 }
 #[derive(Clone)]
-pub(super) struct Precharge {
-    spent: Value,
-    charged: Value,
+pub(super) enum Precharge {
+    Window { spent: Value, charged: Value },
+    Group { remaining: u64 },
 }
 impl FunctionEmitter<'_> {
     pub(super) fn step_window(&mut self) -> Window {
@@ -358,24 +358,35 @@ impl FunctionEmitter<'_> {
         self.store(&Type::I64, charge, &Value::Local(window.charged), 8);
     }
     pub(super) fn step_refund(&mut self) {
-        let Some(progress) = self.precharge.clone() else {
-            return;
+        let refund = match self.precharge.clone() {
+            None => return,
+            Some(Precharge::Group { remaining: 0 }) => return,
+            Some(Precharge::Group { remaining }) => int(remaining),
+            Some(Precharge::Window { spent, charged }) => {
+                let spent = self.load(&Type::I64, &spent, 8);
+                let charged = self.load(&Type::I64, &charged, 8);
+                self.bin(Binary::Sub, &Type::I64, &charged, &spent)
+            }
         };
-        let spent = self.load(&Type::I64, &progress.spent, 8);
-        let charged = self.load(&Type::I64, &progress.charged, 8);
-        let refund = self.bin(Binary::Sub, &Type::I64, &charged, &spent);
         let counter = self.step_counter();
         let left = self.load_steps(&counter);
         let left = self.bin(Binary::Add, &Type::I64, &left, &refund);
         self.store_steps(&left, &counter);
     }
     pub(super) fn prepaid_step(&mut self) -> bool {
-        let Some(progress) = self.precharge.clone() else {
-            return false;
-        };
-        let old = self.load(&Type::I64, &progress.spent, 8);
-        let next = self.bin(Binary::Add, &Type::I64, &old, &int(1));
-        self.store(&Type::I64, &next, &progress.spent, 8);
+        match self.precharge.clone() {
+            None => return false,
+            Some(Precharge::Group { remaining }) => {
+                self.precharge = Some(Precharge::Group {
+                    remaining: remaining - 1,
+                });
+            }
+            Some(Precharge::Window { spent, .. }) => {
+                let old = self.load(&Type::I64, &spent, 8);
+                let next = self.bin(Binary::Add, &Type::I64, &old, &int(1));
+                self.store(&Type::I64, &next, &spent, 8);
+            }
+        }
         true
     }
 }
@@ -807,7 +818,7 @@ impl FunctionEmitter<'_> {
                 .map(|&b| (b, version_label(number, self.body.blocks.len(), b, full)))
                 .collect();
             self.unchecked_steps = true;
-            self.precharge = Some(Precharge {
+            self.precharge = Some(Precharge::Window {
                 spent: Value::Local(window.spent),
                 charged: Value::Local(window.charged),
             });
@@ -859,32 +870,8 @@ impl FunctionEmitter<'_> {
         }
         Ok(())
     }
-    fn step_settle_chunk(&mut self) {
-        let counter = self.step_counter();
-        let remaining = self.load_steps(&counter);
-        let positive = self.cmp(Predicate::Sgt, &Type::I64, &remaining, &int(0));
-        let n = self.counter();
-        let ready = Label::new("step_chunk_ready", n);
-        let slice = Label::new("step_chunk_slice", n);
-        self.likely(&positive, ready, slice);
-        self.block(slice);
-        let site = self.site_word();
-        // A pre-charge only takes available complete trips. Zero is a taken
-        // last Step, so this yields/refills and cannot raise OutOfTime.
-        self.call_declared(
-            "hirsel_core_step_out",
-            Type::I8,
-            &[ptr(CONTEXT), word(site)],
-            FnAttrs::default(),
-            &CallAttrs {
-                cold: true,
-                ..CallAttrs::default()
-            },
-        );
-        self.br(ready);
-        self.block(ready);
-    }
 }
+
 fn version_label(number: usize, blocks: usize, block: usize, full: bool) -> Label {
     Label::new(
         if full { "step_full" } else { "step_fast" },
@@ -892,70 +879,80 @@ fn version_label(number: usize, blocks: usize, block: usize, full: bool) -> Labe
     )
 }
 
-pub(super) fn merged(
+#[derive(Clone, Copy)]
+pub(super) struct Group {
+    pub start: usize,
+    pub end: usize,
+    cost: u64,
+}
+pub(super) fn groups(
     module: &Module,
     body: &Body,
-    constants: &[Option<u64>],
-    instructions: PoolRange<Inst>,
-) -> BTreeMap<usize, Vec<usize>> {
-    let mut result = BTreeMap::new();
-    let insts = instructions.get(&body.insts).unwrap();
-    let mut start = 0;
-    while start < insts.len() {
-        let Inst::Step { fail } = insts[start] else {
-            start += 1;
+    neutral: &[bool],
+    range: PoolRange<Inst>,
+) -> BTreeMap<usize, Group> {
+    let insts = range.get(&body.insts).unwrap();
+    let mut groups = BTreeMap::new();
+    let mut at = 0;
+    while at < insts.len() {
+        if !matches!(insts[at], Inst::Step { .. }) {
+            at += 1;
             continue;
-        };
-        let mut sites = vec![instructions.start as usize + start];
-        let mut end = start + 1;
-        while end < insts.len() {
-            match insts[end] {
-                Inst::Step { fail: next } if next == fail => {
-                    sites.push(instructions.start as usize + end)
-                }
-                Inst::Step { .. } => break,
-                ref inst if pure(module, body, constants, inst, false) => {}
-                _ => break,
+        }
+        let start = at;
+        let mut end = at + 1;
+        let mut cost = 1;
+        at += 1;
+        while at < insts.len() && region_inst(module, body, &insts[at], neutral) {
+            if matches!(insts[at], Inst::Step { .. }) {
+                cost += 1;
+                end = at + 1;
             }
-            end += 1;
+            at += 1;
         }
-        if sites.len() > 1 {
-            result.insert(sites[0], sites);
+        if cost > 1 {
+            let start = range.start as usize + start;
+            let end = range.start as usize + end;
+            groups.insert(start, Group { start, end, cost });
         }
-        start = end;
     }
-    result
+    groups
 }
 impl FunctionEmitter<'_> {
-    pub(super) fn step_group(&mut self, sites: &[usize]) {
+    pub(super) fn step_effect_group(
+        &mut self,
+        group: Group,
+        location: impl Fn(Option<Anchor>) -> Option<usize>,
+    ) -> Result<()> {
         let counter = self.step_counter();
         let before = self.load_steps(&counter);
-        let enough = self.cmp(
-            Predicate::Sge,
-            &Type::I64,
-            &before,
-            &int(sites.len() as u64),
-        );
+        let enough = self.cmp(Predicate::Sgt, &Type::I64, &before, &int(group.cost));
         let n = self.counter();
-        let fast = Label::new("step_group_fast", n);
-        let checked = Label::new("step_group_checked", n);
-        let ready = Label::new("step_group_ready", n);
+        let fast = Label::new("step_effect_fast", n);
+        let checked = Label::new("step_effect_checked", n);
+        let ready = Label::new("step_effect_ready", n);
         self.likely(&enough, fast, checked);
         self.block(fast);
-        let after = self.bin(Binary::Sub, &Type::I64, &before, &int(sites.len() as u64));
+        let after = self.bin(Binary::Sub, &Type::I64, &before, &int(group.cost));
         self.store_steps(&after, &counter);
-        self.anchor = self.body.inst_anchors[*sites.last().unwrap()];
-        self.step_settle_chunk();
-        self.br(ready);
-        self.block(checked);
-        for &site in sites {
-            let Inst::Step { fail } = self.body.insts[site] else {
-                unreachable!()
-            };
-            self.anchor = self.body.inst_anchors[site];
-            self.step(fail);
+        for prepaid in [true, false] {
+            self.precharge = prepaid.then_some(Precharge::Group {
+                remaining: group.cost,
+            });
+            for index in group.start..group.end {
+                let inst = &self.body.insts[index];
+                self.debug_location = location(self.body.inst_anchors[index]);
+                if !matches!(inst, Inst::Const { .. }) {
+                    self.inst(inst, index)?;
+                }
+            }
+            self.precharge = None;
+            self.br(ready);
+            if prepaid {
+                self.block(checked);
+            }
         }
-        self.br(ready);
         self.block(ready);
+        Ok(())
     }
 }

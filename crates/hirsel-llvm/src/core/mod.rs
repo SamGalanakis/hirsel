@@ -605,7 +605,12 @@ fn emit_module(
             e.reload_steps();
         }
         let step_loops = steps::loops(module, body, e.constants, &step_neutral);
-        if !step_loops.is_empty() {
+        let step_groups = body
+            .blocks
+            .iter()
+            .map(|b| steps::groups(module, body, &step_neutral, b.insts))
+            .collect::<Vec<_>>();
+        if !step_loops.is_empty() || step_groups.iter().any(|g| !g.is_empty()) {
             // Both loop copies define the same source values and addresses.
             // Entry allocas give mem2reg their joins before ordinary O3 runs.
             e.value_slots.fill(true);
@@ -662,14 +667,23 @@ fn emit_module(
             e.block(Label::block(i));
             let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
             let mut returned = false;
-            let merged = steps::merged(module, body, e.constants, b.insts);
-            let skipped = merged
+            let groups = &step_groups[i];
+            let skipped = groups
                 .values()
-                .flat_map(|sites| sites.iter().copied())
+                .flat_map(|g| g.start + 1..g.end)
                 .collect::<BTreeSet<_>>();
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
-                e.debug_location = function_debug
-                    .map(|d| d.location(body.inst_anchors[b.insts.start as usize + offset]));
+                let index = b.insts.start as usize + offset;
+                if skipped.contains(&index) {
+                    continue;
+                }
+                e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
+                if let Some(group) = groups.get(&index) {
+                    e.step_effect_group(*group, |anchor| {
+                        function_debug.map(|d| d.location(anchor))
+                    })?;
+                    continue;
+                }
                 if let Some(ending) = &ending
                     && offset == ending.prefix
                     && {
@@ -680,11 +694,7 @@ fn emit_module(
                     returned = true;
                     break;
                 }
-                let index = b.insts.start as usize + offset;
-                if let Some(sites) = merged.get(&index) {
-                    e.step_group(sites);
-                }
-                if !matches!(inst, Inst::Const { .. }) && !skipped.contains(&index) {
+                if !matches!(inst, Inst::Const { .. }) {
                     e.inst(inst, index)?;
                 }
             }

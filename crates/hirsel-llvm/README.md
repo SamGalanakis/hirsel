@@ -44,6 +44,8 @@ Invariants:
   unfinished work at every normal or failing exit. Calls qualify only when
   release-wide body summaries prove no nested Steps or scheduling operation;
   short windows execute the original checked path before any source effect.
+  Straight-line groups use a constant unconsumed suffix, with no dynamic
+  progress counter, and keep each source operation in its original order.
 - Objects install 4 KiB stack probes, so native stack exhaustion is a run stop at a probed
   guard.
 - Variant tags are read and written only through `hirsel-core-layout`'s `read_case` and

@@ -765,6 +765,7 @@ fn probe(s: u64) -> u64 {
     }
 }
 
+
 #[test]
 fn fallible_step_regions_refund_partial_work_and_check_strided_remainders() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
@@ -782,6 +783,19 @@ fn probe(s: u64) -> u64 {
         let n = match take first { Ok(n) => n, Error(take cs) => 19u64 }
         for _ in 0u64 .. 7u64 {}
         n
+    }) { Ok(n) => 1000 + n, Error(e) => e.steps }
+}
+fn straight(s: u64, at: u64) -> u64 {
+    match (bound steps s {
+        let ran = result.unwrap(isolate(scoped fn() -> u64 {
+            let xs: Inline[u64, 2] = [4u64, 7u64]
+            let a: u64 = int.widen(1u8)
+            let b = xs[at]
+            let c: u64 = int.widen(2u8)
+            a + b + c
+        }))
+        for _ in 0u64 .. 3u64 {}
+        match take ran { Ok(n) => n, Error(take cs) => 77u64 }
     }) { Ok(n) => 1000 + n, Error(e) => e.steps }
 }
 fn boundary_overflow(s: u64) -> u64 {
@@ -828,6 +842,14 @@ fn strided(s: u64, stride: u64) -> u64 {
             limit: 1_000_000,
             injection: None,
         });
+        for at in [0, 1, 2, u64::MAX] {
+            cases.push(Case {
+                function: names["straight"],
+                args: vec![s, at],
+                limit: 1_000_000,
+                injection: None,
+            });
+        }
         for stride in [0, 1, 2, 3, u64::MAX] {
             cases.push(Case {
                 function: names["strided"],
@@ -862,6 +884,14 @@ fn strided(s: u64, stride: u64) -> u64 {
     for (s, stride, want) in [(33, 1, 1010), (18, 2, 1005), (15, 3, 1004)] {
         assert_eq!(
             eval::run(&module, names["strided"], &[s, stride], 1_000_000).outcome,
+            eval::Outcome::Returned(vec![want])
+        );
+    }
+    // Two isolate entries, one widening before Bounds, outer unwrap, three
+    // latches = seven. The successful second widening makes eight.
+    for (s, at, want) in [(6, 2, 6), (7, 2, 1077), (8, 0, 1007)] {
+        assert_eq!(
+            eval::run(&module, names["straight"], &[s, at], 1_000_000).outcome,
             eval::Outcome::Returned(vec![want])
         );
     }
@@ -919,8 +949,14 @@ fn strided(s: u64, stride: u64) -> u64 {
             debug_lines: false,
         })
         .collect::<Vec<_>>();
-    let exports = ["probe", "strided", "resetting", "boundary_overflow"]
-        .map(|name| symbol(&module, names[name]));
+    let exports = [
+        "probe",
+        "strided",
+        "resetting",
+        "boundary_overflow",
+        "straight",
+    ]
+    .map(|name| symbol(&module, names[name]));
     let object = hirsel_llvm_lazy::emit_program(&units, &exports).unwrap();
     let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
     for (case, report) in cases.iter().zip(reports) {

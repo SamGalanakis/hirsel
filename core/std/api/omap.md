@@ -7,11 +7,12 @@ persistent B+ tree with maximum fan-out 32 and minimum non-root occupancy 16.
 `new` allocates nothing, `snapshot` shares the root in O(1) without allocation,
 and `len` reads its entry count. `get`, `first` and `last` borrow one version.
 An update returns a new version while every held version retains its contents.
-Each row has one immutable `Arc[Entry[K,V]]` containing its key and value.
-Leaf paths and branch separators share those same entries. A path copy shares
-entry holders and untouched child subtrees, without cloning stored payloads.
-Shared leaf insertion puts holders directly into their final split halves.
-Resources fail the ordinary `shareable` bound.
+Keys and values occupy contiguous node lists. Sharing is the client's choice
+of payload type, for example `Arc[Bytes]`; scalar entries stay inline. Path copies clone their payloads
+and share untouched child subtrees. Branch search uses an upper bound with
+one comparison per step; leaf search uses a direct less-than comparison. Shared leaf insertion copies each entry
+once directly into its final leaf, including both halves of a split. Splitting
+a temporary owned leaf moves its entries without cloning their payloads. Resources fail the ordinary `shareable` bound.
 Versions are sendable; last-holder release frees unreachable nodes and payloads
 through the existing constant-stack Arc worklist.
 
@@ -44,25 +45,17 @@ Checkpoint writers use `root` for an Arc holder and `node_id`, `node_level`,
 nodes. Node level is zero at leaves. Leaf count is the number of key/value
 pairs; branch count is the number of children and their minimum keys. Keys,
 values and children outside their count return None. Branches have no values;
-leaves have no children. Node fields are stamp:u64, depth:u64, size:u64,
-entries:List[Arc[Entry[K,V]]] and kids:List[Arc[Node[K,V]]]. A branch's separator
-is the child's first entry, including its value. That value is already retained
-by the child. Node values remain inaccessible through `node_value` on branches.
-Logical node charge is 80 bytes plus entry and child pointer capacities times 8.
-Each row adds an 8-byte Arc header and its K/V payload; it has one 8-byte slot
-in a leaf. At exact capacity32 a full u64/u64 leaf charges 1104 bytes, against
-616 with contiguous payloads. Bytes payload allocations now occur once per row
-instead of on every shared path. Runtime bookkeeping and allocator size classes
-add physical overhead, reported by the benchmarks. Consuming updates may retain
-spare leaf capacity; fan-out by count stays 32.
+leaves have no children. Node fields are stamp:u64, depth:u64, size:u64 and
+three 24-byte List headers. Logical node charge is 104 bytes plus the list
+capacities times their element sizes: K/V at leaves, K/Arc at branches, plus
+owned payload allocations. Full u64/u64 leaves charge 616 bytes. Consuming
+updates reserve spare leaf slots explicitly; fan-out by count stays 32.
 
 A checkpoint cutoff can skip a whole subtree whose id is already persisted.
 `leaf(id,take keys,take values)` and `branch(id,take low_keys,take children)`
 construct decoded nodes with recorded ids, without rechecking tree invariants.
 The decoder must provide the documented shape. On Capacity they return their
-input lists. `leaf` copies each decoded row once into its entry Arc. The supplied
-branch minima must equal child minima. `branch` shares the children's first
-entries, so decoded branch keys are not stored a second time. `from_root(take optional_root)` publishes them in O(1). Loading is
+input lists. `from_root(take optional_root)` publishes them in O(1). Loading is
 eager and bottom-up, O(n) nodes plus payload bytes. There are no disk, codec or
 unloaded-child operations in omap.
 

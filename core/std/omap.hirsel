@@ -1,16 +1,12 @@
 // A persistent B+ tree. Nodes contain 1..32 entries/children; non-root nodes
-// contain 16..32. Every entry has one immutable Arc shared by leaf copies and
-// branch separators. Node copies share entries and untouched children. See API.md.
-type Entry[K: ordered + shareable + send, V: shareable + send]: shareable + send {
-    key: K,
-    value: V
-}
-
+// contain 16..32. Keys and values are contiguous within a node; shared-node
+// path copies clone their payloads and share untouched children. See API.md.
 pub opaque type Node[K: ordered + shareable + send, V: shareable + send]: shareable + send {
     stamp: u64,
     depth: u64,
     size: u64,
-    entries: List[Arc[Entry[K, V]]],
+    keys: List[K],
+    values: List[V],
     kids: List[Arc[Node[K, V]]]
 }
 
@@ -78,7 +74,7 @@ pub fn node_level[K: ordered + shareable + send, V: shareable + send](n: Arc[Nod
 
 /// Number of leaf entries or branch children, at most 32.
 pub fn node_count[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]]) -> u64 {
-    list.len(n.entries)
+    list.len(n.keys)
 }
 
 /// Total leaf entries beneath this node.
@@ -88,8 +84,8 @@ pub fn node_len[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[
 
 /// Leaf key i, or minimum key of branch child i. None outside count.
 pub fn node_key[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], i: u64) -> Option[View[K]] in n {
-    if i < list.len(n.entries) {
-        Some(view n.entries[i].key)
+    if i < list.len(n.keys) {
+        Some(view n.keys[i])
     } else {
         None
     }
@@ -97,8 +93,8 @@ pub fn node_key[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[
 
 /// Leaf value i. None for branches or outside count.
 pub fn node_value[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], i: u64) -> Option[View[V]] in n {
-    if n.depth == 0 && i < list.len(n.entries) {
-        Some(view n.entries[i].value)
+    if i < list.len(n.values) {
+        Some(view n.values[i])
     } else {
         None
     }
@@ -114,7 +110,7 @@ pub fn node_child[K: ordered + shareable + send, V: shareable + send](n: Arc[Nod
 }
 
 /// Construct a decoded leaf with its recorded id. No order or fan-out checks.
-/// Capacity returns both input lists, unchanged. Each row is copied into one Arc entry. Branches share these same entries.
+/// Capacity returns both input lists, unchanged. Payloads are copied into node lists.
 pub fn leaf[K: ordered + shareable + send, V: shareable + send](id: u64, take keys: List[K], take values: List[V]) -> Result[Arc[Node[K, V]], (Capacity, (List[K], List[V]))] {
     match load_leaf(id, keys, values) {
         Ok(take n) => Ok(take n),
@@ -122,18 +118,16 @@ pub fn leaf[K: ordered + shareable + send, V: shareable + send](id: u64, take ke
     }
 }
 
-fn entry[K: ordered + shareable + send, V: shareable + send](k: K, v: V) -> Result[Arc[Entry[K, V]], Capacity] {
-    let key = copied(k)?
-    let value = copied(v)?
-    result.capacity_only(arc.new(Entry(key: take key, value: take value)))
-}
-
 fn load_leaf[K: ordered + shareable + send, V: shareable + send](id: u64, keys: List[K], values: List[V]) -> Result[Arc[Node[K, V]], Capacity] {
-    let mut es: List[Arc[Entry[K, V]]] = list.with_capacity(list.len(keys))?
-    for i in 0u64 .. list.len(keys) {
-        result.capacity_only(list.push(mut es, entry(keys[i], values[i])?))?
+    let mut ks: List[K] = list.with_capacity(list.len(keys))?
+    let mut vs: List[V] = list.with_capacity(list.len(values))?
+    for k in keys {
+        result.capacity_only(list.push(mut ks, copied(k)?))?
     }
-    pack_leaf(id, take es)
+    for v in values {
+        result.capacity_only(list.push(mut vs, copied(v)?))?
+    }
+    pack_leaf(id, take ks, take vs)
 }
 
 /// Construct a decoded branch with recorded minima and child holders. No tree
@@ -146,19 +140,19 @@ pub fn branch[K: ordered + shareable + send, V: shareable + send](id: u64, take 
 }
 
 fn load_branch[K: ordered + shareable + send, V: shareable + send](id: u64, low_keys: List[K], children: List[Arc[Node[K, V]]]) -> Result[Arc[Node[K, V]], Capacity] {
-    let mut ks: List[Arc[Entry[K, V]]] = list.with_capacity(list.len(low_keys))?
+    let mut ks: List[K] = list.with_capacity(list.len(low_keys))?
     let mut cs: List[Arc[Node[K, V]]] = list.with_capacity(list.len(children))?
     let mut size: u64 = 0
     let mut depth: u64 = 1
-    // The decoded minima equal the children's minima by the constructor contract.
-    // Reuse those entries instead of allocating a second separator representation.
+    for k in low_keys {
+        result.capacity_only(list.push(mut ks, copied(k)?))?
+    }
     for n in children {
         size += n.size
         depth = n.depth + 1
-        result.capacity_only(list.push(mut ks, arc.share(n.entries[0])))?
         result.capacity_only(list.push(mut cs, arc.share(n)))?
     }
-    result.capacity_only(arc.new(Node(stamp: id, depth: depth, size: size, entries: take ks, kids: take cs)))
+    result.capacity_only(arc.new(Node(stamp: id, depth: depth, size: size, keys: take ks, values: list.new(), kids: take cs)))
 }
 
 /// Bottom-up build from strictly increasing keys and equally many values.
@@ -179,12 +173,14 @@ pub fn from_sorted[K: ordered + shareable + send, V: shareable + send](mut ids: 
         } else {
             0u64
         }
-        let mut es: List[Arc[Entry[K, V]]] = list.with_capacity(count)?
+        let mut ks: List[K] = list.with_capacity(count)?
+        let mut vs: List[V] = list.with_capacity(count)?
         for i in at .. at + count {
-            result.capacity_only(list.push(mut es, entry(keys[i], values[i])?))?
+            result.capacity_only(list.push(mut ks, copied(keys[i])?))?
+            result.capacity_only(list.push(mut vs, copied(values[i])?))?
         }
         ids += 1
-        result.capacity_only(list.push(mut level, pack_leaf(ids, take es)?))?
+        result.capacity_only(list.push(mut level, pack_leaf(ids, take ks, take vs)?))?
         at += count
     }
     while list.len(level) > 1 {
@@ -220,9 +216,9 @@ pub fn get[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], k:
 
 fn lookup[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], k: K) -> Option[View[V]] in n {
     if n.depth == 0 {
-        let i = lower(n.entries, k)
-        if i < list.len(n.entries) && key_order(n.entries, i, k) == Equal {
-            Some(view n.entries[i].value)
+        let i = lower(n.keys, k)
+        if i < list.len(n.keys) && key_order(n.keys, i, k) == Equal {
+            Some(view n.values[i])
         } else {
             None
         }
@@ -231,8 +227,8 @@ fn lookup[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]]
     }
 }
 
-fn key_order[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[Entry[K, V]]], i: u64, k: K) -> Order {
-    let a: View[K] = view ks[i].key
+fn key_order[K: ordered + shareable + send](ks: List[K], i: u64, k: K) -> Order {
+    let a: View[K] = view ks[i]
     if a < k {
         Less
     } else if k < a {
@@ -242,12 +238,12 @@ fn key_order[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[En
     }
 }
 
-fn lower[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[Entry[K, V]]], k: K) -> u64 {
+fn lower[K: ordered + shareable + send](ks: List[K], k: K) -> u64 {
     let mut a: u64 = 0
     let mut b = list.len(ks)
     while a < b {
         let mid = a + (b - a) / 2
-        if ks[mid].key < k {
+        if ks[mid] < k {
             a = mid + 1
         } else {
             b = mid
@@ -256,14 +252,14 @@ fn lower[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[Entry[
     a
 }
 
-// First separator greater than k. Its predecessor owns k's interval.
-// Use one ordered comparison per step and no repeated comparison at the end.
-fn upper_child[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[Entry[K, V]]], k: K) -> u64 {
+// First separator greater than k; its predecessor owns k's interval.
+// One comparison per step, without rechecking the final separator.
+fn upper_child[K: ordered + shareable + send](ks: List[K], k: K) -> u64 {
     let mut a: u64 = 0
     let mut b = list.len(ks)
     while a < b {
         let mid = a + (b - a) / 2
-        if k < ks[mid].key {
+        if k < ks[mid] {
             b = mid
         } else {
             a = mid + 1
@@ -277,7 +273,7 @@ fn upper_child[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[
 }
 
 fn child_index[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], k: K) -> u64 {
-    upper_child(n.entries, k)
+    upper_child(n.keys, k)
 }
 
 /// Insert/replace by path copying. ids is the last issued id shared by every
@@ -294,11 +290,13 @@ fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m:
     let pieces = match m.head {
         Some(n) => insert_node(mut ids, n, k, v)?,
         None => {
-            let mut ks: List[Arc[Entry[K, V]]] = list.with_capacity(1)?
-            result.capacity_only(list.push(mut ks, entry(k, v)?))?
+            let mut ks: List[K] = list.with_capacity(1)?
+            let mut vs: List[V] = list.with_capacity(1)?
+            result.capacity_only(list.push(mut ks, copied(k)?))?
+            result.capacity_only(list.push(mut vs, copied(v)?))?
             let mut out: List[Arc[Node[K, V]]] = list.with_capacity(1)?
             ids += 1
-            result.capacity_only(list.push(mut out, pack_leaf(ids, take ks)?))?
+            result.capacity_only(list.push(mut out, pack_leaf(ids, take ks, take vs)?))?
             take out
         },
     }
@@ -311,9 +309,9 @@ fn inserted[K: ordered + shareable + send, V: shareable + send](mut ids: u64, m:
 }
 
 fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64, n: Arc[Node[K, V]], k: K, v: V) -> Result[List[Arc[Node[K, V]]], Capacity] {
-    let i = lower(n.entries, k)
-    let hit = i < list.len(n.entries) && key_order(n.entries, i, k) == Equal
-    let total = list.len(n.entries) + if hit {
+    let i = lower(n.keys, k)
+    let hit = i < list.len(n.keys) && key_order(n.keys, i, k) == Equal
+    let total = list.len(n.keys) + if hit {
         0u64
     } else {
         1u64
@@ -323,8 +321,10 @@ fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
     } else {
         total / 2
     }
-    let mut ka: List[Arc[Entry[K, V]]] = list.with_capacity(cut)?
-    let mut kb: List[Arc[Entry[K, V]]] = list.with_capacity(total - cut)?
+    let mut ka: List[K] = list.with_capacity(cut)?
+    let mut va: List[V] = list.with_capacity(cut)?
+    let mut kb: List[K] = list.with_capacity(total - cut)?
+    let mut vb: List[V] = list.with_capacity(total - cut)?
     for j in 0 .. total {
         let old = if j > i && !hit {
             j - 1
@@ -332,14 +332,21 @@ fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
             j
         }
         let nk = if j == i {
-            entry(k, v)?
+            copied(k)?
         } else {
-            arc.share(n.entries[old])
+            copied(n.keys[old])?
+        }
+        let nv = if j == i {
+            copied(v)?
+        } else {
+            copied(n.values[old])?
         }
         if j < cut {
             result.capacity_only(list.push(mut ka, take nk))?
+            result.capacity_only(list.push(mut va, take nv))?
         } else {
             result.capacity_only(list.push(mut kb, take nk))?
+            result.capacity_only(list.push(mut vb, take nv))?
         }
     }
     let mut out: List[Arc[Node[K, V]]] = list.with_capacity(if cut < total {
@@ -348,10 +355,10 @@ fn insert_leaf[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
         1u64
     })?
     ids += 1
-    result.capacity_only(list.push(mut out, pack_leaf(ids, take ka)?))?
+    result.capacity_only(list.push(mut out, pack_leaf(ids, take ka, take va)?))?
     if cut < total {
         ids += 1
-        result.capacity_only(list.push(mut out, pack_leaf(ids, take kb)?))?
+        result.capacity_only(list.push(mut out, pack_leaf(ids, take kb, take vb)?))?
     }
     Ok(take out)
 }
@@ -381,27 +388,28 @@ fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
     }
 }
 
-fn pack_leaf[K: ordered + shareable + send, V: shareable + send](id: u64, take ks: List[Arc[Entry[K, V]]]) -> Result[Arc[Node[K, V]], Capacity] {
+fn pack_leaf[K: ordered + shareable + send, V: shareable + send](id: u64, take ks: List[K], take vs: List[V]) -> Result[Arc[Node[K, V]], Capacity] {
     let size = list.len(ks)
-    result.capacity_only(arc.new(Node(stamp: id, depth: 0, size: size, entries: take ks, kids: list.new())))
+    result.capacity_only(arc.new(Node(stamp: id, depth: 0, size: size, keys: take ks, values: take vs, kids: list.new())))
 }
 
 fn fresh_branch[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take cs: List[Arc[Node[K, V]]]) -> Result[Arc[Node[K, V]], Capacity] {
-    let mut ks: List[Arc[Entry[K, V]]] = list.with_capacity(list.len(cs))?
+    let mut ks: List[K] = list.with_capacity(list.len(cs))?
     let mut size: u64 = 0
     let depth = cs[0].depth + 1
     for c in cs {
         size += c.size
-        result.capacity_only(list.push(mut ks, arc.share(c.entries[0])))?
+        result.capacity_only(list.push(mut ks, copied(c.keys[0])?))?
     }
     ids += 1
-    result.capacity_only(arc.new(Node(stamp: ids, depth: depth, size: size, entries: take ks, kids: take cs)))
+    result.capacity_only(arc.new(Node(stamp: ids, depth: depth, size: size, keys: take ks, values: list.new(), kids: take cs)))
 }
 
 // Transfer a temporary leaf's entries into the final halves. No payload clone.
-fn split_leaves[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take ks: List[Arc[Entry[K, V]]]) -> Result[List[Arc[Node[K, V]]], Capacity] {
+fn split_leaves[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take ks: List[K], take vs: List[V]) -> Result[List[Arc[Node[K, V]]], Capacity] {
     let total = list.len(ks)
     let mut left_keys = take ks
+    let mut left_values = take vs
     let count = if total <= 32 {
         1u64
     } else {
@@ -410,21 +418,24 @@ fn split_leaves[K: ordered + shareable + send, V: shareable + send](mut ids: u64
     let mut out: List[Arc[Node[K, V]]] = list.with_capacity(count)?
     if total <= 32 {
         ids += 1
-        result.capacity_only(list.push(mut out, pack_leaf(ids, take left_keys)?))?
+        result.capacity_only(list.push(mut out, pack_leaf(ids, take left_keys, take left_values)?))?
         return Ok(take out)
     }
     let mid = total / 2
-    let mut right_entries: List[Arc[Entry[K, V]]] = list.with_capacity(total - mid)?
+    let mut right_keys: List[K] = list.with_capacity(total - mid)?
+    let mut right_values: List[V] = list.with_capacity(total - mid)?
     for _ in mid .. total {
-        result.capacity_only(list.push(mut right_entries, option.unwrap(list.pop(mut left_keys))))?
+        result.capacity_only(list.push(mut right_keys, option.unwrap(list.pop(mut left_keys))))?
+        result.capacity_only(list.push(mut right_values, option.unwrap(list.pop(mut left_values))))?
     }
     for i in 0u64 .. (total - mid) / 2 {
-        list.swap(mut right_entries, i, total - mid - 1 - i)
+        list.swap(mut right_keys, i, total - mid - 1 - i)
+        list.swap(mut right_values, i, total - mid - 1 - i)
     }
     ids += 1
-    result.capacity_only(list.push(mut out, pack_leaf(ids, take left_keys)?))?
+    result.capacity_only(list.push(mut out, pack_leaf(ids, take left_keys, take left_values)?))?
     ids += 1
-    result.capacity_only(list.push(mut out, pack_leaf(ids, take right_entries)?))?
+    result.capacity_only(list.push(mut out, pack_leaf(ids, take right_keys, take right_values)?))?
     Ok(take out)
 }
 
@@ -485,7 +496,7 @@ fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, t
     let OMap(head: old) = take m
     let changed = match take old {
         None => {
-            let empty: Node[K, V] = Node(stamp: 0, depth: 0, size: 0, entries: list.new(), kids: list.new())
+            let empty: Node[K, V] = Node(stamp: 0, depth: 0, size: 0, keys: list.new(), values: list.new(), kids: list.new())
             owned_node(mut ids, take empty, k, v)?
         },
         Some(take h) => owned_arc(mut ids, take h, k, v)?
@@ -523,25 +534,30 @@ fn push_at[T](mut xs: List[T], at: u64, take value: T) -> Result[(), Capacity] {
 fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take n: Node[K, V], k: K, v: V) -> Result[Pieces[K, V], Capacity] {
     let mut node = take n
     if node.depth == 0 {
-        let at = lower(node.entries, k)
-        let hit = at < list.len(node.entries) && key_order(node.entries, at, k) == Equal
-        let nk = entry(k, v)?
+        let at = lower(node.keys, k)
+        let hit = at < list.len(node.keys) && key_order(node.keys, at, k) == Equal
+        let nk = copied(k)?
+        let nv = copied(v)?
         if hit {
-            let _ = list.set(mut node.entries, at, take nk)
+            let _ = list.set(mut node.keys, at, take nk)
+            let _ = list.set(mut node.values, at, take nv)
         } else {
-            let capacity = if list.len(node.entries) < 32 {
+            let capacity = if list.len(node.keys) < 32 {
                 32u64
             } else {
                 33u64
             }
-            let extra_keys = capacity - list.len(node.entries)
-            list.reserve(mut node.entries, extra_keys)?
-            push_at(mut node.entries, at, take nk)?
+            let extra_keys = capacity - list.len(node.keys)
+            let extra_values = capacity - list.len(node.values)
+            list.reserve(mut node.keys, extra_keys)?
+            list.reserve(mut node.values, extra_values)?
+            push_at(mut node.keys, at, take nk)?
+            push_at(mut node.values, at, take nv)?
         }
-        node.size = list.len(node.entries)
+        node.size = list.len(node.keys)
         if node.size > 32 {
-            let Node(stamp: _, depth: _, size: _, entries: ks, kids: _) = take node
-            return Ok(as_pieces(split_leaves(mut ids, take ks)?))
+            let Node(stamp: _, depth: _, size: _, keys: ks, values: vs, kids: _) = take node
+            return Ok(as_pieces(split_leaves(mut ids, take ks, take vs)?))
         }
     } else {
         let at = child_index_node(node, k)
@@ -551,18 +567,18 @@ fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
         let selected = option.unwrap(list.pop(mut node.kids))
         let changed = owned_arc(mut ids, take selected, k, v)?
         let Pieces(first: left, second: right) = take changed
-        let minimum = arc.share(left.entries[0])
+        let minimum = copied(left.keys[0])?
         let mut size = left.size
-        let _ = list.set(mut node.entries, at, take minimum)
+        let _ = list.set(mut node.keys, at, take minimum)
         result.capacity_only(list.push(mut node.kids, take left))?
         list.swap(mut node.kids, at, total - 1)
         if let Some(take r) = take right {
-            let low = arc.share(r.entries[0])
+            let low = copied(r.keys[0])?
             size += r.size
             list.reserve(mut node.kids, 1)?
-            list.reserve(mut node.entries, 1)?
+            list.reserve(mut node.keys, 1)?
             push_at(mut node.kids, at + 1, take r)?
-            push_at(mut node.entries, at + 1, take low)?
+            push_at(mut node.keys, at + 1, take low)?
         }
         node.size = node.size - old_size + size
         if list.len(node.kids) > 32 {
@@ -576,7 +592,7 @@ fn owned_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
 }
 
 fn child_index_node[K: ordered + shareable + send, V: shareable + send](n: Node[K, V], k: K) -> u64 {
-    upper_child(n.entries, k)
+    upper_child(n.keys, k)
 }
 
 /// Remove by path copying and sibling merge/redistribution. Missing keys share
@@ -604,19 +620,21 @@ pub fn remove[K: ordered + shareable + send, V: shareable + send](mut ids: u64, 
 
 fn remove_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64, n: Arc[Node[K, V]], k: K) -> Result[Option[Arc[Node[K, V]]], Capacity] {
     if n.depth == 0 {
-        let at = lower(n.entries, k)
-        let total = list.len(n.entries) - 1
+        let at = lower(n.keys, k)
+        let total = list.len(n.keys) - 1
         if total == 0 {
             return Ok(None)
         }
-        let mut ks: List[Arc[Entry[K, V]]] = list.with_capacity(total)?
-        for i in 0 .. list.len(n.entries) {
+        let mut ks: List[K] = list.with_capacity(total)?
+        let mut vs: List[V] = list.with_capacity(total)?
+        for i in 0 .. list.len(n.keys) {
             if i != at {
-                result.capacity_only(list.push(mut ks, arc.share(n.entries[i])))?
+                result.capacity_only(list.push(mut ks, copied(n.keys[i])?))?
+                result.capacity_only(list.push(mut vs, copied(n.values[i])?))?
             }
         }
         ids += 1
-        Ok(Some(pack_leaf(ids, take ks)?))
+        Ok(Some(pack_leaf(ids, take ks, take vs)?))
     } else {
         let at = child_index(n, k)
         let changed = remove_node(mut ids, n.kids[at], k)?
@@ -638,7 +656,7 @@ fn remove_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
         } else {
             list.len(cs) - 1
         }
-        if list.len(cs[short].entries) < 16 && list.len(cs) > 1 {
+        if list.len(cs[short].keys) < 16 && list.len(cs) > 1 {
             let a = if short > 0 {
                 short - 1
             } else {
@@ -663,15 +681,18 @@ fn remove_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
 
 fn merge_pair[K: ordered + shareable + send, V: shareable + send](mut ids: u64, a: Arc[Node[K, V]], b: Arc[Node[K, V]]) -> Result[List[Arc[Node[K, V]]], Capacity] {
     if a.depth == 0 {
-        let total = list.len(a.entries) + list.len(b.entries)
-        let mut ks: List[Arc[Entry[K, V]]] = list.with_capacity(total)?
-        for i in 0 .. list.len(a.entries) {
-            result.capacity_only(list.push(mut ks, arc.share(a.entries[i])))?
+        let total = list.len(a.keys) + list.len(b.keys)
+        let mut ks: List[K] = list.with_capacity(total)?
+        let mut vs: List[V] = list.with_capacity(total)?
+        for i in 0 .. list.len(a.keys) {
+            result.capacity_only(list.push(mut ks, copied(a.keys[i])?))?
+            result.capacity_only(list.push(mut vs, copied(a.values[i])?))?
         }
-        for i in 0 .. list.len(b.entries) {
-            result.capacity_only(list.push(mut ks, arc.share(b.entries[i])))?
+        for i in 0 .. list.len(b.keys) {
+            result.capacity_only(list.push(mut ks, copied(b.keys[i])?))?
+            result.capacity_only(list.push(mut vs, copied(b.values[i])?))?
         }
-        split_leaves(mut ids, take ks)
+        split_leaves(mut ids, take ks, take vs)
     } else {
         let mut cs: List[Arc[Node[K, V]]] = list.with_capacity(list.len(a.kids) + list.len(b.kids))?
         for c in a.kids {
@@ -702,12 +723,12 @@ pub fn last[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V]) -
 
 fn endpoint[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], high: bool) -> Option[(View[K], View[V])] in n {
     let i = if high {
-        list.len(n.entries) - 1
+        list.len(n.keys) - 1
     } else {
         0u64
     }
     if n.depth == 0 {
-        Some((view n.entries[i].key, view n.entries[i].value))
+        Some((view n.keys[i], view n.values[i]))
     } else {
         endpoint(n.kids[i], high)
     }
@@ -736,10 +757,10 @@ fn seek[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], 
     let i = if n.depth == 0 {
         match lo {
             Unbounded => 0u64,
-            Included(k) => lower(n.entries, k),
+            Included(k) => lower(n.keys, k),
             Excluded(k) => {
-                let j = lower(n.entries, k)
-                if j < list.len(n.entries) && key_order(n.entries, j, k) == Equal {
+                let j = lower(n.keys, k)
+                if j < list.len(n.keys) && key_order(n.keys, j, k) == Equal {
                     j + 1
                 } else {
                     j
@@ -775,7 +796,7 @@ fn ready[K: ordered + shareable + send, V: shareable + send](mut path: List[Fram
         return Ok(false)
     }
     let at = list.len(path) - 1
-    if path[at].node.depth == 0 && path[at].position < list.len(path[at].node.entries) {
+    if path[at].node.depth == 0 && path[at].position < list.len(path[at].node.keys) {
         return Ok(true)
     }
     let _ = list.pop(mut path)
@@ -801,11 +822,11 @@ pub fn next[K: ordered + shareable + send, V: shareable + send](mut c: Cursor[K,
     let pair = {
         let frame = view c.path[at]
         let i = frame.position
-        if !within_upper(c.upper, frame.node.entries[i].key) {
+        if !within_upper(c.upper, frame.node.keys[i]) {
             return Ok(None)
         }
-        let kr: Result[K, Capacity] = clone(frame.node.entries[i].key)
-        let vr: Result[V, Capacity] = clone(frame.node.entries[i].value)
+        let kr: Result[K, Capacity] = clone(frame.node.keys[i])
+        let vr: Result[V, Capacity] = clone(frame.node.values[i])
         (kr?, vr?)
     }
     c.path[at].position += 1

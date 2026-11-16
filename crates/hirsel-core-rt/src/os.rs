@@ -364,6 +364,16 @@ pub unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, _: u64) -> 
         if request.operation != SLEEP_UNTIL || request.buffer.len < 8 {
             return Wait::default();
         }
+        sleep_wait(state, request)
+    }
+}
+/// # Safety
+/// As `wait`, for a SLEEP_UNTIL request with an eight-byte deadline.
+#[cold]
+#[inline(never)]
+unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
+    // SAFETY: forwarded.
+    unsafe {
         let deadline = request.buffer.data.cast::<u64>().read_unaligned();
         let epoch = (*state.cast::<OsProvider>()).epoch;
         let at = epoch.saturating_add(deadline);

@@ -412,7 +412,10 @@ impl Scheduler {
                     if wake == Wake::Cancel && !cancellable(task) {
                         return false;
                     }
-                    let w = (p.wait)(p.state, request, token);
+                    let w = match (*op).entered.take() {
+                        Some(w) => w,
+                        None => (p.wait)(p.state, request, token),
+                    };
                     if wake == Wake::Cancel {
                         // W -> C (CONC-7): the request fails the operation and
                         // issue is never called, whatever wait answered.
@@ -520,10 +523,15 @@ pub(crate) struct Operation {
     /// The deadline of the step that left the operation in I; 0 is none.
     deadline: u64,
     next: Next,
+    /// Entry only: the first `wait`'s answer, Until or Park, which the task
+    /// called itself before parking; None makes the scheduler call it (the
+    /// test-only scheduler-switch path).
+    entered: Option<crate::provider::Wait>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Parked for its first wait, which the scheduler calls before any pop.
+    /// Parked after its first wait answered Until or Park; the scheduler
+    /// applies that answer before any pop.
     Entry,
     /// W after Until or Park.
     Waiting,
@@ -641,24 +649,132 @@ pub extern "C" fn hirsel_core_ready(token: u64) {
 }
 
 /// W and I of one operation (REPLAY-SPEC section 3, driver steps 2 to 6). Runs
-/// in the task; `wait`, `resume` and `abort` are called by the scheduler. None
-/// means the operation was cancelled in W.
+/// in the task; `wait`, `resume` and `abort` run with no task current, and
+/// `deliver` once. Returns what `deliver` returned and records in `issued`
+/// what the provider produced; or returns Cancelled, recording nothing, when
+/// the operation was cancelled in W.
+///
+/// The first `wait` is made here, on the task's stack, with no task current,
+/// and not by switching to the scheduler and back. The two are the same call:
+/// a wait at entry happens at the task's own time, not at a wake. Under the
+/// switch the scheduler calls `wait` straight after the task parks, before it
+/// takes any wake or pops any task, and on Ready it switches straight back to
+/// the same task. So between entry and the call no other task runs, no event
+/// is emitted, and no ready, cancellation request or timer is taken. The
+/// callback sees no task (`CURRENT` is null in both), the same thread, the
+/// same request and token, and the same event position, so the OS provider, a
+/// wrapper and a tape that records waits all observe and record the same
+/// thing. Resuming the task re-binds the payer it already had bound, a no-op.
+/// What differs is only the stack the callback runs on: the task's own stack,
+/// as for `issue`, which already runs there. An Until or Park answer parks the
+/// task with the answer, and the scheduler applies it exactly as it would have
+/// applied its own call's answer (`Operation::entered`).
+/// `provider_s0_tests::s0_direct_entry_wait_matches_the_scheduler_switch`
+/// compares the two paths.
 /// # Safety
 /// The provider is installed; request is pinned through delivery.
+#[inline(always)]
 pub(crate) unsafe fn provider_operation(
     context: *mut Context,
     provider: &crate::provider::Provider,
     request: *mut crate::provider::Request,
-) -> Option<crate::provider::Outcome> {
+    issued: Option<&mut Option<crate::provider::Outcome>>,
+) -> crate::provider::Outcome {
     let token = TOKENS.fetch_add(1, Ordering::Relaxed);
     if token == u64::MAX {
         crate::process::stop(b"HostHandles");
     }
     let task = CURRENT.get();
-    if task.is_null() {
-        // SAFETY: forwarded.
-        return unsafe { alone(context, provider, request, token) };
+    // SAFETY: provider contract; request pinned by the caller through delivery.
+    unsafe {
+        if task.is_null() {
+            return slow(
+                context,
+                task,
+                provider,
+                request,
+                token,
+                Start::Alone,
+                issued,
+            );
+        }
+        #[cfg(test)]
+        if SCHEDULER_ENTRY.get() {
+            let start = Start::Entry(None);
+            return slow(context, task, provider, request, token, start, issued);
+        }
+        CURRENT.set(ptr::null_mut());
+        let wait = (provider.wait)(provider.state, request, token);
+        CURRENT.set(task);
+        if wait.kind != WAIT_READY {
+            let start = Start::Entry(Some(wait));
+            return slow(context, task, provider, request, token, start, issued);
+        }
+        let step = (provider.issue)(provider.state, request, token);
+        if step.kind != STEP_DONE {
+            let start = Start::Issued(step);
+            return slow(context, task, provider, request, token, start, issued);
+        }
+        if let Some(issued) = issued {
+            *issued = Some(step.outcome);
+        }
+        (provider.deliver)(provider.state, request, step.outcome)
     }
+}
+/// An operation that does not finish at once: it parks, or has no scheduler.
+/// The provider is copied before the first park.
+#[cold]
+#[inline(never)]
+unsafe fn slow(
+    context: *mut Context,
+    task: *mut Task,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    token: u64,
+    start: Start,
+    issued: Option<&mut Option<crate::provider::Outcome>>,
+) -> crate::provider::Outcome {
+    let provider = *provider;
+    // SAFETY: forwarded.
+    unsafe {
+        let outcome = match start {
+            Start::Alone => alone(context, &provider, request, token),
+            start => parked(task, &provider, request, token, start),
+        };
+        let Some(outcome) = outcome else {
+            // The scheduler failed the operation in W because a request is
+            // pending and unshielded; observing it records the cause.
+            let observed = check_cancel(context, (*request).site);
+            debug_assert_eq!(observed, 1);
+            return crate::provider::CANCELLED;
+        };
+        if let Some(issued) = issued {
+            *issued = Some(outcome);
+        }
+        (provider.deliver)(provider.state, request, outcome)
+    }
+}
+/// Where an operation that does not finish at once leaves the fast path.
+enum Start {
+    /// No scheduler: the thread waits itself (`alone`).
+    Alone,
+    /// Its first `wait` answered Until or Park (Some), or, test-only, the
+    /// scheduler is to make that call (None).
+    Entry(Option<crate::provider::Wait>),
+    /// `issue` answered this step, which is not Done.
+    Issued(crate::provider::Step),
+}
+/// The rest of an operation that parks: in W after its first wait, or in I
+/// after its issue. The provider is copied before the first park.
+#[cold]
+#[inline(never)]
+unsafe fn parked(
+    task: *mut Task,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    token: u64,
+    start: Start,
+) -> Option<crate::provider::Outcome> {
     let mut op = Operation {
         provider: *provider,
         request,
@@ -666,33 +782,48 @@ pub(crate) unsafe fn provider_operation(
         phase: Phase::Entry,
         deadline: 0,
         next: Next::Issue,
+        entered: None,
     };
     // SAFETY: the frame outlives every park; the scheduler clears no field.
     unsafe {
-        (*task).operation = &mut op;
-        park_operation(task);
+        let mut step = match start {
+            Start::Entry(entered) => {
+                op.entered = entered;
+                (*task).operation = &mut op;
+                park_operation(task);
+                None
+            }
+            Start::Issued(step) => Some(step),
+            Start::Alone => unreachable!("an operation alone never parks"),
+        };
         let produced = loop {
-            match op.next {
-                Next::Issue => {
-                    let step = (provider.issue)(provider.state, request, token);
-                    match step.kind {
-                        STEP_DONE => break Some(step.outcome),
-                        STEP_PENDING => {
-                            op.phase = Phase::Issued;
-                            op.deadline = step.deadline_ns;
-                            park_operation(task);
-                        }
-                        _ => crate::process::stop(b"Provider"),
-                    }
+            let step = match step.take() {
+                Some(step) => step,
+                None => match op.next {
+                    Next::Issue => (op.provider.issue)(op.provider.state, request, token),
+                    Next::Cancelled => break None,
+                    Next::Deliver(outcome) => break Some(outcome),
+                },
+            };
+            match step.kind {
+                STEP_DONE => break Some(step.outcome),
+                STEP_PENDING => {
+                    op.phase = Phase::Issued;
+                    op.deadline = step.deadline_ns;
+                    (*task).operation = &mut op;
+                    park_operation(task);
                 }
-                Next::Cancelled => break None,
-                Next::Deliver(outcome) => break Some(outcome),
+                _ => crate::process::stop(b"Provider"),
             }
         };
         (*task).operation = ptr::null_mut();
         produced
     }
 }
+/// Test-only: make the scheduler call the first `wait` (switch out and back),
+/// to compare against the direct call.
+#[cfg(test)]
+thread_local! { pub(crate) static SCHEDULER_ENTRY: Local<bool> = const { Local::new(false) }; }
 unsafe fn park_operation(task: *mut Task) {
     // SAFETY: the active task switches to its scheduler, which reads the
     // operation before any other task runs.

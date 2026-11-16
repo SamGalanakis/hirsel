@@ -39,6 +39,8 @@ type Answer<T> = fn(&mut Rec, u64, u64, usize) -> T;
 struct Rec {
     calls: Vec<Call>,
     events: usize,
+    /// Every scheduler event, in order.
+    log: Vec<Event>,
     wait: Answer<Wait>,
     issue: Answer<Step>,
     resume: Answer<Step>,
@@ -79,6 +81,7 @@ impl Rec {
         Self {
             calls: vec![],
             events: 0,
+            log: vec![],
             wait,
             issue,
             resume,
@@ -192,9 +195,13 @@ unsafe extern "C" fn p_deliver(state: *mut u8, request: *mut Request, outcome: O
     }
     outcome
 }
-unsafe extern "C" fn count_event(state: *mut u8, _: Event) {
+unsafe extern "C" fn count_event(state: *mut u8, event: Event) {
     // SAFETY: see rec.
-    unsafe { rec(state).events += 1 }
+    unsafe {
+        let r = rec(state);
+        r.events += 1;
+        r.log.push(event);
+    }
 }
 unsafe extern "C" fn lifo(_: *mut u8, count: usize) -> usize {
     count - 1
@@ -959,4 +966,209 @@ fn s0_aborted_close_is_not_closed_again() {
     let rec = cancelled_file_op(crate::provider::CLOSE, true);
     assert_eq!(rec.count(FILE_SITE, Cb::Abort(ABORT_CANCEL)), 1);
     assert_eq!(closes(&rec), 1, "only the program's own close was issued");
+}
+// ---- the first wait: direct call against the scheduler switch ----
+
+unsafe extern "C" fn nothing(_: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
+    0
+}
+/// One scheduler turn for the root: a root poll yields only to a runnable
+/// peer, so join an empty task; the turn takes every pending wake.
+unsafe fn tick(context: *mut Context) {
+    // SAFETY: the root spawns and joins its own child.
+    unsafe {
+        let mut unit = 0u8;
+        let layout = TaskLayout {
+            input: ValueLayout {
+                bytes: 0,
+                align: 1,
+                logical: 0,
+                drop: inert,
+            },
+            result: ValueLayout {
+                bytes: 0,
+                align: 1,
+                logical: 0,
+                drop: inert,
+            },
+        };
+        let task = hirsel_core_spawn(context, 64, (&mut unit as *mut u8), nothing, layout).task;
+        assert!(!task.is_null());
+        assert!(!join(context, task));
+    }
+}
+
+/// What a program and its provider observed: every callback with its context
+/// and event position (tokens renamed by first use, since the counter is
+/// process-wide), every scheduler event in order, and every job's result.
+type Trace = (
+    Vec<(Cb, u64, usize, bool, usize)>,
+    Vec<Event>,
+    Vec<(u64, u64, u8, u8)>,
+);
+fn trace(rec: &Rec) -> Trace {
+    let mut seen = vec![];
+    let calls = rec
+        .calls
+        .iter()
+        .map(|c| {
+            let token = match c.cb {
+                Cb::Deliver => usize::MAX,
+                _ => match seen.iter().position(|&t| t == c.token) {
+                    Some(at) => at,
+                    None => {
+                        seen.push(c.token);
+                        seen.len() - 1
+                    }
+                },
+            };
+            (c.cb, c.site, token, c.in_task, c.events)
+        })
+        .collect();
+    let results = rec
+        .results
+        .iter()
+        .map(|&(site, o, check)| (site, o.value, o.status, check))
+        .collect();
+    (calls, rec.log.clone(), results)
+}
+/// The first wait made by the task itself, with no task current, is the call
+/// the scheduler would make right after the task parks (tasks.rs,
+/// provider_operation): no task runs, no event is emitted and no wake is taken
+/// between entry and that call. Oracle: the scheduler-switch path, kept behind
+/// a test-only switch. For programs of two or more tasks, with every wait
+/// answer at entry (Ready, Until past, Park), a ready taken in W and in I, a
+/// cancellation in W, in I and at entry, and both pop orders, the provider's
+/// view (each callback's context and event position) and the event order are
+/// identical.
+#[test]
+fn s0_direct_entry_wait_matches_the_scheduler_switch() {
+    fn mixed_wait(_: &mut Rec, site: u64, _: u64, nth: usize) -> Wait {
+        match (site, nth) {
+            (2, 0) | (4, _) | (6, 0) => Wait {
+                kind: WAIT_PARK,
+                deadline_ns: 0,
+            },
+            (3, 0) => Wait {
+                kind: WAIT_UNTIL,
+                deadline_ns: 1,
+            },
+            _ => Wait::default(),
+        }
+    }
+    fn mixed_issue(_: &mut Rec, site: u64, _: u64, _: usize) -> Step {
+        match site {
+            2 | 5 | 6 => pending(0),
+            _ => done(site),
+        }
+    }
+    /// Ready at entry, Park then a ready in W and in I, Until(past), Park
+    /// cancelled in W, Pending cancelled in I, a clock, and a job cancelled
+    /// before it ran.
+    unsafe fn mixed(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let tasks: Vec<_> = [1, 2, 3, 4, 5, 6]
+                .into_iter()
+                .map(|site| spawn(context, rec, site, READ))
+                .collect();
+            let clock = spawn(context, rec, 9, crate::provider::MONO_NS);
+            let early = spawn(context, rec, 7, READ);
+            hirsel_core_cancel(context, early);
+            while (*rec).count(6, Cb::Wait) == 0 || (*rec).count(5, Cb::Issue) == 0 {
+                tick(context);
+            }
+            // A ready is dropped while its operation is queued, so ready
+            // until the wake is seen.
+            let ready_until = |site: u64, cb: Cb, n: usize| {
+                while (*rec).count(site, cb) < n {
+                    hirsel_core_ready((*rec).token(site));
+                    tick(context);
+                }
+            };
+            ready_until(6, Cb::Issue, 1);
+            ready_until(2, Cb::Issue, 1);
+            ready_until(2, Cb::Resume, 1);
+            hirsel_core_cancel(context, tasks[3]);
+            hirsel_core_cancel(context, tasks[4]);
+            ready_until(6, Cb::Resume, 1);
+            for task in tasks {
+                join(context, task);
+            }
+            join(context, clock);
+            join(context, early);
+        }
+    }
+    /// Every job parks at entry and is readied in one order.
+    unsafe fn readied(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let tasks: Vec<_> = (1..=4)
+                .map(|site| spawn(context, rec, site, READ))
+                .collect();
+            tick(context);
+            for site in [3, 1, 4, 2] {
+                hirsel_core_ready((*rec).token(site));
+            }
+            for task in tasks {
+                assert!(!join(context, task));
+            }
+        }
+    }
+    /// Two jobs whose second issue readies both (F1): woken in one order,
+    /// popped, with last-first choice, in the other. Driven by joins only.
+    unsafe fn joined(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let a = spawn(context, rec, 1, READ);
+            let b = spawn(context, rec, 2, READ);
+            assert!(!join(context, a));
+            assert!(!join(context, b));
+        }
+    }
+    /// (wait, issue, resume, program, pop orders). A yielding root under
+    /// last-first choice is popped again at once, so programs that ready
+    /// from the root run first-in-first-out only.
+    type Program = (
+        Answer<Wait>,
+        Answer<Step>,
+        Answer<Step>,
+        unsafe fn(*mut Context, *mut Rec),
+        &'static [bool],
+    );
+    let programs: [Program; 4] = [
+        (mixed_wait, mixed_issue, done0, mixed, &[false]),
+        (park_first, done0, never, readied, &[false]),
+        (ready, done0, never, readied_ready, &[false, true]),
+        (
+            ready,
+            ready_both_on_second_issue,
+            done0,
+            joined,
+            &[false, true],
+        ),
+    ];
+    /// Ready everywhere: no task parks at entry on the direct path.
+    unsafe fn readied_ready(context: *mut Context, rec: *mut Rec) {
+        unsafe {
+            let tasks: Vec<_> = (1..=4)
+                .map(|site| spawn(context, rec, site, READ))
+                .collect();
+            tick(context);
+            for task in tasks {
+                assert!(!join(context, task));
+            }
+        }
+    }
+    for (at, &(wait, issue, resume, body, orders)) in programs.iter().enumerate() {
+        for &lifo_choice in orders {
+            let traced = |switch: bool| {
+                SCHEDULER_ENTRY.set(switch);
+                let mut rec = Rec::new(wait, issue, resume);
+                run(&mut rec, lifo_choice, body);
+                SCHEDULER_ENTRY.set(false);
+                trace(&rec)
+            };
+            let switched = traced(true);
+            assert!(switched.0.len() >= 8, "program {at} made its calls");
+            assert_eq!(traced(false), switched, "program {at}, lifo {lifo_choice}");
+        }
+    }
 }

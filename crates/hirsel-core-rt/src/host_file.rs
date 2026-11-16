@@ -88,8 +88,10 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
 ) -> Outcome {
     // SAFETY: exclusive operation borrows; no registry borrow spans a callback.
     unsafe {
-        let Some((issued, mut result)) = drive(context, provider, request) else {
-            return crate::provider::CANCELLED;
+        let mut issued = None;
+        let mut result = drive(context, provider, request, Some(&mut issued));
+        let Some(issued) = issued else {
+            return result;
         };
         let provider = *provider;
         if result.status == 0 && result.error == IoError::OK {
@@ -136,15 +138,15 @@ pub unsafe extern "C" fn hirsel_core_host_file(
             (&(*registry).live)[&file]
         };
         (*request).handle = owned.handle;
-        match drive(context, &owned.provider, request) {
-            Some((_, delivered)) => delivered,
-            None => {
-                if (*request).operation == CLOSE {
-                    close(context, owned);
-                }
-                crate::provider::CANCELLED
-            }
+        if (*request).operation != CLOSE {
+            return drive(context, &owned.provider, request, None);
         }
+        let mut issued = None;
+        let result = drive(context, &owned.provider, request, Some(&mut issued));
+        if issued.is_none() {
+            close(context, owned);
+        }
+        result
     }
 }
 

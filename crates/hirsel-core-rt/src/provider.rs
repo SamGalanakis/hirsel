@@ -136,7 +136,7 @@ pub unsafe extern "C" fn hirsel_core_host(
     request: *mut Request,
 ) -> Outcome {
     // SAFETY: forwarded caller contract.
-    unsafe { drive(context, provider, request).map_or(CANCELLED, |(_, delivered)| delivered) }
+    unsafe { drive(context, provider, request, None) }
 }
 
 /// The failure of an operation that ended before issue.
@@ -146,25 +146,28 @@ pub(crate) const CANCELLED: Outcome = Outcome {
     written: 0,
     status: 1,
 };
-/// Run one operation through C, W, I and D. Returns the outcome the provider
-/// produced (issue, resume or abort) and the one `deliver` returned, or None
-/// when the operation ended before issue: in C, cancelled in W, or refused
-/// for bounds. None means the provider never saw the operation issued, so
+/// Run one operation through C, W, I and D. Returns the outcome `deliver`
+/// returned and records in `issued` the one the provider produced (issue,
+/// resume or abort); or returns Cancelled, recording nothing, when the
+/// operation ended before issue: in C, cancelled in W, or refused for bounds.
+/// Nothing recorded means the provider never saw the operation issued, so
 /// whatever it would have consumed is still the caller's (host_file CLOSE).
 /// # Safety
 /// Same contract as `hirsel_core_host`.
+#[inline(always)]
 pub(crate) unsafe fn drive(
     context: *mut Context,
     provider: *const Provider,
     request: *mut Request,
-) -> Option<(Outcome, Outcome)> {
+    issued: Option<&mut Option<Outcome>>,
+) -> Outcome {
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
         let site = (*request).site;
         let operation = (*request).operation;
         if operation != WALL_MS && operation != MONO_NS {
             if crate::tasks::check_cancel(context, site) != 0 {
-                return None;
+                return CANCELLED;
             }
             if operation == MKDTEMP
                 && (*request)
@@ -174,19 +177,10 @@ pub(crate) unsafe fn drive(
                     .is_none_or(|n| n > (*request).buffer.capacity)
             {
                 causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
-                return None;
+                return CANCELLED;
             }
         }
-        let provider = *provider;
-        let Some(produced) = crate::tasks::provider_operation(context, &provider, request) else {
-            // The scheduler failed the operation in W because a request is
-            // pending and unshielded; observing it records the cause.
-            let observed = crate::tasks::check_cancel(context, site);
-            debug_assert_eq!(observed, 1);
-            return None;
-        };
-        let delivered = (provider.deliver)(provider.state, request, produced);
-        Some((produced, delivered))
+        crate::tasks::provider_operation(context, &*provider, request, issued)
     }
 }
 

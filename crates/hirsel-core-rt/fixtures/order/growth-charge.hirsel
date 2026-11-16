@@ -1,0 +1,19 @@
+// CONC-10 CHARGE: growth borrows the block's original payer, so a child that grows
+// a list the root allocated charges the root's budget and records CHARGE for the root.
+type Work:send { xs: List[u64], out: Stdout }
+fn child(take x: Work) -> u64 waits {
+    let Work(xs: ys, out: out) = take x
+    let mut xs = take ys
+    let mut i = 0u64
+    while i < 40u64 { let _ = list.push(mut xs, i); i += 1 }
+    result.unwrap(stdout.write(out, "c"))
+    list.len(xs)
+}
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 7u64))
+    let h = result.unwrap(task.spawn(tasks, bytes 4096, Work(xs: take xs, out: out), child))
+    let _ = task.join(take h)
+    result.unwrap(stdout.write(out, "r"))
+    Ok(())
+}

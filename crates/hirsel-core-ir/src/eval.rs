@@ -510,7 +510,7 @@ struct Footprint {
 // is ready. So the event order is the native order by construction.
 
 use event::*;
-/// The CONC-10 event kinds, numbered as the native runtime's poll recorder writes them.
+/// The CONC-10 event kinds: the one table native and the evaluator share.
 pub use hirsel_core_layout::event;
 /// One CONC-10 event: its kind, the task that performed it, its object and value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1064,8 +1064,11 @@ impl Machine<'_> {
     /// Record an event of the running task (CONC-10). A poll uses one of the
     /// task's polls; the last one gives a ready peer the turn (native `poll_event`).
     fn event(&mut self, kind: u8, object: u64, value: u64) {
-        self.drain_refunds();
         let k = self.sched.current;
+        if k >= self.sched.tasks.len() {
+            return;
+        }
+        self.drain_refunds();
         let task = self.sched.tasks[k].id;
         self.sched.events.push(Event {
             kind,
@@ -1588,7 +1591,18 @@ impl Machine<'_> {
         if owner == self.sched.current || owner >= self.sched.tasks.len() {
             self.limits[l].used -= n;
         } else {
+            if n != 0 {
+                self.event(REFUND, self.sched.tasks[owner].id, n);
+            }
             self.sched.tasks[owner].refunds.push((l, n));
+        }
+    }
+    /// CONC-10: growth charged to a limit another task owns is an event of the
+    /// growing task (native `allocate_like`).
+    fn foreign_charge(&mut self, l: usize, n: u64) {
+        let owner = self.limits[self.find(l)].owner;
+        if owner != self.sched.current && owner < self.sched.tasks.len() {
+            self.event(CHARGE, self.sched.tasks[owner].id, n);
         }
     }
     /// Apply the running task's pending refunds, each to the live limit its record
@@ -1631,6 +1645,10 @@ impl Machine<'_> {
         self.settle(l);
         let p = self.find(self.limits[l].parent.expect("not the root"));
         let unused = self.limits[l].cap - self.limits[l].used;
+        let owner = self.limits[p].owner;
+        if unused != 0 && owner != self.sched.current && owner < self.sched.tasks.len() {
+            self.event(REFUND, self.sched.tasks[owner].id, unused);
+        }
         self.limits[p].used -= unused;
         self.limits[l].forward = Some(p);
     }
@@ -2077,6 +2095,9 @@ impl Machine<'_> {
         self.edge(node, &FieldTy::Rc(ty), "a counted node");
         let count = self.load(node, 8) - 1;
         self.store(node, 8, count);
+        if self.mem[split(node).0].counted == Some(Counted::Arc) {
+            self.event(ARC_RELEASE, 0, u64::from(count == 0));
+        }
         if count == 0 {
             let mut scratch = Task {
                 limits: Vec::new(),
@@ -3106,9 +3127,15 @@ impl Machine<'_> {
                             _ => None,
                         };
                         let p = self.block(vals[size.index()], Some(l), n, res);
+                        if matches!(place, AllocPlace::Like(_)) {
+                            self.foreign_charge(l, n);
+                        }
                         if let Some(count) = kind.counted() {
                             self.mem[split(p).0].counted = Some(count);
                             self.store(p, 8, 1);
+                            if count == Counted::Arc {
+                                self.event(ARC_NEW, 0, 1);
+                            }
                         }
                         self.mem[split(p).0].class =
                             Some(kind.cleanup(&self.m.types, &self.recipes));
@@ -3271,6 +3298,7 @@ impl Machine<'_> {
                             "grow to a block that does not hold the carrier's elements"
                         );
                         let p = self.block(vals[size.index()], Some(l), n, None);
+                        self.foreign_charge(l, n);
                         let nb = split(p).0;
                         self.mem[nb].class =
                             Some(cleanup_class(&self.m.types, &self.recipes, &edge));
@@ -3300,6 +3328,9 @@ impl Machine<'_> {
                 self.kind(p, kind);
                 let c = self.load(p, 8);
                 self.store(p, 8, c + 1);
+                if kind == Counted::Arc {
+                    self.event(ARC_SHARE, 0, c + 1);
+                }
             }
             Inst::Release { node, ty, kind } => {
                 self.kind(vals[node.index()], kind);

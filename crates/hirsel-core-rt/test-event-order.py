@@ -4,15 +4,13 @@
 Each fixture in fixtures/order runs natively (cranelift) under the recorder with
 HIRSEL_POLL_FIRST, which always runs the first runnable candidate: native's default
 FIFO rule. The same program runs on the evaluator (hirsel-core-contract-eval). Their
-stdout and their CONC-10 event lists must be equal.
+stdout and their whole CONC-10 event lists must be equal: every kind, none dropped.
+Kind numbers come from the published header.
 
 Normalisation, and why each part is engine-local rather than semantic:
-- Arc and ledger events (ARC_NEW/SHARE/RELEASE, REFUND, CHARGE) are dropped: the
-  evaluator inlines allocation differently, and CONC-13's Arc order has its own
-  exact check in test-polls.py.
 - CANCELLED and CHECK_CANCEL carry a source site, numbered per engine.
 - SPAWN carries the child's frame size, which is a layout fact.
-Kind numbers come from the published header.
+- CAPACITY's object is the requested charge, a value; it is kept as is.
 - Task and object ids are renamed by first appearance.
 
 A run where every task waits is not compared: the evaluator reports it as Stuck,
@@ -34,7 +32,6 @@ FIXTURES = Path(__file__).resolve().parent / 'fixtures/order'
 RECORDER = Path(__file__).resolve().parent / 'fixtures/polls/recorder.c'
 KIND = {name: int(n) for name, n in re.findall(
     r'HIRSEL_CORE_EVENT_(\w+)=(\d+)', (ROOT / 'crates/hirsel-core-rt/include/hirsel_core_rt_host.h').read_text())}
-DROPPED = {KIND[k] for k in ('ARC_NEW', 'ARC_SHARE', 'ARC_RELEASE', 'REFUND', 'CHARGE')}
 SITED = {KIND['CANCELLED'], KIND['CHECK_CANCEL']}
 SPAWN = KIND['SPAWN']
 
@@ -42,14 +39,12 @@ SPAWN = KIND['SPAWN']
 def normalized(events):
     names, out = {}, []
     for kind, task, obj, value in events:
-        if kind in DROPPED:
-            continue
         if kind in SITED:
             value = 'site'
         elif kind == SPAWN:
             value = 'frame'
         task = names.setdefault(('id', task), len(names))
-        if kind not in SITED and kind != KIND['CAPACITY']:  # its object is the request
+        if kind not in SITED and kind != KIND['CAPACITY']:
             obj = names.setdefault(('id', obj), len(names))
         out.append((kind, task, obj, value))
     return out
@@ -87,17 +82,29 @@ def main():
     failures = []
     for fixture in fixtures:
         text = fixture.read_text()
-        header = re.search(r'pub fn main\(([^)]*)\)', text)[1]
+        found = re.search(r'pub fn main\(([^)]*)\)[^{]*?(waits)?\s*\{', text)
+        header = found.group(1)
         names = ', '.join(a.split(':')[0].strip() for a in header.split(',') if a.strip())
         folder = work / fixture.stem
         folder.mkdir()
         # The evaluator's entry returns a word; `main` returns its Result through a place.
+        def wrapped(source, waits):
+            return source + (f'\npub fn evaluator_main({header}) -> u64{" waits" if waits else ""} '
+                             f'{{ match main({names}) {{ Ok(()) => 1u64, Error(_) => 0u64 }} }}\n')
         adapted = folder / 'main.hirsel'
-        adapted.write_text(text + f'\npub fn evaluator_main({header}) -> u64 waits '
-                           f'{{ match main({names}) {{ Ok(()) => 1u64, Error(_) => 0u64 }} }}\n')
+        adapted.write_text(wrapped(text, found.group(2)))
         inputs = folder / 'inputs.json'
         inputs.write_text(json.dumps(manifest(adapted)))
         ran = subprocess.run([str(args.evaluator), str(inputs), 'app@1/main/evaluator_main'], capture_output=True, timeout=120)
+        # The evaluator checks `main` as an ordinary function, not as the entry LANG-8
+        # exempts: one declared `waits` that waits on nothing runs there without it.
+        if found.group(2) and b'declared `waits` but calls nothing that waits' in ran.stdout:
+            ordinary = folder / 'evaluator' / 'main.hirsel'
+            ordinary.parent.mkdir()
+            ordinary.write_text(wrapped(text[:found.start(2)] + text[found.end(2):], None))
+            (ordinary.parent / 'inputs.json').write_text(json.dumps(manifest(ordinary)))
+            ran = subprocess.run([str(args.evaluator), str(ordinary.parent / 'inputs.json'),
+                                  'app@1/main/evaluator_main'], capture_output=True, timeout=120)
         report = json.loads(ran.stdout)
         if report.get('outcome', {}).get('kind') != 'returned' or report['outcome'].get('values') != [1]:
             failures.append(f'{fixture.stem}: evaluator {report.get("outcome")}')
@@ -106,7 +113,7 @@ def main():
                    '--backend', 'cranelift', '--runtime', str(args.runtime), '--store', str(work / 'store'),
                    '--cc', str(linker), '--json', '-o', str(folder / 'program')]
         for grant in ('Tasks', 'Clock', 'Stdout'):
-            if f': {grant}' in header:
+            if re.search(rf':\s*{grant}\b', header):
                 command += ['--grant', grant]
         while os.getloadavg()[0] > 32:
             time.sleep(10)

@@ -542,12 +542,13 @@ impl Substitution<'_> {
             ShapeBody::Record(xs) => fields(xs, self),
             ShapeBody::Variant(cases) => cases.iter_mut().for_each(|c| fields(&mut c.fields, self)),
         }
-        // A generic row's finalizer and clone body are the instances at the
-        // substituted arguments.
+        // A generic row's finalizer, clone body and codec maker are the instances at
+        // the substituted arguments.
         shape.finalizer = shape
             .finalizer
             .map(|f| FuncRef(self.function(FuncId(f.0)).0));
         shape.clone = shape.clone.map(|f| FuncRef(self.function(FuncId(f.0)).0));
+        shape.codec = shape.codec.map(|f| FuncRef(self.function(FuncId(f.0)).0));
         self.module.types[row.index()] = shape;
         crate::layout::word_carriage(&mut self.module.types, row.index());
         row

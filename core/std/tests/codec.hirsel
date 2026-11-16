@@ -1688,6 +1688,25 @@ fn derived_generic() -> (bool, bool, u64, u64, (u64, bool, bool, bool, bool), (b
     (written, schema, codec.least(c), held, nested, strung)
 }
 
+type DBox[T]: codec {
+    v: T
+}
+
+// A generic whose field nests two generics at its parameter: DNest[u64]'s instance reaches
+// DPair[DBox[u64]], whose DBox[u64] row is built by substitution there, so DPair's derived
+// `of[T]` finds DBox[u64]'s maker only on that row. Two u64s by hand, least 16, and back.
+type DNest[T]: codec {
+    inner: DPair[DBox[T]]
+}
+
+// expect: run derived_nested_generic() = (true, true, 16)
+fn derived_nested_generic() -> (bool, bool, u64) {
+    let c: codec.Codec[DNest[u64]] = codec.of()
+    let x: DNest[u64] = DNest(inner: DPair(left: DBox(v: 1), right: DBox(v: 2)))
+    let two = unhex("0100000000000000 0200000000000000")
+    (enc(c, x) == two, again(c, two), codec.least(c))
+}
+
 // A recursive type (EXPANSION 5), derived: its decode is the frame loop.
 type DTree: codec {
     label: u64,

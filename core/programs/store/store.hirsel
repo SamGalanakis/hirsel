@@ -10608,8 +10608,8 @@ fn journal_mark(t: Ticket) -> u64 {
 // re-encodes the data section only, so the reply and CALL are gone at reopen.
 pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = disk_test_directory(d)
-    let mut options = defaults()
-    options.resident_limit = 67108864
+    let mut options = journal_crash_options()
+    options.resident_limit = 4194304
     let s = result.unwrap(copied(string.as_bytes("s")))
     let mut before = result.unwrap(open(tasks, dir, c, r, options))
     let first = match result.unwrap(admit(mut before, s, 0)) { Admitted(t) => t, _ => return false }

@@ -222,7 +222,7 @@
         "digest_bytes": 7.771740652569668,
         "index_calls": 1.211118890911637,
         "key_probes": 0.09782943565326985,
-        "row_demands": 0.02940764598795687,
+        "row_demands": 0.03022433832796527,
         "nodes_decoded": 5.601456378658451e-05
       }
     }
@@ -788,6 +788,24 @@
         "/tmp/spec-v1-880-land78.log",
         "/tmp/core-check-callables-913-s5c-land.log"
       ]
+    },
+    {
+      "reason": "std.tally adds an eighteenth std module (7 operations); suite-edit demands its rows (1058, against a ceiling of 1050 at 35705 tokens). Only row_demands receives the observed work plus 2 percent; the record and digest counters (already 69 after 012086d0), byte counters, source-stage ceilings and suite target budgets stay unchanged.",
+      "changes": {
+        "suite-edit": {
+          "row_demands": {
+            "before": 0.02940764598795687,
+            "after": 0.03022433832796527
+          }
+        }
+      },
+      "observation": {
+        "row_demands": 1058,
+        "records_opened": 69,
+        "digests": 69,
+        "tokens": 35705
+      },
+      "evidence": "std-seed-api-889/tally/front-cost.log"
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

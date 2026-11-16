@@ -88,7 +88,7 @@ pub(crate) fn prelink(
     process.arg("-o").arg(&output);
     crate::native::command(&mut process)?;
     let bytes = std::fs::read(&output)?;
-    let (unit, file) = store.put_bare(&bytes)?;
+    let (unit, file) = store.put_bare(crate::native_object::object_name(key), &bytes)?;
     store.put_keyed(
         key,
         &encode(&Root {

@@ -1,13 +1,18 @@
-//! Code and source-neutral rows share one native cache selection and envelope.
+//! An emitted object, its debug rows and the record naming them, all stored
+//! under names derived from the object's key: the record framed under the key
+//! itself, the object bare under [`object_name`] and the debug rows framed
+//! under [`debug_name`]. Every frame carries its key and a schema that its
+//! reader compares, and the object's checksum travels in the record, so a
+//! record, debug row or object moved under another key's name is a miss.
 use crate::store::Bare;
-use crate::{Store, decode, encode, native};
+use crate::{Store, decode, encode};
 use hirsel_core_ids::ContentHash;
-use hirsel_core_ir::source::NativeObject;
+use hirsel_core_ir::source::{NativeDebug, NativeObject};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io;
 
-pub(crate) const SCHEMA: u32 = 2;
+pub(crate) const SCHEMA: u32 = 3;
 #[derive(Serialize, Deserialize)]
 struct Root {
     schema: u32,
@@ -15,25 +20,52 @@ struct Root {
     debug: Option<ContentHash>,
 }
 
-/// Publish an emitted object and its debug rows and select them under `key`:
-/// the object, and the descriptor its bytes were written through.
+/// The name of the bare object stored for the record under `key`.
+pub(crate) fn object_name(key: ContentHash) -> ContentHash {
+    ContentHash::of_parts("hirsel.core-object-file.v1", [&key.0[..]])
+}
+/// The name of the debug rows stored for the record under `key`.
+fn debug_name(key: ContentHash) -> ContentHash {
+    ContentHash::of_parts("hirsel.core-object-debug.v1", [&key.0[..]])
+}
+const DEBUG_SCHEMA: u32 = 1;
+
+/// Store `native`'s object and debug rows under the names `key` derives: the
+/// object, the debug rows' name and the descriptor the object's bytes were
+/// written through.
+fn put_parts(
+    store: &Store,
+    key: ContentHash,
+    native: &NativeObject,
+) -> io::Result<(Bare, Option<ContentHash>, File)> {
+    let (object, file) = store.put_bare(object_name(key), &native.bytes)?;
+    let debug = match &native.debug {
+        Some(debug) => {
+            let name = debug_name(key);
+            store.put_keyed(name, &encode(&(DEBUG_SCHEMA, debug))?)?;
+            Some(name)
+        }
+        None => None,
+    };
+    Ok((object, debug, file))
+}
+
+/// Publish an emitted object and its debug rows with their record under
+/// `key`: the object, and the descriptor its bytes were written through.
 pub(crate) fn publish(
     store: &Store,
     key: ContentHash,
     native: &NativeObject,
 ) -> io::Result<(Bare, File)> {
-    let (object, file) = store.put_bare(&native.bytes)?;
-    let debug = native
-        .debug
-        .as_ref()
-        .map(|debug| encode(debug).and_then(|bytes| store.put(&bytes)))
-        .transpose()?;
-    let root = store.put(&encode(&Root {
-        schema: SCHEMA,
-        object,
-        debug,
-    })?)?;
-    store.select(&native::selection(key), root)?;
+    let (object, debug, file) = put_parts(store, key, native)?;
+    store.put_keyed(
+        key,
+        &encode(&Root {
+            schema: SCHEMA,
+            object,
+            debug,
+        })?,
+    )?;
     Ok((object, file))
 }
 
@@ -41,38 +73,30 @@ pub(crate) fn path(store: &Store, identity: ContentHash) -> std::path::PathBuf {
     store.path(identity)
 }
 
-/// The object selected under `key` when every part checks, with the
+/// The object stored under `key` when every part checks, with the
 /// descriptor its bytes were checked through; the link hands that descriptor
 /// to the linker.
 pub(crate) fn load(
     store: &Store,
     key: ContentHash,
 ) -> io::Result<Option<(Bare, NativeObject, File)>> {
-    let Some(identity) = store.selection(&native::selection(key))? else {
-        return Ok(None);
-    };
-    let Some(bytes) = store.get(identity)? else {
+    let Some(bytes) = store.get(key)? else {
         return Ok(None);
     };
     let Some(root) = decode::<Root>(&bytes) else {
         return Ok(None);
     };
-    if root.schema != SCHEMA {
+    if root.schema != SCHEMA || root.object.address != object_name(key) {
         return Ok(None);
     }
     let Some((bytes, file)) = store.get_bare(root.object)? else {
         return Ok(None);
     };
     let debug = match root.debug {
-        Some(identity) => {
-            let Some(bytes) = store.get(identity)? else {
-                return Ok(None);
-            };
-            let Some(debug) = decode(&bytes) else {
-                return Ok(None);
-            };
-            Some(debug)
-        }
+        Some(name) => match load_debug(store, name)? {
+            Some(debug) => Some(debug),
+            None => return Ok(None),
+        },
         None => None,
     };
     Ok(Some((root.object, NativeObject { bytes, debug }, file)))
@@ -100,42 +124,37 @@ pub(crate) struct Instance {
     /// Every closure a child's arguments name, deduplicated, by hash.
     pub closures: Vec<std::sync::Arc<hirsel_core_ir::Closure>>,
 }
-pub(crate) const INSTANCE_SCHEMA: u32 = 1;
+pub(crate) const INSTANCE_SCHEMA: u32 = 2;
 
-/// Publish an emitted instance's object, debug rows and record, and select the
-/// record under its key; the object, the debug rows' address and the
-/// descriptor the object's bytes were written through.
+/// Publish an emitted instance's object, debug rows and record under its
+/// key; the object, the debug rows' name and the descriptor the object's
+/// bytes were written through.
 pub(crate) fn publish_instance(
     store: &Store,
     key: ContentHash,
     object: &NativeObject,
     mut record: Instance,
 ) -> io::Result<(Bare, Option<ContentHash>, File)> {
-    let (bare, file) = store.put_bare(&object.bytes)?;
+    let (bare, debug, file) = put_parts(store, key, object)?;
     record.object = bare;
-    record.debug = object
-        .debug
-        .as_ref()
-        .map(|debug| encode(debug).and_then(|bytes| store.put(&bytes)))
-        .transpose()?;
-    let address = store.put(&encode(&record)?)?;
-    store.select(&native::selection(key), address)?;
+    record.debug = debug;
+    store.put_keyed(key, &encode(&record)?)?;
     Ok((record.object, record.debug, file))
 }
 
-/// The record selected under `key`, when it decodes and every closure's hash
-/// checks against its rows. Anything else is a miss.
+/// The record stored under `key`, when it decodes, names its key's object and
+/// debug rows, and every closure's hash checks against its rows. Anything
+/// else is a miss.
 pub(crate) fn load_instance(store: &Store, key: ContentHash) -> io::Result<Option<Instance>> {
-    let Some(address) = store.selection(&native::selection(key))? else {
-        return Ok(None);
-    };
-    let Some(bytes) = store.get(address)? else {
+    let Some(bytes) = store.get(key)? else {
         return Ok(None);
     };
     let Some(record) = decode::<Instance>(&bytes) else {
         return Ok(None);
     };
     let sound = record.schema == INSTANCE_SCHEMA
+        && record.object.address == object_name(key)
+        && record.debug.is_none_or(|d| d == debug_name(key))
         && record
             .closures
             .iter()
@@ -143,42 +162,42 @@ pub(crate) fn load_instance(store: &Store, key: ContentHash) -> io::Result<Optio
     Ok(sound.then_some(record))
 }
 
-/// Stored debug rows by their record's address; a damaged record is none.
-pub(crate) fn load_debug(
-    store: &Store,
-    address: ContentHash,
-) -> io::Result<Option<hirsel_core_ir::source::NativeDebug>> {
-    Ok(store.get(address)?.and_then(|bytes| decode(&bytes)))
+/// Stored debug rows by their name; a damaged or foreign record is none.
+pub(crate) fn load_debug(store: &Store, name: ContentHash) -> io::Result<Option<NativeDebug>> {
+    Ok(store
+        .get(name)?
+        .and_then(|bytes| decode::<(u32, NativeDebug)>(&bytes))
+        .filter(|(schema, _)| *schema == DEBUG_SCHEMA)
+        .map(|(_, debug)| debug))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use hirsel_core_ir::source::*;
-    /// Valid object and instance selections under each other's keys are
-    /// misses: a selection names the key it was made under.
+    fn swap(store: &Store, a: ContentHash, b: ContentHash) {
+        let held = store.path(a).with_extension("swap");
+        std::fs::rename(store.path(a), &held).unwrap();
+        std::fs::rename(store.path(b), store.path(a)).unwrap();
+        std::fs::rename(&held, store.path(b)).unwrap();
+    }
+    /// Each kind stored under a key's name, moved under another key's name,
+    /// is a miss: an object record, an instance record, a bare object and
+    /// debug rows. Frames carry their key and schema; a bare object's check
+    /// travels in the record that names it.
     #[test]
-    fn records_selected_under_each_others_keys_are_misses() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(dir.path()).unwrap();
-        let (a, b) = (ContentHash::of_bytes(b"a"), ContentHash::of_bytes(b"b"));
+    fn records_stored_under_each_others_names_are_misses() {
         let object = |bytes: &[u8]| NativeObject {
             bytes: bytes.to_vec(),
-            debug: None,
+            debug: Some(NativeDebug {
+                items: vec![hirsel_core_ids::DefPath::core(
+                    std::str::from_utf8(bytes).unwrap(),
+                )],
+                sections: vec![],
+                sequences: vec![],
+                scopes: vec![],
+            }),
         };
-        let swap = |a, b| {
-            let name = |key| dir.path().join(native::selection(key));
-            let held = dir.path().join("swap");
-            std::fs::rename(name(a), &held).unwrap();
-            std::fs::rename(name(b), name(a)).unwrap();
-            std::fs::rename(&held, name(b)).unwrap();
-        };
-        publish(&store, a, &object(b"object a")).unwrap();
-        publish(&store, b, &object(b"object b")).unwrap();
-        swap(a, b);
-        assert!(load(&store, a).unwrap().is_none(), "object a");
-        assert!(load(&store, b).unwrap().is_none(), "object b");
-        let (c, d) = (ContentHash::of_bytes(b"c"), ContentHash::of_bytes(b"d"));
         let instance = |name: &str| Instance {
             schema: INSTANCE_SCHEMA,
             identity: hirsel_core_ir::Identity::plain(hirsel_core_ids::DefPath::core(name)),
@@ -190,11 +209,40 @@ mod tests {
             items: vec![],
             closures: vec![],
         };
-        publish_instance(&store, c, &object(b"instance c"), instance("c")).unwrap();
-        publish_instance(&store, d, &object(b"instance d"), instance("d")).unwrap();
-        swap(c, d);
-        assert!(load_instance(&store, c).unwrap().is_none(), "instance c");
-        assert!(load_instance(&store, d).unwrap().is_none(), "instance d");
+        let (a, b) = (ContentHash::of_bytes(b"a"), ContentHash::of_bytes(b"b"));
+        let fresh = || {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::new(dir.path()).unwrap();
+            (dir, store)
+        };
+        type Name = fn(ContentHash) -> ContentHash;
+        let kinds: [(&str, Name); 3] = [
+            ("record", |k| k),
+            ("bare object", object_name),
+            ("debug rows", debug_name),
+        ];
+        for (kind, name) in kinds {
+            let (_dir, store) = fresh();
+            // Object records: the link reads the object and debug rows.
+            publish(&store, a, &object(b"a")).unwrap();
+            publish(&store, b, &object(b"b")).unwrap();
+            swap(&store, name(a), name(b));
+            assert!(load(&store, a).unwrap().is_none(), "object {kind} a");
+            assert!(load(&store, b).unwrap().is_none(), "object {kind} b");
+            // Instance records: a hit names the object and debug rows, which
+            // the link reads through the record's check and name.
+            let (_dir, store) = fresh();
+            publish_instance(&store, a, &object(b"a"), instance("a")).unwrap();
+            publish_instance(&store, b, &object(b"b"), instance("b")).unwrap();
+            swap(&store, name(a), name(b));
+            for key in [a, b] {
+                let read = load_instance(&store, key).unwrap().is_some_and(|r| {
+                    store.get_bare(r.object).unwrap().is_some()
+                        && load_debug(&store, r.debug.unwrap()).unwrap().is_some()
+                });
+                assert!(!read, "instance {kind} {key:?}");
+            }
+        }
     }
     #[test]
     fn native_object_caches_unchanged_code_and_optional_rows_atomically() {
@@ -230,12 +278,6 @@ mod tests {
             assert_eq!(object, warm);
             let bytes = std::fs::read(path(&store, loaded.address)).unwrap();
             assert_eq!(bytes, object.bytes);
-            let old = store.put(&object.bytes).unwrap();
-            store.select(&native::selection(key), old).unwrap();
-            assert!(
-                load(&store, key).unwrap().is_none(),
-                "no old object-only representation"
-            );
             publish(&store, key, &object).unwrap();
             assert_eq!(load(&store, key).unwrap().unwrap().1, object);
         }

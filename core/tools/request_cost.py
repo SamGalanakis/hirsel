@@ -1,6 +1,7 @@
 """Shared request-cost-design-948 manifests and native build command (§1).
 
-The suite edit inserts `let _ = 0u8` in dispatch on an unedited store.
+The suite edit inserts `let _ = 0u8` in dispatch on an unedited store; the
+signature edit makes `helper.named` public.
 This module is used by both the design experiment and the front land gate.
 """
 import copy
@@ -31,6 +32,16 @@ def manifests(root, out):
     changed = copy.deepcopy(spec)
     next(s for s in changed['packages'][-1]['sources'] if s['modules'] == ['suite'])['file'] = str(edited)
     (out / 'suite-edited-inputs.json').write_text(json.dumps(changed))
+    # The signature edit: one item's header changes (helper.named becomes
+    # public) and nothing else, so every body key is derived again (B2's shape).
+    helper = next(s for s in spec['packages'][-1]['sources'] if s['modules'] == ['helper'])
+    header = Path(helper['file']).read_text()
+    assert header.count('\nfn named[') == 1
+    signature = out / 'helper-signature.hirsel'
+    signature.write_text(header.replace('\nfn named[', '\npub fn named['))
+    published = copy.deepcopy(spec)
+    next(s for s in published['packages'][-1]['sources'] if s['modules'] == ['helper'])['file'] = str(signature)
+    (out / 'suite-signature-inputs.json').write_text(json.dumps(published))
 
 
 def command(compiler, runtime, out, manifest, entry, store, tag, cc, profile_front=False):

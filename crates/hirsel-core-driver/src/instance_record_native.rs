@@ -249,7 +249,7 @@ fn instance_records(store: &Store, root: &Path) -> Vec<(ContentHash, crate::nati
 /// Law (§11.4, closure corruption): a hit's closures feed its children's
 /// arguments, so a record is a hit only while each closure's rows hash to the
 /// hash it is filed under. `get`'s record is forged to carry `Q`'s rows under
-/// `P`'s closure hash, re-put and selected under its key, and `echo[P]`'s
+/// `P`'s closure hash, stored again under its key, and `echo[P]`'s
 /// record is evicted: the forged parent misses, and the build equals a fresh
 /// store's. Mutant: no rehash on decode, so `echo[P]` is materialised on
 /// `Q`'s rows, red.
@@ -299,8 +299,7 @@ fn a_forged_closure_misses_its_parent() {
         .unwrap()
         .key(&parent.identity, parent.own)
         .unwrap();
-    let forged = store.put(&encode(&parent).unwrap()).unwrap();
-    store.select(&selection(key), forged).unwrap();
+    store.put_keyed(key, &encode(&parent).unwrap()).unwrap();
     std::fs::remove_file(store.path(child(p.hash).unwrap())).unwrap();
     let rebuilt = executable_bytes(&record_check(APP, &core, dir.path(), "store"), &options);
     let fresh = executable_bytes(

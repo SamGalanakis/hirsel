@@ -3,8 +3,10 @@
 //!
 //! Every byte a read uses is covered by an xxh3-64 checksum it verifies:
 //! records and selections carry theirs in the frame, a bare object's sits
-//! beside its address in the record that names it (`Bare`). SHA-256 is
-//! computed once, at write, only to name content. Nothing is synced: a torn,
+//! beside its name in the record that names it (`Bare`). SHA-256 is
+//! computed once, at write, only to name content; keyed records, and the
+//! objects and debug rows named from their keys, hash no bytes to be named.
+//! Nothing is synced: a torn,
 //! short, zero-filled or missing file after a power loss fails its check or
 //! is absent, so it is a miss and is rebuilt.
 use hirsel_core_ids::ContentHash;
@@ -71,7 +73,7 @@ pub(crate) fn checksum(bytes: &[u8]) -> u64 {
 fn word(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }
-/// A bare object's address and the checksum a read verifies: the record that
+/// A bare object's name and the checksum a read verifies: the record that
 /// names the object carries both, so the object's own bytes stay the plain
 /// file a linker reads.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -351,16 +353,18 @@ impl Store {
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentHash> {
         self.archive(|writer| writer.write_all(bytes))
     }
-    /// Publish an ELF/object payload under its raw content hash. Unlike an
-    /// archive record, the file is passed directly to native linkers by path,
-    /// so its checksum travels in the record that names it.
+    /// Publish an ELF/object payload under `name`, which its caller derives
+    /// from the key of the record that names it, never from its bytes. The
+    /// file is passed directly to native linkers by path, so it carries no
+    /// frame: its checksum travels in that record, and a file at the name
+    /// whose bytes are not the record's fails the read check, a miss.
     /// The bytes always replace the file by a rename: a file already at the
     /// path may be one whose check just failed, and an existing name says
     /// nothing about its bytes. The descriptor returned is the one the bytes
     /// were written through.
-    pub(crate) fn put_bare(&self, bytes: &[u8]) -> io::Result<(Bare, File)> {
+    pub(crate) fn put_bare(&self, name: ContentHash, bytes: &[u8]) -> io::Result<(Bare, File)> {
         let bare = Bare {
-            address: ContentHash(Sha256::digest(bytes).into()),
+            address: name,
             check: checksum(bytes),
         };
         let file = self.publish_held(&self.path(bare.address), bytes)?;

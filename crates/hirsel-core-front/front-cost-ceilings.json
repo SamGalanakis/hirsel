@@ -60,11 +60,11 @@
     },
     "suite-edit": {
       "instructions_per_token": {
-        "parse": 445.08612239182185,
+        "parse": 445.0609158381179,
         "index": 11.763058395182748,
         "resolve": 254.41534799047753,
         "input counts": 8.46380058815292,
-        "declarations": 109.30401904495169,
+        "declarations": 109.0463520515334,
         "body keys/new": 71.3457498949727,
         "body keys/for_body": 10.175045511833076,
         "body keys": 81.51799467861645,

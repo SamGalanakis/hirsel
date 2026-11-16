@@ -18,7 +18,7 @@ fn account_take(b: Bytes, mut at: u64) -> Result[Account, std.codec.Stop] {
     Ok(Account(id: id, owner: take owner, balance: balance))
 }
 
-fn account_schema(mut s: std.codec.Schema) -> Result[(), Capacity] {
+fn account_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Account]) -> Result[(), Capacity] {
     std.codec.define(mut s, "store.bench.Account", 0)?
     if std.codec.record(mut s, 3)? {
         return Ok(())

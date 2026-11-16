@@ -2034,7 +2034,7 @@ fn old_take(b: Bytes, mut at: u64) -> Result[OldAccount, std.codec.Stop] {
     Ok(OldAccount(balance: std.codec.take_u64(b, mut at)?))
 }
 
-fn old_schema(mut s: std.codec.Schema) -> Result[(), Capacity] {
+fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[OldAccount]) -> Result[(), Capacity] {
     std.codec.define(mut s, "store.tests.Account", 0)?
     if std.codec.record(mut s, 1)? {
         return Ok(())
@@ -2056,7 +2056,7 @@ fn new_take(b: Bytes, mut at: u64) -> Result[NewAccount, std.codec.Stop] {
     Ok(NewAccount(balance: balance, bonus: bonus))
 }
 
-fn new_schema(mut s: std.codec.Schema) -> Result[(), Capacity] {
+fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[NewAccount]) -> Result[(), Capacity] {
     std.codec.define(mut s, "store.tests.Account", 0)?
     if std.codec.record(mut s, 2)? {
         return Ok(())

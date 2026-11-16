@@ -66,8 +66,9 @@ def main():
                     # belong to 914 and ride S1. Execute every eligible law;
                     # distinguish blocked assembly from an executed answer.
                     error = report.get('error', '')
-                    blocked = (error == 'generic source body is incomplete'
-                               or re.fullmatch(r'not well formed: f\d+: b\d+: direct call through another signature', error))
+                    blocked = (name in {'schema_numbers', 'drop_recreate', 'typed_resident', 'typed_model'}
+                               and (error == 'generic source body is incomplete'
+                                    or re.fullmatch(r'not well formed: f\d+: b\d+: direct call through another signature', error)))
                     rows.append(dict(engine=engine, law=name, passed=True if good else None if blocked else False,
                                      blocked='core-ops-914' if blocked else None, result=report))
                     status = 'PASS' if good else 'BLOCKED by evaluator assembly (914)' if blocked else 'FAIL'

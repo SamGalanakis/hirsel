@@ -547,7 +547,9 @@ impl Machine<'_> {
                 ok(0, 0)
             }
             HostOp::WallMs | HostOp::MonoNs => {
-                self.world.clock += 1;
+                // The host clock is monotonic and deadline arithmetic cannot
+                // turn a maximum deadline into an evaluator panic (CONC-7).
+                self.world.clock = self.world.clock.saturating_add(1);
                 vec![self.world.clock - 1]
             }
             HostOp::Stdout | HostOp::Stderr => {
@@ -1515,7 +1517,20 @@ impl Machine<'_> {
             }
             RtOp::CauseNext => vec![self.load(a[0] + CELL_NEXT, 8)],
             RtOp::CauseValue => vec![a[0]],
-            RtOp::Cancel | RtOp::CheckCancel => vec![], // every child has already ended
+            RtOp::Cancel => {
+                let i = a[0].checked_sub(TASK_BASE).expect("cancel of a task") as usize;
+                if let Some(deferred) = self.children[i].deferred.take() {
+                    self.end_limit(deferred.limit);
+                    self.children[i].status = 2;
+                    self.children[i].chain = vec![Cause {
+                        kind: "Cancelled",
+                        message: [0; 3],
+                        site: None,
+                    }];
+                }
+                vec![]
+            }
+            RtOp::CheckCancel => vec![], // completed children have no pending request
             // Isolation (crate docs): a reservation on entry, set aside with the
             // active chain; refunded when the body returns; on a caught failure the
             // chain becomes a `Causes`, and the reserved cell takes the place of the

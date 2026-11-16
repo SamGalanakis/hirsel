@@ -371,6 +371,8 @@ fn host_operations(backend: Backend) {
         ("host-wait-cancel", 0),
         ("host-rename-sleep", 0),
         ("sleep-peer", 0),
+        ("sleep-cancel", 0),
+        ("parent-failure", 0),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let grant = dir.path().join("grant");
@@ -425,10 +427,11 @@ fn host_operations(backend: Backend) {
             "{name}: {:?}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let want_stdout = if name == "sleep-peer" {
-            b"PS".as_slice()
-        } else {
-            b""
+        let want_stdout = match name {
+            "sleep-peer" => b"PS".as_slice(),
+            "sleep-cancel" => b"C",
+            "parent-failure" => b"F",
+            _ => b"",
         };
         assert_eq!(output.stdout, want_stdout, "{name}");
         if expected_exit == 0 {

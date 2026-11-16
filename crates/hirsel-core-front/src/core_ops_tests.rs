@@ -510,6 +510,72 @@ fn f(tasks: Tasks, clock: Clock, out: Stdout) -> u64 waits {
 }
 
 #[test]
+fn evaluator_sleep_cancellation_and_parent_failure_do_not_overflow_clock() {
+    let cases = [
+        (
+            r#"
+fn sleeper(take c: Clock) waits { host.sleep_until(c, 18446744073709551615u64) }
+fn f(tasks: Tasks, clock: Clock) -> u64 waits {
+    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, clock, sleeper))
+    let now = host.mono_ns(clock)
+    host.sleep_until(clock, now + 1_000_000u64)
+    task.cancel(mut h)
+    match task.join(take h) { Error(Cancelled(take causes)) => { let _ = take causes; 67u64 }, _ => 0u64 }
+}
+"#,
+            67,
+        ),
+        (
+            r#"
+type Pair:send { tasks: Tasks, clock: Clock }
+fn sleeper(take c: Clock) waits { host.sleep_until(c, 18446744073709551615u64) }
+fn parent(take x: Pair) waits {
+    let v = take x
+    let _ = result.unwrap(task.spawn(v.tasks, bytes 4096, v.clock, sleeper))
+    let now = host.mono_ns(v.clock)
+    host.sleep_until(v.clock, now + 1_000_000u64)
+    fail("parent")
+}
+fn f(tasks: Tasks, clock: Clock) -> u64 waits {
+    let h = result.unwrap(task.spawn(tasks, bytes 16384, Pair(tasks: tasks, clock: clock), parent))
+    match task.join(take h) { Error(Failed(take causes)) => { let _ = take causes; 70u64 }, _ => 0u64 }
+}
+"#,
+            70,
+        ),
+    ];
+    for (source, expected) in cases {
+        let (index, modules) = canonical(source);
+        let p = Program::declare(&index, &modules);
+        let mut emitter = Emitter::new();
+        let mut entry = None;
+        for (f, fd) in p
+            .fns
+            .iter()
+            .enumerate()
+            .filter(|(_, fd)| fd.path.0.package.name == "app")
+        {
+            let check = p.check_lower(f, &mut emitter);
+            assert!(
+                check.refusals.is_empty() && check.gaps.is_empty(),
+                "{check:?}"
+            );
+            if fd.path.0.name == "f" {
+                entry = check.function;
+            }
+        }
+        emitter.materialize_instances().unwrap();
+        wf::module(&emitter.module).unwrap();
+        let run = eval::run(&emitter.module, entry.unwrap(), &[1, 1], 1 << 20);
+        assert_eq!(
+            run.outcome,
+            eval::Outcome::Returned(vec![expected]),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn log_boxed_list_append_and_finish_in_evaluator() {
     let source = r#"fn f() -> u64 {
         let l:Log[u64] = result.unwrap(log.new())

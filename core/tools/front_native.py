@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 NAMES = ['args-empty', 'args-len', 'args-print', 'args-returned-views', 'args-values',
-         'clocks', 'host-close-cancel', 'host-read', 'host-wait-cancel', 'host', 'host-rename-sleep', 'sleep-peer',
+         'clocks', 'host-close-cancel', 'host-read', 'host-wait-cancel', 'host', 'host-rename-sleep', 'sleep-peer', 'sleep-cancel', 'parent-failure',
          'mkdtemp-bounds', 'mkdtemp', 'stderr-cancel', 'stderr-closed', 'stdout-cancel',
          'stdout-closed', 'streams', 'string-growth-refusal', 'string-growth', 'string-shorten']
 
@@ -58,7 +58,7 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
             host = name.startswith('host') or name in ('clocks', 'mkdtemp', 'mkdtemp-bounds', 'sleep-peer')
             if host:
                 grants = ['Clock', 'Tasks']
-            if name == 'sleep-peer':
+            if name in ('sleep-peer', 'sleep-cancel', 'parent-failure'):
                 grants = ['Clock', 'Stdout', 'Tasks']
             binary = scratch / 'program'
             command = [str(compiler), 'build', '--source-core', '--inputs', str(inputs),
@@ -99,7 +99,7 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                     if writer is not None:
                         os.close(writer)
                 row['ran'] = True
-                want_stdout = b'alphabeta' if name in ('args-print', 'args-returned-views') else b'out' if name == 'streams' else b'PS' if name == 'sleep-peer' else b''
+                want_stdout = b'alphabeta' if name in ('args-print', 'args-returned-views') else b'out' if name == 'streams' else b'PS' if name == 'sleep-peer' else b'C' if name == 'sleep-cancel' else b'F' if name == 'parent-failure' else b''
                 want_stderr = b'err' if name == 'streams' else b''
                 want_exit = 101 if name == 'mkdtemp-bounds' else 0
                 assert result.returncode == want_exit, f'exit {result.returncode}, stderr={result.stderr!r}'

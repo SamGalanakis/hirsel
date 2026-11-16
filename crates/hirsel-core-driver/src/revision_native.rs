@@ -1,7 +1,8 @@
 // The code revision (hirsel.code-revision.v1, code-revision-1038 DESIGN v2),
 // on the code-revision-review-1040 corpus. Laws:
 // - L1 sensitivity: a pair whose exits differ has different revisions
-//   (s01, s02, s03, s04, s51). Oracle: the executables' exits, run here.
+//   (s01, s02, s03, s04, s51; d1 an edge out of an instance that carries a
+//   dictionary). Oracle: the executables' exits, run here.
 // - L2 invariance: an edit the language defines as non-semantic leaves the
 //   revision equal (c01-c05: local name, parameter name, unreached item,
 //   comment, item order; l1 lines above, l2 re-indent). Oracle: the language
@@ -93,6 +94,16 @@ fn revision_cases() -> Vec<RevisionCase> {
         ),
         s("l1 lines above", LINES, &format!("// a\n// b\n\n\n{LINES}"), WRAP_1002, Equal),
         s("l2 re-indent", LINES, &LINES.replace("    ", "        "), WRAP_1002, Equal),
+        // The callee is reached only through an instance that carries a
+        // dictionary (`via[u64]`, constraint `plain`), so the edge that
+        // carries the edit leaves that instance.
+        s(
+            "d1 call out of a constrained instance",
+            "fn helper() -> u64 { 7 }\nfn via[T: plain](take x: T) -> u64 { helper() }\nfn entry() -> u64 { via(1u64) }\n",
+            "fn helper() -> u64 { 8 }\nfn via[T: plain](take x: T) -> u64 { helper() }\nfn entry() -> u64 { via(1u64) }\n",
+            WRAP_7,
+            Differ,
+        ),
         s(
             "r1 unreached edit",
             "fn spare() -> u64 { 9 }\nfn entry() -> u64 { 7 }\n",

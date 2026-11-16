@@ -61,6 +61,7 @@ pub opaque type Db {
     at: u64,
     resident: u64,
     ceiling: u64,
+    retained: bool,
     following: Option[Latest[Snapshot]],
     acks: Option[Receiver[Ack]],
     journaled: u64,
@@ -97,7 +98,7 @@ pub type Ticket {
     mark: Mark
 }
 
-pub type Read = Point(u32, Bytes) | Span(u32, Bytes, Bytes)
+pub type Read = Point(Bytes) | Span(Bytes, Bytes)
 
 pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(Causes) | Refused(Capacity)
 
@@ -120,6 +121,7 @@ pub scoped type Tx {
     roots: Roots,
     ids: u64,
     resident: u64,
+    retain_old: bool,
     reads: View[Log[Read]],
     issued: View[Log[u64]],
     refusal: Option[Capacity],
@@ -172,7 +174,7 @@ pub fn memory(c: Clock, r: Random, o: Options) -> Db {
 }
 
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, clock: c, roots: empty_roots(), next_node: 0, next_table: 1, schema_out: None, head: 0, file_seq: 1, file_end: 72, at: 0, resident: 0, ceiling: o.resident_limit, following: None, acks: None, journaled: 0, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, checkpoint_task: None)
+    Db(store: id, clock: c, roots: empty_roots(), next_node: 0, next_table: 1, schema_out: None, head: 0, file_seq: 1, file_end: 72, at: 0, resident: 0, ceiling: o.resident_limit, retained: false, following: None, acks: None, journaled: 0, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, checkpoint_task: None)
 }
 
 pub fn identity(db: Db) -> StoreId {
@@ -263,7 +265,7 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
     }
     let ci = call_info(db.store, 0, db.head + 1, wall, db.at)
     let caught = isolate(fn() -> (Result[R, A], Roots, u64, Option[Capacity], bool, Option[Bytes]) {
-        let mut tx = Tx(store: db.store, roots: share_roots(db.roots), ids: db.next_node, resident: db.resident, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci)
+        let mut tx = Tx(store: db.store, roots: share_roots(db.roots), ids: db.next_node, resident: db.resident, retain_old: db.retained, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci)
         let outcome = body(mut tx)
         let frame: Option[Bytes] = match outcome {
             Error(_) => None,
@@ -278,7 +280,7 @@ fn execute[R, A](mut db: Db, wall: u64, body: scoped[view] fn(mut Tx) -> Result[
                 }
             }
         }
-        let Tx(store: _, roots: take roots, ids: _, resident: live, reads: _, issued: _, refusal: no_room, frame_bytes: _, wrote: wrote, ops: _, op_ids: _, info: _) = take tx
+        let Tx(store: _, roots: take roots, ids: _, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: _, wrote: wrote, ops: _, op_ids: _, info: _) = take tx
         (take outcome, take roots, live, no_room, wrote, take frame)
     })
     let consumed = log.finish(take issued)
@@ -438,8 +440,8 @@ fn record(tx: Tx, take read: Read) -> Result[(), Error] {
 }
 
 fn fetch_bytes(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
-    record(tx, Point(id, copied(key)?))?
     let p = physical(id, key)?
+    record(tx, Point(copied(p)?))?
     match std.omap.get(tx.roots.data, p) {
         Some(v) => Ok(Some(copied(v)?)),
         None => Ok(None)
@@ -455,6 +457,9 @@ fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
         return Error(Limit(Value))
     }
     let charge = entry(p, val)
+    let old_charge = if tx.retain_old { 0u64 } else {
+        match std.omap.get(tx.roots.data, p) { Some(old) => entry(p, old), None => 0 }
+    }
     let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 9 + list.len(p) + list.len(val))
     let saved_key = copied(p)?
     if frame > 16777216 {
@@ -467,8 +472,8 @@ fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
         Ok(take data) => {
             record_op(mut tx, take saved_key, Some(copied(val)?))?
             tx.roots.data = take data
-            // Main, without a pin, subtracts only on delete; overwrites conservatively add.
-            tx.resident = int.saturating_add(tx.resident, charge)
+            // Main without a retained durable root subtracts the replaced entry (I4).
+            tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
             tx.frame_bytes = frame
             tx.wrote = true
             Ok(())
@@ -527,7 +532,7 @@ fn lower_bytes(id: u32, limit: Bound[Bytes], high: bool) -> Result[Bytes, Error]
 fn range_bytes(tx: Tx, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[ByteRows, Error] {
     let low = lower_bytes(id, lo, false)?
     let high = lower_bytes(id, hi, true)?
-    record(tx, Span(id, copied(low)?, copied(high)?))?
+    record(tx, Span(copied(low)?, copied(high)?))?
     byte_cursor(tx.roots.data, low, high)
 }
 
@@ -703,17 +708,17 @@ pub fn law_reads_ranges(c: Clock) -> bool waits {
                 return false
             }
             let a = match done.reads[0] {
-                Point(id, k) => id == 1 && k == key_word(1),
+                Point(k) => k == result.unwrap(physical(1, key_word(1))),
                 _ => false
             }
             let b = match done.reads[1] {
-                Point(id, k) => id == 1 && k == key_word(2),
+                Point(k) => k == result.unwrap(physical(1, key_word(2))),
                 _ => false
             }
             let lo = result.unwrap(lower_bytes(1, Excluded(key_word(1)), false))
             let hi = result.unwrap(lower_bytes(1, Included(key_word(3)), true))
             let span = match done.reads[2] {
-                Span(id, l, h) => id == 1 && l == lo && h == hi,
+                Span(l, h) => l == lo && h == hi,
                 _ => false
             }
             a && b && span
@@ -1213,7 +1218,7 @@ pub opaque type Table[K, V]: send {
     id: u32,
     epoch: u64,
     complete: bool,
-    catalog_key: Bytes,
+    catalog_key: Arc[Bytes],
     key: std.codec.Key[K],
     readers: Arc[Readers[V]],
     indexes: List[IndexOf[V]]
@@ -1222,6 +1227,7 @@ pub opaque type Table[K, V]: send {
 pub opaque type Shape[K, V]: shareable + send {
     store: StoreId,
     id: u32,
+    catalog_key: Arc[Bytes],
     key: std.codec.Key[K],
     readers: Arc[Readers[V]]
 }
@@ -1229,6 +1235,7 @@ pub opaque type Shape[K, V]: shareable + send {
 pub opaque type Index[J, K, V]: shareable + send {
     store: StoreId,
     id: u32,
+    catalog_key: Arc[Bytes],
     table: u32,
     key: std.codec.Key[J],
     primary: std.codec.Key[K],
@@ -1245,7 +1252,7 @@ pub opaque type Rows[K, V]: send {
 }
 
 pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
-    Shape(store: t.store, id: t.id, key: t.key, readers: arc.share(t.readers))
+    Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), key: t.key, readers: arc.share(t.readers))
 }
 
 fn decoded[T](take r: Result[Result[T, std.codec.DecodeError], Capacity]) -> Result[T, Error] {
@@ -1318,6 +1325,7 @@ pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
+    readable(tx.roots, t.catalog_key, t.id)?
     let found = fetch_bytes(tx, t.id, encode_key(t.key, k)?)?
     match take found {
         Some(take raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
@@ -1339,14 +1347,15 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
         Some(old) => Some(row_value(t.readers, t.id, old)?),
         None => None
     }
-    if let Some(take value) = previous {
-        for ix in t.indexes {
-            let _ = delete_bytes(mut tx, ix.id, index_key(ix, value, key)?)?
-        }
-    }
     for ix in t.indexes {
-        let empty: Bytes = list.new()
-        put_bytes(mut tx, ix.id, index_key(ix, v, key)?, empty)?
+        let new_key = index_key(ix, v, key)?
+        let old_key = match previous { Some(value) => Some(index_key(ix, value, key)?), None => None }
+        let unchanged = match old_key { Some(old) => old == new_key, None => false }
+        if !unchanged {
+            if let Some(take old) = take old_key { let _ = delete_bytes(mut tx, ix.id, old)? }
+            let empty: Bytes = list.new()
+            put_bytes(mut tx, ix.id, new_key, empty)?
+        }
     }
     let mut raw: Bytes = list.new()
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
@@ -1372,6 +1381,7 @@ pub fn range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
+    readable(tx.roots, t.catalog_key, t.id)?
     let cursor = range_bytes(tx, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
     Ok(Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(tx.roots.data), skip: None))
 }
@@ -1380,6 +1390,7 @@ pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] 
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
+    readable(s.roots, t.catalog_key, t.id)?
     let found = get_bytes(s, t.id, encode_key(t.key, k)?)?
     match take found {
         Some(take raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
@@ -1391,6 +1402,7 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
+    readable(s.roots, t.catalog_key, t.id)?
     let cursor = scan_bytes(s, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
     Ok(Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(s.roots.data), skip: None))
 }
@@ -1453,26 +1465,29 @@ fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -
     }
 }
 
-pub fn lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] {
+pub fn lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
     if !same(tx.store, ix.store) {
         return Error(Foreign)
     }
+    readable(tx.roots, ix.catalog_key, ix.id)?
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
-    record(tx, Span(ix.id, copied(low)?, copied(high)?))?
+    record(tx, Span(copied(low)?, copied(high)?))?
     let cursor = byte_cursor(tx.roots.data, low, high)?
-    indexed_rows(tx.roots.data, ix, take cursor)
+    let rows = indexed_rows(tx.roots.data, ix, take cursor)?
+    Ok(IndexRows(rows: take rows, reads: tx.reads))
 }
 
 pub fn find[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] {
     if !same(s.store, ix.store) {
         return Error(Foreign)
     }
+    readable(s.roots, ix.catalog_key, ix.id)?
     let cursor = byte_cursor(s.roots.data, index_bound(ix.id, ix.key, lo, false)?, index_bound(ix.id, ix.key, hi, true)?)?
     indexed_rows(s.roots.data, ix, take cursor)
 }
 
-pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error] {
+fn advance_rows[K, V](mut r: Rows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[(K, V)], Error] {
     let found = next_bytes(mut r.cursor)?
     let pair = match take found {
         Some(take pair) => take pair,
@@ -1491,11 +1506,17 @@ pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error] {
     if let Some(_) = r.skip {
         let physical_key = physical(r.table, key)?
         match std.omap.get(r.data, physical_key) {
-            Some(raw) => Ok(Some((take k, row_value(r.readers, r.table, raw)?))),
+            Some(raw) => {
+                let value = row_value(r.readers, r.table, raw)?
+                seen(physical_key)?
+                Ok(Some((take k, take value)))
+            },
             None => Error(Stale(r.table))
         }
     } else {
-        Ok(Some((take k, row_value(r.readers, r.table, pair.1)?)))
+        let value = row_value(r.readers, r.table, pair.1)?
+        seen(pair.0)?
+        Ok(Some((take k, take value)))
     }
 }
 
@@ -1661,7 +1682,7 @@ pub fn create_table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], 
     capacity(result.capacity_only(list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))))?
     let c = Catalog(kind: 1, id: db.next_table, owner: 0, epoch: 1, key: capacity(std.codec.key_schema(key))?, schemas: take schemas, next: 1, by: list.new(), revision: list.new())
     let raw = encode_catalog(c)?
-    let live = int.saturating_add(db.resident, entry(k, raw))
+    let live = catalog_recharge(db.resident, db.roots, k, raw, db.retained)
     let base = share_roots(db.roots)
     let roots = catalog_put(mut db, base, k, raw)?
     db.next_table += 1
@@ -1725,13 +1746,13 @@ pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take va
         capacity(result.capacity_only(list.push(mut c.schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))))?
         c.next += 1
         let raw = encode_catalog(c)?
-        let live = int.saturating_add(db.resident, entry(k, raw))
+        let live = catalog_recharge(db.resident, db.roots, k, raw, db.retained)
         let base = share_roots(db.roots)
         let roots = catalog_put(mut db, base, k, raw)?
         let _ = schema_publish(mut db, take roots, live)?
     }
     let catalog = index_catalog(db, c.id)?
-    Ok(Table(store: db.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: take k, key: key, readers: take resolved, indexes: list.new()))
+    Ok(Table(store: db.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: catalog_key_handle(take k)?, key: key, readers: take resolved, indexes: list.new()))
 }
 
 pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Ticket, Error] waits {
@@ -1750,7 +1771,7 @@ pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
     let c = Catalog(kind: 2, id: id, owner: t.id, epoch: 1, key: capacity(std.codec.key_schema(key))?, schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: list.new())
     let raw = encode_catalog(c)?
     let mut roots = share_roots(db.roots)
-    let mut live = int.saturating_add(db.resident, entry(k, raw))
+    let mut live = catalog_recharge(db.resident, db.roots, k, raw, db.retained)
     let mut rows = scan_bytes(snapshot(db), t.id, Unbounded, Unbounded)?
     while let Some((primary, encoded)) = next_bytes(mut rows)? {
         let value = row_value(t.readers, t.id, encoded)?
@@ -1769,7 +1790,7 @@ pub fn create_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
     roots = catalog_put(mut db, roots, k, raw)?
     meta.epoch += 1
     let changed = encode_catalog(meta)?
-    live = int.saturating_add(live, entry(t.catalog_key, changed))
+    live = catalog_recharge(live, db.roots, t.catalog_key, changed, db.retained)
     roots = catalog_put(mut db, roots, t.catalog_key, changed)?
     db.next_table += 1
     schema_publish(mut db, take roots, live)
@@ -1821,7 +1842,7 @@ pub fn index[J, K, V](db: Db, mut t: Table[K, V], name: String, by: StaticFn[fn(
     }
     t.complete = complete
     t.epoch = catalog_entry(db, t.catalog_key)?.epoch
-    Ok(Index(store: t.store, id: c.id, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
+    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
@@ -1940,13 +1961,13 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         let own = option.unwrap(fetch(tx, shape(t), 1)?)
         let mut cursor = lookup(tx, ix, Included(2), Included(2))?
         let mut total = own
-        while let Some((_, v)) = next(mut cursor)? {
+        while let Some((_, v)) = next_indexed(mut cursor)? {
             total += v
         }
         Ok(total)
     })
     match take reads {
-        Ok(Committed(done)) => if done.value != 163 || list.len(done.reads) != 2 {
+        Ok(Committed(done)) => if done.value != 163 || list.len(done.reads) != 6 {
             return false
         },
         _ => return false
@@ -2007,18 +2028,18 @@ type Staged[R] {
 }
 
 fn stage_result[R](take draft: Tx, take change: Result[R, Error]) -> Staged[R] {
-    let Tx(store: _, roots: take roots, ids: ids, resident: live, reads: _, issued: _, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids, info: _) = take draft
+    let Tx(store: _, roots: take roots, ids: ids, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids, info: _) = take draft
     Staged(result: take change, roots: take roots, ids: ids, resident: live, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids)
 }
 
 fn stage_put[K, V](tx: Tx, t: Table[K, V], k: K, v: V) -> Staged[()] {
-    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, resident: tx.resident, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info)
+    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, resident: tx.resident, retain_old: tx.retain_old, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info)
     let changed = put_impl(mut draft, t, k, v)
     stage_result(take draft, take changed)
 }
 
 fn stage_delete[K, V](tx: Tx, t: Table[K, V], k: K) -> Staged[bool] {
-    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, resident: tx.resident, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info)
+    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, resident: tx.resident, retain_old: tx.retain_old, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info)
     let changed = delete_impl(mut draft, t, k)
     stage_result(take draft, take changed)
 }
@@ -2318,8 +2339,9 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
         return false
     }
     let out = run(mut b, fn(mut tx: Tx) -> Result[(), bool] {
-        let ok = is_foreign(fetch(tx, shape(t), 1)) && is_foreign(put(mut tx, t, 1, 2)) && is_foreign(delete(mut tx, t, 1)) && is_foreign(range(tx, shape(t), Unbounded, Unbounded)) && is_foreign(lookup(tx, ix, Unbounded, Unbounded))
-        Error(ok)
+        let ok = is_foreign(fetch(tx, shape(t), 1)) && is_foreign(put(mut tx, t, 1, 2)) && is_foreign(delete(mut tx, t, 1)) && is_foreign(range(tx, shape(t), Unbounded, Unbounded))
+        let lookup_foreign = match lookup(tx, ix, Unbounded, Unbounded) { Error(Foreign) => true, _ => false }
+        Error(ok && lookup_foreign)
     })
     match take out {
         Ok(Aborted(Undone(value: true, ticket: None))) => b.head == 0 && b.resident == 0,
@@ -2478,7 +2500,7 @@ pub fn law_typed_model(c: Clock) -> bool waits {
                 }
                 let mut matches = lookup(tx, ix, Included(2), Included(2))?
                 let mut b: u64 = 0
-                while let Some((_, v)) = next(mut matches)? {
+                while let Some((_, v)) = next_indexed(mut matches)? {
                     b += v
                 }
                 if action == 3 {
@@ -2660,7 +2682,7 @@ pub fn look[R](s: Snapshot, body: scoped[view] fn(Tx) -> R) -> Result[Looked[R],
         Error(c) => return Ok(Refused(c))
     }
     let caught = isolate(fn() -> R {
-        let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, resident: 0, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
+        let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, resident: 0, retain_old: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0))
         body(tx)
     })
     let seen = log.finish(take reads)
@@ -2804,7 +2826,7 @@ fn look_query(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64]) -> Result[u
         sum += v
     }
     let mut matches = lookup(tx, ix, Included(2), Included(2))?
-    while let Some((_, v)) = next(mut matches)? {
+    while let Some((_, v)) = next_indexed(mut matches)? {
         sum += v
     }
     Ok(sum)
@@ -2816,8 +2838,8 @@ fn equal_reads(a: List[Read], b: List[Read]) -> bool {
     }
     for i in 0u64 .. list.len(a) {
         let equal = match (a[i], b[i]) {
-            (Point(x, k), Point(y, j)) => x == y && k == j,
-            (Span(x, l, h), Span(y, low, high)) => x == y && l == low && h == high,
+            (Point(k), Point(j)) => k == j,
+            (Span(l, h), Span(low, high)) => l == low && h == high,
             _ => false
         }
         if !equal {
@@ -2857,15 +2879,15 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || list.len(got.reads) != 4 || db.head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
+    if got.version != head || list.len(got.reads) != 6 || db.head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
         return false
     }
     let p1 = match got.reads[0] {
-        Point(id, k) => id == t.id && k == key_word(1),
+        Point(k) => k == result.unwrap(physical(t.id, key_word(1))),
         _ => false
     }
     let p2 = match got.reads[1] {
-        Point(id, k) => id == t.id && k == key_word(9),
+        Point(k) => k == result.unwrap(physical(t.id, key_word(9))),
         _ => false
     }
     // [table1 || key1 || 00, table1 || key3 || 00) includes precisely 2 and 3.
@@ -2874,13 +2896,13 @@ pub fn law_look(c: Clock) -> bool waits {
     let mut high = result.unwrap(physical(t.id, key_word(3)))
     result.unwrap(list.push(mut high, 0u8))
     let span = match got.reads[2] {
-        Span(id, l, h) => id == t.id && l == low && h == high,
+        Span(l, h) => l == low && h == high,
         _ => false
     }
     let ix_low = result.unwrap(physical(ix.id, key_word(2)))
     let ix_high = result.unwrap(physical(ix.id, key_word(3)))
     let index_span = match got.reads[3] {
-        Span(id, l, h) => id == ix.id && l == ix_low && h == ix_high,
+        Span(l, h) => l == ix_low && h == ix_high,
         _ => false
     }
     if !p1 || !p2 || !span || !index_span {
@@ -2903,7 +2925,7 @@ pub fn law_look(c: Clock) -> bool waits {
     }))
     match take second {
         Seen(value) => match value.value {
-            Ok(108) => value.version == db.head && list.len(value.reads) == 4,
+            Ok(108) => value.version == db.head && list.len(value.reads) == 6,
             _ => false
         },
         _ => false
@@ -3375,4 +3397,46 @@ fn range_boundary_points(c: Clock) -> bool waits {
         _ => return false
     }
     true
+}
+
+
+fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], Error] {
+    match arc.new(take key) { Ok(take shared) => Ok(take shared), Error((c, _)) => Error(Full(c)) }
+}
+
+fn readable(roots: Roots, key: Bytes, id: u32) -> Result[(), Error] {
+    match std.omap.get(roots.catalog, key) {
+        Some(raw) => {
+            if list.len(raw) < 5 { return Error(malformed(0)) }
+            if read_le(raw, 1, 4) == int.widen(id) { Ok(()) } else { Error(Stale(id)) }
+        },
+        None => Error(Stale(id))
+    }
+}
+
+pub scoped type IndexRows[K, V] {
+    rows: Rows[K, V],
+    reads: View[Log[Read]]
+}
+
+pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error] {
+    advance_rows(mut r, fn(key: Bytes) -> Result[(), Error] { Ok(()) })
+}
+
+pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Error] {
+    indexed_advance(mut r.rows, r.reads)
+}
+
+fn indexed_advance[K, V](mut rows: Rows[K, V], reads: View[Log[Read]]) -> Result[Option[(K, V)], Error] {
+    advance_rows(mut rows, fn(key: Bytes) -> Result[(), Error] {
+        match log.append(reads, Point(copied(key)?)) { Ok(()) => Ok(()), Error((c, _)) => Error(Full(c)) }
+    })
+}
+
+
+fn catalog_recharge(live: u64, roots: Roots, key: Bytes, value: Bytes, retained: bool) -> u64 {
+    let old_charge = if retained { 0u64 } else {
+        match std.omap.get(roots.catalog, key) { Some(old) => entry(key, old), None => 0 }
+    }
+    int.saturating_add(int.saturating_sub(live, old_charge), entry(key, value))
 }

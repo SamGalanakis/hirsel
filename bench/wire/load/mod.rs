@@ -157,8 +157,7 @@ async fn caller(
         tokio::select! {
             job = jobs.recv(), if inflight.is_none() => {
                 let Some(job) = job else { client.socket.close(None).await?; return Ok(()); };
-                let socket = Instant::now();
-                client.start_call(0, job.p, job.bit).await?;
+                let socket = client.start_call_timed(0, job.p, job.bit).await?;
                 events.send(Event::Sent { owner, p: job.p, scheduled: job.scheduled, socket }).await?;
                 inflight = Some(job.p);
             }
@@ -187,9 +186,9 @@ async fn observe(
         }
         tokio::select! {
             v = &mut stop, if final_version.is_none() => final_version = Some(v?),
-            frame = observer.receive() => {
-                let at = Instant::now();
-                match frame? {
+            frame = observer.receive_timed() => {
+                let (at, frame) = frame?;
+                match frame {
                     Frame::Batch(version, _, rows, _) => {
                         let chunks = rows.iter().map(|r| u32::from_be_bytes(r.key[4..8].try_into().unwrap())).collect();
                         events.send(Event::Observed { version, chunks, at }).await?;

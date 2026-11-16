@@ -70,10 +70,13 @@ impl Client {
         })
     }
     pub async fn send(&mut self, frame: Frame) -> Result<()> {
-        self.socket
-            .send(Message::Binary(codec::encode(&frame).into()))
-            .await?;
-        Ok(())
+        self.send_timed(frame).await.map(|_| ())
+    }
+    async fn send_timed(&mut self, frame: Frame) -> Result<Instant> {
+        let message = Message::Binary(codec::encode(&frame).into());
+        let at = Instant::now();
+        self.socket.send(message).await?;
+        Ok(at)
     }
     pub async fn subscribe(&mut self) -> Result<()> {
         self.sub = self
@@ -95,7 +98,10 @@ impl Client {
         }
     }
     pub async fn receive(&mut self) -> Result<Frame> {
-        let frame = read_frame(&mut self.socket).await?;
+        self.receive_timed().await.map(|(_, f)| f)
+    }
+    pub async fn receive_timed(&mut self) -> Result<(Instant, Frame)> {
+        let (at, frame) = read_frame_timed(&mut self.socket).await?;
         match &frame {
             Frame::Batch(version, complete, rows, _) => {
                 if *version < self.version {
@@ -117,10 +123,13 @@ impl Client {
             Frame::Ended(_, outcome) => return Err(format!("board ended: {outcome:?}").into()),
             _ => return Err("unexpected server frame after Placed".into()),
         }
-        Ok(frame)
+        Ok((at, frame))
     }
     pub async fn start_call(&mut self, stream: u32, p: u64, bit: u32) -> Result<()> {
-        self.send(Frame::Call(
+        self.start_call_timed(stream, p, bit).await.map(|_| ())
+    }
+    pub async fn start_call_timed(&mut self, stream: u32, p: u64, bit: u32) -> Result<Instant> {
+        self.send_timed(Frame::Call(
             stream,
             p,
             self.toggle_slot,
@@ -226,9 +235,15 @@ pub fn returned(done: &Done) -> Result<bool> {
     }
 }
 async fn read_frame(socket: &mut Socket) -> Result<Frame> {
+    read_frame_timed(socket).await.map(|(_, f)| f)
+}
+async fn read_frame_timed(socket: &mut Socket) -> Result<(Instant, Frame)> {
     loop {
         match socket.next().await.transpose()? {
-            Some(Message::Binary(bytes)) => return codec::decode(&bytes),
+            Some(Message::Binary(bytes)) => {
+                let at = Instant::now();
+                return Ok((at, codec::decode(&bytes)?));
+            }
             Some(Message::Ping(_)) => socket.flush().await?,
             Some(Message::Pong(_)) => (),
             _ => return Err("connection ended before the expected frame".into()),

@@ -308,6 +308,13 @@ fn coalesce(old: Frame, new: Frame) -> Option<Frame> {
             done.extend(outcomes);
             Some(Frame::Reset(version, done))
         }
+        (
+            Frame::Batch(_, _, _, mut done) | Frame::Reset(_, mut done),
+            Frame::Reset(version, outcomes),
+        ) => {
+            done.extend(outcomes);
+            Some(Frame::Reset(version, done))
+        }
         // Control output cannot be coalesced. Closing preserves the bounded queue contract.
         _ => None,
     }
@@ -986,5 +993,13 @@ mod tests {
         assert_eq!(v, 3);
         assert_eq!(rows[0].value, Some(vec![3]));
         assert_eq!(done.iter().map(|d| d.p).collect::<Vec<_>>(), [2, 3]);
+        let Some(Frame::Reset(version, kept)) = coalesce(
+            Frame::Batch(3, vec![], vec![], done.clone()),
+            Frame::Reset(4, vec![]),
+        ) else {
+            panic!("Reset must retain pending outcomes");
+        };
+        assert_eq!(version, 4);
+        assert_eq!(kept, done);
     }
 }

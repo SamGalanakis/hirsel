@@ -64,14 +64,16 @@ task under `bytes n_session` and returns its inbox sender and its task. The sess
 runs `place` itself under n_place, and its task ends with that `RegisterError` if it
 fails. The session answers by itself what V1 lets it: a passed deadline (`Deadline`),
 a key that is not a transact entry (`NoEntry`), an argument that does not decode
-under the entry's n (`Malformed`), an n its account cannot grant (`Budget`), and more
-than q requests held (`Overloaded`). It forwards the rest to
-the head and holds each forwarded position in a slot with a deadline timer until the
-head's answer arrives; a timer that fires first answers `Abandoned`. Every send gets
-exactly one Outcome: a send of a position already held joins its slot without being
-forwarded again, the deadline (the latest send's) answers each unanswered send with
-`Abandoned`, and the head's answer goes once to each send still unanswered, so to none
-when the position was Abandoned and not sent again. `hang_up()` closes the session.
+under the entry's n (`Malformed`), an n its account cannot grant (`Budget`), and a
+full slot table (`Overloaded`). It forwards the rest to the head and holds each
+forwarded position in a slot until the head's answer arrives. Every send gets exactly
+one Outcome. A send of a position already held joins its slot without being forwarded
+again. Each send has its own deadline timer, which answers that send alone with
+`Abandoned`. The head's answer goes once to each send still unanswered, so to none
+when the position was Abandoned and not sent again. The slot table counts, per held
+position, the larger of 1 and its unanswered sends, at most 1 + q in all: a joined
+send takes a slot, and a re-send of an Abandoned position whose slot is still held
+reuses it. `hang_up()` closes the session.
 
 S5 (admit and reply) is not on main. A table `runner.streams`, which the head creates
 at open, stands in for it with STORE-SPEC §1.8's rules. An Error reply is kept in a

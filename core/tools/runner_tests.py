@@ -43,6 +43,9 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 # - store_v22_admit: an admit of latest+1 while latest is unreplied.
 # - late_completion_resent: a session that sends the head's answer to a position whose
 #   sends were all answered (Abandoned, not re-sent), a second Outcome for one send.
+# - one_for_joined: one row for a head answer however many sends of the position are owed.
+# - latest_deadline: a joined send answered only when the latest send's deadline fires.
+# - join_outside_account: a joined send takes no slot, so per-send timers are unbounded.
 MUTANTS = (
     ('duplicate_unchecked',
      [('    if map.contains(r.slots, key) {\n        return Error(AlreadyRegistered(take key))\n    }\n', '')],
@@ -81,8 +84,13 @@ MUTANTS = (
       ('Release(version: d, snapshot', 'Release(version: wv, snapshot')],
      'runner_calls', 'calls_group_version'),
     ('queue_outside_account',
-     [('                if fired > 0u64 {\n                    for',
-       '                if fired > 0u64 {\n                    let _ = map.remove(mut held, slot_key(t.stream, t.p))\n                    for')],
+     [('                    result.unwrap(map.insert(mut held, take k, take owed))\n                    if hit {',
+       '                    if !hit || list.len(owed) > 0u64 {\n'
+       '                        result.unwrap(map.insert(mut held, take k, take owed))\n'
+       '                    } else {\n'
+       '                        used -= 1u64\n'
+       '                    }\n'
+       '                    if hit {')],
      'runner_calls', 'calls_held_head'),
     ('store_v22_admit',
      [('Some(r) => p == r.p + 1u64 && r.replied,', 'Some(r) => p == r.p + 1u64,')],
@@ -91,6 +99,16 @@ MUTANTS = (
      [('                if owed > 0u64 {\n                    last = f.version',
        '                if true {\n                    last = f.version')],
      'runner_calls', 'calls_one_outcome_per_send'),
+    ('one_for_joined',
+     [('                    for _ in 1u64 .. owed {', '                    for _ in 1u64 .. 1u64 {')],
+     'runner_calls', 'calls_one_outcome_per_send'),
+    ('latest_deadline',
+     [('                        if owed[i].generation == t.generation {',
+       '                        if owed[list.len(owed) - 1u64].generation == t.generation {')],
+     'runner_calls', 'calls_held_head'),
+    ('join_outside_account',
+     [('                let grows = fresh || owing > 0u64', '                let grows = fresh')],
+     'runner_calls', 'calls_held_head'),
 )
 
 

@@ -502,7 +502,11 @@ pub fn law_calls_deadline_held(c: Clock, r: Random, tasks: Tasks) -> bool waits 
 //   Overloaded at once, and the head holds one request (C6, queue_outside_account);
 //   a re-send of A p0 joins locally and is Abandoned again, still one request;
 // - q = 1: p0 and p1 of one stream both forwarded and both Abandoned at their deadlines,
-//   though the head answers neither (deadline_rides_release).
+//   though the head answers neither (deadline_rides_release);
+// - L15, each send at its own deadline: A (2 ms) then B (50 ms) of one held position, and
+//   A's Abandoned arrives before B's deadline, then B's (latest_deadline);
+// - L15, a joined send takes a slot: with q = 0 a second send of a held position is
+//   Overloaded at once, and the first is Abandoned at its deadline (join_outside_account).
 pub fn law_calls_held_head(c: Clock, tasks: Tasks) -> bool waits {
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
@@ -526,6 +530,20 @@ pub fn law_calls_held_head(c: Clock, tasks: Tasks) -> bool waits {
     ask(s1, c, 0u64, 1u64, k_write(), u64_arg(2u64), 2000000u64)
     want(is(frame(s1).outcome, Abandoned) && is(frame(s1).outcome, Abandoned), "held_head: both answered by the session")
     hang(take s1)
+    let s3 = conn(tasks, head, c, 1u64)
+    ask(s3, c, 0u64, 0u64, k_write(), u64_arg(3u64), 2000000u64)
+    let b_at = host.mono_ns(c) + 50000000u64
+    ask(s3, c, 0u64, 0u64, k_write(), u64_arg(3u64), 50000000u64)
+    let first = frame(s3)
+    want(is(first.outcome, Abandoned) && host.mono_ns(c) < b_at, "held_head: the first send is Abandoned at its own deadline")
+    want(is(frame(s3).outcome, Abandoned) && host.mono_ns(c) >= b_at, "held_head: the second send at its own")
+    hang(take s3)
+    let s2 = conn(tasks, head, c, 0u64)
+    ask(s2, c, 0u64, 9u64, k_write(), u64_arg(9u64), 2000000u64)
+    ask(s2, c, 0u64, 9u64, k_write(), u64_arg(9u64), 2000000u64)
+    want(is(frame(s2).outcome, Refused(Overloaded)), "held_head: with q = 0 a join takes the second slot")
+    want(is(frame(s2).outcome, Abandoned), "held_head: the first send is still answered")
+    hang(take s2)
     true
 }
 

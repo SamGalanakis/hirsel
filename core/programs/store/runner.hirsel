@@ -798,12 +798,17 @@ pub fn hang_up() -> Event {
     Event(e: Closing)
 }
 
-// A forwarded position keeps its slot until the head's answer arrives (V2). `owed` counts
-// the sends of the position not yet answered (rule 5: one Outcome per send): a send adds
-// one, the deadline answers each with Abandoned, and the head's answer goes once to each
-// owed send, so to none after Abandoned without a re-send. Its timer is the deadline of
-// the latest send; dropping the slot cancels the timer (CONC-8).
-type Held { generation: u64, owed: u64, timer: Task[()] }
+// A forwarded position keeps its slot until the head's answer arrives (V2), with one
+// Owed per send of it not yet answered (rule 5: one Outcome per send). Each send has its
+// own deadline timer: the timer answers that send alone with Abandoned, and the head's
+// answer goes once to each send still owed, so to none after Abandoned without a re-send.
+// Dropping an Owed cancels its timer (CONC-8). The slot table counts max(1, owed sends)
+// per held position, at most 1 + q in all (V2): a joined send takes a slot.
+type Owed { generation: u64, timer: Task[()] }
+
+fn slots(owed: u64) -> u64 {
+    if owed > 1u64 { owed } else { 1u64 }
+}
 
 type Timer: send { clock: Clock, at: u64, to: Sender[Event], stream: Bytes, p: u64, generation: u64 }
 
@@ -864,7 +869,8 @@ fn tell(to: Sender[Frame], version: u64, take stream: Bytes, p: u64, take o: Out
 
 fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError] waits {
     let r = placed(s.place, s.n_place)?
-    let mut held: Map[Bytes, Held] = map.new()
+    let mut held: Map[Bytes, List[Owed]] = map.new()
+    let mut used = 0u64
     let mut last = 0u64
     let mut generation = 0u64
     loop {
@@ -882,19 +888,17 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                     continue
                 }
                 let k = slot_key(c.stream, c.p)
-                let again = match map.remove(mut held, k) {
-                    Some(take h) => {
-                        let Held(generation: _, owed: o, timer: _) = take h
-                        Some(o)
-                    },
-                    None => None,
+                let (fresh, owing) = match map.get(held, k) {
+                    Some(o) => (false, list.len(o)),
+                    None => (true, 0u64),
                 }
-                if let None = again {
-                    if map.len(held) >= s.q + 1u64 {
-                        let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c
-                        tell(s.client, last, take stream, p, Refused(Overloaded));
-                        continue
-                    }
+                // A new position or a join takes a slot; a re-send of an Abandoned position
+                // whose slot is still held reuses it.
+                let grows = fresh || owing > 0u64
+                if grows && used >= s.q + 1u64 {
+                    let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c
+                    tell(s.client, last, take stream, p, Refused(Overloaded));
+                    continue
                 }
                 generation += 1u64
                 let named: Bytes = result.unwrap(clone(c.stream))
@@ -907,25 +911,31 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                         continue
                     },
                 }
+                if grows {
+                    used += 1u64
+                }
+                let mine = Owed(generation: generation, timer: take timing)
                 // V2: a position already forwarded is joined locally, never forwarded twice.
-                if let None = again {
+                if fresh {
                     let Call(stream: take stream, p: p, key: take key, arg: take arg, deadline: _) = take c
                     let q = Req(stream: take stream, p: p, key: take key, arg: take arg, reply_to: channel.sender(s.me))
                     if let Error(_) = channel.send(s.head, take q) {
                         return Ok(())
                     }
+                    let mut owed: List[Owed] = list.new()
+                    result.unwrap(list.push(mut owed, take mine))
+                    result.unwrap(map.insert(mut held, take k, take owed))
+                } else {
+                    let mut owed = option.unwrap(map.remove(mut held, k))
+                    result.unwrap(list.push(mut owed, take mine))
+                    result.unwrap(map.insert(mut held, take k, take owed))
                 }
-                let owed = match again {
-                    Some(o) => o + 1u64,
-                    None => 1u64,
-                }
-                result.unwrap(map.insert(mut held, take k, Held(generation: generation, owed: owed, timer: take timing)))
             },
             Answered(take f) => {
                 let owed = match map.remove(mut held, slot_key(f.stream, f.p)) {
-                    Some(take h) => {
-                        let Held(generation: _, owed: o, timer: _) = take h
-                        o
+                    Some(o) => {
+                        used -= slots(list.len(o))
+                        list.len(o)
                     },
                     None => 0u64,
                 }
@@ -938,22 +948,28 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                     let _ = channel.send(s.client, take f)
                 }
             },
+            // One send's own deadline: that send alone is answered Abandoned; the slot stays.
             Expired(t) => {
-                let g = t.generation
-                let fired = match map.update(mut held, slot_key(t.stream, t.p), fn(mut h: Held) -> u64 {
-                    if h.generation == g {
-                        let o = h.owed
-                        h.owed = 0u64
-                        o
-                    } else {
-                        0u64
+                let k = slot_key(t.stream, t.p)
+                if let Some(take found) = map.remove(mut held, k) {
+                    let mut owed = take found
+                    let mut i = 0u64
+                    let mut hit = false
+                    while !hit && i < list.len(owed) {
+                        if owed[i].generation == t.generation {
+                            hit = true
+                        } else {
+                            i += 1u64
+                        }
                     }
-                }) {
-                    Some(o) => o,
-                    None => 0u64,
-                }
-                if fired > 0u64 {
-                    for _ in 0u64 .. fired {
+                    if hit {
+                        let _ = list.remove(mut owed, i)
+                        if list.len(owed) > 0u64 {
+                            used -= 1u64
+                        }
+                    }
+                    result.unwrap(map.insert(mut held, take k, take owed))
+                    if hit {
                         let named: Bytes = result.unwrap(clone(t.stream))
                         tell(s.client, last, take named, t.p, Abandoned)
                     }

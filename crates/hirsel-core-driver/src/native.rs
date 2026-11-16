@@ -15,8 +15,7 @@ mod release;
 use cleanup::result_cleanup;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
-const DIRECT_LINK_SUPPORT_LIBS: &[&str] =
-    &["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
+use crate::tool_inputs::SUPPORT_LIBS as DIRECT_LINK_SUPPORT_LIBS;
 #[derive(Clone, Copy, Debug, Serialize)]
 pub enum Backend {
     Cranelift,
@@ -1209,13 +1208,20 @@ fn direct_link(
     output: &Path,
     optimize: bool,
 ) -> Result<(), NativeStop> {
-    // The editor runs under an empty environment.
+    // The editor runs under an empty environment, in an empty directory of
+    // its own: a script's relative name finds nothing there
+    // (crate::link_closure). It writes a fixed relative name there, since
+    // the output's name enters the executable (a version script's base
+    // definition), and the executable is then moved to `output`.
+    let parent = output.parent().filter(|p| !p.as_os_str().is_empty());
+    let directory = tempfile::tempdir_in(parent.unwrap_or(Path::new(".")))?;
     let mut process = crate::tool_inputs::tool_command(&recipe.linker);
+    process.current_dir(directory.path());
     let mut inserted = false;
     for argument in &recipe.args {
         if argument == crate::tool_inputs::INPUT_MARKER {
             for input in inputs {
-                process.arg(input);
+                process.arg(std::path::absolute(input)?);
             }
             for library in support_libs {
                 process.arg(library);
@@ -1233,8 +1239,10 @@ fn direct_link(
     if !optimize {
         process.arg("-O0");
     }
-    process.arg("-o").arg(output);
-    command(&mut process).map(|_| ())
+    process.arg("-o").arg("program");
+    command(&mut process)?;
+    std::fs::rename(directory.path().join("program"), output)?;
+    Ok(())
 }
 
 /// Raise the soft descriptor limit to the hard limit once, as Go does since
@@ -1618,6 +1626,7 @@ mod tests {
     include!("prebuild_native.rs");
     include!("image_unit_native.rs");
     include!("reach_native.rs");
+    include!("link_closure_native.rs");
     include!("tape_build_native.rs");
     include!("request_sequences.rs");
     include!("revision_native.rs");

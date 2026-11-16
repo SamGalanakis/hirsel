@@ -24,6 +24,7 @@ mod native_sources;
 mod prebuild;
 pub use prebuild::Prebuilt;
 mod core_inventory;
+mod link_closure;
 mod reach;
 mod reachability;
 mod revision;

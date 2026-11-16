@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
-const LINK_RECIPE_SCHEMA: u32 = 5;
+const LINK_RECIPE_SCHEMA: u32 = 6;
+/// The libraries every direct link appends at the input marker.
+pub(crate) const SUPPORT_LIBS: &[&str] = &["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
 const TOOLCHAIN_SCHEMA: u32 = 2;
 #[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct RecipeFile {
@@ -58,6 +60,10 @@ pub(crate) struct LinkRecipe {
     pub(crate) files: Vec<RecipeFile>,
     #[serde(default)]
     pub(crate) source_files: Vec<RecipeFile>,
+    /// The paths the link's searches tried before each match
+    /// ([`crate::link_closure`]): one that appears is read instead.
+    #[serde(default)]
+    pub(crate) absent: Vec<PathBuf>,
     pub(crate) identity: ContentHash,
 }
 fn selected(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
@@ -299,18 +305,16 @@ fn installed_toolchain(
         .and_then(Path::parent)
         .ok_or_else(|| refused("has no installation around it".into()))?;
     let linker = root.join(INSTALLED_LINKER);
-    let paths = recipe_paths(&linker, &installed.args);
-    let missing = paths
-        .iter()
-        .filter(|path| !path.is_file())
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
+    if !linker.is_file() {
         return Err(refused(format!(
             "names missing inputs: {}",
-            missing.join(", ")
+            linker.display()
         )));
     }
+    let closure = crate::link_closure::closure(&installed.args, INPUT_MARKER, SUPPORT_LIBS)
+        .map_err(|error| refused(error.to_string()))?;
+    let mut paths = closure.files;
+    paths.push(linker.clone());
     let store = host_tools()?;
     let files = paths
         .iter()
@@ -330,13 +334,14 @@ fn installed_toolchain(
         })
         .collect::<Vec<_>>();
     let identity = ContentHash::of_parts(
-        "hirsel.installed-link-recipe.v2",
+        "hirsel.installed-link-recipe.v3",
         [crate::encode(&(
             INSTALLED_RECIPE_SCHEMA,
             target,
             Path::new(INSTALLED_LINKER),
             &installed.args,
             placed,
+            &closure.absent,
         ))?
         .as_slice()],
     );
@@ -355,6 +360,7 @@ fn installed_toolchain(
         args: installed.args,
         files,
         source_files: Vec::new(),
+        absent: closure.absent,
         identity,
     };
     Ok((toolchain, recipe))
@@ -395,16 +401,21 @@ fn driver_toolchain(
         .find(|file| file.path == runtime)
         .expect("the runtime archive is a recorded toolchain input")
         .content;
-    // The runtime archive is this request's input, wherever its build put it:
-    // its bytes are its identity. The driver's tools are named by path.
-    let tools = files
+    // The runtime archive is this request's input, wherever its build put it,
+    // and the C driver and libLLVM reach the link only through what they
+    // run: their bytes are their identity. The recipe's identity holds what
+    // the link reads.
+    let mut tools = files
         .iter()
-        .filter(|file| file.path != runtime)
-        .map(|file| (file.path.as_path(), &file.content))
+        .filter(|file| {
+            file.path != runtime && !recipe.files.iter().any(|seen| seen.path == file.path)
+        })
+        .map(|file| file.content)
         .collect::<Vec<_>>();
+    tools.sort();
     let identity = ContentHash::of_parts(
-        "hirsel.toolchain-image.v3",
-        [crate::encode(&(TOOLCHAIN_SCHEMA, target, tools, archive))?.as_slice()],
+        "hirsel.toolchain-image.v4",
+        [crate::encode(&(TOOLCHAIN_SCHEMA, target, recipe.identity, tools, archive))?.as_slice()],
     );
     let toolchain = Toolchain {
         image: identity,
@@ -530,7 +541,7 @@ fn capture_keyed_link_recipe(
     let driver_key = driver_file_key(&driver)?;
     let environment = CaptureEnvironment::new(search)?;
     let file_key = environment.key(&driver_key)?;
-    capture_link_recipe_with(cc, target, force, &environment, &file_key, &driver_key)
+    capture_link_recipe_with(cc, target, force, &environment, &file_key)
         .map(|r| (r, file_key, environment.digest()))
 }
 
@@ -655,7 +666,6 @@ fn capture_link_recipe_with(
     force: bool,
     environment: &CaptureEnvironment,
     file_key: &str,
-    driver_identity: &str,
 ) -> io::Result<LinkRecipe> {
     let search = environment
         .variables
@@ -894,14 +904,21 @@ fn capture_link_recipe_with(
             .unwrap_or(args.len());
         args.insert(at, INPUT_MARKER.into());
     }
-    let files = recipe_files(&linker, &args)?;
+    // The driver's configuration files decide its argv: a changed one
+    // captures again.
+    let configuration = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("Configuration file: "))
+        .map(PathBuf::from);
+    let (files, absent) = recipe_files(&linker, &args, configuration)?;
     let identity = recipe_identity(
         target,
-        driver_identity,
+        ContentHash::of_bytes(&std::fs::read(&driver)?),
         &linker,
         &args,
         &files,
         &source_files,
+        &absent,
     )?;
     let recipe = LinkRecipe {
         schema: LINK_RECIPE_SCHEMA,
@@ -910,6 +927,7 @@ fn capture_link_recipe_with(
         args,
         files,
         source_files,
+        absent,
         identity,
     };
     publish(&directory, &path, &recipe)?;
@@ -927,30 +945,20 @@ fn capture_link_recipe_with(
     Ok(recipe)
 }
 
-/// The link editor and every file the argv names, sorted.
-fn recipe_paths(linker: &Path, args: &[String]) -> Vec<PathBuf> {
-    let mut paths = vec![linker.to_owned()];
-    let mut skip_dynamic_linker = false;
-    for arg in args {
-        if skip_dynamic_linker {
-            skip_dynamic_linker = false;
-            continue;
-        }
-        if arg == "-dynamic-linker" {
-            skip_dynamic_linker = true;
-            continue;
-        }
-        if arg != INPUT_MARKER && !arg.starts_with('-') && arg.contains('/') {
-            paths.push(PathBuf::from(arg));
-        }
-    }
+/// The link editor, every file the link reads ([`crate::link_closure`]) and
+/// `configuration`, each observed, and the paths the link's searches found
+/// absent.
+fn recipe_files(
+    linker: &Path,
+    args: &[String],
+    configuration: impl Iterator<Item = PathBuf>,
+) -> io::Result<(Vec<RecipeFile>, Vec<PathBuf>)> {
+    let closure = crate::link_closure::closure(args, INPUT_MARKER, SUPPORT_LIBS)?;
+    let mut paths = closure.files;
+    paths.push(linker.to_owned());
+    paths.extend(configuration);
     paths.sort();
     paths.dedup();
-    paths
-}
-
-fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<RecipeFile>> {
-    let paths = recipe_paths(linker, args);
     let missing = paths
         .iter()
         .filter(|path| !path.is_file())
@@ -966,27 +974,46 @@ fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<RecipeFile>> {
                 .join(", ")
         )));
     }
-    paths.into_iter().map(|path| recipe_file(&path)).collect()
+    let files = paths
+        .into_iter()
+        .map(|path| recipe_file(&path))
+        .collect::<io::Result<_>>()?;
+    Ok((files, closure.absent))
 }
 
+/// The recipe's identity: the driver's and the link editor's bytes, wherever
+/// they lie (their paths reach the link only through the argv), the argv,
+/// every other file the link reads by its path and bytes (the argv and the
+/// scripts name them so), and the paths the searches found absent.
 fn recipe_identity(
     target: &str,
-    driver_key: &str,
+    driver: ContentHash,
     linker: &Path,
     args: &[String],
     files: &[RecipeFile],
     source_files: &[RecipeFile],
+    absent: &[PathBuf],
 ) -> io::Result<ContentHash> {
+    let editor = files
+        .iter()
+        .find(|file| file.path == linker)
+        .map(|file| file.content);
+    let named = files
+        .iter()
+        .filter(|file| file.path != linker)
+        .cloned()
+        .collect::<Vec<_>>();
     Ok(ContentHash::of_parts(
-        "hirsel.direct-link-recipe.v2",
+        "hirsel.direct-link-recipe.v3",
         [crate::encode(&(
             LINK_RECIPE_SCHEMA,
             target,
-            driver_key,
-            linker,
+            driver,
+            editor,
             args,
-            image(files),
+            image(&named),
             image(source_files),
+            absent,
         ))?
         .as_slice()],
     ))
@@ -1015,6 +1042,9 @@ enum RecipeInputs {
 /// toolchain file) update the recorded stat, so the next request reads none.
 fn refresh_recipe_inputs(recipe: &mut LinkRecipe) -> io::Result<RecipeInputs> {
     let mut inputs = RecipeInputs::Current;
+    if recipe.absent.iter().any(|path| path.exists()) {
+        return Ok(RecipeInputs::Changed);
+    }
     for input in recipe.files.iter_mut().chain(&mut recipe.source_files) {
         let Ok(seen) = observe(&input.path, Some(input)) else {
             return Ok(RecipeInputs::Changed);
@@ -1520,12 +1550,7 @@ mod tests {
             let installed = InstalledRecipe {
                 schema: INSTALLED_RECIPE_SCHEMA,
                 target: target.into(),
-                args: vec![
-                    "-o".into(),
-                    "out".into(),
-                    crt.display().to_string(),
-                    INPUT_MARKER.into(),
-                ],
+                args: vec![crt.display().to_string(), INPUT_MARKER.into()],
             };
             std::fs::write(&recipe, serde_json::to_vec(&installed).unwrap()).unwrap();
             let (toolchain, recipe) = installed_toolchain(&recipe, target, &runtime).unwrap();
@@ -1631,6 +1656,7 @@ mod tests {
             args: vec![INPUT_MARKER.into()],
             files: vec![recipe_file(input).unwrap()],
             source_files: vec![],
+            absent: vec![],
             identity: ContentHash::of_bytes(b"recipe"),
         }
     }

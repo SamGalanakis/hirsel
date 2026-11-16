@@ -198,6 +198,35 @@ pub unsafe extern "C" fn hirsel_core_send(
         }
     }
 }
+/// Take the front item into `destination`, or return false when the queue is empty.
+/// The slot it frees may let a parked sender publish, so it wakes every waiter
+/// (CONC-5): `receive` and `try_receive` both take here, so they cannot differ.
+///
+/// # Safety
+/// Sole receiver borrow and writable T destination.
+unsafe fn take(channel: *mut Channel, destination: *mut u8) -> bool {
+    // SAFETY: the caller's receiver pins the queue and destination for this call.
+    unsafe {
+        if (*channel).len == 0 {
+            return false;
+        }
+        copy_item(
+            (*channel)
+                .storage
+                .as_ptr()
+                .add((*channel).head * (*channel).item.bytes),
+            destination,
+            (*channel).item.bytes,
+        );
+        (*channel).head += 1;
+        if (*channel).head == (*channel).capacity {
+            (*channel).head = 0;
+        }
+        (*channel).len -= 1;
+        tasks::event_then_wake(tasks::RECEIVE, (*channel).id, 0);
+        true
+    }
+}
 /// # Safety
 /// Sole receiver borrow and writable T destination. Cancellation and closure
 /// initialize nothing; only transferred true moves queue custody into destination.
@@ -217,21 +246,7 @@ pub unsafe extern "C" fn hirsel_core_receive(
                     status: 1,
                 };
             }
-            if (*channel).len != 0 {
-                copy_item(
-                    (*channel)
-                        .storage
-                        .as_ptr()
-                        .add((*channel).head * (*channel).item.bytes),
-                    destination,
-                    (*channel).item.bytes,
-                );
-                (*channel).head += 1;
-                if (*channel).head == (*channel).capacity {
-                    (*channel).head = 0;
-                }
-                (*channel).len -= 1;
-                tasks::event_then_wake(tasks::RECEIVE, (*channel).id, 0);
+            if take(channel, destination) {
                 return Transfer {
                     transferred: true,
                     status: 0,
@@ -258,18 +273,7 @@ pub unsafe extern "C" fn hirsel_core_try_receive(
 ) -> u8 {
     // SAFETY: receiver pins the channel and destination for this call.
     unsafe {
-        let status = if (*channel).len != 0 {
-            copy_item(
-                (*channel)
-                    .storage
-                    .as_ptr()
-                    .add((*channel).head * (*channel).item.bytes),
-                destination,
-                (*channel).item.bytes,
-            );
-            (*channel).head = ((*channel).head + 1) % (*channel).capacity;
-            (*channel).len -= 1;
-            tasks::event(tasks::RECEIVE, (*channel).id, 0);
+        let status = if take(channel, destination) {
             0
         } else if (*channel).senders == 0 {
             2

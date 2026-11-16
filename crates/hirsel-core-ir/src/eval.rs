@@ -2025,6 +2025,18 @@ impl Machine<'_> {
             self.free_as(node, charge, None, "a counted node");
         }
     }
+    /// Take channel `i`'s front item into `dest`, or return false when its queue is
+    /// empty. The slot it frees may let a parked sender publish, so it wakes every
+    /// waiter (CONC-5): `receive` and `try_receive` both take here, as native's `take`.
+    fn take(&mut self, i: usize, dest: u64) -> bool {
+        let Some(bytes) = self.chans[i].queue.pop_front() else {
+            return false;
+        };
+        self.put(dest, &bytes);
+        self.event(RECEIVE, self.chan_id(i), 0);
+        self.wake();
+        true
+    }
     /// Put an item on channel `i` unless it is closed (2) or full (1): native
     /// `publish`, which wakes every waiter on success.
     fn publish(&mut self, i: usize, value: u64, item: TypeId) -> u64 {
@@ -2295,10 +2307,7 @@ impl Machine<'_> {
                 let i = ((a[0] - CHAN_BASE) / 2) as usize;
                 loop {
                     self.check_cancel(t)?;
-                    if let Some(bytes) = self.chans[i].queue.pop_front() {
-                        self.put(a[1], &bytes);
-                        self.event(RECEIVE, self.chan_id(i), 0);
-                        self.wake();
+                    if self.take(i, a[1]) {
                         break vec![1];
                     }
                     if self.chans[i].senders == 0 {
@@ -2343,14 +2352,12 @@ impl Machine<'_> {
             }
             RtOp::TryReceive { .. } => {
                 let i = ((a[0] - CHAN_BASE) / 2) as usize;
-                let status = match self.chans[i].queue.pop_front() {
-                    Some(bytes) => {
-                        self.put(a[1], &bytes);
-                        self.event(RECEIVE, self.chan_id(i), 0);
-                        0
-                    }
-                    None if self.chans[i].senders == 0 => 2,
-                    None => 1,
+                let status = if self.take(i, a[1]) {
+                    0
+                } else if self.chans[i].senders == 0 {
+                    2
+                } else {
+                    1
                 };
                 self.event(TRY_RECEIVE, self.chan_id(i), status);
                 vec![status]

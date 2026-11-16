@@ -165,3 +165,14 @@ pub unsafe extern "C" fn hirsel_core_test_observe_end(
     drop(unsafe { Box::from_raw(observation) });
     hirsel_core_rt::abi::hirsel_core_peak_charge()
 }
+
+/// # Safety
+/// A fixture transfers a fresh owned fd while executing inside the run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_socket_adopt(
+    context: *mut hirsel_core_rt::Context,
+    fd: i32,
+) -> u64 {
+    use std::os::fd::FromRawFd;
+    unsafe { (*context).adopt_fixture_socket(std::os::fd::OwnedFd::from_raw_fd(fd)) }
+}

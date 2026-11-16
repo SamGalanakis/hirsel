@@ -180,6 +180,7 @@ pub enum Role {
     Causes,
     Log,
     StaticFn,
+    Socket,
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {
@@ -201,6 +202,7 @@ impl Role {
             "Sender" => Role::Sender,
             "Receiver" => Role::Receiver,
             "HostFile" => Role::HostFile,
+            "Socket" | "ReadHalf" | "WriteHalf" | "Listener" => Role::Socket,
             "Tape" => Role::Tape,
             "FixedSpan" => Role::FixedSpan,
             "SeqSpan" => Role::SeqSpan,
@@ -249,6 +251,7 @@ impl Role {
             Role::Task
             | Role::Sender
             | Role::Receiver
+            | Role::Socket
             | Role::HostFile
             | Role::Tape
             | Role::Latest => Kind::Resource,
@@ -2102,6 +2105,7 @@ impl Program<'_> {
                     Role::Task
                     | Role::Sender
                     | Role::Receiver
+                    | Role::Socket
                     | Role::HostFile
                     | Role::Tape
                     | Role::Latest,
@@ -2823,7 +2827,12 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),
                     Some(
-                        Role::Sender | Role::Receiver | Role::HostFile | Role::Tape | Role::Latest,
+                        Role::Sender
+                        | Role::Receiver
+                        | Role::Socket
+                        | Role::HostFile
+                        | Role::Tape
+                        | Role::Latest,
                     ) => SEND,
                     Some(Role::Map) => meet(args) & (SHAREABLE | SEND | CODEC),
                     Some(Role::Capability) => PLAIN | SHAREABLE | SEND,

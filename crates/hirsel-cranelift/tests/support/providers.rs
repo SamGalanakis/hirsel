@@ -279,7 +279,25 @@ fn whole_sample_in_dev_and_speed_matches_evaluator() {
 #[test]
 fn every_host_row_preserves_c_fields_and_status() {
     let mut source = String::from("core v1\n");
-    for (i, op) in HostOp::ALL.into_iter().enumerate() {
+    // Socket entries refuse before issue in W1a; their dedicated adapters are
+    // exercised by wire_net_source and the socket ownership fixtures.
+    for (i, op) in HostOp::ALL
+        .iter()
+        .copied()
+        .filter(|op| {
+            !matches!(
+                op,
+                HostOp::Connect
+                    | HostOp::Listen
+                    | HostOp::Accept
+                    | HostOp::Recv
+                    | HostOp::Send
+                    | HostOp::NetNarrow
+                    | HostOp::NetSplit
+            )
+        })
+        .enumerate()
+    {
         let s = RtOp::Host(op).signature();
         let ty = |t: Ty| match t {
             Ty::Ptr => "ptr",
@@ -349,7 +367,23 @@ fn every_host_row_preserves_c_fields_and_status() {
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
     let mut runs = Vec::new();
-    for (i, op) in HostOp::ALL.into_iter().enumerate() {
+    for (i, op) in HostOp::ALL
+        .iter()
+        .copied()
+        .filter(|op| {
+            !matches!(
+                op,
+                HostOp::Connect
+                    | HostOp::Listen
+                    | HostOp::Accept
+                    | HostOp::Recv
+                    | HostOp::Send
+                    | HostOp::NetNarrow
+                    | HostOp::NetSplit
+            )
+        })
+        .enumerate()
+    {
         for failing in [false, true] {
             // The dedicated sleep export is a replay-delivered cancellation
             // point; this generic provider matrix injects only host_op rows.

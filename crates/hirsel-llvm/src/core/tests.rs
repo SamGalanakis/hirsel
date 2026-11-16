@@ -1996,8 +1996,14 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
         assert_eq!(expected.stdout, case.stdout);
         assert!(expected.stderr.is_empty());
     }
-    for op in HostOp::ALL {
+    for &op in HostOp::ALL {
         let params: &[&str] = match op {
+            HostOp::Connect => &["u64", "u8", "u64", "u64", "u16", "ptr"],
+            HostOp::Listen => &["u64", "u8", "u64", "u64", "u16", "u16"],
+            HostOp::Accept => &["u64", "ptr"],
+            HostOp::Recv | HostOp::Send => &["u64", "ptr", "ptr"],
+            HostOp::NetNarrow => &["u64", "u8", "u8", "u64", "u64", "u8", "u16", "u16"],
+            HostOp::NetSplit => &["u64"],
             HostOp::Open => &["u64", "ptr", "u8"],
             HostOp::Close | HostOp::TryLock | HostOp::Unlock | HostOp::WallMs | HostOp::MonoNs => {
                 &["u64"]
@@ -2009,7 +2015,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
         };
         let results: &[&str] = if op == HostOp::Random {
             &[]
-        } else if op.waits() {
+        } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
             &["u64", "u8", "u32", "u64"]
         } else {
             &["u64"]
@@ -2662,4 +2668,82 @@ fn verify_ir(ir: &str) {
     let context = Context::new();
     let llvm = LlvmModule::parse(&context, "test", ir).unwrap();
     llvm.verify().unwrap_or_else(|e| panic!("{e}\n{ir}"));
+}
+
+#[test]
+fn wire_socket_drop_and_split_execute_through_native_cleanup() {
+    let source = format!(
+        "{}\n{}",
+        include_str!("../../../hirsel-core-ir/samples/net.core"),
+        r#"
+sig g3 = () -> (u64)
+inst n3 = test@1/net/prepare [] []
+inst n4 = test@1/net/observe [] []
+inst n5 = test@1/net/native_drop [] []
+inst n6 = test@1/net/native_split [] []
+fn f3 = n3 g3 extern
+fn f4 = n4 g3 extern
+fn f5 = n5 g3 {
+b0:
+ v0: u64 = call f3 g3 () fail b1
+ call f0 g0 (v0) fail b1
+ v1: u64 = call f4 g3 () fail b1
+ return v1
+b1:
+ propagate
+}
+fn f6 = n6 g3 {
+b0:
+ v0: u64 = call f3 g3 () fail b1
+ call f1 g0 (v0) fail b1
+ v1: u64 = call f4 g3 () fail b1
+ return v1
+b1:
+ propagate
+}
+"#
+    );
+    let module = text::parse(&source).unwrap();
+    wf::module(&module).unwrap();
+    let bindings = format!(
+        r#"
+#include <dirent.h>
+#include <sys/socket.h>
+#include <unistd.h>
+extern uint64_t hirsel_core_test_socket_adopt(HirselCoreContext *,int);
+static int peer;
+static size_t before_fds, before_attempts;
+static uint64_t before_available;
+static size_t wire_fds(void) {{ DIR *d=opendir("/proc/self/fd"); assert(d); size_t n=0; while(readdir(d)) n++; closedir(d); return n; }}
+R3 {prepare}(void *raw,uint64_t site) {{
+ HirselCoreContext *ctx=raw;
+ (void)site; before_fds=wire_fds(); before_attempts=hirsel_core_test_attempts(ctx); before_available=hirsel_core_test_available(ctx);
+ int fds[2]; assert(socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,fds)==0); peer=fds[1];
+ return (R3){{.r0=hirsel_core_test_socket_adopt(ctx,fds[0])}};
+}}
+R4 {observe}(void *raw,uint64_t site) {{
+ HirselCoreContext *ctx=raw;
+ (void)site; close(peer); assert(wire_fds()==before_fds);
+ assert(hirsel_core_test_attempts(ctx)==before_attempts);
+ assert(hirsel_core_test_available(ctx)==before_available);
+ return (R4){{.r0=1}};
+}}
+"#,
+        prepare = symbol(&module, FuncId(3)),
+        observe = symbol(&module, FuncId(4))
+    );
+    let cases: Vec<_> = [5, 6]
+        .into_iter()
+        .map(|f| Case {
+            function: FuncId(f),
+            args: vec![],
+            limit: 1000,
+            injection: None,
+        })
+        .collect();
+    for report in execute_with_bindings(&module, &cases, &bindings) {
+        assert_eq!(report.outcome, eval::Outcome::Returned(vec![1]));
+        assert_eq!(report.used, 0);
+        assert_eq!(report.admissions, 0);
+    }
 }

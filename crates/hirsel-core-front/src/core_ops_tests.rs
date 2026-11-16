@@ -22,3 +22,107 @@ fn cap6_ambient_kernels_take_authority() {
     let p = Program::declare(&index, &modules);
     crate::body::core_ops::assert_no_ambient_input(&p);
 }
+
+#[test]
+fn wire_net_operations_lower_and_refuse_without_fake_success() {
+    let (index, modules) = canonical(
+        r#"
+fn denied(n: Net) -> u64 waits {
+    match host.connect(n, Addr(ip: V4(134744072u32), port: 80), Never) { Error(Denied) => 1, _ => 0 }
+}
+fn admitted(n: Net) -> u64 waits {
+    match host.connect(n, Addr(ip: V4(2130706433u32), port: 80), Never) { Error(Other(38)) => 1, _ => 0 }
+}
+fn listening(n: Net) -> u64 waits {
+    match host.listen(n, Addr(ip: V4(2130706433u32), port: 80), 16) { Error(Other(38)) => 1, _ => 0 }
+}
+fn narrow(n: Net) -> u64 waits {
+    match net.narrow(n, Rule(dir: Connect, prefix: V4(2130706433u32), bits: 32, ports: (80u16, 80u16))) {
+        Ok(child) => match host.connect(child, Addr(ip: V4(2130706433u32), port: 81), Never) { Error(Denied) => 1, _ => 0 },
+        _ => 0
+    }
+}
+fn halves(take s: Socket) { let (r, w) = net.split(take s) }
+fn read(mut r: ReadHalf, mut b: Bytes, c: Clock) waits { let _ = host.recv(mut r, mut b, At(c, 1)) }
+fn write(mut w: WriteHalf, b: Bytes) waits { let _ = host.send(mut w, b, Never) }
+fn accepting(mut l: Listener) waits { let _ = host.accept(mut l, Never) }
+"#,
+    );
+    let p = Program::declare(&index, &modules);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    for (f, function) in p
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.path.package_is("app", "1"))
+    {
+        let mut emitter = Emitter::new();
+        let checked = p.check_lower(f, &mut emitter);
+        assert!(
+            checked.refusals.is_empty() && checked.gaps.is_empty(),
+            "{}: {checked:?}",
+            function.path
+        );
+        wf::module(&emitter.module).unwrap_or_else(|e| {
+            panic!(
+                "{}: {e}\n{}",
+                function.path,
+                hirsel_core_ir::text::print(&emitter.module)
+            )
+        });
+        if ["denied", "admitted", "listening", "narrow"].contains(&function.path.0.name.as_str()) {
+            let mut network = eval::Network::default();
+            network.grants.insert(
+                1,
+                vec![
+                    hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
+                    hirsel_core_net::Rule::parse("Listen 127.0.0.0/8 1-65535").unwrap(),
+                ],
+            );
+            let report = eval::run_network(
+                &emitter.module,
+                checked.function.unwrap(),
+                &[1],
+                1 << 20,
+                network,
+            );
+            assert_eq!(
+                report.outcome,
+                eval::Outcome::Returned(vec![1]),
+                "{}",
+                function.path
+            );
+            assert_eq!(report.used, 0);
+        }
+    }
+}
+
+#[test]
+fn wire_socket_resources_are_move_only_send_and_size_eight() {
+    for name in ["Socket", "ReadHalf", "WriteHalf", "Listener"] {
+        let source = format!("fn f(take x: {name}) {{ let y = x }}");
+        let (index, modules) = canonical(&source);
+        let p = Program::declare(&index, &modules);
+        let f = p
+            .fns
+            .iter()
+            .position(|f| f.path.package_is("app", "1"))
+            .unwrap();
+        let mut emitter = Emitter::new();
+        let c = p.check_lower(f, &mut emitter);
+        assert!(c.refusals.is_empty() && c.gaps.is_empty(), "{c:?}");
+        let recipes = hirsel_core_layout::compute(&emitter.module.types).unwrap();
+        let shape = emitter
+            .module
+            .types
+            .iter()
+            .position(|t| t.name.ends_with(&format!("/{name}")))
+            .unwrap();
+        assert_eq!(recipes[shape].logical_size, Some(8));
+        assert!(!recipes[shape].plain);
+        let source = format!("fn f(x: Rc[{name}]) {{}}");
+        let (index, modules) = canonical(&source);
+        let p = Program::declare(&index, &modules);
+        assert!(!p.refusals.is_empty(), "{name} must not be shareable");
+    }
+}

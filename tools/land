@@ -108,7 +108,7 @@ POST_PUSH = (
     '//:hirsel-core-program-tests-test-llvm_source', '//:core-program-llvm-aarch64-runtime',
     '//:core-runner-r0', '//:land-core-native-capabilities',
     '//:hirsel-core-ids-unittest', '//:hirsel-core-diag-unittest', '//:hirsel-core-syntax-unittest',
-    '//:hirsel-core-resolve-unittest', '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest',
+    '//:hirsel-core-resolve-unittest', '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest', '//:hirsel-core-net-unittest',
     '//:hirsel-core-rt-unittest', '//:hirsel-cranelift-unittest', '//:core-driver-sites',
     '//:land-core-library-modes', '//:core-llvm-aarch64-front', '//:core-llvm-aarch64-runtime',
     '//:core-llvm-aarch64-abi', '//:core-llvm-aarch64-failure', '//:core-llvm-native',

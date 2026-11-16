@@ -62,6 +62,28 @@ impl FunctionEmitter<'_> {
         let at = self.site_word();
         let results = [U, K, Ty::Scalar(Scalar::U32), U, K];
         let mut values = match op {
+            HostOp::Connect
+            | HostOp::Listen
+            | HostOp::Accept
+            | HostOp::Recv
+            | HostOp::Send
+            | HostOp::NetNarrow
+            | HostOp::NetSplit => {
+                let mut operands = vec![ptr(CONTEXT)];
+                for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {
+                    let hirsel_core_ir::Param::Value(t) = p else {
+                        unreachable!()
+                    };
+                    operands.push(match *t {
+                        Ty::Ptr => ptr(value.clone()),
+                        Ty::Scalar(Scalar::U8) => zeroext(Type::I8, value.clone()),
+                        Ty::Scalar(Scalar::U16) => zeroext(Type::Int(16), value.clone()),
+                        _ => word(value.clone()),
+                    });
+                }
+                operands.push(word(at));
+                self.native_call(op.net_symbol(), &results, &operands)
+            }
             HostOp::Rename => self.native_call(
                 "hirsel_core_host_rename",
                 &results,

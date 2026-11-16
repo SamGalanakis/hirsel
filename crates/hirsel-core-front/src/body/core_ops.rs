@@ -12,6 +12,7 @@ pub(crate) enum Kernel {
     StringList(&'static str),
     Unique,
     Host(HostOp),
+    Net(HostOp),
     ArgsLen,
     ArgsGet,
     NewOwner(Option<Counted>),
@@ -74,6 +75,7 @@ macro_rules! operations {
 }
 
 operations! {
+
     ("int", "parse", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("core", "isolate", Lane::PendingCode, "A", "core-check-callables-913", false),
     ("latest", "new", Lane::Runtime(Kernel::LatestNew), "A", "core-ops-914", false),
@@ -310,6 +312,13 @@ operations! {
     ("stdout", "write", Lane::Runtime(Kernel::Stream(HostOp::Stdout)), "B", "core-ops-914", false),
     ("stdout", "write_bytes", Lane::Runtime(Kernel::Stream(HostOp::Stdout)), "B", "core-ops-914", false),
     ("stderr", "write_bytes", Lane::Runtime(Kernel::Stream(HostOp::Stderr)), "B", "core-ops-914", false),
+    ("host", "connect", Lane::Runtime(Kernel::Net(HostOp::Connect)), "B", "wire-w1a-1063", false),
+    ("host", "listen", Lane::Runtime(Kernel::Net(HostOp::Listen)), "B", "wire-w1a-1063", false),
+    ("host", "accept", Lane::Runtime(Kernel::Net(HostOp::Accept)), "B", "wire-w1a-1063", false),
+    ("host", "recv", Lane::Runtime(Kernel::Net(HostOp::Recv)), "B", "wire-w1a-1063", false),
+    ("host", "send", Lane::Runtime(Kernel::Net(HostOp::Send)), "B", "wire-w1a-1063", false),
+    ("net", "narrow", Lane::Runtime(Kernel::Net(HostOp::NetNarrow)), "B", "wire-w1a-1063", false),
+    ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
     ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
     ("string", "as_bytes", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", false),
     ("string", "slice", Lane::PendingCode, "C", "std-seed-api-889", false),
@@ -642,6 +651,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
+            Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
             Kernel::Spawn => {
                 self.runtime_spawn(types[0], types[1], vals[1]?, vals[2], vals[3]?, result, n)
             }
@@ -1440,6 +1450,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
         match k {
             Kernel::Stream(_)
             | Kernel::Host(_)
+            | Kernel::Net(_)
             | Kernel::ArgsLen
             | Kernel::ArgsGet
             | Kernel::TapeOpen
@@ -1527,6 +1538,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 | "std-seed-api-889"
                 | "core-collections-918"
                 | "tape-build-1037"
+                | "wire-w1a-1063"
         ));
         if entry.private {
             assert!(
@@ -2711,5 +2723,273 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             |cx, to, ty| cx.runtime_case_payload(to, 1, ty, Some(code), n),
         )
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    fn net_field(
+        &mut self,
+        ty: TyId,
+        at: AddressId,
+        i: usize,
+        n: NodeId,
+    ) -> Option<(TyId, AddressId)> {
+        let child = match self.t.kind(ty) {
+            TyKind::Tuple(xs) => xs[i],
+            TyKind::Adt(d, _) => match &self.p.decls[d.index()].body {
+                DeclBody::Record(fs) => fs[i].ty,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let field = self.runtime_field(at, &[Step::Field(i as u32)], child, n)?;
+        Some((child, field))
+    }
+    fn net_read_field(&mut self, ty: TyId, at: AddressId, i: usize, n: NodeId) -> Option<ValueId> {
+        let (child, field) = self.net_field(ty, at, i, n)?;
+        match self.rep(child).ok()? {
+            Rep::Scalar(t) => Some(self.read_bits(field, t, n)),
+            Rep::Place(_) => Some(self.pointer(field, n)),
+            Rep::None => None,
+        }
+    }
+    fn net_case(&mut self, at: AddressId, n: NodeId) -> ValueId {
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: at,
+            },
+            n,
+        );
+        tag
+    }
+    fn net_ip(&mut self, at: AddressId, n: NodeId) -> Option<[ValueId; 3]> {
+        let u = Ty::Scalar(Scalar::U64);
+        let tag = self.net_case(at, n);
+        let family = self.value(Ty::Scalar(Scalar::U8));
+        self.inst(
+            Inst::Convert {
+                result: family,
+                flag: None,
+                operand: tag,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        let v4 = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 0, n)?;
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[u, u]);
+        self.runtime_branch(v4, yes, no, n);
+        self.start(yes);
+        let at4 = self.address(
+            AddressBase::Address(at),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Value(Ty::Scalar(Scalar::U32)),
+            n,
+        );
+        let lo4 = self.read_bits(at4, Ty::Scalar(Scalar::U32), n);
+        let lo = self.value(u);
+        self.inst(
+            Inst::Convert {
+                result: lo,
+                flag: None,
+                operand: lo4,
+                mode: ConvertMode::Widen,
+            },
+            n,
+        );
+        let zero = self.konst(u, 0, n)?;
+        self.jump(join, &[zero, lo], n);
+        self.start(no);
+        let hi_at = self.address(
+            AddressBase::Address(at),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Value(u),
+            n,
+        );
+        let lo_at = self.address(
+            AddressBase::Address(at),
+            &[Step::CaseField { case: 1, field: 1 }],
+            PlaceTy::Value(u),
+            n,
+        );
+        let hi = self.read_bits(hi_at, u, n);
+        let lo = self.read_bits(lo_at, u, n);
+        self.jump(join, &[hi, lo], n);
+        self.start(join);
+        let values = self.block_params(join);
+        Some([family, values[0], values[1]])
+    }
+    fn runtime_net(
+        &mut self,
+        op: HostOp,
+        f: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let key = if matches!(
+            op,
+            HostOp::Accept | HostOp::Recv | HostOp::Send | HostOp::NetSplit
+        ) {
+            self.runtime_key(vals[0]?, n)
+        } else {
+            vals[0]?
+        };
+        let mut operands = vec![key];
+        match op {
+            HostOp::Connect | HostOp::Listen | HostOp::NetNarrow => {
+                let ty = self.p.fns[f].params[1].ty;
+                let (_, at) = self.runtime_place(ty, vals[1], n)?;
+                let ip_index = usize::from(op == HostOp::NetNarrow);
+                if op == HostOp::NetNarrow {
+                    let (_, dir) = self.net_field(ty, at, 0, n)?;
+                    let d = self.net_case(dir, n);
+                    let d8 = self.value(Ty::Scalar(Scalar::U8));
+                    self.inst(
+                        Inst::Convert {
+                            result: d8,
+                            flag: None,
+                            operand: d,
+                            mode: ConvertMode::Truncate,
+                        },
+                        n,
+                    );
+                    operands.push(d8);
+                }
+                let (_, ip) = self.net_field(ty, at, ip_index, n)?;
+                operands.extend(self.net_ip(ip, n)?);
+                if op == HostOp::NetNarrow {
+                    operands.push(self.net_read_field(ty, at, 2, n)?);
+                    let (pair, ports) = self.net_field(ty, at, 3, n)?;
+                    operands.push(self.net_read_field(pair, ports, 0, n)?);
+                    operands.push(self.net_read_field(pair, ports, 1, n)?);
+                } else {
+                    operands.push(self.net_read_field(ty, at, 1, n)?);
+                    operands.push(vals[2]?);
+                }
+            }
+            HostOp::Accept => operands.push(vals[1]?),
+            HostOp::Recv | HostOp::Send => {
+                operands.push(vals[1]?);
+                operands.push(vals[2]?);
+            }
+            HostOp::NetSplit => {}
+            _ => unreachable!(),
+        }
+        let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
+        let [value, error, code, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        if op == HostOp::NetSplit {
+            self.consume(vals[0], n);
+            let id = self.runtime_type(result, n)?;
+            let to = self.new_slot(PlaceTy::Declared(id), n);
+            self.runtime_store(to, &[Step::Field(0)], u, value, n);
+            self.runtime_store(to, &[Step::Field(1)], u, written, n);
+            return Some(self.pointer(to, n));
+        }
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                if op == HostOp::NetNarrow || matches!(op, HostOp::Recv | HostOp::Send) {
+                    cx.runtime_case_payload(to, 0, ty, Some(value), n);
+                } else if op == HostOp::Connect {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        cx.runtime_store(at, &[], u, value, n);
+                    }
+                }
+                // W1a's provider never produces a Socket/Listener success.
+                // W1b supplies the accepted/bound address with its OS attempts.
+            },
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    if op == HostOp::NetNarrow {
+                        let invalid = cx
+                            .runtime_compare(Ty::Scalar(Scalar::U8), error, 1, n)
+                            .unwrap();
+                        let yes = cx.new_block(&[]);
+                        let no = cx.new_block(&[]);
+                        let join = cx.new_block(&[]);
+                        cx.runtime_branch(invalid, yes, no, n);
+                        cx.start(yes);
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 0,
+                            },
+                            n,
+                        );
+                        cx.jump(join, &[], n);
+                        cx.start(no);
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 1,
+                            },
+                            n,
+                        );
+                        let TyKind::Adt(d, _) = cx.t.kind(ty) else {
+                            return;
+                        };
+                        let DeclBody::Variant(cases) = &cx.p.decls[d.index()].body else {
+                            return;
+                        };
+                        let cap = cases[1].fields[0].ty;
+                        if let Some(cap) =
+                            cx.runtime_field(at, &[Step::CaseField { case: 1, field: 0 }], cap, n)
+                        {
+                            cx.runtime_store(cap, &[Step::Field(0)], u, value, n);
+                            cx.runtime_store(cap, &[Step::Field(1)], u, written, n);
+                        }
+                        cx.jump(join, &[], n);
+                        cx.start(join);
+                    } else {
+                        cx.runtime_net_error(at, error, code, n);
+                    }
+                }
+            },
+        )
+    }
+    fn runtime_net_error(&mut self, to: AddressId, error: ValueId, code: ValueId, n: NodeId) {
+        let join = self.new_block(&[]);
+        for case in 0..7 {
+            let Some(on) =
+                self.runtime_compare(Ty::Scalar(Scalar::U8), error, u64::from(case + 1), n)
+            else {
+                return;
+            };
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(on, yes, no, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.jump(join, &[], n);
+            self.start(no);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 7,
+            },
+            n,
+        );
+        self.runtime_store(
+            to,
+            &[Step::CaseField { case: 7, field: 0 }],
+            Ty::Scalar(Scalar::U32),
+            code,
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
     }
 }

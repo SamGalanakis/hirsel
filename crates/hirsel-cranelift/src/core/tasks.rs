@@ -208,11 +208,40 @@ impl Function<'_, '_, '_> {
                     | HostOp::Rename
                     | HostOp::SleepUntil
                     | HostOp::Sync
-                    | HostOp::SyncDir => (null, no_mode),
+                    | HostOp::SyncDir
+                    | HostOp::Connect
+                    | HostOp::Listen
+                    | HostOp::Accept
+                    | HostOp::Recv
+                    | HostOp::Send
+                    | HostOp::NetNarrow
+                    | HostOp::NetSplit => (null, no_mode),
                 };
                 // The C outcome is always 32 bytes: value at 0, error.tag at 8,
                 // error.code at 12, written at 16, status at 24.
                 let values = match op {
+                    HostOp::Connect
+                    | HostOp::Listen
+                    | HostOp::Accept
+                    | HostOp::Recv
+                    | HostOp::Send
+                    | HostOp::NetNarrow
+                    | HostOp::NetSplit => {
+                        let signature = op_signature(op);
+                        let count = signature.len();
+                        let mut params = vec![P];
+                        params.extend(signature);
+                        params.push(U);
+                        let mut operands = vec![self.context];
+                        operands.extend_from_slice(&args[..count]);
+                        operands.push(site);
+                        self.c_call(
+                            op.net_symbol(),
+                            &params,
+                            &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                            &operands,
+                        )?
+                    }
                     HostOp::Rename => self.c_call(
                         "hirsel_core_host_rename",
                         &[P, U, P, P, U],
@@ -427,4 +456,16 @@ impl Function<'_, '_, '_> {
         }
         Ok(())
     }
+}
+
+fn op_signature(op: HostOp) -> Vec<Ty> {
+    hirsel_core_ir::RtOp::Host(op)
+        .signature()
+        .params
+        .into_iter()
+        .map(|p| match p {
+            hirsel_core_ir::Param::Value(t) => t,
+            _ => unreachable!(),
+        })
+        .collect()
 }

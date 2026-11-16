@@ -5,6 +5,7 @@ pub(super) struct Tables {
     pub parameters: DataId,
     pub names: DataId,
     pub directories: DataId,
+    pub net_rules: DataId,
     pub sources: DataId,
 }
 
@@ -84,6 +85,19 @@ pub(super) fn write(
     let parameters = bytes(object, None, requirements, 8)?;
     let names = views(object, plan.parameters.iter().map(|p| p.name))?;
     let directories = views(object, plan.directories.iter().map(String::as_str))?;
+    let mut rules = Vec::new();
+    for r in plan.net_rules {
+        let mut row = vec![0; 32];
+        row[0] = r.dir;
+        row[1] = r.family;
+        row[8..16].copy_from_slice(&r.hi.to_le_bytes());
+        row[16..24].copy_from_slice(&r.lo.to_le_bytes());
+        row[24] = r.bits;
+        row[26..28].copy_from_slice(&r.first.to_le_bytes());
+        row[28..30].copy_from_slice(&r.last.to_le_bytes());
+        rules.extend(row);
+    }
+    let net_rules = bytes(object, None, rules, 8)?;
     let mut files = Vec::new();
     let mut pointers = Vec::new();
     for file in &sources.files {
@@ -122,6 +136,7 @@ pub(super) fn write(
         parameters,
         names,
         directories,
+        net_rules,
         sources,
     })
 }

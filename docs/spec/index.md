@@ -73,6 +73,9 @@ the core library does not, and a block whose comment says `refused` is refused o
 the comment says. A block marked `hirsel unbuilt` belongs to its rule but shows what the
 built `hirsel` does not implement yet; the mark is removed when it does.
 
+The [Net socket declarations and ownership rules](net.md) define the network
+capability and its explicit grant syntax.
+
 ## Glossary
 
 | term | defined in |

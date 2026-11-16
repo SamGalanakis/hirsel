@@ -949,6 +949,7 @@ fn measure<'r>(
             Handle::Task
             | Handle::Capability
             | Handle::Causes
+            | Handle::Socket
             | Handle::HostFile
             | Handle::Tape
             | Handle::Latest,
@@ -976,6 +977,7 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
             | Handle::Sender
             | Handle::Receiver
             | Handle::Latest
+            | Handle::Socket
             | Handle::HostFile
             | Handle::Tape,
         ) => false,
@@ -1120,6 +1122,7 @@ fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool
             | Handle::Receiver
             | Handle::Latest
             | Handle::Causes
+            | Handle::Socket
             | Handle::HostFile
             | Handle::Tape,
         ) => true,

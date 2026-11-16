@@ -16,7 +16,8 @@
 /// capability_provider(ctx,handle)/capability_handle(ctx,handle) expose the
 /// selected provider and its local designation to core provider adapters.
 /// args_len/get take (context, Args handle [, index]); views remain run-owned.
-/// Net/Random/Stdin/Env/Process have no v1 operations. Tasks authorizes the
+/// Stdin/Env/Process have no v1 operations. Net has explicit rule lists and
+/// declared socket entries, refused with Other(38) until W1b. Tasks authorizes the
 /// source spawn; its FORM row omits the designation. No handle contains an
 /// address or reveals a descriptor to source code.
 ///

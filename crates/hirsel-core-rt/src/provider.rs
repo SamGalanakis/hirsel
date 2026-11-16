@@ -20,6 +20,11 @@ pub const SLEEP_UNTIL: u8 = 15;
 pub const SYNC: u8 = 16;
 pub const SYNC_DIR: u8 = 17;
 pub const RANDOM: u8 = 18;
+pub const CONNECT: u8 = 19;
+pub const LISTEN: u8 = 20;
+pub const ACCEPT: u8 = 21;
+pub const RECV: u8 = 22;
+pub const SEND: u8 = 23;
 
 /// IoError tags. Other carries the host error number.
 #[repr(C)]
@@ -190,6 +195,20 @@ pub(crate) unsafe fn drive(
                 causes::record(&mut *context, causes::Cause::new(causes::BOUNDS, site));
                 return CANCELLED;
             }
+        }
+        if matches!(operation, CONNECT | LISTEN) && !crate::net::permitted(&*request) {
+            return Outcome {
+                error: IoError { tag: 1, code: 0 },
+                ..Outcome::default()
+            };
+        }
+        // W1a declares these entries, but no network operation issues yet.
+        // W1b replaces this refusal with its OS attempts and provider events.
+        if matches!(operation, CONNECT | LISTEN | ACCEPT | RECV | SEND) {
+            return Outcome {
+                error: IoError { tag: 8, code: 38 },
+                ..Outcome::default()
+            };
         }
         let outcome = crate::tasks::provider_operation(context, &*provider, request, issued);
         if outcome.status == STATUS_REFUSED {

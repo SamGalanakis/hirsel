@@ -22,6 +22,7 @@ pub mod host_ops;
 pub mod isolate;
 pub mod latest;
 pub mod limit;
+pub mod net;
 pub mod os;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
@@ -113,6 +114,18 @@ impl Context {
     pub fn reset_test_limit(&mut self, bytes: u64) {
         self.current = Funding::root(bytes);
         self.current.bind();
+    }
+    /// Harness-only transfer of an owned descriptor into this run's socket records.
+    /// # Safety
+    /// The fixture runs inside hirsel_core_run, which pins the descriptor registry.
+    #[cfg(feature = "testing")]
+    pub unsafe fn adopt_fixture_socket(&mut self, fd: std::os::fd::OwnedFd) -> u64 {
+        unsafe {
+            (*self.host_files)
+                .sockets
+                .insert(fd)
+                .unwrap_or_else(|| process::stop(b"HostHandles"))
+        }
     }
     /// Changes the fixture allowance while retaining startup reservations and
     /// the payer domain registered with the scheduler's refund notification.
@@ -227,6 +240,8 @@ mod entry_tests;
 mod host_file_tests;
 #[cfg(test)]
 mod host_ops_tests;
+#[cfg(test)]
+mod net_tests;
 
 #[cfg(test)]
 mod retry_tests;

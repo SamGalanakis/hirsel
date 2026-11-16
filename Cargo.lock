@@ -396,6 +396,7 @@ dependencies = [
  "hirsel-core-ir",
  "hirsel-core-layout",
  "hirsel-core-materialize",
+ "hirsel-core-net",
  "hirsel-core-resolve",
  "hirsel-core-syntax",
  "hirsel-cranelift",
@@ -421,6 +422,7 @@ dependencies = [
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
+ "hirsel-core-net",
  "hirsel-core-resolve",
  "hirsel-core-syntax",
  "hirsel-guard",
@@ -447,6 +449,7 @@ version = "0.1.0"
 dependencies = [
  "hirsel-core-ids",
  "hirsel-core-layout",
+ "hirsel-core-net",
  "hirsel-guard",
  "serde",
 ]
@@ -467,6 +470,15 @@ dependencies = [
  "hirsel-core-ids",
  "hirsel-core-ir",
  "rustc-hash",
+]
+
+[[package]]
+name = "hirsel-core-net"
+version = "0.1.0"
+dependencies = [
+ "hirsel-guard",
+ "libc",
+ "serde",
 ]
 
 [[package]]
@@ -512,6 +524,7 @@ version = "0.1.0"
 dependencies = [
  "bumpalo",
  "hirsel-core-layout",
+ "hirsel-core-net",
  "hirsel-guard",
  "hirsel-stack",
  "libc",

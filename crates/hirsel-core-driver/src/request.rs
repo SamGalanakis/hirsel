@@ -126,6 +126,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let run_args = invocation.arguments;
     let mut directories = Vec::new();
     let mut grant_mask = 0;
+    let mut net_rules = Vec::new();
     let mut json = false;
     use crate::cli::OptionId as Opt;
     for (option, value) in invocation.options {
@@ -144,6 +145,18 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::CoreProduct => core_product = Some(PathBuf::from(value)),
             Opt::Dir => directories.push(value),
             Opt::Grant => {
+                if value == "Net" {
+                    return Err(
+                        format!("Net requires --grant {}", hirsel_core_net::RULE_SYNTAX).into(),
+                    );
+                }
+                if let Some(rules) = value.strip_prefix("Net=") {
+                    for rule in rules.split(';') {
+                        net_rules.push(hirsel_core_net::Rule::parse(rule)?);
+                    }
+                    grant_mask |= 1 << 1;
+                    continue;
+                }
                 let kind = crate::grant_kind(&value)
                     .filter(|kind| (1..=9).contains(kind)).ok_or("expected Net, Clock, Random, Stdout, Stderr, Stdin, Env, Process or Tasks; use --dir for Dir; Args is always present")?;
                 grant_mask |= 1 << kind;
@@ -430,6 +443,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.root_limit = root_limit;
             options.directories = directories;
             options.grant_mask = grant_mask;
+            options.net_rules = net_rules;
             options.logical_charge_report = logical_charge_report;
             Ok(options)
         };
@@ -842,5 +856,21 @@ pub fn main(args: Vec<String>) -> ! {
             eprintln!("hirsel: {e}");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod net_grant_tests {
+    #[test]
+    fn bare_net_grant_is_refused_before_discovery_with_the_rule_syntax() {
+        let result = super::run(
+            ["run", "unused", "--grant", "Net"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        let error = result
+            .err()
+            .expect("a bare Net grant cannot confer authority");
+        assert!(error.to_string().contains(hirsel_core_net::RULE_SYNTAX));
     }
 }

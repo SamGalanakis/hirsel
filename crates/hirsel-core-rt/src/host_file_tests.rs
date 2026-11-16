@@ -188,6 +188,8 @@ fn native_host_file_child() {
         stderr_fd: sink.as_raw_fd(),
         parameters: requirements.as_ptr(),
         parameters_len: 1,
+        net_rules: std::ptr::null(),
+        net_rules_len: 0,
     };
     // SAFETY: process owner pins grants; tracker remains live until process_free.
     unsafe {

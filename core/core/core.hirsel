@@ -90,6 +90,36 @@ pub opaque type Process
 
 pub opaque type Tasks
 
+pub opaque resource type Socket
+
+pub opaque resource type ReadHalf
+
+pub opaque resource type WriteHalf
+
+pub opaque resource type Listener
+
+pub type Ip = V4(u32) | V6(u64, u64)
+
+pub type Addr {
+    ip: Ip,
+    port: u16
+}
+
+pub type Until = Never | At(Clock, u64)
+
+pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32)
+
+pub type NetDirection = Connect | Listen
+
+pub type Rule {
+    dir: NetDirection,
+    prefix: Ip,
+    bits: u8,
+    ports: (u16, u16)
+}
+
+pub type RuleError = Invalid | Capacity(Capacity)
+
 pub opaque resource type HostFile
 
 pub opaque resource type Tape

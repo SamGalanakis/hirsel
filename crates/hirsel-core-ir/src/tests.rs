@@ -492,6 +492,7 @@ fn coreir_data_crates_depend_only_on_neutral_crates() {
         "hirsel-core-ids",
         "hirsel-core-layout",
         "hirsel-core-ir",
+        "hirsel-core-net",
         "hirsel-intern",
         "hirsel-guard",
     ];
@@ -501,6 +502,7 @@ fn coreir_data_crates_depend_only_on_neutral_crates() {
             "hirsel-core-ids" => include_str!("../../hirsel-core-ids/Cargo.toml"),
             "hirsel-core-layout" => include_str!("../../hirsel-core-layout/Cargo.toml"),
             "hirsel-core-ir" => include_str!("../Cargo.toml"),
+            "hirsel-core-net" => include_str!("../../hirsel-core-net/Cargo.toml"),
             "hirsel-intern" => include_str!("../../hirsel-intern/Cargo.toml"),
             "hirsel-guard" => include_str!("../../hirsel-guard/Cargo.toml"),
             _ => panic!("non-neutral data dependency {name}"),

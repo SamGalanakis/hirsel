@@ -802,10 +802,17 @@ pub enum HostOp {
     SyncDir,
     /// Fill a Bytes carrier's spare capacity from the Random capability.
     Random,
+    Connect,
+    Listen,
+    Accept,
+    Recv,
+    Send,
+    NetNarrow,
+    NetSplit,
 }
 
 impl HostOp {
-    pub const ALL: [HostOp; 19] = [
+    pub const ALL: &[HostOp] = &[
         HostOp::Open,
         HostOp::Read,
         HostOp::Write,
@@ -825,6 +832,13 @@ impl HostOp {
         HostOp::Sync,
         HostOp::SyncDir,
         HostOp::Random,
+        HostOp::Connect,
+        HostOp::Listen,
+        HostOp::Accept,
+        HostOp::Recv,
+        HostOp::Send,
+        HostOp::NetNarrow,
+        HostOp::NetSplit,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -852,11 +866,34 @@ impl HostOp {
             HostOp::Sync => "host_sync",
             HostOp::SyncDir => "host_sync_dir",
             HostOp::Random => "host_random",
+            HostOp::Connect => "host_connect",
+            HostOp::Listen => "host_listen",
+            HostOp::Accept => "host_accept",
+            HostOp::Recv => "host_recv",
+            HostOp::Send => "host_send",
+            HostOp::NetNarrow => "net_narrow",
+            HostOp::NetSplit => "net_split",
+        }
+    }
+    /// C entry of a socket or Net ownership/authority adapter.
+    pub const fn net_symbol(self) -> &'static str {
+        match self {
+            Self::Connect => "hirsel_core_host_connect",
+            Self::Listen => "hirsel_core_host_listen",
+            Self::Accept => "hirsel_core_host_accept",
+            Self::Recv => "hirsel_core_host_recv",
+            Self::Send => "hirsel_core_host_send",
+            Self::NetNarrow => "hirsel_core_net_narrow",
+            Self::NetSplit => "hirsel_core_net_split",
+            _ => unreachable!(),
         }
     }
     /// Whether the operation waits (a cancellation point, so it can fail).
     pub const fn waits(self) -> bool {
-        !matches!(self, HostOp::WallMs | HostOp::MonoNs | HostOp::Random)
+        !matches!(
+            self,
+            HostOp::WallMs | HostOp::MonoNs | HostOp::Random | HostOp::NetNarrow | HostOp::NetSplit
+        )
     }
 }
 
@@ -987,6 +1024,44 @@ impl RtOp {
             RtOp::Host(op) => {
                 let outcome = vec![u64_, u8_, Ty::Scalar(Scalar::U32), u64_];
                 match op {
+                    HostOp::Connect => (
+                        vec![
+                            V(u64_),
+                            V(u8_),
+                            V(u64_),
+                            V(u64_),
+                            V(Ty::Scalar(Scalar::U16)),
+                            V(p),
+                        ],
+                        outcome,
+                    ),
+                    HostOp::Listen => (
+                        vec![
+                            V(u64_),
+                            V(u8_),
+                            V(u64_),
+                            V(u64_),
+                            V(Ty::Scalar(Scalar::U16)),
+                            V(Ty::Scalar(Scalar::U16)),
+                        ],
+                        outcome,
+                    ),
+                    HostOp::Accept => (vec![V(u64_), V(p)], outcome),
+                    HostOp::Recv | HostOp::Send => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::NetNarrow => (
+                        vec![
+                            V(u64_),
+                            V(u8_),
+                            V(u8_),
+                            V(u64_),
+                            V(u64_),
+                            V(u8_),
+                            V(Ty::Scalar(Scalar::U16)),
+                            V(Ty::Scalar(Scalar::U16)),
+                        ],
+                        outcome,
+                    ),
+                    HostOp::NetSplit => (vec![V(u64_)], outcome),
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
                     HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),

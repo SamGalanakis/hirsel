@@ -174,6 +174,8 @@ pub enum Handle {
     /// A tape (CAP-9): a mechanical resource like a HostFile; cleaning it writes
     /// its buffered frames and nothing else (REPLAY-SPEC section 8).
     Tape,
+    /// Socket, directional half or listener. The key retains its direction.
+    Socket,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

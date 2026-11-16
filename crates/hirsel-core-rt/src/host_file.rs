@@ -17,6 +17,8 @@ struct Vector {
 }
 #[derive(Default)]
 pub(crate) struct Files {
+    pub(crate) sockets: hirsel_core_net::Sockets,
+    pub(crate) net_grants: Vec<crate::net::Grant>,
     next: u64,
     live: BTreeMap<u64, File>,
     grants: BTreeMap<u64, Box<File>>,
@@ -87,6 +89,8 @@ impl Files {
         while let Some((_, tape)) = self.tapes.pop_last() {
             drop(tape);
         }
+        self.sockets = hirsel_core_net::Sockets::default();
+        self.net_grants.clear();
         while let Some((_, file)) = self.live.pop_last() {
             // SAFETY: removed sole ownership before calling the pinned provider.
             unsafe { close(context, file) };

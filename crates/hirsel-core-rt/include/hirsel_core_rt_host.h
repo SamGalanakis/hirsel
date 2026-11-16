@@ -3,10 +3,12 @@
 #include "hirsel_core_rt.h"
 /* Provider operations: Open 0, Read 1, Write 2, Close 3, TryLock 4, Unlock 5,
    Mkdir 6, Mkdtemp 7, Remove 8, RemoveTree 9, WallMs 10, MonoNs 11,
-   Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18.
+   Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18, Connect 19, Listen 20, Accept 21, Recv 22, Send 23.
    Open modes: Read 0, Write 1, Append 2, CreateNew 3. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
-/* IoError: 0 success, 1 NotFound, 2 Denied, 3 Exists, 4 Closed, 5 Other(code). */
+/* IoError: 0 success, 1 NotFound, 2 Denied, 3 Exists, 4 Closed, 5 Other(code).
+   Network outcomes use 1 Denied, 2 Refused, 3 Unreachable, 4 InUse, 5 Reset,
+   6 TimedOut, 7 Aborted, 8 Other(code). */
 typedef struct { uint8_t *data; size_t len, capacity; } HirselCoreBuffer;
 typedef struct {
     uint8_t operation, mode;
@@ -93,7 +95,9 @@ typedef struct { uint8_t kind; const HirselCoreProvider *provider; uint64_t hand
 typedef struct { uint8_t kind; size_t index; } HirselCoreEntryRequirement;
 /* Grant kinds: Dir 0, Net 1, Clock 2, Random 3, Stdout 4, Stderr 5,
    Stdin 6, Env 7, Process 8, Tasks 9, Args 10. Capability/Args operands
-   are plain u64 provider handles, eight physical/logical bytes in FORM. */
+   are plain u64 provider handles, eight physical/logical bytes in FORM.
+   For Net, EntryGrant.handle designates a pinned HirselCoreNetRules list;
+   OsConfig copies its explicit rules into that immutable run-owned grant. */
 typedef struct HirselCoreProcessConfig {
     uint64_t root_limit;
     const HirselCoreBuffer *args;
@@ -124,6 +128,9 @@ uint64_t hirsel_core_entry_grant(const HirselCoreProcessConfig *, uint8_t kind, 
 bool hirsel_core_entry_grants_present(const HirselCoreProcessConfig *, const HirselCoreEntryRequirement *, size_t);
 const HirselCoreProvider *hirsel_core_capability_provider(const HirselCoreContext *, uint64_t);
 uint64_t hirsel_core_capability_handle(const HirselCoreContext *, uint64_t);
+/* NET-6 configuration. dir: 0 Connect, 1 Listen; family: 0 V4, 1 V6. */
+typedef struct { uint8_t dir, family; uint64_t hi, lo; uint8_t bits; uint16_t first, last; } HirselCoreNetRule;
+typedef struct { const HirselCoreNetRule *data; size_t len; } HirselCoreNetRules;
 typedef struct {
     uint64_t root_limit;
     const HirselCoreView *args;
@@ -134,6 +141,8 @@ typedef struct {
     int32_t stdout_fd, stderr_fd;
     const HirselCoreEntryRequirement *parameters;
     size_t parameters_len;
+    const HirselCoreNetRule *net_rules;
+    size_t net_rules_len;
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;
@@ -152,4 +161,15 @@ const HirselCoreProcessConfig *hirsel_core_os_process_config(const HirselCoreOsP
    and every borrowed view ends, free releases argv/metadata and unused setup. */
 void hirsel_core_os_process_free(HirselCoreOsProcess *);
 #include "hirsel_core_rt_sites.h"
+
+/* W1a provider entries refuse with Other(38). Split has no replay point. */
+HirselCoreHostOutcome hirsel_core_host_connect(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, const uint8_t *, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_listen(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint16_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, const uint8_t *, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_recv(HirselCoreContext *, uint64_t, HirselCoreBuffer *, const uint8_t *, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_send(HirselCoreContext *, uint64_t, HirselCoreBuffer *, const uint8_t *, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);
+void hirsel_core_socket_drop(HirselCoreContext *, uint64_t);
+
 #endif

@@ -104,6 +104,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
         instance_limit,
         directories,
         grant_mask,
+        net_rules,
         // An observation build writes a report besides its answer; it is
         // never recorded (`Request` is not made for one).
         logical_charge_report: _,
@@ -123,6 +124,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
             instance_limit,
             directories,
             grant_mask,
+            net_rules,
             toolchain.image,
             toolchain.environment,
         ))?,

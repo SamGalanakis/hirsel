@@ -37,6 +37,7 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
             index: 0,
         },
     ];
+    let net_rule = hirsel_core_net::Rule::parse("Connect 0.0.0.0/0 0-65535").unwrap();
     let config = OsConfig {
         root_limit: 4096,
         args: argv.as_ptr(),
@@ -48,6 +49,8 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
         stderr_fd: out.as_raw_fd(),
         parameters: parameters.as_ptr(),
         parameters_len: parameters.len(),
+        net_rules: &net_rule,
+        net_rules_len: 1,
     };
     // SAFETY: constructor copies bytes and pins all descriptors before returning.
     unsafe {
@@ -74,7 +77,13 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
                 hirsel_core_capability_provider(&context, operand),
                 (*process).provider
             );
-            assert_eq!(hirsel_core_capability_handle(&context, operand), 0);
+            if kind == NET {
+                let rules = &*(hirsel_core_capability_handle(&context, operand)
+                    as *const crate::net::Rules);
+                assert_eq!(rules.as_slice(), &[net_rule]);
+            } else {
+                assert_eq!(hirsel_core_capability_handle(&context, operand), 0);
+            }
         }
         let args = hirsel_core_entry_grant(process, ARGS, 0);
         assert_ne!(args, 0);
@@ -145,6 +154,8 @@ fn c_constructor_refuses_missing_grants_bad_descriptors_and_invalid_argv_before_
         stderr_fd: sink.as_raw_fd(),
         parameters: missing.as_ptr(),
         parameters_len: 1,
+        net_rules: std::ptr::null(),
+        net_rules_len: 0,
     };
     // SAFETY: missing external configuration is refused before a task exists.
     unsafe {
@@ -226,6 +237,8 @@ fn c_u64_capability_operands_feed_host_requests_and_ok_is_initialized() {
         stderr_fd: sink.as_raw_fd(),
         parameters: parameters.as_ptr(),
         parameters_len: 1,
+        net_rules: std::ptr::null(),
+        net_rules_len: 0,
     };
     // SAFETY: process owner lives through run, including its non-failing grant close.
     unsafe {
@@ -398,6 +411,8 @@ fn broken_pipe_child() {
             stderr_fd: sink.as_raw_fd(),
             parameters: parameters.as_ptr(),
             parameters_len: 1,
+            net_rules: std::ptr::null(),
+            net_rules_len: 0,
         };
         let owner = hirsel_core_os_process_new(&config);
         assert_eq!(owner.error, IoError::OK);

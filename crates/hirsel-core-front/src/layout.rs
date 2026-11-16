@@ -295,6 +295,7 @@ impl<T: TyRead> Shapes<'_, T> {
                         role @ (Role::Sender
                         | Role::Receiver
                         | Role::Task
+                        | Role::Socket
                         | Role::HostFile
                         | Role::Tape
                         | Role::Latest
@@ -306,6 +307,7 @@ impl<T: TyRead> Shapes<'_, T> {
                             Role::Task => Handle::Task,
                             Role::Latest => Handle::Latest,
                             Role::HostFile => Handle::HostFile,
+                            Role::Socket => Handle::Socket,
                             Role::Tape => Handle::Tape,
                             _ => Handle::Causes,
                         };
@@ -569,6 +571,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),
                 Some(Role::Latest) => FieldTy::Handle(Handle::Latest),
                 Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
+                Some(Role::Socket) => FieldTy::Handle(Handle::Socket),
                 Some(Role::Tape) => FieldTy::Handle(Handle::Tape),
                 Some(Role::Causes) => FieldTy::Handle(Handle::Causes),
                 Some(Role::Text) => {

@@ -11,3 +11,8 @@ storage and admission rules, the runtime calls, the calling convention, the nati
 ABI and the instance rules. The samples are `failure`, `cleanup`, `admission`,
 `counted`, `custody` and `variants` (v1b: `case`, `set_case`, inline arrays, `never`
 calls); their run lines check exact `used` totals and the order resources were cleaned.
+
+The `net` sample uses explicit harness-owned descriptors and grant rules instead
+of ordinary run lines. `src/net_tests.rs` checks descriptor release and zero
+admission on split. The evaluator-only `eval` feature uses the shared socket
+ownership and rule code in `hirsel-core-net`; the data-only build does not.

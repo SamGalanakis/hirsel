@@ -233,13 +233,13 @@ allocator chunk size becomes a logical capacity (MEM-28).
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, the `via` override, tombstones, appended variants and the `u32` tag, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the schema fingerprint that keys a registered entry (R13) and the content hash of a declaration for stored data |
 | D, code descriptors | code identity; identity bytes of closed named functions (PROG-9), including typed `StaticFn` values passed into generic parameters; no address or order dependence; the revision, `code.revision(s)` (PROG-9), never part of equality | open: for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them |
 | L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
-| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; tapes and their substitutes (CAP-9); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, and `host.random` ([core](core.md#contracts-the-signatures-do-not-state)) | open: providers for `Net`, `Stdin`, `Env`, `Process`; watching, renaming across directories |
+| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; tapes and their substitutes (CAP-9); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, and `host.random` ([core](core.md#contracts-the-signatures-do-not-state)) | socket declarations and owned resources ([Net](net.md)); open: socket OS attempts/readiness; providers for `Stdin`, `Env`, `Process`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1; selection, shared limits, mutexes and atomics later |
 
 ## Not in v1
 
 User-made shared limits; mutexes and cells; atomics, which are not planned (R3); weak counted references; catching
-failures other than by `isolate`; deadlines and timeouts on operations other than `host.sleep_until`; task sets and selection; `@noalloc`; compile-time
+failures other than by `isolate`; deadlines and timeouts other than `host.sleep_until` and the network operations' declared `until`; task sets and selection; `@noalloc`; compile-time
 evaluation beyond `const`; unsafe code and foreign functions; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list and map
 literals (an `Inline` array literal is not one); format strings; `forget`; static brands;

@@ -128,6 +128,8 @@ pub struct OsConfig {
     /// Main's declaration order. Constructor refuses a missing requirement.
     pub parameters: *const Requirement,
     pub parameters_len: usize,
+    pub net_rules: *const hirsel_core_net::Rule,
+    pub net_rules_len: usize,
 }
 pub struct OsProcess {
     pub(crate) sources: *const crate::abi_sites::SourceTable,
@@ -136,6 +138,8 @@ pub struct OsProcess {
     _args: Vec<Vec<u8>>,
     _carriers: Vec<Buffer>,
     _metadata: Box<[Grant]>,
+    _net_storage: Box<[hirsel_core_net::Rule]>,
+    _net_rules: Box<crate::net::Rules>,
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
     config: Config,
@@ -165,6 +169,7 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
 enum StartupError {
     Io(io::Error),
     MissingGrant(usize),
+    NetRules,
     UnsupportedHostOpenat2(io::Error),
 }
 impl From<io::Error> for StartupError {
@@ -176,7 +181,7 @@ impl StartupError {
     fn into_io(self) -> io::Error {
         match self {
             Self::Io(error) | Self::UnsupportedHostOpenat2(error) => error,
-            Self::MissingGrant(_) => io::Error::from_raw_os_error(libc::EACCES),
+            Self::MissingGrant(_) | Self::NetRules => io::Error::from_raw_os_error(libc::EACCES),
         }
     }
 }
@@ -216,6 +221,20 @@ impl OsProcess {
                     capacity: 0,
                 })
                 .collect::<Vec<_>>();
+            let net_storage: Box<[hirsel_core_net::Rule]> = if input.net_rules_len == 0 {
+                Box::default()
+            } else {
+                std::slice::from_raw_parts(input.net_rules, input.net_rules_len).into()
+            };
+            if input.grant_mask & (1 << NET) != 0
+                && (net_storage.is_empty() || net_storage.iter().any(|r| !r.valid()))
+            {
+                return Err(StartupError::NetRules);
+            }
+            let net_rules = Box::new(crate::net::Rules {
+                data: net_storage.as_ptr(),
+                len: net_storage.len(),
+            });
             let provider = Box::new(os.provider());
             let provider_pointer = &*provider as *const Provider;
             let mut metadata = Vec::new();
@@ -231,7 +250,11 @@ impl OsProcess {
                     metadata.push(Grant {
                         kind,
                         provider: provider_pointer,
-                        handle: 0,
+                        handle: if kind == NET {
+                            (&*net_rules as *const crate::net::Rules) as u64
+                        } else {
+                            0
+                        },
                     });
                 }
             }
@@ -264,6 +287,8 @@ impl OsProcess {
                 _args: args,
                 _carriers: views,
                 _metadata: metadata,
+                _net_storage: net_storage,
+                _net_rules: net_rules,
                 grants: Vec::with_capacity(input.parameters_len),
                 diagnostic: vec![],
                 config,
@@ -417,6 +442,12 @@ unsafe fn run_with_sources_and_probe(
         Err(error) => {
             let mut line = b"not started: ".to_vec();
             match error {
+                StartupError::NetRules => {
+                    line.extend_from_slice(
+                        format!("Net requires --grant {}\n", hirsel_core_net::RULE_SYNTAX)
+                            .as_bytes(),
+                    );
+                }
                 StartupError::MissingGrant(index) => {
                     line.extend_from_slice(b"grant `");
                     // SAFETY: emitter supplies one valid UTF-8 name per main parameter.

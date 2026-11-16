@@ -170,6 +170,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Handle(Handle::Capability) => "cap".into(),
         FieldTy::Handle(Handle::Causes) => "causes".into(),
         FieldTy::Handle(Handle::HostFile) => "hostfile".into(),
+        FieldTy::Handle(Handle::Socket) => "socket".into(),
         FieldTy::Handle(Handle::Tape) => "tape".into(),
         FieldTy::Map(k, v) => format!("map {} {}", field_ty(k), field_ty(v)),
         FieldTy::Text => "text".into(),
@@ -1000,6 +1001,7 @@ impl<'a> Line<'a> {
                     "cap" => FieldTy::Handle(Handle::Capability),
                     "causes" => FieldTy::Handle(Handle::Causes),
                     "hostfile" => FieldTy::Handle(Handle::HostFile),
+                    "socket" => FieldTy::Handle(Handle::Socket),
                     "tape" => FieldTy::Handle(Handle::Tape),
                     "text" => FieldTy::Text,
                     w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
@@ -1683,7 +1685,7 @@ impl BodyParser {
                 "step_enter" => RtOp::StepEnter,
                 "step_leave" => RtOp::StepLeave,
                 "step_catch" => RtOp::StepCatch,
-                _ => match HostOp::ALL.into_iter().find(|op| op.name() == name) {
+                _ => match HostOp::ALL.iter().copied().find(|op| op.name() == name) {
                     Some(op) => RtOp::Host(op),
                     None => return Err(format!("unknown engine operation `{t}`")),
                 },

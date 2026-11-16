@@ -94,6 +94,7 @@ fn core_operations(backend: Backend) {
             directories: vec![],
             grant_mask: 1 << 9,
             logical_charge_report: None,
+            net_rules: vec![],
             observed: None,
         };
         let built = match product.build(&entry, &options) {
@@ -176,6 +177,7 @@ fn counted_operations(backend: Backend) {
             directories: vec![],
             grant_mask: 0,
             logical_charge_report: None,
+            net_rules: vec![],
             observed: None,
         };
         let built = match product.build(&entry, &options) {
@@ -246,6 +248,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             directories: vec![],
             grant_mask: 0,
             logical_charge_report: None,
+            net_rules: vec![],
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -324,6 +327,7 @@ fn stream_operations(backend: Backend) {
             directories: vec![],
             grant_mask: (1 << 4) | (1 << 5) | (1 << 9),
             logical_charge_report: None,
+            net_rules: vec![],
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -395,6 +399,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
             .into_iter()
             .fold(0, |mask, kind| mask | 1 << crate::native::grant_kind(kind).unwrap()),
         logical_charge_report: None,
+        net_rules: vec![],
         observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
@@ -482,6 +487,7 @@ fn host_operations(backend: Backend) {
             directories: vec![grant.to_str().unwrap().into()],
             grant_mask: (1 << 2) | (1 << 4) | (1 << 9),
             logical_charge_report: None,
+            net_rules: vec![],
             observed: None,
         };
         let built = product.build(&entry, &options).unwrap();
@@ -586,6 +592,7 @@ pub fn proof_clone_run() -> u64 {
         directories: vec![],
         grant_mask: 0,
         logical_charge_report: None,
+        net_rules: vec![],
         observed: None,
     };
     let built = product.build(&entry, &options).unwrap();
@@ -2203,3 +2210,41 @@ fn clone_stable_cranelift() {
 fn clone_stable_llvm() {
     clone_stable(Backend::Llvm);
 }
+
+fn wire_net_source(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(r#"
+pub fn main(n: Net) -> Result[(), Exit] waits {
+    match host.connect(n, Addr(ip: V4(134744072u32), port: 80), Never) { Error(Denied) => {}, _ => return Error(Exit(status: 1)) }
+    match host.connect(n, Addr(ip: V4(2130706433u32), port: 80), Never) { Error(Other(38)) => {}, _ => return Error(Exit(status: 2)) }
+    match host.listen(n, Addr(ip: V4(2130706433u32), port: 80), 16) { Error(Other(38)) => {}, _ => return Error(Exit(status: 3)) }
+    match host.listen(n, Addr(ip: V4(0u32), port: 80), 16) { Error(Denied) => {}, _ => return Error(Exit(status: 4)) }
+    let child = result.unwrap(net.narrow(n, Rule(dir: Connect, prefix: V4(2130706433u32), bits: 32, ports: (80u16, 80u16))))
+    match host.connect(child, Addr(ip: V4(2130706433u32), port: 81), Never) { Error(Denied) => {}, _ => return Error(Exit(status: 5)) }
+    Ok(())
+}
+"#, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    assert!(product.accepted(), "{}", serde_json::to_string(&product.machine_diagnostics().unwrap()).unwrap());
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(backend, dir.path());
+    options.grant_mask = 1 << 1;
+    let bare = product.build(&entry, &options).unwrap();
+    assert_not_started(&Command::new(bare.executable).output().unwrap(), &format!("not started: Net requires --grant {}\n", hirsel_core_net::RULE_SYNTAX));
+    options.net_rules = ["Connect 127.0.0.0/8 1-65535", "Listen 127.0.0.0/8 1-65535"].map(|r| hirsel_core_net::Rule::parse(r).unwrap()).to_vec();
+    let granted = product.build(&entry, &options).unwrap();
+    assert!(granted.linked, "the executable key includes explicit Net rules");
+    run_clean(&granted.executable, 0);
+    options.net_rules = vec![hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap()];
+    let changed = product.build(&entry, &options).unwrap();
+    assert!(changed.linked);
+    run_clean(&changed.executable, 3);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn wire_net_source_cranelift() { wire_net_source(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn wire_net_source_llvm() { wire_net_source(Backend::Llvm); }

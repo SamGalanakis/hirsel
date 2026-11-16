@@ -85,6 +85,9 @@ impl OsProvider {
             valid_path(path)?;
         }
         match request.operation {
+            CONNECT | LISTEN | ACCEPT | RECV | SEND => {
+                out.error = IoError { tag: 8, code: 38 };
+            }
             OPEN => {
                 let flags = match request.mode {
                     0 => libc::O_RDONLY,

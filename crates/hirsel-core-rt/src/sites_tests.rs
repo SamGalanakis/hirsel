@@ -63,6 +63,8 @@ fn run(sources: *const SourceTable, entry: Entry, explicit_owner: bool) -> (u8, 
         stderr_fd: writer.as_raw_fd(),
         parameters: ptr::null(),
         parameters_len: 0,
+        net_rules: std::ptr::null(),
+        net_rules_len: 0,
     };
     // SAFETY: config and borrowed source storage remain live through reporting.
     let status = unsafe {

@@ -91,6 +91,8 @@ struct World {
     files: Vec<Option<OpenFile>>,
     temporaries: u64,
     random: u8,
+    network: Network,
+    net_charges: Vec<(usize, u64)>,
 }
 enum Node {
     File(Vec<u8>),
@@ -757,7 +759,51 @@ pub fn run_injected(
     )
     .0
 }
+/// Harness-owned socket descriptors and explicit rules. Never constructed by source code.
+#[derive(Default)]
+pub struct Network {
+    pub grants: BTreeMap<u64, Vec<hirsel_core_net::Rule>>,
+    pub sockets: hirsel_core_net::Sockets,
+}
+/// Run with the network harness's configured authority and owned descriptors.
+pub fn run_network_into(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    network: Network,
+    remaining: &mut Network,
+) -> Report {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            network: Some(network),
+            network_out: Some(remaining),
+            ..WorldInput::default()
+        },
+    )
+    .0
+}
+/// Run with the network harness's configured authority and owned descriptors.
+pub fn run_network(m: &Module, f: FuncId, args: &[u64], limit: u64, network: Network) -> Report {
+    run_world(
+        m,
+        f,
+        args,
+        limit,
+        WorldInput {
+            network: Some(network),
+            ..WorldInput::default()
+        },
+    )
+    .0
+}
 struct WorldInput<'a> {
+    network: Option<Network>,
+    network_out: Option<&'a mut Network>,
     revisions: Option<&'a Revisions>,
     injection: Option<(usize, bool)>,
     argv: &'a [&'a str],
@@ -768,6 +814,8 @@ struct WorldInput<'a> {
 impl Default for WorldInput<'_> {
     fn default() -> Self {
         Self {
+            network: None,
+            network_out: None,
             revisions: None,
             injection: None,
             argv: &[],
@@ -928,6 +976,9 @@ fn run_world(
         k: 0,
         shield: 0,
     };
+    if let Some(network) = input.network.take() {
+        mach.world.network = network;
+    }
     let destination = input.destination.as_ref().map(|bytes| {
         let p = mach.block(bytes.len() as u64, None, 0, None);
         mach.mem[split(p).0].bytes.copy_from_slice(bytes);
@@ -952,12 +1003,19 @@ fn run_world(
     if let Some(bytes) = input.destination.as_mut() {
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }
+    for (l, n) in std::mem::take(&mut mach.world.net_charges) {
+        let l = mach.find(l);
+        mach.limits[l].used -= n;
+    }
     // Refunds still pending when the run ends count toward its final use.
     for k in 0..mach.sched.tasks.len() {
         for (l, n) in std::mem::take(&mut mach.sched.tasks[k].refunds) {
             let l = mach.find(l);
             mach.limits[l].used -= n;
         }
+    }
+    if let Some(remaining) = input.network_out {
+        *remaining = std::mem::take(&mut mach.world.network);
     }
     let sites = chain.iter().map(|c| c.site).collect();
     let checked = Checked {
@@ -1326,10 +1384,86 @@ impl Machine<'_> {
         let file = |h: u64| (h - FILE_BASE) as usize;
         // Every operation but a clock read is a cancellation point at entry
         // (native provider `drive`, `cancellation_point`).
-        if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+        if !matches!(
+            op,
+            HostOp::WallMs | HostOp::MonoNs | HostOp::NetNarrow | HostOp::NetSplit
+        ) {
             self.check_cancel(t)?;
         }
         Ok(match op {
+            HostOp::Connect | HostOp::Listen => {
+                let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rs| {
+                    rs.iter().any(|r| {
+                        r.permits(
+                            u8::from(op == HostOp::Listen),
+                            a[1] as u8,
+                            a[2],
+                            a[3],
+                            a[4] as u16,
+                        )
+                    })
+                });
+                if allowed {
+                    vec![0, 8, 38, 0]
+                } else {
+                    vec![0, 1, 0, 0]
+                }
+            }
+            HostOp::Accept | HostOp::Recv | HostOp::Send => vec![0, 8, 38, 0],
+            HostOp::NetSplit => {
+                let (read, write) = self.world.network.sockets.split(a[0]);
+                vec![read, 0, 0, write]
+            }
+            HostOp::NetNarrow => {
+                let r = hirsel_core_net::Rule {
+                    dir: a[1] as u8,
+                    family: a[2] as u8,
+                    hi: a[3],
+                    lo: a[4],
+                    bits: a[5] as u8,
+                    first: a[6] as u16,
+                    last: a[7] as u16,
+                };
+                if !r.valid() {
+                    vec![0, 1, 0, 0]
+                } else {
+                    let rules = self
+                        .world
+                        .network
+                        .grants
+                        .get(&a[0])
+                        .cloned()
+                        .unwrap_or_default();
+                    let count = rules.iter().filter_map(|p| p.intersect(r)).count() as u64;
+                    let charge = count
+                        .checked_mul(37)
+                        .and_then(|n| n.checked_add(7))
+                        .map(|n| n & !7)
+                        .expect("host-sized rule storage");
+                    let payer = *t.limits.last().unwrap();
+                    match self.admit(payer, charge) {
+                        Err(available) => vec![charge, 2, 0, available],
+                        Ok(()) => {
+                            let key = self
+                                .world
+                                .network
+                                .grants
+                                .keys()
+                                .copied()
+                                .max()
+                                .unwrap_or(0)
+                                .checked_add(1)
+                                .expect("run-local handle counter");
+                            self.world
+                                .network
+                                .grants
+                                .insert(key, rules.iter().filter_map(|p| p.intersect(r)).collect());
+                            self.world.net_charges.push((payer, charge));
+                            ok(key, 0)
+                        }
+                    }
+                }
+            }
             HostOp::SleepUntil => {
                 // Ready if the deadline has passed, else park in W until its
                 // timer (os.rs `sleep_wait`); a cancellation that takes effect
@@ -1954,6 +2088,11 @@ impl Machine<'_> {
             // The evaluator has no tape provider (REPLAY-SPEC S2), so no Tape
             // reaches a drop.
             FieldTy::Handle(Handle::Tape) => panic!("{NO_TAPE}"),
+            FieldTy::Handle(Handle::Socket) => {
+                let h = self.load(at, 8);
+                self.world.network.sockets.release(h);
+                false
+            }
             // The provider closes the file and ignores the outcome (core.md,
             // MEM-24); the trace records the close by its handle.
             FieldTy::Handle(Handle::HostFile) => {

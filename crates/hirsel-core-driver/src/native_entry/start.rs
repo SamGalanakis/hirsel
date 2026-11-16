@@ -50,6 +50,8 @@ pub(super) fn emit(
     let directories_len = f.constant(plan.directories.len() as u64);
     let parameters_len = f.constant(plan.parameters.len() as u64);
     let streams = f.constant((2u64 << 32) | 1);
+    let net_rules = f.address(data.net_rules);
+    let net_rules_len = f.constant(plan.net_rules.len() as u64);
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -60,6 +62,8 @@ pub(super) fn emit(
         (abi::OS_CONFIG_STREAMS, streams),
         (abi::OS_CONFIG_PARAMETERS, requirements),
         (abi::OS_CONFIG_PARAMETERS_LEN, parameters_len),
+        (abi::OS_CONFIG_NET_RULES, net_rules),
+        (abi::OS_CONFIG_NET_RULES_LEN, net_rules_len),
     ] {
         f.store(value, config, offset);
     }

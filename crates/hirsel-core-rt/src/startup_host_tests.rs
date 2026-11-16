@@ -83,6 +83,8 @@ impl Fixture {
             stderr_fd: self.sink.as_raw_fd(),
             parameters: requirements.as_ptr(),
             parameters_len: requirements.len(),
+            net_rules: std::ptr::null(),
+            net_rules_len: 0,
         };
         // SAFETY: every input/name view and diagnostic fd stays live through this run.
         unsafe { run_with_probe(&input, names.as_ptr(), entry, probe) }

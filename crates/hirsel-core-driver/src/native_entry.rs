@@ -43,20 +43,24 @@ pub(crate) struct Plan<'a> {
     cleanup: Option<String>,
     root_limit: u64,
     grant_mask: u64,
+    net_rules: &'a [hirsel_core_net::Rule],
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
 }
 /// Every link-plan input the environment does not cover, canonically: the
-/// root limit, the grant mask, the ordered directories and the charge-report
+/// root limit, the grant mask, the explicit Net rules, ordered directories and charge-report
 /// path. The plan's other fields are the entry's: `symbol` is the entry's
 /// identity, `layout`, `exit_offset` and `parameters` are read from the entry
 /// body (its record's address and the declaration part), `cleanup` is the
 /// cleanup instance's identity. The request's source map is the link's, and
 /// the executable key takes its digest.
-pub(crate) fn policy(options: &NativeOptions) -> (u64, u64, &[String], Option<&[u8]>) {
+pub(crate) fn policy(
+    options: &NativeOptions,
+) -> (u64, u64, &[hirsel_core_net::Rule], &[String], Option<&[u8]>) {
     (
         options.root_limit,
         options.grant_mask,
+        &options.net_rules,
         &options.directories,
         options
             .logical_charge_report
@@ -102,6 +106,7 @@ impl<'a> Plan<'a> {
             cleanup,
             root_limit: options.root_limit,
             grant_mask: options.grant_mask,
+            net_rules: &options.net_rules,
             directories: &options.directories,
             charge_report: options
                 .logical_charge_report

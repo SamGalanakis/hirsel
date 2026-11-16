@@ -75,6 +75,7 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `Sender[T]`, `Receiver[T]` | resource, mechanical | `send` | 24 | resource |
 | `Latest[T]` | resource, mechanical | `send` | 8 | resource |
 | `HostFile` | resource, mechanical | `send` | 8 | resource |
+| `Socket`, `ReadHalf`, `WriteHalf`, `Listener` | resource, mechanical | `send` | 8 | resource |
 | `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks` | plain | `shareable`, `send` | 8 | capability |
 | `Args` | plain | `shareable`, `send` | 8 | nothing |
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |

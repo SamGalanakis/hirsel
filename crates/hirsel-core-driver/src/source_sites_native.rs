@@ -221,3 +221,63 @@ fn failure_sites_adapter_llvm_dev() { failure_sites_adapter(Backend::Llvm, false
 #[test]
 #[ignore = "explicit native integration target"]
 fn failure_sites_adapter_llvm_release_lines() { failure_sites_adapter(Backend::Llvm, true, true); }
+
+/// One module in two files (review 1043 F3). A native site names the file its
+/// item is in: a failure in the second file reports that file's line, an item
+/// moved across the files is found in its new file, and a build against the
+/// primed store links what an empty store links.
+fn failure_sites_two_files(backend: Backend) {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let (a, b) = (dir.path().join("a.hirsel"), dir.path().join("b.hirsel"));
+    let check = |first: &str, second: &str| {
+        std::fs::write(&a, first).unwrap();
+        std::fs::write(&b, second).unwrap();
+        let mut request = source_request("", dir.path());
+        request.inputs.packages[0].sources = [&a, &b]
+            .map(|file| hirsel_core_resolve::ModuleSource {
+                file: file.clone(),
+                modules: vec!["main".into()],
+                signatures: false,
+            })
+            .to_vec();
+        Driver::default().check(request, &mut Meter::new(false)).unwrap()
+    };
+    let options = native_options(backend, dir.path());
+    let mut fresh = 0;
+    let mut built = |product: &CheckProduct| {
+        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        let primed = product.build(&entry, &options).unwrap();
+        fresh += 1;
+        let mut empty = native_options(backend, dir.path());
+        empty.store = dir.path().join(format!("fresh-{fresh}"));
+        empty.output = dir.path().join(format!("fresh-program-{fresh}"));
+        let alone = product.build(&entry, &empty).unwrap();
+        let bytes = std::fs::read(&primed.executable).unwrap();
+        assert!(bytes == std::fs::read(&alone.executable).unwrap(), "primed != fresh");
+        Command::new(&primed.executable).output().unwrap()
+    };
+
+    // The failing item is item 0 of the second file; the first file's item 0
+    // starts two lines lower than it, so the wrong file gives line 4; the
+    // first file has as many items, so the wrong one is found, not refused.
+    const OVERFLOW: &str = "fn overflow(x: u64) -> u64 {\n    x + 1\n}\npub fn main() -> Result[(), Exit] {\n    if overflow(18446744073709551615u64) == 0 { Ok(()) } else { Error(Exit(status: 7)) }\n}\n";
+    let output = built(&check("\n\nfn g() -> u64 {\n    0\n}\nfn h() -> u64 {\n    1\n}\n", OVERFLOW));
+    assert_eq!(output.status.code(), Some(101), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "Overflow at app@1/main.hirsel:2:5\n");
+
+    // The reviewer's move: f leaves the first file for the second, before main.
+    const MAIN: &str = "pub fn main() -> Result[(), Exit] { Error(Exit(status: f())) }\n";
+    let output = built(&check("fn f() -> u8 { 7u8 }\nfn g() -> u8 { 8u8 }\n", MAIN));
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    let output = built(&check("fn g() -> u8 { 8u8 }\n", &format!("fn f() -> u8 {{ 7u8 }}\n{MAIN}")));
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+}
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_two_files_cranelift() { failure_sites_two_files(Backend::Cranelift); }
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_two_files_llvm() { failure_sites_two_files(Backend::Llvm); }

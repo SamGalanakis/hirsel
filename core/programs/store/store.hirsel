@@ -4996,11 +4996,18 @@ type DiskNodeRecord: shareable + send {
 type DiskGraph: send {
     nodes: Map[u64, DiskNodeRecord],
     roots: List[u64],
-    live: u64
+    live: u64,
+    pack_stats: Map[u64, DiskPackState]
+}
+
+type DiskPackState: send {
+    total: u64,
+    live: u64,
+    ids: List[u64]
 }
 
 fn disk_graph() -> DiskGraph {
-    DiskGraph(nodes: map.new(), roots: list.new(), live: 0)
+    DiskGraph(nodes: map.new(), roots: list.new(), live: 0, pack_stats: map.new())
 }
 
 fn disk_node_size(node: Arc[std.omap.Node[Bytes, Bytes]]) -> u64 {
@@ -5068,6 +5075,11 @@ fn disk_unref(mut graph: DiskGraph, id: u64) {
     if refs == 0 {
         let removed = option.unwrap(map.remove(mut graph.nodes, id))
         graph.live -= removed.charge
+        if removed.pack != 0 {
+            let _ = option.unwrap(map.update(mut graph.pack_stats, removed.pack, fn(mut stats: DiskPackState) {
+                stats.live -= removed.size
+            }))
+        }
         for i in 0u64 .. std.omap.node_count(removed.node) {
             if let Some(child) = std.omap.node_child(removed.node, i) {
                 disk_unref(mut graph, std.omap.node_id(child))
@@ -5185,6 +5197,9 @@ fn disk_pack_close(d: Dir, id: StoreId, mut writer: DiskPackWriter, mut graph: D
             row.pack = writer.seq
         }))
     }
+    let ids: List[u64] = capacity(clone(writer.ids))?
+    let stats = DiskPackState(total: list.len(writer.raw), live: list.len(writer.raw) - 72, ids: take ids)
+    capacity(result.capacity_only(map.insert(mut graph.pack_stats, writer.seq, take stats)))?
     writer.seq += 1
     writer.raw = capacity(disk_header_bytes(DiskContext(store: id, role: 3, seq: writer.seq), 0))?
     writer.ids = list.new()
@@ -5260,6 +5275,333 @@ pub fn disk_law_packs(d: Dir, c: Clock) -> bool waits {
 @test
 fn disk_test_packs(d: Dir, c: Clock) -> Result[(), ()] waits {
     if disk_law_packs(d, c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+type DiskRawNode {
+    payload: Bytes,
+    pack: u64,
+    size: u64
+}
+
+type DiskLoaded {
+    store: StoreId,
+    manifest: DiskManifest,
+    roots: Roots,
+    graph: DiskGraph
+}
+
+fn disk_load_pack(d: Dir, id: StoreId, pack: DiskPack, cap: u64, next_node: u64, mut raw_nodes: Map[u64, DiskRawNode], mut ids: List[u64], mut stats: Map[u64, DiskPackState]) -> Result[(), Error] waits {
+    let path = capacity(disk_path("p-", pack.seq, ""))?
+    let limit = if cap < 33686116 {
+        33686116u64
+    } else {
+        cap
+    }
+    let raw = disk_read_file(d, path, limit)?
+    let header = disk_read_header(path, raw, 3, Some(pack.seq), Some(id))?
+    let mut at: u64 = 72
+    let mut count: u64 = 0
+    let mut pack_ids: List[u64] = list.new()
+    while at < list.len(raw) {
+        let frame = disk_read_frame(path, header.context, raw, at)?
+        if frame.kind == 0x0020 {
+            let payload = list.slice(raw, frame.payload, frame.end)
+            let mut position: u64 = 0
+            let node_id = disk_number(path, payload, mut position, 8)?
+            if node_id == 0 || node_id >= next_node {
+                return Error(disk_fault(path, at, Malformed))
+            }
+            if let Some(_) = map.get(raw_nodes, node_id) {
+                return Error(disk_fault(path, at, Order))
+            }
+            let row = DiskRawNode(payload: copied(payload)?, pack: pack.seq, size: frame.end - at)
+            capacity(result.capacity_only(map.insert(mut raw_nodes, node_id, take row)))?
+            capacity(result.capacity_only(list.push(mut ids, node_id)))?
+            capacity(result.capacity_only(list.push(mut pack_ids, node_id)))?
+            count += 1
+        }
+        at = frame.end
+    }
+    if count != int.widen(pack.nodes) {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    capacity(result.capacity_only(map.insert(mut stats, pack.seq, DiskPackState(total: list.len(raw), live: 0, ids: take pack_ids))))?
+    Ok(())
+}
+
+fn disk_attach_tree(nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]], id: u64) -> Result[std.omap.OMap[Bytes, Bytes], Error] {
+    if id == 0 {
+        return Ok(std.omap.new())
+    }
+    match map.get(nodes, id) {
+        Some(node) => Ok(std.omap.from_root(Some(arc.share(node)))),
+        None => Error(disk_fault("MANIFEST", 72, Dangling(id)))
+    }
+}
+
+fn disk_attach_roots(nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]], roots: DiskRoots) -> Result[Roots, Error] {
+    Ok(Roots(data: disk_attach_tree(nodes, roots.data)?, streams: disk_attach_tree(nodes, roots.streams)?, catalog: disk_attach_tree(nodes, roots.catalog)?))
+}
+
+fn disk_track_roots(mut graph: DiskGraph, all: List[Roots]) -> Result[List[Arc[std.omap.Node[Bytes, Bytes]]], Capacity] {
+    let mut next_roots: List[u64] = list.new()
+    let mut fresh: List[Arc[std.omap.Node[Bytes, Bytes]]] = list.new()
+    for roots in all {
+        disk_track_tree(mut graph, roots.data, mut next_roots, mut fresh)?
+        disk_track_tree(mut graph, roots.streams, mut next_roots, mut fresh)?
+        disk_track_tree(mut graph, roots.catalog, mut next_roots, mut fresh)?
+    }
+    let previous = replace(mut graph.roots, take next_roots)
+    for id in previous {
+        disk_unref(mut graph, id)
+    }
+    Ok(take fresh)
+}
+
+fn disk_load(d: Dir, cap: u64, ceiling: u64) -> Result[DiskLoaded, Error] waits {
+    let raw = disk_read_file(d, "MANIFEST", 67108952)?
+    let parsed = disk_read_manifest("MANIFEST", raw)?
+    let (id, take manifest) = take parsed
+    // Only listed packs are opened. Leftovers beyond a naming gap are inert.
+    let mut raw_nodes: Map[u64, DiskRawNode] = map.new()
+    let mut ids: List[u64] = list.new()
+    let mut stats: Map[u64, DiskPackState] = map.new()
+    for pack in manifest.packs {
+        disk_load_pack(d, id, pack, cap, manifest.next_node, mut raw_nodes, mut ids, mut stats)?
+    }
+    list.sort(mut ids, fn(a: u64, b: u64) -> Order {
+        std.order.compare(a, b)
+    })
+    let mut nodes: Map[u64, Arc[std.omap.Node[Bytes, Bytes]]] = map.new()
+    let mut locations: Map[u64, (u64, u64)] = map.new()
+    for node_id in ids {
+        // Release each encoded payload as its node is built, rather than keep
+        // every pack buffer alive alongside the rebuilt trees.
+        let row = option.unwrap(map.remove(mut raw_nodes, node_id))
+        let path = capacity(disk_path("p-", row.pack, ""))?
+        let node = disk_parse_node(path, row.payload, nodes, manifest.next_node)?
+        capacity(result.capacity_only(map.insert(mut nodes, node_id, take node)))?
+        capacity(result.capacity_only(map.insert(mut locations, node_id, (row.pack, row.size))))?
+    }
+    let mut all: List[Roots] = list.new()
+    for branch in manifest.branches {
+        let roots = disk_attach_roots(nodes, branch.roots)?
+        capacity(result.capacity_only(list.push(mut all, take roots)))?
+    }
+    for pin in manifest.pins {
+        let roots = disk_attach_roots(nodes, pin.roots)?
+        capacity(result.capacity_only(list.push(mut all, take roots)))?
+    }
+    let main_roots = share_roots(all[0])
+    let mut graph = disk_graph()
+    let _ = capacity(disk_track_roots(mut graph, all))?
+    graph.pack_stats = take stats
+    for node_id in ids {
+        let place = option.unwrap(map.get(locations, node_id))
+        let present = map.update(mut graph.nodes, node_id, fn(mut row: DiskNodeRecord) -> u64 {
+            row.pack = place.0;
+            row.size = place.1;
+            row.size
+        })
+        if let Some(size) = present {
+            let _ = option.unwrap(map.update(mut graph.pack_stats, place.0, fn(mut pack: DiskPackState) {
+                pack.live += size
+            }))
+        }
+    }
+    if graph.live > ceiling {
+        return Error(Full(Capacity(requested: graph.live, available: ceiling)))
+    }
+    Ok(DiskLoaded(store: id, manifest: take manifest, roots: take main_roots, graph: take graph))
+}
+
+fn disk_root_ids(roots: Roots) -> DiskRoots {
+    let data = match std.omap.root(roots.data) {
+        Some(n) => std.omap.node_id(n),
+        None => 0
+    }
+    let streams = match std.omap.root(roots.streams) {
+        Some(n) => std.omap.node_id(n),
+        None => 0
+    }
+    let catalog = match std.omap.root(roots.catalog) {
+        Some(n) => std.omap.node_id(n),
+        None => 0
+    }
+    DiskRoots(data: data, streams: streams, catalog: catalog)
+}
+
+// L4/L6/L12: load only named packs, rebuild all node ids before attaching
+// roots, check the independently known40 rows and3440-byte account. A valid
+// header-only orphan after a naming gap cannot contribute any state.
+pub fn disk_law_load(d: Dir, c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    for k in 0u64 .. 40 {
+        if !put_one(mut db, k, k + 1) {
+            return false
+        }
+    }
+    let mut graph = disk_graph()
+    let nodes = result.unwrap(disk_track(mut graph, db.roots))
+    let output = result.unwrap(disk_write_nodes(d, db.store, 1, 512, mut graph, nodes))
+    let (take packs, next_pack) = take output
+    let mut manifest = disk_genesis_fixture()
+    manifest.next_node = db.next_node + 1
+    manifest.next_table = db.next_table
+    manifest.packs = take packs
+    manifest.next_pack = next_pack
+    let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 40, at: 0, roots: disk_root_ids(db.roots))
+    let _ = list.set(mut manifest.branches, 0, take branch)
+    result.unwrap(disk_publish_manifest(d, db.store, manifest))
+    let orphan = result.unwrap(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: next_pack + 1), 0))
+    let orphan_path = result.unwrap(disk_path("p-", next_pack + 1, ""))
+    result.unwrap(disk_write_synced(d, orphan_path, orphan))
+    let loaded = result.unwrap(disk_load(d, 512, 40 * 86))
+    if !same(loaded.store, db.store) || loaded.manifest.branches[0].version != 40 || loaded.graph.live != 40 * 86 {
+        return false
+    }
+    for k in 0u64 .. 40 {
+        let key = result.unwrap(physical(1, key_word(k)))
+        match std.omap.get(loaded.roots.data, key) {
+            Some(v) => if v != key_word(k + 1) {
+                return false
+            },
+            None => return false
+        }
+    }
+    match disk_load(d, 512, 40 * 86 - 1) {
+        Error(Full(cause)) => if cause.requested != 3440 || cause.available != 3439 {
+            return false
+        },
+        _ => return false
+    }
+    let path = result.unwrap(disk_path("p-", manifest.packs[0].seq, ""))
+    let mut raw = result.unwrap(disk_read_file(d, path, 33686116))
+    let changed = raw[88] ^ 1u8
+    let _ = list.set(mut raw, 88, changed)
+    result.unwrap(disk_write_synced(d, path, raw))
+    disk_corrupt(disk_load(d, 512, 1073741824))
+}
+
+@test
+fn disk_test_load(d: Dir, c: Clock) -> Result[(), ()] waits {
+    if disk_law_load(d, c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+type DiskPackSet {
+    packs: List[DiskPack],
+    retired: List[u64],
+    next: u64
+}
+
+fn disk_compact(d: Dir, id: StoreId, mut graph: DiskGraph, old: List[DiskPack], seq: u64, cap: u64, take fresh: List[Arc[std.omap.Node[Bytes, Bytes]]]) -> Result[DiskPackSet, Error] waits {
+    let mut packs: List[DiskPack] = list.new()
+    let mut retired: List[u64] = list.new()
+    let mut emitted = take fresh
+    for pack in old {
+        let stats = option.unwrap(map.get(graph.pack_stats, pack.seq))
+        // H1: one-NODE packs are all-live or dead and are never copied.
+        if stats.live == 0 || (list.len(stats.ids) > 1 && stats.live < stats.total / 2) {
+            capacity(result.capacity_only(list.push(mut retired, pack.seq)))?
+            for node_id in stats.ids {
+                if let Some(row) = map.get(graph.nodes, node_id) {
+                    capacity(result.capacity_only(list.push(mut emitted, arc.share(row.node))))?
+                }
+            }
+        } else {
+            capacity(result.capacity_only(list.push(mut packs, pack)))?
+        }
+    }
+    // Forwarded old ids and new parents can share one new pack. Sorting the
+    // emitted ids preserves children-before-parents within that pack.
+    list.sort(mut emitted, fn(a: Arc[std.omap.Node[Bytes, Bytes]], b: Arc[std.omap.Node[Bytes, Bytes]]) -> Order {
+        std.order.compare(std.omap.node_id(a), std.omap.node_id(b))
+    })
+    let result_set = disk_write_nodes(d, id, seq, cap, mut graph, emitted)?
+    let (take written, next_pack) = take result_set
+    for pack in written {
+        capacity(result.capacity_only(list.push(mut packs, pack)))?
+    }
+    for old_seq in retired {
+        let _ = map.remove(mut graph.pack_stats, old_seq)
+    }
+    Ok(DiskPackSet(packs: take packs, retired: take retired, next: next_pack))
+}
+
+// L6: after most old leaves die, move the remaining live child without changing
+// its id, retire the sparse pack, and rebuild after the manifest switch. Moving
+// a node without recomputing its bound checksum makes the final load fail.
+pub fn disk_law_compact(d: Dir, c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    for k in 0u64 .. 96 {
+        if !put_one(mut db, k, k + 1) {
+            return false
+        }
+    }
+    let mut graph = disk_graph()
+    let initial_nodes = result.unwrap(disk_track(mut graph, db.roots))
+    let first = result.unwrap(disk_write_nodes(d, db.store, 1, 4096, mut graph, initial_nodes))
+    let (take original, next_pack) = take first
+    if list.len(original) != 1 {
+        return false
+    }
+    for k in 0u64 .. 64 {
+        if !put_one(mut db, k, k + 101) {
+            return false
+        }
+    }
+    let fresh = result.unwrap(disk_track(mut graph, db.roots))
+    let sizes = {
+        let live_old = option.unwrap(map.get(graph.pack_stats, 1))
+        (live_old.live, live_old.total)
+    }
+    if sizes.0 == 0 || sizes.0 >= sizes.1 / 2 {
+        return false
+    }
+    let output = result.unwrap(disk_compact(d, db.store, mut graph, original, next_pack, 4096, take fresh))
+    if list.len(output.retired) != 1 || output.retired[0] != 1 || output.packs[0].seq != 2 || graph.live != 96 * 86 {
+        return false
+    }
+    let mut manifest = disk_genesis_fixture()
+    manifest.next_node = db.next_node + 1
+    manifest.next_pack = output.next
+    let DiskPackSet(packs: take packs, retired: take retired, next: _) = take output
+    manifest.packs = take packs
+    manifest.retired = take retired
+    let branch = DiskBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 160, at: 0, roots: disk_root_ids(db.roots))
+    let _ = list.set(mut manifest.branches, 0, take branch)
+    result.unwrap(disk_publish_manifest(d, db.store, manifest))
+    let loaded = result.unwrap(disk_load(d, 4096, 96 * 86))
+    for k in 0u64 .. 96 {
+        let key = result.unwrap(physical(1, key_word(k)))
+        let expected = if k < 64 {
+            k + 101
+        } else {
+            k + 1
+        }
+        match std.omap.get(loaded.roots.data, key) {
+            Some(v) => if v != key_word(expected) {
+                return false
+            },
+            None => return false
+        }
+    }
+    let empty = result.unwrap(disk_track(mut graph, empty_roots()))
+    let removed = result.unwrap(disk_compact(d, db.store, mut graph, manifest.packs, manifest.next_pack, 4096, take empty))
+    list.len(removed.packs) == 0 && list.len(removed.retired) == list.len(manifest.packs) && graph.live == 0 && map.len(graph.nodes) == 0
+}
+
+@test
+fn disk_test_compact(d: Dir, c: Clock) -> Result[(), ()] waits {
+    if disk_law_compact(d, c) {
         Ok(())
     } else {
         Error(())

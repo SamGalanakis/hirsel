@@ -1220,6 +1220,7 @@ fn lane(mut xs: Inline[u64, 8], i: u64, at: u64) -> Result[(), Capacity] {
     xs[i % 8] += c
     Ok(())
 }
+
 fn probe(s: u64, n: u64, at: u64) -> u64 {
     let ran = bound steps s {
         let mut xs: Inline[u64, 8] = [0; 8]
@@ -1302,4 +1303,83 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
             case.args
         );
     }
+}
+
+#[test]
+fn exposed_loop_helpers_keep_failure_sites() {
+    let source = r#"
+fn helper(mut xs: Inline[u64, 8], i: u64, d: u64) -> u64 {
+    xs[i % 8] = int.widen(1u8)
+    let quotient = 12u64 / d
+    let value: Option[u64] = if d == 1 { None } else { Some(quotient) }
+    let answer = option.unwrap(take value)
+    xs[i % 8] = answer
+    answer
+}
+fn probe(n: u64, d: u64) -> u64 {
+    let mut xs: Inline[u64, 8] = [0; 8]
+    let mut answer = 0u64
+    for i in 0u64 .. n { answer += helper(mut xs, i, d) }
+    answer + xs[0]
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let cases = [1, 8]
+        .into_iter()
+        .flat_map(|n| {
+            [0, 1, 2].map(|d| Case {
+                function: names["probe"],
+                args: vec![n, d],
+                limit: 1_000_000,
+                injection: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    let check = |reports: Vec<NativeReport>| {
+        for (case, report) in cases.iter().zip(reports) {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(report.outcome, expected.outcome, "args={:?}", case.args);
+            let expected = expected
+                .sites
+                .iter()
+                .map(|a| {
+                    a.map_or(0, |a| {
+                        ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                report.sites, expected,
+                "failure sites, args={:?}",
+                case.args
+            );
+        }
+    };
+    for facts in [false, true] {
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                    .unwrap();
+            check(execute_object(
+                &module,
+                &cases,
+                "",
+                "",
+                optimization,
+                Some(object),
+            ));
+        }
+    }
+    let object = module.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+    check(execute_object(
+        &module,
+        &cases,
+        "",
+        "",
+        Optimization::Speed,
+        Some(object),
+    ));
 }

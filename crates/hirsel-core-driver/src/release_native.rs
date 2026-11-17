@@ -39,6 +39,47 @@ impl CheckProduct {
             entry,
             options.instance_limit,
         )?;
+        // Exact Step planning needs the same helper bodies LLVM will optimize.
+        // Resolve the existing unit tables before lowering, as the evaluator does.
+        let entry_identity = reached
+            .iter()
+            .find(|i| &i.definition == entry)
+            .expect("reached entry");
+        let roots = modules
+            .iter()
+            .enumerate()
+            .map(|(unit, m)| {
+                if let Some(identity) = reached.get(unit) {
+                    return (identity.clone(), materialized.get(identity).function);
+                }
+                let (i, f) = m
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .find(|(_, f)| f.body.is_some())
+                    .expect("reached definition");
+                (m.identity(f.instance), hirsel_core_ir::FuncId(i as u32))
+            })
+            .collect::<Vec<_>>();
+        let units = modules
+            .iter()
+            .zip(&roots)
+            .map(
+                |(module, (identity, function))| hirsel_core_materialize::Unit {
+                    identity,
+                    module,
+                    function: *function,
+                },
+            )
+            .collect::<Vec<_>>();
+        let (joined, _) =
+            hirsel_core_materialize::join(&units, entry_identity).map_err(|message| {
+                NativeStop::Emit {
+                    definition: entry.clone(),
+                    message,
+                }
+            })?;
+        modules = vec![Cow::Owned(joined)];
         let refs = modules.iter().map(|m| &**m).collect::<Vec<_>>();
         // The checked body keys identify the source-neutral published modules.
         // All shape-owner modules used by generic materialization are in this

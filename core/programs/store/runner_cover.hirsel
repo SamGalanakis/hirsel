@@ -1,0 +1,125 @@
+// L20's native case (RUNNER-SPEC v2.11 §8, cover_only_retention): one program, two modes,
+// compared by core/tools/runner_tests.py on the charge-observation runtime's retained bytes
+// at the `subscribed` checkpoint. argv: mode. Both modes store the same 1,954 rows and hold
+// one subscription to `span`, which makes no lookup; its Cover spans 10 rows (mode 0) or all
+// 1,954 (mode 1). The client takes the initial Batch and drops it, then takes a barrier
+// subscription's empty Batch (the session and the publisher handle events in order, so both
+// are past the first Batch by then; the barrier is the same in both modes), then calls
+// task.check_cancel(), the event at which core/tools/runner_mark.c records the checkpoint.
+// A subscription keeps its Cover and read set, never its rows, so the two figures are equal.
+type Hc: send { t: store.Table[u64, u64] }
+
+type Spans = runner.Registry[(), Hc]
+
+const ROWS: u64 = 1954u64
+
+fn handles(mut db: store.Db) -> Result[Hc, store.Error] waits {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
+    Ok(Hc(t: t))
+}
+
+// Keys 0 to n - 1 of "data".
+fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Cover, Capacity] {
+    runner.cover(store.shape(h.t), Included(0u64), Excluded(n))
+}
+
+fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
+    runner.query(mut r, code.describe(span), 65536u64, runner.DEFAULT_STEPS)
+}
+
+// identity ++ fingerprint(A) ++ fingerprint(()), as a client builds a query's key.
+fn k_span() -> Bytes {
+    let mut key: Bytes = list.new()
+    result.unwrap(list.append(mut key, code.identity(code.describe(span))))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
+    let unit: std.codec.Codec[()] = std.codec.of_unit()
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(unit)), mut key))
+    key
+}
+
+fn arg(n: u64) -> Bytes {
+    let mut a: Bytes = list.new()
+    result.unwrap(std.codec.encode(std.codec.of_u64(), n, mut a))
+    a
+}
+
+type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, covered: u64 }
+
+// The initial Batch of `sub`, whole: it names sub complete and carries `rows` rows.
+fn initial(rx: Receiver[runner.Down], sub: u32, rows: u64) -> () waits {
+    match channel.receive(rx) {
+        Ok(Batched(take b)) => {
+            let runner.KeyedBatch(version: _, complete: take complete, rows: take got, outcomes: _) = take b
+            if list.len(complete) != 1u64 || complete[0u64] != sub || list.len(got) != rows {
+                fail("runner_cover: an initial Batch not whole")
+            }
+        },
+        Ok(_) => fail("runner_cover: a frame other than a Batch"),
+        Error(_) => fail("runner_cover: client channel closed"),
+    }
+}
+
+fn drive(take d: D) -> () waits {
+    let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
+    let (tx, rx) = result.unwrap(take made)
+    let (to, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), 1048576u64, d.head, d.post, take tx, d.clock, 1u64, 2097152u64))
+    if let Error(_) = channel.send(to, runner.subscribe(1u32, k_span(), arg(d.covered))) {
+        fail("runner_cover: session gone")
+    }
+    initial(rx, 1u32, d.covered)
+    if let Error(_) = channel.send(to, runner.subscribe(2u32, k_span(), arg(0u64))) {
+        fail("runner_cover: session gone")
+    }
+    initial(rx, 2u32, 0u64)
+    task.check_cancel()
+    let _ = channel.send(to, runner.hang_up())
+    let _ = task.join(take session)
+}
+
+fn fill(mut db: store.Db, t: store.Table[u64, u64], from: u64, to: u64) -> () waits {
+    let done = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        for k in from .. to {
+            store.put(mut tx, t, k, k)?
+        }
+        Ok(())
+    })
+    match take done {
+        Ok(Committed(_)) => (),
+        _ => fail("runner_cover: a fixture put"),
+    }
+}
+
+pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args) -> Result[(), Exit] waits {
+    let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let covered = if result.unwrap(std.int.parse_uint(m, 10u32)) == 1u64 { ROWS } else { 10u64 }
+    let mut db = store.memory(clock, random, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let h = match handles(mut db) {
+        Ok(take h) => take h,
+        Error(_) => return Error(Exit(status: 5)),
+    }
+    let mut k = 0u64
+    while k < ROWS {
+        let next = if k + 100u64 < ROWS { k + 100u64 } else { ROWS }
+        fill(mut db, h.t, k, next)
+        k = next
+    }
+    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
+    let (head, inbox) = result.unwrap(take made)
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, covered: covered)
+    let driving = match task.spawn(tasks, bytes 33554432u64, take d, drive) {
+        Ok(take t) => take t,
+        Error(_) => return Error(Exit(status: 3)),
+    }
+    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
+        Ok(()) => (),
+        Error(_) => return Error(Exit(status: 4)),
+    }
+    match task.join(take driving) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 6)),
+    }
+}

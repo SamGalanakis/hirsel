@@ -9,7 +9,10 @@ registrations, an added A field and a changed R; and ea's code revision, which e
 engine must give alike, PROG-9). Each mutant applies its text changes
 to a copy of runner.hirsel and must turn its law red on the evaluator. L4's high-water
 case builds core/programs/store/runner_rss.hirsel per native backend and compares
-the runtime's exact peak of live backing bytes across its two modes.
+the runtime's exact peak of live backing bytes across its two modes. L20's builds
+core/programs/store/runner_cover.hirsel the same way and compares the live backing bytes
+at its "subscribed" checkpoint across a 10-row and a 1,954-row Cover; its mutant runs on
+Cranelift only.
 
 --part r1 runs R1's calls (transactions at durable versions, runs-once, store refusal)
 and their native twins: the land gate's part. --part r0 runs the rest, which runs after
@@ -96,27 +99,79 @@ def counted(name, report):
 # peak_retained_bytes (the runtime's exact peak of live backing requests) are equal: a
 # refused frame that leaves any bytes behind raises mode 1's peak. ru_maxrss, the
 # earlier figure, moves by 256 KB steps from run to run and cannot see a small leak.
-def l4_retained(args, root, work, engine):
-    inputs_path = manifest(root, work, 'rss', None, [(root / 'core/programs/store/runner_rss.hirsel', 'runner_rss')])
-    binary = work / f'runner_rss_{engine}'
-    charges = work / f'runner_rss_{engine}.json'
+def charged(args, root, work, engine, module, modes, figure, cc=None, runner=None, name=None):
+    """Build programs/store/<module>.hirsel on the charge-observation runtime and run it in
+    each (argv, label) mode: {label: (exit status, figure(charge report))}, or None and the
+    build's error."""
+    name = name or module
+    inputs_path = manifest(root, work, name, runner, [(root / f'core/programs/store/{module}.hirsel', module)])
+    binary = work / f'{name}_{engine}'
+    charges = work / f'{name}_{engine}.json'
     command = [str(args.compiler.resolve()), 'build', '--inputs', str(inputs_path), '--source-core',
                '--source-std', '--backend', engine, '--runtime', str(args.observed.resolve()),
-               '--store', str(work / f'store-rss-{engine}'), '--grant', 'Clock', '--grant', 'Tasks',
-               '--grant', 'Random', '--entry', 'store@1/runner_rss/main',
+               '--store', str(work / f'store-{name}-{engine}'), '--grant', 'Clock', '--grant', 'Tasks',
+               '--grant', 'Random', '--entry', f'store@1/{module}/main',
                '--logical-charge-report', str(charges), '-o', str(binary)]
-    if args.cc:
-        command += ['--cc', str(args.cc.resolve())]
+    if cc or args.cc:
+        command += ['--cc', str(cc or args.cc.resolve())]
     wait_load()
     built = subprocess.run(command, capture_output=True, text=True)
     if built.returncode != 0:
-        return False, {'build': built.stderr[-2000:]}
+        return None, built.stderr[-2000:]
     figures = {}
-    for mode, name in (('0', 'valid'), ('1', 'flood')):
+    for mode, label in modes:
+        charges.unlink(missing_ok=True)
         run = subprocess.run([str(binary), mode], capture_output=True)
-        figures[name] = (run.returncode, json.loads(charges.read_text())['peak_retained_bytes'])
-    held = figures['valid'][0] == 0 and figures['flood'][0] == 0 and figures['flood'][1] == figures['valid'][1]
+        figures[label] = (run.returncode, figure(json.loads(charges.read_text())) if charges.exists() else None)
+    return figures, None
+
+
+def l4_retained(args, root, work, engine):
+    figures, error = charged(args, root, work, engine, 'runner_rss', (('0', 'valid'), ('1', 'flood')),
+                             lambda r: r['peak_retained_bytes'])
+    if figures is None:
+        return False, {'build': error}
+    held = (figures['valid'][0] == 0 and figures['flood'][0] == 0 and figures['valid'][1] is not None
+            and figures['flood'][1] == figures['valid'][1])
     return held, figures
+
+
+# L20 (RUNNER-SPEC v2.11 §8, cover_only_retention): runner_cover.hirsel's program, linked
+# with core/tools/runner_mark.c, which records the checkpoint "subscribed" when the client
+# has dropped its initial Batch. The program stores 1,954 rows and holds one subscription,
+# whose Cover spans 10 rows (mode 0) or all 1,954 (mode 1). Both exit 0 and the
+# checkpoint's retained_bytes (live backing requests at that moment) are equal: a
+# subscription that keeps a copy of its covered rows raises mode 1's.
+def subscribed_bytes(report):
+    marks = [p for p in report['phases'] if p['name'] == 'subscribed']
+    return marks[0]['retained_bytes'] if len(marks) == 1 else None
+
+
+def l20_retained(args, root, work, engine, runner=None, name='runner_cover'):
+    cc = c_compiler(args)
+    support = work / f'{name}_mark_{engine}.o'
+    subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_mark.c'),
+                    '-I' + str(root / 'crates/hirsel-core-rt/include'), '-o', str(support)], check=True)
+    wrapper = work / f'{name}_mark_{engine}-cc'
+    wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
+                       + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
+    wrapper.chmod(0o755)
+    figures, error = charged(args, root, work, engine, 'runner_cover', (('0', 'ten'), ('1', 'all')),
+                             subscribed_bytes, wrapper, runner, name)
+    if figures is None:
+        return None, {'build': error}
+    ran = figures['ten'][0] == 0 and figures['all'][0] == 0 and figures['ten'][1] is not None and figures['all'][1] is not None
+    return ran and figures['ten'][1] == figures['all'][1], figures if ran else {'run': figures}
+
+
+# copy_rows_per_sub (L20): a subscription that keeps a copy of its initial rows beside its Cover.
+COVER_MUTANTS = (
+    ('copy_rows_per_sub',
+     [('type Sub { session: u64, sub: u32, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read] }',
+       'type Sub { session: u64, sub: u32, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read], kept: List[Row] }'),
+      ('cover: take c, reads: take reads)))',
+       'cover: take c, reads: take reads, kept: result.unwrap(clone(o.rows)))))')]),
+)
 
 
 # (name, [(old text, new text)], module, the law that must turn red). Each is a wrong
@@ -180,9 +235,33 @@ MUTANTS = (
      [('    let rev = match revision {\n        Some(b) => Some(copy_bytes(b)?),\n',
        '    let rev: Option[Bytes] = match revision {\n        Some(_) => None,\n')],
      'runner_calls', 'calls_recorded'),
-    # L22 (subscribe_order, v2.12): a Subscribe that runs past the Releases queued behind it,
-    # at the newest version, not at its place in PubIn's order. The spec's name for it,
-    # subscribe_at_latest, is subs_main's Board-level mutant above; this is its inbox form.
+    # L22 (subscribe_order, v2.12), each a Subscribe not at its place in PubIn's order:
+    # second_receiver, a publisher that reads a Subscribe queued behind a Release before
+    # applying that Release, as a second receiver for Subscribes would (it peeks only while
+    # it has no subs, so it never drops the law's Halt); subscribe_past_queue,
+    # a Subscribe that runs past the Releases queued behind it, at the newest version (the
+    # spec's name for it, subscribe_at_latest, is subs_main's Board-level mutant above).
+    ('second_receiver',
+     [('                let Release(version: v, snapshot: take snap, answers: take answers) = take rel\n',
+       '                let Release(version: v, snapshot: take snap, answers: take answers) = take rel\n'
+       '                if list.len(b.subs) == 0u64 {\n'
+       '                    match channel.try_receive(from) {\n'
+       '                        Ok(take ahead) => {\n'
+       '                            let PubIn(e: take next) = take ahead\n'
+       '                            match take next {\n'
+       '                                Subscribed(who, sub, take key, take arg) => if let Some(i) = joiner(joined, who) {\n'
+       '                                    unend(mut joined[i].ended, sub)\n'
+       '                                    let mut early: List[Owe] = list.new()\n'
+       '                                    result.unwrap(list.push(mut early, at_base(mut b, who, sub, take key, take arg)))\n'
+       '                                    deliver(mut b, mut joined, take early)\n'
+       '                                },\n'
+       '                                _ => (),\n'
+       '                            }\n'
+       '                        },\n'
+       '                        _ => (),\n'
+       '                    }\n'
+       '                }\n')],
+     'runner', 'subscribe_order'),
     ('subscribe_past_queue',
      [('                unend(mut joined[i].ended, sub)\n',
        '                match channel.try_receive(from) {\n'
@@ -852,6 +931,8 @@ def main():
                 if r0:
                     held, figures = l4_retained(args, root, work, engine)
                     row(engine=engine, law='l4_peak_retained', passed=held, result=figures)
+                    held, figures = l20_retained(args, root, work, engine)
+                    row(engine=engine, law='l20_cover_only_retention', passed=bool(held), result=figures)
                     try:
                         row(engine=engine, law='l1_crash', passed=True,
                             result=crashes(args, root, work, engine, engine))
@@ -860,6 +941,22 @@ def main():
             # A crash mutant is red only when it builds and the L1 floor check fails it.
             if r0 and not args.no_mutants and 'cranelift' in natives:
                 text = (root / 'core/programs/store/runner.hirsel').read_text()
+                # A cover mutant is red only when it builds, runs and the two figures differ.
+                for name, edits in COVER_MUTANTS:
+                    mutated_text = text
+                    for old, new in edits:
+                        mutated_text = mutated_text.replace(old, new) if mutated_text.count(old) == 1 else None
+                        if mutated_text is None:
+                            break
+                    if mutated_text is None:
+                        row(engine='cranelift', mutant=name, passed=False, result='mutation site not found once')
+                        continue
+                    mutated = work / f'cover_runner_{name}' / 'runner.hirsel'
+                    mutated.parent.mkdir()
+                    mutated.write_text(mutated_text)
+                    held, figures = l20_retained(args, root, work, 'cranelift', mutated, 'cover_' + name)
+                    row(engine='cranelift', mutant=name, law='l20_cover_only_retention',
+                        passed=held is False and 'run' not in figures, result=figures)
                 for name, old, new, scenarios in CRASH_MUTANTS:
                     if text.count(old) != 1:
                         row(engine='cranelift', mutant=name, passed=False, result='mutation site not found once')

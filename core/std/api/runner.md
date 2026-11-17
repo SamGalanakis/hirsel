@@ -81,7 +81,8 @@ snapshot inside `look`, under `bound bytes n` and `s` steps, and returns a `Cove
 data-tree key range of one table, made with `cover(shape, lo, hi)`, which keeps that
 table's published value. A query key's result fingerprint is the unit schema's, because
 its rows travel under their tables' codecs. The publisher keeps each subscription's
-Cover and read set at its base, never its rows (F4). A Subscribe runs the query at the
+Cover and read set at its base, never its rows (F4), so subscribed memory does not grow
+with the rows a Cover spans (L20). A Subscribe runs the query at the
 base, and its whole result goes in one Batch that names the sub in `complete` (G3). A
 Subscribe on a live (session, sub) replaces it. Each round, from the base to the newest
 released snapshot, re-runs only the subscriptions whose reads a change hit. It sends the

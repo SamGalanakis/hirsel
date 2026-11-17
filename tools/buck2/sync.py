@@ -815,7 +815,7 @@ def first_party(meta: dict) -> str:
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives",
                                        "HIRSEL_STORE_CRASH_BRIDGE": "//:core-store-crash-provider[shared]"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/programs/store/frame-vectors.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/programs/store/frame-vectors.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_count.c", "core/tools/runner_mark.c", "core/tools/store_crash_tests.py", "core/tools/store_crash.c"]')))
     out.append("\n" + call("hirsel_script_test", name="core-runner-wire", script="core/tools/runner_tests.py", full=False,
                             host=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-runner-wire/hirsel",

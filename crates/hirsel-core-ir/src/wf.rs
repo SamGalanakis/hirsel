@@ -1390,26 +1390,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
     }
 }
 
-/// `m` with every `mark` and `unmark` removed (FORM v1c). Neither has a run-time
-/// effect, so an engine must emit the same code for both; engines' tests compare them.
-pub fn without_marks(m: &Module) -> Module {
-    let mut m = m.clone();
-    for b in m.functions.iter_mut().filter_map(|f| f.body.as_mut()) {
-        let (mut insts, mut anchors) = (Vec::new(), Vec::new());
-        for block in &mut b.blocks {
-            let start = insts.len() as u32;
-            for i in block.insts.start..block.insts.start + block.insts.len {
-                if !matches!(b.insts[i as usize], Inst::Mark { .. } | Inst::Unmark { .. }) {
-                    insts.push(b.insts[i as usize].clone());
-                    anchors.push(b.inst_anchors[i as usize]);
-                }
-            }
-            block.insts = PoolRange::new(start, insts.len() as u32 - start);
-        }
-        (b.insts, b.inst_anchors) = (insts, anchors);
-    }
-    m
-}
+pub use crate::without_marks;
 
 /// A place in one of the body's slots, as far as its address names it statically:
 /// the slot and its field, case-field and carrier-word steps, cut at the first

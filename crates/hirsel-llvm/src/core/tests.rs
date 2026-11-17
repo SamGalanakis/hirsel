@@ -1098,6 +1098,25 @@ fn marks_emit_nothing() {
 }
 
 #[test]
+fn metered_kernel_marks_and_unmarks_do_not_change_exposure() {
+    let source = include_str!("../../../hirsel-core-ir/samples/kernel.core")
+        .replace("  call f3 ", "  step\n  call f3 ");
+    for marker in ["mark", "unmark"] {
+        let source = source.replace("  mark ", &format!("  {marker} "));
+        let module = text::parse(&source).unwrap();
+        wf::module(&module).unwrap();
+        let stripped = wf::without_marks(&module);
+        assert_ne!(stripped, module);
+        for opt in [Optimization::None, Optimization::Speed] {
+            assert!(
+                emitted_ir(&module, opt).unwrap() == emitted_ir(&stripped, opt).unwrap(),
+                "a metered {marker} changed the IR at {opt:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn every_guarded_admission_refusal_matches_the_evaluator() {
     let admission = include_str!("../../../hirsel-core-ir/samples/admission.core");
     let resource = include_str!("../../tests/core_runtime/injection.core");

@@ -593,7 +593,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     composer = NULL;
     // Local value names only label printed IR. Every unit is parsed, so the
     // optimizer and code generator stop naming the values they create.
-    discard_names = !LLVMContextShouldDiscardValueNames(context);
+    discard_names = !standalone && !LLVMContextShouldDiscardValueNames(context);
     if (discard_names) LLVMContextSetDiscardValueNames(context, 1);
     if (export_count) {
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {

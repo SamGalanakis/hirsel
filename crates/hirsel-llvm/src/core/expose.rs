@@ -441,6 +441,19 @@ fn merge_blocks(body: &mut Body) {
 }
 
 pub(super) fn module(module: &Module) -> Option<Module> {
+    // Marks have no runtime meaning. Remove them before eligibility, budgets
+    // or block merging can let one change the exposed program.
+    let unmarked = module
+        .functions
+        .iter()
+        .filter_map(|f| f.body.as_ref())
+        .any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, Inst::Mark { .. } | Inst::Unmark { .. }))
+        })
+        .then(|| hirsel_core_ir::without_marks(module));
+    let module = unmarked.as_ref().unwrap_or(module);
     let eligible = module
         .functions
         .iter()
@@ -451,12 +464,40 @@ pub(super) fn module(module: &Module) -> Option<Module> {
         })
         .collect::<Vec<_>>();
     let mut result = None;
+    let mut forwarding_facts = None;
     for (i, f) in module.functions.iter().enumerate() {
         let Some(original) = &f.body else {
             continue;
         };
         if original.calls.is_empty() {
             continue;
+        }
+        // An unmetered terminal call already has FORM's forwarding ABI. Keep
+        // that call boundary; exposing it cannot join any Step reservations.
+        let mut forwarded = BTreeSet::new();
+        if !original
+            .insts
+            .iter()
+            .any(|i| matches!(i, Inst::Step { .. }))
+        {
+            let (recipes, failures) = forwarding_facts.get_or_insert_with(|| {
+                (
+                    hirsel_core_layout::compute(&module.types).expect("producer layouts"),
+                    failure::Failures::new(module),
+                )
+            });
+            let mut plan = forward::Forwarding::new(original);
+            for block in 0..original.blocks.len() {
+                if let Some(ending) = plan.ending(
+                    module,
+                    recipes,
+                    &module.signatures[f.signature.index()],
+                    &failures.constants[i],
+                    block,
+                ) {
+                    forwarded.insert(ending.call);
+                }
+            }
         }
         // A small reader can be hot inside a recursive parser without living
         // in a local loop. Use the same bounded exposure at those direct calls.
@@ -475,6 +516,9 @@ pub(super) fn module(module: &Module) -> Option<Module> {
                         let Inst::Call { call } = *inst else {
                             return None;
                         };
+                        if forwarded.contains(&call) {
+                            return None;
+                        }
                         let call = &body.calls[call.index()];
                         let Callee::Direct(f) = call.callee else {
                             return None;
@@ -516,5 +560,5 @@ pub(super) fn module(module: &Module) -> Option<Module> {
             result.get_or_insert_with(|| module.clone()).functions[i].body = Some(body);
         }
     }
-    result
+    result.or(unmarked)
 }

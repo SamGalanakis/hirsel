@@ -614,8 +614,8 @@ fn emit_module(
             e.step_counter = Some(counter);
             e.reload_steps();
         }
-        // Batching introduces joins that the optimizer promotes to registers.
-        // Development objects retain checked Steps without expanding those CFGs.
+        // Eager and lazy objects use the same exact-metering CFG at every
+        // optimization level. LLVM promotes its joins to registers at Speed.
         let step_loops = if source.batch_steps {
             steps::loops(module, body, e.constants, &step_neutral)
         } else {
@@ -1030,10 +1030,6 @@ fn emit_object_site_binding(
     observe_charge: bool,
     source: SourceEmission,
 ) -> Result<Vec<u8>> {
-    let source = SourceEmission {
-        batch_steps: matches!(opt, Optimization::Speed),
-        ..source
-    };
     #[cfg(not(hirsel_lazy_core))]
     {
         compile_observation(module, target, opt, observe_charge, source, |_| (), |_| ())
@@ -1115,10 +1111,6 @@ fn compile_observation<R>(
     mut observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
     observer(CompilationStage::TextConstruction);
-    let source = SourceEmission {
-        batch_steps: matches!(opt, Optimization::Speed),
-        ..source
-    };
     let ir = emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), source)?;
     observer(CompilationStage::TargetSetup);
     let machine =

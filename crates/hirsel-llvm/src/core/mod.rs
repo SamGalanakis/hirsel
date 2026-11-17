@@ -626,6 +626,11 @@ fn emit_module(
         } else {
             Vec::new()
         };
+        let step_regions = if source.batch_steps {
+            steps::regions(module, body, &step_neutral)
+        } else {
+            Vec::new()
+        };
         let step_groups = body
             .blocks
             .iter()
@@ -637,7 +642,10 @@ fn emit_module(
                 }
             })
             .collect::<Vec<_>>();
-        if !step_loops.is_empty() || step_groups.iter().any(|g| !g.is_empty()) {
+        if !step_loops.is_empty()
+            || !step_regions.is_empty()
+            || step_groups.iter().any(|g| !g.is_empty())
+        {
             // Both loop copies define the same source values and addresses.
             // Entry allocas give mem2reg their joins before ordinary O3 runs.
             e.value_slots.fill(true);
@@ -659,6 +667,10 @@ fn emit_module(
             }
         }
         let step_ends = step_loops
+            .iter()
+            .map(|_| e.step_window())
+            .collect::<Vec<_>>();
+        let region_windows = step_regions
             .iter()
             .map(|_| e.step_window())
             .collect::<Vec<_>>();
@@ -692,6 +704,11 @@ fn emit_module(
         let mut forwarding = forward::Forwarding::new(body);
         for (i, b) in body.blocks.iter().enumerate() {
             e.block(Label::block(i));
+            if let Some((number, plan)) =
+                step_regions.iter().enumerate().find(|(_, p)| p.header == i)
+            {
+                e.region_dispatch(plan, region_windows[number], number);
+            }
             let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
             let mut returned = false;
             let groups = &step_groups[i];
@@ -739,6 +756,11 @@ fn emit_module(
         }
         for (number, plan) in step_loops.iter().enumerate() {
             e.step_versions(plan, step_ends[number], number, |anchor| {
+                function_debug.map(|d| d.location(anchor))
+            })?;
+        }
+        for (number, plan) in step_regions.iter().enumerate() {
+            e.region_version(plan, region_windows[number], number, |anchor| {
                 function_debug.map(|d| d.location(anchor))
             })?;
         }

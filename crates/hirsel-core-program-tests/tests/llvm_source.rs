@@ -1477,3 +1477,99 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
         );
     }
 }
+
+#[test]
+fn branched_regions_refund_the_unexecuted_effect_suffix() {
+    let source = r#"
+fn fork(mut xs: Inline[u64, 5], mode: u64) -> Result[(), Capacity] {
+    xs[0] += int.widen(1u8)
+    if mode == 0 {
+        xs[1] += int.widen(2u8)
+    } else {
+        xs[2] += int.widen(3u8)
+        if mode == 1 { return Error(Capacity(requested: 1, available: 0)) }
+        xs[3] += int.widen(4u8)
+    }
+    xs[4] += int.widen(5u8)
+    Ok(())
+}
+fn probe(s: u64, mode: u64, repeats: u64) -> u64 {
+    match (bound steps s {
+        let mut xs: Inline[u64, 5] = [0; 5]
+        let mut early = 0u64
+        for _ in 0u64 .. repeats {
+            match fork(mut xs, mode) { Ok(()) => (), Error(_) => { early += 1 } }
+        }
+        for _ in 0u64 .. 3u64 {}
+        let checksum = xs[0] + xs[1] * 10 + xs[2] * 100 + xs[3] * 1000 + xs[4] * 10000
+        1000000000u64 + early * 1000000u64 + checksum
+    }) { Ok(v) => v, Error(e) => 2000000000u64 + e.steps }
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let mut cases = Vec::new();
+    for (mode, calls, checksum) in [(0, 3, 50021), (1, 2, 301), (2, 4, 54301)] {
+        for repeats in [0, 1, 7, 16384] {
+            // One fork call, its branch's calls, then the outer latch.
+            // Three empty tail latches finish the bound.
+            let need = repeats * (calls + 2) + 3;
+            for s in [0, 1, 2, 3, need - 1, need, need + 1, 65535, 65536, 65537] {
+                let want = if s < need {
+                    2000000000 + s
+                } else {
+                    1000000000 + repeats * (checksum + if mode == 1 { 1000000 } else { 0 })
+                };
+                assert_eq!(
+                    eval::run(&module, names["probe"], &[s, mode, repeats], 1_000_000).outcome,
+                    eval::Outcome::Returned(vec![want]),
+                    "s={s}, mode={mode}, repeats={repeats}"
+                );
+                cases.push(Case {
+                    function: names["probe"],
+                    args: vec![s, mode, repeats],
+                    limit: 1_000_000,
+                    injection: None,
+                });
+            }
+        }
+    }
+    for facts in [false, true] {
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                    .unwrap();
+            let reports = execute_object(&module, &cases, "", "", optimization, Some(object));
+            for (case, report) in cases.iter().zip(reports) {
+                let expected = eval::run(&module, case.function, &case.args, case.limit);
+                assert_eq!(
+                    report.outcome, expected.outcome,
+                    "facts={facts}, args={:?}",
+                    case.args
+                );
+                let sites = expected
+                    .sites
+                    .iter()
+                    .map(|a| {
+                        a.map_or(0, |a| {
+                            ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(report.sites, sites, "failure site, args={:?}", case.args);
+            }
+        }
+    }
+    let object = module.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+    let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
+    for (case, report) in cases.iter().zip(reports) {
+        assert_eq!(
+            report.outcome,
+            eval::run(&module, case.function, &case.args, case.limit).outcome,
+            "split units, args={:?}",
+            case.args
+        );
+    }
+}

@@ -29,6 +29,18 @@ impl<'a> Flow<'a> {
         }
         from == to
     }
+    pub(super) fn block_dominates(&self, from: usize, to: usize) -> bool {
+        let g = self.graph.get_or_init(|| Graph::new(self.body));
+        let from = g.points[from][0];
+        let mut to = g.points[to][0];
+        if g.parent[from].is_none() || g.parent[to].is_none() {
+            return false;
+        }
+        while g.rank[to] > g.rank[from] {
+            to = g.parent[to].unwrap();
+        }
+        from == to
+    }
 }
 struct Graph {
     points: Vec<Vec<usize>>,

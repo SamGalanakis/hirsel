@@ -2,6 +2,8 @@
 //! Fast copies refund their unexecuted suffix; short windows keep checked work.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+mod regions;
+pub(super) use regions::plans as regions;
 
 #[derive(Clone)]
 pub(super) struct Loop {

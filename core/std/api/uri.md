@@ -80,8 +80,11 @@ RFC 3986 §3 and §4.1 `URI-reference`, ASCII only:
 `resolve(base_text: String, base: Uri, ref_text: String, r: Uri, mut out: String) -> Result[Uri, Error]`
 : RFC 3986 §5.2 strict resolution of `r` against `base`, with §5.2.4 dot-segment removal.
   It appends the target to `out` and returns the target's `Uri`, whose spans index `out`.
-  A reference with a scheme is used as is, so `http:g` against an `http` base stays
-  `http:g`. Fails: `Relative` when `base` has no scheme, or `Capacity(c)`. Reserves
+  A reference with a scheme keeps its own components, but its path still has its dot
+  segments removed (§5.2.2), so `http://a/b/../c` resolves to `http://a/c`, and `http:g`
+  against an `http` base stays `http:g` (strict). Fails: `Relative` when `base` has no
+  scheme, even when `r` has one: a base without a scheme is a caller error, whatever the
+  reference. Also `Capacity(c)`. Reserves
   `len(base_text) + len(ref_text) + 1` first, which bounds every target, so on failure `out`
   is unchanged. Alloc: GROWTH of `out`. Cost: O(len base + len ref).
   Ex: `let t = std.uri.resolve(b, bu, s, su, mut out)?`
@@ -143,6 +146,14 @@ RFC 3986 §3 and §4.1 `URI-reference`, ASCII only:
 - **Encode sets by component, ADOPTED from rust `percent-encoding`** (2.3.2 `src/lib.rs`,
   `AsciiSet`). The sets here are named fixed values, not ones the caller builds.
 - **Goose** has no URI module. The caller-owned-output convention is followed (ADOPTED).
+- **Spans in the public API, extending HTTP-6.** HTTP-6 keeps `http1.Span` offsets inside
+  std for the handler-facing `Request`, which is anchored to one buffer and lives for one
+  call. A parsed `Uri` is different. `resolve` writes into `out` and returns spans of it
+  while `out` is still `mut`, and a caller keeps a `Uri` in records and maps next to its
+  text. Under OWN-19, a view would freeze its anchor and could not be a record field of a
+  stable type or a collection element. So `Uri` holds plain spans, and `decode_text` or
+  `string.slice` turns one into text. This rule does not change HTTP-6: handlers still see
+  views.
 - **Extends HTTP B-4** without changing it. B-4 rules how a route's query decodes, and
   `next_pair` with `decode_text` is that rule as a library. `http1` keeps its query raw and
   routing never reads it (http.md HTTP-4).
@@ -159,7 +170,9 @@ parses those), host lowercasing, IPv4 and DNS validation of reg-names, IPvFuture
 
 - **U1 RFC resolution.** RFC 3986 §5.4.1's 23 normal and §5.4.2's 19 abnormal examples
   against base `http://a/b/c/d;p?q` give the RFC's targets byte for byte, with `http:g`
-  strict. Oracle: the RFC text. Bug caught: merging with the base's last segment kept
+  strict. Plus two hand-derived rows from §5.2.2: `http://a/b/../c` gives `http://a/c`, and
+  `HTTP:./g` gives `HTTP:g`. Oracle: the RFC text. Bug caught: a reference with a scheme
+  copied without dot removal (no §5.4 row tests it), or merging with the base's last segment kept
   (`../g` going to `http://a/b/c/g`), or `g;x=1/../y` treating `;` as a separator.
 - **U2 Round trip and presence.** For every reference U1, U5 and U7 accept, and for Go
   `urltests` (`url_test.go:30`) inputs that are strict RFC 3986, `push` gives the input back.

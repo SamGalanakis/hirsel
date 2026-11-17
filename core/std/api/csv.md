@@ -114,6 +114,11 @@ delimiter, quotes, CR, LF and CRLF. It is law C1.
   caller drives the loop. Goose skips nothing and treats a blank line as one empty field.
   Here it is zero fields, so the writer can tell `""` apart from an empty line. Goose's
   `format_field` (`csv.goose:60-71`) quotes on the same four bytes as this writer (ADOPTED).
+- **Spans in the public API, extending HTTP-6.** HTTP-6 keeps `http1.Span` offsets inside
+  std for the handler-facing `Request`. A CSV record cannot follow it. A record is a list of
+  fields, and under OWN-19 a view cannot be a collection element. Also, the caller appends
+  to the buffer after `Need`, which a live view's frozen anchor would forbid. HTTP-6 is
+  unchanged.
 - **Resumable windows; ADAPTED from csv-core** (csv-core 0.1.13 `src/reader.rs`), which is a
   push parser over input chunks with no allocation. csv-core keeps a DFA state between
   chunks. Here the caller re-offers the same `at`, so no hidden state crosses calls.

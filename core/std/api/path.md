@@ -107,7 +107,8 @@ conversion. A path to a file outside every `Dir` is not a value a program can us
 ## Laws (planned for the build lane, `core/std/tests/path.hirsel`)
 
 - **P1 Host differential.** For each row in a table of about 30 strings, `is_valid(p)` is
-  true exactly when `file.write(dir, p, ..)` (with parents created) does not return `Denied`.
+  true exactly when `file.write(sub, p, ..)` (with parents created) does not return
+  `Denied`. `sub` is a fresh subdirectory per row, so no row meets an earlier row's file.
   The table holds the empty string, `/`, `a/`, `/a`, `a//b`, `.`, `..`, `a/./b`, `a/../b`,
   `...`, `.a`, `a.`, a NUL in the middle, `é`, and a 255-byte component. Oracle: the
   provider (the host's own `Denied`), run as an `f(dir)` test. Bug caught: `...` refused as

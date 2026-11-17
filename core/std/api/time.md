@@ -113,14 +113,16 @@ pub type Error: key = Invalid(u64) | Range | Capacity(Capacity)
   `.` with one or more digits, then `Z`, `z` or `±hh:mm`. The offset is returned with the
   instant so the text can be written back as it was. Rulings where RFC 3339 is loose:
   - Fraction digits past the ninth are read and dropped (Go).
-  - `ss` may be `60` only as RFC 3339 §5.7 allows. It reads as 59 and keeps its fraction
-    (jiff), because the time line here has no leap seconds.
+  - Any `ss` of `60` reads as `59` and keeps its fraction (jiff), at any hour and offset,
+    because the time line here has no leap seconds. RFC 3339 §5.7 places a leap second at
+    23:59:60 UTC, which can be any local hour. This rule does not check that.
   - `-00:00` reads as offset 0. RFC 3339 §4.3 gives it the meaning "offset unknown", and this
     type has no way to hold that.
   - A space in place of `T` (RFC 3339 §5.6 NOTE, and ISO 8601's other forms) is `Invalid`.
-  Fails: `Invalid(i)` for a byte the grammar refuses. `Range` for a nonexistent date,
-  `hh > 23`, `mm > 59`, an offset hour above 23 or minute above 59, or an instant outside
-  the range after the offset is applied. Cost: O(len).
+  Fails: `Invalid(i)` for a byte the grammar refuses, a field with the wrong number of
+  digits included. `Range` for a well-formed field out of its range: a nonexistent date,
+  `hh > 23`, `mm > 59`, `ss > 60`, an offset hour above 23 or minute above 59, or an
+  instant outside the range after the offset is applied. Cost: O(len).
   Ex: `let (t, off) = std.time.parse_rfc3339(s)?`
 
 `push_rfc3339(mut out: String, t: Timestamp, offset: i32, digits: u8) -> Result[(), Error]`
@@ -138,7 +140,8 @@ pub type Error: key = Invalid(u64) | Range | Capacity(Capacity)
   by a unit `ns`, `us`, `µs` (U+00B5), `μs` (U+03BC), `ms`, `s`, `m` or `h`. Numbers may have
   a fraction (`1.5h`, `.5s`, `5.s`). `0`, `+0` and `-0` alone need no unit. The fraction is
   converted with Go's binary64 expression, `truncate(f * (unit / scale))` (go 46b62495
-  `src/time/format.go:1634-1731`). Every step is one correctly rounded IEEE operation, so
+  `src/time/format.go:1634-1731`, with `leadingFraction` at `:1580` dropping digits once
+  the fraction would overflow and freezing `scale`). Every step is one correctly rounded IEEE operation, so
   the result is the same on every target. That is why `0.3333333333333333333h` is exactly
   20m, as in Go's table. Fails: `Invalid(i)` for a missing or unknown unit or a stray byte,
   and `Range` when the total leaves `i64`. `-9223372036854775808ns` is accepted.
@@ -195,8 +198,10 @@ policy, not a fact), strftime-style patterns, HTTP-date (RFC 9110 §5.6.7, which
   `%` on a negative day count giving a negative index.
 - **T3 RFC 3339 parse.** The five RFC 3339 §5.8 examples, the `RFC3339` rows of Go
   `parseTests` (`format_test.go:274,283`) and `parseErrorTests` (`format_test.go:652-674`),
-  and jiff's leap-second rows give the instant (or refusal) and offset each source states. Rejections with `Invalid(i)` offsets: a space separator, `24:00:00`, a
-  2-digit year, a missing seconds field, `+24:00`, `.` with no digits, and a trailing byte.
+  and jiff's leap-second rows give the instant (or refusal) and offset each source states.
+  Rejections with `Invalid(i)` offsets: a space separator, a 2-digit year, a missing seconds
+  field, `.` with no digits, and a trailing byte. Rejections with `Range`: `24:00:00`,
+  `+24:00`, Go's `21:00:67`, and `2023-02-29`. `12:00:60+05:00` reads as `12:00:59+05:00`.
   Oracle: the RFC text and the cited tables. Bug caught: the offset added rather than
   subtracted, so `1996-12-19T16:39:57-08:00` reads 16 hours off.
 - **T4 RFC 3339 write.** Go `rfc3339Formats` (`format_test.go:77`, 3 rows) with `digits`

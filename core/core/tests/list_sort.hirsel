@@ -93,8 +93,8 @@ fn stable_one_allocation() -> u64 {
     }
 }
 
-// Each encoded value carries its input index. Sizes0..17 cover odd trailing
-// runs and both final scratch locations. Key/order/bitmask is the list model.
+// Each encoded value carries its input index. Sizes 0..17 cover odd trailing
+// runs. Key, order and bitmask together describe the expected permutation.
 // expect: run model_all_small_sizes() = true
 fn model_all_small_sizes() -> bool {
     for n in 0u64 .. 18 {
@@ -167,26 +167,69 @@ fn ordinary_list_after_sort() -> u64 {
     a * 100 + b * 10 + option.unwrap(list.pop(mut xs))
 }
 
-// Five equal zero-sized elements need no admission. Bottom-up passes compare
-// twice at width1, twice at width2 and four times at width4.
-// expect: run zero_size_sort() = 58
-fn zero_size_sort() -> u64 {
+// Equal zero-sized entries need no admission and retain their list shape.
+// expect: run zero_size_sort() = true
+fn zero_size_sort() -> bool {
     let r = bound bytes 0 {
         let mut xs: List[()] = list.new()
         for _ in 0u64 .. 5 {
             result.unwrap(list.push(mut xs, ()))
         }
         let cap = list.capacity(xs)
-        let mut calls: u64 = 0
+        let mut compared = false
         result.unwrap(list.sort_stable(mut xs, fn(a: (), b: ()) -> Order {
-            calls += 1;
+            compared = true;
             Equal
         }))
-        if list.capacity(xs) != cap {
-            99u64
-        } else {
-            list.len(xs) * 10 + calls
-        }
+        list.len(xs) == 5 && list.capacity(xs) == cap && compared
     }
     result.unwrap(r)
+}
+
+// Stable insertion sort using ordinary swaps, independent of run detection and merging.
+fn reference(mut xs: List[u64]) {
+    for i in 1u64 .. list.len(xs) {
+        let mut j = i
+        while j > 0 && xs[j - 1] / 128 > xs[j] / 128 {
+            list.swap(mut xs, j - 1, j)
+            j -= 1
+        }
+    }
+}
+
+// A non-strict descending check reverses equal keys; a wrong merge order
+// loses or reorders entries in repeated ascending/descending runs.
+// expect: run stable_generated_runs() = true
+fn stable_generated_runs() -> bool {
+    let sizes: Inline[u64, 7] =[0, 1, 5, 15, 16, 31, 65]
+    for n in sizes {
+        for shape in 0u64 .. 4u64 {
+            let mut xs: List[u64] = list.new()
+            let mut expected: List[u64] = list.new()
+            for i in 0u64 .. n {
+                let key = if shape == 0 {
+                    i / 2
+                } else if shape == 1 {
+                    (n - i) / 2
+                } else if shape == 2 {
+                    (i / 9 + 1) * (8 - i % 9)
+                } else {
+                    (i * 17 + 3) % 13
+                }
+                let entry = key * 128 + i
+                result.unwrap(list.push(mut xs, entry))
+                result.unwrap(list.push(mut expected, entry))
+            }
+            if n > 1 {
+                reference(mut expected)
+            }
+            result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+                compare(a / 128, b / 128)
+            }))
+            if xs != expected {
+                return false
+            }
+        }
+    }
+    true
 }

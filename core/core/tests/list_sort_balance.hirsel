@@ -1,11 +1,8 @@
-// Host-free failure cases expose the evaluator's final admitted balance. The
-// comparator always chooses the right run:2 calls at width1,2 at width2,1 at
-// width4. Every prefix failure must refund both scratch and the original list.
-// Resource permutation/drop order is checked separately by list_sort_failure.
+// Every comparator failure must refund both scratch and the original list.
 fn fail_at(failure: u64) -> u64 {
     let mut xs: List[u64] = list.new()
     for i in 0u64 .. 5 {
-        result.unwrap(list.push(mut xs, i))
+        result.unwrap(list.push(mut xs, (i * 3) % 5))
     }
     let mut calls: u64 = 0
     result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
@@ -14,7 +11,11 @@ fn fail_at(failure: u64) -> u64 {
             let none: Option[u64] = None;
             let _ = option.unwrap(none)
         }
-        Less
+        if a < b {
+            Less
+        } else {
+            Greater
+        }
     }))
     calls
 }

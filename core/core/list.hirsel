@@ -86,107 +86,118 @@ fn slots_free[T](take s: Slots[T])
 // Discard only a no-drop element ring; preserves evaluator liveness.
 fn slots_forget_ring[T](mut s: Slots[T], head: u64)
 
-// Stable bottom-up merges. Every pass moves T between xs and one scratch block.
-// Cursor arithmetic is bounded by n; width doubles only below n - width.
+// Stable natural merges, ordered by the first differing bit of adjacent
+// run midpoints (Powersort, as used in Rust's driftsort).
 pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
     let n = list.len(xs)
     if n < 2 {
         return Ok(())
     }
     let scratch: Slots[T] = slots_new(n)?
-    let mut g = Hole(xs: view xs, scratch: take scratch, state: MergeState(source_is_xs: true, a: 0, mid: 0, b: 0, end: 0, n: n))
-    let mut width: u64 = 1
-    while width < n {
-        let mut lo: u64 = 0
-        while lo < n {
-            let left = int.wrapping_sub(n, lo)
-            let mid = int.wrapping_add(lo, if width < left {
-                width
-            } else {
-                left
-            })
-            let room = int.wrapping_sub(n, mid)
-            let end = int.wrapping_add(mid, if width < room {
-                width
-            } else {
-                room
-            })
-            // Publish the entire pair at once. RHS evaluation precedes the store;
-            // every earlier or later failure sees a complete restoration state.
-            g.state = MergeState(source_is_xs: g.state.source_is_xs, a: lo, mid: mid, b: mid, end: end, n: n)
-            // Destination prefix is a + (b - mid), including completed pairs.
-            if g.state.source_is_xs {
-                while g.state.a < g.state.mid && g.state.b < g.state.end {
-                    let right = match before(slots_list_view(g.xs, g.state.b), slots_list_view(g.xs, g.state.a)) {
-                        Less => true,
-                        _ => false
-                    }
-                    if right {
-                        slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
-                        g.state.b = int.wrapping_add(g.state.b, 1)
-                    } else {
-                        slots_from_list(g.xs, g.state.a, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
-                        g.state.a = int.wrapping_add(g.state.a, 1)
-                    }
-                }
-                if g.state.a < g.state.mid {
-                    slots_from_list(g.xs, g.state.a, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), int.wrapping_sub(g.state.mid, g.state.a))
-                    g.state.a = g.state.mid
-                }
-                if g.state.b < g.state.end {
-                    slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), int.wrapping_sub(g.state.end, g.state.b))
-                    g.state.b = g.state.end
-                }
-            } else {
-                while g.state.a < g.state.mid && g.state.b < g.state.end {
-                    let right = match before(slots_view(g.scratch, g.state.b), slots_view(g.scratch, g.state.a)) {
-                        Less => true,
-                        _ => false
-                    }
-                    if right {
-                        slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
-                        g.state.b = int.wrapping_add(g.state.b, 1)
-                    } else {
-                        slots_to_list(mut g.scratch, g.state.a, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
-                        g.state.a = int.wrapping_add(g.state.a, 1)
-                    }
-                }
-                if g.state.a < g.state.mid {
-                    slots_to_list(mut g.scratch, g.state.a, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), int.wrapping_sub(g.state.mid, g.state.a))
-                    g.state.a = g.state.mid
-                }
-                if g.state.b < g.state.end {
-                    slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), int.wrapping_sub(g.state.end, g.state.b))
-                    g.state.b = g.state.end
-                }
-            }
-            lo = g.state.end
+    let mut g = Hole(xs: view xs, scratch: take scratch, state: empty_merge())
+    let mut lo: u64 = 0
+    let mut mid = sorted_run_end(mut g, lo, n, before)
+    // Powers strictly increase up the stack. A u64 bit position has only 64 values.
+    let mut starts: Inline[u64, 64] =[0; 64]
+    let mut powers: Inline[u32, 64] =[0; 64]
+    let mut depth: u64 = 0
+    while mid < n {
+        let end = sorted_run_end(mut g, mid, n, before)
+        let left = lo + (mid - lo) / 2
+        let right = mid + (end - mid) / 2
+        let power = int.leading_zeros(left ^ right)
+        while depth > 0 && powers[depth - 1] >= power {
+            depth -= 1
+            let earlier = starts[depth]
+            merge_runs(mut g, earlier, lo, mid, before)
+            lo = earlier
         }
-        // Flip the buffers and reset every restoration range in one store.
-        g.state = MergeState(source_is_xs: !g.state.source_is_xs, a: 0, mid: 0, b: 0, end: 0, n: n)
-        if width >= int.wrapping_sub(n, width) {
-            width = n
-        } else {
-            width = int.wrapping_mul(width, 2)
-        }
+        starts[depth] = lo
+        powers[depth] = power
+        depth += 1
+        lo = mid
+        mid = end
     }
-    // Its infallible finalizer restores xs on both success and failure. It also
-    // performs the final copy back when the sorted source is scratch.
+    while depth > 0 {
+        depth -= 1
+        let earlier = starts[depth]
+        merge_runs(mut g, earlier, lo, n, before)
+        lo = earlier
+    }
     let _ = take g
     Ok(())
 }
 
-// The prefix already in the destination is derived as a + (b - mid).
-// Every state STORE publishes a complete restoration state. Each element
-// transfer moves the value, then advances one source cursor. Between those
-// statements the state is incomplete: nothing between them may fail.
+fn precedes[T](a: T, b: T, before: scoped fn(T, T) -> Order) -> bool {
+    match before(a, b) {
+        Less => true,
+        _ => false,
+    }
+}
+
+fn sorted_run_end[T](mut g: Hole[T], lo: u64, n: u64, before: scoped fn(T, T) -> Order) -> u64 {
+    let mut end = lo + 1
+    if end == n {
+        return end
+    }
+    let descending = precedes(slots_list_view(g.xs, end), slots_list_view(g.xs, lo), before)
+    end += 1
+    while end < n && precedes(slots_list_view(g.xs, end), slots_list_view(g.xs, end - 1), before) == descending {
+        end += 1
+    }
+    // Only strictly descending runs are reversed, so equal keys never cross.
+    if descending {
+        let mut a = lo
+        let mut b = end - 1
+        while a < b {
+            slots_from_list(g.xs, a, mut g.scratch, 0, 1)
+            slots_from_list(g.xs, b, mut g.scratch, 1, 1)
+            slots_to_list(mut g.scratch, 0, g.xs, b, 1)
+            slots_to_list(mut g.scratch, 1, g.xs, a, 1)
+            a += 1
+            b -= 1
+        }
+    }
+    end
+}
+
+fn merge_runs[T](mut g: Hole[T], lo: u64, mid: u64, end: u64, before: scoped fn(T, T) -> Order) {
+    if !precedes(slots_list_view(g.xs, mid), slots_list_view(g.xs, mid - 1), before) {
+        return
+    }
+    g.state = MergeState(lo: lo, left: lo, mid: mid, right: mid)
+    while g.state.left < mid && g.state.right < end {
+        let at = int.wrapping_add(g.state.left, int.wrapping_sub(g.state.right, mid))
+        if precedes(slots_list_view(g.xs, g.state.right), slots_list_view(g.xs, g.state.left), before) {
+            slots_from_list(g.xs, g.state.right, mut g.scratch, at, 1)
+            g.state.right = int.wrapping_add(g.state.right, 1)
+        } else {
+            slots_from_list(g.xs, g.state.left, mut g.scratch, at, 1)
+            g.state.left = int.wrapping_add(g.state.left, 1)
+        }
+    }
+    let at = int.wrapping_add(g.state.left, int.wrapping_sub(g.state.right, mid))
+    if g.state.left < mid {
+        slots_from_list(g.xs, g.state.left, mut g.scratch, at, int.wrapping_sub(mid, g.state.left))
+    } else if g.state.right < end {
+        slots_from_list(g.xs, g.state.right, mut g.scratch, at, int.wrapping_sub(end, g.state.right))
+    }
+    slots_to_list(mut g.scratch, lo, g.xs, lo, int.wrapping_sub(end, lo))
+    g.state = empty_merge()
+}
+
+// Only the comparator can fail while the pair has holes. The consumed
+// prefixes of the two runs are then empty, and scratch holds exactly that
+// many elements starting at lo. Restore those slots before dropping xs.
 type MergeState {
-    source_is_xs: bool,
-    a: u64,
+    lo: u64,
+    left: u64,
     mid: u64,
-    b: u64,
-    end: u64,
-    n: u64
+    right: u64
+}
+
+fn empty_merge() -> MergeState {
+    MergeState(lo: 0, left: 0, mid: 0, right: 0)
 }
 
 scoped type Hole[T] {
@@ -194,40 +205,11 @@ scoped type Hole[T] {
     scratch: Slots[T],
     state: MergeState
 } drop(g) {
-    let mut read: u64 = 0
-    if g.state.source_is_xs {
-        let mut i: u64 = 0
-        while i < g.state.a {
-            slots_to_list(mut g.scratch, read, g.xs, i, 1)
-            read = int.wrapping_add(read, 1)
-            i = int.wrapping_add(i, 1)
-        }
-        i = g.state.mid
-        while i < g.state.b {
-            slots_to_list(mut g.scratch, read, g.xs, i, 1)
-            read = int.wrapping_add(read, 1)
-            i = int.wrapping_add(i, 1)
-        }
-    } else {
-        let mut out = int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid))
-        let mut i = g.state.a
-        while i < g.state.mid {
-            slots_to_list(mut g.scratch, i, g.xs, out, 1)
-            out = int.wrapping_add(out, 1)
-            i = int.wrapping_add(i, 1)
-        }
-        i = g.state.b
-        while i < g.state.end {
-            slots_to_list(mut g.scratch, i, g.xs, out, 1)
-            out = int.wrapping_add(out, 1)
-            i = int.wrapping_add(i, 1)
-        }
-        i = g.state.end
-        while i < g.state.n {
-            slots_to_list(mut g.scratch, i, g.xs, out, 1)
-            out = int.wrapping_add(out, 1)
-            i = int.wrapping_add(i, 1)
-        }
+    if g.state.lo < g.state.left {
+        slots_to_list(mut g.scratch, g.state.lo, g.xs, g.state.lo, int.wrapping_sub(g.state.left, g.state.lo))
+    }
+    if g.state.mid < g.state.right {
+        slots_to_list(mut g.scratch, g.state.left, g.xs, g.state.mid, int.wrapping_sub(g.state.right, g.state.mid))
     }
     slots_finish_list(g.xs)
 }

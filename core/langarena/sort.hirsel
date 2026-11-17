@@ -98,9 +98,9 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
                 helper.mem(list.fill(mut temp, n, 0))?
                 merge(mut t, mut temp, 0, n)
             } else {
-                list.sort(mut t, fn(a: i32, b: i32) -> Order {
+                helper.mem(list.sort_stable(mut t, fn(a: i32, b: i32) -> Order {
                     std.order.compare(a, b)
-                })
+                }))?
             }
             let sorted_at: u64 = int.narrow(helper.next_int(mut g, int.narrow(size)))
             total = int.wrapping_add(total, int.narrow(t[sorted_at]))

@@ -168,8 +168,7 @@ pub type Error: key = Invalid(u64) | Range | Capacity(Capacity)
 - **The range is the RFC 3339 range.** Go's `Time` spans ±292 billion years. jiff spans years
   -9999 to 9999. Here every `Timestamp` has a text form and every text form has a
   `Timestamp`. No `Range` error can come from `push_rfc3339` except through an offset at the
-  very ends. Years 10000 and above are refused, the same as for v7 UUIDs and JSON dates
-  (REPLACED).
+  very ends. Years 10000 and above are refused (REPLACED).
 - **No time zones.** IANA zones need a tzdb that changes several times a year. That is data
   plus a capability, not a pure library. Programs store UTC and an offset, and render with
   `civil` (NOT TAKEN; a later zone library builds on `Civil`).
@@ -207,7 +206,7 @@ policy, not a fact), strftime-style patterns, HTTP-date (RFC 9110 §5.6.7, which
   Oracle: Go's table and hand derivation. Bug caught: rounding the fraction (giving
   `00:00:01.000`), or using the UTC date at a non-zero offset.
 - **T5 Duration parse.** Go `parseDurationTests` (`time_test.go:945`, 43 rows) and
-  `parseDurationErrorTests` (`time_test.go:1016`). Go's three invalid-UTF-8 rows cannot be a
+  `parseDurationErrorTests` (`time_test.go:1016`). Rows holding invalid UTF-8 cannot be a
   `String` and are dropped. Error rows get hand-derived offsets. Oracle: Go's tables. Bug
   caught: exact fraction arithmetic (`0.3333333333333333333h`), or an overflow check that
   refuses `-9223372036854775808ns`.

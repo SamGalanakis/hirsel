@@ -119,9 +119,38 @@ No semicolons are inserted. These rules use syntax only:
 2. While a statement or item is incomplete (an operand, delimiter, pattern, type,
    right-hand side or body is missing) a newline is whitespace: `let x =\n f()` and
    `a +\n b` continue.
-3. At a complete statement or item a newline ends it. A leading operator, `.`, `(`, `[`
-   or `?` on the next line never continues it. A bare `return`, `break` or `continue` is
-   complete at a newline.
+3. At a complete statement or item a newline ends it, unless the next token after it,
+   past comments and blank lines, is a continuation token that continues the expression
+   or assignment being parsed. The continuation tokens are a closed set: `&&` `||` `==`
+   `!=` `<` `<=` `>` `>=` `+` `*` `/` `%` `&` `|` `^` `<<` `>>` `..` `..=`, `.` and `?`,
+   and, at an assignment position, `=` and every compound assignment operator. A token is
+   classified whole, so `!=` and `-=` are continuation tokens though `!` and `-` are not.
+   `-`, `!`, `~`, `(`, `[` and `{` never continue a line: each starts the next statement.
+   A continued statement is exactly the statement its tokens make on one line, with the
+   same precedence and the same refusals, so `a < b
+ < c` is refused as a chained
+   comparison. The rule is the parser's, not the lexer's:
+   - Only an expression or an assignment continues. A type, pattern or item header does
+     not, so `type T = A
+ | B` is refused at `|`; a function item ends at its closing `}`,
+     while an expression block such as `{ a }
+ + b` continues as `{ a } + b` does.
+   - An assignment position follows a complete expression statement, or a `let` with no
+     `=` yet: `x
+ += 1` and `let y: u64
+ = 2` continue.
+   - A bare `return`, `break` or `continue` is complete at a newline and no token continues
+     it: `return
+ + b` is refused. A valued exit continues its value: `return a
+ + b`
+     returns `a + b`.
+   - An `if`, `while` or `match` subject continues: `if a
+ && b {` and `match x
+ .kind {`
+     are one subject. An unparenthesized subject that ends in a block is still refused,
+     however its lines break.
+   - `;` always ends a statement, and a match arm's expression continues as a statement's
+     does (rule 7).
 4. These continue across newlines and comments: `else` after an `if` block; `drop` after a
    resource declaration; `->`, `waits`, `where`, `in` and a body `{` after a
    function header that has no body yet.
@@ -130,9 +159,14 @@ No semicolons are inserted. These rules use syntax only:
    separated by `;`.
 6. A block's last expression is its value; a trailing `;` discards it. A final `let` or
    assignment gives unit.
-7. In list braces a newline can replace a comma after a complete entry.
+7. In list braces a newline can replace a comma after a complete entry. A match arm's
+   expression continues under rule 3; a field or variant entry is not an expression and
+   does not. Since `-` never continues, a next arm `-1 => ...` is an arm, not a subtraction.
 
-Indentation is never significant.
+Indentation is never significant. The formatter keeps every statement's tree: its output
+parses to the tree of its input. Where it breaks a line inside an expression outside
+brackets, it breaks before a continuation token, which starts the next line one level
+deeper, and after a `-`, which ends its line.
 
 ```hirsel
 fn total(a: u64, b: u64) -> u64 {
@@ -141,11 +175,28 @@ fn total(a: u64, b: u64) -> u64 {
   sum
 }
 ```
-```hirsel
-fn total(a: u64, b: u64) -> u64 {
+```hirsel unbuilt
+fn total(a: u64, b: u64, c: u64) -> u64 {
   let sum = a
-    + b                                                   // refused: LANG-4, `+ b` has no left operand
-  sum
+    + b * c                                               // one statement: a + b * c
+  if sum > a
+    && sum > b {
+    sum
+  } else {
+    a
+  }
+}
+```
+```hirsel
+fn total(a: i64, b: i64) -> i64 {
+  let sum = a
+  -b                                                      // a second statement: the block's value is -b
+}
+```
+```hirsel
+fn first(a: u64) -> u64 {
+  return
+    + a                                                   // refused: LANG-4, a bare return is complete at its newline
 }
 ```
 

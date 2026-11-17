@@ -18,3 +18,14 @@ fn rfc4648() -> bool {
 fn canonical() -> bool {
     result.unwrap(base64.decode(result.unwrap(b"Zh=="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zm9="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zg"))) == None && result.unwrap(base64.decode(result.unwrap(b"Z g="))) == None && result.unwrap(base64.decode(result.unwrap(b"===="))) == None && result.unwrap(base64.decode(result.unwrap(b"Zg==AAAA"))) == None
 }
+
+// RFC 4648 alphabet on a vector long enough to fill several output words.
+// A wrong carry between the second and third words changes the decoded bytes.
+// expect: run word_boundaries() = true
+fn word_boundaries() -> bool {
+    let raw = result.unwrap(b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ>??>>>!")
+    let coded = result.unwrap(b"MDEyMzQ1Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ==")
+    let mut out = result.unwrap(b"prefix:")
+    result.unwrap(base64.encode(raw, mut out))
+    out == result.unwrap(b"prefix:MDEyMzQ1Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ==") && result.unwrap(base64.decode(coded)) == Some(raw) && result.unwrap(base64.decode(result.unwrap(b"/DEyMzQ@Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaPj8/Pj4+IQ=="))) == None
+}

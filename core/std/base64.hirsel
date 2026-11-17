@@ -1,72 +1,112 @@
-// ADAPTED from Goose stdlib/base64.goose: arithmetic alphabet and four-byte
-// groups. Checked arithmetic replaces wrapping offsets. RFC 4648 section 3.5
-// additionally requires zero pad bits, so keys have a canonical spelling.
+// Block and tail handling adapted from Goose stdlib/base64.goose.
+// The scalar alphabet tables follow base64-simd's fallback. All u8 values
+// index the reverse table, and 255 marks bytes outside the RFC 4648 alphabet.
+const ALPHABET: Inline[u8, 64] =[b'A', b'B', b'C', b'D', b'E', b'F', b'G', b'H', b'I', b'J', b'K', b'L', b'M', b'N', b'O', b'P', b'Q', b'R', b'S', b'T', b'U', b'V', b'W', b'X', b'Y', b'Z', b'a', b'b', b'c', b'd', b'e', b'f', b'g', b'h', b'i', b'j', b'k', b'l', b'm', b'n', b'o', b'p', b'q', b'r', b's', b't', b'u', b'v', b'w', b'x', b'y', b'z', b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'+', b'/']
+
+const VALUES: Inline[u8, 256] =[255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 62, 255, 255, 255, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 255, 255, 255, 255, 255, 255, 255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 255, 255, 255, 255, 255, 255, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,]
+
 fn symbol(x: u8) -> u8 {
-    if x < 26 {
-        b'A' + x
-    } else if x < 52 {
-        b'a' + (x - 26)
-    } else if x < 62 {
-        b'0' + (x - 52)
-    } else if x == 62 {
-        b'+'
-    } else {
-        b'/'
-    }
+    ALPHABET[int.widen(x & 63)]
 }
 
 fn value(x: u8) -> u8 {
-    if x >= b'A' && x <= b'Z' {
-        x - b'A'
-    } else if x >= b'a' && x <= b'z' {
-        x - b'a' + 26
-    } else if x >= b'0' && x <= b'9' {
-        x - b'0' + 52
-    } else if x == b'+' {
-        62
-    } else if x == b'/' {
-        63
-    } else {
-        255
-    }
+    VALUES[int.widen(x)]
+}
+
+// Pack two triples into one little-endian word of eight alphabet bytes.
+fn quartet(a: u8, b: u8, c: u8) -> u64 {
+    let x: u64 = int.widen(symbol(a >> 2))
+    let y: u64 = int.widen(symbol(((a & 3) << 4) | (b >> 4)))
+    let z: u64 = int.widen(symbol(((b & 15) << 2) | (c >> 6)))
+    let w: u64 = int.widen(symbol(c & 63))
+    x | (y << 8) | (z << 16) | (w << 24)
+}
+
+fn encode_word(raw: u64) -> u64 {
+    let a = quartet(int.truncate(raw), int.truncate(raw >> 8), int.truncate(raw >> 16))
+    let b = quartet(int.truncate(raw >> 24), int.truncate(raw >> 32), int.truncate(raw >> 40))
+    a | (b << 32)
 }
 
 /// Appends RFC 4648's standard alphabet with '=' padding. O(n).
-/// Fails with Capacity; an earlier prefix may remain. Ex: `base64.encode(b, mut out)?`.
+/// Capacity leaves out unchanged. Ex: `base64.encode(b, mut out)?`.
 pub fn encode(b: Bytes, mut out: Bytes) -> Result[(), Capacity] {
-    let mut i: u64 = 0
     let n = list.len(b)
-    while i < n {
-        let a = b[i]
-        let c: u8 = if n - i > 1 {
-            b[i + 1]
+    let tail = n % 3
+    let full = n - tail
+    let size = (n / 3 + if tail == 0 {
+        0
+    } else {
+        1
+    }) * 4
+    list.reserve(mut out, size)?
+    let mut src: u64 = 0
+    let mut written: u64 = 0
+    // A word covers two triples and two bytes of lookahead. At most seven
+    // input bytes remain for the scalar tail.
+    while n - src >= 8 {
+        list.put_word_le(mut out, encode_word(list.word_le(b, src)))?
+        src += 6
+        written += 8
+    }
+    let mut dst = list.len(out)
+    list.fill(mut out, size - written, b'=')?
+    while src < full {
+        let a = b[src]
+        let c = b[src + 1]
+        let d = b[src + 2]
+        out[dst] = symbol(a >> 2)
+        out[dst + 1] = symbol(((a & 3) << 4) | (c >> 4))
+        out[dst + 2] = symbol(((c & 15) << 2) | (d >> 6))
+        out[dst + 3] = symbol(d & 63)
+        src += 3
+        dst += 4
+    }
+    if tail != 0 {
+        let a = b[full]
+        let c: u8 = if tail == 2 {
+            b[full + 1]
         } else {
             0
         }
-        let d: u8 = if n - i > 2 {
-            b[i + 2]
-        } else {
-            0
+        out[dst] = symbol(a >> 2)
+        out[dst + 1] = symbol(((a & 3) << 4) | (c >> 4))
+        if tail == 2 {
+            out[dst + 2] = symbol((c & 15) << 2)
         }
-        list.reserve(mut out, 4)?
-        let _ = list.push(mut out, symbol(a >> 2))
-        let _ = list.push(mut out, symbol(((a & 3) << 4) | (c >> 4)))
-        let _ = list.push(mut out, if n - i > 1 {
-            symbol(((c & 15) << 2) | (d >> 6))
-        } else {
-            b'='
-        })
-        let _ = list.push(mut out, if n - i > 2 {
-            symbol(d & 63)
-        } else {
-            b'='
-        })
-        if n - i <= 3 {
-            break
-        }
-        i += 3
     }
     Ok(())
+}
+
+// One byte lane per digit. Only an invalid digit has its top bit set.
+fn digits4(raw: u32) -> u32 {
+    let a: u32 = int.widen(value(int.truncate(raw)))
+    let b: u32 = int.widen(value(int.truncate(raw >> 8)))
+    let c: u32 = int.widen(value(int.truncate(raw >> 16)))
+    let d: u32 = int.widen(value(int.truncate(raw >> 24)))
+    a | (b << 8) | (c << 16) | (d << 24)
+}
+
+fn digits8(raw: u64) -> u64 {
+    let a: u64 = int.widen(digits4(int.truncate(raw)))
+    let b: u64 = int.widen(digits4(int.truncate(raw >> 32)))
+    a | (b << 32)
+}
+
+fn decoded3(digits: u32) -> u64 {
+    let a: u64 = int.widen(digits & 63)
+    let b: u64 = int.widen((digits >> 8) & 63)
+    let c: u64 = int.widen((digits >> 16) & 63)
+    let d: u64 = int.widen(digits >> 24)
+    let first = (a << 2) | (b >> 4)
+    let second = ((b & 15) << 4) | (c >> 2)
+    let third = ((c & 3) << 6) | d
+    first | (second << 8) | (third << 16)
+}
+
+fn decoded6(raw: u64) -> u64 {
+    let digits = digits8(raw)
+    decoded3(int.truncate(digits)) | (decoded3(int.truncate(digits >> 32)) << 24)
 }
 
 /// Decodes canonical padded RFC 4648 bytes. Ok(None) means malformed input,
@@ -85,40 +125,71 @@ pub fn decode(b: Bytes) -> Result[Option[Bytes], Capacity] {
             1
         }
     }
-    for i in 0u64 .. n - pad {
-        if value(b[i]) == 255 {
+    let full = if pad == 0 {
+        n
+    } else {
+        n - 4
+    }
+    let mut src: u64 = 0
+    let mut seen: u64 = 0
+    while full - src >= 8 {
+        seen |= digits8(list.word_le(b, src))
+        src += 8
+    }
+    if seen & 0x8080808080808080 != 0 {
+        return Ok(None)
+    }
+    if src < full && (value(b[src]) | value(b[src + 1]) | value(b[src + 2]) | value(b[src + 3])) == 255 {
+        return Ok(None)
+    }
+    let mut first: u8 = 0
+    let mut second: u8 = 0
+    if pad > 0 {
+        let a = value(b[full])
+        let c = value(b[full + 1])
+        let d: u8 = if pad == 1 {
+            value(b[full + 2])
+        } else {
+            0
+        }
+        if (a | c | d) == 255 || (pad == 2 && c & 15 != 0) || d & 3 != 0 {
             return Ok(None)
         }
+        first = (a << 2) | (c >> 4)
+        second = (c << 4) | (d >> 2)
     }
-    if pad == 2 && value(b[n - 3]) & 15 != 0 {
-        return Ok(None)
+    let size = n / 4 * 3 - pad
+    let mut out: Bytes = list.with_capacity(size)?
+    src = 0
+    // Four six-byte results form three complete output words.
+    while full - src >= 32 {
+        let a = decoded6(list.word_le(b, src))
+        let c = decoded6(list.word_le(b, src + 8))
+        let d = decoded6(list.word_le(b, src + 16))
+        let e = decoded6(list.word_le(b, src + 24))
+        list.put_word_le(mut out, a | (c << 48))?
+        list.put_word_le(mut out, (c >> 16) | (d << 32))?
+        list.put_word_le(mut out, (d >> 32) | (e << 16))?
+        src += 32
     }
-    if pad == 1 && value(b[n - 2]) & 3 != 0 {
-        return Ok(None)
+    let mut dst = list.len(out)
+    list.fill(mut out, size - dst, 0)?
+    while src < full {
+        let a = value(b[src])
+        let c = value(b[src + 1])
+        let d = value(b[src + 2])
+        let e = value(b[src + 3])
+        out[dst] = (a << 2) | (c >> 4)
+        out[dst + 1] = (c << 4) | (d >> 2)
+        out[dst + 2] = (d << 6) | e
+        src += 4
+        dst += 3
     }
-    let mut out: Bytes = list.with_capacity(n / 4 * 3 - pad)?
-    let mut i: u64 = 0
-    while i < n {
-        let a = value(b[i])
-        let c = value(b[i + 1])
-        let d: u8 = if b[i + 2] == b'=' {
-            0
-        } else {
-            value(b[i + 2])
+    if pad > 0 {
+        out[dst] = first
+        if pad == 1 {
+            out[dst + 1] = second
         }
-        let e: u8 = if b[i + 3] == b'=' {
-            0
-        } else {
-            value(b[i + 3])
-        }
-        let _ = list.push(mut out, (a << 2) | (c >> 4))
-        if b[i + 2] != b'=' {
-            let _ = list.push(mut out, (c << 4) | (d >> 2))
-        }
-        if b[i + 3] != b'=' {
-            let _ = list.push(mut out, (d << 6) | e)
-        }
-        i += 4
     }
     Ok(Some(take out))
 }

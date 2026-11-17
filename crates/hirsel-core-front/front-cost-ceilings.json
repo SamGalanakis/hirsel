@@ -17,7 +17,7 @@
         "declarations": 163.67616191904048,
         "body keys/new": 63.85926095164801,
         "body keys/for_body": 192.52037678754454,
-        "body keys": 258.7334332833583,
+        "body keys": 258.73021582733816,
         "image index": 0.0,
         "image read": 0.0,
         "image digest": 0.0
@@ -42,7 +42,7 @@
         "declarations": 210.6829980532122,
         "body keys/new": 72.43162889201132,
         "body keys/for_body": 182.10983127839066,
-        "body keys": 255.6639357560026,
+        "body keys": 255.52019782313477,
         "image index": 0.0,
         "image read": 0.0,
         "image digest": 0.0
@@ -61,22 +61,22 @@
     "suite-edit": {
       "instructions_per_token": {
         "parse": 444.96008962330205,
-        "index": 12.121551603416888,
+        "index": 12.056499075163948,
         "resolve": 254.41534799047753,
         "input counts": 8.46365114063113,
         "declarations": 108.86990617560566,
         "body keys/new": 58.40078420389301,
-        "body keys/for_body": 10.175045511833076,
+        "body keys/for_body": 10.360966313547447,
         "body keys": 68.80548942725109,
-        "image read": 11.424170284273911,
-        "image digest": 3.8566027167063437,
+        "image read": 11.714589989350372,
+        "image digest": 3.9795975561907966,
         "image index": 180.10922839938385
       },
       "image_per_token": {
-        "records_opened": 0.002828175325584652,
-        "bytes_read": 11.637027307099846,
-        "digests": 0.002828175325584652,
-        "digest_bytes": 11.52390029407646,
+        "records_opened": 0.0029157558432823276,
+        "bytes_read": 12.005510341348579,
+        "digests": 0.0029157558432823276,
+        "digest_bytes": 11.888880107617286,
         "index_calls": 0.993260887830836,
         "key_probes": 0.09782943565326985,
         "row_demands": 0.024126450311081217,

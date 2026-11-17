@@ -493,6 +493,7 @@ pub(super) struct Parameter {
     pub extension: Extension,
     pub noalias: bool,
     pub readonly: bool,
+    pub dereferenceable: u64,
     pub sret: Option<Type>,
     pub byval: Option<Type>,
     pub align: u32,
@@ -504,6 +505,7 @@ impl Parameter {
             extension: Extension::None,
             noalias: false,
             readonly: false,
+            dereferenceable: 0,
             sret: None,
             byval: None,
             align: 0,
@@ -757,6 +759,9 @@ fn parameter(out: &mut String, p: &Parameter) {
     }
     if p.readonly {
         out.push_str(" readonly");
+    }
+    if p.dereferenceable != 0 {
+        write!(out, " dereferenceable({})", p.dereferenceable).unwrap();
     }
     if let Some(ty) = &p.sret {
         write!(out, " sret({ty})").unwrap();

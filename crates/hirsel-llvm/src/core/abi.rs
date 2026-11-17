@@ -53,7 +53,12 @@ impl Return {
         Parameter::extended(ty(t), extension(self.target, t))
     }
 
-    pub fn parameters(&self, sig: &Signature, facts: bool) -> (Vec<Parameter>, Vec<Local>) {
+    pub fn parameters(
+        &self,
+        sig: &Signature,
+        facts: bool,
+        extent: impl Fn(PlaceTy) -> u64,
+    ) -> (Vec<Parameter>, Vec<Local>) {
         let mut params = vec![];
         let mut locals = vec![];
         if self.indirect {
@@ -72,8 +77,12 @@ impl Return {
         for (i, p) in sig.params.iter().enumerate() {
             params.push(match p {
                 Param::Value(t) => self.value_parameter(*t),
-                Param::Address { loan, .. } if facts => Parameter {
+                Param::Address { loan, place } if facts => Parameter {
                     noalias: true,
+                    // FORM address arguments lend a live place throughout the
+                    // call. Its readable extent lets argument promotion load
+                    // fields even when a Step failure precedes their first use.
+                    dereferenceable: extent(*place),
                     // Loan::View freezes the place for the whole call, including
                     // cleanup. Shared read-only aliases may still overlap.
                     readonly: *loan == Loan::View,
@@ -507,7 +516,7 @@ impl FunctionEmitter<'_> {
         self.next = 0;
         self.has_status = true;
         self.abi = Return::internal_on_target(self.abi.target, &sig.results);
-        let (params, locals) = self.abi.parameters(sig, facts);
+        let (params, locals) = self.abi.parameters(sig, facts, |p| self.place_layout(p).0);
         let attrs = FnAttrs {
             linkage: Linkage::WeakOdr,
             subprogram: debug.map(|(scope, _)| scope),

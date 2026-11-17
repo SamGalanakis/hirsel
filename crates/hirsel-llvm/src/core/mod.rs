@@ -492,7 +492,21 @@ fn emit_module(
         let has_status = failures.may_fail[i];
         let abi = abi::Return::core(target, &sig.results, has_status || f.body.is_none());
         let name = symbol(module, FuncId(i as u32));
-        let (params, locals) = abi.parameters(sig, facts);
+        let (params, locals) = abi.parameters(sig, facts, |place| match place {
+            PlaceTy::Value(t) => size(t),
+            PlaceTy::Declared(t)
+                if matches!(
+                    module.types[t.index()].repr,
+                    hirsel_core_layout::Repr::Resource | hirsel_core_layout::Repr::Stable
+                ) =>
+            {
+                8
+            }
+            PlaceTy::Declared(t) => match &recipes[t.index()].layout {
+                hirsel_core_layout::Layout::Fixed(layout) => layout.size,
+                _ => unreachable!("address parameter has a fixed native place"),
+            },
+        });
         let Some(body) = &f.body else {
             sink.declare(&name, &abi.signature(params), &FnAttrs::default());
             continue;

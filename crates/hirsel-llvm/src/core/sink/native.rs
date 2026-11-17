@@ -21,6 +21,7 @@ const NONNULL: u32 = 9;
 const NOUNWIND: u32 = 10;
 const ALIGN: u32 = 11;
 const ARGMEM_READ: u32 = 12;
+const DEREFERENCEABLE: u32 = 13;
 const ALIAS_SCOPE: u32 = 0;
 const NOALIAS_SCOPE: u32 = 1;
 const INVARIANT: u32 = 2;
@@ -237,6 +238,9 @@ impl NativeSink {
             }
             if p.readonly {
                 self.attribute(target, index, READONLY, None, 0);
+            }
+            if p.dereferenceable != 0 {
+                self.attribute(target, index, DEREFERENCEABLE, None, p.dereferenceable);
             }
             if let Some(t) = &p.sret {
                 self.attribute(target, index, SRET, Some(t), 0);

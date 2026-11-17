@@ -2,7 +2,16 @@
 
 [API overview](../API.md). [Operations and contracts](../http1.hirsel).
 
-`head` creates fixed storage for 64 header fields. `request` and `response`
+`head` creates fixed storage for 64 header fields. `cursor` creates the fixed
+request scan state. `resume(b, mut h, mut cur)` receives the growing buffer,
+with its examined prefix unchanged, beside a head and cursor initialized once
+per request. It retains partial token, UTF-8 and CRLF state and never rereads a
+head byte. `cur.examined` counts actual byte reads. Complete, Bad and TooLarge
+are sticky until the caller initializes a new head and cursor. `cur.line_end`
+is zero until the request line ends; a TooLarge with zero maps to 414, and a
+field or total-head overflow maps to 431.
+
+`request` and `response`
 reset that storage and parse one bounded head. `Complete` sets `end` to the
 first byte after the head; bytes beyond it remain available to the next
 protocol. `Partial` preserves initialized field offsets. `Bad` is malformed

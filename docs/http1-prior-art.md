@@ -123,3 +123,16 @@ of hyper `tests/server.rs:691–728,1072–1113`. Its exact scripted responses g
 past the initial reservation, then shrink through HEAD, 204 and 304 replies;
 leftover initialized bytes must never reach the wire. The driver additionally
 records and replays this case and the existing inline request/body case.
+
+## Resuming request heads
+
+ADAPTED httparse `src/lib.rs:797,912,1013`: token syntax, UTF-8 targets and
+initialized field offsets stay unchanged. Its restart parser is a useful
+single-shot oracle but rereads a growing buffer on each call. The retained
+Hirsel cursor carries token, UTF-8 and CRLF state, so fragmentation reads each
+head byte once. Goose HTTP `message.goose:70,141,222` likewise restarts and
+rediscovers field boundaries. Its bytes-only parsing and fixed bounds are
+ADOPTED; repeated scanning is NOT TAKEN. Field offsets stay in the fixed Head.
+The existing request corpus checks every split plus one-byte fragments against
+the independent single-shot parser, including initialized fields on Partial
+and errors. The counter increments at the only buffer read in resume.

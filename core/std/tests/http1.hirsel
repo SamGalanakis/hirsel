@@ -1,7 +1,47 @@
 // httparse a0fa552e and Go ebe2feefc400, ported from 64d4d617.
 // These laws parse request heads only. Go's body, URL and transfer-framing
 // checks belonged to the deleted HTTP adapter, not httparse's head parser.
+fn same_head(a: http1.Head, b: http1.Head) -> bool {
+    if a.method != b.method || a.target != b.target || a.version != b.version || a.status != b.status || a.reason != b.reason || a.count != b.count || a.end != b.end {
+        return false
+    }
+    for i in 0u64 .. 64u64 {
+        if a.fields[i].name != b.fields[i].name || a.fields[i].value != b.fields[i].value {
+            return false
+        }
+    }
+    true
+}
+
+// L1: every split, including empty fragments, and the one-byte drip schedule.
+// The independent single-shot parser supplies parity; the existing corpus
+// supplies hand-derived syntax/offset answers. The counter counts buffer reads.
+fn resume_parity(raw: Bytes) -> bool {
+    let mut whole = http1.head()
+    let expected = http1.request(raw, mut whole)
+    let n = list.len(raw)
+    for split in 0u64 .. n + 1 {
+        let mut h = http1.head()
+        let mut cur = http1.cursor()
+        let first = http1.resume(list.slice(raw, 0, split), mut h, mut cur)
+        let got = http1.resume(raw, mut h, mut cur)
+        if got != expected || !same_head(h, whole) || cur.examined > n + 1 {
+            return false
+        }
+    }
+    let mut h = http1.head()
+    let mut cur = http1.cursor()
+    let mut got: http1.Progress = Partial
+    for end in 0u64 .. n + 1 {
+        got = http1.resume(list.slice(raw, 0, end), mut h, mut cur)
+    }
+    got == expected && same_head(h, whole) && cur.examined <= n
+}
+
 fn request_case(raw: Bytes, expected: http1.Progress, end: u64, method: Option[Bytes], target: Option[Bytes], version: Option[u8], names: List[Bytes], values: List[Bytes]) -> bool {
+    if !resume_parity(raw) {
+        return false
+    }
     let mut h = http1.head()
     if http1.request(raw, mut h) != expected {
         return false
@@ -601,4 +641,68 @@ fn go_adapter_boundary_12() -> bool {
     let mut names: List[Bytes] = list.new()
     let mut values: List[Bytes] = list.new()
     request_case(result.unwrap(b"CONNECT [::1]garbage HTTP/1.1\r\n\r\n"), Complete, 33, Some(result.unwrap(b"CONNECT")), Some(result.unwrap(b"[::1]garbage")), Some(1), names, values)
+}
+
+// UTF-8 scalars and CRLF may split at any byte. RFC 3629 excludes overlongs,
+// surrogates and scalars above U+10FFFF. Mutants: rescan_from_zero,
+// restart_cursor_loses_field.
+// expect: run resume_utf8() = true
+fn resume_utf8() -> bool {
+    resume_parity(result.unwrap(b"GET /\xc2\xa2\xe2\x82\xac\xf0\x90\x80\x80 HTTP/1.1\r\nA: x\r\nB: y\r\n\r\nTAIL")) && resume_parity(result.unwrap(b"GET /\xe0\x80 HTTP/1.1\r\n\r\n")) && resume_parity(result.unwrap(b"GET /\xed\xa0 HTTP/1.1\r\n\r\n")) && resume_parity(result.unwrap(b"GET /\xf4\x90 HTTP/1.1\r\n\r\n")) && resume_parity(result.unwrap(b"GET /\xe2\x82"))
+}
+
+// HTTP-3 fixed bounds: exactly 8192 bytes succeeds; needing byte 8193 fails.
+// Terminal results preserve the head and do no more work.
+// expect: run resume_limits() = true
+fn resume_limits() -> bool {
+    let mut raw = result.unwrap(b"GET / HTTP/1.1\r\nX:")
+    while list.len(raw) < 8188 {
+        result.unwrap(list.push(mut raw, b'a'))
+    }
+    result.unwrap(list.append(mut raw, result.unwrap(b"\r\n\r\n")))
+    let mut h = http1.head()
+    let mut cur = http1.cursor()
+    if http1.resume(list.slice(raw, 0, 8191), mut h, mut cur) != Partial || http1.resume(raw, mut h, mut cur) != Complete || h.end != 8192 || cur.examined != 8192 || cur.line_end != 16 {
+        return false
+    }
+    let before = h
+    if http1.resume(raw, mut h, mut cur) != Complete || !same_head(h, before) || cur.examined != 8192 {
+        return false
+    }
+    raw[8190] = b'a'
+    raw[8191] = b'a'
+    h = http1.head()
+    cur = http1.cursor()
+    http1.resume(raw, mut h, mut cur) == TooLarge && cur.examined == 8192 && http1.request(raw, mut h) == TooLarge
+}
+
+// HTTP-3 counts initialized fields, including empty values and duplicates.
+// expect: run resume_field_limit() = true
+fn resume_field_limit() -> bool {
+    let mut raw = result.unwrap(b"GET / HTTP/1.1\r\n")
+    for i in 0u64 .. 64u64 {
+        result.unwrap(list.append(mut raw, result.unwrap(b"X:\r\n")))
+    }
+    result.unwrap(list.append(mut raw, result.unwrap(b"\r\n")))
+    if !resume_parity(raw) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.request(raw, mut h) != Complete || h.count != 64 {
+        return false
+    }
+    raw[list.len(raw) - 2] = b'X'
+    http1.request(raw, mut h) == TooLarge && resume_parity(raw)
+}
+
+// A request-line overflow maps to 414 rather than the field limit's 431.
+// expect: run resume_request_line_limit() = true
+fn resume_request_line_limit() -> bool {
+    let mut raw = result.unwrap(b"GET /")
+    while list.len(raw) < 8192 {
+        result.unwrap(list.push(mut raw, b'a'))
+    }
+    let mut h = http1.head()
+    let mut cur = http1.cursor()
+    http1.resume(raw, mut h, mut cur) == TooLarge && cur.line_end == 0 && cur.examined == 8192 && http1.request(raw, mut h) == TooLarge
 }

@@ -820,7 +820,7 @@ def admission_laws(args, root, work, engines, row):
     mutants = (
         ('slot_freed_at_answer', 'h.queued += count', 'h.queued = 0u64', 'unread_client'),
         ('refusal_rows_uncapped', 'if s.refusals >= 1u64 + s.config.q { return Error(1008u16) }', 'if false { return Error(1008u16) }', 'unread_client'),
-        ('reset_drops_held', 'wire_queue(mut s, Reset(version, take done), take marks, list.new())', 'wire_queue(mut s, Reset(version, list.new()), take marks, list.new())', 'unread_client'),
+        ('reset_drops_held', 'wire_queue(mut work, Reset(version, take done), take marks, list.new())', 'wire_queue(mut work, Reset(version, list.new()), take marks, list.new())', 'unread_client'),
     )
     for name, old, new, law in mutants:
         if args.admission_mutant and name not in args.admission_mutant:
@@ -840,7 +840,7 @@ def admission_laws(args, root, work, engines, row):
 def socket_laws(args, root, work, engines, row):
     names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
              'session_limit_503', 'principal_limit_1013', 'call_rate_overloaded',
-             'request_mismatch_wire', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot'}
+             'request_mismatch_wire', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max', 'faulted_owner_releases_slot', 'welcome_with_small_budget'}
     for engine in (e for e in engines if e != 'evaluator'):
         output = work / ('socket-' + engine)
         command = [sys.executable, str(root / 'tools/tests/wire_build.py'),

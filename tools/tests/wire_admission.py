@@ -308,6 +308,18 @@ def reply_over_done_max():
         assert receive(s) == ('batch', 4, [1], [], [])
 
 
+def welcome_with_small_budget():
+    with upgraded(frame(2, hello(('put',)))) as s:
+        welcome = receive(s)
+        assert welcome[:4] == ('welcome', TOKEN, 4, 65536), welcome
+        assert receive(s) == ('placed', 0, 0)
+        ping = bytes(range(125))
+        s.sendall(frame(9, ping))
+        assert read_frame(s) == (10, ping)
+        s.sendall(frame(8, b'\x03\xe8'))
+        assert read_frame(s) == (8, b'\x03\xe8')
+
+
 def faulted_owner_releases_slot():
     def next_owner():
         for _ in range(100):
@@ -338,7 +350,7 @@ def faulted_owner_releases_slot():
 
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
          session_limit_503, principal_limit_1013, call_rate_overloaded, request_mismatch_wire, held_request_mismatch, hello_deadline, resume_unknown,
-         history_below_latest, reply_over_done_max, faulted_owner_releases_slot)}
+         history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget)}
 
 
 def main():
@@ -354,6 +366,13 @@ def main():
             wait_ready(process, 18094)
             TRACE.clear()
             CASES[name]()
+            if name == 'welcome_with_small_budget':
+                stop_process(process)
+                refused = subprocess.Popen([str(args.server.resolve()), 'wire_control_budget_too_small'])
+                try:
+                    assert refused.wait(timeout=8) == 0, 'mandatory control budget was not refused at serve'
+                finally:
+                    stop_process(refused)
             rows.append({'law': name, 'passed': True})
             print(f'{name}: PASS', flush=True)
         except Exception as error:

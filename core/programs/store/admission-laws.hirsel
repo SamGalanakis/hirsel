@@ -46,7 +46,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
         result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
     }
     if wire_units(s) != 5u64 { return false }
-    for _ in 0u64 .. 5u64 { let _ = wire_take_output(mut s) }
+    for _ in 0u64 .. 5u64 { let _ = wire_take_output(mut s, mut work) }
     if wire_units(s) != 0u64 { return false }
     // A durable head answer must retain the same unit while its row is unsent.
     for stream in 0u32 .. 5u32 {
@@ -62,13 +62,13 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
         result.unwrap(wire_answer(mut s, mut work, Told(version: 7u64, stream: take named, p: p, outcome: Returned(take reply_bytes))))
     }
     if wire_units(s) != 5u64 { return false }
-    for stream in 5u32 .. 10u32 { result.unwrap(wire_refused(mut s, stream, 0u64, Budget(Room(requested: 9u64, available: 8u64)))) }
-    if let Error(1008u16) = wire_refused(mut s, 10u32, 0u64, Overloaded) {} else { return false }
+    for stream in 5u32 .. 10u32 { result.unwrap(wire_refused(mut s, mut work, stream, 0u64, Budget(Room(requested: 9u64, available: 8u64)))) }
+    if let Error(1008u16) = wire_refused(mut s, mut work, 10u32, 0u64, Overloaded) {} else { return false }
     let mut retained = 0u64
-    for o in s.output { if let Batch(_, _, _, ds) = o.frame { for d in ds { retained += wire_done_size(d.outcome) } } }
+    for o in work.output { if let Batch(_, _, _, ds) = o.frame { for d in ds { retained += wire_done_size(d.outcome) } } }
     if retained != 41140u64 { return false }
-    result.unwrap(wire_reset(mut s, 7u64))
-    let reset = wire_take_output(mut s)
+    result.unwrap(wire_reset(mut s, mut work, 7u64))
+    let reset = wire_take_output(mut s, mut work)
     let preserved = match take reset {
         Some(Reset(7u64, take ds)) => {
             if list.len(ds) != 10u64 { false } else {
@@ -89,10 +89,10 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool wai
         _ => false,
     }
     let no_head = match channel.try_receive(requests) { Error(Empty) => true, _ => false }
-    let freed = wire_units(s) == 0u64 && s.refusals == 0u64 && list.len(s.output) == 0u64
+    let freed = wire_units(s) == 0u64 && s.refusals == 0u64 && list.len(work.output) == 0u64
     let legacy = result.unwrap(w3c_bytes(8173u32))
     let refused_legacy = match wire_answer(mut s, mut work, Told(version: 9u64, stream: list.new(), p: 0u64, outcome: Returned(take legacy))) { Error(1009u16) => true, _ => false }
-    let unchanged = s.last == 7u64 && list.len(s.output) == 0u64
+    let unchanged = s.last == 7u64 && list.len(work.output) == 0u64
     task.cancel(mut policy_handle)
     let _ = task.join(take policy_handle)
     preserved && freed && no_head && refused_legacy && unchanged
@@ -132,7 +132,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool w
     if let Error(1008u16) = wire_step(mut s, mut work, WClient(Hello(None, list.new()), 0u64)) {} else { return false }
     let at = host.mono_ns(clock)
     result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: 1u32, p: 2u64, slot: 0xffffffffu32, deadline: 10u32, arg: list.new(), at: at, grows: true), true))
-    let refused = match wire_take_output(mut s) { Some(Batch(0u64, _, _, ds)) => list.len(ds) == 1u64 && match ds[0u64].outcome { Refused(NoEntry) => true, _ => false }, _ => false }
+    let refused = match wire_take_output(mut s, mut work) { Some(Batch(0u64, _, _, ds)) => list.len(ds) == 1u64 && match ds[0u64].outcome { Refused(NoEntry) => true, _ => false }, _ => false }
     let empty = match channel.try_receive(requests) { Error(Empty) => true, _ => false }
     let mut old: Bytes = list.new()
     result.unwrap(std.codec.put_u32(0u32, mut old))
@@ -242,7 +242,7 @@ fn w3c_arg(n: u32) -> Bytes {
 fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) -> Frame waits {
     let at = host.mono_ns(rig.owner.clock)
     result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, WirePending(stream: stream, p: p, slot: slot, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
-    if let Some(take out) = wire_take_output(mut rig.owner) { return take out }
+    if let Some(take out) = wire_take_output(mut rig.owner, mut rig.work) { return take out }
     let q = result.unwrap(channel.try_receive(rig.requests))
     result.unwrap(route(mut rig.head, take q))
     if list.len(rig.head.group) != 0u64 { result.unwrap(gate(mut rig.head)) }
@@ -255,7 +255,7 @@ fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) ->
     let WireEvent(e: take event) = result.unwrap(channel.try_receive(rig.inbox))
     let delivered = match take event { FromRunner(take message) => take message, _ => fail("W3c: expected runner event") }
     result.unwrap(wire_step(mut rig.owner, mut rig.work, WRunner(take delivered)))
-    option.unwrap(wire_take_output(mut rig.owner))
+    option.unwrap(wire_take_output(mut rig.owner, mut rig.work))
 }
 
 fn w3c_answer(frame: Frame, version: u64, stream: u32, p: u64, expected: Outcome) -> bool {
@@ -305,7 +305,7 @@ pub fn law_refused_send_releases_timer(tasks: Tasks, clock: Clock, random: Rando
         let at = host.mono_ns(clock)
         let pending = WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: w3c_arg(7u32), at: at, grows: true)
         result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, take pending, true))
-        let output = option.unwrap(wire_take_output(mut rig.owner))
+        let output = option.unwrap(wire_take_output(mut rig.owner, mut rig.work))
         if !w3c_answer(output, 0u64, stream, 0u64, Refused(Overloaded)) || map.len(rig.work.timers) != 0u64 { return false }
     }
     w3c_close(take rig)
@@ -412,17 +412,17 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     owner.publisher = Some(channel.sender(to))
     if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else { return false }
 
-    wire_subscribed(mut owner, 10u32, query_key(code.describe(q1)), no_arg())
+    wire_subscribed(mut owner, mut work, 10u32, query_key(code.describe(q1)), no_arg())
     wire_deliver_content(mut owner, mut work, inbox)
-    let _ = wire_take_output(mut owner)
+    let _ = wire_take_output(mut owner, mut work)
 
     let sub = 8u32
-    wire_subscribed(mut owner, sub, query_key(code.describe(q1)), no_arg())
+    wire_subscribed(mut owner, mut work, sub, query_key(code.describe(q1)), no_arg())
     wire_deliver_content(mut owner, mut work, inbox)
-    wire_subscribed(mut owner, sub, query_key(code.describe(qf)), no_arg())
-    let old_initial_discarded = match wire_take_output(mut owner) { None => true, _ => false }
+    wire_subscribed(mut owner, mut work, sub, query_key(code.describe(qf)), no_arg())
+    let old_initial_discarded = match wire_take_output(mut owner, mut work) { None => true, _ => false }
     wire_deliver_content(mut owner, mut work, inbox)
-    let new_initial = wire_take_output(mut owner)
+    let new_initial = wire_take_output(mut owner, mut work)
     let replacement_published = wire_initial_count(new_initial, sub, 1u64)
 
     set(mut db, t, 2u64, 2u64)
@@ -430,25 +430,25 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let version = store.version(snapshot)
     result.unwrap(channel.send(to, PubIn(e: Released(Release(version: version, snapshot: Some(take snapshot), answers: list.new())))))
     let stale = result.unwrap(channel.receive(inbox))
-    wire_subscribed(mut owner, sub, query_key(code.describe(q1)), no_arg())
+    wire_subscribed(mut owner, mut work, sub, query_key(code.describe(q1)), no_arg())
     if let WireEvent(e: FromRunner(take old_end)) = take stale {
         result.unwrap(wire_step(mut owner, mut work, WRunner(take old_end)))
     } else { return false }
     wire_deliver_content(mut owner, mut work, inbox)
-    let after_end = wire_take_output(mut owner)
+    let after_end = wire_take_output(mut owner, mut work)
     let other_sub_kept = match take after_end {
         Some(Batch(_, complete, rows, _)) => list.len(complete) == 0u64 && list.len(rows) == 1u64 && rows[0].sub == 10u32,
         _ => false,
     }
-    let renewed = wire_take_output(mut owner)
+    let renewed = wire_take_output(mut owner, mut work)
     let stale_end_discarded = other_sub_kept && wire_initial_count(renewed, sub, 2u64)
 
     // The old complete can still be in the owner inbox when a replacement arrives.
-    wire_subscribed(mut owner, 3u32, query_key(code.describe(q1)), no_arg())
-    wire_subscribed(mut owner, 3u32, list.new(), no_arg())
+    wire_subscribed(mut owner, mut work, 3u32, query_key(code.describe(q1)), no_arg())
+    wire_subscribed(mut owner, mut work, 3u32, list.new(), no_arg())
     wire_deliver_content(mut owner, mut work, inbox)
     wire_deliver_content(mut owner, mut work, inbox)
-    let stale_complete_discarded = match wire_take_output(mut owner) {
+    let stale_complete_discarded = match wire_take_output(mut owner, mut work) {
         Some(Ended(3u32, Refused(NoEntry))) => true,
         _ => false,
     }

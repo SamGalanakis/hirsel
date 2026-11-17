@@ -137,6 +137,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/net.hirsel",
+          "modules": [
+            "net"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/option.hirsel",
           "modules": [
             "option"

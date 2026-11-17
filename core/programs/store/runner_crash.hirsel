@@ -64,9 +64,9 @@ fn trip(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
 }
 
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
-    runner.transact(mut r, code.describe(bump), 65536u64)?
-    runner.transact(mut r, code.describe(deny), 65536u64)?
-    runner.transact(mut r, code.describe(trip), 65536u64)
+    runner.transact(mut r, code.describe(bump), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(deny), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(trip), 65536u64, runner.DEFAULT_STEPS)
 }
 
 const N_PLACE: u64 = 1048576u64

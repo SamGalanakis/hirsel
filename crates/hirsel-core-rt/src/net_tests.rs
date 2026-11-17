@@ -249,7 +249,13 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     hirsel_core_host_send(context, s.written, &mut input, 0, 0, 0, 7).value,
                     0
                 );
+                crate::os_net::ATTEMPTS.set(0);
                 let timeout = hirsel_core_host_recv(context, s.value, &mut input, 1, clock, 0, 8);
+                assert_eq!(
+                    crate::os_net::ATTEMPTS.get(),
+                    1,
+                    "an expired wait makes one attempt"
+                );
                 assert_eq!(timeout.error.tag, 6, "expired silent recv");
                 assert_eq!(input.len, 0);
                 hirsel_core_socket_drop(context, c.written);

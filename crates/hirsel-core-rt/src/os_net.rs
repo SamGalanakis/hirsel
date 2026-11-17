@@ -163,8 +163,13 @@ unsafe fn socket(n: &mut NetworkRequest, listener: bool) -> Result<u64, i32> {
             .unwrap_or_else(|| crate::process::stop(b"HostHandles")))
     }
 }
+#[cfg(test)]
+thread_local! { pub(crate) static ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// A not-ready attempt is None. All other attempts commit one result.
 unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) -> Option<Outcome> {
+    #[cfg(test)]
+    ATTEMPTS.set(ATTEMPTS.get() + 1);
     unsafe {
         let write = matches!(request.operation, CONNECT | SEND);
         let sockets = &mut *n.sockets;
@@ -399,6 +404,11 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
         }
         let key = n.connecting.unwrap_or(request.handle);
         let write = matches!(request.operation, CONNECT | SEND);
+        let deadline = pending_deadline(n);
+        // An already-expired wait gets its one try, but never registers to park.
+        if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+            return finish(request, n, signal(6));
+        }
         if let Err(e) = (*n.sockets).arm(key, write, token) {
             return finish(request, n, error(e.raw_os_error().unwrap_or(libc::EIO)));
         }
@@ -410,7 +420,6 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
             return finish(request, n, error(e.raw_os_error().unwrap_or(libc::EIO)));
         }
         crate::tasks::attach_net(n.sockets, (*n.sockets).poller().unwrap());
-        let deadline = pending_deadline(n);
         if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
             let _ = (*n.sockets).disarm(key, write);
             return finish(request, n, signal(6));

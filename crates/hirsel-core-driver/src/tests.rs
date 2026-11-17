@@ -3380,7 +3380,9 @@ fn growth_calls_are_cold_and_len_reads_ranged_in_emitted_ir() {
         .filter_map(|l| l.split_once("!range "))
         .map(|(_, r)| &r[..=r.find('}').unwrap()])
         .collect();
-    assert_eq!(ranges, ["!{i64 0, i64 2049638230412172401}"], "{ir}");
+    // Exact step grouping emits checked and prepaid copies of this load.
+    // Both retain the element-size-derived length bound.
+    assert_eq!(ranges, ["!{i64 0, i64 2049638230412172401}"; 2], "{ir}");
 }
 
 /// LANG-12 at `std.codec.of()`: a closed type without `codec`, and a generic body's

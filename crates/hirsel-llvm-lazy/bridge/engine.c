@@ -640,7 +640,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         if (!e) {
             hirsel_llvm_mark_loop_callbacks(module);
             e = LLVMRunPasses(module,
-                "cgscc(argpromotion),ipsccp,cgscc(inline)", machine, options);
+                "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)", machine, options);
         }
         if (!e) {
             hirsel_llvm_inline_loop_callbacks(module);

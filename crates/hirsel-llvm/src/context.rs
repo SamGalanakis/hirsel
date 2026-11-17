@@ -237,7 +237,8 @@ impl<'context> Module<'context> {
                     fn hirsel_llvm_inline_loop_callbacks(module: LLVMModuleRef);
                 }
                 hirsel_llvm_mark_loop_callbacks(self.raw);
-                let specialize = c_string("cgscc(argpromotion),ipsccp,cgscc(inline)");
+                let specialize =
+                    c_string("cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)");
                 error = LLVMRunPasses(self.raw, specialize.as_ptr(), machine.raw, options);
                 if !error.is_null() {
                     let message = LLVMGetErrorMessage(error);

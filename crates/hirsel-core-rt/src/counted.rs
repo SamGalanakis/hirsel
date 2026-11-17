@@ -237,8 +237,66 @@ pub(crate) unsafe fn drain(
     site: u64,
 ) -> bool {
     let mut list = Worklist::new(site);
-    // SAFETY: as this function's contract.
-    unsafe { run(context, &mut list, Some((node, descriptor, 0))) }
+    // SAFETY: as this function's contract; the new list's head is empty.
+    unsafe {
+        clean_fixed(context, &mut list, node, descriptor, 0);
+        list.failed != 0
+    }
+}
+
+/// Fixed blocks this deep below a drain's root are cleaned by the native
+/// stack; deeper ones go to `run`'s constant-stack worklist. The bound keeps the
+/// drain's stack constant (LANG-19) at a few KiB.
+const NATIVE_DEPTH: u32 = 32;
+
+/// Clean and free one dead fixed block and everything below it, in the
+/// postorder `run` uses, recursing natively for descendants above
+/// NATIVE_DEPTH: a descendant cleaned here needs no frame written into its
+/// parent's payload and no resume through the worklist head.
+/// # Safety
+/// As drain; the list's head is empty and nothing is staged.
+unsafe fn clean_fixed(
+    context: *mut Context,
+    list: &mut Worklist,
+    node: NonNull<u8>,
+    descriptor: *const Descriptor,
+    depth: u32,
+) {
+    // SAFETY: as this function's contract; glue hands over one exclusively
+    // owned descendant per call and leaves the parent's fields it has not
+    // cleaned untouched, so the parent resumes from its live cursor.
+    unsafe {
+        let d = &*descriptor;
+        let payload = node.as_ptr().add(d.payload_offset as usize);
+        let mut cursor = 0;
+        while !(d.recipe)(context, payload, &mut cursor, list) {
+            if !list.staged() {
+                continue;
+            }
+            let p = &*descriptor
+                .cast::<u8>()
+                .add(fixed_point(list.point))
+                .cast::<Point>();
+            // The cursor `run` would resume this block with.
+            if p.index == FIXED_POINT_NO_INDEX {
+                cursor = p.cursor;
+            }
+            match list.take() {
+                Some((child, child_descriptor, _)) if depth < NATIVE_DEPTH => {
+                    clean_fixed(context, list, child, child_descriptor, depth + 1)
+                }
+                staged => {
+                    run(context, list, staged);
+                }
+            }
+            if cursor == FIXED_POINT_DONE {
+                // Nothing follows this yield: the block is finished.
+                break;
+            }
+        }
+        debug_assert!(!list.staged() && list.head == 0);
+        block::free_dead_in(&*context, node, d.charge);
+    }
 }
 
 /// Clean the elements of dead non-terminal buffer storage held outside any
@@ -296,6 +354,7 @@ impl Worklist {
     }
 }
 
+#[inline(never)]
 unsafe fn run(context: *mut Context, list: &mut Worklist, mut current: Option<Fixed>) -> bool {
     // SAFETY: glue keeps unfinished blocks live and hands over one exclusively
     // owned descendant per run; a frame occupies only words its glue no longer

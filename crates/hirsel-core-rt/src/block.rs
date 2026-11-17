@@ -239,6 +239,18 @@ unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>
     unsafe {
         let payer = *funding(payload);
         let tag = payer.native_tag();
+        if tag == 0 {
+            // Plain align-8 blocks, the common case: decode nothing.
+            if let Some(context) = context {
+                payer.settle_in(context, charge);
+            } else {
+                payer.settle(charge);
+            }
+            crate::allocator::deallocate_raw(
+                payload.as_ptr().sub(crate::abi_layout::PLAIN_PREFIX_BYTES),
+            );
+            return;
+        }
         let kind = (tag & 3) as u8;
         let index = tag >> 2;
         let alignment = if index == 7 {
@@ -252,12 +264,9 @@ unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>
         };
         // Alignment is a power of two (allocate), so round with a mask: the
         // drain frees every fixed block through here and a division is its
-        // dearest step. Plain align-8 blocks, the common case, need no rounding.
-        let offset = if tag == 0 {
-            crate::abi_layout::PLAIN_PREFIX_BYTES
-        } else {
-            (prefix(kind) + usize::from(index == 7) * 8 + alignment - 1) & !(alignment - 1)
-        };
+        // dearest step.
+        let offset =
+            (prefix(kind) + usize::from(index == 7) * 8 + alignment - 1) & !(alignment - 1);
         if charge != 0 || kind != RESOURCE {
             if let Some(context) = context {
                 payer.with_tag(0).settle_in(context, charge);

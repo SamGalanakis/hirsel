@@ -418,3 +418,62 @@ fn fixed_frames_and_buffer_frames_share_one_nonrecursive_worklist() {
     assert_eq!(ctx.available(), 8_000_000);
     assert_eq!(ctx.current.attempts(), 0);
 }
+
+/// `{next: Rc[Self], id}` whose only yield is its last step: the point says
+/// FIXED_POINT_DONE, so the block is freed when its child is done and its glue
+/// never runs again (it would read the words the frame vacated).
+static LAST: Fixed<1> = Fixed {
+    descriptor: Descriptor {
+        recipe: last,
+        charge: 16,
+        payload_offset: NODE_PAYLOAD as u64,
+    },
+    points: [at(1, crate::abi_layout::FIXED_POINT_DONE, 0, 8)],
+};
+unsafe extern "C" fn last(
+    _: *mut Context,
+    payload: *mut u8,
+    cursor: *mut u64,
+    work: *mut Worklist,
+) -> bool {
+    // SAFETY: the payload holds one child holder or null, then the node's id.
+    unsafe {
+        assert_eq!(*cursor, 0, "a finished block's glue ran again");
+        // The deepest node's finalizer fails; cleanup goes on (FAIL-10).
+        if payload.add(8).cast::<u64>().read() == 0 {
+            (*work).fail();
+        }
+        match NonNull::new(payload.cast::<*mut u8>().read()) {
+            Some(child) if counted::decrement(child, false) => {
+                (*work).stage_fixed(child, &LAST.descriptor, 1);
+                false
+            }
+            _ => true,
+        }
+    }
+}
+
+#[test]
+fn finished_points_free_without_resuming_and_deep_failures_reach_the_root() {
+    // Deeper than any native bound a drain may use, short of a stack overflow.
+    let mut ctx = Context::new(1_600);
+    let mut head = ptr::null_mut::<u8>();
+    for id in 0..100u64 {
+        let node = block::allocate(ctx.payer(None), Some(16), 24, 8, block::PLAIN).unwrap();
+        // SAFETY: a fresh node receives its count, child and id.
+        unsafe {
+            counted::initialize(node, false);
+            node.as_ptr().add(8).cast::<*mut u8>().write(head);
+            node.as_ptr().add(16).cast::<u64>().write(id);
+        }
+        head = node.as_ptr();
+    }
+    // SAFETY: the sole root holder owns the whole chain.
+    let failed = unsafe {
+        let node = NonNull::new(head).unwrap();
+        assert!(counted::decrement(node, false));
+        counted::drain(&mut ctx, node, &LAST.descriptor, 0)
+    };
+    assert!(failed);
+    assert_eq!(ctx.available(), 1_600);
+}

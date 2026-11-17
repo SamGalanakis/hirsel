@@ -828,9 +828,10 @@ def first_party(meta: dict) -> str:
     # Trace observers run only after a push, in a private adaptation of the law fixtures.
     out.append("\n" + call("hirsel_script_test", name="core-observe-runner", script="core/tools/observe_tests.py", full=False,
                             host=True,
-                            args=["--evaluator", "buck-out/tmp/cargo-bin-exe/core-observe-runner/hirsel-core-contract-eval"],
-                            bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py"]')))
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-observe-runner/hirsel", "--evaluator", "buck-out/tmp/cargo-bin-exe/core-observe-runner/hirsel-core-contract-eval"],
+                            bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py", "crates/hirsel-core-rt/include/**"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py", "core/tools/observe_events.c", "core/tools/runner_count.c"]')))
     out.append("\n" + call("hirsel_script_test", name="core-observe-drive", script="core/tools/observe_drive_tests.py", full=False,
                             host=True,
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/core-observe-drive/hirsel-core-contract-eval"],

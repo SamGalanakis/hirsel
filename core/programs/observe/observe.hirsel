@@ -114,13 +114,13 @@ pub fn verdict(c: Count, h: Header) -> Verdict {
     if c.hits == 0u64 { Vacuous } else { Held(c.hits) }
 }
 
-type Pending { at: u64, deadline: u64, row: u64 }
-type Tracked { key: Bytes, at: u64, done: bool, slot: Bytes, digest: Bytes }
+type Pending { at: u64, deadline: u64, issued: u64, row: u64 }
+type Tracked { key: Bytes, at: u64, done: bool, slot: Bytes, digest: Bytes, deadline: u64 }
 pub type State {
     pending: Map[Bytes, u64], connections: Map[u64, u64], delivery: Count, index: u64,
     waiting: Map[Bytes, Deque[Pending]], closed: Map[u64, u64],
     identity: Count, once: Count, after_close: Count, deadline: Count, mismatch: Count,
-    grace: u64, sends: List[Tracked], by_conn: Map[u64, List[u64]],
+    grace: u64, timing: bool, sends: List[Tracked], by_conn: Map[u64, List[u64]],
     answers: List[Identity], mismatches: List[Identity], runs: Runs, bindings: Map[Bytes, Bytes]
 }
 
@@ -131,8 +131,16 @@ pub fn state() -> State {
         once: count("J2", Safety, false, false, false),
         after_close: count("J4", Safety, false, false, false),
         deadline: count("J5", Safety, true, false, false),
-        mismatch: count("J6", Safety, false, true, true), grace: 1000u64, sends: list.new(), by_conn: map.new(),
+        mismatch: count("J6", Safety, false, true, true), grace: 1000u64, timing: true, sends: list.new(), by_conn: map.new(),
         answers: list.new(), mismatches: list.new(), runs: map.new(), bindings: map.new())
+}
+
+// Real sockets preserve ordering but add transit and scheduler delay. The
+// evaluator retains the exact timing check through state().
+pub fn wire_state() -> State {
+    let mut s = state()
+    s.timing = false
+    s
 }
 
 pub fn key(conn: u64, stream: Bytes, p: u64) -> Bytes {
@@ -153,12 +161,12 @@ pub fn step(mut s: State, e: Obs) {
             let k = key(a.conn, a.stream, a.p)
             let n = number(s.pending, k)
             let row = list.len(s.sends)
-            result.unwrap(list.push(mut s.sends, Tracked(key: own(k), at: s.index, done: false, slot: key(0u64, a.stream, a.p), digest: result.unwrap(clone(a.digest)))))
+            result.unwrap(list.push(mut s.sends, Tracked(key: own(k), at: s.index, done: false, slot: key(0u64, a.stream, a.p), digest: result.unwrap(clone(a.digest)), deadline: a.deadline)))
             let mut rows = match map.remove(mut s.by_conn, a.conn) { Some(take old) => take old, None => list.new() }
             result.unwrap(list.push(mut rows, row))
             result.unwrap(map.insert(mut s.by_conn, a.conn, take rows))
             let mut q = match map.remove(mut s.waiting, k) { Some(take old) => take old, None => deque.new() }
-            result.unwrap(deque.push_back(mut q, Pending(at: s.index, deadline: a.deadline, row: row)))
+            result.unwrap(deque.push_back(mut q, Pending(at: s.index, deadline: a.deadline, issued: a.at, row: row)))
             result.unwrap(map.insert(mut s.waiting, own(k), take q))
             result.unwrap(map.insert(mut s.pending, take k, n + 1u64))
             let total = number(s.connections, a.conn)
@@ -180,6 +188,27 @@ pub fn step(mut s: State, e: Obs) {
             match remove_send(mut q, immediate, abandoned) {
                 Some(p) => {
                     s.sends[p.row].done = true
+                    if !s.timing {
+                        // A reply to a send issued after an older deadline is
+                        // an ordered witness: that older expiry must precede it.
+                        if let Some(take found) = map.remove(mut s.by_conn, a.conn) {
+                            let mut rows = take found
+                            let mut i = 0u64
+                            while i < list.len(rows) {
+                                let row = rows[i]
+                                if s.sends[row].done {
+                                    let _ = list.remove(mut rows, i)
+                                } else {
+                                    if s.sends[row].deadline <= p.issued {
+                                        s.deadline.hits += 1u64
+                                        failed(mut s.deadline, own(s.sends[row].key), s.sends[row].at, s.index)
+                                    }
+                                    i += 1u64
+                                }
+                            }
+                            result.unwrap(map.insert(mut s.by_conn, a.conn, take rows))
+                        }
+                    }
                     let accepted = match a.outcome { ObsReturned(_) => true, _ => false }
                     if accepted {
                         s.identity.hits += 1u64
@@ -192,7 +221,7 @@ pub fn step(mut s: State, e: Obs) {
                     }
                     if abandoned {
                         s.deadline.hits += 1u64
-                        if a.at > p.deadline && a.at - p.deadline > s.grace {
+                        if (!s.timing && a.at < p.deadline) || (s.timing && a.at > p.deadline && a.at - p.deadline > s.grace) {
                             failed(mut s.deadline, own(k), p.at, s.index)
                         }
                     }
@@ -292,7 +321,15 @@ fn remove_send(mut q: Deque[Pending], newest: bool, earliest: bool) -> Option[Pe
 }
 
 pub fn write_verdicts(err: Stderr, take events: List[Obs], end: Obs) -> () waits {
-    let mut s = state()
+    write_assessment(err, take events, end, false)
+}
+
+pub fn write_wire_verdicts(err: Stderr, take events: List[Obs], end: Obs) -> () waits {
+    write_assessment(err, take events, end, true)
+}
+
+fn write_assessment(err: Stderr, take events: List[Obs], end: Obs, wire: bool) -> () waits {
+    let mut s = if wire { wire_state() } else { state() }
     for e in events { step(mut s, e) }
     step(mut s, end)
     let h = Header(has_clock: true, has_digest: true, has_ran: false, complete: true)

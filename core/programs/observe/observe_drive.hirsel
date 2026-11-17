@@ -54,6 +54,10 @@ fn bark(take d: Dog) -> () waits {
 }
 
 fn connect(d: Drive, id: u64) -> Conn {
+    connect_in(d, id, 8u64)
+}
+
+fn connect_in(d: Drive, id: u64, q: u64) -> Conn {
     let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
     let (to, from) = result.unwrap(take made)
     let watch = Dog(clock: d.clock, at: host.mono_ns(d.clock) + 5000000000u64, to: channel.sender(to))
@@ -61,7 +65,7 @@ fn connect(d: Drive, id: u64) -> Conn {
         Ok(take t) => take t,
         Error(_) => fail("observe drive watchdog"),
     }
-    let (send, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), N_PLACE, d.head, d.post, take to, d.clock, 8u64, 2097152u64, false))
+    let (send, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), N_PLACE, d.head, d.post, take to, d.clock, q, 2097152u64, false))
     Conn(id: id, clock: d.clock, out: d.out, to: take send, from: take from, task: take session, dog: take dog)
 }
 
@@ -215,6 +219,24 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
 
 pub type JoinCase: codec + send = CrossSession | AfterAbandoned | AfterAbandonedSame
 type JoinDrive: send { drive: Drive, scenario: JoinCase }
+
+// The original early-then-late observer case retains its 1000 ns timing oracle
+// on the evaluator's virtual Clock. Wire ordering is checked separately.
+pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, tasks: Tasks) -> bool waits {
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
+    let mail = result.unwrap(runner.mailbox(64u64))
+    let d = Drive(head: take head, post: runner.post(mail), clock: clock, tasks: tasks,
+        out: out, err: err, seed: 0u64, mix: Correct)
+    let trace: Log[observe.Obs] = result.unwrap(log.new())
+    let cn = connect_in(d, 99u64, 1u64)
+    let a = args(0u64, 0u64, 0u64, 0u64)
+    ask(cn, trace, a, entry(), 2000000u64)
+    ask(cn, trace, a, entry(), 50000000u64)
+    let _ = frame(cn, trace)
+    close(take cn, trace)
+    join_verdicts(err, log.finish(take trace))
+    true
+}
 
 fn join_verdicts(err: Stderr, take events: List[observe.Obs]) -> () waits {
     let mut state = observe.state()

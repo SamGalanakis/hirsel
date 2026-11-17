@@ -2,15 +2,19 @@
 """Post-push observers. Gate fixtures are adapted only in this test's private manifest."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
+import shlex
+import subprocess
 import sys
 import tempfile
 
 from runner_tests import (CALLS, LAWS, MUTANTS, evaluate, manifest, p19_module, counted,
                           l12_module, L12, l12_holds, l12_values, revision_holds,
-                          l10_values, l10_holds)
-from std_native import ROOT
+                          l10_values, l10_holds, c_compiler, dir_for, native_run, counting_cc,
+                          COUNTS)
+from std_native import ROOT, wait_load
 
 
 OBSERVE_MUTANTS = (
@@ -47,77 +51,98 @@ def without_tests(text):
 
 def traced_calls(root, work):
     text = without_tests((root / 'core/programs/store/runner_calls.hirsel').read_text())
-    text = replace(text, 'type Conn {', 'type Conn { id: u64, clock: Clock, out: Stdout, err: Stderr, log: Log[observe.Obs], digests: Map[Bytes, Bytes],')
+    text = replace(text, 'type Conn =', 'type Transport =')
     text = replace(text, 'type Drive: send {', 'type Drive: send { out: Stdout, err: Stderr,')
-    text = replace(text, 'let d = Drive(head:', 'let d = Drive(out: out, err: err, head:')
-    for name in ('conn', 'conn_in', 'served', 'served_in', 'served_on'):
-        text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ' + ('id: u64, ' if name.startswith('conn') else ''))
-    text = re.sub(r'(?<!fn )\bserved_on\(', 'served_on(out, err, ', text)
-    text = replace(text, '    conn_in(tasks, head, post, clock, q,', '    conn_in(out, err, id, tasks, head, post, clock, q,')
+    text = text.replace('Drive(head:', 'Drive(out: out, err: err, head:')
     text = re.sub(r'(pub fn law_\w+\()', r'\1out: Stdout, err: Stderr, ', text)
-    text = re.sub(r'(?m)^(\s*)served(_in)?\(c,', r'\1served\2(out, err, c,', text)
-    next_id = 0
-
-    def connection(m):
-        nonlocal next_id
-        next_id += 1
-        out = 'd.out' if m[3].startswith('d.tasks') else 'out'
-        err = 'd.err' if m[3].startswith('d.tasks') else 'err'
-        binding = m[1].replace('let ', 'let mut ', 1)
-        return f'{binding}{m[2]}({out}, {err}, {next_id}u64, {m[3]}'
-
-    text = re.sub(r'(let \w+ = )(conn(?:_in)?)\(([^\n]+)', connection, text)
-    text = replace(text, '    Conn(to: take to,',
-                   '    let recorded: Result[Log[observe.Obs], Capacity] = log.new()\n'
-                   '    Conn(id: id, clock: clock, out: out, err: err, log: result.unwrap(take recorded), digests: map.new(), to: take to,')
+    for name in ('served', 'served_in', 'served_on'):
+        text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ')
+        text = re.sub(rf'(?<!fn )\b{name}\(', f'{name}(out, err, ', text)
+    text = replace(text, 'Some(Socket(take cn, take h))',
+                   'Some(observed(d, Socket(take cn, take h)))')
+    text = text.replace('Held(runner.fixture_owner(d.post))',
+                        'observed(d, Held(runner.fixture_owner(d.post)))')
+    text = text.replace('match cn {', 'match cn.link {')
     text = replace(text, 'fn ask(cn: Conn,', 'fn ask(mut cn: Conn,')
     text = replace(text, 'fn stall(b: Conn,', 'fn stall(mut b: Conn,')
     text = re.sub(r'(?<![\w.])stall\(b,', 'stall(mut b,', text)
     text = re.sub(r'(?<![\w.])ask\((\w+),', r'ask(mut \1,', text)
-    text = replace(text, '    if let Error(_) = channel.send(cn.to, runner.ask(take c)) {',
-                   '    let digest = send_digest(mut cn, c.key, c.arg)\n'
-                   '    record(cn, Sent(observe.Send(conn: cn.id, stream: observe.own(c.stream), p: c.p, digest: take digest, deadline: c.deadline, at: host.mono_ns(clock))))\n'
-                   '    if let Error(_) = channel.send(cn.to, runner.ask(take c)) {')
-    text = replace(text, '                return Got(version: v, stream: take stream, p: p, outcome: take o)',
-                   '                record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(stream), p: p, version: v, outcome: observe.from_runner(o), at: host.mono_ns(cn.clock))))\n'
-                   '                return Got(version: v, stream: take stream, p: p, outcome: take o)')
-    text = replace(text, '            Ok(Batched(b)) => b.version == 0u64 && list.len(b.outcomes) == 1u64 && match b.outcomes[0].outcome {',
-                   '            Ok(Batched(b)) => {\n'
-                   '                for t in b.outcomes {\n'
-                   '                    if b.version != NEVER { record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(t.stream), p: t.p, version: b.version, outcome: observe.from_runner(t.outcome), at: host.mono_ns(cn.clock)))) }\n'
-                   '                }\n'
-                   '                let valid = b.version == 0u64 && list.len(b.outcomes) == 1u64 && match b.outcomes[0].outcome {')
-    text = replace(text, '            },\n            _ => false,\n        }\n        i += 1u64',
-                   '            }\n                valid\n            },\n            _ => false,\n        }\n        i += 1u64')
-    text = replace(text, '    let Conn(to: _, from: _, dog: _, session: take s) = take cn\n    match task.join(take s) {\n        Ok(Ok(())) => all,',
-                   '    let Conn(id: id, clock: clock, out: out, err: err, log: take entries, to: _, from: _, dog: _, session: take s) = take cn\n'
-                   '    let joined = task.join(take s)\n'
-                   '    emit(out, Closed(observe.Close(conn: id, code: 1000u64, at: host.mono_ns(clock))))\n'
-                   '    observe.write_verdicts(err, log.finish(take entries), Closed(observe.Close(conn: id, code: 1000u64, at: host.mono_ns(clock))))\n'
-                   '    match joined {\n        Ok(Ok(())) => all,')
-    text = replace(text, '    let Conn(to: _, from: _, dog: _, session: take s) = take cn\n    let _ = task.join(take s)',
-                   '    let Conn(id: id, clock: clock, out: out, err: err, log: take entries, to: _, from: _, dog: _, session: take s) = take cn\n'
-                   '    let _ = task.join(take s)\n'
-                   '    emit(out, Closed(observe.Close(conn: id, code: 1000u64, at: host.mono_ns(clock))))\n'
-                   '    observe.write_verdicts(err, log.finish(take entries), Closed(observe.Close(conn: id, code: 1000u64, at: host.mono_ns(clock))))')
-    text = replace(text, '    let Conn(to: _, from: _, dog: _, session: take s) = take cn\n    let ended = task.join(take s)',
-                   '    let Conn(id: id, clock: clock, out: out, err: err, log: take entries, to: _, from: _, dog: _, session: take s) = take cn\n'
-                   '    let ended = task.join(take s)\n'
-                   '    emit(out, Closed(observe.Close(conn: id, code: 1008u64, at: host.mono_ns(clock))))\n'
-                   '    observe.write_verdicts(err, log.finish(take entries), Closed(observe.Close(conn: id, code: 1008u64, at: host.mono_ns(clock))))')
-    text = text.replace('let Conn(to: _, from: _, dog: _, session: take s) = take cn',
-                        'let Conn(to: _, from: _, dog: _, session: take s, ..) = take cn')
-    text = text.replace('log: take entries, to:', 'log: take entries, digests: _, to:')
+    text = re.sub(r'let (\w+)(: Conn)? = (conn\(|try_conn\(|observed\()', r'let mut \1\2 = \3', text)
+    text = replace(text, 'let Some(take cn) = try_conn', 'let Some(take available) = try_conn')
+    text = replace(text, '    let stream: u32 = int.narrow(s)',
+                   '    let digest = send_digest(mut cn, key, arg)\n'
+                   '    record(cn, Sent(observe.Send(conn: cn.id, stream: sid(s), p: p, digest: take digest, deadline: host.mono_ns(clock) + after, at: host.mono_ns(clock))))\n'
+                   '    let stream: u32 = int.narrow(s)')
+    text = replace(text, '    let bad = string_arg(4096u64, true)', '    let mut cn = take available\n    let bad = string_arg(4096u64, true)')
+    # Record all decoded batches, including malformed-frame probes and try_down.
+    text = replace(text, '        Ok(take d) => take d,',
+                   '        Ok(take d) => { replies(cn, d); take d },')
+    text = replace(text, 'fn try_down(cn: Conn) -> Result[runner.Down, ReceiveError] waits {\n    match cn.link {',
+                   'fn try_down(cn: Conn) -> Result[runner.Down, ReceiveError] waits {\n    let got: Result[runner.Down, ReceiveError] = match cn.link {')
+    text = replace(text, '        Held(owner) => runner.fixture_try_receive(owner),\n    }',
+                   '        Held(owner) => runner.fixture_try_receive(owner),\n    }\n'
+                   '    if let Ok(d) = got { replies(cn, d) }\n    take got')
+    text = replace(text, '    match take cn {\n        Socket(take wire, take s) => { let _ = wire_client.close(take wire); let _ = task.join(take s) },\n        Held(take owner) => runner.fixture_close(take owner),\n    }',
+                   '    let _ = finish(take cn, 1000u64)')
+    text = replace(text, '    match take cn {\n        Socket(take wire, take s) => { let _ = wire_client.close(take wire); match task.join(take s) { Ok(Ok(())) => all, _ => false } },\n        _ => false,\n    }',
+                   '    finish(take cn, 1000u64) && all')
+    text = replace(text, '    match take cn {\n        Socket(take wire, take s) => { let _ = wire_client.close(take wire); match task.join(take s) { Ok(Ok(())) => true, _ => false } },\n        _ => false,\n    }',
+                   '    finish(take cn, 1008u64)')
     text += '''
-pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Tasks) -> bool waits {
+type Conn { id: u64, clock: Clock, out: Stdout, err: Stderr, log: Log[observe.Obs], digests: Map[Bytes, Bytes], link: Transport }
+
+fn observed(d: Drive, take link: Transport) -> Conn {
+    let entries: Result[Log[observe.Obs], Capacity] = log.new()
+    Conn(id: host.mono_ns(d.clock), clock: d.clock, out: d.out, err: d.err,
+        log: result.unwrap(take entries), digests: map.new(), link: take link)
+}
+
+fn replies(cn: Conn, d: runner.Down) -> () waits {
+    if let Batched(b) = d {
+        if b.version != NEVER {
+            for t in b.outcomes {
+                record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(t.stream), p: t.p,
+                    version: b.version, outcome: observe.from_runner(t.outcome), at: host.mono_ns(cn.clock))))
+            }
+        }
+    }
+}
+
+fn finish(take cn: Conn, code: u64) -> bool waits {
+    let Conn(id: id, clock: clock, out: out, err: err, log: take entries, digests: _, link: take link) = take cn
+    let ended = match take link {
+        Socket(take wire, take session) => {
+            let _ = wire_client.close(take wire)
+            match task.join(take session) { Ok(Ok(())) => true, _ => false }
+        },
+        Held(take owner) => { runner.fixture_close(take owner); true },
+    }
+    emit(out, Closed(observe.Close(conn: id, code: code, at: host.mono_ns(clock))))
+    observe.write_wire_verdicts(err, log.finish(take entries), Closed(observe.Close(conn: id, code: code, at: host.mono_ns(clock))))
+    ended
+}
+
+pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(64u64))
-    let mut cn = conn(out, err, 99u64, tasks, head, runner.post(mail), c, 1u64)
+    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, fixture_policy(), 1048576u64))
+    let mut policy_task = take policy_handle
+    let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
+    let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
+        tasks: tasks, net: n, random: r, policy: ingress.share(policy),
+        token: result.unwrap(clone(ingress.principal(principal))))
+    let mut cn = conn(d, 1u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 50000000u64)
+    // A request sent after the first deadline supplies an ordered reply marker.
+    host.sleep_until(c, host.mono_ns(c) + 10000000u64)
+    ask(mut cn, c, 1u64, 0u64, k_write(), u64_arg(2u64), 0u64)
+    let _ = frame(cn)
     let _ = frame(cn)
     hang(take cn)
+    task.cancel(mut policy_task)
+    let _ = task.join(take policy_task)
     true
 }
 
@@ -149,6 +174,61 @@ fn send_digest(mut cn: Conn, key: Bytes, arg: Bytes) -> Bytes {
     path = work / 'runner_calls.hirsel'
     path.write_text(text)
     return path
+
+
+class CallEvaluator:
+    """Wire laws run natively; pure observers and model fixtures use the evaluator."""
+    def __init__(self, args, root, work):
+        self.args, self.root, self.work = args, root, work
+        self.binaries = {}
+        cc = c_compiler(args)
+        support = work / 'observe-events.o'
+        subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/observe_events.c'),
+                        '-I' + str(root / 'crates/hirsel-core-rt/include'), '-o', str(support)], check=True)
+        self.cc = work / 'observe-cc'
+        self.cc.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
+                           + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
+        self.cc.chmod(0o755)
+
+    def __call__(self, inputs_path, definition):
+        if not definition.startswith('store@1/runner_calls/'):
+            return evaluate(self.args.evaluator, inputs_path, definition)
+        if inputs_path not in self.binaries:
+            m = json.loads(inputs_path.read_text())
+            sources = m['packages'][-1]['sources']
+            source = Path(next(s['file'] for s in sources if s['modules'] == ['runner_calls']))
+            dispatch = ['pub fn main(out: Stdout, err: Stderr, c: Clock, r: Random, tasks: Tasks, n: Net, d: Dir, argv: Args) -> Result[(), Exit] waits {',
+                        '    let name = option.unwrap(args.get(argv, 0))', '    let good = false']
+            names = dict(Stdout='out', Stderr='err', Clock='c', Random='r', Tasks='tasks', Net='n', Dir='d')
+            for law, parameters in re.findall(r'pub fn (law_\w+)\(([^)]*)\)', source.read_text()):
+                arguments = ', '.join(names[p.split(':')[1].strip()] for p in parameters.split(',') if p.strip())
+                dispatch.append(f'        || (name == "{law}" && runner_calls.{law}({arguments}))')
+            dispatch += [ '    if good { Ok(()) } else { Error(Exit(status: 1)) }', '}']
+            entry = self.work / (inputs_path.stem + '-entry.hirsel')
+            entry.write_text('\n'.join(dispatch) + '\n')
+            sources.append(dict(file=str(entry), modules=['observe_entry'], signatures=False))
+            selected = entry.with_suffix('.json')
+            selected.write_text(json.dumps(m))
+            binary = entry.with_suffix('')
+            store = self.work / 'native-store'
+            command = [str(self.args.compiler.resolve()), 'build', '--inputs', str(selected),
+                       '--source-core', '--source-std', '--backend', 'cranelift',
+                       '--runtime', str(self.args.runtime.resolve()), '--cc', str(self.cc),
+                       '--store', str(store), '--limit', str(64 * 1024 * 1024),
+                       '--entry', 'store@1/observe_entry/main', '-o', str(binary),
+                       '--grant', 'Stdout', '--grant', 'Stderr', '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
+                       '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
+                       '--dir', str(dir_for(store))]
+            wait_load()
+            built = subprocess.run(command, capture_output=True, text=True)
+            if built.returncode:
+                return None, dict(error=built.stderr, command=command)
+            self.binaries[inputs_path] = binary
+        run = subprocess.run([str(self.binaries[inputs_path]), definition.rsplit('/', 1)[1]], capture_output=True)
+        return (1 if run.returncode == 0 else 0 if run.returncode == 1 else None,
+                dict(outcome=dict(kind='returned' if run.returncode in (0, 1) else 'failed'),
+                     stdout=list(run.stdout), stderr=list(run.stderr) if run.returncode in (0, 1) else [],
+                     status=run.returncode, diagnostic=run.stderr.hex() if run.returncode not in (0, 1) else ''))
 
 
 class Codec:
@@ -294,7 +374,7 @@ def join_manifest(root, work, name, runner=None):
         (source, 'observe_joins')])
 
 
-def identity_cases(root, evaluator, work, artifacts, coverage, unavailable):
+def identity_cases(root, evaluator, work, artifacts, coverage, unavailable, calls):
     rows, bodies = [], 0
     selected = join_manifest(root, work, 'identity')
     for case in JOIN_CASES:
@@ -357,9 +437,17 @@ def identity_cases(root, evaluator, work, artifacts, coverage, unavailable):
         legacy = manifest(root, work, mutant + '-laws', runner)
         for module, cases in (('runner_calls', CALLS), ('runner_laws', LAWS)):
             for case in cases:
-                value, report = evaluate(evaluator, legacy, f'store@1/{module}/law_' + case)
-                bodies += bool(report.get('outcome'))
-                good = value == 1 and counted(case, report)
+                if module == 'runner_calls':
+                    definition = f'store@1/{module}/test_{case}'
+                    cc = counting_cc(calls.args, root, work, case) if case in COUNTS else None
+                    code, report = native_run(calls.args, 'cranelift', legacy, work / 'identity-native-store', definition, cc)
+                    tests = report.get('tests', [])
+                    bodies += len(tests)
+                    good = code == 0 and [t['definition'] for t in tests] == [definition] and all(t['passed'] for t in tests)
+                else:
+                    value, report = evaluate(evaluator, legacy, f'store@1/{module}/law_' + case)
+                    bodies += bool(report.get('outcome'))
+                    good = value == 1 and counted(case, report)
                 if not good:
                     (artifacts / (mutant + '-' + case + '.log')).write_text(json.dumps(report, indent=2) + '\n')
                 print(f'OBSERVE control={mutant} legacy={case} passed={good}', flush=True)
@@ -387,10 +475,33 @@ def identity_cases(root, evaluator, work, artifacts, coverage, unavailable):
     return rows, bodies
 
 
+def deadline_timing(root, evaluator, work, artifacts, coverage, runner=None):
+    source = work / ('deadline-timing' + ('-control' if runner else '') + '.hirsel')
+    source.write_text('pub fn law_timing(out: Stdout, err: Stderr, c: Clock, tasks: Tasks) -> bool waits {\n'
+                      '    observe_drive.deadline_join(out, err, c, tasks)\n}\n')
+    modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
+    selected = manifest(root, work, source.stem, runner, extra=[
+        *((root / f'core/programs/observe/{module}.hirsel',
+           'observe_fixture' if module == 'fixture' else module) for module in modules),
+        (source, 'observe_timing')])
+    value, report = evaluate(evaluator, selected, 'store@1/observe_timing/law_timing')
+    verdicts = Codec(report.get('stderr', [])).verdicts() if value == 1 else []
+    expected = 'Failed' if runner else 'Held'
+    good = value == 1 and any(v['clause'] == 'J5' and v['status'] == expected for v in verdicts)
+    if not runner:
+        for v in verdicts:
+            if v['status'] == 'Held':
+                coverage[v['clause']] += v['hits']
+    if runner or not good:
+        (artifacts / (source.stem + '.log')).write_text(json.dumps(report, indent=2) + '\n')
+    print(f'OBSERVE J5=virtual-timing control={bool(runner)} expected={expected} passed={good}', flush=True)
+    return good, bool(report.get('outcome'))
+
+
 def trace_source(t, name, observer):
     """Construct a test entry from live observations, never a .obs artifact."""
-    observer_module = 'observe' if observer == 'joins' else observer
-    clauses = (CLAUSES if observer == 'joins' else ('V',) if observer == 'versions'
+    observer_module = 'observe' if observer in ('joins', 'wire_joins') else observer
+    clauses = (CLAUSES if observer in ('joins', 'wire_joins') else ('V',) if observer == 'versions'
                else ('W3', 'W4', 'W5') if observer == 'session' else ('H', 'I', 'M', 'HU', 'AH2'))
     blobs = {}
 
@@ -417,7 +528,7 @@ def trace_source(t, name, observer):
             return f'ObsRefused(Obs{payload})'
         return 'Obs' + kind
 
-    lines = [f'fn {name}(out: Stdout) -> bool waits {{', f'    let mut s = {observer_module}.state()']
+    lines = [f'fn {name}(out: Stdout) -> bool waits {{', f'    let mut s = {observer_module}.wire_state()' if observer == 'wire_joins' else f'    let mut s = {observer_module}.state()']
     for e in t['obs']:
         kind = e['kind']
         if kind == 'Sent':
@@ -484,6 +595,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', type=Path, default=ROOT)
     p.add_argument('--evaluator', type=Path, required=True)
+    p.add_argument('--compiler', type=Path, required=True)
+    p.add_argument('--runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_ARCHIVE'))
+    p.add_argument('--cc', type=Path)
     p.add_argument('--case', action='append')
     p.add_argument('--control', action='store_true', help='run the latest-deadline observer control')
     p.add_argument('--identity-only', action='store_true', help='run the identity fixtures and their mutation control')
@@ -501,7 +615,8 @@ def main():
     inventories = {}
     with tempfile.TemporaryDirectory(prefix='hirsel-observe-') as tmp:
         work = Path(tmp)
-        m = observed_manifest(root, work)
+        calls = CallEvaluator(args, root, work)
+        m = observed_manifest(root, work) if not args.identity_only else manifest(root, work, 'identity-inputs')
         cases = [] if args.identity_only else [(case, 'runner_calls', m) for case in (args.case or (*CALLS, 'observe_early_then_late'))]
         if not args.case and not args.identity_only:
             cases += [(case, 'runner_laws', m) for case in LAWS]
@@ -513,13 +628,13 @@ def main():
             p19_inputs.write_text(json.dumps(pm))
             cases.append(('p19_place_twice', 'runner_p19', p19_inputs))
         for case, module, selected in cases:
-            value, report = evaluate(evaluator, selected, f'store@1/{module}/law_' + case)
+            value, report = calls(selected, f'store@1/{module}/law_' + case)
             bodies += bool(report.get('outcome'))
             t = trace(report)
             handoffs.record_visible(t, inventories)
             verdicts = Codec(report.get('stderr', [])).assessments()
             if value != 1 and t['obs'] and not verdicts:
-                verdicts = check_trace(evaluator, root, work, t, 'prefix_' + case)
+                verdicts = check_trace(evaluator, root, work, t, 'prefix_' + case, 'wire_joins' if module == 'runner_calls' else 'joins')
             failures = [v for v in verdicts if v['status'] == 'Failed']
             for v in verdicts:
                 if v['status'] == 'Held':
@@ -539,19 +654,25 @@ def main():
             print(f'OBSERVE case={case} trace={len(t["obs"])} complete={t["header"]["complete"]} passed={good}', flush=True)
             rows.append(good)
         if not args.identity_only and (args.control or not args.case):
+            timing_good, timing_bodies = deadline_timing(root, evaluator, work, args.artifacts, coverage)
+            rows.append(timing_good)
+            bodies += timing_bodies
             changes = next(changes for name, changes, _, _ in MUTANTS if name == 'latest_deadline')
             runner = (root / 'core/programs/store/runner.hirsel').read_text()
             for old, new in changes:
                 runner = replace(runner, old, new)
             altered = work / 'latest-deadline.hirsel'
             altered.write_text(runner)
+            timing_good, timing_bodies = deadline_timing(root, evaluator, work, args.artifacts, coverage, altered)
+            rows.append(timing_good)
+            bodies += timing_bodies
             cm = json.loads(m.read_text())
             for source in cm['packages'][-1]['sources']:
                 if source['modules'] == ['runner']:
                     source['file'] = str(altered)
             control = work / 'latest-deadline.json'
             control.write_text(json.dumps(cm))
-            value, report = evaluate(evaluator, control, 'store@1/runner_calls/law_observe_early_then_late')
+            value, report = calls(control, 'store@1/runner_calls/law_observe_early_then_late')
             bodies += bool(report.get('outcome'))
             verdicts = Codec(report.get('stderr', [])).assessments()
             t = trace(report)
@@ -559,7 +680,7 @@ def main():
             (args.artifacts / 'latest-deadline.obs').write_text(json.dumps(t, indent=2) + '\n')
             if not good:
                 (args.artifacts / 'latest-deadline.log').write_text(json.dumps(report, indent=2) + '\n')
-            print(f'OBSERVE control=latest_deadline expected=J5/Failed passed={good}', flush=True)
+            print(f'OBSERVE control=latest_deadline J5=wire-order expected=J5/Failed passed={good}', flush=True)
             rows.append(good)
         if not args.case and not args.identity_only:
             values = {}
@@ -591,7 +712,7 @@ def main():
                 (args.artifacts / (case.split('/')[1] + '.log')).write_text(json.dumps(report, indent=2) + '\n')
             rows.append(good)
         if not args.case:
-            identity_rows, identity_bodies = identity_cases(root, evaluator, work, args.artifacts, coverage, unavailable)
+            identity_rows, identity_bodies = identity_cases(root, evaluator, work, args.artifacts, coverage, unavailable, calls)
             rows += identity_rows
             bodies += identity_bodies
     rows.append(handoffs.compare(inventories, ('join', 'wake', 'cancel')))

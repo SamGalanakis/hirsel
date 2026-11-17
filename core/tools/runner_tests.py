@@ -7,7 +7,8 @@ core/programs/store/runner_calls.hirsel, and two generated modules, runner_p19 (
 `place` of 1, 100, 1,000 and 10,000 entries, run in two tasks) and runner_l12 (describe across permuted
 registrations, an added A field and a changed R; and ea's code revision, which every
 engine must give alike, PROG-9). Each mutant applies its text changes
-to a copy of runner.hirsel and must turn its law red on the evaluator. L4's high-water
+to a copy of runner.hirsel and must turn its law red. Wire session controls run
+on Cranelift; the in-process controls retain the evaluator. L4's high-water
 case builds core/programs/store/runner_rss.hirsel per native backend and compares
 the runtime's exact peak of live backing bytes across its two modes. L20's builds
 core/programs/store/runner_cover.hirsel the same way and compares the live backing bytes
@@ -313,8 +314,36 @@ MUTANTS = (
      'runner_calls', 'owed_ended_delivered'),
     # L23 (publisher_never_blocks): the publisher sends to an owner and waits.
     ('publisher_blocks_on_full_session',
-     [('fn offer(to: Sender[Event], take e: Event) -> Offered {\n    match channel.try_send(to, take e) {\n        Ok(_) => Took,\n        Error(Full(take x)) => Bounced(take x),\n        Error(Closed(_)) => Shut,\n    }\n',
-       'fn offer(to: Sender[Event], take e: Event) -> Offered waits {\n    match channel.send(to, take e) {\n        Ok(_) => Took,\n        Error(_) => Shut,\n    }\n'),
+     [('''fn offer(to: Delivery, take e: Event) -> Offered {
+    if let Wire(sender) = to {
+        return match channel.try_send(sender, wire_event(FromRunner(take e))) {
+            Ok(()) => Took,
+            Error(Full(WireEvent(e: FromRunner(take back)))) => Bounced(take back),
+            _ => Shut,
+        }
+    }
+    let sender = match to { Seam(sender) => sender, _ => fail("runner: delivery") }
+    match channel.try_send(sender, take e) {
+        Ok(_) => Took,
+        Error(Full(take x)) => Bounced(take x),
+        Error(Closed(_)) => Shut,
+    }
+}
+''',
+       '''fn offer(to: Delivery, take e: Event) -> Offered waits {
+    if let Wire(sender) = to {
+        return match channel.send(sender, wire_event(FromRunner(take e))) {
+            Ok(()) => Took,
+            _ => Shut,
+        }
+    }
+    let sender = match to { Seam(sender) => sender, _ => fail("runner: delivery") }
+    match channel.send(sender, take e) {
+        Ok(_) => Took,
+        Error(_) => Shut,
+    }
+}
+'''),
       ('take a: Answer, at: u64) {\n', 'take a: Answer, at: u64) -> () waits {\n'),
       ('mut waiting: List[Answer], at: u64) {\n    let mut i', 'mut waiting: List[Answer], at: u64) -> () waits {\n    let mut i'),
       ('fn catch_up(mut j: Joiner, at: u64) -> Ledger {', 'fn catch_up(mut j: Joiner, at: u64) -> Ledger waits {'),
@@ -404,7 +433,11 @@ MUTANTS = (
      [('    let mut answers: List[Answer] = list.new()\n'
        '    result.unwrap(list.push(mut answers, Answer(to: take to, stream: take stream, p: p, outcome: take o)))\n'
        '    let _ = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))',
-       '    let _ = channel.send(to, Event(e: Answered(Told(version: 0u64, stream: take stream, p: p, outcome: take o))))')],
+       '    let e = Event(e: Answered(Told(version: 0u64, stream: take stream, p: p, outcome: take o)))\n'
+       '    match to {\n'
+       '        Seam(sender) => { let _ = channel.send(sender, take e) },\n'
+       '        Wire(sender) => { let _ = channel.send(sender, wire_event(FromRunner(take e))) },\n'
+       '    }')],
      'runner_calls', 'calls_duplicate'),
     ('release_at_commit_version',
      [('let Worker(p: p, digest: _, version: _, outcome', 'let Worker(p: p, digest: _, version: wv, outcome'),
@@ -417,7 +450,9 @@ MUTANTS = (
        '                    } else {\n'
        '                        used -= 1u64\n'
        '                    }\n'
-       '                    if hit {')],
+       '                    if hit {'),
+      ('        units += if h.forwarded && live == 0u64 { 1u64 } else { live }',
+       '        units += live')],
      'runner_calls', 'calls_held_head'),
     ('join_without_digest',
      [('Some(w) => Some((w.p, w.digest == q.digest)),', 'Some(w) => Some((w.p, true)),')],
@@ -442,7 +477,9 @@ MUTANTS = (
      'runner_calls', 'calls_one_outcome_per_send'),
     ('latest_deadline',
      [('                        if h.owed[i].generation == t.generation {',
-       '                        if h.owed[list.len(h.owed) - 1u64].generation == t.generation {')],
+       '                        if h.owed[list.len(h.owed) - 1u64].generation == t.generation {'),
+      ('            if h.owed[index].generation == tick.generation {',
+       '            if h.owed[list.len(h.owed) - 1u64].generation == tick.generation {')],
      'runner_calls', 'calls_held_head'),
     ('refused_frames_kept',
      [('    let mut used = 0u64\n', '    let mut used = 0u64\n    let mut kept: List[Bytes] = list.new()\n'),
@@ -453,9 +490,15 @@ MUTANTS = (
        '                    tell(s.client, last, take stream, p, take o);')],
      'runner_calls', 'calls_session_charge'),
     ('join_outside_account',
-     [('                let grows = fresh || owing > 0u64', '                let grows = fresh')],
+     [('                let grows = fresh || owing > 0u64', '                let grows = fresh'),
+      ('Some(h) => !h.forwarded || h.queued != 0u64 || list.len(h.owed) != 0u64, _ => true',
+       'Some(h) => !h.forwarded, _ => true')],
      'runner_calls', 'calls_held_head'),
 )
+
+
+WIRE_MUTANTS = {'publisher_blocks_on_full_session', 'direct_commitless', 'queue_outside_account',
+                'latest_deadline', 'join_outside_account'}
 
 
 def p19_module(path):
@@ -957,6 +1000,50 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None):
     return result.returncode, report
 
 
+def run_mutants(args, root, work, evaluator, row):
+    text = (root / 'core/programs/store/runner.hirsel').read_text()
+    for name, edits, module, law in MUTANTS:
+        if args.mutant and name not in args.mutant:
+            continue
+        mutated_text = text
+        found = True
+        for old, new in edits:
+            found = found and mutated_text.count(old) == 1
+            mutated_text = mutated_text.replace(old, new)
+        if not found:
+            row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
+            continue
+        mutated = work / f'mutant_{name}' / 'runner.hirsel'
+        mutated.parent.mkdir()
+        mutated.write_text(mutated_text)
+        if module == 'l10':
+            seen = l10_values(evaluator, root, work, name, mutated)
+            row(engine='evaluator', mutant=name, law=law,
+                passed=None not in sum(seen.values(), ()) and not l10_holds(seen), result=seen)
+            continue
+        if module == 'l12':
+            seen = l12_values(evaluator, root, work, name, mutated)
+            row(engine='evaluator', mutant=name, law=law,
+                passed=None not in seen.values() and not l12_holds(seen))
+            continue
+        selected = manifest(root, work, 'mutant_' + name, mutated)
+        if name in WIRE_MUTANTS:
+            definition = f'store@1/{module}/test_{law}'
+            code, report = native_run(args, 'cranelift', selected, work / 'mutant-native-store', definition)
+            tests = report.get('tests', [])
+            red = (len(tests) == 1 and tests[0]['definition'] == definition
+                   and tests[0].get('status') in (1, 101) and not tests[0].get('timed_out')
+                   and (tests[0]['status'] == 1 or 'Fail' in tests[0].get('stderr', '')))
+            row(engine='cranelift', mutant=name, law=law, passed=red, result=report)
+            continue
+        value, report = evaluate(evaluator, selected,
+                                 f'store@1/{module}/law_{law}')
+        # Red: the law returns false, or one of its `want` checks fails it (cause Fail only).
+        red = (value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
+               or (value == 1 and not counted(law, report)))
+        row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root', type=Path, default=ROOT)
@@ -971,6 +1058,7 @@ def main():
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm'])
     p.add_argument('--call-law', action='append', choices=CALLS)
     p.add_argument('--no-mutants', action='store_true')
+    p.add_argument('--mutant', action='append', choices=[m[0] for m in MUTANTS])
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=['reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
@@ -993,6 +1081,11 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
+        if args.mutant:
+            run_mutants(args, root, work, evaluator, row)
+            if args.report:
+                args.report.write_text(json.dumps(rows, indent=2) + '\n')
+            return int(any(not r['passed'] for r in rows))
         if args.part in ('admission', 'wire') or (r1 and args.part != 'calls'):
             admission_laws(args, root, work, engines, row)
         if args.part == 'ingress' or (r1 and args.part != 'calls'):
@@ -1038,35 +1131,7 @@ def main():
                 row(engine='evaluator', law=name, passed=value == 1, result=report)
         # A mutant is red only when it builds and its law fails.
         if r0 and not args.no_mutants:
-            text = (root / 'core/programs/store/runner.hirsel').read_text()
-            for name, edits, module, law in MUTANTS:
-                mutated_text = text
-                found = True
-                for old, new in edits:
-                    found = found and mutated_text.count(old) == 1
-                    mutated_text = mutated_text.replace(old, new)
-                if not found:
-                    row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
-                    continue
-                mutated = work / f'mutant_{name}' / 'runner.hirsel'
-                mutated.parent.mkdir()
-                mutated.write_text(mutated_text)
-                if module == 'l10':
-                    seen = l10_values(evaluator, root, work, name, mutated)
-                    row(engine='evaluator', mutant=name, law=law,
-                        passed=None not in sum(seen.values(), ()) and not l10_holds(seen), result=seen)
-                    continue
-                if module == 'l12':
-                    seen = l12_values(evaluator, root, work, name, mutated)
-                    row(engine='evaluator', mutant=name, law=law,
-                        passed=None not in seen.values() and not l12_holds(seen))
-                    continue
-                value, report = evaluate(evaluator, manifest(root, work, 'mutant_' + name, mutated),
-                                         f'store@1/{module}/law_{law}')
-                # Red: the law returns false, or one of its `want` checks fails it (cause Fail only).
-                red = (value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
-                       or (value == 1 and not counted(law, report)))
-                row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
+            run_mutants(args, root, work, evaluator, row)
         natives = [e for e in engines if e != 'evaluator']
         if natives:
             if args.compiler is None or args.runtime is None or args.observed is None or (r0 and args.bridge is None):

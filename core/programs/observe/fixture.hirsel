@@ -1,0 +1,34 @@
+// T2 fixture. Its argument identifies the client request without a product tap.
+pub type Args: codec { stream: Bytes, p: u64, arg: Bytes }
+pub type Handles { ran: store.Table[Bytes, Args] }
+
+pub fn k_record(mut tx: store.Tx, h: Handles, take a: Args) -> Result[u64, store.Error] {
+    let k = observe.key(0u64, a.stream, a.p)
+    store.put(mut tx, h.ran, take k, observe.own(a))?
+    Ok(store.info(mut tx).id.version)
+}
+
+pub fn law_record(out: Stdout, c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let ca: std.codec.Codec[Args] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
+    let t = result.unwrap(store.table(mut db, "ran", std.codec.key_bytes(), ca))
+    let h = Handles(ran: t)
+    let a = Args(stream: list.new(), p: 0u64, arg: list.new())
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[u64, store.Error] {
+        k_record(mut tx, h, observe.own(a))
+    })
+    match ran { Ok(Committed(_)) => (), _ => return false }
+    let held = store.snapshot(db)
+    match store.get(held, store.shape(h.ran), observe.key(0u64, a.stream, a.p)) {
+        Ok(Some(saved)) => {
+            let e: observe.Obs = Ran(observe.Run(stream: observe.own(saved.stream), p: saved.p, digest: list.new(), version: store.version(held)))
+            let co: std.codec.Codec[observe.Obs] = std.codec.of()
+            let mut b: Bytes = list.new()
+            result.unwrap(std.codec.encode(co, e, mut b))
+            result.unwrap(stdout.write_bytes(out, b))
+            saved.p == a.p && saved.arg == a.arg
+        },
+        _ => false,
+    }
+}

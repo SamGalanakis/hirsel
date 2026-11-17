@@ -1,0 +1,113 @@
+// Development-only trace vocabulary and prefix verdicts (OBSERVERS-SPEC sections 1-2).
+pub type Header: codec { has_clock: bool, has_digest: bool, has_ran: bool, complete: bool }
+
+pub type Send: codec + send { conn: u64, stream: Bytes, p: u64, digest: Bytes, deadline: u64, at: u64 }
+pub type Reply: codec + send { conn: u64, stream: Bytes, p: u64, version: u64, outcome: runner.Outcome, at: u64 }
+pub type Close: codec + send { conn: u64, code: u64, at: u64 }
+pub type Run: codec + send { stream: Bytes, p: u64, digest: Bytes, version: u64 }
+pub type Position: codec + send { stream: Bytes, latest: u64, state: u32 }
+pub type TaskEvent: codec + send { kind: u32, task: u64, object: u64, value: u64 }
+pub type Wire: codec + send { conn: u64, frame: Bytes }
+pub type Obs: codec + send = Sent(Send) | Got(Reply) | Closed(Close) | Ran(Run) | Pos(Position) | Task(TaskEvent) | Tx(Wire) | Rx(Wire)
+
+pub type Mode: codec = Safety | Liveness | Coverage
+pub type Clause: codec { name: String, mode: Mode, clock: bool, digest: bool, ran: bool }
+pub type Failure: codec { clause: String, key: Bytes, from: u64, to: u64 }
+pub type Verdict: codec = Held(u64) | Vacuous | Failed(Failure) | Incomplete(u64) | Unavailable(String)
+pub type Count { clause: Clause, hits: u64, pending: u64, failure: Option[Failure] }
+
+pub fn count(take name: String, mode: Mode, clock: bool, digest: bool, ran: bool) -> Count {
+    Count(clause: Clause(name: take name, mode: mode, clock: clock, digest: digest, ran: ran), hits: 0u64, pending: 0u64, failure: None)
+}
+
+pub fn own[T: codec](x: T) -> T {
+    let c: std.codec.Codec[T] = std.codec.of()
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.encode(c, x, mut b))
+    result.unwrap(result.unwrap(std.codec.decode(c, b)))
+}
+
+pub fn failed(mut c: Count, take k: Bytes, from: u64, to: u64) {
+    if let None = c.failure {
+        c.failure = Some(Failure(clause: own(c.clause.name), key: take k, from: from, to: to))
+    }
+}
+
+pub fn verdict(c: Count, h: Header) -> Verdict {
+    if c.clause.clock && !h.has_clock { return Unavailable("clock") }
+    if c.clause.digest && !h.has_digest { return Unavailable("digest") }
+    if c.clause.ran && !h.has_ran { return Unavailable("ran") }
+    if let Some(f) = c.failure { return Failed(own(f)) }
+    if c.pending > 0u64 {
+        if !h.complete { return Incomplete(c.pending) }
+        return Failed(Failure(clause: own(c.clause.name), key: list.new(), from: 0u64, to: 0u64))
+    }
+    if c.hits == 0u64 { Vacuous } else { Held(c.hits) }
+}
+
+pub type State { pending: Map[Bytes, u64], connections: Map[u64, u64], delivery: Count, index: u64 }
+
+pub fn state() -> State {
+    State(pending: map.new(), connections: map.new(), delivery: count("delivery", Liveness, false, false, false), index: 0u64)
+}
+
+pub fn key(conn: u64, stream: Bytes, p: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(conn, mut b))
+    result.unwrap(std.codec.put_list(stream, std.codec.of_u8(), mut b))
+    result.unwrap(std.codec.put_u64(p, mut b))
+    b
+}
+
+fn number[K: key](m: Map[K, u64], k: K) -> u64 {
+    match map.get(m, k) { Some(n) => n, None => 0u64 }
+}
+
+pub fn step(mut s: State, e: Obs) {
+    match e {
+        Sent(a) => {
+            let k = key(a.conn, a.stream, a.p)
+            let n = number(s.pending, k)
+            result.unwrap(map.insert(mut s.pending, take k, n + 1u64))
+            let total = number(s.connections, a.conn)
+            result.unwrap(map.insert(mut s.connections, a.conn, total + 1u64))
+            s.delivery.hits += 1u64
+            s.delivery.pending += 1u64
+        },
+        Got(a) => {
+            let k = key(a.conn, a.stream, a.p)
+            let n = number(s.pending, k)
+            if n > 0u64 {
+                result.unwrap(map.insert(mut s.pending, take k, n - 1u64))
+                let total = number(s.connections, a.conn)
+                if total > 0u64 {
+                    result.unwrap(map.insert(mut s.connections, a.conn, total - 1u64))
+                    s.delivery.pending -= 1u64
+                }
+            }
+        },
+        Closed(a) => {
+            let n = number(s.connections, a.conn)
+            s.delivery.pending -= n
+            result.unwrap(map.insert(mut s.connections, a.conn, 0u64))
+        },
+        _ => (),
+    }
+    s.index += 1u64
+}
+
+pub fn finish(s: State, h: Header) -> List[Verdict] {
+    let mut vs: List[Verdict] = list.new()
+    result.unwrap(list.push(mut vs, verdict(s.delivery, h)))
+    vs
+}
+
+pub fn law_prefix() -> bool {
+    let mut trace: List[Obs] = list.new()
+    result.unwrap(list.push(mut trace, Sent(Send(conn: 0u64, stream: list.new(), p: 0u64, digest: list.new(), deadline: 10u64, at: 0u64))))
+    result.unwrap(list.push(mut trace, Got(Reply(conn: 0u64, stream: list.new(), p: 0u64, version: 0u64, outcome: Abandoned, at: 10u64))))
+    let mut s = state()
+    for i in 0u64 .. list.len(trace) / 2u64 { step(mut s, trace[i]) }
+    let h = Header(has_clock: true, has_digest: false, has_ran: false, complete: false)
+    match finish(s, h)[0u64] { Incomplete(1u64) => true, _ => false }
+}

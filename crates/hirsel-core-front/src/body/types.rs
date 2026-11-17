@@ -406,7 +406,7 @@ pub(super) fn is_type_node(k: NodeKind) -> bool {
 #[derive(Clone, Copy)]
 pub(super) enum Num {
     Int(i128),
-    Float(f64),
+    Float(u64),
 }
 /// `v` cut to `w` bits, read signed or not.
 pub(super) fn wrap(v: i128, signed: bool, w: u32) -> i128 {
@@ -465,13 +465,69 @@ pub(crate) fn int_magnitude(digits: &str) -> Option<u128> {
     }
     any.then_some(value)
 }
-/// The bits of a constant float: a NaN is the canonical one, so a product's constants
-/// do not depend on the NaN the compiler's host gives `0.0 / 0.0` or `-` (FORM #97).
-pub(crate) fn float_bits(s: Scalar, x: f64) -> u64 {
-    match (s, x.is_nan()) {
-        (Scalar::F32, true) => 0x7fc0_0000,
-        (Scalar::F32, false) => u64::from((x as f32).to_bits()),
-        (_, true) => 0x7ff8_0000_0000_0000,
-        (_, false) => x.to_bits(),
+/// Parse the digits directly in the type selected by LANG-3 and LANG-21.
+pub(crate) fn parse_float_bits(s: Scalar, digits: &str, negative: bool) -> Option<u64> {
+    let without_separators;
+    let digits = if digits.contains('_') {
+        without_separators = digits.replace('_', "");
+        &without_separators
+    } else {
+        digits
+    };
+    match s {
+        Scalar::F32 => {
+            let x: f32 = digits.parse().ok()?;
+            Some(float32_bits(if negative { -x } else { x }))
+        }
+        Scalar::F64 => {
+            let x: f64 = digits.parse().ok()?;
+            Some(float64_bits(if negative { -x } else { x }))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn float_negate_bits(s: Scalar, bits: u64) -> u64 {
+    if s == Scalar::F32 {
+        float32_bits(-f32::from_bits(bits as u32))
+    } else {
+        float64_bits(-f64::from_bits(bits))
+    }
+}
+
+pub(crate) fn float_binary_bits(s: Scalar, op: &str, a: u64, b: u64) -> u64 {
+    if s == Scalar::F32 {
+        let (a, b) = (f32::from_bits(a as u32), f32::from_bits(b as u32));
+        float32_bits(match op {
+            "+" => a + b,
+            "-" => a - b,
+            "*" => a * b,
+            _ => a / b,
+        })
+    } else {
+        let (a, b) = (f64::from_bits(a), f64::from_bits(b));
+        float64_bits(match op {
+            "+" => a + b,
+            "-" => a - b,
+            "*" => a * b,
+            _ => a / b,
+        })
+    }
+}
+
+// Use the canonical NaN of each width so constants do not depend on the host (SEM-2).
+fn float32_bits(x: f32) -> u64 {
+    if x.is_nan() {
+        0x7fc0_0000
+    } else {
+        u64::from(x.to_bits())
+    }
+}
+
+fn float64_bits(x: f64) -> u64 {
+    if x.is_nan() {
+        0x7ff8_0000_0000_0000
+    } else {
+        x.to_bits()
     }
 }

@@ -272,6 +272,21 @@ fn below_half_subnormal_32() -> u32 {
     bits32(float.parse32("7.0e-46"))
 }
 
+// The decimal immediately above 1 + 2^-24 rounds up. The sum at the midpoint
+// rounds to 1 before the subtraction. Both rules follow LANG-21 and SEM-2.
+const ABOVE_F32_MIDPOINT: f32 = 1.000000059604644775390625000001 + 0.0
+
+// expect: run literal_binary32_rounding() = 1065353217
+fn literal_binary32_rounding() -> u32 {
+    let direct: f32 = 1.000000059604644775390625000001
+    let sequential: f32 = (1.0 + 0.000000059604644775390625) - 1.0
+    if float.to_bits32(direct) != 0x3f800001 || float.to_bits32(ABOVE_F32_MIDPOINT) != 0x3f800001 || float.to_bits32(sequential) != 0 {
+        return 0
+    }
+    let folded: f32 = 1.000000059604644775390625000001 + 0.0
+    float.to_bits32(folded)
+}
+
 // expect: run finite_number() = true
 fn finite_number() -> bool {
     float.is_finite(1.5)

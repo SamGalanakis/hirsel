@@ -582,41 +582,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return self.untyped_number(n, want);
                 };
                 // LANG-3: an integer token takes only an integer type; a suffix names it.
-                if suffix.is_none() && matches!(s, Scalar::F32 | Scalar::F64) {
+                let Some((signed, w)) = Ty::Scalar(s).int() else {
                     let a = self.shown(scalar(s));
                     let message = format!("an integer literal is not `{a}`");
                     self.refuse_literal(n, negate, a, message);
                     return (ERROR, None);
-                }
+                };
                 let Some(m) = int_magnitude(digits) else {
                     let a = self.shown(scalar(s));
                     let message = format!("the literal does not fit `{a}`");
                     self.refuse_literal(n, negate, a, message);
                     return (ERROR, None);
                 };
-                if matches!(s, Scalar::F32 | Scalar::F64) {
-                    let x = if negate { -(m as f64) } else { m as f64 };
-                    (s, float_bits(s, x))
+                let limit: u128 = if signed {
+                    (1u128 << (w - 1)) - u128::from(!negate)
                 } else {
-                    let (signed, w) = Ty::Scalar(s).int().unwrap_or((false, 64));
-                    let limit: u128 = if signed {
-                        (1u128 << (w - 1)) - u128::from(!negate)
-                    } else {
-                        (1u128 << w) - 1
-                    };
-                    if m > limit {
-                        let a = self.shown(scalar(s));
-                        let message = format!("the literal does not fit `{a}`");
-                        self.refuse_literal(n, negate, a, message);
-                        return (ERROR, None);
-                    }
-                    let v = if negate {
-                        (m as i128).wrapping_neg() as u64
-                    } else {
-                        m as u64
-                    };
-                    (s, v & (u64::MAX >> (64 - w)))
+                    (1u128 << w) - 1
+                };
+                if m > limit {
+                    let a = self.shown(scalar(s));
+                    let message = format!("the literal does not fit `{a}`");
+                    self.refuse_literal(n, negate, a, message);
+                    return (ERROR, None);
                 }
+                let v = if negate {
+                    (m as i128).wrapping_neg() as u64
+                } else {
+                    m as u64
+                };
+                (s, v & (u64::MAX >> (64 - w)))
             }
             Some(TokenKind::Float) => {
                 let (digits, suffix) = float_suffix(text);
@@ -630,15 +624,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.refuse_literal(n, negate, a, message);
                     return (ERROR, None);
                 }
-                let digits: String = digits.chars().filter(|&c| c != '_').collect();
-                let x = match s {
-                    Scalar::F32 => digits.parse::<f32>().map(f64::from),
-                    _ => digits.parse::<f64>(),
-                };
-                let Ok(x) = x else {
+                let Some(bits) = parse_float_bits(s, digits, negate) else {
                     return self.gap_ty(n, "float literal form is not built");
                 };
-                (s, float_bits(s, if negate { -x } else { x }))
+                (s, bits)
             }
             Some(TokenKind::Bytes) => return self.byte_string(n),
             Some(TokenKind::String) => return self.static_literal(n, want),
@@ -658,7 +647,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         let w = Ty::Scalar(s).int().map_or(64, |(_, w)| w);
                         (v as u64) & (u64::MAX >> (64 - w))
                     }
-                    Num::Float(f) => float_bits(s, f),
+                    Num::Float(bits) => bits,
                 };
                 (scalar(s), self.konst(Ty::Scalar(s), bits, n))
             }
@@ -680,9 +669,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             .map_or(i128::MAX, |m| i128::try_from(m).unwrap_or(i128::MAX)),
                     ),
                     (Some(TokenKind::Float), None) => {
-                        let d: String =
-                            float_suffix(text).0.chars().filter(|&c| c != '_').collect();
-                        Num::Float(d.parse::<f64>().ok()?)
+                        Num::Float(parse_float_bits(s, float_suffix(text).0, false)?)
                     }
                     (Some(TokenKind::Integer), None) => {
                         let a = self.shown(scalar(s));
@@ -711,7 +698,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let bare = self.kind(c[0]) == NodeKind::Literal;
                 match (op, self.fold(c[0], s, !(op == "-" && bare))?) {
                     ("-", Num::Int(v)) => Num::Int(-v),
-                    ("-", Num::Float(f)) => Num::Float(-f),
+                    ("-", Num::Float(bits)) => Num::Float(float_negate_bits(s, bits)),
                     (_, Num::Int(v)) => {
                         let (signed, w) = int.unwrap_or((false, 64));
                         Num::Int(wrap(!v, signed, w))
@@ -734,15 +721,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let a = self.fold(c[0], s, true)?;
                 let b = self.fold(c[1], s, true)?;
                 match (a, b) {
-                    (Num::Float(a), Num::Float(b)) => {
-                        let f = match op {
-                            "+" => a + b,
-                            "-" => a - b,
-                            "*" => a * b,
-                            _ => a / b,
-                        };
-                        Num::Float(f)
-                    }
+                    (Num::Float(a), Num::Float(b)) => Num::Float(float_binary_bits(s, op, a, b)),
                     (Num::Int(a), Num::Int(b)) => {
                         let (signed, w) = int.unwrap_or((false, 64));
                         let bad = |cx: &mut Self, why: &str, found: String, required: String| {
@@ -783,10 +762,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
             _ => return None,
-        };
-        let x = match (x, s) {
-            (Num::Float(f), Scalar::F32) => Num::Float(f64::from(f as f32)),
-            (x, _) => x,
         };
         if let (Num::Int(v), Some((signed, w)), true) = (x, int, check) {
             let (lo, hi) = if signed {

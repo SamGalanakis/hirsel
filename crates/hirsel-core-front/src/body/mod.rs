@@ -76,7 +76,9 @@ pub use templates::{
 };
 mod values;
 use types::*;
-pub(crate) use types::{float_bits, float_suffix, int_magnitude, int_suffix};
+pub(crate) use types::{
+    float_binary_bits, float_negate_bits, float_suffix, int_magnitude, int_suffix, parse_float_bits,
+};
 
 /// Work one body check did, for the cost measurements (core/MEASURE.md).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

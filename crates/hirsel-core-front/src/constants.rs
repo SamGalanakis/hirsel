@@ -100,12 +100,7 @@ impl Program<'_> {
                 self.const_refuse(at, expr, "a constant must have a plain type");
                 None
             } else {
-                ConstCx {
-                    p: self,
-                    at,
-                    number: String::new(),
-                }
-                .expr(expr, Some(ty), true)
+                ConstCx { p: self, at }.expr(expr, Some(ty), true)
             };
             self.constants[i].value = value;
             done[i - base] = true;
@@ -201,7 +196,6 @@ impl Program<'_> {
 struct ConstCx<'p, 'a> {
     p: &'p mut Program<'a>,
     at: ItemRef,
-    number: String,
 }
 impl ConstCx<'_, '_> {
     fn fail(&mut self, n: NodeId, message: &str) -> Option<ConstValue> {
@@ -626,17 +620,10 @@ impl ConstCx<'_, '_> {
                 let Some(s @ (Scalar::F32 | Scalar::F64)) = suffix.or(expected) else {
                     return self.fail(n, "a float token requires a float type");
                 };
-                self.number.clear();
-                self.number.extend(digits.chars().filter(|&c| c != '_'));
-                let x = if s == Scalar::F32 {
-                    self.number.parse::<f32>().map(f64::from).ok()
-                } else {
-                    self.number.parse::<f64>().ok()
-                };
-                let Some(x) = x else {
+                let Some(bits) = crate::body::parse_float_bits(s, digits, negative) else {
                     return self.fail(n, "invalid constant float literal");
                 };
-                (s, crate::body::float_bits(s, if negative { -x } else { x }))
+                (s, bits)
             }
             _ => return self.fail(n, "this literal is not a constant"),
         };
@@ -663,11 +650,7 @@ impl ConstCx<'_, '_> {
             "-" if Ty::Scalar(s).int().is_some_and(|(signed, _)| signed) => {
                 fit(s, -integer(s, bits))
             }
-            "-" if s == Scalar::F32 => Some(crate::body::float_bits(
-                s,
-                -f64::from(f32::from_bits(bits as u32)),
-            )),
-            "-" if s == Scalar::F64 => Some(crate::body::float_bits(s, -f64::from_bits(bits))),
+            "-" if Ty::Scalar(s).is_float() => Some(crate::body::float_negate_bits(s, bits)),
             _ => return self.fail(n, "operator does not apply to this constant type"),
         };
         if let Some(bits) = result {
@@ -766,33 +749,7 @@ impl ConstCx<'_, '_> {
             ));
         }
         if Ty::Scalar(s).is_float() && matches!(op, "+" | "-" | "*" | "/") {
-            let x = if s == Scalar::F32 {
-                f64::from(f32::from_bits(a as u32))
-            } else {
-                f64::from_bits(a)
-            };
-            let y = if s == Scalar::F32 {
-                f64::from(f32::from_bits(b as u32))
-            } else {
-                f64::from_bits(b)
-            };
-            let z = if s == Scalar::F32 {
-                let (x, y) = (x as f32, y as f32);
-                f64::from(match op {
-                    "+" => x + y,
-                    "-" => x - y,
-                    "*" => x * y,
-                    _ => x / y,
-                })
-            } else {
-                match op {
-                    "+" => x + y,
-                    "-" => x - y,
-                    "*" => x * y,
-                    _ => x / y,
-                }
-            };
-            return Some(self.bits(s, crate::body::float_bits(s, z)));
+            return Some(self.bits(s, crate::body::float_binary_bits(s, op, a, b)));
         }
         if Ty::Scalar(s).int().is_none() {
             return self.fail(n, "operator does not apply to this constant type");

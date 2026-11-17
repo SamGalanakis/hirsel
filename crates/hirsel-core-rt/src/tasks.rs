@@ -24,7 +24,10 @@ pub struct ValueLayout {
     pub bytes: usize,
     pub align: usize,
     pub logical: u64,
-    pub drop: unsafe extern "C" fn(*mut Context, *mut u8) -> u8,
+    /// The compiler's resumable cleanup of one value in place, run on the
+    /// active drain (counted::Recipe). None for a task input, which the child
+    /// body always cleans itself.
+    pub clean: Option<crate::counted::Recipe>,
 }
 /// A generated body cleans every local owner, including task handles, before
 /// returning. The runtime trusts that cleanup; it never scans for omitted drops.
@@ -153,6 +156,10 @@ pub struct Task {
     layout: TaskLayout,
     failed: u8,
     record: Option<Block>,
+    /// The abandoning parent's cleanup frame, once the task has ended.
+    holder: std::mem::MaybeUninit<crate::counted::Holder>,
+    /// How far the result's cleanup has got.
+    cursor: u64,
 }
 struct Scheduler {
     deferred: *mut Task,
@@ -1510,9 +1517,6 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         std::hint::unreachable_unchecked();
     }
 }
-unsafe extern "C" fn no_drop(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 
 /// Execute a root on the same guarded stack discipline as its children.
 /// # Safety
@@ -1553,7 +1557,7 @@ pub unsafe fn run_root(
         bytes: input_bytes,
         align: 16,
         logical: 0,
-        drop: no_drop,
+        clean: None,
     };
     let mut root = Box::new(Task {
         arc_gate: AtomicBool::new(run.provider.event.is_some()),
@@ -1585,6 +1589,8 @@ pub unsafe fn run_root(
         },
         failed: 0,
         record: None,
+        holder: std::mem::MaybeUninit::uninit(),
+        cursor: 0,
     });
     #[cfg(any(test, feature = "charge-observation"))]
     crate::peak::allocated((&*root as *const Task).cast(), size_of::<Task>());
@@ -1698,6 +1704,8 @@ unsafe fn spawn_in(
             layout,
             failed: 0,
             record: Some(record),
+            holder: std::mem::MaybeUninit::uninit(),
+            cursor: 0,
         });
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
@@ -1864,10 +1872,9 @@ pub unsafe extern "C" fn hirsel_core_join(
         }
     }
 }
-/// # Safety
-/// Transfer the sole live handle. This cleanup shields cancellation, cancels and
-/// waits, then cleans any result or drops its complete cause chain, without admission.
-pub unsafe fn abandon(context: *mut Context, task: *mut Task) -> u8 {
+/// Cancel the task and wait for it to end, under shielding; its result (if it
+/// succeeded) is then this cleanup's alone.
+unsafe fn abandon_begin(context: *mut Context, task: *mut Task) -> *mut crate::counted::Holder {
     // SAFETY: the parent retains task while blocked; cancellation shielding is lexical.
     unsafe {
         (*context).cancel_shield += 1;
@@ -1879,16 +1886,43 @@ pub unsafe fn abandon(context: *mut Context, task: *mut Task) -> u8 {
             checkpoint(true);
         }
         event(JOIN, (*task).id, 2);
-        let failed = if (*task).failed == 0 {
-            ((*task).layout.result.drop)(context, (*task).result.as_ptr())
-        } else {
-            0
-        };
+        (*task).cursor = 0;
+        (*task).holder.as_mut_ptr()
+    }
+}
+/// Clean the result, if any, then drop the child's cause chain and retire it.
+unsafe fn abandon_step(
+    context: *mut Context,
+    holder: *mut crate::counted::Holder,
+    list: *mut crate::counted::Worklist,
+) -> bool {
+    // SAFETY: the frame is the ended task's, whose sole handle is being consumed.
+    unsafe {
+        let task = holder
+            .cast::<u8>()
+            .sub(std::mem::offset_of!(Task, holder))
+            .cast::<Task>();
+        if (*task).failed == 0
+            && let Some(clean) = (*task).layout.result.clean
+            && !clean(context, (*task).result.as_ptr(), &mut (*task).cursor, list)
+        {
+            return false;
+        }
         let causes: Causes = std::mem::take(&mut (*(*task).context).causes);
         drop(causes);
         retire(task);
         (*context).cancel_shield -= 1;
-        failed
+        true
+    }
+}
+/// # Safety
+/// Transfer the sole live handle. This cleanup shields cancellation, cancels and
+/// waits, then cleans any result or drops its complete cause chain, without admission.
+pub unsafe fn abandon(context: *mut Context, task: *mut Task) -> u8 {
+    // SAFETY: as abandon_begin; the drain runs the cleanup to its end.
+    unsafe {
+        let holder = abandon_begin(context, task);
+        u8::from(crate::counted::drain_holder(context, holder, abandon_step))
     }
 }
 /// # Safety
@@ -1897,6 +1931,24 @@ pub unsafe fn abandon(context: *mut Context, task: *mut Task) -> u8 {
 pub unsafe extern "C" fn hirsel_core_task_drop(context: *mut Context, task: *mut Task) -> u8 {
     // SAFETY: emitter transfers one unjoined handle for structured cleanup.
     unsafe { abandon(context, task) }
+}
+/// Abandon the task inside a running drain: wait for it to end, then hand its
+/// cleanup over at `point`. Always stages, so always returns true.
+/// # Safety
+/// As abandon; `list` is the running drain's.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_task_release(
+    context: *mut Context,
+    task: *mut Task,
+    list: *mut crate::counted::Worklist,
+    point: u64,
+) -> bool {
+    // SAFETY: as abandon.
+    unsafe {
+        let holder = abandon_begin(context, task);
+        (*list).stage_holder(holder, abandon_step, point);
+        true
+    }
 }
 
 /// Run non-suspending OS code off the language fiber. Scripted provider issue and

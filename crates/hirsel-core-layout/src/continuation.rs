@@ -168,6 +168,15 @@ fn plan_field(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64) -> No
             }
         }
         FieldTy::Handle(crate::Handle::Capability) => Node::Empty,
+        // A runtime holder hands its cleanup over to the drain; only the handle
+        // word is read, and its record keeps the holder's own frame.
+        FieldTy::Handle(crate::Handle::Receiver | crate::Handle::Task | crate::Handle::Latest) => {
+            Node::Leaf {
+                at,
+                live: vec![(at, 8)],
+                yields: Some(false),
+            }
+        }
         FieldTy::Handle(_) => whole(8),
         FieldTy::OwnFn => whole(field_size(shapes, recipes, ty).0),
         FieldTy::Scalar(_)

@@ -712,23 +712,19 @@ struct TimerRoot {
     order: *const AtomicU64,
 }
 
-unsafe extern "C" fn timer_none_drop(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
-
 fn timer_layout<T>() -> crate::tasks::TaskLayout {
     crate::tasks::TaskLayout {
         input: crate::tasks::ValueLayout {
             bytes: size_of::<T>(),
             align: align_of::<T>(),
             logical: 0,
-            drop: timer_none_drop,
+            clean: None,
         },
         result: crate::tasks::ValueLayout {
             bytes: 0,
             align: 1,
             logical: 0,
-            drop: timer_none_drop,
+            clean: None,
         },
     }
 }

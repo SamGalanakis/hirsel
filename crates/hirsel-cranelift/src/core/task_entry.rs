@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct Glues {
     pub entries: BTreeMap<(TypeId, TypeId), cranelift_module::FuncId>,
-    pub inputs: BTreeMap<TypeId, cranelift_module::FuncId>,
 }
 impl Glues {
     pub fn declare(object: &mut ObjectModule, input: &c::Module) -> Result<Self> {
@@ -22,7 +21,6 @@ impl Glues {
             .collect::<BTreeSet<_>>();
         let mut out = Self {
             entries: BTreeMap::new(),
-            inputs: BTreeMap::new(),
         };
         for (x, r) in pairs {
             let f = object
@@ -33,16 +31,6 @@ impl Glues {
                 )
                 .map_err(error)?;
             out.entries.insert((x, r), f);
-            if let std::collections::btree_map::Entry::Vacant(e) = out.inputs.entry(x) {
-                let f = object
-                    .declare_function(
-                        &format!("hirsel.task.input.{}", x.0),
-                        Linkage::Local,
-                        &abi::Signature::c(object, &[Ty::Ptr; 2], &[Ty::Scalar(Scalar::U8)]).clif,
-                    )
-                    .map_err(error)?;
-                e.insert(f);
-            }
         }
         Ok(out)
     }
@@ -53,27 +41,6 @@ impl Glues {
         observer: &impl profile::Observer,
         scratch: &mut Compilation,
     ) -> Result<()> {
-        for (&x, &f) in &self.inputs {
-            let context = &mut scratch.codegen;
-            object.clear_context(context);
-            context.func.signature =
-                abi::Signature::c(object, &[Ty::Ptr; 2], &[Ty::Scalar(Scalar::U8)]).clif;
-            let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
-            let entry = b.create_block();
-            b.append_block_params_for_function_params(entry);
-            b.switch_to_block(entry);
-            let ps = b.block_params(entry).to_vec();
-            let offset = input_offset(tables.input, tables.layouts, x)?;
-            let data = b.ins().iadd_imm(ps[1], offset as i64);
-            let drop = object.declare_func_in_func(tables.glues.drops[x.index()].unwrap(), b.func);
-            let zero = b.ins().iconst(types::I64, 0);
-            let call = b.ins().call(drop, &[ps[0], data, zero]);
-            let status = b.inst_results(call)[0];
-            b.ins().return_(&[status]);
-            b.seal_all_blocks();
-            b.finalize(object.target_config());
-            observer.define(object, f, context).map_err(error)?;
-        }
         for (&(x, r), &f) in &self.entries {
             let context = &mut scratch.codegen;
             object.clear_context(context);

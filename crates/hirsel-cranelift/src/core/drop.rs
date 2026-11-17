@@ -9,7 +9,9 @@ use resume::plan_type;
 
 pub(super) struct Glues {
     pub drops: Vec<Option<cranelift_module::FuncId>>,
-    pub callbacks: Vec<Option<cranelift_module::FuncId>>,
+    /// The resumable in-place cleanup of a value a runtime holder keeps: a
+    /// channel's item, a task's result, a Latest's root (counted::Recipe).
+    pub values: Vec<Option<cranelift_module::FuncId>>,
     pub resumes: Vec<Option<cranelift_module::FuncId>>,
     pub fixed: Vec<Option<[cranelift_module::DataId; 2]>>,
     pub buffers: Vec<(FieldTy, cranelift_module::FuncId)>,
@@ -40,6 +42,7 @@ impl Glues {
         }
         let mut needed = BTreeSet::new();
         let mut descriptors = BTreeSet::new();
+        let mut values = BTreeSet::new();
         for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
             for inst in &body.insts {
                 match inst {
@@ -52,10 +55,12 @@ impl Glues {
                     Inst::Call { call } => match body.calls[call.index()].callee {
                         Callee::Runtime(RtOp::Spawn { x, r }) => {
                             descriptors.extend([x.index(), r.index()]);
+                            values.insert(r.index());
                             needed.extend([x.index(), r.index()]);
                         }
                         Callee::Runtime(RtOp::ChannelNew { item } | RtOp::LatestNew { item }) => {
                             descriptors.insert(item.index());
+                            values.insert(item.index());
                             needed.insert(item.index());
                         }
                         _ => {}
@@ -176,7 +181,7 @@ impl Glues {
         let mut visited = BTreeSet::new();
         let mut whole = BTreeSet::new();
         loop {
-            for root in roots.clone() {
+            for root in roots.clone().into_iter().chain(values.iter().copied()) {
                 descendants(
                     root,
                     layouts,
@@ -196,7 +201,7 @@ impl Glues {
             }
         }
         let mut drops = vec![None; layouts.len()];
-        let mut callbacks = vec![None; layouts.len()];
+        let mut cleans = vec![None; layouts.len()];
         let mut resumes = vec![None; layouts.len()];
         for (i, recipe) in layouts.iter().enumerate() {
             if (recipe.drop.is_some() || descriptors.contains(&i)) && needed.contains(&i) {
@@ -210,13 +215,13 @@ impl Glues {
                         .map_err(error)?,
                 );
             }
-            if descriptors.contains(&i) {
-                callbacks[i] = Some(
+            if values.contains(&i) {
+                cleans[i] = Some(
                     object
                         .declare_function(
-                            &format!("hirsel.core.drop.callback.{i}"),
+                            &format!("hirsel.core.clean.{i}"),
                             Linkage::Local,
-                            &abi::Signature::c(object, &[P, P], &[B]).clif,
+                            &abi::Signature::c(object, &[P, P, P, P], &[B]).clif,
                         )
                         .map_err(error)?,
                 );
@@ -342,7 +347,7 @@ impl Glues {
         }
         Ok(Self {
             drops,
-            callbacks,
+            values: cleans,
             resumes,
             fixed,
             buffers,
@@ -358,9 +363,6 @@ impl Glues {
         for (i, &function) in self.drops.iter().enumerate() {
             if let Some(function) = function {
                 self.emit_one(object, tables, (i, function, false), observer, scratch)?;
-                if let Some(callback) = self.callbacks[i] {
-                    self.emit_callback(object, callback, function, observer, scratch)?;
-                }
             }
         }
         for (i, &function) in self.resumes.iter().enumerate() {
@@ -371,32 +373,59 @@ impl Glues {
         for (ty, function) in &self.buffers {
             self.emit_buffer(object, tables, ty, *function, observer, scratch)?;
         }
+        for (i, &function) in self.values.iter().enumerate() {
+            if let Some(function) = function {
+                self.emit_value(object, tables, (i, function), observer, scratch)?;
+            }
+        }
         Ok(())
     }
-    fn emit_callback(
+    /// A value's cleanup in place, resumable as a drain recipe with no frame
+    /// of its own: its holder keeps the cursor. Finalizers inherit no site.
+    fn emit_value(
         &self,
         object: &mut ObjectModule,
-        callback: cranelift_module::FuncId,
-        target: cranelift_module::FuncId,
+        tables: &Tables<'_>,
+        definition: (usize, cranelift_module::FuncId),
         observer: &impl profile::Observer,
         scratch: &mut Compilation,
     ) -> Result<()> {
+        let (index, function) = definition;
+        let build = observer.enter("build_glue");
         let context = &mut scratch.codegen;
         object.clear_context(context);
-        context.func.signature = abi::Signature::c(object, &[P, P], &[B]).clif;
+        context.func.signature = abi::Signature::c(object, &[P, P, P, P], &[B]).clif;
         let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
-        let zero = b.ins().iconst(types::I64, 0);
-        let f = object.declare_func_in_func(target, b.func);
-        let call = b.ins().call(f, &[args[0], args[1], zero]);
-        let result = b.inst_results(call)[0];
-        b.ins().return_(&[result]);
-        b.seal_all_blocks();
-        b.finalize(object.target_config());
-        observer.define(object, callback, context).map_err(error)
+        let failed = b.ins().iconst(types::I8, 0);
+        let caller_site = b.ins().iconst(types::I64, 0);
+        let mut g = Glue {
+            b,
+            object,
+            tables,
+            glues: self,
+            ctx: args[0],
+            caller_site,
+            failed,
+            calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
+            point: None,
+            list: Some(args[3]),
+        };
+        let plan = plan_type(tables, TypeRef(index as u32))?;
+        if plan.count() != 0 {
+            let cursor = g.load(args[2], 0);
+            let rank = g.icon(0);
+            g.resume(&plan, args[1], rank, cursor, args[2], args[3])?;
+        }
+        let done = g.b.ins().iconst(types::I8, 1);
+        g.b.ins().return_(&[done]);
+        g.b.seal_all_blocks();
+        g.b.finalize(g.object.target_config());
+        drop(build);
+        observer.define(object, function, context).map_err(error)
     }
     fn emit_buffer(
         &self,

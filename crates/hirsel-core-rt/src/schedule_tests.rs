@@ -74,15 +74,12 @@ unsafe extern "C" fn choose(state: *mut u8, count: usize) -> usize {
         selected
     }
 }
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 fn scalar<T>(logical: u64) -> ValueLayout {
     ValueLayout {
         bytes: size_of::<T>(),
         align: align_of::<T>(),
         logical,
-        drop: inert,
+        clean: None,
     }
 }
 fn descriptor<T>() -> TaskLayout {
@@ -96,6 +93,21 @@ struct Message {
     cell: *mut u8,
     index: u64,
     session: *mut Session,
+}
+/// The drain's view of `drop_message`: one whole step.
+unsafe extern "C" fn clean_message(
+    context: *mut Context,
+    value: *mut u8,
+    _: *mut u64,
+    list: *mut crate::counted::Worklist,
+) -> bool {
+    // SAFETY: the drain transfers the value as `drop_message` expects.
+    unsafe {
+        if drop_message(context, value) != 0 {
+            (*list).fail();
+        }
+    }
+    true
 }
 unsafe extern "C" fn drop_message(context: *mut Context, value: *mut u8) -> u8 {
     // SAFETY: exactly one sender/queue/receiver owns this message's prepaid resource.
@@ -121,7 +133,7 @@ unsafe extern "C" fn drop_message(context: *mut Context, value: *mut u8) -> u8 {
 }
 fn item() -> ValueLayout {
     ValueLayout {
-        drop: drop_message,
+        clean: Some(clean_message),
         ..scalar::<Message>(24)
     }
 }

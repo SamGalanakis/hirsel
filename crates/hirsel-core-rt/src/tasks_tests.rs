@@ -1,14 +1,11 @@
 use crate::{Context, abi::*, block::Block, causes, channel::*, tasks::*};
 use std::ptr;
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 fn value<T>(logical: u64) -> ValueLayout {
     ValueLayout {
         bytes: size_of::<T>(),
         align: align_of::<T>(),
         logical,
-        drop: inert,
+        clean: None,
     }
 }
 fn layout<X, R>(result: u64) -> TaskLayout {
@@ -329,6 +326,21 @@ struct Resource {
     pointer: *mut u8,
     site: u64,
 }
+/// The drain's view of `drop_resource`: one whole step.
+unsafe extern "C" fn clean_resource(
+    context: *mut Context,
+    value: *mut u8,
+    _: *mut u64,
+    list: *mut crate::counted::Worklist,
+) -> bool {
+    // SAFETY: the drain transfers the value as `drop_resource` expects.
+    unsafe {
+        if drop_resource(context, value) != 0 {
+            (*list).fail();
+        }
+    }
+    true
+}
 unsafe extern "C" fn drop_resource(context: *mut Context, value: *mut u8) -> u8 {
     // SAFETY: queue transfers a uniquely owned resource into this generated drop recipe.
     unsafe {
@@ -349,7 +361,7 @@ fn try_send_returns_owner_and_receiver_cleans_reverse_fifo_despite_failures() {
     // SAFETY: this fixture owns all resource/queue handles; drops consume each once.
     unsafe {
         let item = ValueLayout {
-            drop: drop_resource,
+            clean: Some(clean_resource),
             ..value::<Resource>(16)
         };
         let c = hirsel_core_channel_new(&mut context, 2, item, 1);
@@ -629,7 +641,7 @@ fn abandoning_successful_resource_result_propagates_its_finalizer_failure() {
             let descriptor = TaskLayout {
                 input: value::<()>(0),
                 result: ValueLayout {
-                    drop: drop_resource,
+                    clean: Some(clean_resource),
                     ..value::<Resource>(16)
                 },
             };

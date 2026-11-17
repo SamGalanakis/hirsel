@@ -35,45 +35,7 @@ pub(super) fn emit(
             _ => None,
         })
         .collect::<BTreeSet<_>>();
-    let inputs = pairs.iter().map(|(x, _)| *x).collect::<BTreeSet<_>>();
     let input = Value::Local(Local::INPUT);
-    for x in inputs {
-        let offset = input_offset(module, recipes, x);
-        sink.begin_function(
-            &format!("core_task_input_drop_{}", x.0),
-            &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr]),
-            &[Local::CONTEXT, Local::INPUT],
-            &FnAttrs::private(),
-        );
-        let data = Local::Named("x");
-        let status = Local::Named("status");
-        sink.instruction(
-            Some(data),
-            Operation::Gep {
-                ty: &Type::I8,
-                base: &input,
-                indices: &[(Type::I64, int(offset))],
-                inbounds: false,
-            },
-            None,
-        );
-        sink.instruction(
-            Some(status),
-            Operation::Call(
-                &drop_signature(),
-                &Value::global(format!("core_drop_{}", x.0)),
-                &[CONTEXT, data.into(), int(0)],
-                &CallAttrs::default(),
-            ),
-            None,
-        );
-        sink.instruction(
-            None,
-            Operation::Return(Some((&Type::I8, &status.into()))),
-            None,
-        );
-        sink.end_function();
-    }
     let body = Body::default();
     let result = Value::Local(Local::RESULT);
     for (x, r) in pairs {

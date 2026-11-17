@@ -1,11 +1,12 @@
 #ifndef HIRSEL_CORE_TASKS_H
 #define HIRSEL_CORE_TASKS_H
 #include "hirsel_core_rt.h"
-typedef uint8_t (*HirselCoreValueDrop)(HirselCoreContext *, void *);
+/* clean: the value's resumable cleanup in place, run on the active drain;
+   null for a task input, which the child body always cleans. */
 typedef struct {
     size_t bytes, alignment;
     uint64_t logical;
-    HirselCoreValueDrop drop;
+    HirselCoreDropRecipe clean;
 } HirselCoreValueLayout;
 typedef struct { HirselCoreValueLayout input, result; } HirselCoreTaskLayout;
 typedef uint8_t (*HirselCoreTaskBody)(HirselCoreContext *, void *destination, void *input);
@@ -24,6 +25,9 @@ typedef struct { uint8_t kind; HirselCoreCauseCell *causes; uint8_t status; } Hi
 HirselCoreJoin hirsel_core_join(HirselCoreContext *, HirselCoreTask *, void *result, uint64_t site);
 /* Result finalizer failure belongs to the abandoning task: returns status 1. */
 uint8_t hirsel_core_task_drop(HirselCoreContext *, HirselCoreTask *);
+/* Inside a running drain, the holder's cleanup is handed over at point:
+   these return whether it was (receiver and task always; Latest at its last handle). */
+bool hirsel_core_task_release(HirselCoreContext *, HirselCoreTask *, HirselCoreWorklist *, uint64_t point);
 typedef struct HirselCoreChannel HirselCoreChannel;
 typedef struct { HirselCoreChannel *sender, *receiver; uint64_t available; uint8_t status; } HirselCoreChannelNew;
 HirselCoreChannelNew hirsel_core_channel_new(HirselCoreContext *, uint64_t capacity, HirselCoreValueLayout, uint64_t site);
@@ -39,6 +43,7 @@ HirselCoreTransfer hirsel_core_receive(HirselCoreContext *, HirselCoreChannel *,
 uint8_t hirsel_core_try_receive(HirselCoreChannel *, void *destination);
 void hirsel_core_sender_drop(HirselCoreChannel *);
 uint8_t hirsel_core_receiver_drop(HirselCoreContext *, HirselCoreChannel *);
+bool hirsel_core_receiver_release(HirselCoreContext *, HirselCoreChannel *, HirselCoreWorklist *, uint64_t point);
 /* CONC-13 Latest[T]: one swappable Arc holder. new admits the root (null keeps
    node with the caller); read returns the root's node for the caller to share;
    publish installs node and returns the old holder for the caller to release.
@@ -46,11 +51,12 @@ uint8_t hirsel_core_receiver_drop(HirselCoreContext *, HirselCoreChannel *);
    (value 0). None waits, fails or observes cancellation. */
 typedef struct HirselCoreLatest HirselCoreLatest;
 typedef struct { HirselCoreLatest *latest; uint64_t available; } HirselCoreLatestNew;
-HirselCoreLatestNew hirsel_core_latest_new(HirselCoreContext *, void *node, HirselCoreValueDrop);
+HirselCoreLatestNew hirsel_core_latest_new(HirselCoreContext *, void *node, HirselCoreDropRecipe);
 HirselCoreLatest *hirsel_core_latest_handle(HirselCoreLatest *);
 void *hirsel_core_latest_publish(HirselCoreLatest *, void *node);
 void *hirsel_core_latest_read(HirselCoreLatest *);
 void hirsel_core_latest_drop(HirselCoreContext *, HirselCoreLatest *);
+bool hirsel_core_latest_release(HirselCoreLatest *, HirselCoreWorklist *, uint64_t point);
 /* Scheduler events include CHARGE (effectful foreign growth), CHECK_CANCEL
    (no request) and CAPACITY (requested, available). Only Full, Empty, no-request
    check, failed Arc unwrap and Capacity count as polls. */

@@ -172,9 +172,6 @@ fn no_source_or_none_site_keeps_numeric_fallback() {
         (101, "Bounds at 0\n".into())
     );
 }
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 unsafe extern "C" fn child(ctx: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
     // SAFETY: emitter-style prepaid resource finalization after the primary raise.
     unsafe {
@@ -192,7 +189,7 @@ unsafe extern "C" fn joined(ctx: *mut Context, _: *const Config, _: *mut MainRes
         bytes: 0,
         align: 1,
         logical: 0,
-        drop: inert,
+        clean: None,
     };
     // SAFETY: parent owns the child handle; zero-sized input/result need no storage.
     unsafe {

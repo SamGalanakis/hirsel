@@ -1,5 +1,5 @@
 //! Closed FORM runtime rows use their published C shapes. Layout descriptors
-//! carry producer-computed storage, charge and ordinary fallible drop glue.
+//! carry producer-computed storage, charge and the value's drain recipe.
 use super::storage::zeroext;
 use super::*;
 const P: Ty = Ty::Ptr;
@@ -27,12 +27,13 @@ impl FunctionEmitter<'_> {
                 self.store(&Type::I64, &int(value), &at, 8);
             }
             let at = self.offset(&buffer, (i * 32 + 24) as u64);
-            let drop = if task_input && i == 0 {
-                format!("core_task_input_drop_{}", t.0)
+            // A task input has no cleanup here: the child body always cleans it.
+            let clean = if task_input && i == 0 {
+                Value::Null
             } else {
-                format!("core_drop_c_{}", t.0)
+                Value::global(format!("core_clean_{}", t.0))
             };
-            self.store(&Type::Ptr, &Value::global(drop), &at, 8);
+            self.store(&Type::Ptr, &clean, &at, 8);
         }
         buffer
     }
@@ -326,7 +327,7 @@ impl FunctionEmitter<'_> {
                 &[
                     ptr(CONTEXT),
                     p(&args[0]),
-                    ptr(Value::global(format!("core_drop_c_{}", item.0))),
+                    ptr(Value::global(format!("core_clean_{}", item.0))),
                 ],
             ),
             RtOp::LatestHandle => {

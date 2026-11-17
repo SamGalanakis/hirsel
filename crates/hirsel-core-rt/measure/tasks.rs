@@ -7,15 +7,12 @@ use std::{
     ptr,
 };
 const MB: usize = 1_000_000;
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 fn scalar<T>(logical: u64) -> ValueLayout {
     ValueLayout {
         bytes: size_of::<T>(),
         align: align_of::<T>(),
         logical,
-        drop: inert,
+        clean: None,
     }
 }
 fn layout<X, R>(logical: u64) -> TaskLayout {

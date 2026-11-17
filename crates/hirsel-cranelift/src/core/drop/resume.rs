@@ -10,7 +10,7 @@ pub(super) enum Plan {
     Array(u64, u64, Box<Plan>),
 }
 impl Plan {
-    fn count(&self) -> u64 {
+    pub(super) fn count(&self) -> u64 {
         match self {
             Self::Empty => 0,
             Self::Leaf(_) => 1,
@@ -265,6 +265,33 @@ impl Glue<'_, '_, '_> {
                     FieldTy::Inline(t) => {
                         self.drop_type(base, *t);
                         yields = false;
+                    }
+                    // A runtime holder begins its cleanup and hands it over
+                    // (CONC-8, CONC-9, CONC-13); a Latest only at its last handle.
+                    FieldTy::Handle(
+                        h @ (hirsel_core_layout::Handle::Receiver
+                        | hirsel_core_layout::Handle::Task
+                        | hirsel_core_layout::Handle::Latest),
+                    ) => {
+                        let point = self.next_point();
+                        let staged = if *h == hirsel_core_layout::Handle::Latest {
+                            self.call(
+                                "hirsel_core_latest_release",
+                                &[P, P, U],
+                                &[B],
+                                &[node, list, point],
+                            )?[0]
+                        } else {
+                            let name = if *h == hirsel_core_layout::Handle::Task {
+                                "hirsel_core_task_release"
+                            } else {
+                                "hirsel_core_receiver_release"
+                            };
+                            self.call(name, &[P, P, P, U], &[B], &[self.ctx, node, list, point])?[0]
+                        };
+                        let handed = self.b.create_block();
+                        self.b.ins().brif(staged, handed, &[], skip, &[]);
+                        self.b.switch_to_block(handed);
                     }
                     // A handle or an owned closure is released whole in place.
                     FieldTy::Handle(_) | FieldTy::OwnFn => {

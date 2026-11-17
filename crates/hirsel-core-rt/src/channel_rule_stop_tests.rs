@@ -16,15 +16,12 @@ impl Drop for Witness {
         }
     }
 }
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 fn scalar<T>() -> ValueLayout {
     ValueLayout {
         bytes: size_of::<T>(),
         align: align_of::<T>(),
         logical: 0,
-        drop: inert,
+        clean: None,
     }
 }
 unsafe extern "C" fn child_body(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {

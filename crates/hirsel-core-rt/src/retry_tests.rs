@@ -39,15 +39,12 @@ unsafe extern "C" fn choose(state: *mut u8, n: usize) -> usize {
         choice
     }
 }
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 fn value<T>() -> ValueLayout {
     ValueLayout {
         bytes: size_of::<T>(),
         align: align_of::<T>(),
         logical: 0,
-        drop: inert,
+        clean: None,
     }
 }
 #[derive(Clone, Copy)]

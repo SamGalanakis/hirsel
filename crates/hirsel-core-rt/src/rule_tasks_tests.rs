@@ -75,6 +75,21 @@ unsafe extern "C" fn child(_: *mut Context, out: *mut u8, input: *mut u8) -> u8 
     }
     0
 }
+/// The drain's view of `result_drop`: one whole step.
+unsafe extern "C" fn clean_result(
+    context: *mut Context,
+    value: *mut u8,
+    _: *mut u64,
+    list: *mut crate::counted::Worklist,
+) -> bool {
+    // SAFETY: the drain transfers the value as `result_drop` expects.
+    unsafe {
+        if result_drop(context, value) != 0 {
+            (*list).fail();
+        }
+    }
+    true
+}
 unsafe extern "C" fn result_drop(context: *mut Context, result: *mut u8) -> u8 {
     // SAFETY: abandonment transfers the initialized result once to this cleanup.
     unsafe {
@@ -98,7 +113,7 @@ unsafe extern "C" fn abandon(context: *mut Context, out: *mut u8, _: *mut u8) ->
             TaskLayout {
                 input: value::<*mut u64>(0),
                 result: ValueLayout {
-                    drop: result_drop,
+                    clean: Some(clean_result),
                     ..value::<ResultValue>(16)
                 },
             },

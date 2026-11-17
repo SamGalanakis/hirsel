@@ -15,6 +15,24 @@ use std::sync::atomic::{AtomicU64, Ordering, fence};
 /// Never recurse, allocate, fail, run user code, or free the current node.
 pub type Recipe = unsafe extern "C" fn(*mut Context, *mut u8, *mut u64, *mut Worklist) -> bool;
 
+/// One step of a runtime holder's cleanup through the active drain: clean what
+/// the holder still owns, staging at most one descendant, and return false to
+/// resume after it. Return true only once the holder has finished its own
+/// completion (its state transition and refund); the holder may be gone then.
+pub(crate) type Step = unsafe fn(*mut Context, *mut Holder, *mut Worklist) -> bool;
+
+/// The frame of a runtime holder (a receiver's queue, an abandoned task's
+/// result, a Latest's root) while it cleans through a drain. It lives in the
+/// holder's own record, in words only its cleanup uses from then on.
+#[repr(C)]
+pub(crate) struct Holder {
+    next: usize,
+    step: Step,
+}
+
+/// Marks a staged holder in the worklist's descriptor word.
+const HOLDER: *const Descriptor = std::ptr::without_provenance(8);
+
 /// A drain's suspended blocks, newest first, and the descendant the running
 /// glue has just handed over. A parent's frame is written only after its glue
 /// returns, so the parent is always linked under the descendant (postorder).
@@ -22,7 +40,8 @@ pub type Recipe = unsafe extern "C" fn(*mut Context, *mut u8, *mut u64, *mut Wor
 #[repr(C)]
 pub struct Worklist {
     /// 0 when empty. With bit 0 set, the address of a suspended fixed block's
-    /// A word; otherwise a dead GRAPH buffer's payload.
+    /// A word; with bit 1 set, a holder's frame; otherwise a dead GRAPH
+    /// buffer's payload.
     head: usize,
     /// The staged descendant, null when none.
     node: *mut u8,
@@ -47,6 +66,11 @@ const _: () = assert!(std::mem::offset_of!(Worklist, failed) == crate::abi_layou
 type Fixed = (NonNull<u8>, *const Descriptor, u64);
 
 impl Worklist {
+    /// Record a failure of something this drain cleaned (FAIL-10).
+    #[cfg(test)]
+    pub(crate) fn fail(&mut self) {
+        self.failed = 1;
+    }
     fn staged(&self) -> bool {
         !self.node.is_null()
     }
@@ -82,7 +106,20 @@ impl Worklist {
         self.descriptor = std::ptr::null();
         self.point = point;
     }
-    /// Link a staged buffer above the head; return a staged fixed block to run.
+    /// Hand over a runtime holder whose cleanup has begun; its next step runs
+    /// once it is linked.
+    /// # Safety
+    /// As for stage_fixed; the holder stays live until its step returns true.
+    pub(crate) unsafe fn stage_holder(&mut self, holder: *mut Holder, step: Step, point: u64) {
+        debug_assert!(!self.staged());
+        // SAFETY: the caller hands over the holder's frame words.
+        unsafe { (*holder).step = step };
+        self.node = holder.cast();
+        self.descriptor = HOLDER;
+        self.point = point;
+    }
+    /// Link a staged buffer or holder above the head; return a staged fixed
+    /// block to run.
     unsafe fn take(&mut self) -> Option<Fixed> {
         let node = std::mem::replace(&mut self.node, std::ptr::null_mut());
         let buffer = NonNull::new(node)?;
@@ -90,6 +127,11 @@ impl Worklist {
             // SAFETY: stage_buffer wrote this frame; the buffer is ours.
             unsafe { (*block::dead(buffer)).next = self.head };
             self.head = node as usize;
+            None
+        } else if self.descriptor == HOLDER {
+            // SAFETY: stage_holder handed over this frame.
+            unsafe { (*node.cast::<Holder>()).next = self.head };
+            self.head = node as usize | 2;
             None
         } else {
             Some((buffer, self.descriptor, 0))
@@ -194,15 +236,39 @@ pub(crate) unsafe fn drain(
     descriptor: *const Descriptor,
     site: u64,
 ) -> bool {
-    let mut list = Worklist {
-        head: 0,
-        node: std::ptr::null_mut(),
-        descriptor: std::ptr::null(),
-        point: 0,
-        site,
-        failed: 0,
-    };
-    let mut current = Some((node, descriptor, 0));
+    let mut list = Worklist::new(site);
+    // SAFETY: as this function's contract.
+    unsafe { run(context, &mut list, Some((node, descriptor, 0))) }
+}
+
+/// Run a holder's cleanup, begun by its caller, to the end with constant native
+/// stack. Returns whether anything it cleaned failed (FAIL-10).
+/// # Safety
+/// The holder's cleanup has begun and its frame words are free; the context is live.
+pub(crate) unsafe fn drain_holder(context: *mut Context, holder: *mut Holder, step: Step) -> bool {
+    let mut list = Worklist::new(0);
+    // SAFETY: as this function's contract.
+    unsafe {
+        list.stage_holder(holder, step, 0);
+        let current = list.take();
+        run(context, &mut list, current)
+    }
+}
+
+impl Worklist {
+    fn new(site: u64) -> Self {
+        Worklist {
+            head: 0,
+            node: std::ptr::null_mut(),
+            descriptor: std::ptr::null(),
+            point: 0,
+            site,
+            failed: 0,
+        }
+    }
+}
+
+unsafe fn run(context: *mut Context, list: &mut Worklist, mut current: Option<Fixed>) -> bool {
     // SAFETY: glue keeps unfinished blocks live and hands over one exclusively
     // owned descendant per run; a frame occupies only words its glue no longer
     // reads (hirsel_core_layout::frames).
@@ -211,7 +277,7 @@ pub(crate) unsafe fn drain(
             if let Some((node, descriptor, mut cursor)) = current.take() {
                 let d = &*descriptor;
                 let payload = node.as_ptr().add(d.payload_offset as usize);
-                if (d.recipe)(context, payload, &mut cursor, &mut list) {
+                if (d.recipe)(context, payload, &mut cursor, list) {
                     debug_assert!(!list.staged());
                     block::free_dead_in(&*context, node, d.charge);
                     continue;
@@ -258,10 +324,20 @@ pub(crate) unsafe fn drain(
                 } else {
                     current = Some((node, descriptor, cursor));
                 }
+            } else if list.head & 2 != 0 {
+                let holder = (list.head & !2) as *mut Holder;
+                // Read first: a finished step may have freed the holder.
+                let next = (*holder).next;
+                if ((*holder).step)(context, holder, list) {
+                    debug_assert!(!list.staged());
+                    list.head = next;
+                } else {
+                    current = list.take();
+                }
             } else {
                 let buffer = NonNull::new_unchecked(list.head as *mut u8);
                 let frame = &mut *block::dead(buffer);
-                if (frame.recipe)(context, frame.payload, &mut frame.cursor, &mut list) {
+                if (frame.recipe)(context, frame.payload, &mut frame.cursor, list) {
                     list.head = frame.next;
                     block::free_dead_in(&*context, buffer, frame.charge);
                 } else {

@@ -34,19 +34,23 @@ impl Function<'_, '_, '_> {
                     (i * 32 + j * 8) as i32,
                 );
             }
-            let function = self.calls.reference(
-                self.object,
-                &mut self.b,
-                if task_input && i == 0 {
-                    self.task_entries.inputs[&t]
-                } else {
-                    self.glues.callbacks[t.index()].unwrap()
-                },
+            // A task input has no cleanup here: the child body always cleans it.
+            let clean = if task_input && i == 0 {
+                self.b.ins().iconst(types::I64, 0)
+            } else {
+                let function = self.calls.reference(
+                    self.object,
+                    &mut self.b,
+                    self.glues.values[t.index()].unwrap(),
+                );
+                self.b.ins().func_addr(types::I64, function)
+            };
+            self.b.ins().store(
+                MemFlagsData::trusted(),
+                clean,
+                storage,
+                (i * 32 + 24) as i32,
             );
-            let drop = self.b.ins().func_addr(types::I64, function);
-            self.b
-                .ins()
-                .store(MemFlagsData::trusted(), drop, storage, (i * 32 + 24) as i32);
         }
         Ok(storage)
     }
@@ -438,17 +442,17 @@ impl Function<'_, '_, '_> {
                 1
             }
             RtOp::LatestNew { item } => {
-                let drop = self.calls.reference(
+                let clean = self.calls.reference(
                     self.object,
                     &mut self.b,
-                    self.glues.callbacks[item.index()].unwrap(),
+                    self.glues.values[item.index()].unwrap(),
                 );
-                let drop = self.b.ins().func_addr(types::I64, drop);
+                let clean = self.b.ins().func_addr(types::I64, clean);
                 let values = self.c_call(
                     "hirsel_core_latest_new",
                     &[P, P, P],
                     &[P, U],
-                    &[self.context, args[0], drop],
+                    &[self.context, args[0], clean],
                 )?;
                 outputs[0] = values[0];
                 outputs[1] = values[1];

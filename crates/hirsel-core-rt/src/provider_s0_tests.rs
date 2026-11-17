@@ -242,15 +242,12 @@ unsafe extern "C" fn job(context: *mut Context, _: *mut u8, input: *mut u8) -> u
         u8::from(outcome.status != 0 || check != 0)
     }
 }
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 fn job_layout() -> TaskLayout {
     let value = |bytes| ValueLayout {
         bytes,
         align: 8,
         logical: 0,
-        drop: inert,
+        clean: None,
     };
     TaskLayout {
         input: value(size_of::<Job>()),
@@ -909,13 +906,13 @@ fn cancelled_file_op(operation: u8, issued: bool) -> Rec {
                         bytes: size_of::<FileJob>(),
                         align: 8,
                         logical: 0,
-                        drop: inert,
+                        clean: None,
                     },
                     result: ValueLayout {
                         bytes: 0,
                         align: 8,
                         logical: 0,
-                        drop: inert,
+                        clean: None,
                     },
                 },
                 0,
@@ -987,13 +984,13 @@ unsafe fn tick(context: *mut Context) {
                 bytes: 0,
                 align: 1,
                 logical: 0,
-                drop: inert,
+                clean: None,
             },
             result: ValueLayout {
                 bytes: 0,
                 align: 1,
                 logical: 0,
-                drop: inert,
+                clean: None,
             },
         };
         let task =
@@ -1322,13 +1319,13 @@ unsafe fn shield_parent(context: *mut Context, rec: *mut Rec) {
                 bytes: size_of::<ShieldJob>(),
                 align: 8,
                 logical: 0,
-                drop: inert,
+                clean: None,
             },
             result: ValueLayout {
                 bytes: 0,
                 align: 8,
                 logical: 0,
-                drop: inert,
+                clean: None,
             },
         };
         let task = hirsel_core_spawn(
@@ -1577,7 +1574,7 @@ unsafe fn spawn_os(context: *mut Context, site: u64, steps: &'static [OsStep]) -
         bytes,
         align: 8,
         logical: 0,
-        drop: inert,
+        clean: None,
     };
     let layout = TaskLayout {
         input: value(size_of::<OsJob>()),

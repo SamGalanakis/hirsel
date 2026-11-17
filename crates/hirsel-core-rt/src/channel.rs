@@ -4,6 +4,7 @@ use crate::{
     Context,
     block::Block,
     causes::{self, Cause},
+    counted::{self, Holder, Worklist},
     tasks::{self, Storage, ValueLayout},
 };
 use hirsel_core_layout::charge;
@@ -15,6 +16,10 @@ enum Receiver {
     Gone,
 }
 pub struct Channel {
+    /// The receiver's cleanup frame once it is Cleaning.
+    holder: std::mem::MaybeUninit<Holder>,
+    /// How far the newest queued item's cleanup has got.
+    cursor: u64,
     id: u64,
     senders: u64,
     receiver: Receiver,
@@ -75,6 +80,8 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
             .unwrap_or_else(|| crate::process::stop(b"HostMemory"));
         let id = tasks::identity();
         let channel = Box::into_raw(Box::new(Channel {
+            holder: std::mem::MaybeUninit::uninit(),
+            cursor: 0,
             id,
             senders: 1,
             receiver: Receiver::Open,
@@ -300,6 +307,53 @@ pub unsafe extern "C" fn hirsel_core_sender_drop(channel: *mut Channel) {
         }
     }
 }
+/// Close the receiver and begin cleaning what is queued. From here only this
+/// cleanup touches the queue: a sender sees the receiver closed.
+unsafe fn receiver_begin(context: *mut Context, channel: *mut Channel) -> *mut Holder {
+    // SAFETY: the caller transfers the sole receiver.
+    unsafe {
+        (*context).cancel_shield += 1;
+        (*channel).receiver = Receiver::Cleaning;
+        tasks::event_then_wake(tasks::CLOSE, (*channel).id, 1);
+        (*channel).cursor = 0;
+        (*channel).holder.as_mut_ptr()
+    }
+}
+/// Clean the queued items, last published first, each to the end before the
+/// next (CONC-9); a failing item never stops the rest (FAIL-10). Then the
+/// receiver is gone, and the last end of the channel frees it.
+unsafe fn receiver_step(context: *mut Context, holder: *mut Holder, list: *mut Worklist) -> bool {
+    // SAFETY: the frame is the Cleaning receiver's; storage outlives the items.
+    unsafe {
+        let channel = holder
+            .cast::<u8>()
+            .sub(std::mem::offset_of!(Channel, holder))
+            .cast::<Channel>();
+        while (*channel).len != 0 {
+            let newest = (*channel).len - 1;
+            let rest = (*channel).capacity - (*channel).head;
+            let at = if newest >= rest {
+                newest - rest
+            } else {
+                (*channel).head + newest
+            };
+            let item = (*channel).storage.as_ptr().add(at * (*channel).item.bytes);
+            if let Some(clean) = (*channel).item.clean
+                && !clean(context, item, &mut (*channel).cursor, list)
+            {
+                return false;
+            }
+            (*channel).cursor = 0;
+            (*channel).len = newest;
+        }
+        (*channel).receiver = Receiver::Gone;
+        if (*channel).senders == 0 {
+            drop(Box::from_raw(channel));
+        }
+        (*context).cancel_shield -= 1;
+        true
+    }
+}
 /// # Safety
 /// Transfers the sole receiver. Each queued item is cleaned in reverse publication
 /// order, under cancellation shielding. Its own prepaid resource cells add causes;
@@ -309,31 +363,28 @@ pub unsafe extern "C" fn hirsel_core_receiver_drop(
     context: *mut Context,
     channel: *mut Channel,
 ) -> u8 {
-    // SAFETY: receiver retains queue storage throughout possibly blocking item drops.
+    // SAFETY: as receiver_begin; the drain runs the cleanup to its end.
     unsafe {
-        (*context).cancel_shield += 1;
-        (*channel).receiver = Receiver::Cleaning;
-        tasks::event_then_wake(tasks::CLOSE, (*channel).id, 1);
-        let mut failed = 0;
-        while (*channel).len != 0 {
-            (*channel).len -= 1;
-            let rest = (*channel).capacity - (*channel).head;
-            let at = if (*channel).len >= rest {
-                (*channel).len - rest
-            } else {
-                (*channel).head + (*channel).len
-            };
-            failed |= ((*channel).item.drop)(
-                context,
-                (*channel).storage.as_ptr().add(at * (*channel).item.bytes),
-            );
-        }
-        (*channel).receiver = Receiver::Gone;
-        if (*channel).senders == 0 {
-            drop(Box::from_raw(channel));
-        }
-        (*context).cancel_shield -= 1;
-        failed
+        let holder = receiver_begin(context, channel);
+        u8::from(counted::drain_holder(context, holder, receiver_step))
+    }
+}
+/// Release the sole receiver inside a running drain: begin its cleanup and
+/// hand it over at `point`. Always stages, so always returns true.
+/// # Safety
+/// As hirsel_core_receiver_drop; `list` is the running drain's.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_receiver_release(
+    context: *mut Context,
+    channel: *mut Channel,
+    list: *mut Worklist,
+    point: u64,
+) -> bool {
+    // SAFETY: as hirsel_core_receiver_drop.
+    unsafe {
+        let holder = receiver_begin(context, channel);
+        (*list).stage_holder(holder, receiver_step, point);
+        true
     }
 }
 

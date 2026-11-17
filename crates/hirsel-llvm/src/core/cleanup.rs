@@ -109,7 +109,9 @@ pub(super) fn drop_glue(
 ) -> Result<()> {
     let mut normal = BTreeSet::new();
     let mut counted = BTreeSet::new();
-    let mut callbacks = BTreeSet::new();
+    // The values runtime holders keep (a task's result, a channel's item, a
+    // Latest's root), cleaned in place on the active drain.
+    let mut values = BTreeSet::new();
     let mut pending = Vec::new();
     for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
@@ -118,17 +120,27 @@ pub(super) fn drop_glue(
                 Inst::Release { ty, .. } => pending.push((ty.index(), true)),
                 Inst::Call { call } => match body.calls[call.index()].callee {
                     Callee::Runtime(RtOp::Spawn { x, r }) => {
-                        callbacks.insert(r.index());
+                        values.insert(r.index());
                         pending.push((x.index(), false));
                         pending.push((r.index(), false));
                     }
                     Callee::Runtime(RtOp::ChannelNew { item } | RtOp::LatestNew { item }) => {
-                        callbacks.insert(item.index());
+                        values.insert(item.index());
                         pending.push((item.index(), false))
                     }
                     _ => {}
                 },
                 _ => {}
+            }
+        }
+    }
+    for &t in &values {
+        if let Some(drop) = &recipes[t].drop
+            && drop.finalizer.is_none()
+            && module.types[t].repr != Repr::Resource
+        {
+            for field in drop.fields.iter().flatten() {
+                cleanup_dependencies(&field.ty, true, &mut pending);
             }
         }
     }
@@ -270,30 +282,9 @@ pub(super) fn drop_glue(
             e.ret(&Type::I8, &failed);
         }
         sink.end_function();
-        if callbacks.contains(&t) {
-            sink.begin_function(
-                &format!("core_drop_c_{t}"),
-                &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr]),
-                &[Local::CONTEXT, Local::PAYLOAD],
-                &FnAttrs::private(),
-            );
-            let r = Local::Named("r");
-            sink.instruction(
-                Some(r),
-                Operation::Call(
-                    &drop_signature(),
-                    &Value::global(drop_name),
-                    &[CONTEXT, payload.clone(), int(0)],
-                    &CallAttrs::default(),
-                ),
-                None,
-            );
-            sink.instruction(None, Operation::Return(Some((&Type::I8, &r.into()))), None);
-            sink.end_function();
-        }
     }
     let mut sequences = Vec::new();
-    for &t in &counted {
+    for &t in counted.iter().chain(&values) {
         if let Some(drop) = &recipes[t].drop {
             for field in drop.fields.iter().flatten() {
                 collections::collect(&field.ty, &mut sequences);
@@ -302,6 +293,9 @@ pub(super) fn drop_glue(
     }
     counted_glue(
         module, target, recipes, failures, facts, &counted, sink, items,
+    )?;
+    value_glue(
+        module, target, recipes, failures, facts, &values, sink, items,
     )?;
     collections::glue(
         module, target, recipes, failures, facts, &sequences, sink, items,
@@ -629,6 +623,41 @@ impl FunctionEmitter<'_> {
             {
                 self.clean_whole(field, p)?;
             }
+            // A runtime holder begins its cleanup and hands it over (CONC-8,
+            // CONC-9, CONC-13); a Latest only at its last handle.
+            FieldTy::Handle(
+                h @ (hirsel_core_layout::Handle::Receiver
+                | hirsel_core_layout::Handle::Task
+                | hirsel_core_layout::Handle::Latest),
+            ) => {
+                let handle = self.load(&Type::Ptr, p, 1);
+                let point = self.next_point();
+                let list = Value::Local(Local::WORKLIST);
+                let bool_ = Ty::Scalar(Scalar::Bool);
+                let staged = if *h == hirsel_core_layout::Handle::Latest {
+                    self.native_call(
+                        "hirsel_core_latest_release",
+                        &[bool_],
+                        &[ptr(handle), ptr(list), word(int(point))],
+                    )
+                } else {
+                    let name = if *h == hirsel_core_layout::Handle::Task {
+                        "hirsel_core_task_release"
+                    } else {
+                        "hirsel_core_receiver_release"
+                    };
+                    self.native_call(
+                        name,
+                        &[bool_],
+                        &[ptr(CONTEXT), ptr(handle), ptr(list), word(int(point))],
+                    )
+                }
+                .remove(0);
+                let handed = Label::new("handed", n);
+                self.cond(&staged, handed, Label::plain("resume"));
+                self.block(handed);
+                self.ret(&Type::I1, &FALSE);
+            }
             FieldTy::Handle(_) | FieldTy::OwnFn => self.clean_whole(field, p)?,
             FieldTy::Inline(t) => {
                 let drop = self.recipes[t.index()].drop.as_ref().unwrap();
@@ -931,6 +960,55 @@ fn counted_glue(
             Some(frames.points.len() as u64),
             "glue and frames number suspension points alike"
         );
+        e.ret(&Type::I1, &true.into());
+        drop(e);
+        sink.end_function();
+    }
+    Ok(())
+}
+
+/// A held value's cleanup in place (`core_clean_T`), resumable as a drain
+/// recipe with no frame of its own: its holder keeps the cursor. Finalizers
+/// inherit no site.
+#[allow(clippy::too_many_arguments)]
+fn value_glue(
+    module: &Module,
+    target: Target,
+    recipes: &[hirsel_core_layout::Recipe],
+    failures: &failure::Failures,
+    facts: bool,
+    values: &BTreeSet<usize>,
+    sink: &mut dyn Sink,
+    items: &mut Items,
+) -> Result<()> {
+    let empty = Body::default();
+    for &t in values {
+        sink.begin_function(
+            &format!("core_clean_{t}"),
+            &step_signature(),
+            &STEP_PARAMS,
+            &FnAttrs::private(),
+        );
+        let mut e = glue_emitter(
+            module,
+            recipes,
+            failures,
+            facts,
+            &empty,
+            abi::Return::on_target(target, &[]),
+            false,
+            int(0),
+            &mut *sink,
+            &mut *items,
+        );
+        let field = FieldTy::Inline(TypeRef(t as u32));
+        let cursor_at = Value::Local(Local::CURSOR);
+        e.br(Label::plain("resume"));
+        e.block(Label::plain("resume"));
+        let cursor = e.load(&Type::I64, &cursor_at, 0);
+        let next = e.bin(Binary::Add, &Type::I64, &cursor, &int(1));
+        e.store(&Type::I64, &next, &cursor_at, 0);
+        e.mechanical_field(&field, &Local::PAYLOAD.into(), &cursor, 0)?;
         e.ret(&Type::I1, &true.into());
         drop(e);
         sink.end_function();

@@ -61,22 +61,22 @@
     "suite-edit": {
       "instructions_per_token": {
         "parse": 444.96008962330205,
-        "index": 6.91385012050894,
+        "index": 6.7260803766605015,
         "resolve": 254.41534799047753,
         "input counts": 8.46365114063113,
         "declarations": 108.86990617560566,
         "body keys/new": 58.40078420389301,
-        "body keys/for_body": 10.338546045625245,
+        "body keys/for_body": 10.11434336640323,
         "body keys": 68.80548942725109,
-        "image read": 11.68095958746707,
-        "image digest": 3.9795975561907966,
-        "image index": 176.80062776750182
+        "image read": 11.022364217252397,
+        "image digest": 3.744184743007679,
+        "image index": 169.62053696541673
       },
       "image_per_token": {
-        "records_opened": 0.0029157558432823276,
-        "bytes_read": 12.005510341348579,
-        "digests": 0.0029157558432823276,
-        "digest_bytes": 11.888880107617286,
+        "records_opened": 0.0027442407936774846,
+        "bytes_read": 11.300926517571886,
+        "digests": 0.0027442407936774846,
+        "digest_bytes": 11.191156885824785,
         "index_calls": 0.9857827476038338,
         "key_probes": 0.09230368252900623,
         "row_demands": 0.024126450311081217,

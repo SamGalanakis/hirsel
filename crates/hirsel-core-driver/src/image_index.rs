@@ -83,7 +83,10 @@ impl Writer {
             self.bytes.extend_from_slice(row);
         }
         let slots = keys.map(|keys| {
-            let count = (rows.len() * 2).max(2).next_power_of_two();
+            // Keep a quarter of the slots empty for terminating linear probes.
+            let count = (rows.len() + rows.len().div_ceil(3))
+                .max(2)
+                .next_power_of_two();
             let mask = count - 1;
             let mut slots = vec![0u64; count];
             for (row, (bytes, &key)) in rows.iter().zip(keys).enumerate() {
@@ -292,15 +295,25 @@ impl DiskIndex {
         }
         Ok(true)
     }
-    fn u32(&self, pages: &Pages, at: u64) -> io::Result<u32> {
-        let mut bytes = [0; 4];
+    #[inline]
+    fn fixed<const N: usize>(&self, pages: &Pages, at: u64) -> io::Result<[u8; N]> {
+        let offset = usize::try_from(at).map_err(|_| damaged(pages))?;
+        if let Some(bytes) = self
+            .page(pages, offset / PAGE)?
+            .get(offset % PAGE..)
+            .and_then(|tail| tail.get(..N))
+        {
+            return Ok(bytes.try_into().unwrap());
+        }
+        let mut bytes = [0; N];
         self.read(pages, at, &mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
+        Ok(bytes)
+    }
+    fn u32(&self, pages: &Pages, at: u64) -> io::Result<u32> {
+        Ok(u32::from_le_bytes(self.fixed(pages, at)?))
     }
     fn u64(&self, pages: &Pages, at: u64) -> io::Result<u64> {
-        let mut bytes = [0; 8];
-        self.read(pages, at, &mut bytes)?;
-        Ok(u64::from_le_bytes(bytes))
+        Ok(u64::from_le_bytes(self.fixed(pages, at)?))
     }
     fn span(&self, pages: &Pages, section: &Section, index: u32) -> io::Result<(u64, usize)> {
         let start = self.u32(pages, section.offsets + 4 * u64::from(index))?;
@@ -471,6 +484,7 @@ mod tests {
         writer.table(&Table::<Vec<u8>>::default()).unwrap();
         writer.table(&Table::from(rows.clone())).unwrap();
         writer.table(&Table::from(vec![big.clone()])).unwrap();
+        let bytes = writer.bytes.clone();
         let (sections, _) = writer.finish(&store).unwrap();
         let lens: Vec<u32> = [0, strings.len(), 2, numbers.len(), 1, 0, rows.len(), 1]
             .map(|n| n as u32)
@@ -512,6 +526,19 @@ mod tests {
             assert_eq!(index.row(d(6), i as u32).unwrap(), encode(row).unwrap());
         }
         assert_eq!(index.row(d(7), 0).unwrap(), encode(&big).unwrap());
+        let pages = index.installed().unwrap();
+        for at in 0..=bytes.len() + 8 {
+            let expected = bytes
+                .get(at..at + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+            assert_eq!(index.u32(pages, at as u64).ok(), expected, "u32 at {at}");
+            let expected = bytes
+                .get(at..at + 8)
+                .map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+            assert_eq!(index.u64(pages, at as u64).ok(), expected, "u64 at {at}");
+        }
+        assert!(index.u32(pages, u64::MAX).is_err());
+        assert!(index.u64(pages, u64::MAX).is_err());
     }
 
     /// Law: lookups racing from several threads on a cold image answer what

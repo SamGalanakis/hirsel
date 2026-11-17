@@ -11064,6 +11064,83 @@ fn journal_test_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     if journal_law_streams(d, c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
+fn step_row(s: Snapshot, t: Shape[u64, u64], k: u64) -> Option[u64] {
+    let seen = result.unwrap(look(s, None, scoped fn(tx: Tx) -> Result[Option[u64], Error] {
+        fetch(tx, t, k)
+    }))
+    match take seen {
+        Seen(v) => match v.value { Ok(x) => x, _ => None },
+        _ => None
+    }
+}
+
+// L32 on disk. (a) A body that puts row 7 and then loops, run with
+// Some(65536), is Stopped(OutOfTime { steps: 65536 }); the version, the
+// account, the frame count and the journal's end are unchanged, row 7 is
+// absent from main, after durable of the last earlier ticket and after
+// reopen, and the next run commits at version + 1. (c) The same terminating
+// body shape run with None and with Some(1048576) answers the same value,
+// advances the version by one each time and writes frames of equal size
+// (keys 8 and 9 encode to equal lengths, and so do their values). Wrong
+// implementations caught: a stop that still publishes or hands its frame
+// over (stop_after_publish); a stop reported as another outcome
+// (stop_as_failed, run as a Refused stand-in); (c) a bounded run that
+// writes no frame or a different one (bounded_no_frame).
+pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let dir = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 4194304
+    let mut db = result.unwrap(open(tasks, dir, c, r, options))
+    result.unwrap(create_table(mut db, spec("steps", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 10) { return false }
+    let earlier = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let before = db.heads[0].head
+    let live = db.resident
+    let frames = db.frame_seq
+    let end = db.file_end
+    let ran = result.unwrap(run(mut db, Some(65536u64), scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 7u64, 70u64)?
+        loop {}
+    }))
+    match take ran { Stopped(e) => if e.steps != 65536 { return false }, _ => return false }
+    if db.heads[0].head != before || db.resident != live || db.frame_seq != frames || db.file_end != end { return false }
+    let main = main_branch(db)
+    if let Some(_) = step_row(result.unwrap(snapshot_of(db, main)), shape(t), 7) { return false }
+    result.unwrap(durable(mut db, earlier))
+    if let Some(_) = step_row(snapshot(db), shape(t), 7) { return false }
+    // (c): None, then Some with room to finish.
+    let open_end = db.file_end
+    let unbounded = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[u64, Error] {
+        put(mut tx, t, 8u64, 80u64)?
+        Ok(5u64)
+    }))
+    match take unbounded { Committed(done) => if done.value != 5 { return false }, _ => return false }
+    if db.heads[0].head != before + 1 { return false }
+    let unbounded_bytes = db.file_end - open_end
+    let bounded_end = db.file_end
+    let bounded = result.unwrap(run(mut db, Some(1048576u64), scoped fn(mut tx: Tx) -> Result[u64, Error] {
+        put(mut tx, t, 9u64, 90u64)?
+        Ok(5u64)
+    }))
+    let last = match take bounded { Committed(done) => if done.value != 5 { return false } else { done.ticket }, _ => return false }
+    if db.heads[0].head != before + 2 || db.file_end - bounded_end != unbounded_bytes || unbounded_bytes == 0 { return false }
+    result.unwrap(durable(mut db, last))
+    result.unwrap(close(take db))
+    let mut after = result.unwrap(open(tasks, dir, c, r, options))
+    let t2 = result.unwrap(table(mut after, "steps", std.codec.key_u64(), std.codec.of_u64()))
+    let s = snapshot(after)
+    let good = after.heads[0].head == before + 2 && step_row(s, shape(t2), 7) == None &&
+        step_row(s, shape(t2), 1) == Some(10u64) && step_row(s, shape(t2), 8) == Some(80u64) && step_row(s, shape(t2), 9) == Some(90u64)
+    result.unwrap(close(take after))
+    good
+}
+
+@test
+fn journal_test_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_step_stop(d, c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
 pub fn journal_law_recorded_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     journal_recorded_case(disk_test_directory(d), c, r, tasks, false) && journal_recorded_case(disk_test_directory(d), c, r, tasks, true)
 }

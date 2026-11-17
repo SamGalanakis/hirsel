@@ -217,7 +217,8 @@ def record_visible(trace, observed):
             if trace['header']['has_digest']:
                 if outcome['kind'] == 'Returned':
                     observed['admit'].add('Returned')
-                    observed['reply'].add('Returned')
+                    is_error = len(outcome['payload']) >= 4 and int.from_bytes(bytes(outcome['payload'][:4]), 'little') == 1
+                    observed['reply'].add('typed error' if is_error else 'Returned')
                 elif outcome['kind'] == 'Failed' and outcome['payload'] == [3]:
                     observed['reply'].add('Failed(Gone)')
                 elif outcome['kind'] == 'Refused':

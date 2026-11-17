@@ -1,0 +1,219 @@
+// The bounded seeded client driver. The target lands after S5b and uses the
+// runner's in-process API; it adds no observer hooks to the runner or store.
+pub type Mix: codec + send = Correct | ReuseWhileLive | RecoverNewBytes | NoDirectory | AdvanceOnRefusal
+type Reg = runner.Registry[(), observe_fixture.Handles]
+type Drive: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks, out: Stdout, err: Stderr, seed: u64, mix: Mix }
+type Conn {
+    id: u64, clock: Clock, out: Stdout, to: Sender[runner.Event], from: Receiver[runner.Down],
+    task: Task[Result[(), runner.RegisterError]], dog: Task[()]
+}
+type Dog: send { clock: Clock, at: u64, to: Sender[runner.Down] }
+const NEVER: u64 = 18446744073709551615u64
+const LATER: u64 = 10000000000u64
+const N_PLACE: u64 = 1048576u64
+
+fn place(mut r: Reg) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(observe_fixture.record), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn entry() -> Bytes {
+    let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
+    let cr: std.codec.Codec[Result[observe_fixture.Recorded, u32]] = std.codec.of()
+    let mut b: Bytes = list.new()
+    result.unwrap(list.append(mut b, code.identity(code.describe(observe_fixture.record))))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut b))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut b))
+    b
+}
+
+fn stream(id: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(id, mut b))
+    b
+}
+
+fn args(seed: u64, s: u64, p: u64, request: u64) -> observe_fixture.Request {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_u64(seed, mut b))
+    result.unwrap(std.codec.put_u64(request, mut b))
+    observe_fixture.Request(stream: stream(s), p: p, arg: take b)
+}
+
+fn delay(seed: u64, salt: u64) -> u64 {
+    // Goose test/stdlib/stdlib_slice_pool_equivalence.goose:3,16, and
+    // core/std/tests/omap.hirsel:137. Explicit wrapping; sample the high word.
+    let state = int.wrapping_add(seed, salt)
+    let x = int.wrapping_add(int.wrapping_mul(state, 6364136223846793005u64), 1442695040888963407u64)
+    2000000u64 + ((x >> 32) % 4000000u64)
+}
+
+fn emit(out: Stdout, trace: Log[observe.Obs], take e: observe.Obs) -> () waits {
+    let co: std.codec.Codec[observe.Obs] = std.codec.of()
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.encode(co, e, mut b))
+    result.unwrap(stdout.write_bytes(out, b))
+    result.unwrap(log.append(trace, take e))
+}
+
+fn bark(take d: Dog) -> () waits {
+    host.sleep_until(d.clock, d.at)
+    let Dog(clock: _, at: _, to: take to) = take d
+    let _ = channel.send(to, Batched(runner.KeyedBatch(version: NEVER, complete: list.new(), rows: list.new(), outcomes: list.new())))
+}
+
+fn connect(d: Drive, id: u64) -> Conn {
+    let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
+    let (to, from) = result.unwrap(take made)
+    let watch = Dog(clock: d.clock, at: host.mono_ns(d.clock) + 5000000000u64, to: channel.sender(to))
+    let dog = match task.spawn(d.tasks, bytes 65536u64, take watch, bark) {
+        Ok(take t) => take t,
+        Error(_) => fail("observe drive watchdog"),
+    }
+    let (send, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), N_PLACE, d.head, take to, d.clock, 8u64, 2097152u64))
+    Conn(id: id, clock: d.clock, out: d.out, to: take send, from: take from, task: take session, dog: take dog)
+}
+
+fn ask(c: Conn, trace: Log[observe.Obs], a: observe_fixture.Request, key: Bytes, after: u64) -> () waits {
+    let raw = observe_fixture.encoded(a)
+    let at = host.mono_ns(c.clock)
+    let deadline = at + after
+    emit(c.out, trace, Sent(observe.Send(conn: c.id, stream: observe.own(a.stream), p: a.p,
+        digest: observe_fixture.digest(key, raw), deadline: deadline, at: at)))
+    let call = runner.Call(stream: observe.own(a.stream), p: a.p, key: observe.own(key), arg: take raw, deadline: deadline)
+    let _ = result.unwrap(channel.send(c.to, runner.ask(take call)))
+}
+
+type Got { version: u64, stream: Bytes, p: u64, outcome: runner.Outcome }
+
+// The same public Down/KeyedBatch seam as runner_calls.frame.
+fn receive(c: Conn) -> Got waits {
+    match channel.receive(c.from) {
+        Ok(Batched(take b)) => {
+            if b.version == NEVER { fail("observe drive: unanswered send") }
+            if list.len(b.rows) != 0u64 || list.len(b.outcomes) != 1u64 { fail("observe drive: one outcome per Batch") }
+            let runner.KeyedBatch(version: v, complete: _, rows: _, outcomes: take os) = take b
+            for take t in os {
+                let runner.KeyedDone(stream: take received_stream, p: p, outcome: take o) = take t
+                return Got(version: v, stream: take received_stream, p: p, outcome: take o)
+            }
+            fail("observe drive: empty Batch")
+        },
+        Ok(_) => fail("observe drive: expected Batch"),
+        Error(_) => fail("observe drive: client channel closed"),
+    }
+}
+
+fn frame(c: Conn, trace: Log[observe.Obs]) -> Got waits {
+    let f = receive(c)
+    // A Recorded reply is the fixture's committed ran-table row. Duplicate
+    // carries the original row too, so changed-byte clients cannot rewrite it.
+    if let Returned(b) = f.outcome {
+        let cr: std.codec.Codec[observe_fixture.Recorded] = std.codec.of()
+        let mut at = 0u64
+        if let Ok(Ok(r)) = std.codec.take_result(b, mut at, cr, std.codec.of_u32()) {
+            let raw = observe_fixture.encoded(r.request)
+            emit(c.out, trace, Ran(observe.Run(stream: observe.own(r.request.stream), p: r.request.p,
+                digest: observe_fixture.digest(entry(), raw), version: r.version)))
+        }
+    }
+    emit(c.out, trace, Got(observe.Reply(conn: c.id, stream: observe.own(f.stream), p: f.p,
+        version: f.version, outcome: observe.from_runner(f.outcome), at: host.mono_ns(c.clock))))
+    f
+}
+
+fn close(take c: Conn, trace: Log[observe.Obs]) -> () waits {
+    let _ = channel.send(c.to, runner.hang_up())
+    let Conn(id: id, clock: clock, out: out, to: _, from: _, task: take session, dog: _) = take c
+    let _ = task.join(take session)
+    emit(out, trace, Closed(observe.Close(conn: id, code: 1000u64, at: host.mono_ns(clock))))
+}
+
+fn publish(err: Stderr, take events: List[observe.Obs]) -> () waits {
+    let mut p = positions.state()
+    let mut j = observe.state()
+    let mut w = session.state()
+    for e in events {
+        positions.step(mut p, e)
+        observe.step(mut j, e)
+        session.step(mut w, e)
+    }
+    let h = observe.Header(has_clock: true, has_digest: true, has_ran: true, complete: true)
+    let cp: std.codec.Codec[List[observe.Verdict]] = std.codec.of()
+    let pv = positions.finish(p, h)
+    let jv = observe.finish(j, h)
+    let wv = session.finish(w, h)
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.encode(cp, pv, mut b))
+    result.unwrap(std.codec.encode(cp, jv, mut b))
+    result.unwrap(std.codec.encode(cp, wv, mut b))
+    result.unwrap(stderr.write_bytes(err, b))
+}
+
+fn drive(take d: Drive) -> () waits {
+    let trace: Log[observe.Obs] = result.unwrap(log.new())
+    let a = connect(d, 0u64)
+    let b = connect(d, 1u64)
+    let c = connect(d, 2u64)
+    let key = entry()
+    let gap = delay(d.seed, 0u64)
+    // The host delays starting the real head for 20 ms. The original p0 stays
+    // in its inbox after this connection is Abandoned and closes.
+    let held = args(d.seed, 0u64, 0u64, 0u64)
+    ask(a, trace, held, key, gap)
+    let _ = frame(a, trace)
+    close(take a, trace)
+    let retry = match d.mix {
+        ReuseWhileLive => args(d.seed, 0u64, 0u64, 99u64),
+        RecoverNewBytes => args(d.seed, 0u64, 0u64, 99u64),
+        _ => observe.own(held),
+    }
+    ask(c, trace, retry, key, LATER)
+    let _ = frame(c, trace)
+    // Recover the original reply before advancing this stream.
+    ask(b, trace, held, key, LATER)
+    let _ = frame(b, trace)
+    ask(b, trace, args(d.seed, 0u64, 1u64, 1u64), key, LATER)
+    let _ = frame(b, trace)
+    ask(b, trace, args(d.seed, 0u64, 2u64, 2u64), key, LATER)
+    let _ = frame(b, trace)
+    if let NoDirectory = d.mix {
+        ask(c, trace, args(d.seed, 0u64, 0u64, 98u64), key, LATER)
+        let _ = frame(c, trace)
+    }
+    // A pre-admission refusal leaves p unconsumed. Only the deliberate
+    // advance_on_refusal client skips it; H must fail for that control.
+    if let AdvanceOnRefusal = d.mix {
+        ask(c, trace, args(d.seed, 1u64, 0u64, 0u64), string.as_bytes("missing"), LATER)
+        let _ = frame(c, trace)
+        ask(c, trace, args(d.seed, 1u64, 1u64, 1u64), key, gap)
+        let _ = frame(c, trace)
+    } else {
+        for p in 0u64 .. 3u64 {
+            ask(b, trace, args(d.seed, 1u64, p, p), key, 50000000u64 + delay(d.seed, p + 10u64))
+            let _ = frame(b, trace)
+        }
+    }
+    close(take b, trace)
+    close(take c, trace)
+    publish(d.err, log.finish(take trace))
+}
+
+pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, seed: u64, mix: Mix) -> bool waits {
+    let mut db = store.memory(clock, random, store.defaults())
+    let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
+    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
+    let (head, inbox) = result.unwrap(take made)
+    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
+    let (_, joins) = result.unwrap(take joined)
+    let input = Drive(head: take head, clock: clock, tasks: tasks, out: out, err: err, seed: seed, mix: mix)
+    let body = match task.spawn(tasks, bytes 33554432u64, take input, drive) {
+        Ok(take t) => take t,
+        Error(_) => return false,
+    }
+    host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), take inbox, take joins, tasks, 1048576u64)
+    let driven = task.join(take body)
+    match opened { Ok(()) => (), Error(_) => return false }
+    match driven { Ok(()) => true, Error(_) => false }
+}

@@ -35,6 +35,8 @@ pub fn step(mut s: State, e: observe.Obs) {
         },
         Ran(r) => {
             observe.remember(mut s.runs, r)
+            let previous: u64 = match map.get(s.store_latest, r.stream) { Some(p) => p, None => 0u64 }
+            result.unwrap(map.insert(mut s.store_latest, observe.own(r.stream), if r.p > previous { r.p } else { previous }))
             let k = observe.key(0u64, r.stream, r.p)
             if !map.contains(s.bindings, k) { result.unwrap(map.insert(mut s.bindings, take k, observe.own(r.digest))) }
         },

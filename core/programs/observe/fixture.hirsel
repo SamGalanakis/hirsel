@@ -1,8 +1,54 @@
 // T2 fixture. Its argument identifies the client request without a product tap.
-pub type Args: codec { stream: Bytes, p: u64, arg: Bytes }
-pub type Handles { ran: store.Table[Bytes, Args] }
+pub type Request: codec + send { stream: Bytes, p: u64, arg: Bytes }
+pub type Handles: send { ran: store.Table[Bytes, Request] }
+pub type Recorded: codec + send { request: Request, version: u64 }
 
-pub fn k_record(mut tx: store.Tx, h: Handles, take a: Args) -> Result[u64, store.Error] {
+// STORE v2.24 section 1.8. This hashes fixture inputs, not store-private state.
+pub fn digest(key: Bytes, args: Bytes) -> Bytes {
+    let mut input: Bytes = list.new()
+    result.unwrap(list.push(mut input, 17u8))
+    result.unwrap(list.append(mut input, string.as_bytes("hirsel.request.v1")))
+    result.unwrap(std.codec.put_list(key, std.codec.of_u8(), mut input))
+    result.unwrap(std.codec.put_list(args, std.codec.of_u8(), mut input))
+    let sum = std.sha256.hash(input)
+    let mut out_digest: Bytes = list.new()
+    for byte in sum { result.unwrap(list.push(mut out_digest, byte)) }
+    out_digest
+}
+
+pub fn encoded(a: Request) -> Bytes {
+    let c: std.codec.Codec[Request] = std.codec.of()
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.encode(c, a, mut b))
+    b
+}
+
+pub fn law_digest() -> bool {
+    // Python hashlib over the section 1.8 domain and two empty u32-length fields.
+    let expected: Inline[u8, 32] =[13, 143, 47, 79, 130, 12, 211, 105, 198, 35, 67, 133, 75, 7, 71, 44, 193, 167, 249, 81, 17, 172, 68, 71, 127, 198, 76, 73, 98, 178, 180, 227]
+    let empty: Bytes = list.new()
+    let got = digest(empty, empty)
+    if list.len(got) != 32u64 { return false }
+    for i in 0u64 .. 32u64 { if got[i] != expected[i] { return false } }
+    let mut other: Bytes = list.new()
+    result.unwrap(list.push(mut other, 1u8))
+    got != digest(empty, other)
+}
+
+pub fn record(mut tx: store.Tx, h: Handles, take a: Request) -> Result[Recorded, u32] {
+    match k_record(mut tx, h, observe.own(a)) {
+        Ok(v) => Ok(Recorded(request: take a, version: v)),
+        Error(_) => Error(1u32),
+    }
+}
+
+pub fn handles(mut db: store.Db) -> Result[Handles, store.Error] waits {
+    let ca: std.codec.Codec[Request] = std.codec.of()
+    let t = store.table(mut db, "ran", std.codec.key_bytes(), ca)?
+    Ok(Handles(ran: t))
+}
+
+pub fn k_record(mut tx: store.Tx, h: Handles, take a: Request) -> Result[u64, store.Error] {
     let k = observe.key(0u64, a.stream, a.p)
     store.put(mut tx, h.ran, take k, observe.own(a))?
     Ok(store.info(mut tx).id.version)
@@ -10,11 +56,11 @@ pub fn k_record(mut tx: store.Tx, h: Handles, take a: Args) -> Result[u64, store
 
 pub fn law_record(out: Stdout, c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, store.defaults())
-    let ca: std.codec.Codec[Args] = std.codec.of()
+    let ca: std.codec.Codec[Request] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
     let t = result.unwrap(store.table(mut db, "ran", std.codec.key_bytes(), ca))
     let h = Handles(ran: t)
-    let a = Args(stream: list.new(), p: 0u64, arg: list.new())
+    let a = Request(stream: list.new(), p: 0u64, arg: list.new())
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[u64, store.Error] {
         k_record(mut tx, h, observe.own(a))
     })

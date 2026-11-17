@@ -5,6 +5,79 @@ use std::collections::{BTreeMap, BTreeSet};
 mod regions;
 pub(super) use regions::plans as regions;
 
+#[cfg(all(test, not(hirsel_lazy_core)))]
+#[test]
+fn a_parent_trace_does_not_hide_a_fixed_trip_child() {
+    let source = r#"core v1
+sig g0 = (u64) -> (u64)
+inst n0 = tests@1/nested_steps/run [] []
+fn f0 = n0 g0 {
+  slot s0 = u64
+  slot s1 = u64
+  slot s2 = u64
+  addr a0 = s0 : u64
+  addr a1 = s1 : u64
+  addr a2 = s2 : u64
+b0(v0: u64):
+  live s0
+  live s1
+  live s2
+  address a0
+  address a1
+  address a2
+  v1: u64 = const 0
+  v2: u64 = const 1
+  v3: u64 = const 8
+  store a0, v1
+  store a2, v1
+  jump b1
+b1:
+  v4: u64 = read a0
+  v5: bool = lt v4, v0
+  branch v5, b2, b6
+b2:
+  step
+  store a1, v1
+  jump b3
+b3:
+  v6: u64 = read a1
+  v7: bool = lt v6, v3
+  branch v7, b4, b5
+b4:
+  step
+  v8: u64 = read a2
+  v9: u64 = wrapping_add v8, v2
+  store a2, v9
+  v10: u64 = wrapping_add v6, v2
+  store a1, v10
+  jump b3
+b5:
+  step
+  v11: u64 = wrapping_add v4, v2
+  store a0, v11
+  jump b1
+b6:
+  v12: u64 = read a2
+  dead s2
+  dead s1
+  dead s0
+  return v12
+}
+"#;
+    let module = hirsel_core_ir::text::parse(source).unwrap();
+    hirsel_core_ir::wf::module(&module).unwrap();
+    let body = module.functions[0].body.as_ref().unwrap();
+    let facts = failure::Failures::new(&module);
+    let neutral = neutral_functions(&module, None);
+    let selected = loops(&module, body, &facts.constants[0], &neutral);
+    assert!(
+        selected
+            .iter()
+            .any(|p| p.nodes.contains(&3) && p.nodes.contains(&4)),
+        "the eight-trip child must remain selected or be absorbed in full"
+    );
+}
+
 #[derive(Clone)]
 pub(super) struct Loop {
     pub header: usize,
@@ -634,11 +707,17 @@ fn minimum_cost(
     block: usize,
     state: &mut BTreeMap<usize, Option<u64>>,
     neutral: &[bool],
+    headers: &BTreeSet<usize>,
 ) -> Option<u64> {
     if block == header {
         return Some(0);
     }
     if block == exit {
+        return None;
+    }
+    // A nested loop's exit is not a zero-trip alternative to its body. Leave
+    // its header outside the trace so its own plan remains independently usable.
+    if headers.contains(&block) {
         return None;
     }
     if let Some(cost) = state.get(&block) {
@@ -651,7 +730,7 @@ fn minimum_cost(
     }
     let tail = next(body, block)?
         .into_iter()
-        .filter_map(|b| minimum_cost(module, body, header, exit, b, state, neutral))
+        .filter_map(|b| minimum_cost(module, body, header, exit, b, state, neutral, headers))
         .min()?;
     let cost = tail.checked_add(
         insts
@@ -669,9 +748,12 @@ fn cheap_trace(
     entry: usize,
     exit: usize,
     neutral: &[bool],
+    headers: &BTreeSet<usize>,
 ) -> Option<(u64, BTreeSet<usize>, BTreeMap<(usize, usize), u64>)> {
     let mut costs = BTreeMap::new();
-    let cost = minimum_cost(module, body, header, exit, entry, &mut costs, neutral)?;
+    let cost = minimum_cost(
+        module, body, header, exit, entry, &mut costs, neutral, headers,
+    )?;
     if cost == 0 {
         return None;
     }
@@ -747,6 +829,7 @@ pub(super) fn loops(
     neutral: &[bool],
 ) -> Vec<Loop> {
     let mut known = BTreeMap::new();
+    let headers = std::cell::OnceCell::new();
     loop {
         let before = known.len();
         for (header, row) in body.blocks.iter().enumerate() {
@@ -864,6 +947,18 @@ pub(super) fn loops(
                 entry,
                 body.edges[no.index()].target.index(),
                 neutral,
+                headers.get_or_init(|| {
+                    let flow = flow::Flow::new(body);
+                    let mut headers = BTreeSet::new();
+                    for from in 0..body.blocks.len() {
+                        for to in next(body, from).unwrap_or_default() {
+                            if flow.block_dominates(to, from) {
+                                headers.insert(to);
+                            }
+                        }
+                    }
+                    headers
+                }),
             )
             .filter(|(cost, _, _)| full_cost.is_none_or(|full| *cost < full));
             let (cost, mut nodes, cuts) = if let Some(trace) = trace {

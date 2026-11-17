@@ -135,7 +135,7 @@ export async function laws(codec, only, mutant) {
     assert.notDeepEqual(h.storage.raw.token,token);
     assert.equal(fresh.server.calls.length,0,'lost bytes must not replay under the new principal');
     h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);
-    assert.equal((await answer).tag,'LocallyUnknown');assert.equal(h.client.state,'Fenced');
+    assert.equal(h.client.state,'Fenced');assert.equal((await answer).tag,'LocallyUnknown');
     assert.equal(h.server.calls.length,1);h.server.check();
   };
   tests.refused_p_reused=async()=>{

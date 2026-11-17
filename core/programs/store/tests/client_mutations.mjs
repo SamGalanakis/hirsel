@@ -10,6 +10,14 @@ function replace(text, from, to) {
   return text.replace(from,to);
 }
 export const controls = {
+  replay_under_new_principal: ['lost_stream_fences_generation', text => replace(text,
+    "if (state.generation !== this.generation || !state.token || !this.token || !equal(state.token, this.token)) {\n        await this.stop('Fenced', 'LocallyUnknown'); return;\n      }",
+    "if (state.generation !== this.generation || !state.token || !this.token || !equal(state.token, this.token)) {\n        Object.assign(this, {generation: state.generation}); this.token = state.token;\n        const record = structuredClone(this.record); if (record.pending) record.pending.generation = state.generation;\n        state.streams[this.stream] = record; this.record = record; await this.options.storage.write(state);\n      }")],
+  shared_stream: ['stream_lease', text => replace(text,
+    'lease = await options.storage.lock(`stream-${state.generation}-${n}`, false);',
+    'lease = await options.storage.lock(`stream-${state.generation}-${n}`, false);\n        if (!lease) lease = {lost: new Promise<void>(() => {}), release: async () => {}};')],
+  new_work_before_recovery: ['stream_lease', text => replace(text,
+    "      if (this.record.pending) throw new ClientError('RecoveringOrBusy');\n", '')],
   treat_as_superseded: ['history_unavailable_retires', text => replace(text,
     "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.retire('LocallyUnknown'); continue; }",
     "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.installation(async state => { const record = state.streams[this.stream]; record.next = pending.p + 1n; delete record.pending; await this.options.storage.write(state); this.record = structuredClone(record); this.finish({tag: 'LocallyUnknown'}); }); continue; }")],

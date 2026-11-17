@@ -215,6 +215,11 @@ std::unique_ptr<Module> part(const Module &m, Function &f, const StringMap<std::
     p->setSourceFileName("hirsel-part");
     p->setTargetTriple(m.getTargetTriple());
     p->setDataLayout(m.getDataLayout());
+    // Module flags steer code generation (the DWARF version among them).
+    if (NamedMDNode *flags = m.getModuleFlagsMetadata()) {
+        NamedMDNode *copy = p->getOrInsertModuleFlagsMetadata();
+        for (MDNode *flag : flags->operands()) copy->addOperand(flag);
+    }
     References refs;
     refs.seen.insert(&f);
     for (BasicBlock &b : f)

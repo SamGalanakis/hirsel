@@ -56,7 +56,7 @@ fn launch_target(a: Args) -> Result[String, Capacity] {
 // (RUNNER-SPEC v2.4 §1.1). A compute slot runs in the caller's task; a granted slot
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
 // session's check (rule 5: decode the argument, keep nothing) and the head's run.
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran)
+type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran) | Query(own[send] fn(store.Snapshot, H, Bytes) -> Queried)
 
 pub opaque type Registry[G: send, H: send]: send {
     slots: Map[Bytes, Slot[G, H]],
@@ -435,6 +435,292 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
         },
         Error((e, _)) => Error(Full(e)),
     }
+}
+
+// ---- R2 (RUNNER-SPEC v2.11 §4): queries and their Covers.
+
+// A Cover names one data-tree key range [low, high) of one table (I1), without reading it. It
+// keeps that table's published value, erased once here (v2.11.1, STORE-SPEC AG3), so the
+// publisher normalizes a Cover's initial rows and its changed rows alike (F10).
+pub opaque type Cover: send {
+    low: Bytes,
+    high: Bytes,
+    value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error]
+}
+
+pub fn cover[K, V](t: store.Shape[K, V], lo: store.Bound[K], hi: store.Bound[K]) -> Result[Cover, Capacity] {
+    let (take low, take high) = match store.key_span(t, lo, hi) {
+        Ok(Span(take l, take h)) => (take l, take h),
+        Error(Full(c)) => return Error(c),
+        _ => fail("runner: a Cover's bounds do not encode"),
+    }
+    let mine: store.Shape[K, V] = clone(t)?
+    let made = fn(c: store.Change) -> Result[Option[Bytes], store.Error] { store.published_value(mine, c) }
+    match made {
+        Ok(take f) => Ok(Cover(low: take low, high: take high, value: take f)),
+        Error((c, _)) => Error(c),
+    }
+}
+
+// What a query run at a Snapshot gives the publisher: its Cover and read set, an Outcome
+// that ends the subscription, or a store error, which is a Reset.
+type Viewed { cover: Cover, reads: List[store.Read] }
+
+type Queried = Covered(Viewed) | Stopped(Outcome) | Lost(store.Error)
+
+// The query adapter: decode A and call f inside `look` (which isolates it), all inside
+// `bound bytes n`. A fault, or exhaustion after entry, ends the subscription with Failed.
+fn adapt_query[H: send, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], ca: std.codec.Codec[A], s: store.Snapshot, h: H, arg: Bytes, n: u64, steps: u64) -> Queried {
+    let body = code.callable(f)
+    let looked = bound bytes n {
+        store.look(s, Some(steps), scoped fn(tx: store.Tx) -> Result[Cover, Outcome] {
+            match std.codec.decode(ca, arg) {
+                Ok(Ok(take a)) => match body(tx, h, take a) {
+                    Ok(take c) => Ok(take c),
+                    Error(c) => Error(Failed(OutOfBytes(room(c)))),
+                },
+                Ok(Error(e)) => Error(Refused(Malformed(bad(e)))),
+                Error(c) => Error(Failed(OutOfBytes(room(c)))),
+            }
+        })
+    }
+    match take looked {
+        Ok(Ok(Seen(take x))) => {
+            let store.Seen(value: take v, version: _, reads: take reads) = take x
+            match take v {
+                Ok(take c) => Covered(Viewed(cover: take c, reads: take reads)),
+                Error(take o) => Stopped(take o),
+            }
+        },
+        Ok(Ok(Failed(cs))) => Stopped(Failed(Raised(raised(cs)))),
+        Ok(Ok(Refused(c))) => Stopped(Failed(OutOfBytes(room(c)))),
+        Ok(Ok(Stopped(e))) => Stopped(Failed(OutOfTime(e.steps))),
+        Ok(Error(e)) => Lost(e),
+        Error(c) => Stopped(Refused(Budget(room(c)))),
+    }
+}
+
+// A query's rows travel in Batches under their tables' codecs, so its described result is
+// the unit schema.
+pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
+    let ca: std.codec.Codec[A] = std.codec.of()
+    let cr: std.codec.Codec[()] = std.codec.of_unit()
+    let (take key, take d) = match described(code.identity(f), Query, ca, cr) {
+        Ok(take kd) => take kd,
+        Error(c) => return Error(Full(c)),
+    }
+    let made = fn(at: store.Snapshot, h: H, arg: Bytes) -> Queried { adapt_query(f, ca, at, h, arg, n, s) }
+    match made {
+        Ok(take run) => insert(mut r, take key, take d, Query(take run)),
+        Error((c, _)) => Error(Full(c)),
+    }
+}
+
+// ---- The publisher's subscriptions (G2, G3). A subscription keeps its Cover and read set at
+// the base, never its rows (F4): rows are enumerated from the snapshots the publisher holds.
+type Sub { session: u64, sub: u32, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read] }
+
+// What one step owes one session: at `version`, the subs whose whole initial result it
+// carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
+type Owe { session: u64, version: u64, complete: List[u32], rows: List[Row], ended: List[(u32, Outcome)], reset: bool }
+
+type Board[G: send, H: send] { r: Registry[G, H], h: H, base: store.Snapshot, newest: Option[store.Snapshot], subs: List[Sub] }
+
+// A Subscribe on a live (session, sub) replaces it.
+fn find(subs: List[Sub], who: u64, sub: u32) -> Option[u64] {
+    let mut i = 0u64
+    while i < list.len(subs) {
+        if subs[i].session == who && subs[i].sub == sub {
+            return Some(i)
+        }
+        i += 1u64
+    }
+    None
+}
+
+fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
+    let mut i = 0u64
+    while i < list.len(owes) {
+        if owes[i].session == who {
+            return i
+        }
+        i += 1u64
+    }
+    result.unwrap(list.push(mut owes, Owe(session: who, version: version, complete: list.new(), rows: list.new(), ended: list.new(), reset: false)))
+    i
+}
+
+fn run_query[G: send, H: send](r: Registry[G, H], h: H, s: store.Snapshot, key: Bytes, arg: Bytes) -> Queried {
+    match map.get(r.slots, key) {
+        Some(Query(go)) => go(s, h, arg),
+        _ => Stopped(Refused(NoEntry)),
+    }
+}
+
+// The rows inside a Cover at s, each with its published value (F10).
+fn cover_rows(s: store.Snapshot, c: Cover, sub: u32, mut out: List[Row]) -> Result[(), store.Error] {
+    for ch in store.span_changes(s, c.low, c.high)? {
+        let v = (c.value)(ch)?
+        result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(ch.tree_key)), value: take v)))
+    }
+    Ok(())
+}
+
+// G3: the query runs at the base, and its whole result goes in one owe naming it complete.
+fn subscribe[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, take key: Bytes, take arg: Bytes) -> Owe {
+    if let Some(i) = find(b.subs, who, sub) {
+        let _ = list.remove(mut b.subs, i)
+    }
+    let version = store.version(b.base)
+    let mut o = Owe(session: who, version: version, complete: list.new(), rows: list.new(), ended: list.new(), reset: false)
+    match run_query(b.r, b.h, b.base, key, arg) {
+        Covered(take v) => {
+            let Viewed(cover: take c, reads: take reads) = take v
+            if let Error(_) = cover_rows(b.base, c, sub, mut o.rows) {
+                o.rows = list.new()
+                o.reset = true
+                return take o
+            }
+            result.unwrap(list.push(mut o.complete, sub))
+            result.unwrap(list.push(mut b.subs, Sub(session: who, sub: sub, key: take key, arg: take arg, cover: take c, reads: take reads)))
+        },
+        Stopped(take why) => result.unwrap(list.push(mut o.ended, (sub, take why))),
+        Lost(_) => {
+            o.reset = true
+        },
+    }
+    take o
+}
+
+fn read_hit(reads: List[store.Read], d: List[store.Change]) -> bool {
+    for ch in d {
+        for r in reads {
+            if store.reads_key(r, ch.tree_key) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+// The rerun's difference: the keys inside the old Cover at a against the keys inside the new
+// Cover at b, removals included, each new or changed key with its published value at b.
+fn rerun_rows(a: store.Snapshot, old: Cover, b: store.Snapshot, new: Cover, sub: u32, mut out: List[Row]) -> Result[(), store.Error] {
+    let before = store.span_changes(a, old.low, old.high)?
+    let after = store.span_changes(b, new.low, new.high)?
+    let mut i = 0u64
+    let mut j = 0u64
+    while i < list.len(before) || j < list.len(after) {
+        let gone = j == list.len(after) || (i < list.len(before) && before[i].tree_key < after[j].tree_key)
+        if gone {
+            result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(before[i].tree_key)), value: None)))
+            i += 1u64
+            continue
+        }
+        let was = if i < list.len(before) && before[i].tree_key == after[j].tree_key {
+            i += 1u64
+            (old.value)(before[i - 1u64])?
+        } else {
+            None
+        }
+        let now = (new.value)(after[j])?
+        if was != now {
+            result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(after[j].tree_key)), value: take now)))
+        }
+        j += 1u64
+    }
+    Ok(())
+}
+
+// The changed keys inside a Cover, with their published values at b.
+fn covered_rows(d: List[store.Change], c: Cover, sub: u32, mut out: List[Row]) -> Result[(), store.Error] {
+    for ch in d {
+        if c.low <= ch.tree_key && ch.tree_key < c.high {
+            let v = (c.value)(ch)?
+            result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(ch.tree_key)), value: take v)))
+        }
+    }
+    Ok(())
+}
+
+// A session Reset loses all its subscriptions and owes nothing else.
+fn reset_session(mut b: List[Sub], mut owes: List[Owe], who: u64, version: u64) {
+    let mut i = 0u64
+    while i < list.len(b) {
+        if b[i].session == who {
+            let _ = list.remove(mut b, i)
+        } else {
+            i += 1u64
+        }
+    }
+    let k = owe(mut owes, who, version)
+    owes[k].complete = list.new()
+    owes[k].rows = list.new()
+    owes[k].ended = list.new()
+    owes[k].reset = true
+}
+
+// G2: one round from the base to the newest snapshot released.
+fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
+    let mut owes: List[Owe] = list.new()
+    let newest = match replace(mut b.newest, None) {
+        Some(take s) => take s,
+        None => return take owes,
+    }
+    let version = store.version(newest)
+    let d = match store.changes(b.base, newest) {
+        Ok(take x) => take x,
+        Error(_) => {
+            while list.len(b.subs) > 0u64 {
+                let who = b.subs[0].session
+                reset_session(mut b.subs, mut owes, who, version)
+            }
+            b.base = take newest
+            return take owes
+        },
+    }
+    let mut i = 0u64
+    while i < list.len(b.subs) {
+        let who = b.subs[i].session
+        let sub = b.subs[i].sub
+        let k = owe(mut owes, who, version)
+        if owes[k].reset {
+            i += 1u64
+            continue
+        }
+        if !read_hit(b.subs[i].reads, d) {
+            if let Error(_) = covered_rows(d, b.subs[i].cover, sub, mut owes[k].rows) {
+                reset_session(mut b.subs, mut owes, who, version)
+                i = 0u64
+                continue
+            }
+            i += 1u64
+            continue
+        }
+        match run_query(b.r, b.h, newest, b.subs[i].key, b.subs[i].arg) {
+            Covered(take v) => {
+                let Viewed(cover: take c, reads: take reads) = take v
+                if let Error(_) = rerun_rows(b.base, b.subs[i].cover, newest, c, sub, mut owes[k].rows) {
+                    reset_session(mut b.subs, mut owes, who, version)
+                    i = 0u64
+                    continue
+                }
+                b.subs[i].cover = take c
+                b.subs[i].reads = take reads
+                i += 1u64
+            },
+            Stopped(take why) => {
+                result.unwrap(list.push(mut owes[k].ended, (sub, take why)))
+                let _ = list.remove(mut b.subs, i)
+            },
+            Lost(_) => {
+                reset_session(mut b.subs, mut owes, who, version)
+                i = 0u64
+            },
+        }
+    }
+    b.base = take newest
+    take owes
 }
 
 // The stream's reply at p is the Outcome's codec bytes (STORE-SPEC §1.8 reply).
@@ -1069,5 +1355,291 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                 }
             },
         }
+    }
+}
+
+// ---- R2's subscription law (RUNNER-SPEC §8.2: subs25's main_two_sessions, as hand-written
+// steps). Table "data" holds perm (key 0), row0 (key 1) and row1 (key 2). Q1 reads perm and,
+// when it is not 0, covers row0 and row1; otherwise it covers nothing. Qf reads row1 and
+// covers it, and faults when row1 is 2. The client applies each owe to its cache per
+// (session, sub); the expected caches are written out by hand from the store's values at each
+// version, as a from-scratch run of the query would give them (K1), never from the publisher.
+// A value is the u64 codec's 8 bytes little-endian (codec.md), so `word` is the oracle's.
+type Qh: send { t: store.Shape[u64, u64] }
+
+fn q1(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
+    let allowed = match store.fetch(tx, h.t, 0u64) {
+        Ok(Some(p)) => p != 0u64,
+        Ok(None) => false,
+        Error(_) => fail("subs: q1 reads perm"),
+    }
+    if allowed {
+        cover(h.t, Included(1u64), Included(2u64))
+    } else {
+        cover(h.t, Included(1u64), Excluded(1u64))
+    }
+}
+
+fn qf(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
+    match store.fetch(tx, h.t, 2u64) {
+        Ok(Some(v)) => if v == 2u64 {
+            fail("subs: qf at row1 = 2")
+        },
+        _ => (),
+    }
+    cover(h.t, Included(2u64), Included(2u64))
+}
+
+fn subs_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(q1), 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(qf), 65536u64, DEFAULT_STEPS)
+}
+
+fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.table(mut db, "data", std.codec.key_u64(), cv)?
+    Ok(Qh(t: store.shape(t)))
+}
+
+fn query_key(f: StaticFn[fn(store.Tx, Qh, take u32) -> Result[Cover, Capacity]]) -> Bytes {
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let cr: std.codec.Codec[()] = std.codec.of_unit()
+    let (take k, _) = result.unwrap(described(code.identity(f), Query, ca, cr))
+    k
+}
+
+fn no_arg() -> Bytes {
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let mut a: Bytes = list.new()
+    result.unwrap(std.codec.encode(ca, 0u32, mut a))
+    a
+}
+
+fn word(v: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(list.push(mut out, v))
+    for _ in 0u64 .. 7u64 {
+        result.unwrap(list.push(mut out, 0u8))
+    }
+    out
+}
+
+fn set(mut db: store.Db, t: store.Table[u64, u64], k: u64, v: u64) -> () waits {
+    let done = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, t, k, v)
+    })
+    match take done {
+        Ok(Committed(_)) => (),
+        _ => fail("subs: a fixture put"),
+    }
+}
+
+type Cached { who: u64, sub: u32, rows: Map[Bytes, Bytes] }
+
+type Client { caches: List[Cached], last: List[(u64, u64)] }
+
+fn cached(c: Client, who: u64, sub: u32) -> Option[u64] {
+    let mut i = 0u64
+    while i < list.len(c.caches) {
+        if c.caches[i].who == who && c.caches[i].sub == sub {
+            return Some(i)
+        }
+        i += 1u64
+    }
+    None
+}
+
+fn drop_cache(mut c: Client, who: u64, sub: u32) {
+    if let Some(i) = cached(c, who, sub) {
+        let _ = list.remove(mut c.caches, i)
+    }
+}
+
+// The client's side of one owe: versions never decrease (K2); a complete sub starts its cache
+// empty; a row for a sub with no cache is a row before its complete (L17).
+fn apply(mut c: Client, take o: Owe) -> bool {
+    let mut seen = false
+    let mut i = 0u64
+    while i < list.len(c.last) {
+        if c.last[i].0 == o.session {
+            if o.version < c.last[i].1 {
+                return false
+            }
+            c.last[i].1 = o.version
+            seen = true
+        }
+        i += 1u64
+    }
+    if !seen {
+        result.unwrap(list.push(mut c.last, (o.session, o.version)))
+    }
+    if o.reset {
+        while let Some(j) = first_of(c, o.session) {
+            let _ = list.remove(mut c.caches, j)
+        }
+        return true
+    }
+    for sub in o.complete {
+        drop_cache(mut c, o.session, sub)
+        result.unwrap(list.push(mut c.caches, Cached(who: o.session, sub: sub, rows: map.new())))
+    }
+    let Owe(session: who, version: _, complete: _, rows: take rows, ended: take ended, reset: _) = take o
+    for take row in rows {
+        let Row(sub: sub, key: take key, value: take value) = take row
+        let k = match cached(c, who, sub) {
+            Some(k) => k,
+            None => return false,
+        }
+        let _ = map.remove(mut c.caches[k].rows, key)
+        if let Some(take v) = take value {
+            result.unwrap(map.insert(mut c.caches[k].rows, take key, take v))
+        }
+    }
+    for e in ended {
+        drop_cache(mut c, who, e.0)
+    }
+    true
+}
+
+fn first_of(c: Client, who: u64) -> Option[u64] {
+    let mut i = 0u64
+    while i < list.len(c.caches) {
+        if c.caches[i].who == who {
+            return Some(i)
+        }
+        i += 1u64
+    }
+    None
+}
+
+fn apply_all(mut c: Client, take owes: List[Owe]) -> bool {
+    for take o in owes {
+        if !apply(mut c, take o) {
+            return false
+        }
+    }
+    true
+}
+
+// The cache of (who, sub) holds exactly row0 and row1 (keys[1], keys[2]) with these values;
+// None leaves a row out.
+fn holds(c: Client, keys: List[Bytes], who: u64, sub: u32, row0: Option[u8], row1: Option[u8]) -> bool {
+    let k = match cached(c, who, sub) {
+        Some(k) => k,
+        None => return false,
+    }
+    let rows = c.caches[k].rows
+    let mut n = 0u64
+    if let Some(v) = row0 {
+        n += 1u64
+        match map.get(rows, keys[1]) {
+            Some(got) => if got != word(v) {
+                return false
+            },
+            None => return false,
+        }
+    }
+    if let Some(v) = row1 {
+        n += 1u64
+        match map.get(rows, keys[2]) {
+            Some(got) => if got != word(v) {
+                return false
+            },
+            None => return false,
+        }
+    }
+    map.len(rows) == n
+}
+
+fn step[G: send, H: send](mut b: Board[G, H], db: store.Db) -> List[Owe] {
+    b.newest = Some(store.snapshot(db))
+    round(mut b)
+}
+
+pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let empty = store.snapshot(db)
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let mut keys: List[Bytes] = list.new()
+    for ch in result.unwrap(store.changes(empty, base)) {
+        result.unwrap(list.push(mut keys, result.unwrap(clone(ch.tree_key))))
+    }
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let reg = match placed(code.describe(subs_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: list.new())
+    let mut cl = Client(caches: list.new(), last: list.new())
+    let k1 = query_key(code.describe(q1))
+    let kf = query_key(code.describe(qf))
+    // subscribe_at_latest: w0 commits and is released, then session 0 subscribes Q1 before the
+    // round. Its result is the base's (row0 = 0), labelled with the base.
+    set(mut db, t, 1u64, 1u64)
+    b.newest = Some(store.snapshot(db))
+    let first = subscribe(mut b, 0u64, 1u32, result.unwrap(clone(k1)), no_arg())
+    if first.version != 4u64 || list.len(first.complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
+        return false
+    }
+    if !apply_all(mut cl, round(mut b)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(0u8)) {
+        return false
+    }
+    // shared_cache: session 1 subscribes Q1 with the same sub id; session 0 subscribes Qf.
+    // Then row1 = 5 is a cover change for both Q1s and a re-run for Qf.
+    if !apply(mut cl, subscribe(mut b, 1u64, 1u32, result.unwrap(clone(k1)), no_arg())) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8)) {
+        return false
+    }
+    if !apply(mut cl, subscribe(mut b, 0u64, 2u32, result.unwrap(clone(kf)), no_arg())) || !holds(cl, keys, 0u64, 2u32, None, Some(0u8)) {
+        return false
+    }
+    set(mut db, t, 2u64, 5u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) {
+        return false
+    }
+    // rerun_without_retract: revoke re-runs both Q1s, whose Covers become empty, so both lose
+    // row0 and row1. A Subscribe of Q1 now completes with an empty result (L17).
+    set(mut db, t, 0u64, 0u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, None, None) || !holds(cl, keys, 1u64, 1u32, None, None) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) {
+        return false
+    }
+    let empty_result = subscribe(mut b, 1u64, 3u32, result.unwrap(clone(k1)), no_arg())
+    if list.len(empty_result.complete) != 1u64 || empty_result.complete[0] != 3u32 || list.len(empty_result.rows) != 0u64 || !apply(mut cl, take empty_result) {
+        return false
+    }
+    // K7: grant, then the call's row1 = 2. Qf's re-run faults and ends Qf alone, with
+    // Failed(Raised(5)) (Fail); session 0's Q1 follows row1 by its Cover.
+    set(mut db, t, 0u64, 1u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 3u32, Some(1u8), Some(5u8)) {
+        return false
+    }
+    set(mut db, t, 2u64, 2u64)
+    let owes = step(mut b, db)
+    let mut faulted = false
+    for o in owes {
+        for e in o.ended {
+            faulted = o.session == 0u64 && e.0 == 2u32 && match e.1 {
+                Failed(Raised(n)) => n == 5u32,
+                _ => false,
+            }
+        }
+    }
+    faulted && apply_all(mut cl, take owes) && cached(cl, 0u64, 2u32) == None && holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8))
+}
+
+@test
+fn test_subs_main(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_subs_main(c, r) {
+        Ok(())
+    } else {
+        Error(())
     }
 }

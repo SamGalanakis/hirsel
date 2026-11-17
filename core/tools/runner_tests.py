@@ -59,6 +59,9 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 # compute body; the marker precedes the head's exhaustion slice (kind21).
 COUNTS = {'calls_runs_once': (7, 1), 'calls_deadline_hung': (7, 32665)}
 
+# R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
+SUBS = ('subs_main',)
+
 
 def counted(name, report):
     if name not in COUNTS:
@@ -148,6 +151,20 @@ MUTANTS = (
     ('duplicate_unchecked',
      [('    if map.contains(r.slots, key) {\n        return Error(AlreadyRegistered(take key))\n    }\n', '')],
      'runner_laws', 'p13_duplicate_refused'),
+    # R2 (RUNNER-SPEC §8.2): a Subscribe answered at the newest snapshot, not the base;
+    # one session's sub found by another session's same sub id; a rerun that drops a key
+    # without retracting it.
+    ('subscribe_at_latest',
+     [('    let version = store.version(b.base)\n    let mut o = Owe(',
+       '    if let Some(take n) = replace(mut b.newest, None) {\n        b.base = take n\n    }\n'
+       '    let version = store.version(b.base)\n    let mut o = Owe(')],
+     'runner', 'subs_main'),
+    ('shared_cache',
+     [('if subs[i].session == who && subs[i].sub == sub {', 'if subs[i].sub == sub {')],
+     'runner', 'subs_main'),
+    ('rerun_without_retract',
+     [('            result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(before[i].tree_key)), value: None)))\n', '')],
+     'runner', 'subs_main'),
     ('decode_unbounded',
      [('    let ran = bound bytes n {\n', '    let ran = bound bytes 4611686018427387904u64 {\n')],
      'runner_laws', 'l4_malformed_flood'),
@@ -606,6 +623,9 @@ def main():
             for name in CALLS:
                 value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
+            for name in SUBS:
+                value, report = evaluate(evaluator, base, 'store@1/runner/law_' + name)
+                row(engine='evaluator', law=name, passed=value == 1, result=report)
         # A mutant is red only when it builds and its law fails.
         if r0 and not args.no_mutants:
             text = (root / 'core/programs/store/runner.hirsel').read_text()
@@ -657,7 +677,8 @@ def main():
             # R1's calls build alone under --part r1; 'store@1/runner_l' selects runner_laws and runner_l12.
             calls = ('calls', [], 'store@1/runner_calls/', 'shared',
                      {f'store@1/runner_calls/test_{n}' for n in CALLS})
-            groups = (calls,) if r1 else ()
+            subs = ('subs', [], 'store@1/runner/', 'shared', {f'store@1/runner/test_{n}' for n in SUBS})
+            groups = (calls, subs) if r1 else ()
             groups += () if not r0 else (
                       ('laws', [(l12, 'runner_l12')], 'store@1/runner_l', 'shared',
                        {f'store@1/runner_laws/test_{n}' for n in LAWS} | l12_want),

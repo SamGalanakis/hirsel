@@ -67,6 +67,22 @@ carried a snapshot (G1). The session hands its client a `Down`: `Batched(KeyedBa
 `KeyedDone{stream, p, outcome}` (the wire `Done` with the store's stream key in place of a
 stream slot, until R3), or `Ended(sub, outcome)`, or `Reset`.
 
+R2 adds `query(mut r, f, n, s)`, which registers a subscription entry. Its body reads at a
+snapshot inside `look`, under `bound bytes n` and `s` steps, and returns a `Cover`: one
+data-tree key range of one table, made with `cover(shape, lo, hi)`, which keeps that
+table's published value. A query key's result fingerprint is the unit schema's, because
+its rows travel under their tables' codecs. The publisher keeps each subscription's
+Cover and read set at its base, never its rows (F4). A Subscribe runs the query at the
+base, and its whole result goes in one Batch that names the sub in `complete` (G3). A
+Subscribe on a live (session, sub) replaces it. Each round, from the base to the newest
+released snapshot, re-runs only the subscriptions whose reads a change hit. It sends the
+difference between the old and the new Cover's rows, a removal being a row with no value,
+and for an unchanged Cover only the changed keys inside it (G2). Every row's value is the
+table's published value (F10). A query that faults or runs out ends its subscription
+with `Ended(sub, Failed(..))`. A session Reset drops all of that session's
+subscriptions. Sessions do not yet send Subscribe to the publisher; until then the
+publisher's subscriptions are exercised through the law `subs_main`.
+
 `connect(tasks, place, n_place, head, client, clock, q, n_session)` spawns a session
 task under `bytes n_session` and returns its inbox sender and its task. The session
 runs `place` itself under n_place, and its task ends with that `RegisterError` if it

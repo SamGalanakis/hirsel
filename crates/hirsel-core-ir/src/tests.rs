@@ -24,6 +24,10 @@ const SAMPLES: &[(&str, &str)] = &[
         include_str!("../samples/closure-chain.core"),
     ),
     (
+        "finalizer-chain",
+        include_str!("../samples/finalizer-chain.core"),
+    ),
+    (
         "receiver-chain",
         include_str!("../samples/receiver-chain.core"),
     ),

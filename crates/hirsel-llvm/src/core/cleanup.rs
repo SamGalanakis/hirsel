@@ -69,6 +69,7 @@ pub(super) fn glue_emitter<'a>(
         items,
         next: 0,
         fixed_point: None,
+        fixed_rank: None,
     }
 }
 
@@ -146,7 +147,6 @@ pub(super) fn drop_glue(
     }
     for &t in &values {
         if let Some(drop) = &recipes[t].drop
-            && drop.finalizer.is_none()
             && module.types[t].repr != Repr::Resource
         {
             for field in drop.fields.iter().flatten() {
@@ -164,9 +164,8 @@ pub(super) fn drop_glue(
             continue;
         }
         if let Some(drop) = &recipes[t].drop {
-            // FORM v1c: counted cleanup runs a row with a finalizer, or a
-            // resource, whole, by its ordinary glue.
-            if mechanical && (drop.finalizer.is_some() || module.types[t].repr == Repr::Resource) {
+            // Counted cleanup runs a resource whole, by its ordinary glue.
+            if mechanical && module.types[t].repr == Repr::Resource {
                 pending.push((t, false));
                 continue;
             }
@@ -219,41 +218,7 @@ pub(super) fn drop_glue(
                 let id = e.load(&Type::I64, &field, 1);
                 e.runtime_void("hirsel_core_test_drop_trace", &[word(id)]);
             }
-            // A resource's finalizer runs under its grant; a core slot kernel's on an
-            // own row runs under the current limit (FORM v1c).
-            if let Some(f) = module.types[t].finalizer {
-                let finalizer_site = e.call_site_word(Callee::Direct(FuncId(f.0)));
-                if resource {
-                    e.runtime_void(
-                        "hirsel_core_finalizer_begin",
-                        &[ptr(CONTEXT), ptr(base.clone())],
-                    );
-                }
-                let symbol = symbol(module, FuncId(f.0));
-                let args = [CONTEXT, base.clone(), finalizer_site];
-                if failures.may_fail[f.0 as usize] {
-                    let failed = e.call(
-                        &drop_signature(),
-                        &Value::global(symbol),
-                        &args,
-                        &CallAttrs::default(),
-                    );
-                    e.store(&Type::I8, &failed, &status, 0);
-                } else {
-                    e.call(
-                        &FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr, Type::I64]),
-                        &Value::global(format!("{symbol}.infallible")),
-                        &args,
-                        &CallAttrs::default(),
-                    );
-                }
-                if resource {
-                    e.runtime_void(
-                        "hirsel_core_finalizer_end",
-                        &[ptr(CONTEXT), ptr(base.clone())],
-                    );
-                }
-            }
+            e.finalize(t, &base, &status);
             if let Some(drop) = &recipes[t].drop {
                 let tag = e.fixed(TypeId(t as u32)).tag;
                 if let Some(tag) = tag {
@@ -333,11 +298,7 @@ impl FunctionEmitter<'_> {
             )),
             FieldTy::Box(t)
                 if !hirsel_core_layout::terminal(&self.module.types, self.recipes, field)
-                    && self.module.types[t.index()].repr != Repr::Resource
-                    && self.recipes[t.index()]
-                        .drop
-                        .as_ref()
-                        .is_some_and(|d| d.finalizer.is_none()) =>
+                    && self.module.types[t.index()].repr != Repr::Resource =>
             {
                 let block = self.load(&Type::Ptr, p, 1);
                 Some(self.runtime(
@@ -574,11 +535,11 @@ pub(super) fn mechanical_count(
             let Some(drop) = &recipes[t.index()].drop else {
                 return Ok(0);
             };
-            // FORM v1c: a row with a finalizer, or a resource, is one step,
-            // cleaned whole.
-            if drop.finalizer.is_some() || module.types[t.index()].repr == Repr::Resource {
+            // A resource is one step, cleaned whole.
+            if module.types[t.index()].repr == Repr::Resource {
                 return Ok(1);
             }
+            // A finalizer is step 0 of its row.
             let mut max = 0;
             for row in &drop.fields {
                 let mut n = 0;
@@ -587,7 +548,7 @@ pub(super) fn mechanical_count(
                 }
                 max = max.max(n);
             }
-            max
+            u64::from(drop.finalizer.is_some()) + max
         }
         FieldTy::Array(e, n) => mechanical_count(module, recipes, e)? * n,
         FieldTy::Handle(hirsel_core_layout::Handle::Capability) => 0,
@@ -608,9 +569,10 @@ pub(super) fn mechanical_count(
 impl FunctionEmitter<'_> {
     /// The next suspension point of fixed glue, or 0 in buffer glue.
     pub(super) fn next_point(&mut self) -> u64 {
-        self.fixed_point.as_mut().map_or(0, |n| {
-            *n += 1;
-            *n
+        let cursor = self.fixed_rank.map(|r| r + 1);
+        self.fixed_point.as_mut().map_or(0, |points| {
+            points.push(cursor);
+            points.len() as u64
         })
     }
     pub(super) fn mechanical_field(
@@ -634,16 +596,9 @@ impl FunctionEmitter<'_> {
         self.block(clean);
         match field {
             // One step cleaned whole by ordinary glue, under the release's
-            // site: a row with a finalizer (the finalizer, then its fields), a
-            // resource, a handle or a callable. A failure goes into the
-            // worklist's byte and cleaning goes on (FAIL-10).
-            FieldTy::Inline(t)
-                if self.module.types[t.index()].repr == Repr::Resource
-                    || self.recipes[t.index()]
-                        .drop
-                        .as_ref()
-                        .is_some_and(|d| d.finalizer.is_some()) =>
-            {
+            // site: a resource or a handle. A failure goes into the worklist's
+            // byte and cleaning goes on (FAIL-10).
+            FieldTy::Inline(t) if self.module.types[t.index()].repr == Repr::Resource => {
                 self.clean_whole(field, p)?;
             }
             // A runtime holder begins its cleanup and hands it over (CONC-8,
@@ -705,6 +660,21 @@ impl FunctionEmitter<'_> {
             }
             FieldTy::Inline(t) => {
                 let drop = self.recipes[t.index()].drop.as_ref().unwrap();
+                // Step 0 of a row with a finalizer runs it and yields nothing;
+                // it may fail, which goes into the worklist's byte (FAIL-10).
+                let first = u64::from(drop.finalizer.is_some());
+                if first == 1 {
+                    let now = self.cmp(Predicate::Eq, &i64, &local, &int(0));
+                    let finalize = Label::new("finalize", n);
+                    let fields = Label::new("fields", n);
+                    self.cond(&now, finalize, fields);
+                    self.block(finalize);
+                    let list = Value::Local(Local::WORKLIST);
+                    let failed = self.offset(&list, memory_layout::WORKLIST_FAILED as u64);
+                    self.finalize(t.index(), p, &failed);
+                    self.br(Label::plain("resume"));
+                    self.block(fields);
+                }
                 let tag = self.fixed(TypeId(t.0)).tag;
                 let row_label = |row: usize| Label {
                     name: "row",
@@ -725,16 +695,19 @@ impl FunctionEmitter<'_> {
                 } else {
                     self.br(row_label(0));
                 }
+                let rank = self.fixed_rank;
                 for (row, fields) in drop.fields.iter().enumerate() {
                     self.block(row_label(row));
-                    let mut offset = 0;
+                    let mut offset = first;
                     for f in fields {
                         let at = self.offset(p, f.offset);
+                        self.fixed_rank = rank.map(|r| r + offset);
                         self.mechanical_field(&f.ty, &at, &local, offset)?;
                         offset += mechanical_count(self.module, self.recipes, &f.ty)?;
                     }
                     self.br(Label::plain("resume"));
                 }
+                self.fixed_rank = rank;
             }
             FieldTy::Array(e, _) => {
                 let per = mechanical_count(self.module, self.recipes, e)?;
@@ -743,7 +716,9 @@ impl FunctionEmitter<'_> {
                 let stride = field_size(&self.module.types, self.recipes, e).0;
                 let off = self.bin(Binary::Mul, &i64, &index, &int(stride));
                 let at = self.offset_by(p, &off);
+                let rank = self.fixed_rank.take();
                 self.mechanical_field(e, &at, &inner, 0)?;
+                self.fixed_rank = rank;
                 self.br(Label::plain("resume"));
             }
             FieldTy::Seq(_) | FieldTy::Map(_, _) => self.enqueue_collection(field, p),
@@ -820,6 +795,48 @@ impl FunctionEmitter<'_> {
         self.clean_field(field, p, &failed)?;
         self.br(Label::plain("resume"));
         Ok(())
+    }
+    /// Row `t`'s finalizer, if it has one, on `base`, its failure ORed into the
+    /// byte at `status`. A resource's runs under its grant; a core slot
+    /// kernel's on an own row under the current limit (FORM v1c).
+    fn finalize(&mut self, t: usize, base: &Value, status: &Value) {
+        let Some(f) = self.module.types[t].finalizer else {
+            return;
+        };
+        let resource = self.module.types[t].repr == Repr::Resource;
+        let site = self.call_site_word(Callee::Direct(FuncId(f.0)));
+        if resource {
+            self.runtime_void(
+                "hirsel_core_finalizer_begin",
+                &[ptr(CONTEXT), ptr(base.clone())],
+            );
+        }
+        let symbol = symbol(self.module, FuncId(f.0));
+        let args = [CONTEXT, base.clone(), site];
+        if self.failures.may_fail[f.0 as usize] {
+            let failed = self.call(
+                &drop_signature(),
+                &Value::global(symbol),
+                &args,
+                &CallAttrs::default(),
+            );
+            let before = self.load(&Type::I8, status, 0);
+            let after = self.bin(Binary::Or, &Type::I8, &before, &failed);
+            self.store(&Type::I8, &after, status, 0);
+        } else {
+            self.call(
+                &FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr, Type::I64]),
+                &Value::global(format!("{symbol}.infallible")),
+                &args,
+                &CallAttrs::default(),
+            );
+        }
+        if resource {
+            self.runtime_void(
+                "hirsel_core_finalizer_end",
+                &[ptr(CONTEXT), ptr(base.clone())],
+            );
+        }
     }
     /// Recipes clean under the site their release was called with.
     pub(super) fn release_site(&mut self) {
@@ -1003,13 +1020,22 @@ fn counted_glue(
         let cursor = e.load(&Type::I64, &cursor_at, 0);
         let next = e.bin(Binary::Add, &Type::I64, &cursor, &int(1));
         e.store(&Type::I64, &next, &cursor_at, 0);
-        e.fixed_point = Some(0);
+        e.fixed_point = Some(Vec::new());
+        e.fixed_rank = Some(0);
         e.mechanical_field(&field, &Local::PAYLOAD.into(), &cursor, 0)?;
+        let staged = e.fixed_point.take().unwrap_or_default();
         debug_assert_eq!(
-            e.fixed_point,
-            Some(frames.points.len() as u64),
+            staged.len(),
+            frames.points.len(),
             "glue and frames number suspension points alike"
         );
+        for (cursor, point) in staged.iter().zip(&frames.points) {
+            debug_assert!(
+                cursor.map_or(point.index.is_some(), |c| c == point.cursor
+                    && point.index.is_none()),
+                "glue and frames count steps alike: t{t} stages at {cursor:?}, frames say {point:?}"
+            );
+        }
         e.ret(&Type::I1, &true.into());
         drop(e);
         sink.end_function();

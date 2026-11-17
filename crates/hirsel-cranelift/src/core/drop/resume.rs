@@ -5,6 +5,8 @@ use super::*;
 pub(super) enum Plan {
     Empty,
     Leaf(FieldTy),
+    /// Step 0 of a row with a finalizer: the finalizer, which yields nothing.
+    Finalize(TypeRef),
     Fields(Vec<(u64, Plan)>),
     Variant(hirsel_core_layout::Tag, Vec<Plan>),
     Array(u64, u64, Box<Plan>),
@@ -13,7 +15,7 @@ impl Plan {
     pub(super) fn count(&self) -> u64 {
         match self {
             Self::Empty => 0,
-            Self::Leaf(_) => 1,
+            Self::Leaf(_) | Self::Finalize(_) => 1,
             Self::Fields(fs) => fs.iter().map(|(_, p)| p.count()).sum(),
             Self::Variant(_, cs) => cs.iter().map(Self::count).max().unwrap_or(0),
             Self::Array(n, _, p) => n * p.count(),
@@ -27,8 +29,8 @@ pub(super) fn plan_type(tables: &Tables<'_>, t: TypeRef) -> Result<Plan> {
     let Layout::Fixed(f) = &tables.layouts[t.index()].layout else {
         return Ok(Plan::Empty);
     };
-    // FORM v1c: a row with a finalizer, or a resource, is one step, cleaned whole.
-    if d.finalizer.is_some() || tables.input.types[t.index()].repr == Repr::Resource {
+    // A resource is one step, cleaned whole.
+    if tables.input.types[t.index()].repr == Repr::Resource {
         return Ok(Plan::Leaf(FieldTy::Inline(t)));
     }
     let rows = d
@@ -41,10 +43,16 @@ pub(super) fn plan_type(tables: &Tables<'_>, t: TypeRef) -> Result<Plan> {
                 .map(Plan::Fields)
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(if let Some(tag) = f.tag {
+    let fields = if let Some(tag) = f.tag {
         Plan::Variant(tag, rows)
     } else {
         rows.into_iter().next().unwrap()
+    };
+    // A finalizer is step 0 of its row (FAIL-8).
+    Ok(if d.finalizer.is_some() {
+        Plan::Fields(vec![(0, Plan::Finalize(t)), (0, fields)])
+    } else {
+        fields
     })
 }
 fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
@@ -80,9 +88,10 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
 impl Glue<'_, '_, '_> {
     /// The next suspension point of fixed glue, or 0 in buffer glue.
     fn next_point(&mut self) -> Value {
-        let k = self.point.as_mut().map_or(0, |n| {
-            *n += 1;
-            *n
+        let cursor = self.rank.map(|r| r + 1);
+        let k = self.point.as_mut().map_or(0, |points| {
+            points.push(cursor);
+            points.len() as u64
         });
         self.icon(k)
     }
@@ -261,9 +270,9 @@ impl Glue<'_, '_, '_> {
                 let node = self.load(base, 0);
                 let mut yields = true;
                 match field {
-                    // Its ordinary glue: the finalizer, then the fields, or the
-                    // resource's release. Its status joins the worklist's, and it
-                    // hands nothing over.
+                    // A resource's ordinary glue: its finalizer, its fields and
+                    // its release. Its status joins the worklist's, and it hands
+                    // nothing over.
                     FieldTy::Inline(t) => {
                         self.drop_type(base, *t);
                         yields = false;
@@ -398,14 +407,29 @@ impl Glue<'_, '_, '_> {
                 }
                 self.b.switch_to_block(skip);
             }
+            Plan::Finalize(t) => {
+                let skip = self.b.create_block();
+                let run = self.b.create_block();
+                let past = self.b.ins().icmp(IntCC::UnsignedGreaterThan, cursor, rank);
+                self.b.ins().brif(past, skip, &[], run, &[]);
+                self.b.switch_to_block(run);
+                let next = self.b.ins().iadd_imm_s(rank, 1);
+                self.b.ins().store(MemFlagsData::trusted(), next, slot, 0);
+                self.finalize(t.index(), base)?;
+                self.b.ins().jump(skip, &[]);
+                self.b.switch_to_block(skip);
+            }
             Plan::Fields(fields) => {
+                let outer = self.rank;
                 let mut off = 0;
                 for (offset, p) in fields {
                     let at = self.at(base, *offset);
                     let r = self.at(rank, off);
+                    self.rank = outer.map(|r| r + off);
                     self.resume(p, at, r, cursor, slot, list)?;
                     off += p.count();
                 }
+                self.rank = outer;
             }
             Plan::Variant(tag, cases) => {
                 let v =
@@ -426,7 +450,9 @@ impl Glue<'_, '_, '_> {
             }
             Plan::Array(n, stride, p) if p.count() != 0 => {
                 let len = self.icon(*n);
+                let outer = self.rank.take();
                 self.resume_array(p, [base, rank, cursor, slot, list, len], *stride, false)?;
+                self.rank = outer;
             }
             Plan::Array(..) => {}
         }

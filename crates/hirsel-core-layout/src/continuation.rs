@@ -13,8 +13,9 @@
 //! never charged (MEM-24).
 //!
 //! Points and steps follow [`DropRecipe`](crate::DropRecipe)'s counted visit order:
-//! a `Box`, `Rc`, `Arc`, `Seq` or `Map` field and a row with a finalizer are one
-//! step each, a `Seq` of zero-sized elements none.
+//! a `Box`, `Rc`, `Arc`, `Seq` or `Map` field is one step, a `Seq` of zero-sized
+//! elements none, and a row with a finalizer takes one step for its finalizer
+//! (step 0 of the row) before its fields.
 
 use crate::{FieldTy, Layout, Recipe, Shape, Tag, TypeRef, cleanup_class, field_size};
 
@@ -92,13 +93,6 @@ fn plan_type(shapes: &[Shape], recipes: &[Recipe], t: TypeRef, at: u64) -> Node 
     let (Some(d), Layout::Fixed(f)) = (&r.drop, &r.layout) else {
         return Node::Empty;
     };
-    if d.finalizer.is_some() {
-        return Node::Leaf {
-            at,
-            live: vec![(at, f.size)],
-            yields: None,
-        };
-    }
     let rows: Vec<Node> = d
         .fields
         .iter()
@@ -110,7 +104,7 @@ fn plan_type(shapes: &[Shape], recipes: &[Recipe], t: TypeRef, at: u64) -> Node 
             )
         })
         .collect();
-    match f.tag {
+    let fields = match f.tag {
         Some(tag) => Node::Variant(
             Tag {
                 offset: at + tag.offset,
@@ -119,6 +113,20 @@ fn plan_type(shapes: &[Shape], recipes: &[Recipe], t: TypeRef, at: u64) -> Node 
             rows,
         ),
         None => rows.into_iter().next().unwrap_or(Node::Empty),
+    };
+    // A finalizer is step 0 of its row and never yields; it may read the whole
+    // row, so no frame word goes there before it has run (FAIL-8).
+    if d.finalizer.is_some() {
+        Node::Fields(vec![
+            Node::Leaf {
+                at,
+                live: vec![(at, f.size)],
+                yields: None,
+            },
+            fields,
+        ])
+    } else {
+        fields
     }
 }
 

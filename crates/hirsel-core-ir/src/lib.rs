@@ -149,9 +149,9 @@
 //!   function or of one whose body the module does not hold). Arithmetic its
 //!   invariants bound is written wrapping. A module that only names the row holds no
 //!   body to check; the one that defines it does. The fields' cleanup then drops the values, resuming
-//!   past a failed drop as it always does (FAIL-12). In counted cleanup such a
-//!   value is one step (its finalizer and then its fields, whole); a counted
-//!   payload holds no resource, so it cannot fail there.
+//!   past a failed drop as it always does (FAIL-12). In counted cleanup the
+//!   finalizer is step 0 of its row and its fields follow as their own steps, so
+//!   no frame word goes into the row before the finalizer has run.
 //! - **A clone body on an own row** (`type tN = own "Deque[T]" clone fM { .. }`,
 //!   `Shape::clone`, MEM-17) is `(ptr from, ptr to) -> (u64 requested, u64
 //!   available)`. A derived clone of any value holding the row copies its bytes and

@@ -562,6 +562,7 @@ fn emit_module(
             items: &mut items,
             next: 0,
             fixed_point: None,
+            fixed_rank: None,
         };
         let body_name = if has_status {
             name.clone()
@@ -1203,9 +1204,13 @@ struct FunctionEmitter<'a> {
     sink: &'a mut dyn Sink,
     items: &'a mut Items,
     next: usize,
-    /// In fixed counted glue, the suspension points numbered so far, in the
-    /// order hirsel_core_layout::frames lists them; None elsewhere.
-    fixed_point: Option<u64>,
+    /// In fixed counted glue, the cursor after each suspension point numbered
+    /// so far (None inside an array), in the order hirsel_core_layout::frames
+    /// lists them; None elsewhere.
+    fixed_point: Option<Vec<Option<u64>>>,
+    /// In fixed counted glue, the step of the field being walked counted from
+    /// the block's first; None inside an array.
+    fixed_rank: Option<u64>,
 }
 impl FunctionEmitter<'_> {
     /// AAPCS64 leaves narrow C arguments' upper bits unspecified.

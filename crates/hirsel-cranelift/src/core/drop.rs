@@ -131,8 +131,8 @@ impl Glues {
         for t in needed.clone() {
             normal(t, layouts, &mut needed, &mut roots, &mut normal_seen);
         }
-        // A row with a finalizer is one counted step, cleaned whole by its
-        // ordinary glue (FORM v1c), so its fields are not descendants.
+        // A resource is one counted step, cleaned whole by its ordinary glue,
+        // so its fields are not descendants.
         fn descendants(
             t: usize,
             layouts: &[Recipe],
@@ -141,11 +141,7 @@ impl Glues {
             visited: &mut BTreeSet<usize>,
             whole: &mut BTreeSet<usize>,
         ) {
-            if layouts[t]
-                .drop
-                .as_ref()
-                .is_some_and(|d| d.finalizer.is_some())
-            {
+            if resources.contains(&t) {
                 whole.insert(t);
                 return;
             }
@@ -437,6 +433,7 @@ impl Glues {
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
             point: None,
+            rank: None,
             list: Some(args[3]),
         };
         let plan = plan_type(tables, TypeRef(index as u32))?;
@@ -487,6 +484,7 @@ impl Glues {
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
             point: None,
+            rank: None,
             list: Some(args[3]),
         };
         g.resume_buffer(ty, args[1], args[2], args[3])?;
@@ -540,7 +538,8 @@ impl Glues {
             caller_site,
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
-            point: resume.then_some(0),
+            point: resume.then(Vec::new),
+            rank: Some(0),
             list: resume.then(|| args[3]),
         };
         if resume {
@@ -550,19 +549,26 @@ impl Glues {
                     .load(types::I64, MemFlagsData::trusted(), args[2], 0);
             let rank = g.icon(0);
             g.resume(&plan, args[1], rank, cursor, args[2], args[3])?;
-            debug_assert_eq!(
-                g.point,
-                Some(
-                    hirsel_core_layout::frames(
-                        &tables.input.types,
-                        tables.layouts,
-                        TypeRef(index as u32)
-                    )
-                    .points
-                    .len() as u64
-                ),
-                "glue and frames number suspension points alike"
-            );
+            let staged = g.point.take().unwrap_or_default();
+            if cfg!(debug_assertions) {
+                let frames = hirsel_core_layout::frames(
+                    &tables.input.types,
+                    tables.layouts,
+                    TypeRef(index as u32),
+                );
+                debug_assert_eq!(
+                    staged.len(),
+                    frames.points.len(),
+                    "glue and frames number suspension points alike"
+                );
+                for (cursor, point) in staged.iter().zip(&frames.points) {
+                    debug_assert!(
+                        cursor.map_or(point.index.is_some(), |c| c == point.cursor
+                            && point.index.is_none()),
+                        "glue and frames count steps alike: t{index} stages at {cursor:?}, frames say {point:?}"
+                    );
+                }
+            }
             let done = g.b.ins().iconst(types::I8, 1);
             g.b.ins().return_(&[done]);
         } else {
@@ -585,31 +591,7 @@ impl Glues {
                 let id = g.load(base, layout.offsets[0][i] as i32);
                 g.call("hirsel_core_test_drop_trace", &[U], &[], &[id])?;
             }
-            if let Some(finalizer) = tables.layouts[index]
-                .drop
-                .as_ref()
-                .and_then(|d| d.finalizer)
-            {
-                // A resource's finalizer runs under its grant; a core slot kernel's on
-                // an own row runs under the current limit (FORM v1c).
-                if resource {
-                    g.call("hirsel_core_finalizer_begin", &[P, P], &[], &[g.ctx, base])?;
-                }
-                let function = &tables.input.functions[finalizer.0 as usize];
-                let site =
-                    if c::source::inherits_site(&tables.input.instances[function.instance.index()])
-                    {
-                        g.caller_site
-                    } else {
-                        g.ctx
-                    };
-                let f = tables.functions[finalizer.0 as usize];
-                let status = g.direct(f, &[g.ctx, base, site]);
-                g.merge(status);
-                if resource {
-                    g.call("hirsel_core_finalizer_end", &[P, P], &[], &[g.ctx, base])?;
-                }
-            }
+            g.finalize(index, base)?;
             g.fields(base, index)?;
             if resource {
                 let storage = g.icon(tables.layouts[index].logical_size.unwrap());
@@ -634,9 +616,13 @@ struct Glue<'a, 'b, 'c> {
     caller_site: Value,
     failed: Value,
     calls: calls::Calls<'c>,
-    /// In fixed resume glue, the suspension points numbered so far, in the
-    /// order hirsel_core_layout::frames lists them; None in buffer glue.
-    point: Option<u64>,
+    /// In fixed resume glue, the cursor after each suspension point numbered
+    /// so far (None inside an array), in the order hirsel_core_layout::frames
+    /// lists them; None in buffer glue.
+    point: Option<Vec<Option<u64>>>,
+    /// In fixed resume glue, the step of the plan node being resumed, counted
+    /// from the block's first; None inside an array.
+    rank: Option<u64>,
     /// In drain recipes, the worklist whose failed byte takes each status as
     /// it happens; ordinary glue returns its status instead.
     list: Option<Value>,
@@ -678,6 +664,41 @@ impl Glue<'_, '_, '_> {
     ) -> Result<calls::NativeValues> {
         self.calls
             .c(self.object, &mut self.b, name, params, results, args)
+    }
+    /// Row `index`'s finalizer, if it has one, on `base`, its status merged. A
+    /// resource's runs under its grant; a core slot kernel's on an own row
+    /// under the current limit (FORM v1c).
+    fn finalize(&mut self, index: usize, base: Value) -> Result<()> {
+        let Some(finalizer) = self.tables.layouts[index]
+            .drop
+            .as_ref()
+            .and_then(|d| d.finalizer)
+        else {
+            return Ok(());
+        };
+        let resource = self.tables.input.types[index].repr == Repr::Resource;
+        if resource {
+            self.call(
+                "hirsel_core_finalizer_begin",
+                &[P, P],
+                &[],
+                &[self.ctx, base],
+            )?;
+        }
+        let function = &self.tables.input.functions[finalizer.0 as usize];
+        let site =
+            if c::source::inherits_site(&self.tables.input.instances[function.instance.index()]) {
+                self.caller_site
+            } else {
+                self.ctx
+            };
+        let f = self.tables.functions[finalizer.0 as usize];
+        let status = self.direct(f, &[self.ctx, base, site]);
+        self.merge(status);
+        if resource {
+            self.call("hirsel_core_finalizer_end", &[P, P], &[], &[self.ctx, base])?;
+        }
+        Ok(())
     }
     fn drop_type(&mut self, at: Value, t: TypeRef) {
         if let Some(f) = self.glues.drops[t.index()] {
@@ -732,17 +753,13 @@ impl Glue<'_, '_, '_> {
         match t {
             FieldTy::Inline(t) => self.drop_type(at, *t),
             // LANG-19: a block that owns more is released by the constant-stack
-            // drain. A finalizer row is still cleaned whole by its glue.
+            // drain.
             FieldTy::Box(b)
                 if !hirsel_core_layout::terminal(
                     &self.tables.input.types,
                     self.tables.layouts,
                     t,
-                ) && self.tables.input.types[b.index()].repr != Repr::Resource
-                    && self.tables.layouts[b.index()]
-                        .drop
-                        .as_ref()
-                        .is_some_and(|d| d.finalizer.is_none()) =>
+                ) && self.tables.input.types[b.index()].repr != Repr::Resource =>
             {
                 let p = self.load(at, 0);
                 let descriptor = self.descriptor(*b, false);

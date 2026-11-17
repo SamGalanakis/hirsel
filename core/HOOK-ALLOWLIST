@@ -356,3 +356,12 @@ core@1/latest/new
 core@1/latest/handle
 core@1/latest/publish
 core@1/latest/read
+# WIRE-SPEC W3b, ruling 2026-11-17: store's runner owns the serve entry,
+# accepting sockets and starting bounded owner/reader/writer sessions.
+core@1/core/Addr
+core@1/core/Ip
+core@1/core/Listener
+core@1/core/NetError
+core@1/core/Socket
+core@1/core/Until
+core@1/host/accept

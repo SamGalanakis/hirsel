@@ -1,9 +1,10 @@
 //! Release composition consumes the existing reachable/materialized products.
 //! The release unit is the whole program: every reached body, the program's and
 //! each library's alike, is an internal definition of one LLVM module that the
-//! whole-program pipeline optimises. Code generation then runs per part, one
-//! per out-of-line definition, and a part's object is keyed by the part's
-//! bitcode: an unchanged definition is generated once, whichever program and
+//! whole-program pipeline optimises. Each out-of-line definition is then a
+//! part keyed by its own bitcode and the code generator's settings; one code
+//! generation covers every part not already held, and its object is cut per
+//! part. An unchanged definition is generated once, whichever program and
 //! build reached it.
 use super::*;
 use serde::{Deserialize, Serialize};
@@ -19,18 +20,24 @@ fn unit_key(
     )
 }
 
-/// A part's key: the code generator (`generator`: compiler, libLLVM, target,
-/// debug lines) and the part's bitcode, which is all a part's object is a
-/// function of.
-fn part_key(generator: &impl serde::Serialize, bitcode: &[u8]) -> io::Result<ContentHash> {
+/// A part's key: the compiler, libLLVM, target and debug lines
+/// (`generator`), the target machine's settings as libLLVM states them
+/// (`machine`: CPU, features, relocation and code model, codegen options), and
+/// the part's bitcode, which is all a part's object is a function of.
+fn part_key(
+    generator: &impl serde::Serialize,
+    machine: &str,
+    bitcode: &[u8],
+) -> io::Result<ContentHash> {
     crate::native::key(
-        "hirsel.core-release-part.v1",
-        &(generator, ContentHash::of_bytes(bitcode)),
+        "hirsel.core-release-part.v2",
+        &(generator, machine, ContentHash::of_bytes(bitcode)),
     )
 }
 
 /// The release unit's record: its parts in link order, each by its key and
-/// whether it is in the shared tier.
+/// whether it is in the shared tier. A program whose module cannot be cut is
+/// one part.
 #[derive(Serialize, Deserialize)]
 struct Parts {
     schema: u32,
@@ -187,13 +194,14 @@ impl CheckProduct {
             let symbols = shared_symbols(reached);
             let mut parts = Vec::new();
             let mut failure = None;
-            let objects = hirsel_llvm_lazy::emit_program_parts(
+            let program = hirsel_llvm_lazy::emit_program_parts(
                 &units,
                 &[instance.symbol()],
                 target,
-                &mut |name, bitcode| {
-                    let in_shared = symbols.contains(name.get(..65).unwrap_or(name));
-                    let loaded = part_key(&generator, bitcode).and_then(|key| {
+                &mut |name, machine, bitcode| {
+                    let in_shared =
+                        !name.is_empty() && symbols.contains(name.get(..65).unwrap_or(name));
+                    let loaded = part_key(&generator, machine, bitcode).and_then(|key| {
                         parts.push((in_shared, key));
                         crate::native_object::load(tier(in_shared), key)
                     });
@@ -214,18 +222,31 @@ impl CheckProduct {
             if let Some(error) = failure {
                 return Err(error.into());
             }
-            // Objects generated now join the hits in part order.
+            // The one object generated now is cut per missed part; those parts
+            // join the hits in part order.
+            let missed = program
+                .parts
+                .iter()
+                .zip(&parts)
+                .filter(|(part, _)| !part.reused)
+                .map(|(part, &(_, key))| (part.name.as_str(), key))
+                .collect::<Vec<_>>();
+            let mut made = match &program.object {
+                Some(object) => hirsel_llvm_lazy::core::split_native_object(
+                    object,
+                    &missed,
+                    options.debug_lines,
+                )
+                .map_err(emit)?,
+                None => Vec::new(),
+            }
+            .into_iter();
             let mut hits = std::mem::take(&mut held).into_iter();
-            for (&(in_shared, key), object) in parts.iter().zip(objects) {
-                held.push(match object {
-                    None => hits.next().expect("a reused part was loaded"),
-                    Some(bytes) => {
-                        let object = hirsel_llvm_lazy::core::finish_native_object(
-                            bytes,
-                            key,
-                            options.debug_lines,
-                        )
-                        .map_err(emit)?;
+            for (part, &(in_shared, key)) in program.parts.iter().zip(&parts) {
+                held.push(match part.reused {
+                    true => hits.next().expect("a reused part was loaded"),
+                    false => {
+                        let object = made.next().expect("a missed part was generated");
                         let (bare, file) =
                             crate::native_object::publish(tier(in_shared), key, &object)?;
                         (tier(in_shared), bare, object, file, true)

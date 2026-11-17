@@ -15,6 +15,8 @@ mod collections;
 mod copy_tests;
 mod debug;
 pub use debug::finish_native_object;
+mod split;
+pub use split::split_native_object;
 mod empty;
 mod expose;
 mod fast;

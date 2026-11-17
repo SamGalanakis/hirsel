@@ -26,7 +26,7 @@ extern void *hirsel_llvm_composer(LLVMModuleRef module);
 extern int hirsel_llvm_compose(void *composer, LLVMModuleRef unit);
 extern void hirsel_llvm_composer_free(void *composer);
 extern void hirsel_llvm_merge_glue(LLVMModuleRef module);
-typedef int (*HirselLlvmReuse)(void *, const char *, size_t, const uint8_t *, size_t);
+typedef int (*HirselLlvmReuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t);
 typedef void (*HirselLlvmDeliver)(void *, const uint8_t *, size_t);
 extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine,
     HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, char **error);
@@ -673,8 +673,9 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         }
     }
     buffer = NULL; message = NULL;
-    // A program is generated as parts, one per definition; a standalone
-    // module, which keeps its order, as one object.
+    // A program is keyed in parts, one per definition, and what no caller
+    // holds is generated as one object to cut per part; a standalone module,
+    // which keeps its order, as one object.
     if (export_count) failed = hirsel_llvm_emit_parts(module, machine, reuse, deliver, receiver, &message);
     else {
         failed = LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, &message, &buffer);
@@ -694,11 +695,11 @@ done:
     if (discard_names && !own_context) LLVMContextSetDiscardValueNames(context, 0);
     if (own_context) LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
-// Emit units as parts (exports given) or as one standalone object: `deliver`
-// gets each object generated, `reuse` is asked first for each part, and `out`
-// is empty or holds the error.
+// Emit units as parts (exports given) or as one standalone object: `reuse` is
+// asked first for each part, `deliver` gets the one object generated, if any,
+// and `out` is empty or holds the error.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v4(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v5(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,

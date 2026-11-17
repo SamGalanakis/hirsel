@@ -32,7 +32,15 @@ struct Input {
     len: usize,
     module: *mut libc::c_void,
 }
-type Reuse = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize, *const u8, usize) -> i32;
+type Reuse = unsafe extern "C" fn(
+    *mut libc::c_void,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+    *const u8,
+    usize,
+) -> i32;
 type Deliver = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize);
 type Program = unsafe extern "C" fn(
     *const Input,
@@ -210,7 +218,7 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v1".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v4".as_ptr()) };
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v5".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null() || free.is_null() || program.is_null() || construction.is_null() {
@@ -286,63 +294,64 @@ pub(crate) fn compile_module(
     speed: bool,
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
-    let mut parts = emit(
+    let program = emit(
         vec![ProgramUnit::Native(module)],
         &[],
         speed,
         target,
-        &mut |_, _| false,
+        &mut |_, _, _| false,
     )?;
-    Ok(parts
-        .pop()
-        .flatten()
-        .expect("a standalone module is one object"))
+    Ok(program.object.expect("a standalone module is one object"))
 }
 
-/// A program's parts, in order: `None` for each part `reuse` answered true
-/// for, else the part's object.
+/// A program's parts, in order, and the one object generated for the parts
+/// `reuse` did not answer true for.
 pub(crate) fn program(
     units: Vec<ProgramUnit<'_>>,
     exports: &[String],
     target: hirsel_core_layout::Target,
-    reuse: &mut dyn FnMut(&str, &[u8]) -> bool,
-) -> Result<Vec<Option<Vec<u8>>>, String> {
+    reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
+) -> Result<crate::Program, String> {
     emit(units, exports, true, target, reuse)
 }
 
 struct Receiver<'a> {
-    reuse: &'a mut dyn FnMut(&str, &[u8]) -> bool,
-    parts: Vec<Option<Vec<u8>>>,
-    asked: bool,
+    reuse: &'a mut dyn FnMut(&str, &str, &[u8]) -> bool,
+    program: crate::Program,
 }
 unsafe extern "C" fn reuse_part(
     receiver: *mut libc::c_void,
     name: *const u8,
     name_len: usize,
+    machine: *const u8,
+    machine_len: usize,
     bitcode: *const u8,
     len: usize,
 ) -> i32 {
     // SAFETY: `receiver` is the Receiver `emit` passes for this synchronous
-    // call; the name and bitcode are borrowed for this callback only.
+    // call; the name, machine text and bitcode are borrowed for this callback
+    // only.
     unsafe {
         let receiver = &mut *(receiver as *mut Receiver<'_>);
-        let name = std::str::from_utf8(std::slice::from_raw_parts(name, name_len)).unwrap_or("");
-        let hit = (receiver.reuse)(name, std::slice::from_raw_parts(bitcode, len));
-        receiver.parts.push(None);
-        receiver.asked = !hit;
-        i32::from(hit)
+        let text = |p, n| std::str::from_utf8(std::slice::from_raw_parts(p, n)).unwrap_or("");
+        let name = text(name, name_len);
+        let reused = (receiver.reuse)(
+            name,
+            text(machine, machine_len),
+            std::slice::from_raw_parts(bitcode, len),
+        );
+        receiver.program.parts.push(crate::Part {
+            name: name.to_owned(),
+            reused,
+        });
+        i32::from(reused)
     }
 }
 unsafe extern "C" fn deliver_part(receiver: *mut libc::c_void, object: *const u8, len: usize) {
     // SAFETY: as in `reuse_part`; the object is copied before the callback returns.
     unsafe {
         let receiver = &mut *(receiver as *mut Receiver<'_>);
-        let object = std::slice::from_raw_parts(object, len).to_vec();
-        if std::mem::take(&mut receiver.asked) {
-            *receiver.parts.last_mut().unwrap() = Some(object);
-        } else {
-            receiver.parts.push(Some(object));
-        }
+        receiver.program.object = Some(std::slice::from_raw_parts(object, len).to_vec());
     }
 }
 
@@ -351,8 +360,8 @@ fn emit(
     exports: &[String],
     speed: bool,
     target: hirsel_core_layout::Target,
-    reuse: &mut dyn FnMut(&str, &[u8]) -> bool,
-) -> Result<Vec<Option<Vec<u8>>>, String> {
+    reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
+) -> Result<crate::Program, String> {
     let triple = CString::new(target.triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
     let backend = backend()?;
@@ -387,8 +396,7 @@ fn emit(
     };
     let mut receiver = Receiver {
         reuse,
-        parts: Vec::new(),
-        asked: false,
+        program: crate::Program::default(),
     };
     // SAFETY: inputs, terminated export names and the receiver stay borrowed
     // through the synchronous C call, which calls back only during it. The
@@ -410,7 +418,7 @@ fn emit(
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
         (backend.free)(output.data);
         if output.failed == 0 {
-            Ok(receiver.parts)
+            Ok(receiver.program)
         } else {
             Err(String::from_utf8_lossy(&bytes).into_owned())
         }

@@ -97,15 +97,15 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
         let lazy = hirsel_llvm_lazy::compile_ir(IR, speed).unwrap();
         assert_eq!(lazy, direct, "lazy probe interval, speed={speed}");
         if speed {
-            // Release composition generates each function in a part of its
-            // own: the same code, probes included, up to relocated fields.
-            let parts = hirsel_llvm_lazy::emit_program(
+            // Release composition gives each function a section of its own:
+            // the same code, probes included, up to relocated fields.
+            let object = hirsel_llvm_lazy::emit_program(
                 &[hirsel_llvm_lazy::Unit::Text(IR)],
                 &["wide".into(), "narrow".into()],
             )
             .unwrap();
             for name in ["wide", "narrow"] {
-                let composed = parts.iter().find_map(|part| code(part, name));
+                let composed = code(&object, name);
                 assert_eq!(
                     composed,
                     code(&direct, name),

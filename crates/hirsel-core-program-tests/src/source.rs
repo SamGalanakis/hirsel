@@ -285,10 +285,7 @@ impl SourceProgram {
                 .into_iter()
                 .map(|f| hirsel_llvm::core::symbol(&self.joined, f))
                 .collect::<Vec<_>>();
-            combine(
-                &hirsel_llvm_lazy::emit_program_for_target(&units, &exports, target).unwrap(),
-                target,
-            )
+            hirsel_llvm_lazy::emit_program_for_target(&units, &exports, target).unwrap()
         } else {
             let objects = texts
                 .iter()

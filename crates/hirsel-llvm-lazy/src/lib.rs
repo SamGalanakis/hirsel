@@ -35,11 +35,11 @@ pub enum Unit<'a> {
     },
     Text(&'a str),
 }
-/// A release program's part objects, every part generated: LLVM resolves
+/// A release program, every part generated as one object: LLVM resolves
 /// instance symbols, internalizes all owned definitions except `exports`, runs
 /// the ordinary O3 pipeline over the whole program, then generates code once
-/// per definition ([`emit_program_parts`]).
-pub fn emit_program(units: &[Unit<'_>], exports: &[String]) -> Result<Vec<Vec<u8>>, String> {
+/// ([`emit_program_parts`]). The object has a section per definition.
+pub fn emit_program(units: &[Unit<'_>], exports: &[String]) -> Result<Vec<u8>, String> {
     emit_program_for_target(units, exports, hirsel_core_layout::Target::X86_64Linux)
 }
 
@@ -48,25 +48,40 @@ pub fn emit_program_for_target(
     units: &[Unit<'_>],
     exports: &[String],
     target: hirsel_core_layout::Target,
-) -> Result<Vec<Vec<u8>>, String> {
+) -> Result<Vec<u8>, String> {
     Ok(
-        emit_program_parts(units, exports, target, &mut |_, _| false)?
-            .into_iter()
-            .map(|part| part.expect("every part generated"))
-            .collect(),
+        emit_program_parts(units, exports, target, &mut |_, _, _| false)?
+            .object
+            .expect("an unreused program is generated"),
     )
+}
+
+/// A release program's parts after whole-program optimisation, in order, and
+/// the one object generated for every part not reused.
+#[derive(Default)]
+pub struct Program {
+    pub parts: Vec<Part>,
+    /// A section per definition; [`core::split_native_object`] cuts it per
+    /// part. None when every part was reused.
+    pub object: Option<Vec<u8>>,
+}
+/// One out-of-line definition, by its content-derived symbol. The empty name
+/// is a whole module that cannot be cut per definition: its only part.
+pub struct Part {
+    pub name: String,
+    pub reused: bool,
 }
 
 /// Compose a release program for `target` and generate it in parts, one per
 /// out-of-line definition after whole-program optimisation. `reuse` sees each
-/// part's definition name and bitcode, in order; a part it answers true for
-/// is `None` (the caller holds its object), any other is its object.
+/// part's definition name, the code generator's machine text and the part's
+/// bitcode, in order, and answers whether the caller holds its object.
 pub fn emit_program_parts(
     units: &[Unit<'_>],
     exports: &[String],
     target: hirsel_core_layout::Target,
-    reuse: &mut dyn FnMut(&str, &[u8]) -> bool,
-) -> Result<Vec<Option<Vec<u8>>>, String> {
+    reuse: &mut dyn FnMut(&str, &str, &[u8]) -> bool,
+) -> Result<Program, String> {
     let context = units
         .iter()
         .any(|unit| matches!(unit, Unit::Core { .. }))

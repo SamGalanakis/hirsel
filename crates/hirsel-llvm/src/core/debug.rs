@@ -26,8 +26,24 @@ pub fn finish_native_object(
         return Ok(NativeObject { bytes, debug: None });
     }
     let file = object::File::parse(bytes.as_slice()).map_err(error)?;
-    let addresses = Addresses::new(&file, unit)?;
-    let sections = gimli::DwarfSections::load(|id| addresses.section(&file, id.name()))?;
+    let (debug, addresses) = extract(&file, unit)?;
+    Ok(NativeObject {
+        bytes: addresses.strip(&bytes)?,
+        debug: Some(debug),
+    })
+}
+
+/// The debug rows of a freshly emitted object, with the object's section
+/// index of each code section, in `sections` order.
+pub(super) fn object_debug(bytes: &[u8]) -> Result<(NativeDebug, Vec<usize>), String> {
+    let file = object::File::parse(bytes).map_err(error)?;
+    let (debug, addresses) = extract(&file, ContentHash::of_bytes(b""))?;
+    Ok((debug, addresses.sections.iter().map(|s| s.index).collect()))
+}
+
+fn extract(file: &object::File<'_>, unit: ContentHash) -> Result<(NativeDebug, Addresses), String> {
+    let addresses = Addresses::new(file, unit)?;
+    let sections = gimli::DwarfSections::load(|id| addresses.section(file, id.name()))?;
     let dwarf = sections.borrow(|bytes| R::new(bytes, LittleEndian));
     let mut debug = NativeDebug {
         sections: addresses.sections.iter().map(|s| s.code.clone()).collect(),
@@ -49,10 +65,7 @@ pub fn finish_native_object(
                 .ok_or("native debug origin is not a function scope")?,
         );
     }
-    Ok(NativeObject {
-        bytes: addresses.strip(&bytes)?,
-        debug: Some(debug),
-    })
+    Ok((debug, addresses))
 }
 
 struct Section {

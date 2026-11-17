@@ -1,6 +1,7 @@
-// The release module's codegen parts. Whole-program O3 has run; code
-// generation then runs once per out-of-line definition, and a part whose
-// bitcode a caller already holds an object for is not generated again.
+// The release module's codegen parts. Whole-program O3 has run; each
+// out-of-line definition is then a part keyed by its bitcode, a part whose
+// object a caller already holds is not generated again, and the rest are
+// generated together in one object the caller cuts per part.
 //
 // A part is one definition with the declarations it references. A local
 // constant it references is defined in it `linkonce_odr` (a weak hidden
@@ -33,6 +34,8 @@
 #include <llvm/Support/CBindingWrapping.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/xxhash.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/TargetParser/Triple.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 #include <string>
@@ -276,15 +279,95 @@ std::unique_ptr<Module> part(const Module &m, Function &f, const StringMap<std::
     return p;
 }
 
+// What code generation is a function of besides the IR: the machine and the
+// backend options a part's object depends on. A part's key carries it.
+std::string machine_text(const TargetMachine &tm) {
+    std::string s;
+    raw_string_ostream os(s);
+    const TargetOptions &o = tm.Options;
+    os << "triple " << tm.getTargetTriple().str() << "\ncpu " << tm.getTargetCPU() << "\nfeatures "
+       << tm.getTargetFeatureString() << "\nreloc " << (int)tm.getRelocationModel() << "\ncode-model "
+       << (int)tm.getCodeModel() << "\nopt " << (int)tm.getOptLevel() << "\nfunction-sections "
+       << o.FunctionSections << "\ndata-sections " << o.DataSections << "\nunique-section-names "
+       << o.UniqueSectionNames << "\nipra " << o.EnableIPRA << "\nmachine-outliner " << o.EnableMachineOutliner
+       << "\nglobal-isel " << o.EnableGlobalISel << "\nfast-isel " << o.EnableFastISel << "\n";
+    return s;
+}
+
+// Why `m` cannot be split into per-definition objects, or empty. A part's
+// object is cut from the program's object by its text section; anything
+// whose output the module owns as a whole (constructors, used lists, module
+// assembly beyond the site aliases, explicit sections, comdats, aliases,
+// writable or thread-local data, unwinding personalities, named metadata
+// that reaches the object) is not a part's, so such a module is generated
+// and keyed whole.
+std::string unsplittable(const Module &m) {
+    Triple triple(m.getTargetTriple());
+    if (triple.getArch() != Triple::x86_64 || !triple.isOSBinFormatELF())
+        return "the object split is x86-64 ELF only";
+    if (!m.alias_empty() || !m.ifunc_empty()) return "aliases";
+    if (!m.getComdatSymbolTable().empty()) return "comdats";
+    for (const GlobalVariable &g : m.globals()) {
+        if (g.hasAppendingLinkage()) return "appending global " + g.getName().str();
+        if (g.isDeclaration()) continue;
+        // A part copies each constant it reaches as its own weak hidden
+        // definition, so a constant must be local: nothing outside names it.
+        if (!g.isConstant() || !g.hasLocalLinkage() || g.isThreadLocal() || g.hasSection() ||
+            g.hasComdat())
+            return "data " + g.getName().str();
+    }
+    for (const Function &f : m) {
+        if (f.isDeclaration()) continue;
+        if (f.hasSection() || f.hasComdat() || f.hasPersonalityFn() || f.hasPrefixData() ||
+            f.hasPrologueData() || f.hasGC())
+            return "function " + f.getName().str();
+    }
+    for (const Module::GlobalAsmFragment &f : m.getModuleInlineAsm()) {
+        if (!f.hasSameProperties(Module::GlobalAsmFragment(std::string()))) return "module assembly properties";
+        StringRef rest = f.Asm;
+        while (!rest.empty()) {
+            auto [line, tail] = rest.split('\n');
+            rest = tail;
+            StringRef body = line.trim();
+            if (!body.empty() && !body.starts_with(".set ")) return "module assembly";
+        }
+    }
+    for (const NamedMDNode &n : m.named_metadata())
+        if (n.getName() != "llvm.module.flags" && n.getName() != "llvm.dbg.cu")
+            return "named metadata " + n.getName().str();
+    return "";
+}
+
+// Bitcode of `m` alone: no IR symbol table, which only restates the module.
+void bitcode(const Module &m, SmallVectorImpl<char> &out) {
+    BitcodeWriter writer(out);
+    writer.writeModule(m);
+    writer.writeStrtab();
+}
+
 }  // namespace
 
-// Generate `module` as parts, in module order. For each part `reuse` gets its
-// definition's name and bitcode; unless it answers 1, `deliver` gets the part's
-// object. Returns 0, or 1 with `*error` set to an LLVM message.
+// Generate `module` once for every definition a caller does not hold. Each
+// out-of-line definition is a part keyed by its own bitcode (`part`); `reuse`
+// gets the machine text, the part's definition name and bitcode, and answers 1
+// when it holds the part's object, whose body is then dropped. One codegen
+// over what is left gives one object with a section per definition, which
+// `deliver` gets and the caller cuts per part. A module that cannot be cut
+// (`unsplittable`) is one part named "" keyed by the module's bitcode.
+// Returns 0, or 1 with `*error` set to an LLVM message.
 extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine,
-    int (*reuse)(void *, const char *, size_t, const uint8_t *, size_t),
+    int (*reuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t),
     void (*deliver)(void *, const uint8_t *, size_t), void *context, char **error) {
     Module &m = *unwrap(module);
+    TargetMachine &tm = *reinterpret_cast<TargetMachine *>(machine);
+    // A section per definition, and no code generation across definitions:
+    // a part's code is a function of the part alone.
+    tm.Options.FunctionSections = true;
+    tm.Options.DataSections = true;
+    tm.Options.UniqueSectionNames = true;
+    tm.Options.EnableIPRA = false;
+    tm.Options.EnableMachineOutliner = false;
+    std::string machine_key = machine_text(tm);
     // Local value names label printed IR only.
     for (Function &f : m) {
         for (Argument &a : f.args()) a.setName("");
@@ -294,21 +377,40 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         }
     }
     name_from_content(m);
-    StringMap<std::string> sets = asm_lines(m);
-    for (Function &f : m) {
-        if (f.isDeclaration()) continue;
-        std::unique_ptr<Module> p = part(m, f, sets);
-        SmallVector<char, 0> bitcode;
-        raw_svector_ostream os(bitcode);
-        WriteBitcodeToFile(*p, os);
-        StringRef name = f.getName();
-        if (reuse(context, name.data(), name.size(), (const uint8_t *)bitcode.data(), bitcode.size()))
-            continue;
-        LLVMMemoryBufferRef object = nullptr;
-        if (LLVMTargetMachineEmitToMemoryBuffer(machine, wrap(p.get()), LLVMObjectFile, error, &object))
-            return 1;
-        deliver(context, (const uint8_t *)LLVMGetBufferStart(object), LLVMGetBufferSize(object));
-        LLVMDisposeMemoryBuffer(object);
+    bool whole = !unsplittable(m).empty();
+    auto ask = [&](StringRef name, const SmallVectorImpl<char> &code) {
+        return reuse(context, name.data(), name.size(), machine_key.data(), machine_key.size(),
+                     (const uint8_t *)code.data(), code.size()) != 0;
+    };
+    size_t misses = 0;
+    if (whole) {
+        SmallVector<char, 0> code;
+        bitcode(m, code);
+        if (ask("", code)) return 0;
+        misses = 1;
+    } else {
+        // Every local definition is a hidden global: a part's references to
+        // another part's definitions resolve at link time.
+        for (GlobalObject &g : m.global_objects())
+            if (!g.isDeclaration() && g.hasLocalLinkage()) {
+                g.setLinkage(GlobalValue::ExternalLinkage);
+                g.setVisibility(GlobalValue::HiddenVisibility);
+            }
+        StringMap<std::string> sets = asm_lines(m);
+        std::vector<Function *> held;
+        for (Function &f : m) {
+            if (f.isDeclaration()) continue;
+            SmallVector<char, 0> code;
+            bitcode(*part(m, f, sets), code);
+            if (ask(f.getName(), code)) held.push_back(&f);
+            else ++misses;
+        }
+        for (Function *f : held) f->deleteBody();
     }
+    if (!misses) return 0;
+    LLVMMemoryBufferRef object = nullptr;
+    if (LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, error, &object)) return 1;
+    deliver(context, (const uint8_t *)LLVMGetBufferStart(object), LLVMGetBufferSize(object));
+    LLVMDisposeMemoryBuffer(object);
     return 0;
 }

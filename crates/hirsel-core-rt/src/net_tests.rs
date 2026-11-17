@@ -444,9 +444,6 @@ struct SocketScenario {
     appended: usize,
     sticky: bool,
 }
-unsafe extern "C" fn socket_no_drop(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 unsafe extern "C" fn socket_reader(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
     unsafe {
         let scenario = input.cast::<*mut SocketScenario>().read();
@@ -471,13 +468,13 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
             bytes: size_of::<*mut SocketScenario>(),
             align: align_of::<*mut SocketScenario>(),
             logical: 0,
-            drop: socket_no_drop,
+            clean: None,
         };
         let result_layout = ValueLayout {
             bytes: 0,
             align: 1,
             logical: 0,
-            drop: socket_no_drop,
+            clean: None,
         };
         let child = hirsel_core_spawn(
             context,

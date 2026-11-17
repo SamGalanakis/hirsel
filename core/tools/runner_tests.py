@@ -47,7 +47,7 @@ CHUNK = 500
 N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks')
+         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'owed_ended_delivered')
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
 # L3's tally handler and the publisher, once per answer it tells (L23), are the only
@@ -63,7 +63,7 @@ COUNTS = {'calls_runs_once': (7, 5), 'calls_deadline_hung': (7, 32668)}
 HUNG_TOLDS = 3
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
-SUBS = ('subs_main', 'rows_normalized')
+SUBS = ('subs_main', 'rows_normalized', 'subscribe_order')
 
 
 def counted(name, report):
@@ -180,6 +180,45 @@ MUTANTS = (
      [('    let rev = match revision {\n        Some(b) => Some(copy_bytes(b)?),\n',
        '    let rev: Option[Bytes] = match revision {\n        Some(_) => None,\n')],
      'runner_calls', 'calls_recorded'),
+    # L22 (subscribe_order, v2.12): a Subscribe that runs past the Releases queued behind it,
+    # at the newest version, not at its place in PubIn's order. The spec's name for it,
+    # subscribe_at_latest, is subs_main's Board-level mutant above; this is its inbox form.
+    ('subscribe_past_queue',
+     [('                unend(mut joined[i].ended, sub)\n',
+       '                match channel.try_receive(from) {\n'
+       '                    Ok(take ahead) => {\n'
+       '                        let PubIn(e: take next) = take ahead\n'
+       '                        match take next {\n'
+       '                            Released(take rel) => {\n'
+       '                                let Release(version: v, snapshot: take snap, answers: _) = take rel\n'
+       '                                match take snap {\n'
+       '                                    Some(take s) => {\n'
+       '                                        at = v\n'
+       '                                        b.newest = Some(take s)\n'
+       '                                        let owes = round(mut b)\n'
+       '                                        deliver(mut b, mut joined, take owes)\n'
+       '                                    },\n'
+       '                                    None => (),\n'
+       '                                }\n'
+       '                            },\n'
+       '                            _ => (),\n'
+       '                        }\n'
+       '                    },\n'
+       '                    Error(_) => (),\n'
+       '                }\n'
+       '                unend(mut joined[i].ended, sub)\n')],
+     'runner', 'subscribe_order'),
+    # L24 (owed_ended_delivered, v2.13): the owner never wakes the publisher, so a waiting
+    # Ended needs other traffic; and an owner that wakes it once per session, then never.
+    ('owed_ended_waits_for_traffic',
+     [('        let _ = channel.try_send(s.publisher, PubIn(e: Drained))\n', '')],
+     'runner_calls', 'owed_ended_delivered'),
+    ('wake_once',
+     [('            run = 0u64\n            match channel.receive(s.inbox) {\n',
+       '            if run <= INBOX {\n                run = 0u64\n            }\n            match channel.receive(s.inbox) {\n'),
+      ('        let _ = channel.try_send(s.publisher, PubIn(e: Drained))\n        run = 0u64\n',
+       '        let _ = channel.try_send(s.publisher, PubIn(e: Drained))\n        run = INBOX + 1u64\n')],
+     'runner_calls', 'owed_ended_delivered'),
     # L23 (publisher_never_blocks): the publisher sends to an owner and waits.
     ('publisher_blocks_on_full_session',
      [('fn offer(to: Sender[Event], take e: Event) -> Offered {\n    match channel.try_send(to, take e) {\n        Ok(_) => Took,\n        Error(Full(take x)) => Bounced(take x),\n        Error(Closed(_)) => Shut,\n    }\n',

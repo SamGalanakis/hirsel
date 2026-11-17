@@ -71,6 +71,8 @@ def traced_calls(root, work):
                    '    let recorded: Result[Log[observe.Obs], Capacity] = log.new()\n'
                    '    Conn(id: id, clock: clock, out: out, err: err, log: result.unwrap(take recorded), digests: map.new(), to: take to,')
     text = replace(text, 'fn ask(cn: Conn,', 'fn ask(mut cn: Conn,')
+    text = replace(text, 'fn stall(b: Conn,', 'fn stall(mut b: Conn,')
+    text = re.sub(r'(?<![\w.])stall\(b,', 'stall(mut b,', text)
     text = re.sub(r'(?<![\w.])ask\((\w+),', r'ask(mut \1,', text)
     text = replace(text, '    if let Error(_) = channel.send(cn.to, runner.ask(take c)) {',
                    '    let digest = send_digest(mut cn, c.key, c.arg)\n'

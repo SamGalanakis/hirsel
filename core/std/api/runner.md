@@ -106,10 +106,12 @@ each subscription whose content did not fit with `Ended(sub, Refused(Overloaded)
 client resubscribes. That Ended, and any answer that did not fit, waits in the publisher until
 the inbox takes it, retried after every message the publisher handles and before that
 session's next content; a retried answer is told at the publisher's current base. The
-publisher keeps no subscription content for a full inbox. Not built yet: a waiting Ended
-moves only when the publisher next gets a message, so in a place that goes quiet the client
-lacks the rows it missed and has no Ended until then; and the budget ledger that bounds
-these bytes (R2-a).
+publisher keeps no subscription content for a full inbox. A subscribed session's owner
+wakes the publisher (v2.13, L24): it counts the events it takes since it last found its
+inbox empty, and at the inbox's capacity it offers the publisher a `Drained` by `try_send`
+(dropped if the publisher's inbox is full), so a waiting Ended reaches its client in a
+quiet place too. An owner that keeps up never offers one. Not built yet: the budget ledger
+that bounds these bytes (R2-a).
 
 `connect(tasks, place, n_place, head, publisher, client, clock, q, n_session)` spawns a session
 task under `bytes n_session` and returns its inbox sender and its task. The session

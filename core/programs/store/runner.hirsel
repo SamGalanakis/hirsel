@@ -775,7 +775,7 @@ pub opaque type Release: send {
 // without selection, which v1 lacks.
 pub opaque type PubIn: send { e: ToPub }
 
-type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes, Bytes) | Unsubscribed(u64, u32) | Left(u64) | Halt
+type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes, Bytes) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
 
 // A session's join, on its first Subscribe: where its content goes, and where the
 // publisher answers with the id it mints for the session.
@@ -1249,6 +1249,8 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 let _ = list.remove(mut b.subs, i)
             },
             Left(who) => forget(mut b.subs, mut joined, who),
+            // An owner made room (v2.13): the retry below is the whole of it.
+            Drained => (),
         }
         settle(mut b.subs, mut joined, mut waiting, at)
     }
@@ -1503,7 +1505,7 @@ type Session[G: send, H: send]: send {
 // client on `client`. The returned
 // sender is the client's way in; the task ends with Place's error if `place` fails.
 pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], to_publisher: Sender[PubIn], take client: Sender[Down], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity] {
-    let (tx, rx): (Sender[Event], Receiver[Event]) = channel.new(64u64)?
+    let (tx, rx): (Sender[Event], Receiver[Event]) = channel.new(INBOX)?
     let s = Session(place: place, n_place: n_place, inbox: take rx, me: channel.sender(tx), head: channel.sender(head), publisher: channel.sender(to_publisher), client: take client, clock: clock, tasks: tasks, q: q)
     match task.spawn(tasks, bytes n_session, take s, session) {
         Ok(take t) => Ok((take tx, take t)),
@@ -1583,15 +1585,55 @@ fn hand(to: Sender[Down], take o: Owe) -> () waits {
     }
 }
 
+// A session owner's inbox capacity: C, the run of takes after which a joined owner wakes the
+// publisher (v2.13).
+const INBOX: u64 = 64u64
+
+// A joined owner's take (v2.13, L24): try_receive first, and a run of takes that finding the
+// inbox empty resets. At C takes in a run it offers the publisher one Drained, never waiting
+// (a full PubIn drops it), so a ledger a full inbox bounced is retried once the owner has made
+// room, with no other traffic. An owner that keeps up finds its inbox empty first and never
+// offers; one that has not joined keeps no run.
+fn take_event[G: send, H: send](s: Session[G, H], joined: bool, mut run: u64) -> Option[Event] waits {
+    if !joined {
+        return match channel.receive(s.inbox) {
+            Ok(take x) => Some(take x),
+            Error(_) => None,
+        }
+    }
+    let got = match channel.try_receive(s.inbox) {
+        Ok(take x) => take x,
+        Error(Empty) => {
+            run = 0u64
+            match channel.receive(s.inbox) {
+                Ok(take x) => take x,
+                Error(_) => return None,
+            }
+        },
+        Error(_) => return None,
+    }
+    run += 1u64
+    if run == INBOX {
+        let _ = channel.try_send(s.publisher, PubIn(e: Drained))
+        run = 0u64
+    }
+    Some(take got)
+}
+
 fn sessioned[G: send, H: send](s: Session[G, H], r: Registry[G, H], mut id: Option[u64]) -> () waits {
     let mut held: Map[Bytes, Held] = map.new()
     let mut used = 0u64
     let mut last = 0u64
     let mut generation = 0u64
+    let mut run = 0u64
     loop {
-        let got = match channel.receive(s.inbox) {
-            Ok(take x) => take x,
-            Error(_) => return,
+        let joined = match id {
+            Some(_) => true,
+            None => false,
+        }
+        let got = match take_event(s, joined, mut run) {
+            Some(take x) => take x,
+            None => return,
         }
         let Event(e: take e) = take got
         match take e {
@@ -2006,6 +2048,88 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
         }
     }
     faulted && apply_all(mut cl, take owes) && cached(cl, 0u64, 2u32) == None && holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8))
+}
+
+// L22 (RUNNER-SPEC v2.12, subscribe_order): a Subscribe runs at the version of the last
+// Released taken before it in PubIn's order, and each later Release reaches it as a round.
+// The publisher's own loop drains one inbox filled in that order: Joined, c1's Release, the
+// Subscribe, c2's Release, Halt. Sub 1's initial result holds c1 (row 1 = 1) at c1's version,
+// and c2 (row 2 = 7) follows as a round at c2's version.
+pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let empty = store.snapshot(db)
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let mut keys: List[Bytes] = list.new()
+    for ch in result.unwrap(store.changes(empty, base)) {
+        result.unwrap(list.push(mut keys, result.unwrap(clone(ch.tree_key))))
+    }
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let reg = match placed(code.describe(subs_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    set(mut db, t, 1u64, 1u64)
+    let c1 = store.snapshot(db)
+    set(mut db, t, 2u64, 7u64)
+    let c2 = store.snapshot(db)
+    let v1 = store.version(c1)
+    let v2 = store.version(c2)
+    let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(8u64))
+    let (ev_to, ev_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(8u64))
+    let (told_to, told_from): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
+    let mut queue: List[ToPub] = list.new()
+    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to))))
+    result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
+    result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg())))
+    result.unwrap(list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new()))))
+    result.unwrap(list.push(mut queue, Halt))
+    for take e in queue {
+        if let Error(_) = channel.send(to, PubIn(e: take e)) {
+            return false
+        }
+    }
+    publisher(take reg, take h, take base, take from)
+    match channel.try_receive(told_from) {
+        Ok(1u64) => (),
+        _ => return false,
+    }
+    let mut cl = Client(caches: list.new(), last: list.new())
+    let mut n = 0u64
+    while let Ok(take x) = channel.try_receive(ev_from) {
+        let Event(e: take e) = take x
+        let o = match take e {
+            Content(take o) => take o,
+            _ => return false,
+        }
+        let ok = if n == 0u64 {
+            o.version == v1 && list.len(o.complete) == 1u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8))
+        } else {
+            o.version == v2 && list.len(o.complete) == 0u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(7u8))
+        }
+        if !ok {
+            return false
+        }
+        n += 1u64
+    }
+    n == 2u64
+}
+
+@test
+fn test_subscribe_order(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_subscribe_order(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test

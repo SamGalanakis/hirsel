@@ -699,14 +699,10 @@ fn drive_subs_wired(take d: Drive) -> () waits {
 // and its inbox (64), with room to spare.
 const STALL_WRITES: u64 = 150u64
 
-fn drive_publisher_never_blocks(take d: Drive) -> () waits {
-    let a = conn(d.tasks, d.head, d.post, d.clock, 1u64)
-    let b = conn(d.tasks, d.head, d.post, d.clock, 1u64)
-    subscribe(a, 1u32, k_everything())
-    subscribe(b, 1u32, k_everything())
-    want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "never_blocks: B's empty initial Batch at 1")
-    for i in 0u64 .. STALL_WRITES {
-        ask(b, d.clock, 0u64, i, k_write(), u64_arg(i), LATER)
+// B's writes from `from` while A reads nothing: each reaches B in its own round.
+fn stall(b: Conn, clock: Clock, from: u64) -> () waits {
+    for i in from .. from + STALL_WRITES {
+        ask(b, clock, 0u64, i, k_write(), u64_arg(i), LATER)
         let v = 3u64 + 2u64 * i
         want(match down(b) {
             Batched(x) => x.version == v && list.len(x.rows) == 1u64 && list.len(x.outcomes) == 0u64,
@@ -714,9 +710,27 @@ fn drive_publisher_never_blocks(take d: Drive) -> () waits {
         }, "never_blocks: B's row arrives in its round while A is full")
         want(written(frame(b), v), "never_blocks: B's write answered")
     }
+}
+
+// A resubscribes sub 1 after its Ended: one Batch naming it, with all n rows written.
+fn resubscribed(a: Conn, n: u64) -> () waits {
+    subscribe(a, 1u32, k_everything())
+    want(match down(a) {
+        Batched(x) => x.version == 3u64 + 2u64 * (n - 1u64) && list.len(x.complete) == 1u64 && x.complete[0] == 1u32 && list.len(x.rows) == n,
+        _ => false,
+    }, "never_blocks: A's resubscribe is one Batch with every row")
+}
+
+fn drive_publisher_never_blocks(take d: Drive) -> () waits {
+    let a = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let b = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    subscribe(a, 1u32, k_everything())
+    subscribe(b, 1u32, k_everything())
+    want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "never_blocks: B's empty initial Batch at 1")
+    stall(b, d.clock, 0u64)
     // A drains: its Batches until its Ended(1, Refused(Overloaded)); anything for sub 1 after
-    // it would come before the resubscribe's Batch below. The Ended waits on the ledger until A's inbox has room, and the publisher
-    // retries it after every message, so B's writes carry it out.
+    // it would come before the resubscribe's Batch below. Here B keeps writing while A drains
+    // (L24 below drains in a quiet place).
     let mut ended = false
     let mut extra = 0u64
     while !ended {
@@ -737,14 +751,51 @@ fn drive_publisher_never_blocks(take d: Drive) -> () waits {
             },
         }
     }
-    subscribe(a, 1u32, k_everything())
-    let last = 3u64 + 2u64 * (STALL_WRITES + extra - 1u64)
-    want(match down(a) {
-        Batched(x) => x.version == last && list.len(x.complete) == 1u64 && x.complete[0] == 1u32 && list.len(x.rows) == STALL_WRITES + extra,
-        _ => false,
-    }, "never_blocks: A's resubscribe is one Batch with every row")
+    resubscribed(a, STALL_WRITES + extra)
     hang(take a)
     hang(take b)
+}
+
+// A reads in a quiet place until its Ended: only the owner's wake can carry it (L24).
+fn quiet_drain(a: Conn) -> () waits {
+    loop {
+        match down(a) {
+            Batched(x) => want(x.version != NEVER, "owed_ended: A's Ended never came in a quiet place"),
+            Ended(sub, o) => {
+                want(sub == 1u32 && is(o, Refused(Overloaded)), "owed_ended: A's sub ends Overloaded")
+                return
+            },
+            _ => fail("owed_ended: A got a Reset"),
+        }
+    }
+}
+
+// L24 (RUNNER-SPEC v2.13, owed_ended_delivered): L23's stall, then B stops and the place is
+// quiet; A still gets its Ended, after the rounds that fit and before its resubscribe's
+// Batch. Twice, so a wake spent on the first bounce cannot carry the second.
+fn drive_owed_ended_delivered(take d: Drive) -> () waits {
+    let a = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let b = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    subscribe(a, 1u32, k_everything())
+    subscribe(b, 1u32, k_everything())
+    want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "owed_ended: B's empty initial Batch at 1")
+    stall(b, d.clock, 0u64)
+    quiet_drain(a)
+    resubscribed(a, STALL_WRITES)
+    stall(b, d.clock, STALL_WRITES)
+    quiet_drain(a)
+    resubscribed(a, 2u64 * STALL_WRITES)
+    hang(take a)
+    hang(take b)
+}
+
+pub fn law_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_owed_ended_delivered)
+}
+
+@test
+fn test_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_owed_ended_delivered(c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 pub fn law_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks) -> bool waits {

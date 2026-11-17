@@ -58,7 +58,7 @@ export async function vectors(c,frame,entries) {
   vector({tag:'Batch',values:[2n,[],[{sub:3,key:bytes('aa'),value:{tag:'None'}}],[{stream:4,p:5n,outcome:{tag:'Returned',value:bytes('')}}]]},'06000000 0200000000000000 00000000 01000000 03000000 01000000 aa 00000000 01000000 04000000 0500000000000000 00000000 00000000');
   vector({tag:'Batch',values:[2n,[7],[{sub:3,key:bytes('aa'),value:{tag:'Some',value:bytes('bb')}}],[]]},'06000000 0200000000000000 01000000 07000000 01000000 03000000 01000000 aa 01000000 01000000 bb 00000000');
   vector({tag:'Reset',values:[2n,[]]},'08000000 0200000000000000 00000000');
-  vector({tag:'Reset',values:[2n,[{stream:3,p:4n,outcome:{tag:'Superseded'}}]]},'08000000 0200000000000000 01000000 03000000 0400000000000000 03000000');
+  vector({tag:'Reset',values:[2n,[{stream:3,p:4n,outcome:{tag:'Refused',value:{tag:'HistoryUnavailable'}}}]]},'08000000 0200000000000000 01000000 03000000 0400000000000000 02000000 07000000');
   for (const [outcome,hex] of [
     [{tag:'Returned',value:bytes('aa')},'00000000 01000000 aa'],
     [{tag:'Failed',value:{tag:'Raised',value:1}},'01000000 00000000 01000000'],
@@ -72,12 +72,16 @@ export async function vectors(c,frame,entries) {
     [{tag:'Refused',value:{tag:'Deadline'}},'02000000 03000000'],
     [{tag:'Refused',value:{tag:'Budget',value:{requested:2n,available:3n}}},'02000000 04000000 0200000000000000 0300000000000000'],
     [{tag:'Refused',value:{tag:'NotAllowed'}},'02000000 05000000'],
-    [{tag:'Superseded'},'03000000'],[{tag:'Abandoned'},'04000000'],[{tag:'InDoubt'},'05000000']
+    [{tag:'Refused',value:{tag:'RequestMismatch'}},'02000000 06000000'],
+    [{tag:'Refused',value:{tag:'HistoryUnavailable'}},'02000000 07000000'],
+    [{tag:'Abandoned'},'03000000'],[{tag:'InDoubt'},'04000000']
   ]) vector({tag:'Ended',values:[3,outcome]},'07000000 03000000 '+hex);
   assert.throws(() => c.Frame.decode(bytes('09000000')),c.Malformed);
   assert.throws(() => c.Frame.decode(bytes('0500000003000000')),c.Malformed);
   assert.throws(() => c.Frame.decode(bytes('0000000002000000')),c.Malformed);
-  assert.throws(() => c.Frame.decode(bytes('070000000000000006000000')),c.Malformed);
+  assert.throws(() => c.Frame.decode(bytes('070000000000000005000000')),c.Malformed);
+  assert.throws(() => c.Frame.decode(bytes('07000000000000000200000008000000')),c.Malformed);
+  assert.throws(() => c.Frame.encode({tag:'Ended',values:[3,{tag:'Superseded'}]}),TypeError);
   return {cases};
 }
 
@@ -96,7 +100,7 @@ export function differential(c) {
       case 5: value={tag:'Placed',value:state%3 === 0 ? {tag:'Ready',value:i} : state%3 === 1 ? {tag:'Resolve',values:[i,bytes('09')]} : {tag:'Gone'}}; break;
       case 6: value={tag:'Batch',values:[n,state%2 === 0 ? [i] : [],[{sub:1,key:bytes('01'),value:{tag:'Some',value:bytes('03')}}],[{stream:i,p,outcome:{tag:'Returned',value:bytes('04')}}]]}; break;
       case 7: value={tag:'Ended',values:[i,i%2 === 0 ? {tag:'Failed',value:{tag:'Raised',value:state}} : {tag:'Refused',value:{tag:'Deadline'}}]}; break;
-      default: value={tag:'Reset',values:[n,[{stream:i,p,outcome:{tag:['Superseded','Abandoned','InDoubt'][state%3]}}]]};
+      default: value={tag:'Reset',values:[n,[{stream:i,p,outcome:[{tag:'Abandoned'},{tag:'InDoubt'},{tag:'Refused',value:{tag:'RequestMismatch'}},{tag:'Refused',value:{tag:'HistoryUnavailable'}}][state%4]}]]};
     }
     const encoded = c.Frame.encode(value); assert.deepEqual(c.Frame.decode(encoded),value); chunks.push(encoded);
   }

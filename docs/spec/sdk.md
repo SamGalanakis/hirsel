@@ -48,6 +48,9 @@ type shared by every executable. The generator computes
 `std.codec.schema(of[runner.Frame]())` from the compiler's bundled runner and
 std sources. Describe contains only per-program data. A Frame change requires
 a subprotocol change; the client checks the negotiated subprotocol.
+Outcome has Returned, Failed, Refused, Abandoned and InDoubt at tags 0 through
+4. Refusal appends RequestMismatch at tag 6 and HistoryUnavailable at tag 7.
+Superseded is absent. The generated codecs follow the bundled declarations.
 
 `--place-timeout` is a positive number of seconds, default 10. `--n-place` fixes
 the registration allowance, default 16 MiB. Ordinary native build options select

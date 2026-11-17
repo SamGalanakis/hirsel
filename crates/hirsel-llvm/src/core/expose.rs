@@ -19,35 +19,6 @@ fn successors(body: &Body, block: usize) -> Vec<usize> {
         _ => Vec::new(),
     }
 }
-fn cyclic_blocks(body: &Body) -> BTreeSet<usize> {
-    fn visit(
-        body: &Body,
-        b: usize,
-        seen: &mut [bool],
-        stack: &mut Vec<usize>,
-        hot: &mut BTreeSet<usize>,
-    ) {
-        if let Some(at) = stack.iter().position(|&n| n == b) {
-            hot.extend(stack[at..].iter().copied());
-        } else if !seen[b] {
-            seen[b] = true;
-            stack.push(b);
-            for next in successors(body, b) {
-                visit(body, next, seen, stack, hot);
-            }
-            stack.pop();
-        }
-    }
-    let mut hot = BTreeSet::new();
-    visit(
-        body,
-        0,
-        &mut vec![false; body.blocks.len()],
-        &mut Vec::new(),
-        &mut hot,
-    );
-    hot
-}
 fn supported(i: &Inst) -> bool {
     matches!(
         i,
@@ -475,10 +446,7 @@ pub(super) fn module(module: &Module) -> Option<Module> {
         .iter()
         .map(|f| {
             f.body.as_ref().filter(|b| {
-                b.insts.len() <= 192
-                    && b.blocks.len() <= 24
-                    && b.insts.iter().all(supported)
-                    && cyclic_blocks(b).is_empty()
+                b.insts.len() <= 192 && b.blocks.len() <= 24 && b.insts.iter().all(supported)
             })
         })
         .collect::<Vec<_>>();

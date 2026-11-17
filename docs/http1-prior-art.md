@@ -145,3 +145,17 @@ which avoids another pass but rescans growing input and accepts equal
 repeated lengths. Hirsel reads the saved Head offsets once and follows
 HTTP-4's refusal of every duplicate or listed length and TE+CL. Go's
 duplicate coalescing and HTTP/1.0 TE tolerance are NOT TAKEN.
+
+## Chunk decoding and trailers
+
+ADAPTED httparse `a0fa552`, `src/lib.rs:1260`, and Go `46b6249`,
+`src/net/http/internal/chunked.go:46,278`: bounded hexadecimal sizes and a
+stateful body reader. Both discard extensions before interpreting their
+syntax, a weakness for HTTP-4's explicit grammar requirement. Hirsel uses
+RFC 9112 section 7.1.1's token/quoted-string states, including quoted-pairs.
+The 1024-byte line cap includes CRLF; decoded size is bounded in total.
+Trailers share Head's byte and field allowances. Trailer merging is NOT
+TAKEN: Decoder keeps counts and has no Head reference. A merge mutation of
+its read-only Head argument is refused by the checker, and L2 compares
+Head's entire fixed storage before and after decoding. All runtime failures
+latch close, including a limit hit caught by a handler.

@@ -65,3 +65,338 @@ pub fn framing(b: Bytes, h: http1.Head, body_max: u64) -> Result[Framing, BodyEr
     }
     Ok(ContentLength(size))
 }
+
+type BodyState: key = Fixed | Size | SizeWs | ExtStart | ExtName | ExtNameWs | ExtValueStart | ExtToken | ExtQuote | ExtEscape | ExtAfter | ExtWs | ChunkLf | ChunkData | DataCr | DataLf | TrailerStart | TrailerName | TrailerValue | TrailerLf | TrailerEndLf | Finished | Broken
+
+pub type Decoder {
+    state: BodyState,
+    used: u64,
+    decoded: u64,
+    remaining: u64,
+    body_max: u64,
+    size: u64,
+    digits: u8,
+    line_bytes: u64,
+    trailer_bytes: u64,
+    trailer_fields: u64,
+    error: BodyError
+}
+
+pub type BodyProgress: key = More | Data(http1.Span) | Done | Failed(BodyError)
+
+/// Starts a fixed-storage body decoder after framing succeeds. Head is read
+/// only here; trailers can never change it. All errors permanently latch close.
+/// Ex: `let mut d = http.decoder(frame, h, body_max)`.
+pub fn decoder(frame: Framing, h: http1.Head, body_max: u64) -> Decoder {
+    let mut d = Decoder(state: Finished, used: 0, decoded: 0, remaining: 0, body_max: body_max, size: 0, digits: 0, line_bytes: 0, trailer_bytes: h.end, trailer_fields: h.count, error: failure(400))
+    match frame {
+        Empty => {},
+        ContentLength(n) => {
+            d.remaining = n
+            if n > 0 {
+                d.state = Fixed
+            }
+        },
+        Chunked => {
+            d.state = Size
+        }
+    }
+    d
+}
+
+fn fail(mut d: Decoder, status: u16) {
+    d.error = failure(status)
+    d.state = Broken
+}
+
+fn token(c: u8) -> bool {
+    int.is_ascii_alpha(c) || int.is_ascii_digit(c) || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126
+}
+
+fn whitespace(c: u8) -> bool {
+    c == b' ' || c == 9
+}
+
+fn field_value(c: u8) -> bool {
+    c == 9 || c >= 32 && c != 127
+}
+
+fn hex(c: u8) -> Option[u64] {
+    if c >= b'0' && c <= b'9' {
+        let digit: u64 = int.widen(c - b'0')
+        return Some(digit)
+    }
+    let lower = int.to_ascii_lower(c)
+    if lower >= b'a' && lower <= b'f' {
+        let digit: u64 = int.widen(lower - b'a')
+        return Some(digit + 10)
+    }
+    None
+}
+
+fn extension_end(c: u8, mut d: Decoder) {
+    if c == b';' {
+        d.state = ExtStart
+    } else if c == 13 {
+        d.state = ChunkLf
+    } else if whitespace(c) {
+        d.state = ExtWs
+    } else {
+        fail(mut d, 400)
+    }
+}
+
+fn extension_name_end(c: u8, mut d: Decoder) {
+    if c == b'=' {
+        d.state = ExtValueStart
+    } else if whitespace(c) {
+        d.state = ExtNameWs
+    } else {
+        extension_end(c, mut d)
+    }
+}
+
+fn chunk_line(c: u8, mut d: Decoder) {
+    match d.state {
+        Size => {
+            match hex(c) {
+                Some(digit) => {
+                    if d.digits == 16 || d.size > (18446744073709551615u64 - digit) / 16 {
+                        fail(mut d, 400)
+                    } else {
+                        d.size = d.size * 16 + digit
+                        d.digits += 1
+                    }
+                },
+                None => {
+                    if d.digits == 0 {
+                        fail(mut d, 400)
+                    } else if whitespace(c) {
+                        d.state = SizeWs
+                    } else {
+                        extension_end(c, mut d)
+                    }
+                }
+            }
+        },
+        SizeWs => {
+            if c == b';' {
+                d.state = ExtStart
+            } else if !whitespace(c) {
+                fail(mut d, 400)
+            }
+        },
+        ExtStart => {
+            if token(c) {
+                d.state = ExtName
+            } else if !whitespace(c) {
+                fail(mut d, 400)
+            }
+        },
+        ExtName => {
+            if !token(c) {
+                extension_name_end(c, mut d)
+            }
+        },
+        ExtNameWs => {
+            if c == b'=' {
+                d.state = ExtValueStart
+            } else if c == b';' {
+                d.state = ExtStart
+            } else if !whitespace(c) {
+                fail(mut d, 400)
+            }
+        },
+        ExtValueStart => {
+            if c == b'"' {
+                d.state = ExtQuote
+            } else if token(c) {
+                d.state = ExtToken
+            } else if !whitespace(c) {
+                fail(mut d, 400)
+            }
+        },
+        ExtToken => {
+            if !token(c) {
+                extension_end(c, mut d)
+            }
+        },
+        ExtQuote => {
+            if c == b'"' {
+                d.state = ExtAfter
+            } else if c == b'\\' {
+                d.state = ExtEscape
+            } else if !field_value(c) {
+                fail(mut d, 400)
+            }
+        },
+        ExtEscape => {
+            if field_value(c) {
+                d.state = ExtQuote
+            } else {
+                fail(mut d, 400)
+            }
+        },
+        ExtAfter => extension_end(c, mut d),
+        ExtWs => {
+            if c == b';' {
+                d.state = ExtStart
+            } else if !whitespace(c) {
+                fail(mut d, 400)
+            }
+        },
+        ChunkLf => {
+            if c != 10 {
+                fail(mut d, 400)
+            } else if d.size > d.body_max - d.decoded {
+                fail(mut d, 413)
+            } else {
+                d.remaining = d.size
+                if d.size == 0 {
+                    d.state = TrailerStart
+                } else {
+                    d.state = ChunkData
+                }
+                d.size = 0
+                d.digits = 0
+                d.line_bytes = 0
+            }
+        },
+        _ => {}
+    }
+}
+
+fn in_trailers(state: BodyState) -> bool {
+    state == TrailerStart || state == TrailerName || state == TrailerValue || state == TrailerLf || state == TrailerEndLf
+}
+
+fn trailer(c: u8, mut d: Decoder) {
+    match d.state {
+        TrailerStart => {
+            if c == 13 {
+                d.state = TrailerEndLf
+            } else if !token(c) {
+                fail(mut d, 400)
+            } else if d.trailer_fields == 64 {
+                fail(mut d, 431)
+            } else {
+                d.trailer_fields += 1
+                d.state = TrailerName
+            }
+        },
+        TrailerName => {
+            if c == b':' {
+                d.state = TrailerValue
+            } else if !token(c) {
+                fail(mut d, 400)
+            }
+        },
+        TrailerValue => {
+            if c == 13 {
+                d.state = TrailerLf
+            } else if !field_value(c) {
+                fail(mut d, 400)
+            }
+        },
+        TrailerLf => {
+            if c == 10 {
+                d.state = TrailerStart
+            } else {
+                fail(mut d, 400)
+            }
+        },
+        TrailerEndLf => {
+            if c == 10 {
+                d.state = Finished
+            } else {
+                fail(mut d, 400)
+            }
+        },
+        _ => {}
+    }
+}
+
+/// Consumes a fresh input fragment, returning one body span at a time. used
+/// counts bytes consumed from THIS call's input, including framing bytes.
+/// Pass its unconsumed suffix to the next call. More needs more network bytes;
+/// Done leaves the pipelined tail untouched. Data is a view into this input.
+/// Ex: `http.decode(mut d, input)`.
+pub fn decode(mut d: Decoder, b: Bytes) -> BodyProgress {
+    d.used = 0
+    loop {
+        if d.state == Finished {
+            return Done
+        }
+        if d.state == Broken {
+            return Failed(d.error)
+        }
+        if d.used == list.len(b) {
+            if in_trailers(d.state) && d.trailer_bytes == 8192 {
+                fail(mut d, 431)
+                continue
+            }
+            if d.line_bytes == 1024 {
+                fail(mut d, 400)
+                continue
+            }
+            return More
+        }
+        if d.state == Fixed || d.state == ChunkData {
+            let start = d.used
+            let n = order.min(d.remaining, list.len(b) - start)
+            d.used += n
+            d.remaining -= n
+            d.decoded += n
+            if d.remaining == 0 {
+                if d.state == Fixed {
+                    d.state = Finished
+                } else {
+                    d.state = DataCr
+                }
+            }
+            return Data(http1.Span(start: start, end: d.used))
+        }
+        let c = b[d.used]
+        d.used += 1
+        if in_trailers(d.state) {
+            if d.trailer_bytes == 8192 {
+                fail(mut d, 431)
+            } else {
+                d.trailer_bytes += 1
+                trailer(c, mut d)
+            }
+        } else if d.state == DataCr {
+            if c == 13 {
+                d.state = DataLf
+            } else {
+                fail(mut d, 400)
+            }
+        } else if d.state == DataLf {
+            if c == 10 {
+                d.state = Size
+            } else {
+                fail(mut d, 400)
+            }
+        } else {
+            if d.line_bytes == 1024 {
+                fail(mut d, 400)
+            } else {
+                d.line_bytes += 1
+                chunk_line(c, mut d)
+            }
+        }
+    }
+}
+
+/// End of input is successful only after Done. Truncation permanently closes
+/// the connection, including a short Content-Length body or unfinished CRLF.
+/// Ex: `http.body_eof(mut d)`.
+pub fn body_eof(mut d: Decoder) -> Result[(), BodyError] {
+    if d.state == Finished {
+        return Ok(())
+    }
+    if d.state != Broken {
+        fail(mut d, 400)
+    }
+    Error(d.error)
+}

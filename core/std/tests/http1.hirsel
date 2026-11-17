@@ -20,12 +20,17 @@ fn resume_parity(raw: Bytes) -> bool {
     let mut whole = http1.head()
     let expected = http1.request(raw, mut whole)
     let n = list.len(raw)
+    let head_len = if expected == Complete {
+        whole.end
+    } else {
+        n
+    }
     for split in 0u64 .. n + 1 {
         let mut h = http1.head()
         let mut cur = http1.cursor()
         let first = http1.resume(list.slice(raw, 0, split), mut h, mut cur)
         let got = http1.resume(raw, mut h, mut cur)
-        if got != expected || !same_head(h, whole) || cur.examined > n + 1 {
+        if got != expected || !same_head(h, whole) || cur.examined > head_len + 1 {
             return false
         }
     }
@@ -35,7 +40,7 @@ fn resume_parity(raw: Bytes) -> bool {
     for end in 0u64 .. n + 1 {
         got = http1.resume(list.slice(raw, 0, end), mut h, mut cur)
     }
-    got == expected && same_head(h, whole) && cur.examined <= n
+    got == expected && same_head(h, whole) && cur.examined <= head_len
 }
 
 fn request_case(raw: Bytes, expected: http1.Progress, end: u64, method: Option[Bytes], target: Option[Bytes], version: Option[u8], names: List[Bytes], values: List[Bytes]) -> bool {
@@ -705,4 +710,25 @@ fn resume_request_line_limit() -> bool {
     let mut h = http1.head()
     let mut cur = http1.cursor()
     http1.resume(raw, mut h, mut cur) == TooLarge && cur.line_end == 0 && cur.examined == 8192 && http1.request(raw, mut h) == TooLarge
+}
+
+// HTTP-3's 414 applies only when the request line alone overflows. A prefix
+// of empty lines consumes head space, never request-line space.
+// expect: run resume_prefixed_limit() = true
+fn resume_prefixed_limit() -> bool {
+    let mut raw = result.unwrap(b"\r\n")
+    while list.len(raw) < 8192 {
+        result.unwrap(list.push(mut raw, b'a'))
+    }
+    let mut h = http1.head()
+    let mut cur = http1.cursor()
+    if http1.resume(raw, mut h, mut cur) != TooLarge || cur.line_start != 2 || cur.line_end != 0 || cur.examined != 8192 {
+        return false
+    }
+    for i in 0u64 .. 8192u64 {
+        raw[i] = 10
+    }
+    h = http1.head()
+    cur = http1.cursor()
+    http1.resume(raw, mut h, mut cur) == TooLarge && cur.line_start == 8192 && cur.line_end == 0 && cur.examined == 8192
 }

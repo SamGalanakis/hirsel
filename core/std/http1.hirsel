@@ -32,6 +32,7 @@ pub type Cursor {
     state: Scan,
     offset: u64,
     line_end: u64,
+    line_start: u64,
     start: u64,
     name_end: u64,
     value_start: u64,
@@ -47,7 +48,7 @@ pub type Cursor {
 /// Starts a request scan beside a fresh head. examined counts actual byte reads.
 /// Ex: `let mut cur = http1.cursor()`.
 pub fn cursor() -> Cursor {
-    Cursor(state: Leading, offset: 0, line_end: 0, start: 0, name_end: 0, value_start: 0, value_end: 0, part: 0, utf8_left: 0, utf8_low: 128, utf8_high: 191, examined: 0, result: Partial)
+    Cursor(state: Leading, offset: 0, line_end: 0, line_start: 0, start: 0, name_end: 0, value_start: 0, value_end: 0, part: 0, utf8_left: 0, utf8_low: 128, utf8_high: 191, examined: 0, result: Partial)
 }
 
 fn finish_field(mut h: Head, mut cur: Cursor) {
@@ -132,7 +133,9 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
             Leading => {
                 if c == 13 {
                     cur.state = LeadingLf
-                } else if c != 10 {
+                } else if c == 10 {
+                    cur.line_start = cur.offset
+                } else {
                     if !token(c) {
                         cur.result = Bad
                     } else {
@@ -145,6 +148,7 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
                 if c != 10 {
                     cur.result = Bad
                 } else {
+                    cur.line_start = cur.offset
                     cur.state = Leading
                 }
             },

@@ -8,8 +8,10 @@ with its examined prefix unchanged, beside a head and cursor initialized once
 per request. It retains partial token, UTF-8 and CRLF state and never rereads a
 head byte. `cur.examined` counts actual byte reads. Complete, Bad and TooLarge
 are sticky until the caller initializes a new head and cursor. `cur.line_end`
-is zero until the request line ends; a TooLarge with zero maps to 414, and a
-field or total-head overflow maps to 431.
+is zero until the request line ends, and `cur.line_start` excludes initial empty
+lines. TooLarge maps to 414 only when the request line alone fills 8192 bytes
+(`line_end == 0` and `offset - line_start == 8192`); every other head/field
+overflow maps to 431.
 
 `request` and `response`
 reset that storage and parse one bounded head. `Complete` sets `end` to the

@@ -1,0 +1,474 @@
+fn after_ms(at: u64, ms: u64) -> u64 {
+    at + ms * 1000000
+}
+
+fn test_config() -> http.Config {
+    http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 5, inbox_cap: 2, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 16384, body_max: 16384, out_cap: 128, handler_bytes: 4096, first_head_ms: 16, idle_ms: 100, head_ms: 20, body_ms: 100, handler_ms: 100, write_ms: 30, drain_ms: 10, linger_ms: 5, drain_max: 16, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+}
+
+type TestServer: send {
+    listener: Listener,
+    c: Clock,
+    tasks: Tasks,
+    cfg: http.Config
+}
+
+fn echo(req: http.Request, mut b: http.Body, clock: Clock) -> Result[http.Outcome, http.ResponseError] waits {
+    let allocated: Result[Bytes, Capacity] = list.with_capacity(192)
+    let mut out = match take allocated {
+        Ok(take x) => take x,
+        Error(e) => return Error(Allocation(e))
+    }
+    let raw_path = http.path(req)
+    if raw_path == string.as_bytes("/large") {
+        result.unwrap(list.fill(mut out, 160, b'x'))
+    } else if raw_path == string.as_bytes("/when") {
+        let mut time = string.new()
+        result.unwrap(string.push_u64(mut time, host.mono_ns(clock)))
+        let _ = list.append(mut out, string.as_bytes(time))
+    } else if raw_path != string.as_bytes("/skip") {
+        if let Some(inline) = http.inline_body(req) {
+            let _ = list.append(mut out, inline)
+        } else {
+            loop {
+                match http.read(mut b, mut out) {
+                    Ok(0) => break,
+                    Ok(_) => {},
+                    Error(_) => break,
+                }
+            }
+        }
+    }
+    Ok(Reply(http.response(200, take out, false)?))
+}
+
+fn test_server(take server: TestServer) waits {
+    let TestServer(listener: take l, c: c, tasks: tasks, cfg: take cfg) = take server
+    let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut listeners, take l))
+    result.unwrap(http.serve(take listeners, c, tasks, take cfg, echo, c))
+}
+
+fn listen_for_law(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config) -> (Task[()], Addr) waits {
+    let addr = Addr(ip: V4(2130706433), port: 0)
+    let (listener, where_to) = result.unwrap(host.listen(n, addr, 8))
+    let job = TestServer(listener: take listener, c: c, tasks: tasks, cfg: take cfg)
+    (result.unwrap(task.spawn(tasks, bytes 262144, take job, test_server)), where_to)
+}
+
+// The client resumes independently of the writer under test.
+fn client_send(mut w: WriteHalf, data: Bytes, until: Until) -> bool waits {
+    let mut delivered: u64 = 0
+    let end = list.len(data)
+    while delivered < end {
+        match host.send(mut w, list.slice(data, delivered, end), until) {
+            Ok(0) => return false,
+            Ok(n) => {
+                delivered += n
+            },
+            Error(_) => return false,
+        }
+    }
+    true
+}
+
+fn client_head(mut r: ReadHalf, mut received: Bytes, c: Clock, deadline: u64) -> u16 waits {
+    let mut h = http1.head()
+    loop {
+        match http1.response(received, mut h) {
+            Complete => return h.status,
+            Partial => {},
+            _ => return 0,
+        }
+        match host.recv(mut r, mut received, At(c, deadline)) {
+            Ok(0) => return 0,
+            Ok(_) => {},
+            Error(_) => return 0,
+        }
+    }
+}
+
+fn client_end(mut r: ReadHalf, mut received: Bytes, until: Until) -> bool waits {
+    loop {
+        match host.recv(mut r, mut received, until) {
+            Ok(0) => return true,
+            Ok(_) => {},
+            Error(_) => return false,
+        }
+    }
+}
+
+type Drip: send {
+    w: WriteHalf,
+    c: Clock,
+    start: u64,
+    first_ms: u64,
+    every_ms: u64
+}
+
+fn drip(take plan: Drip) waits {
+    let Drip(w: take w, c: c, start: start, first_ms: first_ms, every_ms: every_ms) = take plan
+    let mut output = take w
+    let raw = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
+    for i in 0u64 .. list.len(raw) {
+        host.sleep_until(c, after_ms(start, first_ms + i * every_ms))
+        if !client_send(mut output, list.slice(raw, i, i + 1), At(c, after_ms(start, 70))) {
+            return
+        }
+    }
+}
+
+fn within_wake(ns: u64, planned_ms: u64, wake_ms: u64) -> bool {
+    ns + 1000 >= planned_ms * 1000000 && ns <= (planned_ms + wake_ms) * 1000000
+}
+
+// L3. The first deadline is accept + 16 ms, with the client beginning at
+// 8 ms. On the reused socket, the first byte at +5 ms starts a 20 ms deadline.
+// A reset on progress would complete the head or exceed either window.
+// expect: run http_absolute_deadlines(network) = true
+fn http_absolute_deadlines(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let accepted = host.mono_ns(c)
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let sender = result.unwrap(task.spawn(tasks, bytes 1024, Drip(w: take w, c: c, start: accepted, first_ms: 8, every_ms: 4), drip))
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if client_head(mut input, mut received, c, after_ms(accepted, 60)) != 408 || !within_wake(host.mono_ns(c) - accepted, 16, 4) {
+        return false
+    }
+    let _ = task.join(take sender)
+    let s = result.unwrap(host.connect(n, addr, Never))
+    let (r2, w2) = net.split(take s)
+    let mut input2 = take r2
+    let mut output2 = take w2
+    let end = after_ms(host.mono_ns(c), 60)
+    if !client_send(mut output2, string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n"), At(c, end)) {
+        return false
+    }
+    list.clear(mut received)
+    if client_head(mut input2, mut received, c, end) != 200 {
+        return false
+    }
+    let previous = host.mono_ns(c)
+    let later = result.unwrap(task.spawn(tasks, bytes 1024, Drip(w: take output2, c: c, start: previous, first_ms: 5, every_ms: 5), drip))
+    list.clear(mut received)
+    client_head(mut input2, mut received, c, after_ms(previous, 60)) == 408 && within_wake(host.mono_ns(c) - previous, 25, 5)
+}
+
+// L4/L6. The model admits at most eight bytes per send. The head followed
+// by exactly 160 x bytes exceeds the 128-byte writer and must arrive intact.
+// The virtual clock has no timer advances in this exchange, so Date is epoch.
+// expect: run http_committed_prefix(network) = true
+fn http_committed_prefix(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let mut output = take w
+    let end = At(c, after_ms(host.mono_ns(c), 60))
+    if !client_send(mut output, string.as_bytes("GET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), end) {
+        return false
+    }
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if !client_end(mut input, mut received, end) {
+        return false
+    }
+    let expected = string.as_bytes("HTTP/1.1 200 OK\r\nContent-Length: 160\r\nConnection: close\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\n\r\n")
+    let offset = list.len(expected)
+    if list.len(received) != offset + 160 || list.slice(received, 0, offset) != expected {
+        return false
+    }
+    for i in offset .. list.len(received) {
+        if received[i] != b'x' {
+            return false
+        }
+    }
+    true
+}
+
+// Expect remains pending until read. The peer sends three bytes only after
+// 100, then sees a 200 whose body is those exact bytes.
+// expect: run http_lazy_continue(network) = true
+fn http_lazy_continue(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let mut output = take w
+    let until = after_ms(host.mono_ns(c), 90)
+    let request = string.as_bytes("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n")
+    if !client_send(mut output, request, At(c, until)) {
+        return false
+    }
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if client_head(mut input, mut received, c, until) != 100 || received != string.as_bytes("HTTP/1.1 100 Continue\r\n\r\n") || !client_send(mut output, string.as_bytes("abc"), At(c, until)) {
+        return false
+    }
+    list.clear(mut received)
+    if !client_end(mut input, mut received, At(c, until)) {
+        return false
+    }
+    let mut h = http1.head()
+    http1.response(received, mut h) == Complete && h.status == 200 && list.slice(received, h.end, list.len(received)) == string.as_bytes("abc")
+}
+
+type ClientJob: send {
+    w: WriteHalf,
+    raw: Bytes,
+    until: Until
+}
+
+fn client_write(take job: ClientJob) waits {
+    let ClientJob(w: take w, raw: take raw, until: until) = take job
+    let mut output = take w
+    let _ = client_send(mut output, raw, until)
+}
+
+fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, last_body: u64) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let end = At(c, after_ms(host.mono_ns(c), 90))
+    let writer = result.unwrap(task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take requests, until: end), client_write))
+    let mut received: Bytes = result.unwrap(list.with_capacity(1024))
+    if !client_end(mut input, mut received, end) {
+        return false
+    }
+    let nbytes = list.len(received)
+    let mut offset: u64 = 0
+    for _ in 0u64 .. count {
+        let mut h = http1.head()
+        if http1.response(list.slice(received, offset, nbytes), mut h) != Complete || h.status != 200 {
+            return false
+        }
+        offset += h.end
+    }
+    nbytes - offset == last_body
+}
+
+// L5. When ignoring a one-byte body the next head is preserved. An unread
+// 24-byte body is over the 16-byte drain limit. An invalid chunk caught by the
+// handler also closes, even though the handler returns a 200.
+// expect: run http_drain_and_sticky_failure(network) = true
+fn http_drain_and_sticky_failure(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    pipelined(n, c, tasks, result.unwrap(b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\n\r\nxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 2, 0) && pipelined(n, c, tasks, result.unwrap(b"POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 24\r\n\r\nabcdefghijklmnopqrstuvwxGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 1, 0) && pipelined(n, c, tasks, result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nQ\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 1, 0) && pipelined(n, c, tasks, result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n4001\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 1, 0)
+}
+
+// L5. With an eight-byte model queue, an unread 160-byte response cannot
+// finish. Give it 35 ms against the 30 ms unit deadline before draining the
+// client end. The client must see the accepted prefix followed by EOF.
+// expect: run http_output_deadline(network) = true
+fn http_output_deadline(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let start = host.mono_ns(c)
+    let end = At(c, after_ms(start, 60))
+    let raw = result.unwrap(b"GET /large HTTP/1.1\r\nHost: a\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    let sender = result.unwrap(task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take raw, until: end), client_write))
+    host.sleep_until(c, after_ms(start, 35))
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if !client_end(mut input, mut received, end) {
+        return false
+    }
+    let prefix = string.as_bytes("HTTP/1.1")
+    let len = order.min(list.len(received), list.len(prefix))
+    len > 0 && list.len(received) < 160 && received[0] == b'H' && list.slice(received, 0, len) == list.slice(prefix, 0, len)
+}
+
+// L6. The next two requests are sent without waiting for the prior reply.
+// Exactly three responses must arrive in order, with the long body last.
+// expect: run http_pipeline_order(network) = true
+fn http_pipeline_order(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    pipelined(n, c, tasks, result.unwrap(b"GET / HTTP/1.1\r\nHost: a\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\nGET /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), 3, 160)
+}
+
+// L11a. Completing a first response releases its first-phase slot, but
+// the idle socket still reserves its only HTTP slot. A refusal worker stays
+// occupied until its peer writes EOF or its own deadline expires.
+// expect: run http_socket_caps(network) = true
+fn http_socket_caps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.http_max = 1
+    cfg.conns_max = 1
+    cfg.inbox_cap = 1
+    let (server, addr) = listen_for_law(n, c, tasks, take cfg)
+    let accepted = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take accepted)
+    let mut input = take r
+    let mut output = take w
+    let deadline = after_ms(host.mono_ns(c), 80)
+    let request = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    if !client_send(mut output, request, At(c, deadline)) || client_head(mut input, mut received, c, deadline) != 200 {
+        return false
+    }
+    let refused = result.unwrap(host.connect(n, addr, Never))
+    let (rr, rw) = net.split(take refused)
+    let mut first_refusal = take rr
+    list.clear(mut received)
+    if !client_end(mut first_refusal, mut received, At(c, deadline)) || received != string.as_bytes("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n") {
+        return false
+    }
+    let other = result.unwrap(host.connect(n, addr, Never))
+    let (r3, w3) = net.split(take other)
+    let mut second_refusal = take r3
+    list.clear(mut received)
+    if !client_end(mut second_refusal, mut received, At(c, deadline)) || list.len(received) != 0 {
+        return false
+    }
+    client_send(mut output, request, At(c, deadline)) && client_head(mut input, mut received, c, deadline) == 200
+}
+
+fn empty_get(mut w: WriteHalf, mut r: ReadHalf, raw: Bytes, c: Clock, until: u64) -> u16 waits {
+    let mut got: Bytes = result.unwrap(list.with_capacity(512))
+    if client_send(mut w, raw, At(c, until)) {
+        client_head(mut r, mut got, c, until)
+    } else {
+        0
+    }
+}
+
+// L11a. Two first-phase sockets cannot coexist when conns_max is one.
+// The first completed response releases that count while retaining HTTP C.
+// expect: run http_first_phase_refund(network) = true
+fn http_first_phase_refund(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.conns_max = 1
+    let (server, addr) = listen_for_law(n, c, tasks, take cfg)
+    let left = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take left)
+    let mut left_in = take r
+    let mut left_out = take w
+    let until = after_ms(host.mono_ns(c), 80)
+    let excess = result.unwrap(host.connect(n, addr, Never))
+    let (bad_in, bad_out) = net.split(take excess)
+    let mut refused = take bad_in
+    let mut got: Bytes = result.unwrap(list.with_capacity(512))
+    if client_head(mut refused, mut got, c, until) != 503 {
+        return false
+    }
+    let raw = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n")
+    if empty_get(mut left_out, mut left_in, raw, c, until) != 200 {
+        return false
+    }
+    let right = result.unwrap(host.connect(n, addr, Never))
+    let (r2, w2) = net.split(take right)
+    let mut right_in = take r2
+    let mut right_out = take w2
+    empty_get(mut right_out, mut right_in, raw, c, until) == 200
+}
+
+// HTTP-1. The TCP peer gets the first slot. Its validated forwarding field
+// moves that count away, letting the next TCP socket reach the same check.
+// That connection still cannot borrow the first source's reservation.
+// expect: run http_trusted_source_caps(network) = true
+fn http_trusted_source_caps(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.ip_sockets_max = 1
+    result.unwrap(list.push(mut cfg.ingress, wsock.Prefix(ip: V4(2130706433), bits: 32)))
+    let (server, addr) = listen_for_law(n, c, tasks, take cfg)
+    let left = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take left)
+    let mut left_in = take r
+    let mut left_out = take w
+    let until = after_ms(host.mono_ns(c), 80)
+    let raw = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\nX-Forwarded-For: 192.0.2.1\r\n\r\n")
+    if empty_get(mut left_out, mut left_in, raw, c, until) != 200 {
+        return false
+    }
+    let right = result.unwrap(host.connect(n, addr, Never))
+    let (r2, w2) = net.split(take right)
+    let mut right_in = take r2
+    let mut right_out = take w2
+    if empty_get(mut right_out, mut right_in, raw, c, until) != 503 {
+        return false
+    }
+    empty_get(mut left_out, mut left_in, raw, c, until) == 200
+}
+
+// HTTP-4(11). HEAD preserves the GET length and finishes at the blank line.
+// expect: run http_head_response(network) = true
+fn http_head_response(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let mut output = take w
+    let end = At(c, after_ms(host.mono_ns(c), 60))
+    if !client_send(mut output, string.as_bytes("HEAD /large HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), end) {
+        return false
+    }
+    let mut received: Bytes = result.unwrap(list.with_capacity(512))
+    client_end(mut input, mut received, end) && received == string.as_bytes("HTTP/1.1 200 OK\r\nContent-Length: 160\r\nConnection: close\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\n\r\n")
+}
+
+// L5. The peer leaves one body byte unread and keeps its own write half open.
+// Drain ends in 10 ms and linger in 5 ms. A later socket can use the HTTP slot
+// even while the original peer still holds both of its halves.
+// expect: run http_drain_timeout_and_linger(network) = true
+fn http_drain_timeout_and_linger(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.http_max = 1
+    let (server, addr) = listen_for_law(n, c, tasks, take cfg)
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let mut output = take w
+    let until = after_ms(host.mono_ns(c), 90)
+    let raw = string.as_bytes("POST /skip HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\n\r\n")
+    if empty_get(mut output, mut input, raw, c, until) != 200 {
+        return false
+    }
+    let started = host.mono_ns(c)
+    let mut got: Bytes = result.unwrap(list.with_capacity(128))
+    if !client_end(mut input, mut got, At(c, until)) || list.len(got) != 0 || !within_wake(host.mono_ns(c) - started, 10, 1) {
+        return false
+    }
+    host.sleep_until(c, after_ms(started, 16))
+    let second = result.unwrap(host.connect(n, addr, At(c, until)))
+    let (r2, w2) = net.split(take second)
+    let mut read_next = take r2
+    let mut write_next = take w2
+    empty_get(mut write_next, mut read_next, string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\n\r\n"), c, until) == 200
+}
+
+// L6. Withholding client reads until +5 ms prevents the first oversized
+// response from committing. A timestamp taken at the next handler's entry
+// must therefore be at or after +5 ms, even though the client sends both
+// requests immediately.
+// expect: run http_handler_starts_after_commit(network) = true
+fn http_handler_starts_after_commit(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let start = host.mono_ns(c)
+    let read_start = after_ms(start, 5)
+    let end = At(c, after_ms(start, 60))
+    let raw = result.unwrap(b"GET /large HTTP/1.1\r\nHost: a\r\n\r\nGET /when HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    let writer = result.unwrap(task.spawn(tasks, bytes 1024, ClientJob(w: take w, raw: take raw, until: end), client_write))
+    host.sleep_until(c, read_start)
+    let mut received: Bytes = result.unwrap(list.with_capacity(1024))
+    if !client_end(mut input, mut received, end) {
+        return false
+    }
+    let mut first = http1.head()
+    let mut second = http1.head()
+    if http1.response(received, mut first) != Complete || first.status != 200 || list.len(received) < first.end + 160 {
+        return false
+    }
+    let rest = list.slice(received, first.end + 160, list.len(received))
+    if http1.response(rest, mut second) != Complete || second.status != 200 {
+        return false
+    }
+    let stamp = result.unwrap(http.copy_bytes(list.slice(rest, second.end, list.len(rest))))
+    let text = result.unwrap(string.from_utf8(take stamp))
+    match int.parse_uint(text, 10) {
+        Ok(at) => at >= read_start,
+        Error(_) => false,
+    }
+}

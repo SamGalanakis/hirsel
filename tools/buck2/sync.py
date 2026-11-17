@@ -669,7 +669,9 @@ def first_party(meta: dict) -> str:
         arguments = ["--phase", phase, "--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel"]
         if phase == "std":
             binaries["hirsel-core-contract-eval"] = "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"
-            arguments += ["--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval"]
+            binaries["model-runtime.a"] = "//:core-llvm-runtime-fixtures[aarch64]"
+            arguments += ["--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval",
+                          "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a"]
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/aarch64.py", full=False,
             args=arguments, bin_exes=binaries, production=True, native_tools=True, host=True,
             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt-archives[aarch64]"},
@@ -852,8 +854,9 @@ def first_party(meta: dict) -> str:
                             ("core-native-laws-cranelift", ["--backend", "cranelift"]),
                             ("core-native-laws-llvm", ["--backend", "llvm"])):
         out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/gate_native_laws.py", full=False,
-                                host=True, args=selection + ["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel"],
-                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
+                                host=True, args=selection + ["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel",
+                                                             "--model-runtime", "buck-out/tmp/cargo-bin-exe/" + name + "/model-runtime.a"],
+                                bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel", "model-runtime.a": "//:core-native-runtime-fixture-pic"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py", full=False,

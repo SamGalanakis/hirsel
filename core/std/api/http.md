@@ -2,33 +2,35 @@
 
 [API overview](../API.md). [Specification](../../../docs/spec/http.md).
 
-The pure HTTP-4 request framing and body decoder are built. The server is not
-built yet. Its rules are HTTP-1 to HTTP-15 and the stream
-ownership rules of the [HTTP specification](../../../docs/spec/http.md).
+`serve(take listeners, clock, tasks, take config, handler, take state)`
+serves HTTP/1.1 and HTTP/1.0 on listeners from `Net`. The supplied
+`Tasks` capability owns the acceptors, connection tasks and refusal
+workers. The supervisor reserves the refusal workers at startup, admits
+each connection at spawn, and keeps its reservation through the last
+request and linger. It counts accepted peers before reading a head and
+moves the per-IP count after validating a trusted forwarding field.
 
-`serve(take listeners, clock, cfg, router, state)` serves HTTP/1.1 and
-HTTP/1.0 on listeners from `Net`. One supervisor task owns every socket. Each
-connection has one task that holds the only parser, framing and writer, and it
-runs at most one handler at a time. `Config` is a plain record with every
-bound required. Every population (connections, stream groups, upgraded
-protocols and refusals) has its own cap and is admitted at spawn, so no live
-connection meets `Capacity` from an admitted workload. A socket refused for
-capacity gets a static 503 while a refusal slot is free, and otherwise a bare
-close.
+The raw handler receives an anchored `Request`, a mutable `Body` and a
+read-only view of shared state. It returns `Reply(Response)` or an error.
+One task parses, handles and writes each request in turn. The router,
+stream and upgrade slices extend dispatch and the outcome boundary.
 
-Heads are parsed once and resumably under fixed bounds. Framing follows RFC
-9112: a request with both `Content-Length` and `Transfer-Encoding` gets 400.
-Every phase has one absolute deadline, computed once from a recorded clock read
-and never moved by progress.
-A handler returns an outcome value: a complete response, a `Stream` that the
-supervisor hands to a stream group with its encoded state, or an `Upgrade` that
-hands the socket and its unread bytes to a protocol task. Errors are values.
-The SSE encoder writes whole events only; a failed or partial append publishes
-nothing.
+`method`, `target`, `path`, `query` and `field` borrow request bytes.
+`segments` borrows the decoded path segments. `copy_bytes` makes an owned
+copy charged to the current request. `handler_deadline` gives the absolute
+monotonic deadline used by the dispatcher.
 
-Runner bindings (one transport-neutral ingress, `HttpBinding` values, JSON
-forms, statuses, the HTTP relay and SSE subscriptions) are rules B-1 to B-12.
-Keyed operations (K-1 to K-10) are a separate, unbuilt part.
+`inline_body` borrows a short fixed-length body already in the read buffer.
+Otherwise `read(mut body, mut buffer)` copies decoded body bytes into the
+buffer's spare capacity and returns zero at EOF. The first read of a pending
+`Expect: 100-continue` sends 100 before receiving more body data. The
+connection remembers body framing errors even when the handler catches them.
+
+The writer owns one fixed buffer and advances through an output unit by the
+number of bytes the socket accepted. Write failures and expired deadlines
+close the connection. Unread body bytes are drained under the request's drain
+budget and deadline before the next head is parsed. A response without a
+body still sends a complete head.
 
 `response(status, take body, close)` builds a final response for status 200
 through 599. `header(mut response, take name, take value)` appends a field
@@ -41,6 +43,7 @@ field syntax return `StatusInvalid` and `HeaderInvalid` respectively.
 lengths, invalid decimal lengths, HTTP/1.0 TE and unsupported codings with a
 `BodyError { status, close: true }`. Framing syntax refusals are 400, a valid
 length above the body cap is 413, and unsupported HTTP/1.1 codings are 501.
+The selector allocates nothing and performs no I/O.
 
 `decoder(frame, head, body_max)` starts fixed storage after successful framing.
 `decode(mut decoder, input)` consumes a fresh input fragment and returns one

@@ -1,5 +1,5 @@
 // Socket driver for websocket. Ingress policy is independent of Net authority.
-pub type Prefix: send {
+pub type Prefix: shareable + send {
     ip: Ip,
     bits: u8
 }
@@ -200,21 +200,16 @@ fn literal(b: Bytes) -> Option[Ip] {
     Some(normalize(V6(hi, lo)))
 }
 
-/// Source key for a complete HTTP request. Trusted ingress must supply one
-/// canonical XFF literal; other peers' XFF is ignored. Error is HTTP 400.
-/// O(head + ingress prefixes), no allocation. Ex: `wsock.source(b, peer, ingress)`.
-pub fn source(b: Bytes, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
-    let mut trusted = false
+fn trusted(peer: Ip, ingress: List[Prefix]) -> bool {
     for p in ingress {
-        trusted = trusted || contains(p, peer) || contains(p, normalize(peer))
+        if contains(p, peer) || contains(p, normalize(peer)) {
+            return true
+        }
     }
-    if !trusted {
-        return Ok(normalize(peer))
-    }
-    let mut h = http1.head()
-    if http1.request(b, mut h) != Complete {
-        return Error(400)
-    }
+    false
+}
+
+fn forwarded_source(b: Bytes, h: http1.Head) -> Result[Ip, u16] {
     let mut value: Option[http1.Span] = None
     for i in 0u64 .. h.count {
         let f = h.fields[i]
@@ -233,6 +228,29 @@ pub fn source(b: Bytes, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
         Some(ip) => Ok(ip),
         None => Error(400)
     }
+}
+
+/// Source key from a head the caller has already parsed. Error is HTTP 400.
+pub fn source_for_head(b: Bytes, h: http1.Head, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
+    if trusted(peer, ingress) {
+        forwarded_source(b, h)
+    } else {
+        Ok(normalize(peer))
+    }
+}
+
+/// Source key for a complete HTTP request. Trusted ingress must supply one
+/// canonical XFF literal; other peers' XFF is ignored. Error is HTTP 400.
+/// O(head + ingress prefixes), no allocation. Ex: `wsock.source(b, peer, ingress)`.
+pub fn source(b: Bytes, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
+    if !trusted(peer, ingress) {
+        return Ok(normalize(peer))
+    }
+    let mut h = http1.head()
+    if http1.request(b, mut h) != Complete {
+        return Error(400)
+    }
+    forwarded_source(b, h)
 }
 
 pub type Config: send {

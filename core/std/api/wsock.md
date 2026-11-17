@@ -78,3 +78,5 @@ never renews idle. Timers use checked absolute timestamp arithmetic; an
 unrepresentable deadline raises Overflow rather than silently shortening the
 configured duration. The idle_probe fixture uses a 250 ms interval to qualify
 fragment activity against real sockets.
+
+`source_for_head(bytes, head, peer, ingress)` applies the same source policy to a parsed head. It borrows the existing head and performs no I/O.

@@ -80,3 +80,12 @@ target; run them directly when changing this workload.
   framing and service behavior.
 - ADOPTED Callgrind's `events` and `summary` format. The reader selects `Ir` by
   event name; other counters and the uninstrumented client are excluded.
+
+## Hirsel
+
+Run `instructions hirsel --compiler PATH --runtime ARCHIVE --cc PATH` with
+the checkout's checked driver, runtime archive and pinned Clang wrapper.
+The command builds the HTTP connection task with LLVM release code and
+serves one socket. It verifies the same status, content type, body length
+and body as the Rust baselines, plus Hirsel's IMF-fixdate Date field. The
+served count comes from responses whose writes completed before peer EOF.

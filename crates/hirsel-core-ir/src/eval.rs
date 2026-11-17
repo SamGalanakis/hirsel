@@ -798,6 +798,32 @@ pub fn run_nans_into(
     instructions: u64,
     revisions: &Revisions,
 ) -> (Report, Checked) {
+    run_nans_into_network(
+        m,
+        f,
+        args,
+        limit,
+        nans,
+        destination,
+        instructions,
+        revisions,
+        None,
+    )
+}
+
+/// Like [run_nans_into], with an explicitly supplied deterministic network.
+#[allow(clippy::too_many_arguments)]
+pub fn run_nans_into_network(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    nans: Nans,
+    destination: Option<&mut [u8]>,
+    instructions: u64,
+    revisions: &Revisions,
+    network: Option<Network>,
+) -> (Report, Checked) {
     run_world(
         m,
         f,
@@ -808,6 +834,7 @@ pub fn run_nans_into(
             destination,
             instructions,
             revisions: Some(revisions),
+            network,
             ..WorldInput::default()
         },
     )

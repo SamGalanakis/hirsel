@@ -21,7 +21,8 @@ pub opaque type Response: send {
     status: u16,
     fields: List[ResponseField],
     body: Bytes,
-    close: bool
+    close: bool,
+    invalid: bool
 }
 
 pub type ResponseError: send = StatusInvalid | HeaderReserved | HeaderInvalid | HeadTooLarge | Allocation(Capacity)
@@ -31,7 +32,7 @@ pub fn response(status: u16, take body: Bytes, close: bool) -> Result[Response, 
     if status < 200 || status > 599 {
         return Error(StatusInvalid)
     }
-    Ok(Response(status: status, fields: list.new(), body: take body, close: close))
+    Ok(Response(status: status, fields: list.new(), body: take body, close: close, invalid: false))
 }
 
 fn reserved_field(name: Bytes) -> bool {
@@ -59,9 +60,11 @@ fn valid_field(name: Bytes, value: Bytes) -> bool {
 /// Appends a handler-owned field. Framing fields belong to the connection.
 pub fn header(mut r: Response, take name: Bytes, take value: Bytes) -> Result[(), ResponseError] {
     if reserved_field(name) {
+        r.invalid = true
         return Error(HeaderReserved)
     }
     if !valid_field(name, value) {
+        r.invalid = true
         return Error(HeaderInvalid)
     }
     match list.push(mut r.fields, ResponseField(name: take name, value: take value)) {
@@ -167,6 +170,9 @@ fn has_body(status: u16) -> bool {
 // Construct the whole head before the first send. A full head leaves the
 // connection free to send a bounded error, with no partial header to undo.
 fn response_head(mut out: Bytes, r: Response, version: u8, close: bool, wall_ms: u64) -> Result[(), ResponseError] {
+    if r.invalid {
+        return Error(HeaderInvalid)
+    }
     list.clear(mut out)
     head_text(mut out, if version == 0 {
         "HTTP/1.0 "
@@ -379,7 +385,7 @@ type RequestHead {
 }
 
 fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
-    let method = part(b, h.method)
+    let verb = part(b, h.method)
     let mut host: Option[http1.Span] = None
     let mut expect = false
     let mut close = false
@@ -406,13 +412,13 @@ fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
     if h.version == 1 && host == None {
         return Error(400)
     }
-    if method == string.as_bytes("CONNECT") {
+    if verb == string.as_bytes("CONNECT") {
         return Error(501)
     }
     let mut start = h.target.start
     let end = h.target.end
     if part(b, h.target) == string.as_bytes("*") {
-        if method != string.as_bytes("OPTIONS") {
+        if verb != string.as_bytes("OPTIONS") {
             return Error(400)
         }
     } else if b[start] != b'/' {
@@ -438,7 +444,7 @@ fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
             start += 1
         }
         let absolute = http1.Span(start: host_start, end: start)
-        if !authority(part(b, absolute)) {
+        if host == None || !authority(part(b, absolute)) {
             return Error(400)
         }
         host = Some(absolute)
@@ -450,12 +456,12 @@ fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
         }
         path_end += 1
     }
-    let query = if path_end == end {
+    let query_at = if path_end == end {
         end
     } else {
         path_end + 1
     }
-    Ok(RequestHead(authority: host, path: http1.Span(start: start, end: path_end), query: http1.Span(start: query, end: end), expect_continue: expect, close: close || h.version == 0 && !keep_alive))
+    Ok(RequestHead(authority: host, path: http1.Span(start: start, end: path_end), query: http1.Span(start: query_at, end: end), expect_continue: expect, close: close || h.version == 0 && !keep_alive))
 }
 
 type TargetError: key = BadTarget | TargetCapacity
@@ -501,31 +507,998 @@ fn segment(b: Bytes) -> Result[String, TargetError] {
 
 // Split before decoding; a decoded slash is data in a single segment.
 // Root and an empty absolute-form path both have zero segments.
-fn segments_of(path: Bytes) -> Result[List[String], TargetError] {
-    let mut segments: List[String] = list.new()
-    let n = list.len(path)
+fn segments_of(raw_path: Bytes) -> Result[List[String], TargetError] {
+    let mut decoded_segments: List[String] = list.new()
+    let n = list.len(raw_path)
     if n <= 1 {
-        return Ok(take segments)
+        return Ok(take decoded_segments)
     }
     let mut start: u64 = 1
     while start <= n {
         let mut end = start
-        while end < n && path[end] != b'/' {
+        while end < n && raw_path[end] != b'/' {
             end += 1
         }
         if end == start && end < n {
             return Error(BadTarget)
         }
-        let s = segment(list.slice(path, start, end))?
-        if let Error(_) = list.push(mut segments, take s) {
+        let s = segment(list.slice(raw_path, start, end))?
+        if let Error(_) = list.push(mut decoded_segments, take s) {
             return Error(TargetCapacity)
         }
         if end == n {
-            return Ok(take segments)
+            return Ok(take decoded_segments)
         }
         start = end + 1
     }
-    Ok(take segments)
+    Ok(take decoded_segments)
+}
+
+pub type Config: shareable + send {
+    ingress: List[wsock.Prefix],
+    sockets_max: u64,
+    http_max: u64,
+    upgrades_max: u64,
+    conns_max: u64,
+    ip_sockets_max: u64,
+    refuse_max: u64,
+    refuse_ms: u64,
+    inbox_cap: u64,
+    head_max: u64,
+    fields_max: u64,
+    pipeline_max: u64,
+    body_inline: u64,
+    body_max: u64,
+    out_cap: u64,
+    handler_bytes: u64,
+    first_head_ms: u64,
+    idle_ms: u64,
+    head_ms: u64,
+    body_ms: u64,
+    handler_ms: u64,
+    write_ms: u64,
+    drain_ms: u64,
+    linger_ms: u64,
+    drain_max: u64,
+    streams_max: u64,
+    state_max: u64,
+    reads_max: u64,
+    heartbeat_ms: u64,
+    lease_ms: u64
+}
+
+pub opaque scoped type Request {
+    input: View[Bytes],
+    head: View[http1.Head],
+    meta: RequestHead,
+    segments: List[String],
+    inline_body: Option[View[Bytes]],
+    deadline: u64
+}
+
+pub fn method(r: Request) -> View[Bytes] in r {
+    part(r.input, r.head.method)
+}
+
+pub fn target(r: Request) -> View[Bytes] in r {
+    part(r.input, r.head.target)
+}
+
+pub fn path(r: Request) -> View[Bytes] in r {
+    part(r.input, r.meta.path)
+}
+
+pub fn segments(r: Request) -> View[List[String]] in r {
+    view r.segments
+}
+
+pub fn query(r: Request) -> View[Bytes] in r {
+    part(r.input, r.meta.query)
+}
+
+pub fn field(r: Request, name: Bytes) -> Option[View[Bytes]] in r {
+    if http1.equal_ascii(name, string.as_bytes("host")) {
+        return match r.meta.authority {
+            Some(s) => Some(part(r.input, s)),
+            None => None,
+        }
+    }
+    for i in 0u64 .. r.head.count {
+        let f = r.head.fields[i]
+        if http1.equal_ascii(part(r.input, f.name), name) {
+            return Some(part(r.input, f.value))
+        }
+    }
+    None
+}
+
+pub fn handler_deadline(r: Request) -> u64 {
+    r.deadline
+}
+
+pub fn inline_body(r: Request) -> Option[View[Bytes]] in r {
+    r.inline_body
+}
+
+/// Copies a borrowed field or body into the current handler's allowance.
+pub fn copy_bytes(b: Bytes) -> Result[Bytes, Capacity] {
+    let mut copied: Bytes = list.with_capacity(list.len(b))?
+    let _ = list.append(mut copied, b)
+    Ok(take copied)
+}
+
+type HeadResult: key = Ready | PeerClosed | Rejected(u16)
+
+fn after_ms(at: u64, ms: u64) -> u64 {
+    int.saturating_add(at, int.saturating_mul(ms, 1000000u64))
+}
+
+// recv appends into spare capacity. Reserve the leading space in the
+// existing scratch when a phase may read fewer than 8192 bytes.
+fn receive(mut r: ReadHalf, mut scratch: Bytes, n: u64, c: Clock, deadline: u64) -> Result[u64, NetError] waits {
+    list.clear(mut scratch)
+    let _ = list.fill(mut scratch, 8192 - n, 0u8)
+    host.recv(mut r, mut scratch, At(c, deadline))
+}
+
+fn receive_head(mut r: ReadHalf, mut b: Bytes, mut scratch: Bytes, c: Clock, deadline: u64, cfg: Config) -> Result[u64, NetError] waits {
+    let allowance = order.min(8192, order.min(cfg.pipeline_max + 1, list.capacity(b) - list.len(b)))
+    let n = receive(mut r, mut scratch, allowance, c, deadline)?
+    let _ = list.append(mut b, list.slice(scratch, 8192 - allowance, 8192 - allowance + n))
+    Ok(n)
+}
+
+fn read_head(mut r: ReadHalf, mut b: Bytes, mut scratch: Bytes, mut h: http1.Head, c: Clock, first: bool, start: u64, cfg: Config) -> HeadResult waits {
+    let mut deadline = after_ms(start, cfg.first_head_ms)
+    if !first {
+        if list.len(b) == 0 {
+            let idle = after_ms(start, cfg.idle_ms)
+            if host.mono_ns(c) >= idle {
+                return Rejected(408)
+            }
+            match receive_head(mut r, mut b, mut scratch, c, idle, cfg) {
+                Ok(0) => return PeerClosed,
+                Ok(_) => {},
+                Error(TimedOut) => return Rejected(408),
+                Error(_) => return PeerClosed,
+            }
+        }
+        deadline = after_ms(host.mono_ns(c), cfg.head_ms)
+    }
+    let mut cur = http1.cursor()
+    loop {
+        if host.mono_ns(c) >= deadline {
+            return Rejected(408)
+        }
+        let view_end = order.min(cfg.head_max, list.len(b))
+        let outcome = http1.resume(list.slice(b, 0, view_end), mut h, mut cur)
+        if h.count > cfg.fields_max {
+            return Rejected(431)
+        }
+        match outcome {
+            Complete => return Ready,
+            Bad => return Rejected(400),
+            _ => {},
+        }
+        if outcome == TooLarge || view_end == cfg.head_max {
+            return Rejected(if cur.line_end == 0 && cur.offset - cur.line_start == cfg.head_max {
+                414
+            } else {
+                431
+            })
+        }
+        match receive_head(mut r, mut b, mut scratch, c, deadline, cfg) {
+            Ok(0) => return if list.len(b) == 0 {
+                PeerClosed
+            } else {
+                Rejected(400)
+            },
+            Ok(_) => {},
+            Error(TimedOut) => return Rejected(408),
+            Error(_) => return PeerClosed,
+        }
+    }
+}
+
+// A single deadline and committed byte count cover both carriers.
+fn write_unit(mut w: WriteHalf, prefix: Bytes, body: Bytes, c: Clock, deadline: u64) -> Result[(), NetError] waits {
+    let boundary = list.len(prefix)
+    let end = boundary + list.len(body)
+    let mut committed: u64 = 0
+    while committed < end {
+        if host.mono_ns(c) >= deadline {
+            return Error(TimedOut)
+        }
+        let sent = if committed < boundary {
+            host.send(mut w, list.slice(prefix, committed, boundary), At(c, deadline))
+        } else {
+            host.send(mut w, list.slice(body, committed - boundary, list.len(body)), At(c, deadline))
+        }
+        match sent {
+            Ok(0) => return Error(Reset),
+            Ok(n) => {
+                committed += n
+            },
+            Error(e) => return Error(e),
+        }
+    }
+    Ok(())
+}
+
+fn refusal_head(status: u16) -> String {
+    match status {
+        400 => "HTTP/1.1 400 Bad Request\r\n",
+        408 => "HTTP/1.1 408 Request Timeout\r\n",
+        413 => "HTTP/1.1 413 Content Too Large\r\n",
+        414 => "HTTP/1.1 414 URI Too Long\r\n",
+        417 => "HTTP/1.1 417 Expectation Failed\r\n",
+        431 => "HTTP/1.1 431 Request Header Fields Too Large\r\n",
+        501 => "HTTP/1.1 501 Not Implemented\r\n",
+        503 => "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n",
+        _ => "HTTP/1.1 500 Internal Server Error\r\n",
+    }
+}
+
+fn reply_error(mut w: WriteHalf, status: u16, c: Clock, deadline: u64) -> Result[(), NetError] waits {
+    write_unit(mut w, string.as_bytes(refusal_head(status)), string.as_bytes("Connection: close\r\nContent-Length: 0\r\n\r\n"), c, deadline)
+}
+
+pub opaque scoped type Body {
+    input: View[Bytes],
+    input_at: u64,
+    reader: ReadHalf,
+    writer: WriteHalf,
+    scratch: Bytes,
+    scratch_at: u64,
+    decoder: Decoder,
+    head_max: u64,
+    fields_max: u64,
+    clock: Clock,
+    body_deadline: u64,
+    handler_deadline: u64,
+    write_ms: u64,
+    pipeline_max: u64,
+    expect_continue: bool,
+    fault: Option[BodyError],
+    output_failed: bool
+}
+
+fn body_fault(mut b: Body, status: u16) -> BodyError {
+    let error = failure(status)
+    b.fault = Some(error)
+    error
+}
+
+type BodyPiece = Buffered(http1.Span) | Received(http1.Span) | NeedBytes | BodyDone | BodyFailed(BodyError)
+
+fn body_piece(mut b: Body, max: u64) -> BodyPiece {
+    if let Some(e) = b.fault {
+        return BodyFailed(e)
+    }
+    let in_input = b.input_at < list.len(b.input)
+    let start = if in_input {
+        b.input_at
+    } else {
+        b.scratch_at
+    }
+    let result = if in_input {
+        let limit = start + order.min(max, list.len(b.input) - start)
+        decode(mut b.decoder, list.slice(b.input, start, limit))
+    } else {
+        let limit = start + order.min(max, list.len(b.scratch) - start)
+        decode(mut b.decoder, list.slice(b.scratch, start, limit))
+    }
+    if in_input {
+        b.input_at += b.decoder.used
+    } else {
+        b.scratch_at += b.decoder.used
+    }
+    if b.decoder.trailer_bytes > b.head_max || b.decoder.trailer_fields > b.fields_max {
+        return BodyFailed(body_fault(mut b, 431))
+    }
+    match result {
+        Data(s) => {
+            let span = http1.Span(start: start + s.start, end: start + s.end)
+            if in_input {
+                Buffered(span)
+            } else {
+                Received(span)
+            }
+        },
+        Done => BodyDone,
+        Failed(e) => {
+            b.fault = Some(e)
+            BodyFailed(e)
+        },
+        More => NeedBytes,
+    }
+}
+
+fn refill_body(mut b: Body, max: u64, deadline: u64, timeout_status: u16) -> Result[(), BodyError] waits {
+    if host.mono_ns(b.clock) >= deadline {
+        return Error(body_fault(mut b, timeout_status))
+    }
+    b.scratch_at = 8192 - max
+    match receive(mut b.reader, mut b.scratch, max, b.clock, deadline) {
+        Ok(0) => match body_eof(mut b.decoder) {
+            Ok(()) => Ok(()),
+            Error(e) => {
+                b.fault = Some(e)
+                Error(e)
+            },
+        },
+        Ok(_) => Ok(()),
+        Error(TimedOut) => Error(body_fault(mut b, timeout_status)),
+        Error(_) => Error(body_fault(mut b, 400)),
+    }
+}
+
+/// Appends decoded bytes within the caller-provided spare capacity. Returns
+/// zero at body EOF. Use a nonempty spare buffer for a read.
+pub fn read(mut b: Body, mut into: Bytes) -> Result[u64, BodyError] waits {
+    if let Some(e) = b.fault {
+        return Error(e)
+    }
+    let room = list.capacity(into) - list.len(into)
+    if room == 0 {
+        return Error(BodyError(status: 503, close: false))
+    }
+    let until = order.min(b.body_deadline, b.handler_deadline)
+    let timeout_status: u16 = if b.handler_deadline < b.body_deadline {
+        503
+    } else {
+        408
+    }
+    if host.mono_ns(b.clock) >= until {
+        return Error(body_fault(mut b, timeout_status))
+    }
+    if b.expect_continue {
+        let write_end = order.min(until, after_ms(host.mono_ns(b.clock), b.write_ms))
+        let result = write_unit(mut b.writer, string.as_bytes("HTTP/1.1 100 Continue\r\n\r\n"), string.as_bytes(""), b.clock, write_end)
+        b.expect_continue = false
+        if let Error(_) = result {
+            b.output_failed = true
+            return Error(body_fault(mut b, 408))
+        }
+    }
+    loop {
+        match body_piece(mut b, room) {
+            Buffered(s) => {
+                let _ = list.append(mut into, part(b.input, s))
+                return Ok(s.end - s.start)
+            },
+            Received(s) => {
+                let _ = list.append(mut into, part(b.scratch, s))
+                return Ok(s.end - s.start)
+            },
+            BodyDone => return Ok(0),
+            BodyFailed(e) => return Error(e),
+            NeedBytes => {
+                if b.input_at == list.len(b.input) && b.scratch_at == list.len(b.scratch) {
+                    let max = order.min(8192, b.pipeline_max + 1)
+                    refill_body(mut b, max, until, timeout_status)?
+                }
+            },
+        }
+    }
+}
+
+fn drain(mut b: Body, remaining: u64, deadline: u64) -> bool waits {
+    if b.fault != None {
+        return false
+    }
+    if b.decoder.state == Finished {
+        return true
+    }
+    if b.expect_continue || b.decoder.state == Fixed && b.decoder.remaining > remaining || host.mono_ns(b.clock) >= deadline {
+        return false
+    }
+    let mut budget = remaining
+    let mut reads = remaining / 8192 + if remaining % 8192 == 0 {
+        1
+    } else {
+        2
+    }
+    loop {
+        let input_at = b.input_at
+        let scratch_at = b.scratch_at
+        let result = body_piece(mut b, budget)
+        budget -= (b.input_at - input_at) + (b.scratch_at - scratch_at)
+        match result {
+            BodyDone => return true,
+            BodyFailed(_) => return false,
+            NeedBytes => {
+                if budget == 0 || reads == 0 {
+                    return false
+                }
+                if b.input_at == list.len(b.input) && b.scratch_at == list.len(b.scratch) {
+                    let max = order.min(budget, order.min(8192, b.pipeline_max + 1))
+                    if let Error(_) = refill_body(mut b, max, deadline, 408) {
+                        return false
+                    }
+                    reads -= 1
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+pub type Outcome: send = Reply(Response)
+
+type Step = Keep(u64, u64) | RepliedAndClose | CloseConnection
+
+fn discard(take bytes_to_drop: Bytes) {}
+
+fn compact(mut b: Bytes, at: u64) {
+    let used = list.len(b)
+    if at == used {
+        list.clear(mut b)
+    } else if at > 0 {
+        for i in at .. used {
+            let c = b[i]
+            let _ = list.set(mut b, i - at, c)
+        }
+        for _ in 0u64 .. at {
+            let _ = list.pop(mut b)
+        }
+    }
+}
+
+fn write_succeeded(r: Result[(), NetError]) -> bool {
+    match r {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}
+
+type OutputResult = FinalReply(bool) | ClosingReply(bool)
+
+fn error_step(mut w: WriteHalf, status: u16, clock: Clock, end: u64) -> Step waits {
+    if write_succeeded(reply_error(mut w, status, clock, end)) {
+        RepliedAndClose
+    } else {
+        CloseConnection
+    }
+}
+
+fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress: bool, close: bool, cfg: Config) -> OutputResult waits {
+    if let Error(_) = response_head(mut out, r, version, close, host.wall_ms(b.clock)) {
+        return ClosingReply(write_succeeded(reply_error(mut b.writer, 500, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))))
+    }
+    let write_end = after_ms(host.mono_ns(b.clock), cfg.write_ms)
+    if suppress || !has_body(r.status) {
+        return FinalReply(write_succeeded(write_unit(mut b.writer, out, string.as_bytes(""), b.clock, write_end)))
+    }
+    if list.len(r.body) <= list.capacity(out) - list.len(out) {
+        let _ = list.append(mut out, r.body)
+        return FinalReply(write_succeeded(write_unit(mut b.writer, out, string.as_bytes(""), b.clock, write_end)))
+    }
+    FinalReply(write_succeeded(write_unit(mut b.writer, out, r.body, b.clock, write_end)))
+}
+
+fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S) -> Step waits {
+    let outcome = bound bytes cfg.handler_bytes {
+        let normalized = match segments_of(part(input, meta.path)) {
+            Ok(take x) => take x,
+            Error(BadTarget) => {
+                return error_step(mut b.writer, 400, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
+            },
+            Error(TargetCapacity) => {
+                return error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
+            },
+        }
+        let inline = match frame {
+            ContentLength(n) => if n <= cfg.body_inline && n <= list.len(input) - h.end && !meta.expect_continue {
+                Some(list.slice(input, h.end, h.end + n))
+            } else {
+                None
+            },
+            _ => None,
+        }
+        if let Some(v) = inline {
+            b.input_at += list.len(v)
+            b.decoder.state = Finished
+            b.decoder.remaining = 0
+        }
+        let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, inline_body: inline, deadline: b.handler_deadline)
+        let result = handler(req, mut b, state)
+        let returned = host.mono_ns(b.clock)
+        if b.output_failed {
+            return CloseConnection
+        }
+        if let Some(e) = b.fault {
+            if e.status == 408 || e.status == 503 {
+                return error_step(mut b.writer, e.status, b.clock, after_ms(returned, cfg.write_ms))
+            }
+        }
+        if returned >= b.handler_deadline {
+            return error_step(mut b.writer, 503, b.clock, after_ms(returned, cfg.write_ms))
+        }
+        // Stream and upgrade outcomes take the halves here, before any
+        // response is committed. The caller owns ordinary close and drain.
+        let reply = match take result {
+            Ok(Reply(take r)) => take r,
+            Error(e) => {
+                let status: u16 = match e {
+                    Allocation(_) => 503,
+                    _ => 500
+                }
+                return error_step(mut b.writer, status, b.clock, after_ms(returned, cfg.write_ms))
+            },
+        }
+        let abandon_expect = b.expect_continue && b.decoder.state != Finished
+        let close = meta.close || reply.close || b.fault != None || abandon_expect
+        let suppress = part(input, h.method) == string.as_bytes("HEAD")
+        match send_response(mut b, mut out, reply, h.version, suppress, close, cfg) {
+            FinalReply(true) => if close {
+                RepliedAndClose
+            } else {
+                Keep(host.mono_ns(b.clock), order.min(b.body_deadline, after_ms(returned, cfg.drain_ms)))
+            },
+            ClosingReply(true) => RepliedAndClose,
+            _ => CloseConnection,
+        }
+    }
+    match outcome {
+        Ok(step) => step,
+        Error(_) => {
+            error_step(mut b.writer, 503, b.clock, after_ms(host.mono_ns(b.clock), cfg.write_ms))
+        },
+    }
+}
+
+type ConnectionSignal: send = FirstResponse(u64) | Source(u64, Ip, Sender[bool]) | EndNotice | Refused(u64) | Accepted(Socket, Ip, u64) | ListenerFailed(NetError)
+
+resource type Completion: send {
+    done: Sender[u64],
+    wake: Sender[ConnectionSignal],
+    slot: u64,
+    armed: bool
+} drop(completion) {
+    if completion.armed {
+        let _ = channel.try_send(completion.done, completion.slot)
+        // If the inbox is full, its queued event will wake the supervisor.
+        let _ = channel.try_send(completion.wake, EndNotice)
+    }
+}
+
+type ConnectionJob[S: shareable + send]: send {
+    socket: Socket,
+    c: Clock,
+    cfg: Arc[Config],
+    peer: Ip,
+    at: u64,
+    handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits,
+    state: Arc[S],
+    inbox: Sender[ConnectionSignal],
+    slot: u64,
+    completion: Completion
+}
+
+fn change_source(inbox: Sender[ConnectionSignal], slot: u64, ip: Ip) -> bool waits {
+    let allocated: Result[(Sender[bool], Receiver[bool]), Capacity] = channel.new(1)
+    let (tx, rx) = match take allocated {
+        Ok(take pair) => take pair,
+        Error(_) => return false,
+    }
+    if let Error(_) = channel.send(inbox, Source(slot, ip, take tx)) {
+        return false
+    }
+    match channel.receive(rx) {
+        Ok(allowed) => allowed,
+        Error(_) => false,
+    }
+}
+
+fn connection[S: shareable + send](take job: ConnectionJob[S]) waits {
+    let ConnectionJob(socket: take socket, c: c, cfg: take cfg, peer: peer, at: accepted, handler: handler, state: take state, inbox: take inbox, slot: slot, completion: take notice) = take job
+    let mut completion = take notice
+    completion.armed = true
+    let _ = run_connection(take socket, c, cfg, peer, accepted, handler, state, inbox, slot)
+}
+
+fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S, inbox: Sender[ConnectionSignal], slot: u64) -> u64 waits {
+    let (r, w) = net.split(take socket)
+    let mut reader = take r
+    let mut writer = take w
+    let read_alloc: Result[Bytes, Capacity] = list.with_capacity(cfg.head_max + cfg.pipeline_max + cfg.body_inline)
+    let mut input = match take read_alloc {
+        Ok(take b) => take b,
+        Error(_) => return 0
+    }
+    let out_alloc: Result[Bytes, Capacity] = list.with_capacity(cfg.out_cap)
+    let mut out = match take out_alloc {
+        Ok(take b) => take b,
+        Error(_) => return 0
+    }
+    let scratch_alloc: Result[Bytes, Capacity] = list.with_capacity(8192)
+    let mut scratch = match take scratch_alloc {
+        Ok(take b) => take b,
+        Error(_) => return 0
+    }
+    let mut first = true
+    let mut start = accepted
+    let mut batch: u64 = 0
+    let mut completed_replies: u64 = 0
+    loop {
+        let mut head = http1.head()
+        match read_head(mut reader, mut input, mut scratch, mut head, c, first, start, cfg) {
+            PeerClosed => break,
+            Rejected(status) => {
+                if write_succeeded(reply_error(mut writer, status, c, after_ms(host.mono_ns(c), cfg.write_ms))) && first {
+                    let _ = channel.send(inbox, FirstResponse(slot))
+                }
+                break
+            },
+            Ready => {},
+        }
+        let completed = host.mono_ns(c)
+        if first && list.len(cfg.ingress) != 0 {
+            let source = match wsock.source_for_head(input, head, peer, cfg.ingress) {
+                Ok(ip) => ip,
+                Error(status) => {
+                    if write_succeeded(reply_error(mut writer, status, c, after_ms(host.mono_ns(c), cfg.write_ms))) && first {
+                        let _ = channel.send(inbox, FirstResponse(slot))
+                    }
+                    break
+                },
+            }
+            if source_key(source) != source_key(peer) && !change_source(inbox, slot, source) {
+                if write_succeeded(reply_error(mut writer, 503, c, after_ms(host.mono_ns(c), cfg.write_ms))) && first {
+                    let _ = channel.send(inbox, FirstResponse(slot))
+                }
+                break
+            }
+        }
+        let frame = match framing(input, head, cfg.body_max) {
+            Ok(f) => f,
+            Error(e) => {
+                if write_succeeded(reply_error(mut writer, e.status, c, after_ms(host.mono_ns(c), cfg.write_ms))) && first {
+                    let _ = channel.send(inbox, FirstResponse(slot))
+                }
+                break
+            },
+        }
+        let policy = match request_policy(input, head) {
+            Ok(p) => p,
+            Error(status) => {
+                if write_succeeded(reply_error(mut writer, status, c, after_ms(host.mono_ns(c), cfg.write_ms))) && first {
+                    let _ = channel.send(inbox, FirstResponse(slot))
+                }
+                break
+            },
+        }
+        list.clear(mut scratch)
+        let (reuse, input_at, scratch_at) = {
+            let mut body = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, body_deadline: after_ms(completed, cfg.body_ms), handler_deadline: after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, fault: None, output_failed: false)
+            let step = handle(input, head, policy, frame, mut body, mut out, cfg, handler, state)
+            let reuse = match step {
+                Keep(at, end) => {
+                    completed_replies += 1
+                    start = at
+                    if first {
+                        let _ = channel.send(inbox, FirstResponse(slot))
+                    }
+                    drain(mut body, cfg.drain_max, end)
+                },
+                RepliedAndClose => {
+                    completed_replies += 1
+                    if first {
+                        let _ = channel.send(inbox, FirstResponse(slot))
+                    }
+                    false
+                },
+                CloseConnection => false,
+            }
+            let Body(reader: take next_reader, writer: take next_writer, scratch: take s, input_at: input_at, scratch_at: scratch_at, input: _, decoder: _, head_max: _, fields_max: _, clock: _, body_deadline: _, handler_deadline: _, write_ms: _, pipeline_max: _, expect_continue: _, fault: _, output_failed: _) = take body
+            reader = take next_reader
+            writer = take next_writer
+            scratch = take s
+            (reuse, input_at, scratch_at)
+        }
+        if !reuse {
+            break
+        }
+        compact(mut input, input_at)
+        let _ = list.append(mut input, list.slice(scratch, scratch_at, list.len(scratch)))
+        first = false
+        batch += 1
+        if batch == 16 {
+            task.check_cancel()
+            batch = 0
+        }
+    }
+    discard(take scratch)
+    let _ = net.finish(take writer, take reader, c, after_ms(host.mono_ns(c), cfg.linger_ms))
+    completed_replies
+}
+
+pub type ServeError: send = Configuration | Capacity(Capacity) | Network(NetError)
+
+type AcceptorJob: send {
+    listener: Listener,
+    c: Clock,
+    inbox: Sender[ConnectionSignal]
+}
+
+fn acceptor(take job: AcceptorJob) waits {
+    let AcceptorJob(listener: take listener, c: c, inbox: take inbox) = take job
+    let mut l = take listener
+    loop {
+        match host.accept(mut l, Never) {
+            Ok((take socket, peer)) => {
+                let at = host.mono_ns(c)
+                if let Error(_) = channel.send(inbox, Accepted(take socket, peer.ip, at)) {
+                    return
+                }
+            },
+            Error(e) => {
+                let _ = channel.send(inbox, ListenerFailed(e))
+                return
+            },
+        }
+    }
+}
+
+type RefusalJob: send {
+    socket: Socket,
+    at: u64
+}
+
+type RefusalWorker: send {
+    inbox: Sender[ConnectionSignal],
+    jobs: Receiver[RefusalJob],
+    slot: u64,
+    c: Clock,
+    ms: u64
+}
+
+fn refusal_worker(take worker: RefusalWorker) waits {
+    let RefusalWorker(inbox: take inbox, jobs: take jobs, slot: slot, c: c, ms: ms) = take worker
+    while let Ok(take job) = channel.receive(jobs) {
+        let RefusalJob(socket: take socket, at: at) = take job
+        let until = after_ms(at, ms)
+        let (input, output) = net.split(take socket)
+        let mut w = take output
+        let _ = reply_error(mut w, 503, c, until)
+        let _ = net.finish(take w, take input, c, until)
+        if let Error(_) = channel.send(inbox, Refused(slot)) {
+            return
+        }
+    }
+}
+
+type RefusalSlot {
+    child: Task[()],
+    tx: Sender[RefusalJob],
+    busy: bool
+}
+
+type HttpSlot {
+    child: Task[()],
+    first: bool,
+    ip: (u64, u64, u64)
+}
+
+resource type ServerTasks {
+    connections: List[Option[HttpSlot]],
+    refusals: List[RefusalSlot],
+    acceptors: List[Task[()]]
+} drop(group) {
+    for i in 0u64 .. list.len(group.acceptors) {
+        task.cancel(mut group.acceptors[i])
+    }
+    for i in 0u64 .. list.len(group.refusals) {
+        task.cancel(mut group.refusals[i].child)
+    }
+    for i in 0u64 .. list.len(group.connections) {
+        let slot = replace(mut group.connections[i], None)
+        if let Some(take held) = take slot {
+            let mut active = take held
+            task.cancel(mut active.child)
+            group.connections[i] = Some(take active)
+        }
+    }
+}
+
+fn refuse(mut slots: List[RefusalSlot], take socket: Socket, at: u64) {
+    for i in 0u64 .. list.len(slots) {
+        if !slots[i].busy {
+            let job = RefusalJob(socket: take socket, at: at)
+            if let Ok(()) = channel.try_send(slots[i].tx, take job) {
+                slots[i].busy = true
+            }
+            return
+        }
+    }
+}
+
+fn bytes_for_connection(cfg: Config) -> u64 {
+    let input = cfg.head_max + cfg.pipeline_max + cfg.body_inline
+    // List carriers are inline. MEM-24 rounds their allocations to 8.
+    let read_bytes = (input + 7) / 8 * 8
+    let write_bytes = (cfg.out_cap + 7) / 8 * 8
+    // Head, decoder and cursors are inline. Reserve J and the one-slot
+    // hand-over reply alongside the handler's allowance.
+    read_bytes + write_bytes + 8192 + 1024 + 128 + cfg.handler_bytes
+}
+
+fn valid_config(cfg: Config) -> bool {
+    if cfg.head_max == 0 || cfg.head_max > 8192 || cfg.fields_max > 64 || cfg.inbox_cap == 0 {
+        return false
+    }
+    // Reserve only arithmetic room here. Actual population storage and
+    // task allocations still use checked Capacity.
+    let input_size = int.saturating_add(cfg.pipeline_max, cfg.body_inline)
+    let with_output = int.saturating_add(input_size, cfg.out_cap)
+    let total = int.saturating_add(with_output, cfg.handler_bytes)
+    total <= 18446744073709551615 - 32768
+}
+
+fn source_key(ip: Ip) -> (u64, u64, u64) {
+    match ip {
+        V4(lo) => (4u64, 0u64, int.widen(lo)),
+        V6(hi, lo) => if hi == 0 && lo >> 32 == 65535 {
+            let v4: u32 = int.truncate(lo)
+            (4u64, 0u64, int.widen(v4))
+        } else {
+            (6u64, hi, lo)
+        },
+    }
+}
+
+fn serve_alloc[T](take r: Result[T, Capacity]) -> Result[T, ServeError] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(e) => Error(Capacity(e)),
+    }
+}
+
+/// Serves a group of listeners with one handler per connection. The raw
+/// handler entry is also the seam for the router's later route selection.
+pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits, take state: S) -> Result[(), ServeError] waits {
+    if !valid_config(cfg) {
+        return Error(Configuration)
+    }
+    if list.len(listeners) == 0 {
+        return Ok(())
+    }
+    let shared = serve_alloc(result.capacity_only(arc.new(take state)))?
+    let settings = serve_alloc(result.capacity_only(arc.new(take cfg)))?
+    let made: Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity] = channel.new(settings.inbox_cap)
+    let (tx, rx) = serve_alloc(take made)?
+    let http_slots = order.min(settings.http_max, settings.sockets_max)
+    let reserved: Result[List[Option[HttpSlot]], Capacity] = list.with_capacity(http_slots)
+    let mut slots = serve_alloc(take reserved)?
+    let returns: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(order.max(http_slots, 1))
+    let (done_tx, done_rx) = serve_alloc(take returns)?
+    for _ in 0u64 .. http_slots {
+        let _ = list.push(mut slots, None)
+    }
+    let refusal_slots: Result[List[RefusalSlot], Capacity] = list.with_capacity(settings.refuse_max)
+    let refusals = serve_alloc(take refusal_slots)?
+    let acceptor_slots: Result[List[Task[()]], Capacity] = list.with_capacity(list.len(listeners))
+    let acceptors = serve_alloc(take acceptor_slots)?
+    let allocated_group = ServerTasks(connections: take slots, refusals: take refusals, acceptors: take acceptors)
+    let mut group = serve_alloc(result.capacity_only(take allocated_group))?
+    for i in 0u64 .. settings.refuse_max {
+        let allocated: Result[(Sender[RefusalJob], Receiver[RefusalJob]), Capacity] = channel.new(1)
+        let (job_tx, jobs) = serve_alloc(take allocated)?
+        let job = RefusalWorker(inbox: channel.sender(tx), jobs: take jobs, slot: i, c: c, ms: settings.refuse_ms)
+        match task.spawn(tasks, bytes 8256, take job, refusal_worker) {
+            Ok(take child) => {
+                let _ = list.push(mut group.refusals, RefusalSlot(child: take child, tx: take job_tx, busy: false))
+            },
+            Error((e, _)) => return Error(Capacity(e)),
+        }
+    }
+    let mut pending = take listeners
+    while let Some(take listener) = list.pop(mut pending) {
+        let job = AcceptorJob(listener: take listener, c: c, inbox: channel.sender(tx))
+        match task.spawn(tasks, bytes 64, take job, acceptor) {
+            Ok(take child) => {
+                let _ = list.push(mut group.acceptors, take child)
+            },
+            Error((e, _)) => return Error(Capacity(e)),
+        }
+    }
+    let child_bytes = bytes_for_connection(settings)
+    let mut in_first_phase: u64 = 0
+    while let Ok(take event) = channel.receive(rx) {
+        match take event {
+            Accepted(take socket, peer, at) => {
+                let ip = source_key(peer)
+                let mut from_ip: u64 = 0
+                let mut vacant = http_slots
+                for i in 0u64 .. http_slots {
+                    match group.connections[i] {
+                        Some(s) => {
+                            if s.ip == ip {
+                                from_ip += 1
+                            }
+                        },
+                        None => {
+                            if vacant == http_slots {
+                                vacant = i
+                            }
+                        },
+                    }
+                }
+                if vacant == http_slots || from_ip >= settings.ip_sockets_max || in_first_phase >= settings.conns_max {
+                    refuse(mut group.refusals, take socket, at)
+                } else {
+                    let completion = match Completion(done: channel.sender(done_tx), wake: channel.sender(tx), slot: vacant, armed: false) {
+                        Ok(take x) => take x,
+                        Error(_) => {
+                            refuse(mut group.refusals, take socket, at)
+                            continue
+                        },
+                    }
+                    let job = ConnectionJob(socket: take socket, c: c, cfg: arc.share(settings), peer: peer, at: at, handler: handler, state: arc.share(shared), inbox: channel.sender(tx), slot: vacant, completion: take completion)
+                    match task.spawn(tasks, bytes child_bytes, take job, connection) {
+                        Ok(take child) => {
+                            group.connections[vacant] = Some(HttpSlot(child: take child, first: true, ip: ip))
+                            in_first_phase += 1
+                        },
+                        Error((_, take refused)) => {
+                            let ConnectionJob(socket: take declined, c: _, cfg: _, peer: _, at: _, handler: _, state: _, inbox: _, slot: _, completion: _) = take refused
+                            refuse(mut group.refusals, take declined, at)
+                        },
+                    }
+                }
+            },
+            Source(slot, next_ip, take reply) => {
+                let ip = source_key(next_ip)
+                let mut from_ip: u64 = 0
+                for i in 0u64 .. http_slots {
+                    if let Some(s) = group.connections[i] {
+                        if s.ip == ip {
+                            from_ip += 1
+                        }
+                    }
+                }
+                let allowed = from_ip < settings.ip_sockets_max
+                if allowed {
+                    let current = replace(mut group.connections[slot], None)
+                    if let Some(take session) = take current {
+                        let mut s = take session
+                        s.ip = ip
+                        group.connections[slot] = Some(take s)
+                    }
+                }
+                let _ = channel.try_send(reply, allowed)
+            },
+            FirstResponse(slot) => {
+                let current = replace(mut group.connections[slot], None)
+                match take current {
+                    Some(take session) => {
+                        let mut s = take session
+                        s.first = false
+                        group.connections[slot] = Some(take s)
+                        in_first_phase -= 1
+                    },
+                    None => {},
+                }
+            },
+            EndNotice => {},
+            Refused(slot) => {
+                group.refusals[slot].busy = false
+            },
+            ListenerFailed(e) => return Error(Network(e)),
+        }
+        while let Ok(slot) = channel.try_receive(done_rx) {
+            let ended = replace(mut group.connections[slot], None)
+            if let Some(take s) = take ended {
+                let HttpSlot(child: take child, first: first, ip: _) = take s
+                let _ = task.join(take child)
+                if first {
+                    in_first_phase -= 1
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Selects a request body boundary from the already parsed Head. No allocation.

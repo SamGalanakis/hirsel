@@ -1,0 +1,31 @@
+// B1 selects this entry in a source view of std.http so it measures the
+// production connection task with exactly one accepted socket.
+fn b1_handler(request: Request, mut body: Body, state: ()) -> Result[Outcome, ResponseError] {
+    let payload = result.unwrap(b"Hello, world")
+    let mut reply = response(200, take payload, false)?
+    header(mut reply, result.unwrap(b"content-type"), result.unwrap(b"text/plain"))?
+    Ok(Reply(take reply))
+}
+
+fn b1_emit(out: Stdout, prefix: String, value: u64) waits {
+    let mut line = result.unwrap(string.from(prefix))
+    result.unwrap(string.push_u64(mut line, value))
+    result.unwrap(string.push_char(mut line, '\n'))
+    result.unwrap(stdout.write(out, line))
+}
+
+pub fn b1_main(n: Net, c: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let cfg = Config(ingress: list.new(), sockets_max: 1, http_max: 1, upgrades_max: 0, conns_max: 1, ip_sockets_max: 1, refuse_max: 0, refuse_ms: 1000, inbox_cap: 1, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 16384, body_max: 1048576, out_cap: 8192, handler_bytes: 262144, first_head_ms: 5000, idle_ms: 60000, head_ms: 10000, body_ms: 30000, handler_ms: 30000, write_ms: 30000, drain_ms: 2000, linger_ms: 2000, drain_max: 65536, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+    let addr = Addr(ip: V4(0x7f000001u32), port: 0)
+    let (listener, bound_addr) = result.unwrap(host.listen(n, addr, 1))
+    let port: u64 = int.widen(bound_addr.port)
+    b1_emit(out, "LISTEN 127.0.0.1:", port)
+    let mut accepting = take listener
+    let (socket, peer) = result.unwrap(host.accept(mut accepting, Never))
+    let at = host.mono_ns(c)
+    let allocated: Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity] = channel.new(1)
+    let (tx, rx) = result.unwrap(take allocated)
+    let completed = run_connection(take socket, c, cfg, peer.ip, at, b1_handler, (), tx, 0)
+    b1_emit(out, "SERVED ", completed)
+    Ok(())
+}

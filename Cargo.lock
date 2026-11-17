@@ -363,6 +363,7 @@ dependencies = [
  "hirsel-core-ir",
  "hirsel-core-layout",
  "hirsel-core-materialize",
+ "hirsel-core-net",
  "hirsel-core-resolve",
  "hirsel-guard",
  "serde_json",

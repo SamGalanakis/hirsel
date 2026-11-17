@@ -2,6 +2,8 @@
 """B1 server-only Callgrind instructions for http1-plaintext-keepalive."""
 
 import argparse
+import contextlib
+import email.utils
 import fcntl
 import json
 import os
@@ -35,6 +37,41 @@ def build(server):
     raise RuntimeError(f'build did not produce http-b1-{server}')
 
 
+def build_hirsel(compiler, runtime, cc, directory):
+    root = HERE.parents[2]
+    sys.path.insert(0, str(root / 'core/tools'))
+    from std_native import Contract, manifest
+    fixture = HERE / 'hirsel.hirsel'
+    source = directory / 'http.hirsel'
+    source.write_text((root / 'core/std/http.hirsel').read_text() + '\n' + fixture.read_text())
+    inputs = directory / 'inputs.json'
+    inputs.write_text(json.dumps(manifest(root, Contract(fixture, 0, '', '', True, test_of='http'), source)))
+    binary = directory / 'hirsel-http-b1'
+    command = [str(compiler), 'build', '--release', '--backend', 'llvm', '--source-core',
+               '--inputs', str(inputs), '--entry', 'std@1/http/b1_main',
+               '--runtime', str(runtime), '--store', str(directory / 'store'), '-o', str(binary),
+               '--grant', 'Clock', '--grant', 'Stdout', '--grant', 'Net=Listen 127.0.0.1/32 0-65535']
+    if cc:
+        command.extend(['--cc', str(cc)])
+    subprocess.run(command, check=True)
+    return [str(binary)]
+
+
+def hirsel_reply(replies):
+    status = replies.readline(128)
+    content_type = replies.readline(128)
+    length = replies.readline(128)
+    date = replies.readline(128)
+    if not (status == b'HTTP/1.1 200 OK\r\n' and content_type == b'content-type: text/plain\r\n'
+            and length == b'Content-Length: 12\r\n' and date.startswith(b'Date: ')
+            and date.endswith(b' GMT\r\n') and replies.readline(128) == b'\r\n'):
+        raise RuntimeError(f'unexpected Hirsel response: {status + content_type + length + date!r}')
+    parsed = email.utils.parsedate_to_datetime(date[6:-2].decode('ascii'))
+    if email.utils.format_datetime(parsed, usegmt=True).encode('ascii') != date[6:-2]:
+        raise RuntimeError(f'invalid HTTP Date: {date!r}')
+    return RESPONSE[:-12] + replies.read(12)
+
+
 def stop(process):
     # Only the Popen child owned by this invocation can reach this function.
     for force in (False, True):
@@ -55,7 +92,7 @@ def stop(process):
             continue
 
 
-def exchange(command, requests, timeout=900):
+def exchange(command, requests, timeout=900, *, hirsel=False):
     """One connection, no readiness probe connection and no measured client."""
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen([*command, '--requests', str(requests), '--port', '0'],
@@ -77,7 +114,7 @@ def exchange(command, requests, timeout=900):
                             raise TimeoutError('sample exceeded 15 minutes executing')
                         stream.settimeout(min(30, remaining))
                         stream.sendall(REQUEST)
-                        reply = replies.read(len(RESPONSE))
+                        reply = hirsel_reply(replies) if hirsel else replies.read(len(RESPONSE))
                         if reply != RESPONSE:
                             raise RuntimeError(f'response {index + 1} differs: {reply!r}')
                     stream.shutdown(socket.SHUT_WR)
@@ -116,8 +153,11 @@ def per_request(low, high, small, large):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('server', help='tokio, hyper, or a label with --command')
+    parser.add_argument('server', help='tokio, hyper, hirsel, or a label with --command')
     parser.add_argument('--command', help='server command, accepting --requests and --port')
+    parser.add_argument('--compiler', type=Path)
+    parser.add_argument('--runtime', type=Path)
+    parser.add_argument('--cc', type=Path)
     parser.add_argument('--small', type=int, default=1024)
     parser.add_argument('--large', type=int, default=8192)
     parser.add_argument('--cpu', type=int, help='one allowed CPU; default first inherited CPU')
@@ -130,30 +170,40 @@ def main():
     if cpu not in available:
         parser.error('CPU must be inherited and in 0-11 or 16-27')
     os.sched_setaffinity(0, {cpu})
-    if not args.command and args.server not in {'tokio', 'hyper'}:
-        parser.error('a custom server requires --command')
-    command = shlex.split(args.command) if args.command else build(args.server)
-    if not command:
-        parser.error('--command must not be empty')
-    if args.check:
-        exchange(command, 3)
-        print(f'{args.server}: 3/3 byte-identical replies on one connection, CPU {cpu}')
-        return
-    counts = []
-    # Each profile includes initialization, accept and EOF teardown. Their
-    # difference removes those fixed costs; the client never runs in Valgrind.
-    with tempfile.TemporaryDirectory(prefix='http-b1-') as directory:
-        for requests in (args.small, args.large):
-            profile = Path(directory) / f'{requests}.callgrind'
-            with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                exchange(['valgrind', '--tool=callgrind', '--quiet',
-                          f'--callgrind-out-file={profile}', *command], requests)
-            counts.append(instructions(profile))
-    cost = per_request(*counts, args.small, args.large)
-    print('workload                    server   cpu  small  large       Ir_small        Ir_large     Ir/request')
-    print(f'http1-plaintext-keepalive    {args.server:<8} {cpu:>3} {args.small:>6} {args.large:>6}'
-          f' {counts[0]:>14} {counts[1]:>15} {cost:>14.2f}')
+    with contextlib.ExitStack() as resources:
+        if not args.command and args.server not in {'tokio', 'hyper', 'hirsel'}:
+            parser.error('a custom server requires --command')
+        if args.server == 'hirsel' and not args.command and not (args.compiler and args.runtime):
+            parser.error('hirsel needs --compiler and --runtime, or --command')
+        if args.command:
+            command = shlex.split(args.command)
+        elif args.server == 'hirsel':
+            directory = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix='http-b1-hirsel-')))
+            command = build_hirsel(args.compiler.resolve(), args.runtime.resolve(),
+                                   args.cc.resolve() if args.cc else None, directory)
+        else:
+            command = build(args.server)
+        if not command:
+            parser.error('--command must not be empty')
+        if args.check:
+            exchange(command, 3, hirsel=args.server == 'hirsel')
+            print(f'{args.server}: 3/3 verified replies on one connection, CPU {cpu}')
+            return
+        counts = []
+        # Each profile includes initialization, accept and EOF teardown. Their
+        # difference removes those fixed costs; the client never runs in Valgrind.
+        with tempfile.TemporaryDirectory(prefix='http-b1-') as directory:
+            for requests in (args.small, args.large):
+                profile = Path(directory) / f'{requests}.callgrind'
+                with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    exchange(['valgrind', '--tool=callgrind', '--quiet',
+                              f'--callgrind-out-file={profile}', *command], requests, hirsel=args.server == 'hirsel')
+                counts.append(instructions(profile))
+        cost = per_request(*counts, args.small, args.large)
+        print('workload                    server   cpu  small  large       Ir_small        Ir_large     Ir/request')
+        print(f'http1-plaintext-keepalive    {args.server:<8} {cpu:>3} {args.small:>6} {args.large:>6}'
+              f' {counts[0]:>14} {counts[1]:>15} {cost:>14.2f}')
 
 
 if __name__ == '__main__':

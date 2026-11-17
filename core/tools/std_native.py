@@ -18,6 +18,16 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+MODEL_NET_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535')
+
+
+def model_network(case):
+    return '(network)' in case.call
+
+
+def model_grants():
+    return ['--grant', 'Net=' + ';'.join(MODEL_NET_RULES), '--grant', 'Clock', '--grant', 'Tasks']
+
 LANES = {'895': 'core-check-895', '910': 'core-check-calls-910', '912': 'core-check-index-912',
          '913': 'core-check-callables-913', '914': 'core-ops-914'}
 
@@ -172,6 +182,8 @@ def discover(root, filters):
 
 
 def host_parameter(case):
+    if model_network(case):
+        return 'native_net:Net,native_clock:Clock,native_tasks:Tasks', ''
     for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks')]:
         if '(' + argument + ')' in case.call:
             name = 'native_' + argument
@@ -190,10 +202,12 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, network=False):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
         if instructions is not None:
             request["instructions"] = instructions
+        if network:
+            request["model_net"] = MODEL_NET_RULES
         if sdk_out is not None:
             request.update(sdk_out=str(sdk_out), sdk_describe=str(sdk_describe))
         if sdk_compiler is not None:
@@ -221,6 +235,7 @@ class Evaluator:
 def wrapper(case):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
+    call = call.replace('(network)', '(native_net,native_clock,native_tasks)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
     if case.expected.startswith(('fail ', 'fault ')):
@@ -352,7 +367,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node'):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', model_runtime=None):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -484,7 +499,10 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            '--test-timeout', str(timeout), '--dir', str(host), '-o', str(scratch / 'programs')]
                 if evaluating:
                     law_started = time.monotonic()
-                    result = resident.evaluate(inputs, entry)
+                    if model_network(case):
+                        result = resident.evaluate(inputs, entry, network=True)
+                    else:
+                        result = resident.evaluate(inputs, entry)
                     row['ran'], row['cause'] = evaluator_observation(case, result)
                     try:
                         row['revision'] = json.loads(result.stdout).get('revision')
@@ -495,9 +513,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         reference = [str(compiler), 'build', '--source-core', '--inputs', str(inputs), '--entry', entry,
                                      '--backend', 'cranelift', '--runtime', str(runtime), '--store', str(work / 'revision-store'),
                                      '--json', '--limit', str(64 * 1024 * 1024), '-o', str(scratch / 'revision-program')]
-                        for capability in ('Tasks', 'Clock'):
-                            if host_parameter(case)[0].endswith(':' + capability):
-                                reference.extend(['--grant', capability])
+                        if model_network(case):
+                            reference.extend(model_grants())
+                        else:
+                            for capability in ('Tasks', 'Clock'):
+                                if host_parameter(case)[0].endswith(':' + capability):
+                                    reference.extend(['--grant', capability])
                         if cc:
                             reference.extend(['--cc', str(cc)])
                         built = subprocess.run(reference, capture_output=True, cwd=host)
@@ -541,6 +562,18 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Tasks'])
                 linker = cc
                 scripts = []
+                if model_network(case):
+                    if model_runtime is None:
+                        raise ValueError('native model-network laws require --model-runtime')
+                    if case.schedule or case.first_write is not None:
+                        raise ValueError('a model-network law uses its own provider and scheduler')
+                    command[command.index('--runtime') + 1] = str(model_runtime)
+                    command.extend(model_grants())
+                    linker = scratch / 'model-net-cc'
+                    actual = str(cc or Path(shutil.which('cc')))
+                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) +
+                                      ' "$@" -Wl,--wrap=hirsel_core_os_run_with_sources\n')
+                    linker.chmod(0o755)
                 if case.first_write is not None:
                     scripts.append(('std_host.c', [f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}'],
                                     'hirsel_core_host_op'))
@@ -588,6 +621,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path)
     parser.add_argument('--runtime', type=Path)
+    parser.add_argument('--model-runtime', type=Path)
     parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--backend', choices=['all', 'evaluator', 'both', 'cranelift', 'llvm'], default='both')
@@ -612,7 +646,8 @@ def main():
     rows = run(root, args.compiler.resolve() if args.compiler else None, args.runtime.resolve() if args.runtime else None, contracts, engines,
                args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None, args.target,
                args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
-               typescript=args.typescript, node=args.node)
+               typescript=args.typescript, node=args.node,
+               model_runtime=args.model_runtime.resolve() if args.model_runtime else None)
     return int(any(r['applicable'] and not r['passed'] for r in rows))
 
 

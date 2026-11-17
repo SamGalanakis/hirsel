@@ -20,6 +20,7 @@ fn evaluate(
     entry: DefPath,
     program_entry: bool,
     instructions: u64,
+    network: Option<eval::Network>,
 ) -> Result<Value, String> {
     let inputs: CorpusManifest =
         serde_json::from_slice(&std::fs::read(manifest).map_err(|e| e.to_string())?)
@@ -63,7 +64,7 @@ fn evaluate(
         return Ok(json!({"error":format!("not well formed: {error}"), "revision":revision}));
     }
     let mut result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run(&module, function, instructions, &revisions)
+        run(&module, function, instructions, &revisions, network)
     })) {
         Ok(result) => result?,
         Err(fault) => fault_report(fault),
@@ -77,6 +78,7 @@ fn run(
     function: hirsel_core_ir::FuncId,
     instructions: u64,
     revisions: &eval::Revisions,
+    network: Option<eval::Network>,
 ) -> Result<Value, String> {
     let signature = &module.signatures[module.functions[function.index()].signature.index()];
     let recipes = compute(&module.types).map_err(|e| format!("layouts: {e:?}"))?;
@@ -91,7 +93,7 @@ fn run(
     // A capability parameter gets handle 0 of a fresh model world. A Result's
     // leading destination is supplied separately by its caller, never a wrapper.
     let handles = vec![0; signature.params.len()];
-    let (report, checked) = eval::run_nans_into(
+    let (report, checked) = eval::run_nans_into_network(
         module,
         function,
         &handles,
@@ -100,6 +102,7 @@ fn run(
         destination.as_deref_mut(),
         instructions,
         revisions,
+        network,
     );
     let outcome = match report.outcome {
         eval::Outcome::Returned(values) => {
@@ -142,6 +145,20 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
         let manifest = input["manifest"].as_str().ok_or("expected manifest")?;
         let entry = DefPath::from_full(input["entry"].as_str().ok_or("expected entry")?)
             .ok_or("invalid entry")?;
+        let network = if let Some(rules) = input["model_net"].as_array() {
+            let rules = rules
+                .iter()
+                .map(|rule| {
+                    hirsel_core_net::Rule::parse(rule.as_str().ok_or("expected a net rule")?)
+                        .map_err(|_| "invalid net rule")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut net = eval::Network::default();
+            net.grants.insert(0, rules);
+            Some(net)
+        } else {
+            None
+        };
         let report = evaluate(
             driver,
             store,
@@ -149,6 +166,7 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
             entry,
             input["program_entry"].as_bool().unwrap_or(false),
             input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
+            network,
         )?;
         if let Some(out) = input["sdk_out"].as_str() {
             if report["outcome"] != json!({"kind":"returned","values":[1]}) {

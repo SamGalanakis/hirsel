@@ -166,3 +166,8 @@ materializing. Later demands reuse those generic sources without rechecking
 them. Nongeneric bodies are never restored or deferred past their seal. The
 walker_generic and walker_sealed laws cover late generic instances and a
 later-defined word-carried enum callee respectively.
+
+A socket law uses `// expect: run law(network) = value`. Its parameters
+are Net, Clock and Tasks, in that order. The evaluator and both native
+engines use the deterministic network model with an explicit loopback
+grant. Pass `--model-runtime` to `std_native.py` for a direct native run.

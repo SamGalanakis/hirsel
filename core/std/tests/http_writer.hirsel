@@ -70,6 +70,6 @@ fn bad_path(s: String) -> bool {
 // and invalid UTF-8 are not. A decoded slash does not create another segment.
 // expect: run http_segment_boundaries() = true
 fn http_segment_boundaries() -> bool {
-    let segments = result.unwrap(segments_of(string.as_bytes("/a%2fb/%C3%A9/")))
-    list.len(segments) == 3 && segments[0] == "a/b" && segments[1] == "é" && segments[2] == "" && bad_path("//") && bad_path("/./") && bad_path("/.%2e/") && bad_path("/%c0%80") && bad_path("/%2")
+    let decoded = result.unwrap(segments_of(string.as_bytes("/a%2fb/%C3%A9/")))
+    list.len(decoded) == 3 && decoded[0] == "a/b" && decoded[1] == "é" && decoded[2] == "" && bad_path("//") && bad_path("/./") && bad_path("/.%2e/") && bad_path("/%c0%80") && bad_path("/%2")
 }

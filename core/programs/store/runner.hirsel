@@ -3636,7 +3636,6 @@ fn wire_call_ready[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
     let to = match s.me { Some(to) => channel.sender(to), None => return Error(1008u16) }
     let timing = WireDeadline(clock: s.clock, at: sent.deadline, to: take to, stream: result.unwrap(clone(sent.stream)), p: p, generation: s.generation)
     let h = match task.spawn(s.tasks, bytes 4096u64, take timing, wire_deadline) { Ok(take h) => take h, Error(_) => return wire_refused(mut s, stream, p, Overloaded) }
-    result.unwrap(map.insert(mut work.timers, s.generation, take h))
     let owed = WireOwed(generation: s.generation)
     if forwarded {
         let mut held = option.unwrap(map.remove(mut s.held, k))
@@ -3650,6 +3649,7 @@ fn wire_call_ready[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
         result.unwrap(list.push(mut sends, take owed))
         result.unwrap(map.insert(mut s.held, take k, WireHeld(stream: stream, p: p, digest: digest, forwarded: true, queued: queued, owed: take sends)))
     }
+    result.unwrap(map.insert(mut work.timers, s.generation, take h))
     Ok(())
 }
 
@@ -3762,6 +3762,7 @@ fn wire_answer[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, t
 }
 
 fn wire_expired[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tick: Tick) {
+    let _ = map.remove(mut work.timers, tick.generation)
     let version = s.last
     let key = slot_key(tick.stream, tick.p)
     if let Some(take found) = map.remove(mut s.held, key) {
@@ -3773,7 +3774,6 @@ fn wire_expired[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, 
         }
         if hit {
             let _ = list.remove(mut h.owed, index)
-            let _ = map.remove(mut work.timers, tick.generation)
             h.queued += 1u64
             wire_row(mut s, key, h.stream, h.p, version, Abandoned)
         }

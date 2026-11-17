@@ -793,7 +793,7 @@ def admission_laws(args, root, work, engines, row):
     adapted.write_text(text + '\n' + laws)
     selected = manifest(root, work, 'admission-laws', adapted)
     durable = ('gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max')
-    state = ('unread_client', 'hello_and_slots', 'join_cleanup')
+    state = ('unread_client', 'hello_and_slots', 'join_cleanup', 'refused_send_releases_timer')
     names = args.admission_law or (*state, *durable)
     qualified = set()
     if 'evaluator' in engines:
@@ -958,7 +958,7 @@ def main():
     p.add_argument('--session-law', action='append', choices=['reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
     p.add_argument('--session-mutant', action='append', choices=['undersized_reader', 'head_frames_uncounted', 'writer_queue', 'orphan_reader'])
     p.add_argument('--admission-law', action='append', choices=['unread_client', 'hello_and_slots', 'join_cleanup',
-                   'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
+                   'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket'])
     args = p.parse_args()

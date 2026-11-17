@@ -7,10 +7,9 @@
 #include <string.h>
 static unsigned operation;
 static uint64_t count;
-static uint8_t inert(HirselCoreContext *ctx, void *p) { (void)ctx; (void)p; return 0; }
 static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg, HirselCoreMainResult *result) {
     (void)cfg; (void)result;
-    HirselCoreValueLayout layout={8,8,8,inert};
+    HirselCoreValueLayout layout={8,8,8,NULL};
     HirselCoreChannelNew c=hirsel_core_channel_new(ctx,1,layout,0);
     if(!c.sender || c.status) abort();
     uint64_t x=7, y=0, checksum=0;

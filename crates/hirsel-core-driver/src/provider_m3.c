@@ -189,7 +189,6 @@ static void s0_wrap(void) {
     s0_outer=s0_inner; s0_outer.wait=s0_wait; s0_outer.issue=s0_issue; s0_outer.resume=s0_resume;
     s0_outer.abort=s0_abort; s0_outer.deliver=s0_deliver;
 }
-static uint8_t s0_drop(HirselCoreContext *c,void *p) {(void)c;(void)p;return 0;}
 static const HirselCoreProvider *s0_selected;
 /* (a): the sleeper's 20 ms sleep must not block the scheduler, so the peer
    finishes first: PS, with or without the wrapper. */
@@ -204,7 +203,7 @@ static uint8_t s0_sleeper(HirselCoreContext *c,void *out,void *in) {
 }
 static uint8_t s0_peer(HirselCoreContext *c,void *out,void *in) {(void)c;(void)out;(void)in;s0_order[s0_at++]='P';return 0;}
 static uint8_t s0_sleep_entry(HirselCoreContext *c,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {
-    (void)cfg; char in=0,res=0; HirselCoreValueLayout v={0,1,0,s0_drop}; HirselCoreTaskLayout l={v,v};
+    (void)cfg; char in=0,res=0; HirselCoreValueLayout v={0,1,0,NULL}; HirselCoreTaskLayout l={v,v};
     HirselCoreSpawn a=hirsel_core_spawn(c,0,4096,&in,s0_sleeper,l,0), b=hirsel_core_spawn(c,0,4096,&in,s0_peer,l,0);
     CHECK(hirsel_core_join(c,a.task,&res,2).status==0 && hirsel_core_join(c,b.task,&res,3).status==0);
     out->kind=0; out->exit=0; return 0;

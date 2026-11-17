@@ -1,5 +1,5 @@
 {
-  "contract": "WIRE-SPEC v2 section 3, six-field Welcome; frozen against RUNNER-SPEC v2.11 R2 F9-F12",
+  "contract": "WIRE-SPEC v2 section 3, six-field Welcome; frozen against RUNNER-SPEC v2.11.4 Outcome and Refusal tags",
   "oracle": "Hand-derived from codec.md widths. hex is payload only; wire_bytes includes the unmasked server WebSocket header.",
   "vectors": [
     {
@@ -279,6 +279,20 @@
       "value": "Reset(0x0102030405060708u64, one(runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b(\"0000000001\")))))",
       "hex": "0800000008070605040302010100000004030201080706050403020100000000050000000000000001",
       "derivation": "envelope 16 + Done 25 = 41"
+    },
+    {
+      "name": "done_refused_request_mismatch",
+      "type": "Done",
+      "value": "runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Refused(RequestMismatch))",
+      "hex": "0403020108070605040302010200000006000000",
+      "derivation": "stream 4 LE + p 8 LE + Outcome Refused tag 2 u32 LE + Refusal RequestMismatch tag 6 u32 LE = 20"
+    },
+    {
+      "name": "done_refused_history_unavailable",
+      "type": "Done",
+      "value": "runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Refused(HistoryUnavailable))",
+      "hex": "0403020108070605040302010200000007000000",
+      "derivation": "stream 4 LE + p 8 LE + Outcome Refused tag 2 u32 LE + Refusal HistoryUnavailable tag 7 u32 LE = 20"
     }
   ]
 }

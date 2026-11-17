@@ -91,6 +91,8 @@ version, completing subscription ids, rows and outcomes, in that order. A Row ke
 is the physical data-tree key, with big-endian table and integer key components;
 its optional value contains the current value codec's bytes without a stored
 schema prefix. The session still uses `Told`; wire serving is a later slice.
+Outcome tags are Returned 0, Failed 1, Refused 2, Abandoned 3 and InDoubt 4.
+Refusal appends RequestMismatch 6 and HistoryUnavailable 7 after NotAllowed 5.
 
 The head's stream state is the store's own (STORE-SPEC §1.8, S5 and v2.24's request
 identity): `store.admit` and `store.reply`, with no runner table. The gate waits on
@@ -109,7 +111,8 @@ Laws and cases: `core/programs/store/runner_laws.hirsel` (R0),
 `core/programs/store/runner_crash.hirsel` (R1b, native only), run by
 `core/tools/runner_tests.py` on the evaluator, Cranelift and LLVM: R1 in the land gate
 (`//:core-runner-r1`), and R0 and R1b after the push (`//:core-runner-r0`).
-The hand-derived `frame_vectors` law and its `tag_order` and `complete_omitted`
-mutants run with R0 after the push, or alone with `//:core-runner-wire`. The byte
+The hand-derived `frame_vectors` law and its `tag_order`, `complete_omitted` and
+`refusal_tag_inserted` mutants run with R0 after the push, or alone with
+`//:core-runner-wire`. The byte
 fixtures in `core/programs/store/frame-vectors.json` are frozen against
-RUNNER-SPEC v2.11's R2 contract, including F9-F12.
+RUNNER-SPEC v2.11.4's R2 contract and Outcome/Refusal tags, including F9-F12.

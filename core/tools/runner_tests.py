@@ -15,7 +15,7 @@ the runtime's exact peak of live backing bytes across its two modes.
 and their native twins: the land gate's part. --part r0 runs the rest, which runs after
 the push: R0's laws, p19, l12, L4, R1b's L1, the wire frame vectors, and every mutant
 (a mutant qualifies a law, not the runner a change lands). --part wire selects only
-frame_vectors and its two evaluator mutants. Without --part both R0 and R1 run.
+frame_vectors and its evaluator mutants. Without --part both R0 and R1 run.
 
 R1b's L1 builds core/programs/store/runner_crash.hirsel per native backend under the
 store's W2 crash adapter (core/tools/store_crash_tests.py): every cut of each scenario,
@@ -437,7 +437,9 @@ def frame_vectors(args, root, work, engines, row):
                     ('tag_order', 'Hello(Option[Bytes], List[Want]) | Call(u32, u64, u32, u32, Bytes)',
                      'Call(u32, u64, u32, u32, Bytes) | Hello(Option[Bytes], List[Want])'),
                     ('complete_omitted', 'Batch(u64, List[u32], List[Row], List[Done])',
-                     'Batch(u64, List[Row], List[Done])')):
+                     'Batch(u64, List[Row], List[Done])'),
+                    ('refusal_tag_inserted', 'NotAllowed | RequestMismatch | HistoryUnavailable',
+                     'RequestMismatch | NotAllowed | HistoryUnavailable')):
                 if text.count(old) != 1:
                     row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
                     continue

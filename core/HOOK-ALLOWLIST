@@ -36,6 +36,9 @@ core@1/char/to_u32
 core@1/code/callable
 core@1/code/describe
 core@1/code/identity
+# DECISIONS.md 2026-11-16 (code.revision ruled, V4): store's runner records the
+# revision of the entry that ran in each call record (RUNNER-SPEC R5, §7).
+core@1/code/revision
 core@1/core/$clone
 core@1/core/$clone_in
 core@1/core/$clone_twin

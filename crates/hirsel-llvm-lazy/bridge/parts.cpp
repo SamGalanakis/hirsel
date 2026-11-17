@@ -201,18 +201,35 @@ struct References {
         if (auto *md = dyn_cast<MetadataAsValue>(v)) metadata(md->getMetadata());
     }
     DenseSet<const Metadata *> seen_md;
+    bool metadata_values = false;
     void metadata(const Metadata *md) {
         if (!md || !seen_md.insert(md).second) return;
-        if (auto *v = dyn_cast<ValueAsMetadata>(md)) value(v->getValue());
+        if (auto *v = dyn_cast<ValueAsMetadata>(md)) {
+            metadata_values |= !isa<ConstantData>(v->getValue());
+            value(v->getValue());
+        }
         else if (auto *n = dyn_cast<MDNode>(md))
             for (const MDOperand &op : n->operands()) metadata(op.get());
         else if (auto *list = dyn_cast<DIArgList>(md))
-            for (ValueAsMetadata *v : list->getArgs()) value(v->getValue());
+            for (ValueAsMetadata *v : list->getArgs()) metadata(v);
     }
 };
 
-// `f` alone, with what it references, in a module of its own.
-std::unique_ptr<Module> part(const Module &m, Function &f, const StringMap<std::string> &sets) {
+// Bitcode of `m` alone: no IR symbol table, which only restates the module.
+void bitcode(const Module &m, SmallVectorImpl<char> &out) {
+    BitcodeWriter writer(out);
+    writer.writeModule(m);
+    writer.writeStrtab();
+}
+
+// The bitcode of `f` alone, with what it references, in a module of its own.
+// The part's definition borrows `f`'s body for the write: its blocks move in,
+// its operands that name a global name the part's declaration instead, and
+// all of it is put back after, so `m` is as it was. A body the move cannot
+// put back exactly (a block whose address is taken, metadata that names a
+// value, debug records, a subprogram whose units the part must list) is
+// cloned instead; both give the same bitcode.
+void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets, SmallVectorImpl<char> &out) {
     LLVMContext &context = m.getContext();
     auto p = std::make_unique<Module>("hirsel-part", context);
     p->setSourceFileName("hirsel-part");
@@ -225,13 +242,18 @@ std::unique_ptr<Module> part(const Module &m, Function &f, const StringMap<std::
     }
     References refs;
     refs.seen.insert(&f);
-    for (BasicBlock &b : f)
+    bool movable = !f.getSubprogram();
+    for (BasicBlock &b : f) {
+        movable = movable && !b.hasAddressTaken();
         for (Instruction &i : b) {
             for (const Use &op : i.operands()) refs.value(op.get());
             SmallVector<std::pair<unsigned, MDNode *>, 4> attached;
             i.getAllMetadataOtherThanDebugLoc(attached);
             for (auto &[kind, node] : attached) refs.metadata(node);
+            movable = movable && !i.hasDbgRecords();
         }
+    }
+    movable = movable && !refs.metadata_values;
     ValueToValueMapTy map;
     std::string assembly;
     std::vector<std::pair<GlobalVariable *, GlobalVariable *>> constants;
@@ -271,12 +293,40 @@ std::unique_ptr<Module> part(const Module &m, Function &f, const StringMap<std::
     map[&f] = own;
     // After `f` is mapped: a constant may point back at it.
     for (auto &[from, to] : constants) to->setInitializer(MapValue(from->getInitializer(), map));
-    auto to = own->arg_begin();
-    for (Argument &a : f.args()) map[&a] = &*to++;
-    SmallVector<ReturnInst *, 8> returns;
-    CloneFunctionInto(own, &f, map, CloneFunctionChangeType::DifferentModule, returns);
     if (!assembly.empty()) p->appendModuleInlineAsm(Module::GlobalAsmFragment(assembly));
-    return p;
+    if (!movable) {
+        auto to = own->arg_begin();
+        for (Argument &a : f.args()) map[&a] = &*to++;
+        SmallVector<ReturnInst *, 8> returns;
+        CloneFunctionInto(own, &f, map, CloneFunctionChangeType::DifferentModule, returns);
+        bitcode(*p, out);
+        return;
+    }
+    SmallVector<std::pair<unsigned, MDNode *>, 4> attached;
+    f.getAllMetadata(attached);
+    for (auto &[kind, node] : attached) own->addMetadata(kind, *MapMetadata(node, map));
+    // As the clone gives it: the part lists the compile units of its body.
+    p->getOrInsertNamedMetadata("llvm.dbg.cu");
+    own->splice(own->end(), &f);
+    for (auto [from, to] = std::pair(f.arg_begin(), own->arg_begin()); from != f.arg_end(); ++from, ++to)
+        from->replaceAllUsesWith(&*to);
+    std::vector<std::pair<Use *, Value *>> moved;
+    for (BasicBlock &b : *own)
+        for (Instruction &i : b)
+            for (Use &u : i.operands()) {
+                Value *v = u.get();
+                if (!isa<Constant>(v) || isa<ConstantData>(v)) continue;
+                Value *n = MapValue(v, map);
+                if (n && n != v) {
+                    moved.push_back({&u, v});
+                    u.set(n);
+                }
+            }
+    bitcode(*p, out);
+    for (auto it = moved.rbegin(); it != moved.rend(); ++it) it->first->set(it->second);
+    for (auto [from, to] = std::pair(f.arg_begin(), own->arg_begin()); from != f.arg_end(); ++from, ++to)
+        to->replaceAllUsesWith(&*from);
+    f.splice(f.end(), own);
 }
 
 // What code generation is a function of besides the IR: the machine and the
@@ -338,13 +388,6 @@ std::string unsplittable(const Module &m) {
     return "";
 }
 
-// Bitcode of `m` alone: no IR symbol table, which only restates the module.
-void bitcode(const Module &m, SmallVectorImpl<char> &out) {
-    BitcodeWriter writer(out);
-    writer.writeModule(m);
-    writer.writeStrtab();
-}
-
 }  // namespace
 
 // Generate `module` once for every definition a caller does not hold. Each
@@ -401,7 +444,7 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         for (Function &f : m) {
             if (f.isDeclaration()) continue;
             SmallVector<char, 0> code;
-            bitcode(*part(m, f, sets), code);
+            part_bitcode(m, f, sets, code);
             if (ask(f.getName(), code)) held.push_back(&f);
             else ++misses;
         }

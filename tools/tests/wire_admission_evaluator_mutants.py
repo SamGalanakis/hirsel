@@ -16,12 +16,20 @@ CONTROLS = {
         'if !known && !map.contains(r.gone, want.key) { return Error(NoEntry) }',
         'if !known { return Error(NoEntry) }'),
     'no_principal_rate': ('ingress', 'store@1/ingress/law_limits',
-        'if list.len(s.mints) >= c.mint_burst { false } else {',
+        'if s.mint_count >= c.mint_burst { false } else {',
         'if false { false } else {'),
     'commit_then_check': ('runner', 'store@1/runner/law_reply_over_done_max',
         'Ok(()) => if list.len(out) > DONE_MAX - 20u64 {',
         'Ok(()) => if false {'),
-
+    'expiry_resets_active': ('ingress', 'store@1/ingress/law_rates_and_expiry',
+        'if full {', 'if true {'),
+    'admit_without_digest': ('store', 'store@1/runner/law_request_mismatch_wire',
+        'if at.digest != d {', 'if false {'),
+    # Superseded was deleted. Returned models its erroneous claim of completion;
+    # the law requires HistoryUnavailable and unchanged store version and data.
+    'superseded_from_rejected': ('runner', 'store@1/runner/law_history_below_latest',
+        'HistoryUnavailable => commitless(mut hd, take q, Refused(HistoryUnavailable)),',
+        'HistoryUnavailable => commitless(mut hd, take q, Returned(list.new())),')
 }
 
 

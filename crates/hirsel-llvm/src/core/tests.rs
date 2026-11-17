@@ -1263,27 +1263,37 @@ fn counted_sequences_destroy_deep_chains_with_constant_stack() {
 
 /// LANG-19: ordinary release of a 10^6-deep `Box` chain, of one whose rows
 /// carry a finalizer, of a closure whose environment captures a closure 10^6
-/// deep, and of a node whose List holds the next node 10^6 deep, completes
-/// under the default stack, and every block is refunded (hand-derived: n + 1
-/// boxes, n environments, n buffers).
+/// deep, of a node whose List holds the next node 10^6 deep, and of a resource
+/// whose field owns the next resource 10^6 deep, completes under the default
+/// stack, and every block is refunded (hand-derived: n + 1 boxes, n
+/// environments, n buffers, n resources and their n boxes).
 #[test]
 fn box_chain_releases_with_constant_stack() {
-    for (source, boxes) in [
+    for (source, boxes, links) in [
         (
             include_str!("../../../hirsel-core-ir/samples/box-chain.core"),
+            1,
             1,
         ),
         (
             include_str!("../../../hirsel-core-ir/samples/closure-chain.core"),
             0,
+            1,
         ),
         (
             include_str!("../../../hirsel-core-ir/samples/finalizer-chain.core"),
+            1,
             1,
         ),
         (
             include_str!("../../../hirsel-core-ir/samples/seq-chain.core"),
             0,
+            1,
+        ),
+        (
+            include_str!("../../../hirsel-core-ir/samples/resource-chain.core"),
+            0,
+            2,
         ),
     ] {
         let module = text::parse(source).unwrap();
@@ -1298,7 +1308,7 @@ fn box_chain_releases_with_constant_stack() {
             let n = case.args[0];
             assert_eq!(got.outcome, eval::Outcome::Returned(vec![n]));
             assert_eq!(got.used, 0);
-            assert_eq!(got.admissions, boxes + n as usize);
+            assert_eq!(got.admissions, boxes + links * n as usize);
         }
     }
 }

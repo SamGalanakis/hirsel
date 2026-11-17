@@ -366,7 +366,7 @@ pub unsafe extern "C" fn hirsel_core_receiver_drop(
     // SAFETY: as receiver_begin; the drain runs the cleanup to its end.
     unsafe {
         let holder = receiver_begin(context, channel);
-        u8::from(counted::drain_holder(context, holder, receiver_step))
+        u8::from(counted::drain_holder(context, holder, receiver_step, 0))
     }
 }
 /// Release the sole receiver inside a running drain: begin its cleanup and

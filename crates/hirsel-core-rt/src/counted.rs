@@ -264,11 +264,17 @@ pub(crate) unsafe fn drain_buffer(
 }
 
 /// Run a holder's cleanup, begun by its caller, to the end with constant native
-/// stack. Returns whether anything it cleaned failed (FAIL-10).
+/// stack. `site` is the release's caller site word, for finalizers that inherit
+/// it. Returns whether anything it cleaned failed (FAIL-10).
 /// # Safety
 /// The holder's cleanup has begun and its frame words are free; the context is live.
-pub(crate) unsafe fn drain_holder(context: *mut Context, holder: *mut Holder, step: Step) -> bool {
-    let mut list = Worklist::new(0);
+pub(crate) unsafe fn drain_holder(
+    context: *mut Context,
+    holder: *mut Holder,
+    step: Step,
+    site: u64,
+) -> bool {
+    let mut list = Worklist::new(site);
     // SAFETY: as this function's contract.
     unsafe {
         list.stage_holder(holder, step, 0);

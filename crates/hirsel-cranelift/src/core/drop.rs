@@ -18,6 +18,10 @@ pub(super) struct Glues {
     /// environment's word 0 names it (core-ir crate docs, "Callable environments").
     pub environments: Vec<Option<cranelift_module::DataId>>,
     pub buffers: Vec<(FieldTy, cranelift_module::FuncId)>,
+    /// A resource type's drain recipe over its storage: the trace hook and
+    /// finalizer as step 0, then its fields (LANG-19). Every release of a
+    /// resource, ordinary or drained, runs it from the resource's own frame.
+    pub resources: Vec<Option<cranelift_module::FuncId>>,
 }
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
@@ -82,19 +86,28 @@ impl Glues {
                 }
             }
         }
+        let resources: BTreeSet<usize> = (0..input.types.len())
+            .filter(|&t| input.types[t].repr == Repr::Resource)
+            .collect();
         // Ordinary glue walks only the value it was handed; every owned block
         // below it is released by the drain (LANG-19): a box from its type's
         // descriptor, Seq and Map storage by its buffer recipe, whose element
-        // types are therefore drained descendants (`buffered`).
+        // types are therefore drained descendants (`buffered`), and a resource
+        // by its recipe, whose fields are drained descendants too.
         fn normal(
             t: usize,
             layouts: &[Recipe],
+            resources: &BTreeSet<usize>,
             needed: &mut BTreeSet<usize>,
             roots: &mut BTreeSet<usize>,
             buffered: &mut BTreeSet<usize>,
             seen: &mut BTreeSet<usize>,
         ) {
             if !seen.insert(t) {
+                return;
+            }
+            if resources.contains(&t) {
+                buffered.insert(t);
                 return;
             }
             fn inline(f: &FieldTy, buffered: &mut BTreeSet<usize>) {
@@ -113,6 +126,7 @@ impl Glues {
             fn field(
                 f: &FieldTy,
                 layouts: &[Recipe],
+                resources: &BTreeSet<usize>,
                 needed: &mut BTreeSet<usize>,
                 roots: &mut BTreeSet<usize>,
                 buffered: &mut BTreeSet<usize>,
@@ -121,16 +135,18 @@ impl Glues {
                 match f {
                     FieldTy::Inline(t) => {
                         needed.insert(t.index());
-                        normal(t.index(), layouts, needed, roots, buffered, seen);
+                        normal(t.index(), layouts, resources, needed, roots, buffered, seen);
                     }
                     // A non-terminal box is released by the drain from its
                     // descriptor (LANG-19), so its type is a root too.
                     FieldTy::Box(t) => {
                         needed.insert(t.index());
                         roots.insert(t.index());
-                        normal(t.index(), layouts, needed, roots, buffered, seen);
+                        normal(t.index(), layouts, resources, needed, roots, buffered, seen);
                     }
-                    FieldTy::Array(e, _) => field(e, layouts, needed, roots, buffered, seen),
+                    FieldTy::Array(e, _) => {
+                        field(e, layouts, resources, needed, roots, buffered, seen)
+                    }
                     FieldTy::Seq(_) | FieldTy::Map(..) => {
                         inline(f, buffered);
                         counted(f, roots);
@@ -140,7 +156,7 @@ impl Glues {
             }
             if let Some(d) = &layouts[t].drop {
                 for f in d.fields.iter().flatten() {
-                    field(&f.ty, layouts, needed, roots, buffered, seen);
+                    field(&f.ty, layouts, resources, needed, roots, buffered, seen);
                 }
             }
         }
@@ -150,28 +166,28 @@ impl Glues {
             normal(
                 t,
                 layouts,
+                &resources,
                 &mut needed,
                 &mut roots,
                 &mut buffered,
                 &mut normal_seen,
             );
         }
-        // A resource is one counted step, cleaned whole by its ordinary glue,
-        // so its fields are not descendants.
+        // A resource is handed to the drain whole and cleaned by its recipe,
+        // whose fields are descendants (`resourced`).
         fn descendants(
             t: usize,
             layouts: &[Recipe],
             resources: &BTreeSet<usize>,
             roots: &mut BTreeSet<usize>,
             visited: &mut BTreeSet<usize>,
-            whole: &mut BTreeSet<usize>,
+            resourced: &mut BTreeSet<usize>,
         ) {
-            if resources.contains(&t) {
-                whole.insert(t);
-                return;
-            }
             if !visited.insert(t) {
                 return;
+            }
+            if resources.contains(&t) {
+                resourced.insert(t);
             }
             fn field(
                 f: &FieldTy,
@@ -179,72 +195,48 @@ impl Glues {
                 resources: &BTreeSet<usize>,
                 roots: &mut BTreeSet<usize>,
                 visited: &mut BTreeSet<usize>,
-                whole: &mut BTreeSet<usize>,
+                resourced: &mut BTreeSet<usize>,
             ) {
                 match f {
-                    // A resource is one step cleaned whole by its ordinary glue.
-                    FieldTy::Inline(t) if resources.contains(&t.index()) => {
-                        whole.insert(t.index());
-                    }
                     FieldTy::Inline(t) => {
-                        descendants(t.index(), layouts, resources, roots, visited, whole)
+                        descendants(t.index(), layouts, resources, roots, visited, resourced)
                     }
                     FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                         roots.insert(t.index());
-                        descendants(t.index(), layouts, resources, roots, visited, whole);
+                        descendants(t.index(), layouts, resources, roots, visited, resourced);
                     }
                     FieldTy::Array(e, _) | FieldTy::Seq(e) => {
-                        field(e, layouts, resources, roots, visited, whole)
+                        field(e, layouts, resources, roots, visited, resourced)
                     }
                     FieldTy::Map(k, v) => {
-                        field(k, layouts, resources, roots, visited, whole);
-                        field(v, layouts, resources, roots, visited, whole);
+                        field(k, layouts, resources, roots, visited, resourced);
+                        field(v, layouts, resources, roots, visited, resourced);
                     }
                     _ => {}
                 }
             }
             if let Some(d) = &layouts[t].drop {
                 for f in d.fields.iter().flatten() {
-                    field(&f.ty, layouts, resources, roots, visited, whole);
+                    field(&f.ty, layouts, resources, roots, visited, resourced);
                 }
             }
         }
-        let resources: BTreeSet<usize> = (0..input.types.len())
-            .filter(|&t| input.types[t].repr == Repr::Resource)
-            .collect();
         let mut visited = BTreeSet::new();
-        let mut whole = BTreeSet::new();
-        loop {
-            for root in roots
-                .clone()
-                .into_iter()
-                .chain(values.iter().copied())
-                .chain(buffered.iter().copied())
-            {
-                descendants(
-                    root,
-                    layouts,
-                    &resources,
-                    &mut roots,
-                    &mut visited,
-                    &mut whole,
-                );
-            }
-            let fresh: Vec<usize> = whole.difference(&needed).copied().collect();
-            if fresh.is_empty() {
-                break;
-            }
-            for t in fresh {
-                needed.insert(t);
-                normal(
-                    t,
-                    layouts,
-                    &mut needed,
-                    &mut roots,
-                    &mut buffered,
-                    &mut normal_seen,
-                );
-            }
+        let mut resourced = BTreeSet::new();
+        for root in roots
+            .clone()
+            .into_iter()
+            .chain(values.iter().copied())
+            .chain(buffered.iter().copied())
+        {
+            descendants(
+                root,
+                layouts,
+                &resources,
+                &mut roots,
+                &mut visited,
+                &mut resourced,
+            );
         }
         let mut drops = vec![None; layouts.len()];
         let mut cleans = vec![None; layouts.len()];
@@ -284,11 +276,28 @@ impl Glues {
                 );
             }
         }
+        let mut recipes = vec![None; layouts.len()];
+        for &i in &resourced {
+            recipes[i] = Some(
+                object
+                    .declare_function(
+                        &format!("hirsel.core.resource.{i}"),
+                        Linkage::Local,
+                        &abi::Signature::c(object, &[P, P, P, P], &[B]).clif,
+                    )
+                    .map_err(error)?,
+            );
+        }
         let mut fixed = vec![None; layouts.len()];
         let mut environment = vec![None; layouts.len()];
         for (i, function) in resumes.iter().enumerate() {
             if let Some(function) = *function {
-                let logical = layouts[i].logical_size.unwrap();
+                // The block of a box or counted resource holds its pointer.
+                let logical = if resources.contains(&i) {
+                    8
+                } else {
+                    layouts[i].logical_size.unwrap()
+                };
                 let mut ids = Vec::new();
                 let owners = [
                     ("own", charge::boxed(logical), 0),
@@ -409,6 +418,7 @@ impl Glues {
             fixed,
             environments: environment,
             buffers,
+            resources: recipes,
         })
     }
     pub fn emit(
@@ -433,22 +443,29 @@ impl Glues {
         }
         for (i, &function) in self.values.iter().enumerate() {
             if let Some(function) = function {
-                self.emit_value(object, tables, (i, function), observer, scratch)?;
+                self.emit_value(object, tables, (i, function, false), observer, scratch)?;
+            }
+        }
+        for (i, &function) in self.resources.iter().enumerate() {
+            if let Some(function) = function {
+                self.emit_value(object, tables, (i, function, true), observer, scratch)?;
             }
         }
         Ok(())
     }
     /// A value's cleanup in place, resumable as a drain recipe with no frame
-    /// of its own: its holder keeps the cursor. Finalizers inherit no site.
+    /// of its own: its holder keeps the cursor. Finalizers inherit no site. With
+    /// `resource`, the recipe of a resource's storage instead, whose release
+    /// passed its caller site through the worklist.
     fn emit_value(
         &self,
         object: &mut ObjectModule,
         tables: &Tables<'_>,
-        definition: (usize, cranelift_module::FuncId),
+        definition: (usize, cranelift_module::FuncId, bool),
         observer: &impl profile::Observer,
         scratch: &mut Compilation,
     ) -> Result<()> {
-        let (index, function) = definition;
+        let (index, function, resource) = definition;
         let build = observer.enter("build_glue");
         let context = &mut scratch.codegen;
         object.clear_context(context);
@@ -459,7 +476,16 @@ impl Glues {
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
-        let caller_site = b.ins().iconst(types::I64, 0);
+        let caller_site = if resource {
+            b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                args[3],
+                memory_layout::WORKLIST_SITE as i32,
+            )
+        } else {
+            b.ins().iconst(types::I64, 0)
+        };
         let mut g = Glue {
             b,
             object,
@@ -473,7 +499,11 @@ impl Glues {
             rank: None,
             list: Some(args[3]),
         };
-        let plan = plan_type(tables, TypeRef(index as u32))?;
+        let plan = if resource {
+            resume::plan_resource(tables, TypeRef(index as u32))?
+        } else {
+            plan_type(tables, TypeRef(index as u32))?
+        };
         if plan.count() != 0 {
             let cursor = g.load(args[2], 0);
             let rank = g.icon(0);
@@ -609,30 +639,20 @@ impl Glues {
             let done = g.b.ins().iconst(types::I8, 1);
             g.b.ins().return_(&[done]);
         } else {
-            let resource = tables.input.types[index].repr == Repr::Resource;
-            let base = if resource {
-                g.load(args[1], 0)
+            if tables.input.types[index].repr == Repr::Resource {
+                // LANG-19: a resource is released through the drain by its recipe.
+                let p = g.load(args[1], 0);
+                let (recipe, storage) = g.resource_recipe(index);
+                let status = g.call(
+                    "hirsel_core_resource_release",
+                    &[P, P, P, U, U],
+                    &[B],
+                    &[g.ctx, p, recipe, storage, g.caller_site],
+                )?[0];
+                g.merge(status);
             } else {
-                args[1]
-            };
-            if resource
-                && tables.trace_drops
-                && let hirsel_core_layout::Body::Record(fields) = &tables.input.types[index].body
-                && let Some(i) = fields
-                    .iter()
-                    .position(|f| f.ty == FieldTy::Scalar(Scalar::U64))
-            {
-                let Layout::Fixed(layout) = &tables.layouts[index].layout else {
-                    unreachable!()
-                };
-                let id = g.load(base, layout.offsets[0][i] as i32);
-                g.call("hirsel_core_test_drop_trace", &[U], &[], &[id])?;
-            }
-            g.finalize(index, base)?;
-            g.fields(base, index)?;
-            if resource {
-                let storage = g.icon(tables.layouts[index].logical_size.unwrap());
-                g.call("hirsel_core_resource_free", &[P, U], &[], &[base, storage])?;
+                g.finalize(index, args[1])?;
+                g.fields(args[1], index)?;
             }
             let status = g.failed;
             g.b.ins().return_(&[status]);
@@ -702,10 +722,32 @@ impl Glue<'_, '_, '_> {
         self.calls
             .c(self.object, &mut self.b, name, params, results, args)
     }
+    /// Resource type `index`'s recipe address and logical storage.
+    fn resource_recipe(&mut self, index: usize) -> (Value, Value) {
+        let function = self.glues.resources[index].expect("a resource recipe");
+        let reference = self.calls.reference(self.object, &mut self.b, function);
+        let recipe = self.b.ins().func_addr(types::I64, reference);
+        let storage = self.icon(self.tables.layouts[index].logical_size.unwrap());
+        (recipe, storage)
+    }
     /// Row `index`'s finalizer, if it has one, on `base`, its status merged. A
-    /// resource's runs under its grant; a core slot kernel's on an own row
-    /// under the current limit (FORM v1c).
+    /// resource's runs under its grant, after the test trace hook; a core slot
+    /// kernel's on an own row under the current limit (FORM v1c).
     fn finalize(&mut self, index: usize, base: Value) -> Result<()> {
+        let resource = self.tables.input.types[index].repr == Repr::Resource;
+        if resource
+            && self.tables.trace_drops
+            && let hirsel_core_layout::Body::Record(fields) = &self.tables.input.types[index].body
+            && let Some(i) = fields
+                .iter()
+                .position(|f| f.ty == FieldTy::Scalar(Scalar::U64))
+        {
+            let Layout::Fixed(layout) = &self.tables.layouts[index].layout else {
+                unreachable!()
+            };
+            let id = self.load(base, layout.offsets[0][i] as i32);
+            self.call("hirsel_core_test_drop_trace", &[U], &[], &[id])?;
+        }
         let Some(finalizer) = self.tables.layouts[index]
             .drop
             .as_ref()
@@ -713,7 +755,6 @@ impl Glue<'_, '_, '_> {
         else {
             return Ok(());
         };
-        let resource = self.tables.input.types[index].repr == Repr::Resource;
         if resource {
             self.call(
                 "hirsel_core_finalizer_begin",
@@ -790,13 +831,13 @@ impl Glue<'_, '_, '_> {
         match t {
             FieldTy::Inline(t) => self.drop_type(at, *t),
             // LANG-19: a block that owns more is released by the constant-stack
-            // drain.
+            // drain; a box of a resource from the descriptor of its pointer.
             FieldTy::Box(b)
                 if !hirsel_core_layout::terminal(
                     &self.tables.input.types,
                     self.tables.layouts,
                     t,
-                ) && self.tables.input.types[b.index()].repr != Repr::Resource =>
+                ) =>
             {
                 let p = self.load(at, 0);
                 let descriptor = self.descriptor(*b, false);

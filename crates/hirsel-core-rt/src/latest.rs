@@ -158,7 +158,7 @@ pub unsafe extern "C" fn hirsel_core_latest_drop(context: *mut Context, latest: 
     // SAFETY: as latest_begin; a shareable root's release cannot fail.
     unsafe {
         if let Some(holder) = latest_begin(latest) {
-            counted::drain_holder(context, holder, latest_step);
+            counted::drain_holder(context, holder, latest_step, 0);
         }
     }
 }

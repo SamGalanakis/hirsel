@@ -117,6 +117,9 @@ pub(super) fn drop_glue(
     // The capture rows of own-fn environments, released by the drain from
     // their descriptors.
     let mut environments = BTreeSet::new();
+    // Resource types, each released through the drain by its recipe
+    // (`core_resource_T`) over its storage (LANG-19).
+    let mut resources = BTreeSet::new();
     let mut pending = Vec::new();
     for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
@@ -165,13 +168,14 @@ pub(super) fn drop_glue(
             continue;
         }
         if let Some(drop) = &recipes[t].drop {
-            // Counted cleanup runs a resource whole, by its ordinary glue.
-            if mechanical && module.types[t].repr == Repr::Resource {
-                pending.push((t, false));
-                continue;
+            // Every release of a resource runs its recipe on the drain, so its
+            // fields are counted cleanup.
+            let resource = module.types[t].repr == Repr::Resource;
+            if resource {
+                resources.insert(t);
             }
             for field in drop.fields.iter().flatten() {
-                cleanup_dependencies(&field.ty, mechanical, &mut pending);
+                cleanup_dependencies(&field.ty, mechanical || resource, &mut pending);
             }
         }
     }
@@ -198,27 +202,19 @@ pub(super) fn drop_glue(
                 &mut *sink,
                 &mut *items,
             );
+            if module.types[t].repr == Repr::Resource {
+                // LANG-19: a resource is released through the drain by its recipe.
+                let resource = e.load(&Type::Ptr, &payload, 1);
+                let failed = e.release_resource(t, &resource);
+                e.ret(&Type::I8, &failed);
+                drop(e);
+                sink.end_function();
+                continue;
+            }
             let status = e.temp(Type::I8);
             e.store(&Type::I8, &int(0), &status, 0);
-            let resource = module.types[t].repr == Repr::Resource;
-            let base = if resource {
-                e.load(&Type::Ptr, &payload, 1)
-            } else {
-                payload.clone()
-            };
+            let base = payload.clone();
             e.test_hooks = test_hooks;
-            if test_hooks
-                && resource
-                && let hirsel_core_layout::Body::Record(fields) = &module.types[t].body
-                && let Some(i) = fields
-                    .iter()
-                    .position(|f| f.ty == FieldTy::Scalar(Scalar::U64))
-            {
-                let offset = e.fixed(TypeId(t as u32)).offsets[0][i];
-                let field = e.offset(&base, offset);
-                let id = e.load(&Type::I64, &field, 1);
-                e.runtime_void("hirsel_core_test_drop_trace", &[word(id)]);
-            }
             e.finalize(t, &base, &status);
             if let Some(drop) = &recipes[t].drop {
                 let tag = e.fixed(TypeId(t as u32)).tag;
@@ -247,13 +243,6 @@ pub(super) fn drop_glue(
                 }
                 e.block(settle);
             }
-            if resource {
-                let storage = recipes[t].logical_size.expect("resource storage");
-                e.runtime_void(
-                    "hirsel_core_resource_free",
-                    &[ptr(base), word(int(storage))],
-                );
-            }
             let failed = e.load(&Type::I8, &status, 0);
             e.ret(&Type::I8, &failed);
         }
@@ -281,6 +270,9 @@ pub(super) fn drop_glue(
     value_glue(
         module, target, recipes, failures, facts, &values, sink, items,
     )?;
+    resource_glue(
+        module, target, recipes, failures, facts, test_hooks, &resources, sink, items,
+    )?;
     collections::glue(
         module, target, recipes, failures, facts, &sequences, sink, items,
     )?;
@@ -297,9 +289,10 @@ impl FunctionEmitter<'_> {
                 &[CONTEXT, p.clone(), site],
                 &CallAttrs::default(),
             )),
+            // LANG-19: a block that owns more is released by the constant-stack
+            // drain; a box of a resource from the descriptor of its pointer.
             FieldTy::Box(t)
-                if !hirsel_core_layout::terminal(&self.module.types, self.recipes, field)
-                    && self.module.types[t.index()].repr != Repr::Resource =>
+                if !hirsel_core_layout::terminal(&self.module.types, self.recipes, field) =>
             {
                 let block = self.load(&Type::Ptr, p, 1);
                 Some(self.runtime(
@@ -322,11 +315,7 @@ impl FunctionEmitter<'_> {
                     &[CONTEXT, block.clone(), site],
                     &CallAttrs::default(),
                 );
-                let logical = if self.module.types[t.index()].repr == Repr::Resource {
-                    8
-                } else {
-                    self.recipes[t.index()].logical_size.unwrap()
-                };
+                let logical = self.recipes[t.index()].logical_size.unwrap();
                 let charge = hirsel_core_layout::charge::boxed(logical).unwrap();
                 self.free_block(&block, &int(charge));
                 Some(failed)
@@ -496,7 +485,7 @@ pub(super) fn release_lasts(
             &mut *items,
         );
         let t = TypeRef(t);
-        let logical = recipes[t.index()].logical_size.unwrap();
+        let logical = held_logical(module, recipes, t.index());
         let charge = hirsel_core_layout::charge::counted(logical).unwrap();
         let edge = if atomic {
             FieldTy::Arc(t)
@@ -593,12 +582,27 @@ impl FunctionEmitter<'_> {
         self.cond(&here, clean, skip);
         self.block(clean);
         match field {
-            // One step cleaned whole by ordinary glue, under the release's
-            // site: a resource or a handle. A failure goes into the worklist's
-            // byte and cleaning goes on (FAIL-10).
+            // A resource is handed over whole; its recipe cleans it from its
+            // own frame.
             FieldTy::Inline(t) if self.module.types[t.index()].repr == Repr::Resource => {
-                self.clean_whole(field, p)?;
+                let resource = self.load(&Type::Ptr, p, 1);
+                let point = self.next_point();
+                let storage = self.recipes[t.index()].logical_size.unwrap();
+                self.runtime_void(
+                    "hirsel_core_resource_stage",
+                    &[
+                        ptr(resource),
+                        ptr(Value::global(format!("core_resource_{}", t.0))),
+                        word(int(storage)),
+                        ptr(Value::Local(Local::WORKLIST)),
+                        word(int(point)),
+                    ],
+                );
+                self.ret(&Type::I1, &FALSE);
             }
+            // One step cleaned whole by ordinary glue, under the release's
+            // site. A failure goes into the worklist's byte and cleaning goes
+            // on (FAIL-10).
             // A runtime holder begins its cleanup and hands it over (CONC-8,
             // CONC-9, CONC-13); a Latest only at its last handle.
             FieldTy::Handle(
@@ -722,7 +726,7 @@ impl FunctionEmitter<'_> {
             FieldTy::Seq(_) | FieldTy::Map(_, _) => self.enqueue_collection(field, p),
             FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                 let node = self.load(&Type::Ptr, p, 1);
-                let logical = self.recipes[t.index()].logical_size.unwrap();
+                let logical = held_logical(self.module, self.recipes, t.index());
                 let charge = if matches!(field, FieldTy::Box(_)) {
                     hirsel_core_layout::charge::boxed(logical).unwrap()
                 } else {
@@ -873,7 +877,7 @@ impl FunctionEmitter<'_> {
         let Some(tag) = self.fixed(TypeId(t.0)).tag else {
             return Ok(());
         };
-        if drop.finalizer.is_some() {
+        if drop.finalizer.is_some() || self.module.types[t.index()].repr == Repr::Resource {
             return Ok(());
         }
         let rows: Vec<Vec<hirsel_core_layout::FieldDrop>> = drop.fields.clone();
@@ -932,10 +936,7 @@ fn counted_glue(
 ) -> Result<()> {
     let empty = Body::default();
     for &t in demanded {
-        if module.types[t].repr == Repr::Resource {
-            continue;
-        }
-        let logical = recipes[t].logical_size.unwrap();
+        let logical = held_logical(module, recipes, t);
         let drop_name = format!("core_counted_drop_{t}");
         let frames = hirsel_core_layout::frames(&module.types, recipes, TypeRef(t as u32));
         let owners = [
@@ -1035,6 +1036,135 @@ fn counted_glue(
             );
         }
         e.ret(&Type::I1, &true.into());
+        drop(e);
+        sink.end_function();
+    }
+    Ok(())
+}
+
+/// The logical bytes a box or counted block of type `t` holds: a resource's
+/// block holds its pointer.
+fn held_logical(module: &Module, recipes: &[hirsel_core_layout::Recipe], t: usize) -> u64 {
+    if module.types[t].repr == Repr::Resource {
+        8
+    } else {
+        recipes[t].logical_size.unwrap()
+    }
+}
+
+impl FunctionEmitter<'_> {
+    /// The one ordinary release of `resource`, of resource type `t`: its
+    /// recipe runs on a drain of its own (LANG-19). Returns the failure byte.
+    fn release_resource(&mut self, t: usize, resource: &Value) -> Value {
+        let storage = self.recipes[t].logical_size.expect("resource storage");
+        let site = self.site_word();
+        self.runtime(
+            "hirsel_core_resource_release",
+            Type::I8,
+            &[
+                ptr(CONTEXT),
+                ptr(resource.clone()),
+                ptr(Value::global(format!("core_resource_{t}"))),
+                word(int(storage)),
+                word(site),
+            ],
+            &CallAttrs::default(),
+        )
+    }
+}
+
+/// A resource's recipe over its storage (`core_resource_T`): step 0 runs the
+/// test trace hook and its finalizer under its grant, then its fields are
+/// cleaned resumably; its frame is the resource's native state (LANG-19).
+#[allow(clippy::too_many_arguments)]
+fn resource_glue(
+    module: &Module,
+    target: Target,
+    recipes: &[hirsel_core_layout::Recipe],
+    failures: &failure::Failures,
+    facts: bool,
+    test_hooks: bool,
+    resources: &BTreeSet<usize>,
+    sink: &mut dyn Sink,
+    items: &mut Items,
+) -> Result<()> {
+    let empty = Body::default();
+    let i64 = Type::I64;
+    for &t in resources {
+        sink.begin_function(
+            &format!("core_resource_{t}"),
+            &step_signature(),
+            &STEP_PARAMS,
+            &FnAttrs::private(),
+        );
+        let mut e = glue_emitter(
+            module,
+            recipes,
+            failures,
+            facts,
+            &empty,
+            abi::Return::on_target(target, &[]),
+            false,
+            int(0),
+            &mut *sink,
+            &mut *items,
+        );
+        e.test_hooks = test_hooks;
+        let recipe = recipes[t].drop.as_ref().expect("a resource drops");
+        let base = Value::Local(Local::PAYLOAD);
+        let cursor_at = Value::Local(Local::CURSOR);
+        e.release_site();
+        e.br(Label::plain("resume"));
+        e.block(Label::plain("resume"));
+        let cursor = e.load(&i64, &cursor_at, 0);
+        let next = e.bin(Binary::Add, &i64, &cursor, &int(1));
+        e.store(&i64, &next, &cursor_at, 0);
+        let n = e.counter();
+        let begin = Label::new("begin", n);
+        let fields = Label::new("fields", n);
+        let now = e.cmp(Predicate::Eq, &i64, &cursor, &int(0));
+        e.cond(&now, begin, fields);
+        e.block(begin);
+        if test_hooks
+            && let hirsel_core_layout::Body::Record(row) = &module.types[t].body
+            && let Some(i) = row
+                .iter()
+                .position(|f| f.ty == FieldTy::Scalar(Scalar::U64))
+        {
+            let offset = e.fixed(TypeId(t as u32)).offsets[0][i];
+            let field = e.offset(&base, offset);
+            let id = e.load(&i64, &field, 1);
+            e.runtime_void("hirsel_core_test_drop_trace", &[word(id)]);
+        }
+        let list = Value::Local(Local::WORKLIST);
+        let failed = e.offset(&list, memory_layout::WORKLIST_FAILED as u64);
+        e.finalize(t, &base, &failed);
+        e.br(Label::plain("resume"));
+        e.block(fields);
+        let row_label = |row: usize| Label {
+            name: "row",
+            n: n as u32,
+            edge: row as u32,
+        };
+        if let Some(tag) = e.fixed(TypeId(t as u32)).tag {
+            let which = e.case_value(&tag, &base);
+            let arms: Vec<_> = (1..recipe.fields.len())
+                .map(|row| (row as i128, row_label(row)))
+                .collect();
+            e.effect(Operation::Switch(&Type::I32, &which, row_label(0), &arms));
+        } else {
+            e.br(row_label(0));
+        }
+        for (row, fs) in recipe.fields.iter().enumerate() {
+            e.block(row_label(row));
+            let mut offset = 1;
+            for f in fs {
+                let at = e.offset(&base, f.offset);
+                e.mechanical_field(&f.ty, &at, &cursor, offset)?;
+                offset += mechanical_count(module, recipes, &f.ty)?;
+            }
+            e.ret(&Type::I1, &true.into());
+        }
         drop(e);
         sink.end_function();
     }

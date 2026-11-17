@@ -29,7 +29,8 @@ pub(super) fn plan_type(tables: &Tables<'_>, t: TypeRef) -> Result<Plan> {
     let Layout::Fixed(f) = &tables.layouts[t.index()].layout else {
         return Ok(Plan::Empty);
     };
-    // A resource is one step, cleaned whole.
+    // A value of a resource type is its pointer: one step, handing the
+    // resource to the drain.
     if tables.input.types[t.index()].repr == Repr::Resource {
         return Ok(Plan::Leaf(FieldTy::Inline(t)));
     }
@@ -54,6 +55,33 @@ pub(super) fn plan_type(tables: &Tables<'_>, t: TypeRef) -> Result<Plan> {
     } else {
         fields
     })
+}
+/// A resource's recipe over its storage: the trace hook and finalizer as step
+/// 0, then its fields (LANG-19).
+pub(super) fn plan_resource(tables: &Tables<'_>, t: TypeRef) -> Result<Plan> {
+    let d = tables.layouts[t.index()]
+        .drop
+        .as_ref()
+        .expect("a resource drops");
+    let Layout::Fixed(f) = &tables.layouts[t.index()].layout else {
+        unreachable!("a resource is fixed")
+    };
+    let rows = d
+        .fields
+        .iter()
+        .map(|fs| {
+            fs.iter()
+                .map(|f| Ok((f.offset, plan_field(tables, &f.ty)?)))
+                .collect::<Result<Vec<_>>>()
+                .map(Plan::Fields)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let fields = if let Some(tag) = f.tag {
+        Plan::Variant(tag, rows)
+    } else {
+        rows.into_iter().next().unwrap()
+    };
+    Ok(Plan::Fields(vec![(0, Plan::Finalize(t)), (0, fields)]))
 }
 fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
     Ok(match t {
@@ -270,12 +298,17 @@ impl Glue<'_, '_, '_> {
                 let node = self.load(base, 0);
                 let mut yields = true;
                 match field {
-                    // A resource's ordinary glue: its finalizer, its fields and
-                    // its release. Its status joins the worklist's, and it hands
-                    // nothing over.
+                    // A resource is handed over whole; its recipe cleans it
+                    // from its own frame.
                     FieldTy::Inline(t) => {
-                        self.drop_type(base, *t);
-                        yields = false;
+                        let (recipe, storage) = self.resource_recipe(t.index());
+                        let point = self.next_point();
+                        self.call(
+                            "hirsel_core_resource_stage",
+                            &[P, P, U, P, U],
+                            &[],
+                            &[node, recipe, storage, list, point],
+                        )?;
                     }
                     // A runtime holder begins its cleanup and hands it over
                     // (CONC-8, CONC-9, CONC-13); a Latest only at its last handle.

@@ -941,6 +941,46 @@ pub unsafe extern "C" fn hirsel_core_release_buffer(
     // SAFETY: the caller transfers the buffer; its carrier outlives the drain.
     unsafe { counted::drain_buffer(context, buffer, charge, recipe, carrier, site) }
 }
+/// The one ordinary release of a resource (LANG-19): `recipe` runs its trace
+/// hook and finalizer, then cleans its fields through the constant-stack
+/// drain, and the resource is freed with `storage`, its logical field storage.
+/// Returns whether its finalizer or anything it cleaned failed (FAIL-10).
+/// # Safety
+/// The caller transfers the exclusively owned resource; `recipe` and `storage`
+/// are exact for its type.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_resource_release(
+    context: *mut Context,
+    resource: NonNull<u8>,
+    recipe: Recipe,
+    storage: u64,
+    site: u64,
+) -> bool {
+    // SAFETY: as this function's contract.
+    unsafe {
+        let holder = crate::causes::resource_begin(resource, recipe, storage);
+        counted::drain_holder(context, holder, crate::causes::resource_step, site)
+    }
+}
+/// Hand a resource over to the running drain at `point`, as
+/// hirsel_core_resource_release would clean it.
+/// # Safety
+/// As hirsel_core_resource_release; `list` is the running drain's and nothing
+/// is staged on it yet.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_resource_stage(
+    resource: NonNull<u8>,
+    recipe: Recipe,
+    storage: u64,
+    list: *mut counted::Worklist,
+    point: u64,
+) {
+    // SAFETY: as this function's contract.
+    unsafe {
+        let holder = crate::causes::resource_begin(resource, recipe, storage);
+        (*list).stage_holder(holder, crate::causes::resource_step, point);
+    }
+}
 /// Full-new admission, replacement, carrier install, then original-payer refund.
 /// # Safety
 /// The consuming sequence carrier is exclusively owned and has nonzero capacity.

@@ -180,6 +180,8 @@ uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *);
 void hirsel_core_free_value(void *, uint64_t);
 /* Recipe borrows its descriptor from the still-live parent frame. */
 bool hirsel_core_release_buffer(HirselCoreContext *, void *buffer, uint64_t charge, void *carrier, HirselCoreDropRecipe, uint64_t site);
+bool hirsel_core_resource_release(HirselCoreContext *, void *resource, HirselCoreDropRecipe, uint64_t storage, uint64_t site);
+void hirsel_core_resource_stage(void *resource, HirselCoreDropRecipe, uint64_t storage, HirselCoreWorklist *, uint64_t point);
 void hirsel_core_release_buffer_enqueue(HirselCoreWorklist *, void *buffer, uint64_t charge, void *payload, HirselCoreDropRecipe, uint64_t point);
 #include "hirsel_core_rt_host.h"
 #include "hirsel_core_rt_tasks.h"

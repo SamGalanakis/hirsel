@@ -2058,7 +2058,12 @@ pub unsafe fn abandon(context: *mut Context, task: *mut Task) -> u8 {
     // SAFETY: as abandon_begin; the drain runs the cleanup to its end.
     unsafe {
         let holder = abandon_begin(context, task);
-        u8::from(crate::counted::drain_holder(context, holder, abandon_step))
+        u8::from(crate::counted::drain_holder(
+            context,
+            holder,
+            abandon_step,
+            0,
+        ))
     }
 }
 /// # Safety

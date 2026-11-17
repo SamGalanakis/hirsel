@@ -15,7 +15,10 @@
 //! Points and steps follow [`DropRecipe`](crate::DropRecipe)'s counted visit order:
 //! a `Box`, `Rc`, `Arc`, `Seq` or `Map` field is one step, a `Seq` of zero-sized
 //! elements none, and a row with a finalizer takes one step for its finalizer
-//! (step 0 of the row) before its fields.
+//! (step 0 of the row) before its fields. A resource is one step that hands the
+//! resource itself to the drain: its storage holds no frame word, since its
+//! frame lives in its native state. The fixed block of a `Box`, `Rc` or `Arc`
+//! of a resource holds that one pointer, so its frames are a single last point.
 
 use crate::{FieldTy, Layout, Recipe, Shape, Tag, TypeRef, cleanup_class, field_size};
 
@@ -141,7 +144,12 @@ fn plan_field(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64) -> No
         yields: None,
     };
     match ty {
-        FieldTy::Inline(t) if shapes[t.index()].repr == crate::Repr::Resource => whole(8),
+        // The resource pointer is read once, to hand the resource over.
+        FieldTy::Inline(t) if shapes[t.index()].repr == crate::Repr::Resource => Node::Leaf {
+            at,
+            live: vec![(at, 8)],
+            yields: Some(false),
+        },
         FieldTy::Inline(t) => plan_type(shapes, recipes, *t, at),
         FieldTy::Seq(_) if crate::storage_free(shapes, ty) => Node::Empty,
         FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) => Node::Leaf {
@@ -373,14 +381,19 @@ pub fn frames(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Frames {
     let Layout::Fixed(fixed) = &recipes[t.index()].layout else {
         return Frames::default();
     };
-    let root = plan_type(shapes, recipes, t, 0);
+    // A value of a resource type is its pointer.
+    let (root, size) = if shapes[t.index()].repr == crate::Repr::Resource {
+        (plan_field(shapes, recipes, &FieldTy::Inline(t), 0), 8)
+    } else {
+        (plan_type(shapes, recipes, t, 0), fixed.size)
+    };
     let mut found = Vec::new();
     sites(&root, 0, &mut Vec::new(), None, &mut found);
-    let words = fixed.size / 8;
+    let words = size / 8;
     let mut chosen = Vec::new();
     let mut spares = 0;
     for site in &found {
-        let mut bytes = vec![false; fixed.size as usize];
+        let mut bytes = vec![false; size as usize];
         live(&root, 0, site, &mut 0, true, &mut bytes);
         bytes[site.keep.0 as usize..(site.keep.0 + site.keep.1) as usize].fill(true);
         if let Some((at, len)) = site.array {
@@ -400,7 +413,7 @@ pub fn frames(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Frames {
             std::mem::take(&mut free),
         ));
     }
-    let spare = fixed.size.next_multiple_of(8);
+    let spare = size.next_multiple_of(8);
     let points = chosen
         .into_iter()
         .map(|(cursor, in_array, last, mut free)| {
@@ -422,13 +435,17 @@ pub fn frames(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Frames {
 }
 
 /// Uncharged spare words after the value in a block owned by `edge` (zero
-/// unless the edge's cleanup is [`Cleanup::Fixed`](crate::Cleanup)). A counted
+/// unless the edge's cleanup is [`Cleanup::Fixed`](crate::Cleanup) or, for the
+/// block holding a resource pointer, [`Cleanup::Resource`](crate::Cleanup)). A counted
 /// node's value starts at 8, so for both owners the block's native bytes are
 /// round8(bytes) + 8 * spares when spares is nonzero.
 pub fn spare_words(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> u64 {
     match edge {
         FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t)
-            if cleanup_class(shapes, recipes, edge) == Some(crate::Cleanup::Fixed) =>
+            if matches!(
+                cleanup_class(shapes, recipes, edge),
+                Some(crate::Cleanup::Fixed | crate::Cleanup::Resource)
+            ) =>
         {
             frames(shapes, recipes, *t).spares
         }

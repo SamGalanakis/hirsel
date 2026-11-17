@@ -285,6 +285,14 @@ pub(crate) struct Resource {
     previous: Option<Funding>,
     previous_resource: *mut Resource,
     previous_grant_depth: usize,
+    /// The resource's frame while it cleans through a drain (LANG-19): its
+    /// storage's recipe, the recipe's cursor, and the logical storage refunded
+    /// once the recipe is done. The storage itself never holds a frame word.
+    holder: std::mem::MaybeUninit<crate::counted::Holder>,
+    recipe: Option<crate::counted::Recipe>,
+    cursor: u64,
+    storage: u64,
+    payload: *mut u8,
 }
 
 /// Admit the complete container before moving fields into it.
@@ -312,6 +320,11 @@ pub unsafe fn resource_new(
         previous: None,
         previous_resource: ptr::null_mut(),
         previous_grant_depth: usize::MAX,
+        holder: std::mem::MaybeUninit::uninit(),
+        recipe: None,
+        cursor: 0,
+        storage: 0,
+        payload: ptr::null_mut(),
     });
     #[cfg(any(test, feature = "charge-observation"))]
     crate::peak::allocated((&*state as *const Resource).cast(), size_of::<Resource>());
@@ -380,6 +393,53 @@ pub unsafe fn resource_free(pointer: std::ptr::NonNull<u8>, storage: u64) {
     // SAFETY: grant/cell charges are settled separately; refund all container storage.
     unsafe {
         block::free(pointer, storage);
+    }
+}
+
+/// Begin a resource's cleanup through a drain: `recipe` runs the trace hook
+/// and finalizer as its step 0 and then cleans the fields, resumably; then the
+/// resource is freed with `storage`, its logical field storage (LANG-19).
+/// # Safety
+/// The caller transfers the exclusively owned resource; the recipe is its
+/// type's and lives as long as the compiled program.
+pub(crate) unsafe fn resource_begin(
+    pointer: std::ptr::NonNull<u8>,
+    recipe: crate::counted::Recipe,
+    storage: u64,
+) -> *mut crate::counted::Holder {
+    // SAFETY: the caller transfers the resource and so its native state.
+    unsafe {
+        let resource = &mut *block::resource(pointer);
+        resource.recipe = Some(recipe);
+        resource.cursor = 0;
+        resource.storage = storage;
+        resource.payload = pointer.as_ptr();
+        resource.holder.as_mut_ptr()
+    }
+}
+
+/// One step of a resource's cleanup: resume its recipe, and once it is done
+/// free the resource (its frame goes with it).
+/// # Safety
+/// The holder is one resource_begin returned, linked by the running drain.
+pub(crate) unsafe fn resource_step(
+    context: *mut Context,
+    holder: *mut crate::counted::Holder,
+    list: *mut crate::counted::Worklist,
+) -> bool {
+    // SAFETY: the holder lives inside its resource's native state.
+    unsafe {
+        let resource = holder
+            .cast::<u8>()
+            .sub(std::mem::offset_of!(Resource, holder))
+            .cast::<Resource>();
+        let recipe = (*resource).recipe.expect("a begun resource");
+        if !recipe(context, (*resource).payload, &mut (*resource).cursor, list) {
+            return false;
+        }
+        let (payload, storage) = ((*resource).payload, (*resource).storage);
+        resource_free(std::ptr::NonNull::new_unchecked(payload), storage);
+        true
     }
 }
 

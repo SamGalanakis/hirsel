@@ -403,9 +403,10 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
 /// cursor with different offsets.
 /// LANG-19: ordinary release of a 10^6-deep `Box` chain, of one whose rows
 /// carry a finalizer, of a closure whose environment captures a closure 10^6
-/// deep, and of a node whose List holds the next node 10^6 deep, completes
-/// under the default stack, and every block is refunded (hand-derived: n + 1
-/// boxes, n environments, n buffers).
+/// deep, of a node whose List holds the next node 10^6 deep, and of a resource
+/// whose field owns the next resource 10^6 deep, completes under the default
+/// stack, and every block is refunded (hand-derived: n + 1 boxes, n
+/// environments, n buffers, n resources and their n boxes).
 #[test]
 fn box_chain_releases_with_constant_stack() {
     let n = 1_000_000;
@@ -425,6 +426,10 @@ fn box_chain_releases_with_constant_stack() {
         (
             include_str!("../../hirsel-core-ir/samples/seq-chain.core"),
             n as usize,
+        ),
+        (
+            include_str!("../../hirsel-core-ir/samples/resource-chain.core"),
+            2 * n as usize,
         ),
     ] {
         let module = text::parse(source).unwrap();

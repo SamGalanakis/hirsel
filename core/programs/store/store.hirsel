@@ -1252,8 +1252,8 @@ fn replace_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[Option
 
 fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
     let p = physical(id, key)?
-    let cost = match std.omap.get(tx.roots.data, p) {
-        Some(v) => entry(p, v),
+    let refund = match std.omap.get(tx.roots.data, p) {
+        Some(v) => if tx.retain_old { 0u64 } else { entry(p, v) },
         None => return Ok(false)
     }
     let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 5 + list.len(p))
@@ -1268,7 +1268,7 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
         Ok(take data) => {
             record_op(mut tx, copied(p)?, None)?
             tx.roots.data = take data
-            tx.resident = int.saturating_sub(tx.resident, cost)
+            tx.resident = int.saturating_sub(tx.resident, refund)
             tx.frame_bytes = frame
             Ok(true)
         }
@@ -5311,6 +5311,38 @@ fn test_branches(c: Clock) -> Result[(), ()] waits {
 @test
 fn test_pin_settle(c: Clock) -> Result[(), ()] waits {
     if law_pin_settle(c) { Ok(()) } else { Error(()) }
+}
+
+// I4: each 12-byte key and 8-byte value charges 62 + 16 + 8 = 86.
+// Deleting the main row leaves the pin's 86 bytes live, so another row
+// would need 172 of the available 90. Unpin makes the same write fit.
+pub fn law_pinned_delete(c: Clock) -> bool waits {
+    let mut db = test_db(c, 90)
+    if !put_one(mut db, 1, 10) { return false }
+    let first = snapshot(db)
+    let _ = result.unwrap(pin(mut db, "p", first))
+    let removed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete_bytes(mut tx, 1, key_word(1))
+    }))
+    match take removed { Committed(done) => if !done.value { return false }, _ => return false }
+    let after_delete = version(snapshot(db))
+    let inserted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(2), key_word(20))
+    }))
+    match take inserted {
+        Refused(cap) => if cap.requested != 172 || cap.available != 90 { return false },
+        _ => return false
+    }
+    let head = snapshot(db)
+    if version(head) != after_delete || value_at(head, 1) != 0 || value_at(head, 2) != 0 { return false }
+    match pinned(db, "p") { Some(held) => if value_at(held, 1) != 10 { return false }, None => return false }
+    let _ = result.unwrap(unpin(mut db, "p"))
+    put_one(mut db, 2, 20) && value_at(snapshot(db), 2) == 20
+}
+
+@test
+fn test_pinned_delete(c: Clock) -> Result[(), ()] waits {
+    if law_pinned_delete(c) { Ok(()) } else { Error(()) }
 }
 
 fn mark_is(t: Ticket, n: u64) -> bool {

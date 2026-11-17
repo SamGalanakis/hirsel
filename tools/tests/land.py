@@ -1889,6 +1889,19 @@ if not marker.exists():
         self.assertNotIn('checking 3 files', refused.stdout)
         self.assertIn('refusing to push a red tree', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
+        module = runpy.run_path(str(ROOT / 'tools/land'))
+        error = '\x1b[1m\x1b[31merror: cooperative wait condition is immutable\x1b[0m'
+        output = '\n'.join(['checking runtime', error, *['warning: later diagnostic'] * 50])
+        for prefix in ('', '\x1b[31m✗ Fail: root//:runtime-clippy\x1b[0m\n'):
+            with self.subTest(target_section=bool(prefix)):
+                script = self.top / 'coloured-clippy.py'
+                script.write_text(f'import sys\nsys.stderr.write({(prefix + output)!r})\nsys.exit(1)\n')
+                with contextlib.redirect_stdout(io.StringIO()):
+                    report = '\n'.join(module['check']('Clippy', [sys.executable, str(script)]))
+                self.assertIn('error: cooperative wait condition is immutable', report)
+                self.assertNotIn('checking runtime', report)
+                if prefix:
+                    self.assertIn('failing targets: root//:runtime-clippy', report)
 
 
 class Units(unittest.TestCase):

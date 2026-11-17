@@ -608,7 +608,7 @@ def tree_id(commit):
 
 def first_error(text, count=40):
     """The output from its first error line on (its tail when none is found)."""
-    lines = text.splitlines()
+    lines = re.sub(r'\x1b\[[0-9;]*m', '', text).splitlines()
     start = next((i for i, line in enumerate(lines) if re.match(r'\s*(error|Error|Diff in|Traceback)', line)),
                  max(0, len(lines) - count))
     return '\n'.join(lines[start:start + count])
@@ -624,7 +624,7 @@ def failing_targets(text, count=12):
     """The failing Buck2 test targets first, then each one's failing cases and its own first error.
 
     None when the output names no failing target, so other checks keep first_error."""
-    lines = [STAMP.sub('', line) for line in text.splitlines()]
+    lines = [STAMP.sub('', line) for line in re.sub(r'\x1b\[[0-9;]*m', '', text).splitlines()]
     sections = [(match[1], list(itertools.takewhile(lambda line: not SECTION_END.match(line), lines[at + 1:])))
                 for at, line in enumerate(lines) if (match := re.match(r'✗ Fail: (\S+)', line))]
     if not sections:

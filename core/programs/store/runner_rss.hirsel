@@ -53,9 +53,9 @@ type D: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks, flood: u64 
 fn answer(rx: Receiver[runner.Down]) -> runner.Outcome waits {
     match channel.receive(rx) {
         Ok(Batched(take b)) => {
-            let runner.Batch(version: _, complete: _, rows: _, outcomes: take os) = take b
+            let runner.KeyedBatch(version: _, complete: _, rows: _, outcomes: take os) = take b
             for take t in os {
-                let runner.Done(stream: _, p: _, outcome: take o) = take t
+                let runner.KeyedDone(stream: _, p: _, outcome: take o) = take t
                 return take o
             }
             fail("runner_rss: empty Batch")

@@ -830,19 +830,17 @@ pub type Call: send { stream: Bytes, p: u64, key: Bytes, arg: Bytes, deadline: u
 // The head's answer to one send at the publisher's base: one Batch outcome row before batching.
 type Told: send { version: u64, stream: Bytes, p: u64, outcome: Outcome }
 
-// §3's server-to-client frames (WIRE-SPEC §3's Frame), as a session hands them to its client.
-// A Batch at `version` names in `complete` each sub whose whole initial result it carries
-// (F11), and carries subscription rows (F10: the data-tree key and the published value at
-// `version`, None for a removal) and Done rows, one per send answered. Until R3's frames,
-// a Done names its stream by the store's stream key and a row is SubRow, because `Row` is
-// the streams table's stored type.
-pub type SubRow: send { sub: u32, key: Bytes, value: Option[Bytes] }
+// What a session hands its client, before the wire Frame (WIRE-SPEC §3): the Frame's Batch,
+// Ended and Reset with each answered send named by the store's stream key, until R3 gives
+// sessions stream slots. A KeyedBatch at `version` names in `complete` each sub whose whole
+// initial result it carries (F11), and carries the wire's subscription Rows (F10: the
+// data-tree key and the published value at `version`, None for a removal) and KeyedDone
+// rows, one per send answered.
+pub type KeyedDone: send { stream: Bytes, p: u64, outcome: Outcome }
 
-pub type Done: send { stream: Bytes, p: u64, outcome: Outcome }
+pub type KeyedBatch: send { version: u64, complete: List[u32], rows: List[Row], outcomes: List[KeyedDone] }
 
-pub type Batch: send { version: u64, complete: List[u32], rows: List[SubRow], outcomes: List[Done] }
-
-pub type Down: send = Batched(Batch) | Ended(u32, Outcome) | Reset
+pub type Down: send = Batched(KeyedBatch) | Ended(u32, Outcome) | Reset
 
 type Tick: send { stream: Bytes, p: u64, generation: u64 }
 
@@ -926,11 +924,11 @@ fn refusal[G: send, H: send](r: Registry[G, H], s: Session[G, H], c: Call) -> Op
     }
 }
 
-// One Outcome row, in its own Batch at `version`.
+// One Outcome row, in its own KeyedBatch at `version`.
 fn tell(to: Sender[Down], version: u64, take stream: Bytes, p: u64, take o: Outcome) -> () waits {
-    let mut outcomes: List[Done] = list.new()
-    result.unwrap(list.push(mut outcomes, Done(stream: take stream, p: p, outcome: take o)))
-    let _ = channel.send(to, Batched(Batch(version: version, complete: list.new(), rows: list.new(), outcomes: take outcomes)))
+    let mut outcomes: List[KeyedDone] = list.new()
+    result.unwrap(list.push(mut outcomes, KeyedDone(stream: take stream, p: p, outcome: take o)))
+    let _ = channel.send(to, Batched(KeyedBatch(version: version, complete: list.new(), rows: list.new(), outcomes: take outcomes)))
 }
 
 fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError] waits {

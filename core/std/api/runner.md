@@ -59,9 +59,10 @@ groups commits and releases a group only after it is durable (V4). Answers that 
 no commit (a duplicate's stored reply, Superseded, a refusal) go in a Release
 without a snapshot and the publisher sends them at its base (V3). The publisher
 tells each answer to its session as a `Told` at the version of the last Release that
-carried a snapshot (G1). The session hands its client a `Down`: `Batched(Batch)`, where a
-`Batch` is `{version, complete, rows, outcomes}` and each outcome is a `Done{stream, p,
-outcome}`, or `Ended(sub, outcome)`, or `Reset`.
+carried a snapshot (G1). The session hands its client a `Down`: `Batched(KeyedBatch)`, where a
+`KeyedBatch` is `{version, complete, rows, outcomes}` with wire `Row`s and each outcome a
+`KeyedDone{stream, p, outcome}` (the wire `Done` with the store's stream key in place of a
+stream slot, until R3), or `Ended(sub, outcome)`, or `Reset`.
 
 `connect(tasks, place, n_place, head, client, clock, q, n_session)` spawns a session
 task under `bytes n_session` and returns its inbox sender and its task. The session

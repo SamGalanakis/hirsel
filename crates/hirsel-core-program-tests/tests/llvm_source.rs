@@ -1708,3 +1708,111 @@ fn failing(s: u64, n: u64) -> u64 {
         );
     }
 }
+
+#[test]
+fn counted_breaks_refund_the_partial_trip_and_unused_iterations() {
+    let source = r#"
+fn probe(s: u64, n: u64, at: u64) -> u64 {
+    match (bound steps s {
+        let mut xs: Inline[u64, 8] = [0; 8]
+        for i in 0u64 .. n {
+            let one: u64 = int.widen(1u8)
+            if i == at { break }
+            xs[i % 8] += one
+        }
+        for _ in 0u64 .. 3u64 {}
+        xs[0] + xs[1] * 10 + xs[2] * 100 + xs[3] * 1000 + xs[4] * 10000 + xs[5] * 100000 + xs[6] * 1000000 + xs[7] * 10000000
+    }) { Ok(v) => 1000000000000u64 + v, Error(e) => 2000000000000u64 + e.steps }
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let mut cases = Vec::new();
+    for n in [0u64, 1, 8, 32768, 1u64 << 63, u64::MAX] {
+        let exits = if n > 32768 {
+            [0, 1, 7]
+        } else {
+            [0, n.saturating_sub(1), n]
+        };
+        for at in exits {
+            let trips = n.min(at);
+            // One widening and latch per completed trip; an early break
+            // pays its widening but no latch, then three tail latches.
+            let need = 2 * trips + u64::from(at < n) + 3;
+            let checksum = (0..8u32)
+                .map(|i| (trips / 8 + u64::from(u64::from(i) < trips % 8)) * 10u64.pow(i))
+                .sum::<u64>();
+            for s in [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                need - 1,
+                need,
+                need + 1,
+                65535,
+                65536,
+                65537,
+            ] {
+                let want = if s < need {
+                    2000000000000 + s
+                } else {
+                    1000000000000 + checksum
+                };
+                assert_eq!(
+                    eval::run(&module, names["probe"], &[s, n, at], 1_000_000).outcome,
+                    eval::Outcome::Returned(vec![want]),
+                    "s={s}, n={n}, at={at}"
+                );
+                cases.push(Case {
+                    function: names["probe"],
+                    args: vec![s, n, at],
+                    limit: 1_000_000,
+                    injection: None,
+                });
+            }
+        }
+    }
+    for facts in [false, true] {
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                    .unwrap();
+            let reports = execute_object(&module, &cases, "", "", optimization, Some(object));
+            for (case, report) in cases.iter().zip(reports) {
+                let expected = eval::run(&module, case.function, &case.args, case.limit);
+                assert_eq!(
+                    report.outcome, expected.outcome,
+                    "facts={facts}, args={:?}",
+                    case.args
+                );
+                let sites = expected
+                    .sites
+                    .iter()
+                    .map(|a| {
+                        a.map_or(0, |a| {
+                            ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(report.sites, sites, "failure site, args={:?}", case.args);
+            }
+        }
+    }
+    let object = module.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+    let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
+    for (case, report) in cases.iter().zip(reports) {
+        assert_eq!(
+            report.outcome,
+            eval::run(&module, case.function, &case.args, case.limit).outcome,
+            "split units, args={:?}",
+            case.args
+        );
+    }
+}

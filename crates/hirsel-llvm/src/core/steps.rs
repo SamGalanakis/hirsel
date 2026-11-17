@@ -9,6 +9,7 @@ pub(super) use regions::plans as regions;
 pub(super) struct Loop {
     pub header: usize,
     nodes: BTreeSet<usize>,
+    exits: BTreeSet<usize>,
     index: ValueId,
     limit: ValueId,
     yes: EdgeId,
@@ -447,12 +448,13 @@ fn path_cost(
     body: &Body,
     constants: &[Option<u64>],
     header: usize,
+    exit: usize,
     block: usize,
     state: &mut BTreeMap<usize, Option<u64>>,
     known: &BTreeMap<usize, Loop>,
     neutral: &[bool],
 ) -> Option<u64> {
-    if block == header {
+    if block == header || block == exit {
         return Some(0);
     }
     if let Some(child) = known.get(&block) {
@@ -462,18 +464,18 @@ fn path_cost(
         }
         let after = body.edges[child.no.index()].target.index();
         let tail = path_cost(
-            module, body, constants, header, after, state, known, neutral,
+            module, body, constants, header, exit, after, state, known, neutral,
         )?;
         return child.cost.checked_mul(trips)?.checked_add(tail);
     }
     if let Some(cost) = state.get(&block) {
         return *cost;
     }
-    state.insert(block, None);
     let insts = body.blocks[block].insts.get(&body.insts)?;
     if !insts.iter().all(|i| region_inst(module, body, i, neutral)) {
         return None;
     }
+    state.insert(block, None);
     let successors = next(body, block).or_else(|| {
         matches!(
             body.terminators[block],
@@ -487,7 +489,7 @@ fn path_cost(
     let mut first = 0;
     for successor in successors {
         first = first.max(path_cost(
-            module, body, constants, header, successor, state, known, neutral,
+            module, body, constants, header, exit, successor, state, known, neutral,
         )?);
     }
     let cost = first.checked_add(
@@ -608,7 +610,15 @@ pub(super) fn loops(
             let entry = body.edges[yes.index()].target.index();
             let mut state = BTreeMap::new();
             let Some(cost) = path_cost(
-                module, body, constants, header, entry, &mut state, &known, neutral,
+                module,
+                body,
+                constants,
+                header,
+                body.edges[no.index()].target.index(),
+                entry,
+                &mut state,
+                &known,
+                neutral,
             ) else {
                 continue;
             };
@@ -620,6 +630,13 @@ pub(super) fn loops(
             if nodes.contains(&body.edges[no.index()].target.index()) {
                 continue;
             }
+            let exits = nodes
+                .iter()
+                .copied()
+                .filter(|&b| b != header)
+                .flat_map(|b| next(body, b).unwrap_or_default())
+                .filter(|b| !nodes.contains(b))
+                .collect::<BTreeSet<_>>();
             // Every back edge advances by the same positive stride. A checked
             // overflow exits through the refund path; zero strides stay checked.
             let inclusive = *comparison == CompareOp::Le;
@@ -755,20 +772,22 @@ pub(super) fn loops(
             } else {
                 None
             };
-            let exact = exact_cost(
-                module,
-                body,
-                constants,
-                header,
-                entry,
-                &mut BTreeMap::new(),
-                &known,
-            ) == Some(cost);
+            let exact = exits.is_empty()
+                && exact_cost(
+                    module,
+                    body,
+                    constants,
+                    header,
+                    entry,
+                    &mut BTreeMap::new(),
+                    &known,
+                ) == Some(cost);
             known.insert(
                 header,
                 Loop {
                     header,
                     nodes,
+                    exits,
                     index: *index,
                     limit: *limit,
                     yes,
@@ -811,13 +830,13 @@ fn iteration_prefixes(body: &Body, plan: &Loop) -> Option<BTreeMap<usize, u64>> 
             }
             continue;
         }
-        if !plan.nodes.contains(&block) {
-            return None;
-        }
         if let Some(old) = prefixes.insert(block, prefix) {
             if old != prefix {
                 return None;
             }
+            continue;
+        }
+        if !plan.nodes.contains(&block) {
             continue;
         }
         let spent = prefix.checked_add(
@@ -832,7 +851,10 @@ fn iteration_prefixes(body: &Body, plan: &Loop) -> Option<BTreeMap<usize, u64>> 
             pending.push((successor, spent));
         }
     }
-    (prefixes.len() == plan.nodes.len()).then_some(prefixes)
+    plan.nodes
+        .iter()
+        .all(|b| prefixes.contains_key(b))
+        .then_some(prefixes)
 }
 
 impl FunctionEmitter<'_> {
@@ -917,20 +939,23 @@ impl FunctionEmitter<'_> {
         let eligible = self.bin(Binary::And, &Type::I1, &nonzero, &count_fits);
         let counter = self.step_counter();
         let before = self.load_steps(&counter);
-        // Equality must take checked execution: its last Step yields before
-        // the following source effect. A fast region never reaches that boundary.
-        let spare = self.cmp(Predicate::Sgt, &Type::I64, &before, &int(1));
-        let room = self.bin(Binary::Sub, &Type::I64, &before, &int(1));
-        let room = self.select(&Type::I64, &spare, &room, &int(0));
-        let quota = self.bin(Binary::UDiv, &Type::I64, &room, &int(plan.cost));
-        let quota = self.select(&Type::I64, &eligible, &quota, &int(0));
-        let full = self.cmp(Predicate::Uge, &Type::I64, &quota, &trips);
+        // Try the whole remaining loop without dividing the lease. Short
+        // loops usually fit; the partial path alone needs a trip quota.
+        let charge = self.bin(Binary::Mul, &Type::I64, &trips, &int(plan.cost));
+        let charge_fits = self.cmp(
+            Predicate::Ule,
+            &Type::I64,
+            &trips,
+            &int(i64::MAX as u64 / plan.cost),
+        );
+        // Equality remains checked so the final Step yields before its effect.
+        let full = self.cmp(Predicate::Sgt, &Type::I64, &before, &charge);
         let full = self.bin(Binary::And, &Type::I1, &full, &eligible);
+        let full = self.bin(Binary::And, &Type::I1, &full, &charge_fits);
         let whole = Label::new("step_whole", n);
         let partial = Label::new("step_partial", n);
         self.likely(&full, whole, partial);
         self.block(whole);
-        let charge = self.bin(Binary::Mul, &Type::I64, &trips, &int(plan.cost));
         let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
         self.store_steps(&after, &counter);
         if !plan.exact {
@@ -943,6 +968,13 @@ impl FunctionEmitter<'_> {
             true,
         ));
         self.block(partial);
+        // Equality must take checked execution: its last Step yields before
+        // the following source effect. A fast region never reaches that boundary.
+        let spare = self.cmp(Predicate::Sgt, &Type::I64, &before, &int(1));
+        let room = self.bin(Binary::Sub, &Type::I64, &before, &int(1));
+        let room = self.select(&Type::I64, &spare, &room, &int(0));
+        let quota = self.bin(Binary::UDiv, &Type::I64, &room, &int(plan.cost));
+        let quota = self.select(&Type::I64, &eligible, &quota, &int(0));
         let any = self.cmp(Predicate::Ne, &Type::I64, &quota, &int(0));
         let chunk = Label::new("step_chunk", n);
         let checked = self.edge_label(plan.yes);
@@ -982,6 +1014,11 @@ impl FunctionEmitter<'_> {
                 .nodes
                 .iter()
                 .map(|&b| (b, version_label(number, self.body.blocks.len(), b, full)))
+                .chain(
+                    plan.exits
+                        .iter()
+                        .map(|&b| (b, trace_exit_label(number, self.body.blocks.len(), b, full))),
+                )
                 .collect();
             self.unchecked_steps = true;
             self.precharge = (!plan.exact).then_some(Precharge::Window {
@@ -1059,9 +1096,43 @@ impl FunctionEmitter<'_> {
             } else {
                 self.br(Label::block(plan.header));
             }
+            for &exit in &plan.exits {
+                self.block(trace_exit_label(number, self.body.blocks.len(), exit, full));
+                self.precharge = if let Some(prefixes) = &prefixes {
+                    let Stride::Constant(stride) = plan.stride else {
+                        unreachable!();
+                    };
+                    Some(Precharge::Iteration {
+                        index: plan.index,
+                        start: Value::Local(window.start),
+                        charged: Value::Local(window.charged),
+                        stride,
+                        cost: plan.cost,
+                        prefix: prefixes[&exit],
+                    })
+                } else {
+                    Some(Precharge::Window {
+                        spent: Value::Local(window.spent),
+                        charged: Value::Local(window.charged),
+                    })
+                };
+                self.step_refund();
+                self.br(Label::block(exit));
+            }
+            self.precharge = None;
         }
         Ok(())
     }
+}
+fn trace_exit_label(number: usize, blocks: usize, block: usize, full: bool) -> Label {
+    Label::new(
+        if full {
+            "step_full_exit"
+        } else {
+            "step_fast_exit"
+        },
+        number * blocks + block,
+    )
 }
 
 fn version_label(number: usize, blocks: usize, block: usize, full: bool) -> Label {

@@ -1643,3 +1643,154 @@ fn test_subs_main(c: Clock, r: Random) -> Result[(), ()] waits {
         Error(())
     }
 }
+
+// ---- L16 (rows_normalized, RUNNER-SPEC v2.11.1 §3 Rows): a Row's key is the table id
+// big-endian ‖ the key codec, and its value is the table's current value codec without the
+// stored u16 schema prefix. 257 pad tables take ids 1..257, so "accounts" is 0x00000102,
+// whose bytes differ under the two byte orders. Its row 1 is stored under schema 0
+// ({balance}); the table is then opened at schema 1 ({balance, bonus = 7}) and row 2 is put.
+// The expected bytes are written out by hand: u64 keys are 8 bytes big-endian (codec.md's
+// order-preserving key format), u64 values 8 bytes little-endian.
+type Old { balance: u64 }
+
+type New { balance: u64, bonus: u64 }
+
+fn old_put(v: Old, mut b: Bytes) -> Result[(), Capacity] {
+    std.codec.put_u64(v.balance, mut b)
+}
+
+fn old_take(b: Bytes, mut at: u64) -> Result[Old, std.codec.Stop] {
+    Ok(Old(balance: std.codec.take_u64(b, mut at)?))
+}
+
+fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Old]) -> Result[(), Capacity] {
+    std.codec.define(mut s, "runner.tests.Account", 0)?
+    if std.codec.record(mut s, 1)? {
+        return Ok(())
+    }
+    std.codec.field(mut s, "balance")?
+    std.codec.schema_u64(mut s)?
+    std.codec.close(mut s)
+    Ok(())
+}
+
+fn new_put(v: New, mut b: Bytes) -> Result[(), Capacity] {
+    std.codec.put_u64(v.balance, mut b)?
+    std.codec.put_u64(v.bonus, mut b)
+}
+
+fn new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.Stop] {
+    let balance = std.codec.take_u64(b, mut at)?
+    let bonus = std.codec.take_u64(b, mut at)?
+    Ok(New(balance: balance, bonus: bonus))
+}
+
+fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[New]) -> Result[(), Capacity] {
+    std.codec.define(mut s, "runner.tests.Account", 0)?
+    if std.codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    std.codec.field(mut s, "balance")?
+    std.codec.schema_u64(mut s)?
+    std.codec.field_default(mut s, "bonus", std.codec.of_u64(), 7)?
+    std.codec.close(mut s)
+    Ok(())
+}
+
+type Ah: send { t: store.Shape[u64, New] }
+
+fn accounts_q(tx: store.Tx, h: Ah, take _arg: u32) -> Result[Cover, Capacity] {
+    cover(h.t, Included(1u64), Included(2u64))
+}
+
+fn accounts_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(accounts_q), 65536u64, DEFAULT_STEPS)
+}
+
+fn push_bytes(mut out: Bytes, x: u8, n: u64) {
+    for _ in 0u64 .. n {
+        result.unwrap(list.push(mut out, x))
+    }
+}
+
+// The tree key of accounts row k (k < 256), by hand.
+fn account_key(k: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    push_bytes(mut out, 0u8, 2u64)
+    push_bytes(mut out, 1u8, 1u64)
+    push_bytes(mut out, 2u8, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    push_bytes(mut out, k, 1u64)
+    out
+}
+
+// A New value by hand: balance then bonus, each 8 bytes little-endian (both < 256).
+fn account_value(balance: u8, bonus: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    push_bytes(mut out, balance, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    push_bytes(mut out, bonus, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    out
+}
+
+fn row_is(r: Row, key: Bytes, value: Bytes) -> bool {
+    r.sub == 7u32 && r.key == key && match r.value {
+        Some(v) => v == value,
+        None => false,
+    }
+}
+
+pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    for i in 0i64 .. 257i64 {
+        let mut name = result.unwrap(string.from("pad"))
+        result.unwrap(string.push_i64(mut name, i))
+        let _ = result.unwrap(store.create_table(mut db, store.spec(take name, std.codec.key_u64(), std.codec.of_u64())))
+    }
+    let oc: std.codec.Codec[Old] = std.codec.make(old_put, old_take, old_schema, 8u64)
+    let nc: std.codec.Codec[New] = std.codec.make(new_put, new_take, new_schema, 16u64)
+    let _ = result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), oc)))
+    let old = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), oc))
+    let first = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, old, 1u64, Old(balance: 10u64))
+    })
+    match take first {
+        Ok(Committed(_)) => (),
+        _ => return false,
+    }
+    let current = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), nc))
+    let h = Ah(t: store.shape(current))
+    let reg = match placed(code.describe(accounts_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let cr: std.codec.Codec[()] = std.codec.of_unit()
+    let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), Query, ca, cr))
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
+    // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
+    let initial = subscribe(mut b, 0u64, 7u32, take key, no_arg())
+    if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
+        return false
+    }
+    // G2: row 2, put at schema 1, arrives from changes with the same normalization.
+    let second = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, current, 2u64, New(balance: 20u64, bonus: 9u64))
+    })
+    match take second {
+        Ok(Committed(_)) => (),
+        _ => return false,
+    }
+    let owes = step(mut b, db)
+    list.len(owes) == 1u64 && list.len(owes[0].rows) == 1u64 && row_is(owes[0].rows[0], account_key(2u8), account_value(20u8, 9u8))
+}
+
+@test
+fn test_rows_normalized(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_rows_normalized(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

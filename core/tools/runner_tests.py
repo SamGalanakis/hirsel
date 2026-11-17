@@ -60,7 +60,7 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 COUNTS = {'calls_runs_once': (7, 1), 'calls_deadline_hung': (7, 32665)}
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
-SUBS = ('subs_main',)
+SUBS = ('subs_main', 'rows_normalized')
 
 
 def counted(name, report):
@@ -165,6 +165,18 @@ MUTANTS = (
     ('rerun_without_retract',
      [('            result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(before[i].tree_key)), value: None)))\n', '')],
      'runner', 'subs_main'),
+    # L16 (RUNNER-SPEC §8.2): a row's value is the published value (F10), never the raw
+    # stored bytes, nor stored bytes with a fixed two-byte header stripped.
+    ('raw_value',
+     [('{ store.published_value(mine, c) }',
+       '{\n        if list.len(c.tree_key) == 0u64 {\n            return store.published_value(mine, c)\n        }\n'
+       '        match c.value {\n            Some(v) => Ok(Some(result.unwrap(clone(v)))),\n            None => Ok(None),\n        }\n    }')],
+     'runner', 'rows_normalized'),
+    ('strip_two_bytes',
+     [('{ store.published_value(mine, c) }',
+       '{\n        if list.len(c.tree_key) == 0u64 {\n            return store.published_value(mine, c)\n        }\n'
+       '        match c.value {\n            Some(v) => Ok(Some(result.unwrap(clone(list.slice(v, 2u64, list.len(v)))))),\n            None => Ok(None),\n        }\n    }')],
+     'runner', 'rows_normalized'),
     ('decode_unbounded',
      [('    let ran = bound bytes n {\n', '    let ran = bound bytes 4611686018427387904u64 {\n')],
      'runner_laws', 'l4_malformed_flood'),

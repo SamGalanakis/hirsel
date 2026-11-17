@@ -358,14 +358,6 @@ fn emit_module(
 ) -> Result<()> {
     let exposed = source.batch_steps.then(|| expose::module(module)).flatten();
     let module = exposed.as_ref().unwrap_or(module);
-    let provided = EmissionFacts {
-        roles: if exposed.is_some() {
-            None
-        } else {
-            provided.roles
-        },
-        neutral: provided.neutral,
-    };
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
         0,

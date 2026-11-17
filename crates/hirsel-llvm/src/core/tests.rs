@@ -152,6 +152,46 @@ fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return(
 }
 
 #[test]
+fn exposed_helpers_keep_imported_carrier_facts() {
+    let module = text::parse(include_str!("../../tests/core_runtime/carrier-shadow.core")).unwrap();
+    wf::module(&module).unwrap();
+    let facts = hirsel_core_ir::roles::Facts::new(&module);
+    let mut caller = module.clone();
+    caller.functions[1].body = None;
+    assert!(expose::module(&caller).is_some());
+    assert!(facts.place_blind(FuncId(1), 0));
+    assert!(!hirsel_core_ir::roles::Facts::new(&caller).place_blind(FuncId(1), 0));
+    let ir = carrier_ir(&caller, &facts, Target::X86_64Linux, false);
+    assert!(ir.contains("call void @llvm.lifetime.start.p0"));
+    let mut callee = module.clone();
+    callee.functions[0].body = None;
+    callee.functions[2].body = None;
+    let callee = carrier_ir(&callee, &facts, Target::X86_64Linux, false);
+    let object = hirsel_llvm_lazy::emit_program(
+        &[
+            hirsel_llvm_lazy::Unit::Text(&ir),
+            hirsel_llvm_lazy::Unit::Text(&callee),
+        ],
+        &[symbol(&module, FuncId(2))],
+    )
+    .unwrap();
+    let cases = [0, 1].map(|mode| Case {
+        function: FuncId(2),
+        args: vec![mode],
+        limit: u64::MAX,
+        injection: None,
+    });
+    let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
+    for (case, report) in cases.iter().zip(reports) {
+        assert_eq!(
+            report.outcome,
+            eval::run(&module, case.function, &case.args, case.limit).outcome
+        );
+        assert_eq!(report.used, 0);
+    }
+}
+
+#[test]
 fn storage_roles_keep_moved_buffers_in_one_scope() {
     let module = text::parse(include_str!("../../tests/core_runtime/roles.core")).unwrap();
     wf::module(&module).unwrap();

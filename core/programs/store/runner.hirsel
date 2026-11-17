@@ -55,8 +55,9 @@ fn launch_target(a: Args) -> Result[String, Capacity] {
 // One erased adapter per kind, holding the entry's byte bound n from registration
 // (RUNNER-SPEC v2.4 §1.1). A compute slot runs in the caller's task; a granted slot
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
-// session's check (rule 5: decode the argument, keep nothing) and the head's run.
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran) | Query(own[send] fn(store.Snapshot, H, Bytes) -> Queried)
+// session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
+// entry's step bound and its code.revision, which each call record carries (R5, §7).
+type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take G, take Bytes) -> Result[Task[Outcome], Capacity]) | Transact(u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Bytes) -> Ran) | Query(own[send] fn(store.Snapshot, H, Bytes) -> Queried)
 
 pub opaque type Registry[G: send, H: send]: send {
     slots: Map[Bytes, Slot[G, H]],
@@ -426,11 +427,21 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
         Ok(take kd) => take kd,
         Error(c) => return Error(Full(c)),
     }
+    let revision: Option[Bytes] = match code.revision(f) {
+        Some(v) => {
+            let mut b: Bytes = list.new()
+            if let Error(c) = list.append(mut b, v) {
+                return Error(Full(c))
+            }
+            Some(take b)
+        },
+        None => None,
+    }
     let check = fn(arg: Bytes) -> Option[Refusal] { check_arg(ca, arg, n) }
     let run = fn(mut tx: store.Tx, h: H, arg: Bytes) -> Ran { adapt_transact(f, ca, cr, ce, mut tx, h, arg, n) }
     match check {
         Ok(take c) => match run {
-            Ok(take go) => insert(mut r, take key, take d, Transact(s, take c, take go)),
+            Ok(take go) => insert(mut r, take key, take d, Transact(s, take revision, take c, take go)),
             Error((e, _)) => Error(Full(e)),
         },
         Error((e, _)) => Error(Full(e)),
@@ -986,17 +997,17 @@ type Kept = Alone(Outcome) | Nothing(Refusal)
 // as separate places, so the body can view the registry and handles while db is lent.
 fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, q: Req) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
     match map.get(r.slots, q.key) {
-        Some(Transact(s, _, go)) => Some(store.run(mut db, Some(s), scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
+        Some(Transact(s, revision, _, go)) => Some(store.run(mut db, Some(s), scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
             match go(mut tx, h, q.arg) {
                 Commit(take b) => {
                     let o = Returned(take b)
-                    match reply(mut tx, q.stream, q.p, o) {
+                    match answered(mut tx, q, o, revision) {
                         Ok(()) => Ok(take o),
                         Error(_) => Error(Nothing(Overloaded)),
                     }
                 },
-                Abort(take b) => keep_reply(mut tx, q, Returned(take b)),
-                Faulted(take f) => keep_reply(mut tx, q, Failed(take f)),
+                Abort(take b) => keep_reply(mut tx, q, Returned(take b), revision),
+                Faulted(take f) => keep_reply(mut tx, q, Failed(take f), revision),
                 Refuse(take why) => Error(Nothing(take why)),
             }
         })),
@@ -1004,8 +1015,42 @@ fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, q: Req) -
     }
 }
 
-fn keep_reply(mut tx: store.Tx, q: Req, take o: Outcome) -> Result[Outcome, Kept] {
-    match reply(mut tx, q.stream, q.p, o) {
+// R5 (§7): a run's reply and its call record in one Tx: the requested key, the exact
+// argument bytes, the stream, and the code.revision of the entry that ran.
+fn answered(mut tx: store.Tx, q: Req, o: Outcome, revision: Option[Bytes]) -> Result[(), store.Error] {
+    reply(mut tx, q.stream, q.p, o)?
+    let rev = match revision {
+        Some(b) => Some(copy_bytes(b)?),
+        None => None,
+    }
+    store.record(mut tx, store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: copy_bytes(q.stream)?, revision: take rev))
+}
+
+fn copy_bytes(b: Bytes) -> Result[Bytes, store.Error] {
+    let mut out: Bytes = list.new()
+    match list.append(mut out, b) {
+        Ok(()) => Ok(take out),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+// The revision a reply-only commit records for a faulted or stopped run of q's entry.
+fn revision_of[G: send, H: send](r: Registry[G, H], key: Bytes) -> Option[Option[Bytes]] {
+    match map.get(r.slots, key) {
+        Some(Transact(_, revision, _, _)) => match revision {
+            Some(b) => {
+                let mut out: Bytes = list.new()
+                result.unwrap(list.append(mut out, b))
+                Some(Some(take out))
+            },
+            None => Some(None),
+        },
+        _ => None,
+    }
+}
+
+fn keep_reply(mut tx: store.Tx, q: Req, take o: Outcome, revision: Option[Bytes]) -> Result[Outcome, Kept] {
+    match answered(mut tx, q, o, revision) {
         Ok(()) => Error(Alone(take o)),
         Error(_) => Error(Nothing(Overloaded)),
     }
@@ -1018,7 +1063,8 @@ fn execute[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), stor
             Ok(take y) => take y,
             Error(e) => return Error(e),
         },
-        None => return reply_only(mut hd, take q, Failed(Gone)),
+        // §7's one exception: a gone entry's reply has no call record.
+        None => return reply_only(mut hd, take q, Failed(Gone), None),
     }
     match take ran {
         Committed(take d) => {
@@ -1033,21 +1079,32 @@ fn execute[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), stor
             store.Undone(value: Alone(_), ticket: None) => fail("runner: an aborted run lost its reply"),
             store.Undone(value: Nothing(take why), ticket: _) => commitless(mut hd, take q, Refused(take why)),
         },
-        Failed(cs) => reply_only(mut hd, take q, Failed(Raised(raised(cs)))),
-        Stopped(e) => reply_only(mut hd, take q, Failed(OutOfTime(e.steps))),
+        Failed(cs) => {
+            let rev = revision_of(hd.r, q.key)
+            reply_only(mut hd, take q, Failed(Raised(raised(cs))), take rev)
+        },
+        Stopped(e) => {
+            let rev = revision_of(hd.r, q.key)
+            reply_only(mut hd, take q, Failed(OutOfTime(e.steps)), take rev)
+        },
         Refused(_) => commitless(mut hd, take q, Refused(Overloaded)),
     }
 }
 
-fn reply_alone(mut db: store.Db, q: Req, o: Outcome) -> Result[store.Outcome[(), store.Error], store.Error] waits {
+// `record` is Some(the entry's revision) for a run's reply, which keeps its call record,
+// and None for a gone entry's.
+fn reply_alone(mut db: store.Db, q: Req, o: Outcome, record: Option[Option[Bytes]]) -> Result[store.Outcome[(), store.Error], store.Error] waits {
     store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        reply(mut tx, q.stream, q.p, o)
+        match record {
+            Some(revision) => answered(mut tx, q, o, revision),
+            None => reply(mut tx, q.stream, q.p, o),
+        }
     })
 }
 
 // A reply with no effect: a run whose body only replies (STORE-SPEC §1.8).
-fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome) -> Result[(), store.Error] waits {
-    let ran = reply_alone(mut hd.db, q, o)?
+fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome, take record: Option[Option[Bytes]]) -> Result[(), store.Error] waits {
+    let ran = reply_alone(mut hd.db, q, o, record)?
     match take ran {
         Committed(d) => worker(mut hd, take q, take o, d.ticket, d.info.id.version),
         Refused(_) => commitless(mut hd, take q, Refused(Overloaded)),
@@ -1223,7 +1280,7 @@ fn refusal[G: send, H: send](r: Registry[G, H], s: Session[G, H], c: Call) -> Op
     }
     match map.get(r.slots, c.key) {
         Some(Compute(run)) => Some(run(c.arg)),
-        Some(Transact(_, check, _)) => match check(c.arg) {
+        Some(Transact(_, _, check, _)) => match check(c.arg) {
             Some(take why) => Some(Refused(take why)),
             None => None,
         },

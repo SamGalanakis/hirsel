@@ -316,7 +316,11 @@ fn served(c: Clock, r: Random, tasks: Tasks, f: fn(take Drive) -> () waits) -> b
 }
 
 fn served_in(c: Clock, r: Random, tasks: Tasks, o: store.Options, f: fn(take Drive) -> () waits) -> bool waits {
-    let mut db = store.memory(c, r, o)
+    served_on(store.memory(c, r, o), c, tasks, f)
+}
+
+fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, f: fn(take Drive) -> () waits) -> bool waits {
+    let mut db = take fresh
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
@@ -572,6 +576,102 @@ fn drive_refusals(take d: Drive) -> () waits {
 
 pub fn law_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     served(c, r, tasks, drive_refusals)
+}
+
+// R5 (RUNNER-SPEC §7's table, rows Committed, Aborted(u) and Failed) on a disk store, since a
+// memory store keeps no record. One stream's three positions, as in refusals: write(10)
+// commits at 3, refuse(7)'s aborted run keeps its reply alone at 5, and crash(2)'s fault
+// leaves the runner's reply-only Failed commit at 7, each admit the commit before. After a
+// reopen, `recorded` gives a record at exactly 3, 5 and 7 (none at 1, 2, 4, 6 or 8), each
+// with the requested key, the exact argument bytes, the stream, and the code.revision of
+// the entry that ran.
+fn drive_recorded(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
+    want(ok_value(frame(s0).outcome) == Some(3u64), "recorded: write committed at 3")
+    ask(s0, d.clock, 0u64, 1u64, k_refuse(), u64_arg(7u64), LATER)
+    want(err_value(frame(s0).outcome) == Some(7u32), "recorded: refuse's Error kept")
+    ask(s0, d.clock, 0u64, 2u64, k_crash(), u64_arg(2u64), LATER)
+    want(is(frame(s0).outcome, Failed(Raised(2u32))), "recorded: crash's Failed(Raised(2))")
+    hang(take s0)
+}
+
+// The record names this entry's revision: Some, 32 bytes, and code.revision's own.
+fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
+    match code.revision(s) {
+        Some(v) => match got {
+            Some(b) => {
+                let mut w: Bytes = list.new()
+                result.unwrap(list.append(mut w, v))
+                list.len(b) == 32u64 && b == w
+            },
+            None => false,
+        },
+        None => false,
+    }
+}
+
+fn record_is(got: Option[store.CallRecord], key: Bytes, arg: u64, entry: u64) -> bool {
+    match got {
+        Some(c) => c.key == key && c.args == u64_arg(arg) && c.stream == sid(0u64) && if entry == 0u64 {
+            revision_is(c.revision, code.describe(write))
+        } else if entry == 1u64 {
+            revision_is(c.revision, code.describe(refuse))
+        } else {
+            revision_is(c.revision, code.describe(crash))
+        },
+        None => false,
+    }
+}
+
+// The defaults' checkpoint task (256 MiB) would not fit a native test's 64 MiB limit.
+fn disk_options() -> store.Options {
+    let mut o = store.defaults()
+    o.checkpoint_task_bytes = 1048576u64
+    o.resident_limit = 1048576u64
+    o.pack_bytes = 512u64
+    o.group_commits = 2u32
+    o.group_bytes = 1048576u32
+    o
+}
+
+pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut name = result.unwrap(string.with_capacity(64u64))
+    result.unwrap(string.push(mut name, "runner-recorded-"))
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let db = result.unwrap(store.open(tasks, dir, c, r, disk_options()))
+    if !served_on(take db, c, tasks, drive_recorded) {
+        return false
+    }
+    let mut o = disk_options()
+    o.create = false
+    let again = result.unwrap(store.open(tasks, dir, c, r, o))
+    let b = store.main_branch(again)
+    for v in 1u64 .. 9u64 {
+        let got = result.unwrap(store.recorded(again, b, v))
+        let held = if v == 3u64 {
+            record_is(got, k_write(), 10u64, 0u64)
+        } else if v == 5u64 {
+            record_is(got, k_refuse(), 7u64, 1u64)
+        } else if v == 7u64 {
+            record_is(got, k_crash(), 2u64, 2u64)
+        } else {
+            match got {
+                None => true,
+                Some(_) => false,
+            }
+        }
+        if !held {
+            return false
+        }
+    }
+    result.unwrap(store.close(take again))
+    true
+}
+
+@test
+fn test_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_recorded(d, c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 // L3 (§8): a Failed position re-sent k times runs its handler exactly once. A Failed

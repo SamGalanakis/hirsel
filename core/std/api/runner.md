@@ -47,6 +47,15 @@ Only the head runs it, in a store run under the entry's n: `Ok` commits and its
 reply is written with the effects; `Error` aborts the effects and the store keeps the
 reply alone in the aborted run's frame (STORE-SPEC F2).
 
+R5 records each call (RUNNER-SPEC §7). Every reply a run writes carries, in the same Tx
+and after the reply, a `store.CallRecord`: the requested key, the exact argument bytes,
+the stream, and the `code.revision` of the entry that ran, which `transact` copies when
+it registers the entry. That holds for a commit, for an abort's kept reply, and for the
+runner's reply-only commit after a body fails or runs out of steps. The one exception
+is `Failed(Gone)`, whose entry no longer exists: its reply has no record.
+`store.recorded(db, branch, v)` reads a record back from a disk store; a memory store
+keeps none.
+
 `place_head(db, place, n_place, handles, inbox, sessions, tasks, n_publisher)` runs on
 the caller's task, because `store.Db` is not send. It runs `place` under `bytes
 n_place` (rule 10) and `handles` twice (rule 12). The head keeps the first H. The

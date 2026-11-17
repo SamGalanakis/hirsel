@@ -47,7 +47,7 @@ CHUNK = 500
 N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch')
+         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded')
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
 # L3's tally handler is the only caller of try_send (TRY_SEND is kind 7 in
@@ -165,6 +165,16 @@ MUTANTS = (
     ('rerun_without_retract',
      [('            result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(before[i].tree_key)), value: None)))\n', '')],
      'runner', 'subs_main'),
+    # R5 (RUNNER-SPEC §7): an aborted run's reply kept without its call record (STORE G1),
+    # and records that name no revision.
+    ('abort_unrecorded',
+     [('    match answered(mut tx, q, o, revision) {\n        Ok(()) => Error(Alone(take o)),',
+       '    match reply(mut tx, q.stream, q.p, o) {\n        Ok(()) => Error(Alone(take o)),')],
+     'runner_calls', 'calls_recorded'),
+    ('record_without_revision',
+     [('    let rev = match revision {\n        Some(b) => Some(copy_bytes(b)?),\n',
+       '    let rev: Option[Bytes] = match revision {\n        Some(_) => None,\n')],
+     'runner_calls', 'calls_recorded'),
     # L17 (RUNNER-SPEC §8.2, complete_marks_empty): an empty initial result names its sub in
     # no Batch's complete, so the client never learns that sub is current.
     ('no_complete_on_empty',
@@ -566,11 +576,19 @@ def counting_cc(args, root, work, name):
     return wrapper
 
 
+# calls_recorded's disk store goes in a directory of its own beside the test store.
+def dir_for(store):
+    host = Path(str(store) + '-dir')
+    host.mkdir(exist_ok=True)
+    return host
+
+
 def native_run(args, engine, inputs_path, store, prefix, cc=None):
     command = [str(args.compiler.resolve()), 'test', '--inputs', str(inputs_path), '--source-core',
                '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
                '--store', str(store), '--json', '--filter', prefix,
-               '--limit', str(64 * 1024 * 1024), '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random']
+               '--limit', str(64 * 1024 * 1024), '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
+               '--dir', str(dir_for(store))]
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
     wait_load()

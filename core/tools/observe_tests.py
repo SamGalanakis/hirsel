@@ -50,8 +50,9 @@ def traced_calls(root, work):
     text = replace(text, 'type Conn {', 'type Conn { id: u64, clock: Clock, out: Stdout, err: Stderr, log: Log[observe.Obs], digests: Map[Bytes, Bytes],')
     text = replace(text, 'type Drive: send {', 'type Drive: send { out: Stdout, err: Stderr,')
     text = replace(text, 'let d = Drive(head:', 'let d = Drive(out: out, err: err, head:')
-    for name in ('conn', 'conn_in', 'served', 'served_in'):
+    for name in ('conn', 'conn_in', 'served', 'served_in', 'served_on'):
         text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ' + ('id: u64, ' if name.startswith('conn') else ''))
+    text = re.sub(r'(?<!fn )\bserved_on\(', 'served_on(out, err, ', text)
     text = replace(text, '    conn_in(tasks, head, clock, q,', '    conn_in(out, err, id, tasks, head, clock, q,')
     text = re.sub(r'(pub fn law_\w+\()', r'\1out: Stdout, err: Stderr, ', text)
     text = re.sub(r'(?m)^(\s*)served(_in)?\(c,', r'\1served\2(out, err, c,', text)

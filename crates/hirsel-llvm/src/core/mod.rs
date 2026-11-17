@@ -59,6 +59,7 @@ pub enum Optimization {
 
 #[derive(Clone, Copy)]
 struct SourceEmission {
+    batch_steps: bool,
     test_hooks: bool,
     relocatable_sites: bool,
     debug_lines: bool,
@@ -196,6 +197,7 @@ pub fn emit_ir_for_target(module: &Module, target: Target, observe_charge: bool)
         observe_charge,
         facts_enabled(),
         SourceEmission {
+            batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
@@ -211,6 +213,7 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
         observe_charge,
         facts,
         SourceEmission {
+            batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
@@ -604,11 +607,23 @@ fn emit_module(
             e.step_counter = Some(counter);
             e.reload_steps();
         }
-        let step_loops = steps::loops(module, body, e.constants, &step_neutral);
+        // Batching introduces joins that the optimizer promotes to registers.
+        // Development objects retain checked Steps without expanding those CFGs.
+        let step_loops = if source.batch_steps {
+            steps::loops(module, body, e.constants, &step_neutral)
+        } else {
+            Vec::new()
+        };
         let step_groups = body
             .blocks
             .iter()
-            .map(|b| steps::groups(module, body, &step_neutral, b.insts))
+            .map(|b| {
+                if source.batch_steps {
+                    steps::groups(module, body, &step_neutral, b.insts)
+                } else {
+                    Default::default()
+                }
+            })
             .collect::<Vec<_>>();
         if !step_loops.is_empty() || step_groups.iter().any(|g| !g.is_empty()) {
             // Both loop copies define the same source values and addresses.
@@ -757,6 +772,7 @@ pub(crate) fn emit_native_module_in_context(
         context,
         observe_charge,
         SourceEmission {
+            batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
@@ -885,6 +901,7 @@ pub fn emit_ir_relocatable_for_target(
         observe_charge,
         facts_enabled(),
         SourceEmission {
+            batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
@@ -907,6 +924,7 @@ pub fn emit_ir_relocatable_with_role_facts_for_target(
         observe_charge,
         facts_enabled(),
         SourceEmission {
+            batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
@@ -944,6 +962,7 @@ pub fn emit_object_for_target(
         opt,
         observe_charge,
         SourceEmission {
+            batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
@@ -967,6 +986,7 @@ pub fn emit_object_relocatable_for_target(
         opt,
         observe_charge,
         SourceEmission {
+            batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: true,
             debug_lines,
@@ -981,6 +1001,10 @@ fn emit_object_site_binding(
     observe_charge: bool,
     source: SourceEmission,
 ) -> Result<Vec<u8>> {
+    let source = SourceEmission {
+        batch_steps: matches!(opt, Optimization::Speed),
+        ..source
+    };
     #[cfg(not(hirsel_lazy_core))]
     {
         compile_observation(module, target, opt, observe_charge, source, |_| (), |_| ())
@@ -1041,6 +1065,7 @@ fn compile<R>(
         opt,
         false,
         SourceEmission {
+            batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: false,
             debug_lines: false,
@@ -1061,6 +1086,10 @@ fn compile_observation<R>(
     mut observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
     observer(CompilationStage::TextConstruction);
+    let source = SourceEmission {
+        batch_steps: matches!(opt, Optimization::Speed),
+        ..source
+    };
     let ir = emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), source)?;
     observer(CompilationStage::TargetSetup);
     let machine =
@@ -1816,6 +1845,7 @@ pub fn emit_ir_for_test_with_facts(
         observe_charge,
         facts,
         SourceEmission {
+            batch_steps: true,
             test_hooks: true,
             relocatable_sites: true,
             debug_lines,
@@ -1839,6 +1869,7 @@ pub fn emit_ir_for_test(
         observe_charge,
         facts_enabled(),
         SourceEmission {
+            batch_steps: true,
             test_hooks: true,
             relocatable_sites: true,
             debug_lines,
@@ -1861,6 +1892,7 @@ pub fn emit_object_for_test(
         optimization,
         observe_charge,
         SourceEmission {
+            batch_steps: true,
             test_hooks: true,
             relocatable_sites: true,
             debug_lines,

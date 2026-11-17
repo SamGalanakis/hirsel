@@ -17,7 +17,7 @@ use hirsel_core_layout::{
     compute, field_size, map_entry,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
@@ -94,7 +94,7 @@ struct World {
     temporaries: u64,
     random: u8,
     network: Network,
-    net_charges: Vec<(usize, u64)>,
+    net_charges: Vec<(Limit, u64)>,
 }
 enum Node {
     File(Vec<u8>),
@@ -172,7 +172,7 @@ struct Blk {
     bytes: Vec<u8>,
     live: bool,
     /// The limit the block is charged to; None for frame slots and engine records.
-    limit: Option<usize>,
+    limit: Option<Limit>,
     charge: u64,
     res: Option<Res>,
     /// A counted node's kind, fixed by its `alloc`; its operations must name it.
@@ -361,31 +361,102 @@ struct Res {
     settled: bool,
     cell_used: bool,
 }
-struct Limit {
+/// A pin held by each scope, funded object and queued refund. Only the
+/// evaluator baton changes the balance or links, but pins can be dropped by
+/// different task threads when the scheduler tears down a run.
+#[derive(Clone, Debug)]
+struct Limit(Arc<LimitRecord>);
+
+#[derive(Debug)]
+struct LimitRecord {
     cap: u64,
-    used: u64,
-    parent: Option<usize>,
-    forward: Option<usize>,
     grant: bool,
-    /// The scheduler index of the task whose admissions it serves (MEM-20): a refund
-    /// from another task reaches it at that task's next event.
+    /// Scheduler index of the task whose admissions this limit serves.
     owner: usize,
+    state: Mutex<LimitState>,
+}
+
+#[derive(Debug)]
+struct LimitState {
+    used: u64,
+    parent: Option<Limit>,
+    ended: bool,
+}
+
+impl Limit {
+    fn new(cap: u64, parent: Option<Self>, grant: bool, owner: usize) -> Self {
+        Self(Arc::new(LimitRecord {
+            cap,
+            grant,
+            owner,
+            state: Mutex::new(LimitState {
+                used: 0,
+                parent,
+                ended: false,
+            }),
+        }))
+    }
+
+    fn find(&self) -> Self {
+        let mut limit = self.clone();
+        loop {
+            let forward = {
+                let state = limit.0.state.lock().unwrap();
+                if !state.ended {
+                    break;
+                }
+                state.parent.clone().unwrap()
+            };
+            limit = forward;
+        }
+        limit
+    }
+
+    fn used(&self) -> u64 {
+        self.0.state.lock().unwrap().used
+    }
+
+    fn subtract(&self, n: u64) {
+        self.0.state.lock().unwrap().used -= n;
+    }
+}
+
+impl Drop for LimitRecord {
+    fn drop(&mut self) {
+        // Release a uniquely owned forwarding chain without recursive drops.
+        let mut parent = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .parent
+            .take();
+        while let Some(Limit(link)) = parent {
+            let Some(mut record) = Arc::into_inner(link) else {
+                break;
+            };
+            parent = record
+                .state
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .parent
+                .take();
+        }
+    }
 }
 /// A cause cell an obligation holds unused (FAIL-10): the limit and amount it
 /// refunds to, and whether it is a resource's own cell, which its block's free
 /// refunds.
-#[derive(Clone, Copy)]
 struct Cell {
-    limit: usize,
+    limit: Limit,
     amount: u64,
     resource: bool,
 }
 /// A running `isolate`'s reservation (crate docs, "Isolation"): its cell's limit,
 /// and the active chain it set aside, with that chain's cells.
 struct Reservation {
-    limit: usize,
+    limit: Limit,
     chain: Vec<Cause>,
-    cells: Vec<(usize, u64)>,
+    cells: Vec<(Limit, u64)>,
 }
 struct StepBound {
     left: u64,
@@ -395,11 +466,11 @@ struct StepBound {
 struct Task {
     step_bounds: Vec<usize>,
     slice_steps: u64,
-    limits: Vec<usize>,
+    limits: Vec<Limit>,
     /// The active chain: the causes of the failure in progress, primary first.
     chain: Vec<Cause>,
     /// The active chain's cells, with the limit and amount each refunds to.
-    cells: Vec<(usize, u64)>,
+    cells: Vec<(Limit, u64)>,
     /// The obligations that can take a cause: the task's primary first, then one
     /// per running finalizer, the innermost last. A cause goes into the last
     /// one's cell; `None` once it is used.
@@ -420,10 +491,10 @@ struct Child {
     r: TypeRef,
     charge: u64,
     n: u64,
-    limit: usize,
+    limit: Option<Limit>,
     joined: bool,
     /// The child's used cells: those of the chain it failed with.
-    cells: Vec<(usize, u64)>,
+    cells: Vec<(Limit, u64)>,
     /// Its primary cell when unused at its end, refunded when it is joined.
     primary: Option<Cell>,
     /// Its causes, primary first, while no `Causes` holds them.
@@ -444,7 +515,7 @@ struct Chan {
     senders: u64,
     receiver: bool,
     charge: u64,
-    limit: usize,
+    limit: Option<Limit>,
 }
 /// A `Latest[T]` root: the current `Arc[T]` node, admitted at `LATEST_ROOT`.
 struct Latest {
@@ -453,7 +524,7 @@ struct Latest {
     item: TypeRef,
     root: u64,
     handles: u64,
-    limit: usize,
+    limit: Option<Limit>,
 }
 
 #[derive(Clone, Copy)]
@@ -475,7 +546,7 @@ struct Machine<'m> {
     m: &'m Module,
     recipes: Vec<Recipe>,
     mem: Blocks,
-    limits: Vec<Limit>,
+    root: Option<Limit>,
     step_bounds: Vec<StepBound>,
     peak_reserved: u64,
     regions: Vec<Vec<usize>>,
@@ -483,7 +554,7 @@ struct Machine<'m> {
     chans: Vec<Chan>,
     latests: Vec<Latest>,
     /// Each live delivered `Causes`, by its head cell: the charged cells it owns.
-    causes: HashMap<u64, Vec<(usize, u64)>>,
+    causes: HashMap<u64, Vec<(Limit, u64)>>,
     /// Every inline array field type of the module: element and length.
     arrays: Vec<(FieldTy, u64)>,
     trace: Vec<u64>,
@@ -583,7 +654,7 @@ struct Rec {
     start: Option<(Task, FuncId, Vec<u64>)>,
     /// Refunds from other tasks to limits it owns, applied at its next event
     /// (MEM-20; native `drain_refunds` in `tasks::event`).
-    refunds: Vec<(usize, u64)>,
+    refunds: Vec<(Limit, u64)>,
 }
 #[derive(Default)]
 struct Sched {
@@ -879,60 +950,7 @@ fn run_world(
     limit: u64,
     mut input: WorldInput<'_>,
 ) -> (Report, Checked) {
-    let mut mach = Machine {
-        step_bounds: Vec::new(),
-        m,
-        recipes: compute(&m.types).expect("layouts"),
-        mem: Blocks::default(),
-        peak_reserved: 0,
-        limits: vec![Limit {
-            cap: limit,
-            used: 0,
-            parent: None,
-            forward: None,
-            grant: false,
-            owner: 0,
-        }],
-        regions: Vec::new(),
-        children: Vec::new(),
-        chans: Vec::new(),
-        latests: Vec::new(),
-        causes: HashMap::new(),
-        arrays: Vec::new(),
-        trace: Vec::new(),
-        dests: 0,
-        admissions: 0,
-        instructions: input.instructions,
-        injection: input.injection,
-        world: World {
-            launch: Some(input.launch.cloned().unwrap_or_else(|| {
-                hirsel_core_ids::launch::Metadata::source(
-                    "",
-                    hirsel_core_ids::launch::DEFAULT_N_PLACE,
-                    false,
-                )
-            })),
-            ..World::default()
-        },
-        frozen: Vec::new(),
-        loans: 0,
-        facts: Arc::new(roles::Facts::new(m)),
-        roles: vec![None; m.functions.len()],
-        footprints: Vec::new(),
-        role_checks: 0,
-        inherits: m
-            .functions
-            .iter()
-            .map(|f| crate::source::inherits_site(&m.instances[f.instance.index()]))
-            .collect(),
-        scrambled: (input.nans == Nans::Scrambled).then_some(0),
-        sched: Sched {
-            next: 1,
-            ..Sched::default()
-        },
-        links: vec![None],
-        descriptors: vec![0; m.functions.len()],
-    };
+    let mut mach = Machine::new(m, limit, &input);
     for s in &m.statics {
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
         mach.mem[split(p).0].bytes.clone_from(&s.bytes);
@@ -1033,11 +1051,11 @@ fn run_world(
     let task = Task {
         step_bounds: Vec::new(),
         slice_steps: 0,
-        limits: vec![0],
+        limits: vec![mach.root().clone()],
         chain: Vec::new(),
         cells: Vec::new(),
         obligations: vec![Some(Cell {
-            limit: 0,
+            limit: mach.root().clone(),
             amount: 0,
             resource: false,
         })],
@@ -1074,14 +1092,12 @@ fn run_world(
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }
     for (l, n) in std::mem::take(&mut mach.world.net_charges) {
-        let l = mach.find(l);
-        mach.limits[l].used -= n;
+        l.find().subtract(n);
     }
     // Refunds still pending when the run ends count toward its final use.
     for k in 0..mach.sched.tasks.len() {
         for (l, n) in std::mem::take(&mut mach.sched.tasks[k].refunds) {
-            let l = mach.find(l);
-            mach.limits[l].used -= n;
+            l.find().subtract(n);
         }
     }
     if let Some(remaining) = input.network_out {
@@ -1095,7 +1111,7 @@ fn run_world(
     };
     let report = Report {
         outcome,
-        used: mach.limits[0].used,
+        used: mach.root().used(),
         peak_reserved: mach.peak_reserved,
         trace: mach.trace,
         admissions: mach.admissions,
@@ -1272,6 +1288,56 @@ fn cause(r: RaiseCause) -> &'static str {
 }
 
 impl<'m> Machine<'m> {
+    fn new(m: &'m Module, limit: u64, input: &WorldInput<'_>) -> Self {
+        Self {
+            step_bounds: Vec::new(),
+            m,
+            recipes: compute(&m.types).expect("layouts"),
+            mem: Blocks::default(),
+            peak_reserved: 0,
+            root: Some(Limit::new(limit, None, false, 0)),
+            regions: Vec::new(),
+            children: Vec::new(),
+            chans: Vec::new(),
+            latests: Vec::new(),
+            causes: HashMap::new(),
+            arrays: Vec::new(),
+            trace: Vec::new(),
+            dests: 0,
+            admissions: 0,
+            instructions: input.instructions,
+            injection: input.injection,
+            world: World {
+                launch: Some(input.launch.cloned().unwrap_or_else(|| {
+                    hirsel_core_ids::launch::Metadata::source(
+                        "",
+                        hirsel_core_ids::launch::DEFAULT_N_PLACE,
+                        false,
+                    )
+                })),
+                ..World::default()
+            },
+            frozen: Vec::new(),
+            loans: 0,
+            facts: Arc::new(roles::Facts::new(m)),
+            roles: vec![None; m.functions.len()],
+            footprints: Vec::new(),
+            role_checks: 0,
+            inherits: m
+                .functions
+                .iter()
+                .map(|f| crate::source::inherits_site(&m.instances[f.instance.index()]))
+                .collect(),
+            scrambled: (input.nans == Nans::Scrambled).then_some(0),
+            sched: Sched {
+                next: 1,
+                ..Sched::default()
+            },
+            links: vec![None],
+            descriptors: vec![0; m.functions.len()],
+        }
+    }
+
     /// What a parked task's slot holds while its baton runs elsewhere.
     fn shell(&self) -> Machine<'m> {
         Machine {
@@ -1279,7 +1345,7 @@ impl<'m> Machine<'m> {
             m: self.m,
             recipes: Vec::new(),
             mem: Blocks::default(),
-            limits: Vec::new(),
+            root: None,
             peak_reserved: 0,
             regions: Vec::new(),
             children: Vec::new(),
@@ -1422,7 +1488,7 @@ impl Machine<'_> {
         if let (Ok(values), Carried::Value(ty)) = (&returned, self.m.types[r.index()].carried) {
             self.store(rb, bytes_of(ty), values[0]);
         }
-        self.end_limit(t.limits[0]);
+        self.end_limit(t.limits.pop().unwrap());
         let status = match t.chain.first().map(|c| c.kind) {
             _ if returned.is_ok() => 0,
             Some("Cancelled") => 2,
@@ -1432,7 +1498,7 @@ impl Machine<'_> {
         c.status = status;
         c.cells = std::mem::take(&mut t.cells);
         c.chain = std::mem::take(&mut t.chain);
-        c.primary = t.obligations[0];
+        c.primary = t.obligations[0].take();
         let id = self.sched.tasks[t.k].id;
         self.event(END, id, u64::from(status != 0));
         self.sched.tasks[t.k].state = State::Ended;
@@ -1625,7 +1691,7 @@ impl Machine<'_> {
                         .and_then(|n| n.checked_add(7))
                         .map(|n| n & !7)
                         .expect("host-sized rule storage");
-                    let payer = *t.limits.last().unwrap();
+                    let payer = t.limits.last().unwrap();
                     match self.admit(payer, charge) {
                         Err(available) => vec![charge, 2, 0, available],
                         Ok(()) => {
@@ -1643,7 +1709,7 @@ impl Machine<'_> {
                                 .network
                                 .grants
                                 .insert(key, rules.iter().filter_map(|p| p.intersect(r)).collect());
-                            self.world.net_charges.push((payer, charge));
+                            self.world.net_charges.push((payer.clone(), charge));
                             ok(key, 0)
                         }
                     }
@@ -1831,7 +1897,7 @@ impl Machine<'_> {
             "a counted operation names another kind than its alloc"
         );
     }
-    fn block(&mut self, size: u64, limit: Option<usize>, charge: u64, res: Option<Res>) -> u64 {
+    fn block(&mut self, size: u64, limit: Option<Limit>, charge: u64, res: Option<Res>) -> u64 {
         // An admitted block the host cannot provide is a run stop, as for
         // `hirsel_core_native_alloc`, never `Capacity`: a refusal is the limit's
         // (give the run `limit N`).
@@ -2012,26 +2078,26 @@ impl Machine<'_> {
     }
 
     // ---- limits
-    fn find(&self, mut l: usize) -> usize {
-        while let Some(f) = self.limits[l].forward {
-            l = f;
-        }
-        l
+    fn root(&self) -> &Limit {
+        self.root.as_ref().unwrap()
     }
+
     /// Admit `n` against `l`, or Err(the room left). A successful admission reports
     /// no room: `available` is 0 then.
-    fn admit(&mut self, l: usize, n: u64) -> Result<(), u64> {
-        let lim = &mut self.limits[l];
-        let room = lim.cap - lim.used;
+    fn admit(&mut self, l: &Limit, n: u64) -> Result<(), u64> {
+        let mut state = l.0.state.lock().unwrap();
+        let room = l.0.cap - state.used;
         self.admissions += 1;
         let refused = self
             .injection
             .is_some_and(|(nth, later)| self.admissions == nth || (later && self.admissions > nth));
         if n <= room && !refused {
-            lim.used += n;
-            self.peak_reserved = self.peak_reserved.max(self.limits[0].used);
+            state.used += n;
+            drop(state);
+            self.peak_reserved = self.peak_reserved.max(self.root().used());
             Ok(())
         } else {
+            drop(state);
             self.event(CAPACITY, n, room);
             Err(room)
         }
@@ -2039,18 +2105,22 @@ impl Machine<'_> {
     /// The limit growth of `old` admits from: the one its record leads to, or,
     /// inside a finalizer (N03, MEM-27), the current limit, which is the grant or a
     /// bound scope entered within it (MEM-25).
-    fn like(&self, t: &Task, old: u64) -> usize {
-        if t.limits.iter().any(|&l| self.limits[l].grant) {
-            return *t.limits.last().unwrap();
+    fn like(&self, t: &Task, old: u64) -> Limit {
+        if t.limits.iter().any(|l| l.0.grant) {
+            return t.limits.last().unwrap().clone();
         }
-        self.find(self.mem[split(old).0].limit.expect("a charged block"))
+        self.mem[split(old).0]
+            .limit
+            .as_ref()
+            .expect("a charged block")
+            .find()
     }
     /// An `alloc` or `grow` admission of `n`, refused outright when its exact
     /// charge overflowed: Err(the room left).
-    fn admit_charge(&mut self, l: usize, n: u64, overflowed: bool) -> Result<(), u64> {
+    fn admit_charge(&mut self, l: &Limit, n: u64, overflowed: bool) -> Result<(), u64> {
         if overflowed {
             self.admissions += 1;
-            let room = self.limits[l].cap - self.limits[l].used;
+            let room = l.0.cap - l.used();
             self.event(CAPACITY, u64::MAX, room);
             return Err(room);
         }
@@ -2059,11 +2129,11 @@ impl Machine<'_> {
     /// MEM-20: a refund to a limit the running task owns applies at once; one to
     /// another task's limit waits for that task's next event, so its admissions see
     /// exactly the refunds the event order puts before their task's latest event.
-    fn refund(&mut self, l: usize, n: u64) {
-        let l = self.find(l);
-        let owner = self.limits[l].owner;
+    fn refund(&mut self, l: Limit, n: u64) {
+        let l = l.find();
+        let owner = l.0.owner;
         if owner == self.sched.current || owner >= self.sched.tasks.len() {
-            self.limits[l].used -= n;
+            l.subtract(n);
         } else {
             if n != 0 {
                 self.event(REFUND, self.sched.tasks[owner].id, n);
@@ -2073,8 +2143,8 @@ impl Machine<'_> {
     }
     /// CONC-10: growth charged to a limit another task owns is an event of the
     /// growing task (native `allocate_like`).
-    fn foreign_charge(&mut self, l: usize, n: u64) {
-        let owner = self.limits[self.find(l)].owner;
+    fn foreign_charge(&mut self, l: &Limit, n: u64) {
+        let owner = l.find().0.owner;
         if owner != self.sched.current && owner < self.sched.tasks.len() {
             self.event(CHARGE, self.sched.tasks[owner].id, n);
         }
@@ -2090,41 +2160,37 @@ impl Machine<'_> {
         }
     }
     /// Apply every pending refund whose record leads to `l`, before `l` ends.
-    fn settle(&mut self, l: usize) {
+    fn settle(&mut self, l: &Limit) {
         for k in 0..self.sched.tasks.len() {
             let pending = std::mem::take(&mut self.sched.tasks[k].refunds);
             for (r, n) in pending {
-                if self.find(r) == l {
-                    self.limits[l].used -= n;
+                if Arc::ptr_eq(&r.find().0, &l.0) {
+                    l.subtract(n);
                 } else {
                     self.sched.tasks[k].refunds.push((r, n));
                 }
             }
         }
     }
-    fn open_limit(&mut self, cap: u64, parent: usize, grant: bool, owner: usize) -> usize {
-        self.limits.push(Limit {
-            cap,
-            used: 0,
-            parent: Some(parent),
-            forward: None,
-            grant,
-            owner,
-        });
-        self.limits.len() - 1
-    }
     /// MEM-20: refund the unused part to the parent and forward the record to it.
     /// Refunds still pending for `l` land in it first (native `drain_locked` at retire).
-    fn end_limit(&mut self, l: usize) {
-        self.settle(l);
-        let p = self.find(self.limits[l].parent.expect("not the root"));
-        let unused = self.limits[l].cap - self.limits[l].used;
-        let owner = self.limits[p].owner;
+    fn end_limit(&mut self, l: Limit) {
+        self.settle(&l);
+        let (parent, unused) = {
+            let state = l.0.state.lock().unwrap();
+            (
+                state.parent.as_ref().expect("not the root").find(),
+                l.0.cap - state.used,
+            )
+        };
+        let owner = parent.0.owner;
         if unused != 0 && owner != self.sched.current && owner < self.sched.tasks.len() {
             self.event(REFUND, self.sched.tasks[owner].id, unused);
         }
-        self.limits[p].used -= unused;
-        self.limits[l].forward = Some(p);
+        parent.subtract(unused);
+        let mut state = l.0.state.lock().unwrap();
+        state.parent = Some(parent);
+        state.ended = true;
     }
 
     // ---- types
@@ -2451,9 +2517,8 @@ impl Machine<'_> {
                 if self.latests[i].handles != 0 {
                     return false;
                 }
-                let Latest {
-                    item, root, limit, ..
-                } = self.latests[i];
+                let latest = &mut self.latests[i];
+                let (item, root, limit) = (latest.item, latest.root, latest.limit.take().unwrap());
                 let tmp = self.block(8, None, 0, None);
                 self.put(tmp, &root.to_le_bytes());
                 let failed = self.drop_value(t, tmp, item);
@@ -2495,21 +2560,16 @@ impl Machine<'_> {
         let mut failed = false;
         if let Some(f) = self.shape(ty).finalizer {
             let grant = self.mem[b].res.as_ref().expect("a resource block").grant;
-            let g = self.open_limit(
-                grant,
-                self.mem[b].limit.expect("charged"),
-                true,
-                self.sched.current,
-            );
+            let payer = self.mem[b].limit.clone().expect("charged");
+            let g = Limit::new(grant, Some(payer.clone()), true, self.sched.current);
             t.limits.push(g);
             t.obligations.push(Some(Cell {
-                limit: self.mem[b].limit.expect("charged"),
+                limit: payer,
                 amount: charge::CAUSE_CELL,
                 resource: true,
             }));
             failed = self.call(t, FuncId(f.0), &[blk]).is_err();
-            t.limits.pop();
-            self.end_limit(g);
+            self.end_limit(t.limits.pop().unwrap());
             // FAIL-10: a used resource cell left with a chain; a cell an isolate
             // installed in its place (unused) is refunded now.
             let used = match t.obligations.pop().expect("the finalizer's obligation") {
@@ -2537,11 +2597,11 @@ impl Machine<'_> {
     /// charge holds the child's first primary cell, which may have left with a
     /// chain: a used cell is among the cells returned to go with its `Causes`, or
     /// went with one the child caught.
-    fn settle_child(&mut self, i: usize) -> Vec<(usize, u64)> {
+    fn settle_child(&mut self, i: usize) -> Vec<(Limit, u64)> {
         let c = &mut self.children[i];
         assert!(!c.joined, "task handle used twice");
         c.joined = true;
-        let (l, n) = (c.limit, c.charge - c.n - charge::CAUSE_CELL);
+        let (l, n) = (c.limit.take().unwrap(), c.charge - c.n - charge::CAUSE_CELL);
         let cells = std::mem::take(&mut c.cells);
         let primary = c.primary.take();
         self.refund(l, n);
@@ -2553,7 +2613,7 @@ impl Machine<'_> {
     /// A chain as the run time delivers it, a `Causes` owning `cells`: one cell per
     /// cause, each a `Cause` in core's layout then the next cell (crate docs,
     /// "Causes"). The head cell.
-    fn deliver(&mut self, chain: Vec<Cause>, cells: Vec<(usize, u64)>) -> u64 {
+    fn deliver(&mut self, chain: Vec<Cause>, cells: Vec<(Limit, u64)>) -> u64 {
         let mut head = 0;
         for c in chain.iter().rev() {
             let cell = self.block(CELL_NEXT + 8, None, 0, None);
@@ -2643,9 +2703,9 @@ impl Machine<'_> {
         0
     }
     fn chan_freed(&mut self, i: usize) {
-        let c = &self.chans[i];
+        let c = &mut self.chans[i];
         if c.senders == 0 && !c.receiver {
-            let (l, n) = (c.limit, c.charge);
+            let (l, n) = (c.limit.take().unwrap(), c.charge);
             self.refund(l, n);
         }
     }
@@ -2668,7 +2728,7 @@ impl Machine<'_> {
 
     // ---- engine operations (CONC-3..6)
     fn rt(&mut self, t: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>> {
-        let cur = *t.limits.last().unwrap();
+        let cur = t.limits.last().unwrap();
         Ok(match op {
             RtOp::StepEnter => {
                 let parent = t.step_bounds.last().copied();
@@ -2729,7 +2789,7 @@ impl Machine<'_> {
                     return Ok(vec![0, room]); // x stays the caller's
                 }
                 // The child's limit serves the child, the next scheduler record.
-                let lim = self.open_limit(n, cur, false, self.sched.tasks.len());
+                let lim = Limit::new(n, Some(cur.clone()), false, self.sched.tasks.len());
                 let xb = self.block(self.held(x), None, 0, None);
                 let bytes = self.get(a[1], self.held(x) as usize).to_vec();
                 self.put(xb, &bytes);
@@ -2746,7 +2806,7 @@ impl Machine<'_> {
                     chain: Vec::new(),
                     cells: Vec::new(),
                     obligations: vec![Some(Cell {
-                        limit: cur,
+                        limit: cur.clone(),
                         amount: charge::CAUSE_CELL,
                         resource: false,
                     })],
@@ -2775,7 +2835,7 @@ impl Machine<'_> {
                     r,
                     charge,
                     n,
-                    limit: cur,
+                    limit: Some(cur.clone()),
                     joined: false,
                     cells: Vec::new(),
                     chain: Vec::new(),
@@ -2850,7 +2910,7 @@ impl Machine<'_> {
                     return Ok(vec![0, room]);
                 }
                 let r = Reservation {
-                    limit: cur,
+                    limit: cur.clone(),
                     chain: std::mem::take(&mut t.chain),
                     cells: std::mem::take(&mut t.cells),
                 };
@@ -2959,7 +3019,7 @@ impl Machine<'_> {
                             senders: 1,
                             receiver: true,
                             charge,
-                            limit: cur,
+                            limit: Some(cur.clone()),
                         });
                         let s = CHAN_BASE + 2 * (self.chans.len() as u64 - 1);
                         vec![s, s + 1, 0]
@@ -3014,7 +3074,7 @@ impl Machine<'_> {
                         item: TypeRef(item.0),
                         root: a[0],
                         handles: 1,
-                        limit: cur,
+                        limit: Some(cur.clone()),
                     });
                     vec![LATEST_BASE + self.latests.len() as u64 - 1, 0]
                 }
@@ -3731,14 +3791,14 @@ impl Machine<'_> {
             } => {
                 let l = match place {
                     AllocPlace::Like(v) => self.like(t, vals[v.index()]),
-                    AllocPlace::Current | AllocPlace::Region(_) => *t.limits.last().unwrap(),
+                    AllocPlace::Current | AllocPlace::Region(_) => t.limits.last().unwrap().clone(),
                 };
                 if let Some(token) = region_entry {
                     vals[token.index()] = 0;
                 }
                 let n = vals[charge.index()];
-                match self.admit_charge(l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
-                    Err(_) if self.limits[l].grant => return Err(Stop::Cause("Capacity")),
+                match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
+                    Err(_) if l.0.grant => return Err(Stop::Cause("Capacity")),
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
                     Ok(()) => {
                         let res = match kind {
@@ -3749,9 +3809,9 @@ impl Machine<'_> {
                             }),
                             _ => None,
                         };
-                        let p = self.block(vals[size.index()], Some(l), n, res);
+                        let p = self.block(vals[size.index()], Some(l.clone()), n, res);
                         if matches!(place, AllocPlace::Like(_)) {
-                            self.foreign_charge(l, n);
+                            self.foreign_charge(&l, n);
                         }
                         if let AllocKind::Environment { ty } = kind {
                             self.store(p, 8, ENV_BASE + u64::from(ty.0));
@@ -3804,7 +3864,10 @@ impl Machine<'_> {
                     "trim of a non-block or above its charge"
                 );
                 self.mem[blk].charge = n;
-                self.refund(self.mem[blk].limit.expect("a region block"), old - n);
+                self.refund(
+                    self.mem[blk].limit.clone().expect("a region block"),
+                    old - n,
+                );
             }
             Inst::RegionOpen { result } => {
                 self.regions.push(Vec::new());
@@ -3846,14 +3909,14 @@ impl Machine<'_> {
                 available,
                 bytes,
             } => {
-                let cur = *t.limits.last().unwrap();
+                let cur = t.limits.last().unwrap();
                 let n = vals[bytes.index()];
                 let (ok, room) = match self.admit(cur, n) {
                     Ok(()) => (1, 0),
                     Err(room) => (0, room),
                 };
                 if ok == 1 {
-                    let l = self.open_limit(n, cur, false, self.sched.current);
+                    let l = Limit::new(n, Some(cur.clone()), false, self.sched.current);
                     t.limits.push(l);
                 }
                 (vals[admitted.index()], vals[available.index()]) = (ok, room);
@@ -3926,8 +3989,8 @@ impl Machine<'_> {
                 self.edge(old, &edge, "grow's old storage");
                 let l = self.like(t, old);
                 let n = vals[charge.index()];
-                match self.admit_charge(l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
-                    Err(_) if self.limits[l].grant => return Err(Stop::Cause("Capacity")),
+                match self.admit_charge(&l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
+                    Err(_) if l.0.grant => return Err(Stop::Cause("Capacity")),
                     // Refused: the carrier, its block and the block's elements stay.
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
                     Ok(()) => {
@@ -3946,8 +4009,8 @@ impl Machine<'_> {
                             len <= new_cap && bytes <= vals[size.index()],
                             "grow to a block that does not hold the carrier's elements"
                         );
-                        let p = self.block(vals[size.index()], Some(l), n, None);
-                        self.foreign_charge(l, n);
+                        let p = self.block(vals[size.index()], Some(l.clone()), n, None);
+                        self.foreign_charge(&l, n);
                         let nb = split(p).0;
                         self.mem[nb].class =
                             Some(cleanup_class(&self.m.types, &self.recipes, &edge));
@@ -4172,4 +4235,44 @@ impl MinimumOrNumber for f64 {
         }
         x.min(y)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn ended_byte_limits_release_their_records() {
+    use hirsel_guard::admission::{Owner, OwnerKind};
+
+    let module = Module::default();
+    let mut machine = Machine::new(&module, 64, &WorldInput::default());
+    let meter = Owner::new(OwnerKind::Ledger);
+    let measure = meter.enter();
+    let mut peak = 0;
+    // MEM-20: each zero-byte scope has ended with no surviving reference.
+    // Only the root and the current scope need records, regardless of count.
+    let root = machine.root().clone();
+    for _ in 0..4096 {
+        machine.admit(&root, 0).unwrap();
+        let scope = Limit::new(0, Some(root.clone()), false, 0);
+        peak = peak.max(meter.bytes());
+        machine.end_limit(scope);
+    }
+    assert_eq!(root.used(), 0);
+    assert_eq!(meter.bytes(), 0);
+    eprintln!("peak live byte-limit record allocations: {peak} bytes");
+    assert!(peak <= 1024, "limit records used {peak} bytes");
+
+    // A live allocation pins both ended records through hand-over. Freeing the
+    // block refunds exactly its surviving charge to the root.
+    drop(measure);
+    machine.admit(&root, 64).unwrap();
+    let outer = Limit::new(64, Some(root.clone()), false, 0);
+    machine.admit(&outer, 48).unwrap();
+    let inner = Limit::new(48, Some(outer.clone()), false, 0);
+    machine.admit(&inner, 8).unwrap();
+    let block = machine.block(8, Some(inner.clone()), 8, None);
+    machine.end_limit(inner);
+    machine.end_limit(outer);
+    assert_eq!(root.used(), 8);
+    machine.free(block);
+    assert_eq!(root.used(), 0);
 }

@@ -3,6 +3,7 @@
 
 No runtime ratio is inferred from these compilation totals. Rust libraries are
 prebuilt as MEASURE.md requires; all first-party source lines are counted.
+The JSON fresh-build row also counts its executable lifecycle for the runtime budget.
 """
 import argparse
 import json
@@ -18,6 +19,20 @@ import measure
 import measurement_artifacts
 from run import manifest
 from service import execute, sample
+
+
+def runtime_budget(group, backend, side, observed):
+    # The matched Rust JSON family costs 378.7 M instructions with checked
+    # arithmetic, x86-64, O3 and the committed documents.json. Allow Rust +2%,
+    # rounded up to 0.1 M, independently of Hirsel's current count (json-regress-1080).
+    if (group, backend, side) != ('json', 'llvm', 'hirsel'):
+        return {}
+    rust = 378_700_000
+    maximum = (rust * 102 // 100 + 99_999) // 100_000 * 100_000
+    instructions = observed.get('instructions')
+    return dict(rust_instructions=rust, instruction_budget=maximum,
+                budget_passed=observed.get('status') == 'ok'
+                and type(instructions) is int and 0 < instructions <= maximum)
 
 
 def inputs(args, module, source):
@@ -178,10 +193,21 @@ def main():
                 command = [binary]
                 if side != 'hirsel' and args.group == 'json':
                     command += [Path(__file__).with_name('inputs').resolve() / 'documents.json']
-                observed = execute(command)
                 want = expected if stage != 'edit' else (b'262144\n241502240\n1\n' if args.group == 'json' else f'{int(expected)+1}\n'.encode())
-                if observed.returncode or observed.stdout != want or observed.stderr:
-                    row.update(status='wrong-output', output=observed.stdout.decode(errors='replace'), error=observed.stderr.decode(errors='replace'))
+                if (stage, args.group, args.backend, side) == ('fresh', 'json', 'llvm', 'hirsel'):
+                    runtime_directory = args.out / f'{stage}-{side}-run'
+                    runtime = sample(command, runtime_directory)
+                    output = (runtime_directory / 'stdout').read_bytes()
+                    if output != want:
+                        runtime.update(status='wrong-output', output=output.decode(errors='replace'))
+                    row['runtime'] = runtime
+                    row.update(runtime_budget(args.group, args.backend, side, runtime))
+                    if runtime['status'] != 'ok':
+                        row['status'] = runtime['status']
+                else:
+                    observed = execute(command)
+                    if observed.returncode or observed.stdout != want or observed.stderr:
+                        row.update(status='wrong-output', output=observed.stdout.decode(errors='replace'), error=observed.stderr.decode(errors='replace'))
             rows.append(row)
             (args.out / 'results.json').write_text(json.dumps(rows, indent=2, default=str) + '\n')
             print(json.dumps(row, default=str), flush=True)
@@ -190,7 +216,7 @@ def main():
     store = args.out / 'store'
     if store.is_dir():
         shutil.rmtree(store)
-    return int(any(r['status'] != 'ok' for r in rows))
+    return int(any(r['status'] != 'ok' or r.get('budget_passed') is False for r in rows))
 
 
 if __name__ == '__main__':

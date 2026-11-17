@@ -911,7 +911,7 @@ def counting_cc(args, root, work, name):
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
-                       + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
+                       + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_channel_new -Wl,--wrap=hirsel_core_try_send\n')
     wrapper.chmod(0o755)
     return wrapper
 
@@ -928,7 +928,10 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None):
                '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
                '--store', str(store), '--json', '--filter', prefix,
                '--limit', str(64 * 1024 * 1024), '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
+               '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
                '--dir', str(dir_for(store))]
+    if engine == 'llvm':
+        command.append('--release')
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
     wait_load()
@@ -952,6 +955,7 @@ def main():
     p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--cc', type=Path)
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm'])
+    p.add_argument('--call-law', action='append', choices=CALLS)
     p.add_argument('--no-mutants', action='store_true')
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
@@ -960,9 +964,10 @@ def main():
     p.add_argument('--admission-law', action='append', choices=['unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls'])
     args = p.parse_args()
-    r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1')
+    r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')
+    selected_calls = args.call_law or CALLS
     root = args.root.resolve()
     evaluator = args.evaluator.resolve()
     engines = args.backend or ['evaluator', 'cranelift', 'llvm']
@@ -974,9 +979,9 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
-        if args.part in ('admission', 'wire') or r1:
+        if args.part in ('admission', 'wire') or (r1 and args.part != 'calls'):
             admission_laws(args, root, work, engines, row)
-        if args.part == 'ingress' or r1:
+        if args.part == 'ingress' or (r1 and args.part != 'calls'):
             ingress_laws(args, root, work, engines, row)
         if r0 or args.part in ('wire', 'session'):
             session_laws(args, root, work, engines, row)
@@ -1009,10 +1014,12 @@ def main():
                                      'store@1/runner_p19/law_p19_place_twice')
             row(engine='evaluator', law='p19_place_twice', passed=value == 1, result=report)
         if 'evaluator' in engines and r1:
-            for name in CALLS:
+            # Socket laws wait for W8a's model network provider. W3d qualifies
+            # their unchanged assertions on both native engines.
+            for name in (n for n in selected_calls if n == 'l14_handles'):
                 value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
-            for name in SUBS:
+            for name in (() if args.part == 'calls' else SUBS):
                 value, report = evaluate(evaluator, base, 'store@1/runner/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1, result=report)
         # A mutant is red only when it builds and its law fails.
@@ -1064,10 +1071,8 @@ def main():
             # p19's place builds as its own program, in the store the laws primed and in a
             # fresh one: at 10,000 entries it reaches over 10,000 functions, each described.
             # R1's calls build alone under --part r1; 'store@1/runner_l' selects runner_laws and runner_l12.
-            calls = ('calls', [], 'store@1/runner_calls/', 'shared',
-                     {f'store@1/runner_calls/test_{n}' for n in CALLS})
             subs = ('subs', [], 'store@1/runner/', 'shared', {f'store@1/runner/test_{n}' for n in SUBS})
-            groups = (calls, subs) if r1 else ()
+            groups = ((subs,) if args.part != 'calls' else ()) if r1 else ()
             groups += () if not r0 else (
                       ('laws', [(l12, 'runner_l12')], 'store@1/runner_l', 'shared',
                        {f'store@1/runner_laws/test_{n}' for n in LAWS} | l12_want),
@@ -1088,12 +1093,12 @@ def main():
                     row(engine=engine, group=group, selection=f'{len(selected & want)}/{len(want)}',
                         passed=code == 0 and selected == want,
                         result=sorted(want ^ selected) or report.get('stderr', ''))
-                for name in COUNTS if r1 else ():
+                for name in selected_calls if r1 else ():
                     definition = f'store@1/runner_calls/test_{name}'
-                    code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition,
-                                              counting_cc(args, root, work, name))
+                    cc = counting_cc(args, root, work, name) if name in COUNTS else None
+                    code, report = native_run(args, engine, base, work / f'store-{engine}-shared', definition, cc)
                     tests = report.get('tests', [])
-                    row(engine=engine, law=name + '_count',
+                    row(engine=engine, law=name,
                         passed=code == 0 and [t['definition'] for t in tests] == [definition]
                         and all(t.get('passed') for t in tests),
                         result=tests or report)

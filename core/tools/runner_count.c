@@ -3,10 +3,58 @@
  * CONC-10 TRY_SEND events (the case's body, once per run, and the publisher, once per
  * answer it tells) and fails the run (status 105) unless there are exactly TRY_SENDS. */
 #include "hirsel_core_rt_host.h"
+#include "hirsel_core_rt_tasks.h"
+#include "hirsel_core_rt_sites.h"
+#include <string.h>
 #include <stdio.h>
 #ifndef TRY_SENDS
 #error "define TRY_SENDS"
 #endif
+// The socket owner and ingress add their own TRY_SENDs. Keep the original
+// body/publisher/compute-marker observation by attributing their tasks and the
+// marker's channel from the native source sites, rather than counting transport.
+static const HirselCoreSourceTable *source_table;
+static uint64_t head_task, publisher_task;
+static int publisher_spawn, observed, marker_send;
+static HirselCoreChannel *marker_channel;
+static int item_named(uint64_t site, const char *name) {
+    uint64_t ordinal = site >> 32;
+    if (!source_table || !ordinal || ordinal > source_table->items_len) return 0;
+    HirselCoreSourceItem item = source_table->items[ordinal - 1];
+    if (item.file >= source_table->files_len) return 0;
+    HirselCoreView source = source_table->files[item.file].source;
+    size_t offset = item.file_offset;
+    if (offset >= source.len) return 0;
+    for (size_t i = offset; i + 3 < source.len && i < offset + 32; i++) {
+        if (!memcmp(source.data + i, "fn ", 3)) {
+            size_t n = strlen(name), at = i + 3;
+            return at + n < source.len && !memcmp(source.data + at, name, n)
+                && (source.data[at+n] == '(' || source.data[at+n] == '[');
+        }
+    }
+    return 0;
+}
+extern HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext *, uint64_t, uint64_t, void *, HirselCoreTaskBody, HirselCoreTaskLayout, uint64_t);
+HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx, uint64_t tasks, uint64_t bytes, void *input, HirselCoreTaskBody body, HirselCoreTaskLayout layout, uint64_t site) {
+    publisher_spawn = item_named(site, "place_head");
+    HirselCoreSpawn out = __real_hirsel_core_spawn(ctx, tasks, bytes, input, body, layout, site);
+    publisher_spawn = 0;
+    return out;
+}
+extern HirselCoreChannelNew __real_hirsel_core_channel_new(HirselCoreContext *, uint64_t, HirselCoreValueLayout, uint64_t);
+HirselCoreChannelNew __wrap_hirsel_core_channel_new(HirselCoreContext *ctx, uint64_t capacity, HirselCoreValueLayout layout, uint64_t site) {
+    HirselCoreChannelNew out = __real_hirsel_core_channel_new(ctx, capacity, layout, site);
+    if (item_named(site, "answer")) marker_channel = out.sender;
+    return out;
+}
+extern uint8_t __real_hirsel_core_try_send(HirselCoreChannel *, void *);
+uint8_t __wrap_hirsel_core_try_send(HirselCoreChannel *channel, void *input) {
+    marker_send = channel == marker_channel && marker_channel != NULL;
+    if (marker_send) marker_channel = NULL;
+    uint8_t result = __real_hirsel_core_try_send(channel, input);
+    marker_send = 0;
+    return result;
+}
 static uint64_t try_sends;
 #ifdef HUNG_BODY_SENDS
 static struct { uint64_t object, task, count; int before_slice; } senders[3];
@@ -16,7 +64,13 @@ static int too_many_senders;
 #endif
 static void event(void *state, HirselCoreEvent e) {
     (void)state;
-    if (e.kind == HIRSEL_CORE_EVENT_TRY_SEND) {
+    if (e.kind == HIRSEL_CORE_EVENT_SPAWN && publisher_spawn) {
+        publisher_task = e.object;
+        head_task = e.task;
+        observed = 1;
+    }
+    if (e.kind == HIRSEL_CORE_EVENT_TRY_SEND && observed
+        && (e.task == head_task || e.task == publisher_task || marker_send)) {
         try_sends++;
 #ifdef HUNG_BODY_SENDS
         size_t i = 0;
@@ -35,21 +89,34 @@ static void event(void *state, HirselCoreEvent e) {
     if (e.kind == HIRSEL_CORE_EVENT_STEP_SLICE) { slice_task = e.task; slices++; }
 #endif
 }
+#ifdef HUNG_BODY_SENDS
+static size_t choose(void *state, size_t runnable) {
+    (void)state;
+    return runnable - 1;
+}
+#endif
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     const HirselCoreView *names, const HirselCoreSourceTable *sources, HirselCoreEntry entry) {
     (void)names;
+    source_table = sources;
     HirselCoreOpenProcess open = hirsel_core_os_process_new(input);
     if (!open.process) return HIRSEL_CORE_NOT_STARTED;
     hirsel_core_os_process_set_sources(open.process, sources);
     HirselCoreProcessConfig cfg = *hirsel_core_os_process_config(open.process);
     cfg.scheduler.event = event;
+#ifdef HUNG_BODY_SENDS
+    cfg.scheduler.choose = choose;
+#endif
     uint8_t status = hirsel_core_run(&cfg, entry);
     hirsel_core_os_process_free(open.process);
     dprintf(2, "runner_count: try_send %llu, want %llu\n", (unsigned long long)try_sends,
             (unsigned long long)TRY_SENDS);
     if (status) return status;
 #ifdef HUNG_BODY_SENDS
-    if (too_many_senders || sender_count != 3 || slices != 1) return 105;
+    if (try_sends != TRY_SENDS || too_many_senders || sender_count != 3 || slices != 1) {
+        for (size_t k = 0; k < sender_count; k++) fprintf(stderr, "runner_count: object %llu task %llu sends %llu\n", (unsigned long long)senders[k].object, (unsigned long long)senders[k].task, (unsigned long long)senders[k].count);
+        return 105;
+    }
     size_t body = 3, marker = 3, told = 3;
     for (size_t k = 0; k < 3; k++) {
         if (senders[k].count == HUNG_BODY_SENDS) body = k;
@@ -58,7 +125,10 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     }
     if (body == 3 || marker == 3 || told == 3 ||
         senders[body].task != slice_task || senders[marker].task == slice_task ||
-        senders[told].task == slice_task || !senders[marker].before_slice) return 105;
+        senders[told].task == slice_task || !senders[marker].before_slice) {
+        fprintf(stderr, "runner_count: body=%zu marker=%zu told=%zu slice_task=%llu marker_before_slice=%d\n", body, marker, told, (unsigned long long)slice_task, marker < 3 ? senders[marker].before_slice : -1);
+        return 105;
+    }
 #endif
     return try_sends == TRY_SENDS ? 0 : 105;
 }

@@ -3931,8 +3931,13 @@ fn wire_finish[G: send, H: send](mut s: WireSession[G, H]) -> Option[PubIn] {
 
 // Production sessions build place inside the owner, after source admission.
 pub fn wire_place_service[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], policy: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
+    wire_place_target(place, policy, head, clock, tasks, config, result.unwrap(launch_target(a)))
+}
+
+// Embedded hosts and socket fixtures supply their launch target directly.
+pub fn wire_place_target[G: send, H: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], policy: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H]] {
     let initial: Registry[G, H] = registry()
-    let mut service = wire_service(take initial, policy, head, clock, tasks, config, a)
+    let mut service = wire_service_seed(take initial, policy, head, clock, tasks, config, take target)
     service.context.place = Some(place)
     take service
 }
@@ -4015,4 +4020,52 @@ fn wire_check_live[G: send, H: send](s: WireSession[G, H], f: Frame) -> Option[u
         }
     }
     None
+}
+
+// Publisher harness: a joined inbox whose consumer the law can hold still.
+// This fixture does not create a session or a second call transport.
+pub type FixtureOwner { inbox: Receiver[Event], out: Sender[Down], from: Receiver[Down], post: Sender[PubIn], who: u64 }
+
+pub fn fixture_owner(pub_in: Sender[PubIn]) -> FixtureOwner waits {
+    let (to, inbox): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(64u64))
+    let who = join_as(pub_in, take to, None)
+    let (out, from): (Sender[Down], Receiver[Down]) = result.unwrap(channel.new(64u64))
+    FixtureOwner(inbox: take inbox, out: take out, from: take from, post: channel.sender(pub_in), who: who)
+}
+
+pub fn fixture_subscribe(owner: FixtureOwner, sub: u32, take key: Bytes, take arg: Bytes) -> () waits {
+    let _ = channel.send(owner.post, PubIn(e: Subscribed(owner.who, sub, take key, take arg)))
+}
+
+pub fn fixture_unsubscribe(owner: FixtureOwner, sub: u32) -> () waits {
+    let _ = channel.send(owner.post, PubIn(e: Unsubscribed(owner.who, sub)))
+}
+
+fn fixture_content(owner: FixtureOwner, take event: Event) -> () waits {
+    let Event(e: take e) = take event
+    let mut dropped: List[u32] = list.new()
+    if let Content(take o) = take e { hand(owner.out, take o, mut dropped) }
+    let _ = channel.try_send(owner.post, PubIn(e: Drained))
+}
+
+pub fn fixture_receive(owner: FixtureOwner) -> Result[Down, ReceiveError] waits {
+    loop {
+        if let Ok(take d) = channel.try_receive(owner.from) { return Ok(take d) }
+        match channel.receive(owner.inbox) {
+            Ok(take e) => fixture_content(owner, take e),
+            Error(_) => return Error(Closed),
+        }
+    }
+}
+
+pub fn fixture_try_receive(owner: FixtureOwner) -> Result[Down, ReceiveError] waits {
+    if let Ok(take d) = channel.try_receive(owner.from) { return Ok(take d) }
+    match channel.try_receive(owner.inbox) {
+        Ok(take e) => { fixture_content(owner, take e); channel.try_receive(owner.from) },
+        Error(e) => Error(e),
+    }
+}
+
+pub fn fixture_close(take owner: FixtureOwner) -> () waits {
+    let _ = channel.send(owner.post, PubIn(e: Left(owner.who)))
 }

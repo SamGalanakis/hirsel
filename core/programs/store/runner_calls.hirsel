@@ -255,50 +255,57 @@ fn err_value(o: runner.Outcome) -> Option[u32] {
 
 const NEVER: u64 = 18446744073709551615u64
 
-// A client: its way into a session, the session's frames, and a watchdog that sends a
-// frame at version NEVER after 5 s, so a call left unanswered fails its case.
-type Conn { to: Sender[runner.Event], from: Receiver[runner.Down], dog: Task[()], session: Task[Result[(), runner.RegisterError]] }
+// Each fixture binds one principal. Its connections resume that token, so two
+// connections naming one stream still address the same durable position.
+type Conn = Socket(wire_client.Conn, Task[Result[(), std.wsock.Error]]) | Held(runner.FixtureOwner)
+type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, policy: ingress.Ingress, token: Bytes }
 
-type Dog: send { clock: Clock, at: u64, to: Sender[runner.Down] }
-
-fn bark(take d: Dog) -> () waits {
-    host.sleep_until(d.clock, d.at)
-    let Dog(clock: _, at: _, to: take to) = take d
-    let _ = channel.send(to, Batched(runner.KeyedBatch(version: NEVER, complete: list.new(), rows: list.new(), outcomes: list.new())))
+// The malformed-flood laws exercise decoding and retained bytes, not the
+// production 20/s throttle. A one-nanosecond refill keeps their 10,000 probes
+// below the configured fixture rate without changing any queue or byte bound.
+fn fixture_policy() -> ingress.Config {
+    let mut config = ingress.defaults()
+    config.call_period_ns = 1u64
+    config
 }
 
-type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks }
-
-fn conn(tasks: Tasks, head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, q: u64) -> Conn {
-    conn_in(tasks, head, post, clock, q, 2097152u64)
-}
-
-fn conn_in(tasks: Tasks, head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, q: u64, n_session: u64) -> Conn {
-    let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
-    let (tx, rx) = result.unwrap(take made)
-    let d = Dog(clock: clock, at: host.mono_ns(clock) + 5000000000u64, to: channel.sender(tx))
-    let dog = match task.spawn(tasks, bytes 65536u64, take d, bark) {
-        Ok(take t) => take t,
-        Error(_) => fail("calls: watchdog spawn"),
+fn client_keys() -> List[Bytes] {
+    let mut requested_keys: List[Bytes] = list.new()
+    for key in [k_write(), k_refuse(), k_crash(), k_tally(), k_named(), k_flood(), k_everything(),
+        key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply()),
+        key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64()),
+        key_of(code.identity(code.describe(write)), std.codec.of_u32(), reply())] {
+        result.unwrap(list.push(mut requested_keys, result.unwrap(clone(key))))
     }
-    let (to, session) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, post, take tx, clock, q, n_session, false))
-    Conn(to: take to, from: take rx, dog: take dog, session: take session)
+    requested_keys
+}
+
+fn try_conn(d: Drive, q: u64, n_session: u64) -> Option[Conn] waits {
+    match wire_client.pair(d.tasks, d.net, d.clock, d.random, d.policy, d.head, d.post,
+        code.describe(place), client_keys(), Some(result.unwrap(clone(d.token))), q, n_session) {
+        Ok((take cn, take h)) => Some(Socket(take cn, take h)),
+        Error(_) => None,
+    }
+}
+
+fn conn(d: Drive, q: u64) -> Conn waits {
+    option.unwrap(try_conn(d, q, 2097152u64))
 }
 
 // A call with its deadline `after` ns from now.
 fn ask(cn: Conn, clock: Clock, s: u64, p: u64, take key: Bytes, take arg: Bytes, after: u64) -> () waits {
-    let c = runner.Call(stream: sid(s), p: p, key: take key, arg: take arg, deadline: host.mono_ns(clock) + after)
-    if let Error(_) = channel.send(cn.to, runner.ask(take c)) {
-        fail("calls: session gone")
-    }
+    let stream: u32 = int.narrow(s)
+    let ms: u32 = int.narrow(after / 1000000u64)
+    let request: runner.Frame = Call(stream, p, wire_client.slot(client_keys(), key), ms, take arg)
+    match cn { Socket(wire, _) => wire_client.send_frame(wire, take request), _ => fail("calls: synthetic owner cannot call") }
 }
 
 // One answer: a session sends each Outcome row in a Batch of its own, with no rows.
 type Got { version: u64, stream: Bytes, p: u64, outcome: runner.Outcome }
 
 fn frame(cn: Conn) -> Got waits {
-    match channel.receive(cn.from) {
-        Ok(Batched(take b)) => {
+    match down(cn) {
+        Batched(take b) => {
             want(b.version != NEVER, "calls: a call was not answered within 5 s")
             want(list.len(b.rows) == 0u64 && list.len(b.outcomes) == 1u64, "calls: one Outcome row per Batch")
             let runner.KeyedBatch(version: v, complete: _, rows: _, outcomes: take os) = take b
@@ -308,43 +315,58 @@ fn frame(cn: Conn) -> Got waits {
             }
             fail("calls: empty Batch")
         },
-        Ok(_) => fail("calls: a frame other than a Batch"),
-        Error(_) => fail("calls: client channel closed"),
+        _ => fail("calls: a frame other than a Batch"),
     }
 }
 
 fn hang(take cn: Conn) -> () waits {
-    let _ = channel.send(cn.to, runner.hang_up())
-    let Conn(to: _, from: _, dog: _, session: take s) = take cn
-    let _ = task.join(take s)
+    match take cn {
+        Socket(take wire, take s) => { let _ = wire_client.close(take wire); let _ = task.join(take s) },
+        Held(take owner) => runner.fixture_close(take owner),
+    }
 }
 
 const LATER: u64 = 10000000000u64
 
 // One place: a fresh memory store with "data", place_head on this task, and the case's
 // client driver as a task that ends by dropping its head sender.
-fn served(c: Clock, r: Random, tasks: Tasks, f: fn(take Drive) -> () waits) -> bool waits {
-    served_in(c, r, tasks, store.defaults(), f)
+fn served(c: Clock, r: Random, tasks: Tasks, n: Net, f: fn(take Drive) -> () waits) -> bool waits {
+    served_in(c, r, tasks, n, store.defaults(), f)
 }
 
-fn served_in(c: Clock, r: Random, tasks: Tasks, o: store.Options, f: fn(take Drive) -> () waits) -> bool waits {
-    served_on(store.memory(c, r, o), c, tasks, f)
+fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(take Drive) -> () waits) -> bool waits {
+    let mut token: Bytes = list.new()
+    served_on(store.memory(c, r, o), c, tasks, n, r, mut token, false, f)
 }
 
-fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, f: fn(take Drive) -> () waits) -> bool waits {
+fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: bool, f: fn(take Drive) -> () waits) -> bool waits {
     let mut db = take fresh
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let d = Drive(head: take head, post: runner.post(mail), clock: c, tasks: tasks)
+    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, fixture_policy(), 1048576u64))
+    let mut policy_task = take policy_handle
+    let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
+    result.unwrap(list.append(mut token, ingress.principal(principal)))
+    let mut forwarding: Option[Task[()]] = None
+    let to_head = if grouped {
+        let (to, from): (Sender[runner.Req], Receiver[runner.Req]) = result.unwrap(channel.new(64u64))
+        let seed = Group(head: take head, from: take from)
+        forwarding = Some(result.unwrap(task.spawn(tasks, bytes 65536u64, take seed, group)))
+        take to
+    } else { take head }
+    let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))))
     let driving = match task.spawn(tasks, bytes 33554432u64, take d, f) {
         Ok(take t) => take t,
         Error(_) => return false,
     }
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
+    if let Some(take h) = take forwarding { let _ = task.join(take h) }
+    task.cancel(mut policy_task)
+    let _ = task.join(take policy_task)
     match opened {
         Ok(()) => (),
         Error(_) => return false,
@@ -355,11 +377,22 @@ fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, f: fn(take Drive) -> 
     }
 }
 
+// V4's fixture submits its first two independent streams together, after the
+// socket owner has admitted both. Subsequent requests pass through normally.
+type Group: send { head: Sender[runner.Req], from: Receiver[runner.Req] }
+fn group(take g: Group) -> () waits {
+    let first = result.unwrap(channel.receive(g.from))
+    let second = result.unwrap(channel.receive(g.from))
+    result.unwrap(channel.try_send(g.head, take first))
+    result.unwrap(channel.try_send(g.head, take second))
+    loop { match channel.receive(g.from) { Ok(take q) => { let _ = channel.send(g.head, take q) }, Error(_) => return } }
+}
+
 // two_sessions_two_streams, and C5: each outcome arrives in a frame at its commit's
 // version or later, and a session's frame versions never go back.
 fn drive_two_streams(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
-    let s1 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
+    let s1 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
     let a0 = frame(s0)
     want(ok_value(a0.outcome) == Some(3u64) && a0.version == 3u64, "two_streams: A p0 at 3")
@@ -373,8 +406,8 @@ fn drive_two_streams(take d: Drive) -> () waits {
     hang(take s1)
 }
 
-pub fn law_calls_two_streams(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_two_streams)
+pub fn law_calls_two_streams(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_two_streams)
 }
 
 // V4 (release_at_commit_version): A and B, sent together, commit in one group (A at 4,
@@ -382,7 +415,7 @@ pub fn law_calls_two_streams(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 // alone, commits at 8. These pins carry L6+L7: an answer held past its first Batch
 // at or above its commit moves a version off its pin.
 fn drive_group(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(1u64), LATER)
     ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(2u64), LATER)
     let x = frame(s0)
@@ -407,15 +440,15 @@ fn drive_group(take d: Drive) -> () waits {
 // version 0, the client channel stays open, and the session ends without a fault. Then
 // p0 of the stream commits at 4: the version and the streams row did not move.
 fn survives(d: Drive, n: u64, frames: u64) -> bool waits {
-    let cn = conn_in(d.tasks, d.head, d.post, d.clock, 1u64, n)
+    let Some(take cn) = try_conn(d, 1u64, n) else { return false }
     let bad = string_arg(4096u64, true)
     let mut all = true
     let mut i = 0u64
     while all && i < frames {
         let arg: Bytes = result.unwrap(clone(bad))
         ask(cn, d.clock, 0u64, 0u64, k_named(), take arg, LATER)
-        all = match channel.receive(cn.from) {
-            Ok(Batched(b)) => b.version == 0u64 && list.len(b.outcomes) == 1u64 && match b.outcomes[0].outcome {
+        all = match down(cn) {
+            Batched(b) => b.version == 0u64 && list.len(b.outcomes) == 1u64 && match b.outcomes[0].outcome {
                 Refused(Malformed(_)) => true,
                 _ => false,
             },
@@ -423,10 +456,8 @@ fn survives(d: Drive, n: u64, frames: u64) -> bool waits {
         }
         i += 1u64
     }
-    let _ = channel.send(cn.to, runner.hang_up())
-    let Conn(to: _, from: _, dog: _, session: take s) = take cn
-    match task.join(take s) {
-        Ok(Ok(())) => all,
+    match take cn {
+        Socket(take wire, take s) => { let _ = wire_client.close(take wire); match task.join(take s) { Ok(Ok(())) => all, _ => false } },
         _ => false,
     }
 }
@@ -444,19 +475,20 @@ fn drive_session_charge(take d: Drive) -> () waits {
     }
     want(lo < 4194304u64, "session_charge: no session answers one hostile frame")
     want(survives(d, lo, 10000u64), "session_charge: 10,000 refused frames under one hostile decode")
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(1u64), LATER)
     let f = frame(s0)
     want(ok_value(f.outcome) == Some(3u64), "session_charge: nothing committed, p0 at 3")
     hang(take s0)
 }
 
-pub fn law_calls_session_charge(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_session_charge)
+pub fn law_calls_session_charge(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_session_charge)
 }
 
-pub fn law_calls_group_version(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_group)
+pub fn law_calls_group_version(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    let mut token: Bytes = list.new()
+    served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, true, drive_group)
 }
 
 // joiners (drop_joiner): two sessions send one position; both are answered with the one
@@ -465,9 +497,9 @@ pub fn law_calls_group_version(c: Clock, r: Random, tasks: Tasks) -> bool waits 
 // Refused(RequestMismatch), never the run's reply, whether it meets the worker (H1) or the
 // store's admit after the release (AH1); it commits nothing, so p1 is still at 5.
 fn drive_joiners(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
-    let s1 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
-    let s2 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
+    let s1 = conn(d, 1u64)
+    let s2 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
     ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
     ask(s2, d.clock, 0u64, 0u64, k_write(), u64_arg(6u64), LATER)
@@ -483,8 +515,8 @@ fn drive_joiners(take d: Drive) -> () waits {
     hang(take s2)
 }
 
-pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_joiners)
+pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_joiners)
 }
 
 // L21/V2 (join_digest): one session sends p with x, then p with y while p is held. The
@@ -492,15 +524,15 @@ pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 // its client receives is the 5 s watchdog's batch, and its task has ended. Another session
 // then gets x's reply at p, so the body ran once, with x.
 fn drive_session_mismatch(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(6u64), LATER)
-    match channel.receive(s0.from) {
-        Ok(Batched(b)) => want(b.version == NEVER, "session_mismatch: a row after the mismatch"),
+    match down(s0) {
+        Batched(b) => want(b.version == NEVER, "session_mismatch: a row after the mismatch"),
         _ => fail("session_mismatch: a frame other than the watchdog's"),
     }
     want(session_closed(take s0), "session_mismatch: the session did not end")
-    let s1 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s1 = conn(d, 1u64)
     ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
     want(ok_value(frame(s1).outcome) == Some(3u64), "session_mismatch: x ran once, at 3")
     hang(take s1)
@@ -508,32 +540,30 @@ fn drive_session_mismatch(take d: Drive) -> () waits {
 
 // The session ended by itself (Close 1008 on the wire): its task has returned.
 fn session_closed(take cn: Conn) -> bool waits {
-    let Conn(to: _, from: _, dog: _, session: take s) = take cn
-    let ended = task.join(take s)
-    match ended {
-        Ok(Ok(())) => true,
+    match take cn {
+        Socket(take wire, take s) => { let _ = wire_client.close(take wire); match task.join(take s) { Ok(Ok(())) => true, _ => false } },
         _ => false,
     }
 }
 
-pub fn law_calls_session_mismatch(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_session_mismatch)
+pub fn law_calls_session_mismatch(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_session_mismatch)
 }
 
 @test
-fn test_calls_session_mismatch(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_session_mismatch(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_session_mismatch(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_session_mismatch(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 // V3 and C3/C5 (direct_commitless): a re-send from another session gets the stored reply,
 // byte-equal, in a frame at or above its commit; an older position gets Refused(HistoryUnavailable).
 fn drive_duplicate(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
     let first = frame(s0)
     want(ok_value(first.outcome) == Some(3u64) && first.version == 3u64, "duplicate: first answer")
     hang(take s0)
-    let s1 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s1 = conn(d, 1u64)
     ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
     let again = frame(s1)
     want(is(again.outcome, first.outcome), "duplicate: byte-equal reply")
@@ -547,8 +577,8 @@ fn drive_duplicate(take d: Drive) -> () waits {
     hang(take s1)
 }
 
-pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_duplicate)
+pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_duplicate)
 }
 
 // refusals with L2 and L3, one session with q = 0:
@@ -559,7 +589,7 @@ pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 // - L3: the failed position re-sent 3 times returns the stored reply and runs nothing
 //   (the next position commits at 10).
 fn drive_refusals(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 0u64)
+    let s0 = conn(d, 0u64)
     for _ in 0u64 .. 10000u64 {
         ask(s0, d.clock, 1u64, 0u64, k_write(), list.new(), LATER)
         let f = frame(s0)
@@ -585,8 +615,8 @@ fn drive_refusals(take d: Drive) -> () waits {
     hang(take s0)
 }
 
-pub fn law_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_refusals)
+pub fn law_calls_refusals(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_refusals)
 }
 
 // L17 on the wire (RUNNER-SPEC §8.2; v2.12's one publisher inbox): a Subscribe reaches the
@@ -613,10 +643,37 @@ fn data_value(k: u8) -> Bytes {
     out
 }
 
+fn projected(take f: runner.Frame) -> runner.Down {
+    match take f {
+        Batch(v, take complete, take rows, take outcomes) => {
+            let mut os: List[runner.KeyedDone] = list.new()
+            for take d in outcomes {
+                let runner.Done(stream: stream, p: p, outcome: take o) = take d
+                result.unwrap(list.push(mut os, runner.KeyedDone(stream: sid(int.widen(stream)), p: p, outcome: take o)))
+            }
+            Batched(runner.KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: take os))
+        },
+        Ended(sub, take o) => Ended(sub, take o),
+        Reset(_, _) => Reset,
+        _ => fail("calls: unexpected wire frame"),
+    }
+}
+
 fn down(cn: Conn) -> runner.Down waits {
-    match channel.receive(cn.from) {
+    let got: Result[runner.Down, ReceiveError] = match cn {
+        Socket(wire, _) => match wire_client.next(wire) { Ok(take f) => Ok(projected(take f)), Error(e) => Error(e) },
+        Held(owner) => runner.fixture_receive(owner),
+    }
+    match take got {
         Ok(take d) => take d,
-        Error(_) => fail("calls: client channel closed"),
+        Error(_) => Batched(runner.KeyedBatch(version: NEVER, complete: list.new(), rows: list.new(), outcomes: list.new())),
+    }
+}
+
+fn try_down(cn: Conn) -> Result[runner.Down, ReceiveError] waits {
+    match cn {
+        Socket(wire, _) => match wire_client.try_next(wire) { Ok(take f) => Ok(projected(take f)), Error(e) => Error(e) },
+        Held(owner) => runner.fixture_try_receive(owner),
     }
 }
 
@@ -624,14 +681,16 @@ fn subscribe(cn: Conn, sub: u32, take key: Bytes) -> () waits {
     let ca: std.codec.Codec[u32] = std.codec.of()
     let mut arg: Bytes = list.new()
     result.unwrap(std.codec.encode(ca, 0u32, mut arg))
-    if let Error(_) = channel.send(cn.to, runner.subscribe(sub, take key, take arg)) {
-        fail("calls: session gone")
+    match cn {
+        Socket(wire, _) => wire_client.send_frame(wire, Subscribe(sub, wire_client.slot(client_keys(), key), take arg, None)),
+        Held(owner) => runner.fixture_subscribe(owner, sub, take key, take arg),
     }
 }
 
 fn unsubscribe(cn: Conn, sub: u32) -> () waits {
-    if let Error(_) = channel.send(cn.to, runner.unsubscribe(sub)) {
-        fail("calls: session gone")
+    match cn {
+        Socket(wire, _) => wire_client.send_frame(wire, Unsubscribe(sub)),
+        Held(owner) => runner.fixture_unsubscribe(owner, sub),
     }
 }
 
@@ -674,7 +733,7 @@ fn written(g: Got, version: u64) -> bool {
 }
 
 fn drive_subs_wired(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
     want(written(frame(s0), 3u64), "wired: write(10) at 3")
     subscribe(s0, 1u32, k_everything())
@@ -722,8 +781,8 @@ fn resubscribed(a: Conn, n: u64) -> () waits {
 }
 
 fn drive_publisher_never_blocks(take d: Drive) -> () waits {
-    let a = conn(d.tasks, d.head, d.post, d.clock, 1u64)
-    let b = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let a: Conn = Held(runner.fixture_owner(d.post))
+    let b = conn(d, 1u64)
     subscribe(a, 1u32, k_everything())
     subscribe(b, 1u32, k_everything())
     want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "never_blocks: B's empty initial Batch at 1")
@@ -734,7 +793,7 @@ fn drive_publisher_never_blocks(take d: Drive) -> () waits {
     let mut ended = false
     let mut extra = 0u64
     while !ended {
-        match channel.try_receive(a.from) {
+        match try_down(a) {
             Ok(Batched(_)) => (),
             Ok(Ended(sub, o)) => {
                 want(sub == 1u32 && is(o, Refused(Overloaded)), "never_blocks: A's sub ends Overloaded")
@@ -774,8 +833,8 @@ fn quiet_drain(a: Conn) -> () waits {
 // quiet; A still gets its Ended, after the rounds that fit and before its resubscribe's
 // Batch. Twice, so a wake spent on the first bounce cannot carry the second.
 fn drive_owed_ended_delivered(take d: Drive) -> () waits {
-    let a = conn(d.tasks, d.head, d.post, d.clock, 1u64)
-    let b = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let a: Conn = Held(runner.fixture_owner(d.post))
+    let b = conn(d, 1u64)
     subscribe(a, 1u32, k_everything())
     subscribe(b, 1u32, k_everything())
     want(content(down(b), 1u64, Some(1u32), 1u32, list.new()), "owed_ended: B's empty initial Batch at 1")
@@ -789,31 +848,31 @@ fn drive_owed_ended_delivered(take d: Drive) -> () waits {
     hang(take b)
 }
 
-pub fn law_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_owed_ended_delivered)
+pub fn law_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_owed_ended_delivered)
 }
 
 @test
-fn test_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_owed_ended_delivered(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_owed_ended_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_owed_ended_delivered(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
-pub fn law_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_publisher_never_blocks)
-}
-
-@test
-fn test_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_publisher_never_blocks(c, r, tasks) { Ok(()) } else { Error(()) }
-}
-
-pub fn law_subs_wired(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_subs_wired)
+pub fn law_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_publisher_never_blocks)
 }
 
 @test
-fn test_subs_wired(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_subs_wired(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_publisher_never_blocks(c, r, tasks, n) { Ok(()) } else { Error(()) }
+}
+
+pub fn law_subs_wired(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_subs_wired)
+}
+
+@test
+fn test_subs_wired(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_subs_wired(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 // R5 (RUNNER-SPEC §7's table, rows Committed, Aborted(u) and Failed) on a disk store, since a
@@ -824,7 +883,7 @@ fn test_subs_wired(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
 // with the requested key, the exact argument bytes, the stream, and the code.revision of
 // the entry that ran.
 fn drive_recorded(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(10u64), LATER)
     want(ok_value(frame(s0).outcome) == Some(3u64), "recorded: write committed at 3")
     ask(s0, d.clock, 0u64, 1u64, k_refuse(), u64_arg(7u64), LATER)
@@ -849,9 +908,9 @@ fn revision_is[F](got: Option[Bytes], s: StaticFn[F]) -> bool {
     }
 }
 
-fn record_is(got: Option[store.CallRecord], key: Bytes, arg: u64, entry: u64) -> bool {
+fn record_is(got: Option[store.CallRecord], key: Bytes, arg: u64, entry: u64, token: Bytes) -> bool {
     match got {
-        Some(c) => c.key == key && c.args == u64_arg(arg) && c.stream == sid(0u64) && if entry == 0u64 {
+        Some(c) => c.key == key && c.args == u64_arg(arg) && c.stream == wire_client.stream(token, 0u32) && if entry == 0u64 {
             revision_is(c.revision, code.describe(write))
         } else if entry == 1u64 {
             revision_is(c.revision, code.describe(refuse))
@@ -873,12 +932,13 @@ fn disk_options() -> store.Options {
     o
 }
 
-pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut name = result.unwrap(string.with_capacity(64u64))
     result.unwrap(string.push(mut name, "runner-recorded-"))
     let dir = result.unwrap(host.mkdtemp(d, mut name))
     let db = result.unwrap(store.open(tasks, dir, c, r, disk_options()))
-    if !served_on(take db, c, tasks, drive_recorded) {
+    let mut token: Bytes = list.new()
+    if !served_on(take db, c, tasks, n, r, mut token, false, drive_recorded) {
         return false
     }
     let mut o = disk_options()
@@ -888,11 +948,11 @@ pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wai
     for v in 1u64 .. 9u64 {
         let got = result.unwrap(store.recorded(again, b, v))
         let held = if v == 3u64 {
-            record_is(got, k_write(), 10u64, 0u64)
+            record_is(got, k_write(), 10u64, 0u64, token)
         } else if v == 5u64 {
-            record_is(got, k_refuse(), 7u64, 1u64)
+            record_is(got, k_refuse(), 7u64, 1u64, token)
         } else if v == 7u64 {
-            record_is(got, k_crash(), 2u64, 2u64)
+            record_is(got, k_crash(), 2u64, 2u64, token)
         } else {
             match got {
                 None => true,
@@ -908,8 +968,8 @@ pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wai
 }
 
 @test
-fn test_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_recorded(d, c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_recorded(d, c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 // L3 (§8): a Failed position re-sent k times runs its handler exactly once. A Failed
@@ -920,7 +980,7 @@ fn test_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 // on every engine: p0 is admitted at 3 and its reply kept alone at 4, and each of the
 // three re-sends returns that stored reply.
 fn drive_runs_once(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 0u64)
+    let s0 = conn(d, 0u64)
     for _ in 0u64 .. 4u64 {
         ask(s0, d.clock, 0u64, 0u64, k_tally(), u64_arg(5u64), LATER)
         let f = frame(s0)
@@ -929,8 +989,8 @@ fn drive_runs_once(take d: Drive) -> () waits {
     hang(take s0)
 }
 
-pub fn law_calls_runs_once(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_runs_once)
+pub fn law_calls_runs_once(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_runs_once)
 }
 
 // refusals' store refusal (C3): the store refuses p0's effect commit
@@ -939,7 +999,7 @@ pub fn law_calls_runs_once(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 // it waits in the FIFO and is Abandoned at its deadline. A re-send of p0 runs it again
 // and is refused again; it is not HistoryUnavailable, which C3 allows only for a replied position.
 fn drive_store_refusal(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_flood(), u64_arg(FLOOD), LATER)
     let a = frame(s0)
     want(is(a.outcome, Refused(Overloaded)) && a.version == 1u64, "store_refusal: p0 refused by the store")
@@ -954,10 +1014,10 @@ fn drive_store_refusal(take d: Drive) -> () waits {
 
 const FLOOD: u64 = 4000u64
 
-pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut o = store.defaults()
     o.resident_limit = 32768u64
-    served_in(c, r, tasks, o, drive_store_refusal)
+    served_in(c, r, tasks, n, o, drive_store_refusal)
 }
 
 // Rule 5: every send ends in exactly one Outcome (review 1042, law_abandoned_no_resend).
@@ -973,7 +1033,7 @@ pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks) -> bool waits 
 // - p1 Abandoned in a session that then ends: the head runs it for nobody, and another
 //   session's p0 and p2 of that stream are answered (22, 26).
 fn drive_one_outcome_per_send(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 2u64)
+    let s0 = conn(d, 2u64)
     ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(1u64), 2000000u64)
     let a = frame(s0)
     want(a.p == 1u64 && is(a.outcome, Abandoned), "one_outcome: p1 Abandoned")
@@ -1008,7 +1068,7 @@ fn drive_one_outcome_per_send(take d: Drive) -> () waits {
     ask(s0, d.clock, 3u64, 2u64, k_write(), u64_arg(302u64), LATER)
     let e3 = frame(s0)
     want(e3.p == 2u64 && ok_value(e3.outcome) == Some(19u64), "one_outcome: stream 3 p2 next")
-    let s1 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s1 = conn(d, 1u64)
     ask(s1, d.clock, 4u64, 1u64, k_write(), u64_arg(401u64), 2000000u64)
     let f = frame(s1)
     want(f.p == 1u64 && is(f.outcome, Abandoned), "one_outcome: stream 4 p1 Abandoned")
@@ -1022,8 +1082,8 @@ fn drive_one_outcome_per_send(take d: Drive) -> () waits {
     hang(take s0)
 }
 
-pub fn law_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_one_outcome_per_send)
+pub fn law_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_one_outcome_per_send)
 }
 
 // L7/deadline_held (v2.4), on the real head. p1 of a fresh stream, sent before p0, waits
@@ -1032,7 +1092,7 @@ pub fn law_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks) -> bool
 // p0 commits at 4, and p1, which the re-send joins locally, runs once and commits at 6.
 // The next position is the next frame, at 8, so p1 was answered once.
 fn drive_deadline_held(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
     ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(11u64), 2000000u64)
     let a = frame(s0)
     want(is(a.outcome, Abandoned) && a.p == 1u64 && a.version == 0u64, "deadline_held: Abandoned at the deadline")
@@ -1048,8 +1108,8 @@ fn drive_deadline_held(take d: Drive) -> () waits {
     hang(take s0)
 }
 
-pub fn law_calls_deadline_held(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_deadline_held)
+pub fn law_calls_deadline_held(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_deadline_held)
 }
 
 // The session's V1 and V2 logic against a head that holds every request and answers none
@@ -1063,12 +1123,16 @@ pub fn law_calls_deadline_held(c: Clock, r: Random, tasks: Tasks) -> bool waits 
 //   A's Abandoned arrives before B's deadline, then B's (latest_deadline);
 // - L15, a joined send takes a slot: with q = 0 a second send of a held position is
 //   Overloaded at once, and the first is Abandoned at its deadline (join_outside_account).
-pub fn law_calls_held_head(c: Clock, tasks: Tasks) -> bool waits {
+pub fn law_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
     let mail = result.unwrap(runner.mailbox(1u64))
     let post = runner.post(mail)
-    let s0 = conn(tasks, head, post, c, 0u64)
+    let (policy, take policy_handle) = result.unwrap(ingress.start(tasks, c, r, fixture_policy(), 1048576u64))
+    let mut policy_task = take policy_handle
+    let principal = option.unwrap(ingress.hello(policy, V4(0x7f000001u32), None))
+    let d = Drive(head: channel.sender(head), post: channel.sender(post), clock: c, tasks: tasks, net: n, random: r, policy: ingress.share(policy), token: result.unwrap(clone(ingress.principal(principal))))
+    let s0 = conn(d, 0u64)
     ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     let a = frame(s0)
     want(is(a.outcome, Abandoned) && a.version == 0u64, "held_head: Abandoned at the deadline")
@@ -1083,12 +1147,12 @@ pub fn law_calls_held_head(c: Clock, tasks: Tasks) -> bool waits {
     want(is(frame(s0).outcome, Abandoned), "held_head: a re-send joins locally")
     want(empty(inbox), "held_head: a re-send is not forwarded")
     hang(take s0)
-    let s1 = conn(tasks, head, post, c, 1u64)
+    let s1 = conn(d, 1u64)
     ask(s1, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     ask(s1, c, 0u64, 1u64, k_write(), u64_arg(2u64), 2000000u64)
     want(is(frame(s1).outcome, Abandoned) && is(frame(s1).outcome, Abandoned), "held_head: both answered by the session")
     hang(take s1)
-    let s3 = conn(tasks, head, post, c, 1u64)
+    let s3 = conn(d, 1u64)
     ask(s3, c, 0u64, 0u64, k_write(), u64_arg(3u64), 2000000u64)
     let b_at = host.mono_ns(c) + 50000000u64
     ask(s3, c, 0u64, 0u64, k_write(), u64_arg(3u64), 50000000u64)
@@ -1096,17 +1160,19 @@ pub fn law_calls_held_head(c: Clock, tasks: Tasks) -> bool waits {
     want(is(first.outcome, Abandoned) && host.mono_ns(c) < b_at, "held_head: the first send is Abandoned at its own deadline")
     want(is(frame(s3).outcome, Abandoned) && host.mono_ns(c) >= b_at, "held_head: the second send at its own")
     hang(take s3)
-    let s2 = conn(tasks, head, post, c, 0u64)
+    let s2 = conn(d, 0u64)
     ask(s2, c, 0u64, 9u64, k_write(), u64_arg(9u64), 2000000u64)
     ask(s2, c, 0u64, 9u64, k_write(), u64_arg(9u64), 2000000u64)
     want(is(frame(s2).outcome, Refused(Overloaded)), "held_head: with q = 0 a join takes the second slot")
     want(is(frame(s2).outcome, Abandoned), "held_head: the first send is still answered")
     hang(take s2)
+    task.cancel(mut policy_task)
+    let _ = task.join(take policy_task)
     true
 }
 
 // L14: a `handles` that commits on its second call fails the open; one that resolves opens.
-pub fn law_l14_handles(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+pub fn law_l14_handles(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut ok = true
     for commits in [false, true] {
         let mut db = store.memory(c, r, store.defaults())
@@ -1131,70 +1197,70 @@ pub fn law_l14_handles(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 }
 
 @test
-fn test_calls_two_streams(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_two_streams(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_two_streams(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_two_streams(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_session_charge(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_session_charge(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_session_charge(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_session_charge(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_group_version(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_group_version(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_group_version(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_group_version(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_joiners(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_joiners(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_joiners(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_joiners(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_duplicate(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_duplicate(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_duplicate(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_duplicate(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_refusals(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_refusals(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_refusals(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_refusals(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_one_outcome_per_send(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_one_outcome_per_send(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_one_outcome_per_send(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_store_refusal(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_store_refusal(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_store_refusal(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_store_refusal(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_held_head(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_held_head(c, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> Result[(), ()] waits {
+    if law_calls_held_head(c, tasks, n, r) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_deadline_held(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_deadline_held(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_deadline_held(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_deadline_held(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_runs_once(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_runs_once(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 @test
-fn test_l14_handles(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_l14_handles(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_l14_handles(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_l14_handles(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 // A stopped transaction is reply-only, is replayed for a Duplicate, and leaves
 // its writes absent. The second session's compute call also receives its answer.
 fn drive_deadline_hung(take d: Drive) -> () waits {
-    let s0 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
-    let s1 = conn(d.tasks, d.head, d.post, d.clock, 1u64)
+    let s0 = conn(d, 1u64)
+    let s1 = conn(d, 1u64)
     let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply())
     let ka = key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64())
     ask(s0, d.clock, 0u64, 0u64, result.unwrap(clone(kh)), u64_arg(5u64), LATER)
@@ -1219,11 +1285,11 @@ fn drive_deadline_hung(take d: Drive) -> () waits {
     hang(take s1)
 }
 
-pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    served(c, r, tasks, drive_deadline_hung)
+pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_deadline_hung)
 }
 
 @test
-fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_calls_deadline_hung(c, r, tasks) { Ok(()) } else { Error(()) }
+fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_deadline_hung(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }

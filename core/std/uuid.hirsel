@@ -1,0 +1,175 @@
+/// The 128 UUID bits in network order. Ordering compares hi first.
+pub type Uuid: key + ordered {
+    hi: u64,
+    lo: u64
+}
+
+/// The prefix of byte 8, as defined in RFC 9562 section 4.1.
+pub type Variant: key = Ncs | Rfc | Microsoft | Future
+
+/// The byte offset at which the text first stops matching the grammar.
+pub type Error: key = Invalid(u64)
+
+fn hyphen_at(i: u64) -> bool {
+    i == 8 || i == 13 || i == 18 || i == 23
+}
+
+fn hex_digit(b: u8) -> Option[u64] {
+    if b >= b'0' && b <= b'9' {
+        Some(int.widen(b - b'0'))
+    } else if b >= b'a' && b <= b'f' {
+        Some(int.widen(b - b'a' + 10))
+    } else if b >= b'A' && b <= b'F' {
+        Some(int.widen(b - b'A' + 10))
+    } else {
+        None
+    }
+}
+
+/// Accepts exactly the RFC 9562 section 4 form, 8-4-4-4-12, in either case.
+/// Fails: Invalid at the first wrong byte, the end of a short matching prefix,
+/// or byte 36 if a complete UUID is followed by extra bytes.
+/// Alloc: nothing. Cost: O(36). Ex: `let id = std.uuid.parse(text)?`.
+pub fn parse(s: String) -> Result[Uuid, Error] {
+    let b = string.as_bytes(s)
+    let len = list.len(b)
+    let mut hi: u64 = 0
+    let mut lo: u64 = 0
+    let mut i: u64 = 0
+    while i < 36 && i < len {
+        if hyphen_at(i) {
+            if b[i] != b'-' {
+                return Error(Invalid(i))
+            }
+        } else {
+            let Some(digit) = hex_digit(b[i]) else {
+                return Error(Invalid(i))
+            }
+            if i < 18 {
+                hi = (hi << 4) | digit
+            } else {
+                lo = (lo << 4) | digit
+            }
+        }
+        i += 1
+    }
+    if len != 36 {
+        return Error(Invalid(i))
+    }
+    Ok(Uuid(hi: hi, lo: lo))
+}
+
+/// Appends the lowercase RFC 9562 section 4 text in 8-4-4-4-12 form.
+/// Fails: Capacity leaves out unchanged. The function reserves all 36 bytes first.
+/// Alloc: growth of out. Cost: O(36). Ex: `std.uuid.push(mut line, id)?`.
+pub fn push(mut out: String, u: Uuid) -> Result[(), Capacity] {
+    string.reserve(mut out, 36)?
+    let hex = "0123456789abcdef"
+    let mut digits: u64 = 0
+    for i in 0u64 .. 36u64 {
+        if hyphen_at(i) {
+            let _ = string.push(mut out, "-")
+        } else {
+            let word = if digits < 16 {
+                u.hi
+            } else {
+                u.lo
+            }
+            let digit = (word >> ((15 - digits % 16) * 4)) & 15
+            let _ = string.push(mut out, string.slice(hex, digit, digit + 1))
+            digits += 1
+        }
+    }
+    Ok(())
+}
+
+// Offsets are relative to a checked suffix, so even u64's largest offset
+// produces Bounds without forming an overflowing at + width.
+fn read_word(b: Bytes, start: u64, end: u64) -> u64 {
+    let mut word: u64 = 0
+    for i in start .. end {
+        let byte: u64 = int.widen(b[i])
+        word = (word << 8) | byte
+    }
+    word
+}
+
+/// Reads the 16 bytes starting at at, in network order.
+/// Fails: Bounds if the range is outside b. Alloc: nothing.
+pub fn from_bytes(b: Bytes, at: u64) -> Uuid {
+    let suffix = list.slice(b, at, list.len(b))
+    Uuid(hi: read_word(suffix, 0, 8), lo: read_word(suffix, 8, 16))
+}
+
+/// Appends the 16 UUID bytes in network order. The function reserves all 16
+/// bytes first. Fails: Capacity leaves out unchanged. Alloc: growth of out.
+pub fn push_bytes(mut out: Bytes, u: Uuid) -> Result[(), Capacity] {
+    list.reserve(mut out, 16)?
+    for i in 0u64 .. 16u64 {
+        let word = if i < 8 {
+            u.hi
+        } else {
+            u.lo
+        }
+        let byte: u8 = int.truncate(word >> ((7 - i % 8) * 8))
+        let _ = list.push(mut out, byte)
+    }
+    Ok(())
+}
+
+/// Returns the top four bits of byte 6 for any variant.
+pub fn version(u: Uuid) -> u8 {
+    int.truncate((u.hi >> 12) & 15)
+}
+
+/// Classifies byte 8 by prefix: 0xxx Ncs, 10xx Rfc, 110x Microsoft, 111x Future.
+pub fn variant(u: Uuid) -> Variant {
+    let prefix = u.lo >> 61
+    if prefix < 4 {
+        Ncs
+    } else if prefix < 6 {
+        Rfc
+    } else if prefix == 6 {
+        Microsoft
+    } else {
+        Future
+    }
+}
+
+fn rfc_variant(lo: u64) -> u64 {
+    (lo & 0x3fffffffffffffff) | 0x8000000000000000
+}
+
+/// RFC 9562 section 5.4. Reads 16 bytes starting at at and replaces the version
+/// nibble with 4 and the variant prefix with 10. Preserves the other 122 bits.
+/// Fails: Bounds as from_bytes. Alloc: nothing.
+/// Ex: `let mut b: Bytes = list.with_capacity(16)?; host.random(r, mut b); let id = std.uuid.v4(b, 0)`.
+pub fn v4(b: Bytes, at: u64) -> Uuid {
+    let u = from_bytes(b, at)
+    Uuid(hi: (u.hi & 0xffffffffffff0fff) | 0x4000, lo: rfc_variant(u.lo))
+}
+
+/// RFC 9562 section 5.7. Stores the timestamp in the top 48 bits. Reads 10 bytes
+/// starting at at for the remaining bits, with version 7 and variant 10
+/// replacing six of those bits. Returns None when ms is at least 2^48.
+/// Fails: Bounds if a valid timestamp's byte range is outside b. Alloc: nothing.
+/// Ex: `std.uuid.v7(host.wall_ms(c), b, 0)`.
+pub fn v7(ms: u64, b: Bytes, at: u64) -> Option[Uuid] {
+    if ms >= (1u64 << 48) {
+        return None
+    }
+    let suffix = list.slice(b, at, list.len(b))
+    let rand_a = read_word(suffix, 0, 2) & 0xfff
+    let rand_b = rfc_variant(read_word(suffix, 2, 10))
+    Some(Uuid(hi: (ms << 16) | 0x7000 | rand_a, lo: rand_b))
+}
+
+/// Returns the top 48 bits as milliseconds since the Unix epoch for version 7
+/// with the Rfc variant. Returns None for other UUIDs.
+pub fn unix_ms(u: Uuid) -> Option[u64] {
+    if version(u) == 7 && variant(u) == Rfc {
+        Some(u.hi >> 16)
+    } else {
+        None
+    }
+}

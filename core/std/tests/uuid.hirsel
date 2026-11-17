@@ -1,0 +1,198 @@
+fn representation(text: String, lower: String, expected: uuid.Uuid, network: Bytes) -> bool {
+    let mut rendered = string.new()
+    result.unwrap(string.push(mut rendered, "id="))
+    result.unwrap(uuid.push(mut rendered, expected))
+    let mut full = string.new()
+    result.unwrap(string.push(mut full, "id="))
+    result.unwrap(string.push(mut full, lower))
+    let mut packed = result.unwrap(b"+")
+    result.unwrap(uuid.push_bytes(mut packed, expected))
+    let text_matches = uuid.parse(text) == Ok(expected) && rendered == full
+    let bytes_match = packed[0] == b'+' && list.len(packed) == 17 && list.slice(packed, 1, 17) == network
+    let from_bytes_matches = uuid.from_bytes(packed, 1) == expected
+    text_matches && bytes_match && from_bytes_matches
+}
+
+// U1. RFC 9562, rfc9562.txt:2233-2263, A.3 Figures 20 and 21.
+// field     bits value
+// random_a  48   0x919108f752d1
+// ver        4   0x4
+// random_b  12   0x320
+// var        2   0b10
+// random_c  62   0b01, 0xbacf847db4148a8
+// total     128
+// final: 919108f7-52d1-4320-9bac-f847db4148a8
+// Mutants: little-endian word packing, version overwrite in byte 7.
+// expect: run rfc_v4() = true
+fn rfc_v4() -> bool {
+    let text = "919108f7-52d1-4320-9bac-f847db4148a8"
+    let expected = uuid.Uuid(hi: 0x919108f752d14320, lo: 0x9bacf847db4148a8)
+    let network = result.unwrap(b"\x91\x91\x08\xf7\x52\xd1\x43\x20\x9b\xac\xf8\x47\xdb\x41\x48\xa8")
+    let raw = result.unwrap(b"+\x91\x91\x08\xf7\x52\xd1\x33\x20\x5b\xac\xf8\x47\xdb\x41\x48\xa8!")
+    representation(text, text, expected, network) && uuid.v4(raw, 1) == expected
+}
+
+// U1. RFC 9562, rfc9562.txt:2322-2345, A.6 Figure 26.
+// field       bits value
+// unix_ts_ms  48   0x017F22E279B0
+// ver          4   0x7
+// rand_a      12   0xCC3
+// var          2   0b10
+// rand_b      62   0b01, 0x8C4DC0C0C07398F
+// total       128
+// final: 017F22E2-79B0-7CC3-98C4-DC0C0C07398F
+// Mutants: little-endian word packing, version overwrite in byte 7.
+// expect: run rfc_v7() = true
+fn rfc_v7() -> bool {
+    let text = "017F22E2-79B0-7CC3-98C4-DC0C0C07398F"
+    let lower = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f"
+    let expected = uuid.Uuid(hi: 0x017f22e279b07cc3, lo: 0x98c4dc0c0c07398f)
+    let network = result.unwrap(b"\x01\x7f\x22\xe2\x79\xb0\x7c\xc3\x98\xc4\xdc\x0c\x0c\x07\x39\x8f")
+    let raw = result.unwrap(b"+\x0c\xc3\x18\xc4\xdc\x0c\x0c\x07\x39\x8f!")
+    representation(text, lower, expected, network) && uuid.v7(1645557742000, raw, 1) == Some(expected)
+}
+
+// U2. RFC 9562 sections 5.4 and 5.7, with expected words from
+// python3.14 -I core/tools/uuid_reference.py (core/tools/uuid_reference.py:5-7).
+// Mutants: clear three variant bits or OR the version without clearing its field.
+// expect: run version_variant_masks() = true
+fn version_variant_masks() -> bool {
+    // ffffffff-ffff-4fff-bfff-ffffffffffff
+    let ones = uuid.v4(result.unwrap(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"), 0)
+    // 00000000-0000-4000-8000-000000000000
+    let zeros = uuid.v4(result.unwrap(b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), 0)
+    // 00000000-0000-7fff-bfff-ffffffffffff
+    let seven = option.unwrap(uuid.v7(0, result.unwrap(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"), 0))
+    let ones_match = ones == uuid.Uuid(hi: 0xffffffffffff4fff, lo: 0xbfffffffffffffff)
+    let zeros_match = zeros == uuid.Uuid(hi: 0x0000000000004000, lo: 0x8000000000000000)
+    let seven_matches = seven == uuid.Uuid(hi: 0x0000000000007fff, lo: 0xbfffffffffffffff)
+    let versions = uuid.version(ones) == 4 && uuid.version(zeros) == 4 && uuid.version(seven) == 7
+    let variants = uuid.variant(ones) == Rfc && uuid.variant(zeros) == Rfc && uuid.variant(seven) == Rfc
+    ones_match && zeros_match && seven_matches && versions && variants
+}
+
+// U2. RFC 9562, rfc9562.txt section 4.1; version nibble rows from
+// 771885fb^:examples/eventmerge/fixtures/uuid-vectors.json:2-17.
+// Mutants: read the low nibble of byte 6, or misclassify a variant boundary.
+// expect: run inspect_bits() = true
+fn inspect_bits() -> bool {
+    for version in 0u64 .. 16u64 {
+        let u = uuid.Uuid(hi: 0xf47ac10b58cc0372 | (version << 12), lo: 0x85670e02b2c3d479)
+        if uuid.version(u) != int.truncate(version) {
+            return false
+        }
+    }
+    let ncs_edge = uuid.variant(uuid.Uuid(hi: 0, lo: 0x7fffffffffffffff)) == Ncs
+    let rfc_edge = uuid.variant(uuid.Uuid(hi: 0, lo: 0xbfffffffffffffff)) == Rfc
+    let ms_low = uuid.variant(uuid.Uuid(hi: 0, lo: 0xc000000000000000)) == Microsoft
+    let ms_high = uuid.variant(uuid.Uuid(hi: 0, lo: 0xdfffffffffffffff)) == Microsoft
+    let future_edge = uuid.variant(uuid.Uuid(hi: 0, lo: 0xe000000000000000)) == Future
+    ncs_edge && rfc_edge && ms_low && ms_high && future_edge
+}
+
+// U3. Go src/uuid/uuid_test.go:130-153, the four hyphenated TestParseSuccess rows.
+// Mutant: only accept lowercase letters, or reject the Nil and Max UUIDs.
+// expect: run go_accepted() = true
+fn go_accepted() -> bool {
+    let u1 = uuid.Uuid(hi: 0xf81d4fae7dec11d0, lo: 0xa76500a0c91e6bf6)
+    let nil_matches = uuid.parse("00000000-0000-0000-0000-000000000000") == Ok(uuid.Uuid(hi: 0, lo: 0))
+    let max_matches = uuid.parse("ffffffff-ffff-ffff-ffff-ffffffffffff") == Ok(uuid.Uuid(hi: 0xffffffffffffffff, lo: 0xffffffffffffffff))
+    let lower = uuid.parse("f81d4fae-7dec-11d0-a765-00a0c91e6bf6") == Ok(u1)
+    let upper = uuid.parse("F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6") == Ok(u1)
+    nil_matches && max_matches && lower && upper
+}
+
+fn rejects(s: String, i: u64) -> bool {
+    match uuid.parse(s) {
+        Error(Invalid(offset)) => offset == i,
+        Ok(_) => false,
+    }
+}
+
+// U3. Go src/uuid/uuid_test.go:175-200. Go reports binary accept/reject;
+// these offsets are the first byte outside the RFC 9562 section 4 grammar.
+// Mutants: accept misplaced hyphens or read past the end.
+// expect: run go_rejected() = true
+fn go_rejected() -> bool {
+    let missing_data = rejects("", 0) && rejects("0000000000000-0000-0000-000000000000", 8) && rejects("00000000-000000000-0000-000000000000", 13)
+    let bad_group_lengths = rejects("00000000-0000-000000000-000000000000", 18) && rejects("00000000-0000-0000-00000000000000000", 23) && rejects("00000000-0000-0000-0000-00000000000", 35)
+    let non_hex_digits = rejects("x0000000-0000-0000-0000-000000000000", 0) && rejects("00000000-x000-0000-0000-000000000000", 9) && rejects("00000000-0000-x000-0000-000000000000", 14)
+    let non_hex_suffix = rejects("00000000-0000-0000-x000-000000000000", 19) && rejects("00000000-0000-0000-0000-x00000000000", 24)
+    let malformed_prefixes = rejects("{x0000000-0000-0000-0000-000000000000}", 0) && rejects("urn:uuid:x000000-0000-0000-0000-000000000000", 0) && rejects("urk:uuid:00000000-0000-0000-0000-000000000000", 0)
+    let malformed_digits = rejects("x0000000000000000000000000000000", 0) && rejects("0000-0000-0000-0000-0000-0000-0000-0000", 4)
+    let mixed_forms = rejects("{00000000000000000000000000000000}", 0) && rejects("{urn:uuid:00000000-0000-0000-0000-000000000000}", 0) && rejects("urn:uuid:00000000000000000000000000000000", 0)
+    missing_data && bad_group_lengths && non_hex_digits && non_hex_suffix && malformed_prefixes && malformed_digits && mixed_forms
+}
+
+// U3. RFC 9562 section 4 grammar and Go src/uuid/uuid_test.go:154-164.
+// Mutants: accept an alternate spelling or check length before prefix bytes.
+// expect: run one_text_form() = true
+fn one_text_form() -> bool {
+    // Go accepts bare hex. This grammar requires a hyphen at byte 8.
+    let bare = rejects("f81d4fae7dec11d0a76500a0c91e6bf6", 8)
+    // Go accepts enclosing braces. This grammar refuses the opening brace.
+    let braced = rejects("{f81d4fae-7dec-11d0-a765-00a0c91e6bf6}", 0)
+    // Go accepts both URN spellings. This grammar refuses the prefix.
+    let urn = rejects("urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6", 0)
+    let mixed_urn = rejects("UrN:UuId:f81d4fae-7dec-11d0-a765-00a0c91e6bf6", 0)
+    let trailing_letter = rejects("00000000-0000-0000-0000-00000000000g", 35)
+    let extra_hyphen = rejects("00000000-0000-0000--000-000000000000", 19)
+    let long = rejects("00000000-0000-0000-0000-0000000000000", 36)
+    // c5690b37^:conformance/SEM/SEM-3-uuid-layout-run.hir:136.
+    // The first byte of a non-ASCII scalar fails before the length check.
+    let non_ascii = rejects("\u{130}", 0)
+    bare && braced && urn && mixed_urn && trailing_letter && extra_hyphen && long && non_ascii
+}
+
+// U4. RFC 9562 section 6.11, rfc9562.txt:1700-1714. Random bits decrease as time increases.
+// Mutant: compare lo before hi, or compare hi as a signed word.
+// expect: run time_order() = true
+fn time_order() -> bool {
+    let early = option.unwrap(uuid.v7(1, result.unwrap(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"), 0))
+    let middle = option.unwrap(uuid.v7(2, result.unwrap(b"\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01"), 0))
+    let late = option.unwrap(uuid.v7(1u64 << 47, result.unwrap(b"\0\0\0\0\0\0\0\0\0\0"), 0))
+    let mut ids: List[uuid.Uuid] = list.new()
+    result.unwrap(list.push(mut ids, late))
+    result.unwrap(list.push(mut ids, early))
+    result.unwrap(list.push(mut ids, middle))
+    list.sort(mut ids, fn(a: uuid.Uuid, b: uuid.Uuid) -> Order {
+        order.compare(a, b)
+    })
+    ids[0] == early && ids[1] == middle && ids[2] == late
+}
+
+// U5. RFC 9562 sections 4.1 and 5.7, and A.6 rfc9562.txt:2322-2345.
+// Mutants: 47-bit timestamp, off-by-one at 2^48, or ignore the variant.
+// expect: run unix_ms_round_trip() = true
+fn unix_ms_round_trip() -> bool {
+    let b = result.unwrap(b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")
+    let max = (1u64 << 48) - 1
+    let zero_matches = uuid.unix_ms(option.unwrap(uuid.v7(0, b, 0))) == Some(0)
+    let rfc_matches = uuid.unix_ms(option.unwrap(uuid.v7(1645557742000, b, 0))) == Some(1645557742000)
+    let max_matches = uuid.unix_ms(option.unwrap(uuid.v7(max, b, 0))) == Some(max)
+    let too_large = uuid.v7(max + 1, b, 0) == None
+    let wrong_version = uuid.unix_ms(uuid.v4(b, 0)) == None
+    let wrong_variant = uuid.unix_ms(uuid.Uuid(hi: 0x017f22e279b07cc3, lo: 0xd8c4dc0c0c07398f)) == None
+    zero_matches && rfc_matches && max_matches && too_large && wrong_version && wrong_variant
+}
+
+// U1 byte-range contract. core/core/list.hirsel:14, Bounds on a bad slice.
+// Mutant: overflow from forming at + 16 before checking the byte range.
+// expect: run from_bytes_large_offset() = fail Bounds
+fn from_bytes_large_offset() -> u64 {
+    uuid.from_bytes(result.unwrap(b""), 0xffffffffffffffff).hi
+}
+
+// U2 v4 byte-range contract. RFC 9562 A.3 rfc9562.txt:2235, 16 input bytes.
+// Mutant: ignore at when checking the byte range.
+// expect: run v4_short_suffix() = fail Bounds
+fn v4_short_suffix() -> u64 {
+    uuid.v4(result.unwrap(b"0123456789abcdef"), 1).hi
+}
+
+// U5 v7 byte-range contract. RFC 9562 A.6 rfc9562.txt:2332-2342.
+// Mutant: permit nine bytes by zero-filling the final byte.
+// expect: run v7_short_suffix() = fail Bounds
+fn v7_short_suffix() -> bool {
+    uuid.v7(0, result.unwrap(b"0123456789"), 1) == None
+}

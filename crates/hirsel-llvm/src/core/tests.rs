@@ -1242,24 +1242,36 @@ fn counted_sequences_destroy_deep_chains_with_constant_stack() {
     }
 }
 
-/// LANG-19: ordinary release of a 10^6-deep `Box` chain completes under the
-/// default stack, and every box is refunded (hand-derived: n + 1 admissions).
+/// LANG-19: ordinary release of a 10^6-deep `Box` chain, and of a closure
+/// whose environment captures a closure 10^6 deep, completes under the default
+/// stack, and every block is refunded (hand-derived: n + 1 boxes, n
+/// environments).
 #[test]
 fn box_chain_releases_with_constant_stack() {
-    let source = include_str!("../../../hirsel-core-ir/samples/box-chain.core");
-    let module = text::parse(source).unwrap();
-    wf::module(&module).unwrap();
-    let cases = [0, 32, 1_000_000].map(|n| Case {
-        function: FuncId(0),
-        args: vec![n],
-        limit: u64::MAX,
-        injection: None,
-    });
-    for (case, got) in cases.iter().zip(execute(&module, &cases)) {
-        let n = case.args[0];
-        assert_eq!(got.outcome, eval::Outcome::Returned(vec![n]));
-        assert_eq!(got.used, 0);
-        assert_eq!(got.admissions, 1 + n as usize);
+    for (source, boxes) in [
+        (
+            include_str!("../../../hirsel-core-ir/samples/box-chain.core"),
+            1,
+        ),
+        (
+            include_str!("../../../hirsel-core-ir/samples/closure-chain.core"),
+            0,
+        ),
+    ] {
+        let module = text::parse(source).unwrap();
+        wf::module(&module).unwrap();
+        let cases = [0, 32, 1_000_000].map(|n| Case {
+            function: FuncId(0),
+            args: vec![n],
+            limit: u64::MAX,
+            injection: None,
+        });
+        for (case, got) in cases.iter().zip(execute(&module, &cases)) {
+            let n = case.args[0];
+            assert_eq!(got.outcome, eval::Outcome::Returned(vec![n]));
+            assert_eq!(got.used, 0);
+            assert_eq!(got.admissions, boxes + n as usize);
+        }
     }
 }
 

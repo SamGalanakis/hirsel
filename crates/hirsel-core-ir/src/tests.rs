@@ -20,6 +20,10 @@ const SAMPLES: &[(&str, &str)] = &[
     ("admission", include_str!("../samples/admission.core")),
     ("box-chain", include_str!("../samples/box-chain.core")),
     (
+        "closure-chain",
+        include_str!("../samples/closure-chain.core"),
+    ),
+    (
         "receiver-chain",
         include_str!("../samples/receiver-chain.core"),
     ),

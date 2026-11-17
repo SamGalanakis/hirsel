@@ -22,7 +22,11 @@ and admitting Hello; `welcomed` clears the separate Hello deadline.
 `server` consumes a Socket and pending lease, validates the bounded request
 and source, writes the 101 response and returns `Upgraded`. Its reader retains
 the original 8192-byte input buffer and consumed cursor, including frame
-read-ahead. Its timers start Hello at the completed 101. `client` uses sixteen
+read-ahead. Its timers start Hello at the completed 101. `server_with` calls a
+source policy after sanitization and before 101, under the original accept
+deadline; refusal is 503. `hello_deadline` exposes the fixed Hello deadline to
+the runner owner. `refuse_socket` sends a bounded HTTP refusal while keeping
+its socket halves inside wsock. `client` uses sixteen
 bytes from host.random for its challenge, requires hirsel.1, rejects extensions,
 and retains response read-ahead. It returns `Connected` and a client encoder.
 

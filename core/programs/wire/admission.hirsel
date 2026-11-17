@@ -1,0 +1,84 @@
+type H: send { table: store.store.Table[u64, u32] }
+type Reg = store.runner.Registry[(), H]
+
+fn handles(mut db: store.store.Db) -> Result[H, store.store.Error] waits {
+    let codec: std.codec.Codec[u32] = std.codec.of()
+    let table = store.store.table(mut db, "data", std.codec.key_u64(), codec)?
+    Ok(H(table: table))
+}
+
+fn put(mut tx: store.store.Tx, h: H, take value: u32) -> Result[u64, u32] {
+    if let Error(_) = store.store.put(mut tx, h.table, 0u64, value) { return Error(1u32) }
+    Ok(store.store.info(mut tx).id.version)
+}
+
+fn large(mut tx: store.store.Tx, h: H, take count: u32) -> Result[Bytes, u32] {
+    if let Error(_) = store.store.put(mut tx, h.table, 0u64, 99u32) { return Error(1u32) }
+    let mut b: Bytes = list.new()
+    let n: u64 = int.widen(count)
+    for _ in 0u64 .. n { if let Error(_) = list.push(mut b, 1u8) { return Error(2u32) } }
+    Ok(take b)
+}
+
+fn big(take count: u32) -> Result[Bytes, Capacity] {
+    let mut b: Bytes = list.new()
+    let n: u64 = int.widen(count)
+    for _ in 0u64 .. n { result.capacity_only(list.push(mut b, 2u8))? }
+    Ok(take b)
+}
+
+fn read(tx: store.store.Tx, h: H, take _arg: u32) -> Result[store.runner.Cover, Capacity] {
+    store.runner.cover(store.store.shape(h.table), Included(0u64), Included(0u64))
+}
+
+fn retired() -> Bytes {
+    let mut key: Bytes = list.new()
+    result.unwrap(list.append(mut key, string.as_bytes("retired")))
+    result.unwrap(std.codec.put_u64(0u64, mut key))
+    result.unwrap(std.codec.put_u64(0u64, mut key))
+    key
+}
+
+fn place(mut r: Reg) -> Result[(), store.runner.RegisterError] {
+    store.runner.transact(mut r, code.describe(put), 65536u64, store.runner.DEFAULT_STEPS)?
+    store.runner.transact(mut r, code.describe(large), 65536u64, store.runner.DEFAULT_STEPS)?
+    store.runner.compute(mut r, code.describe(big), 65536u64, store.runner.DEFAULT_STEPS)?
+    store.runner.query(mut r, code.describe(read), 65536u64, store.runner.DEFAULT_STEPS)?
+    store.runner.retain_gone(mut r, retired())
+}
+
+type Server: send { net: Net, clock: Clock, tasks: Tasks, random: Random, args: Args, head: Sender[store.runner.Req], post: Sender[store.runner.PubIn] }
+
+fn server(take seed: Server) -> () waits {
+    let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post) = take seed
+    let mut listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) { Ok((take l, _)) => take l, Error(_) => return }
+    let (policy, take policy_handle) = result.unwrap(store.ingress.start(tasks, c, random, store.ingress.defaults(), 8388608u64))
+    let mut handle = take policy_handle
+    let mut config = store.runner.wire_defaults(1048576u64, 1048576u64)
+    config.socket.close_ms = 200u64
+    let make: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[(), H]] = fn() -> store.runner.Service[store.runner.WireSession[(), H]] {
+        store.runner.wire_place_service(code.describe(place), policy, head, c, tasks, config, a)
+    }
+    let _ = store.runner.serve_admitted(n, mut listener, tasks, c, post, config, 128u64, list.new(), policy, make)
+    task.cancel(mut handle)
+    let _ = task.join(take handle)
+}
+
+pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+    let mut db = store.store.memory(c, random, store.store.defaults())
+    let codec: std.codec.Codec[u32] = std.codec.of()
+    let _ = result.unwrap(store.store.create_table(mut db, store.store.spec("data", std.codec.key_u64(), codec)))
+    // An admitted, unreplied position on the retained key exercises V5 on resend.
+    let mut stream: Bytes = list.new()
+    result.unwrap(list.append(mut stream, string.as_bytes("anon:")))
+    for _ in 0u64 .. 16u64 { result.unwrap(list.push(mut stream, 0u8)) }
+    result.unwrap(list.push(mut stream, 0u8)); result.unwrap(list.push(mut stream, 0u8)); result.unwrap(list.push(mut stream, 0u8)); result.unwrap(list.push(mut stream, 77u8))
+    let _ = result.unwrap(store.store.admit(mut db, stream, 0u64, store.store.request_digest(retired(), list.new())))
+    let (head, inbox): (Sender[store.runner.Req], Receiver[store.runner.Req]) = result.unwrap(channel.new(64u64))
+    let mail = result.unwrap(store.runner.mailbox(64u64))
+    let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: store.runner.post(mail))
+    let h = result.unwrap(task.spawn(tasks, bytes 1073741824u64, take seed, server))
+    let _ = store.runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), take inbox, take mail, tasks, 8388608u64)
+    let _ = task.join(take h)
+    Ok(())
+}

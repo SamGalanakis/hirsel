@@ -47,4 +47,15 @@ concurrent upgrades, strict Frame decoding, blocked output and bounded Close.
 Add --idle-session <output>/session-idle-<backend> to check idle Ping and Close;
 --session-codes-only selects just the text and idle Close-code cases.
 Its test service returns deterministic Batches and Resets and refuses Hello;
-production Hello and call admission belong to W3c.
+the production service is exercised by the W3c fixture below.
+
+
+W3c's `admission.hirsel` starts the shared ingress policy and real store head.
+Build with `wire_build.py --admission-only` and run `wire_admission.py --server
+<output>/admission-<backend>`. It uses port 18094 and a 1.5 GiB logical root
+inside the unchanged 2 GiB process ceiling, covering the 32-session admission
+law's reservations. The hand-written codec derives identities from PROG-9 and
+fingerprints from SEM-10 schema bytes; store versions and reply sizes are fixed
+by the spec. `--case` selects individual laws. The shared runner harness's
+`--part admission` checks the exact outcome reserve and Reset retention on all
+engines. core-runner-r1 selects those state laws during land acceptance.

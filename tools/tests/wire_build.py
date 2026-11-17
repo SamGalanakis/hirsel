@@ -16,6 +16,8 @@ def main():
     parser.add_argument('--backend', choices=['cranelift', 'llvm'], required=True)
     parser.add_argument('--cc', type=Path)
     parser.add_argument('--session-only', action='store_true')
+    parser.add_argument('--admission-only', action='store_true')
+    parser.add_argument('--runner', type=Path)
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -28,27 +30,31 @@ def main():
             'sources':[{'file':str(path), 'modules':[path.stem], 'signatures':name == 'core'}
                        for path in sorted((ROOT/'core'/name).glob('*.hirsel'))],
         })
-    if args.session_only:
+    if args.session_only or args.admission_only:
         store = json.loads((ROOT/'core/programs/store/manifest.json').read_text())['packages'][0]
         for source in store['sources']:
             source['file'] = str(ROOT/source['file'])
+        if args.runner:
+            next(source for source in store['sources'] if source['modules'] == ['runner'])['file'] = str(args.runner.resolve())
         packages.append(store)
     packages.append({
-        'package': {'name':'wire', 'version':'1'}, 'dependencies':[core, std] + ([{'name':'store', 'version':'1'}] if args.session_only else []),
+        'package': {'name':'wire', 'version':'1'}, 'dependencies':[core, std] + ([{'name':'store', 'version':'1'}] if args.session_only or args.admission_only else []),
         'sources':[{'file':str(ROOT/'core/programs/wire'/f'{name}.hirsel'),
-                    'modules':[name], 'signatures':False} for name in (['session'] if args.session_only else ['echo','finish'])],
+                    'modules':[name], 'signatures':False} for name in (['admission'] if args.admission_only else ['session'] if args.session_only else ['echo','finish'])],
     })
     inputs = output/'inputs.json'
     inputs.write_text(json.dumps({'core':core, 'packages':packages})+'\n')
     entries = [('session','session/main'), ('session-idle','session/idle')] if args.session_only else [('main','echo/main'), ('client_probe','echo/client_probe'), ('idle_probe','echo/idle_probe'), ('finish','finish/probe')]
+    if args.admission_only:
+        entries = [('admission', 'admission/main')]
     for name, entry in entries:
         stem = f'{name}-{args.backend}'
         command = [str(args.compiler.resolve()), 'build', '--source-core',
                    '--inputs', str(inputs), '--store', str(output/'store'),
                    '--entry', 'wire@1/'+entry, '--backend', args.backend,
-                   '--runtime', str(args.runtime.resolve()), '--limit', '67108864' if args.session_only else '268435456',
+                   '--runtime', str(args.runtime.resolve()), '--limit', '1610612736' if args.admission_only else '67108864' if args.session_only else '268435456',
                    '--grant', 'Clock', '--grant', 'Tasks', '--grant', 'Random',
-                   '--grant', 'Net=Listen 127.0.0.0/8 18094-18094' if args.session_only else 'Net=Listen 127.0.0.0/8 18089-18089;Connect 127.0.0.0/8 18090-18091',
+                   '--grant', 'Net=Listen 127.0.0.0/8 18094-18094' if args.session_only or args.admission_only else 'Net=Listen 127.0.0.0/8 18089-18089;Connect 127.0.0.0/8 18090-18091',
                    '--json', '-o', str(output/stem)]
         if args.backend == 'llvm':
             command.append('--release')

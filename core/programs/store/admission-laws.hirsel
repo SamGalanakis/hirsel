@@ -1,0 +1,170 @@
+// WIRE W3c: hand-sized replies and the exact 41,140-byte outcome reserve.
+fn w3c_bytes(take count: u32) -> Result[Bytes, Capacity] {
+    let mut b: Bytes = list.new()
+    let n: u64 = int.widen(count)
+    for _ in 0u64 .. n { result.capacity_only(list.push(mut b, 3u8))? }
+    Ok(take b)
+}
+
+fn w3c_tx(mut tx: store.Tx, h: (), take count: u32) -> Result[Bytes, u32] {
+    match w3c_bytes(count) { Ok(take b) => Ok(take b), Error(_) => Error(1u32) }
+}
+
+fn w3c_key[A, R](f: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
+    let mut key: Bytes = result.unwrap(clone(f))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key))
+    key
+}
+
+pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut reg: Registry[(), ()] = registry()
+    result.unwrap(compute(mut reg, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
+    result.unwrap(transact(mut reg, code.describe(w3c_tx), 65536u64, DEFAULT_STEPS))
+    let carried: std.codec.Codec[Result[Bytes, u32]] = std.codec.of()
+    let transact_key = w3c_key(code.identity(code.describe(w3c_tx)), std.codec.of_u32(), carried)
+    let codec: std.codec.Codec[Bytes] = std.codec.of()
+    let key = w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), codec)
+    let (policy, take handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
+    let mut policy_handle = take handle
+    let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
+    let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(5u64))
+    let service = wire_service_seed(take reg, policy, head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let Service(context: take initial, step: _, ready: _, finish: _, check: _) = take service
+    let mut s = take initial
+    let mut work = wire_work()
+    let (owner, events): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
+    s.me = Some(take owner)
+    s.principal = Some(take principal)
+    s.phase = 3u8
+    result.unwrap(list.push(mut s.entries, take key))
+    result.unwrap(list.push(mut s.entries, take transact_key))
+    for stream in 0u32 .. 5u32 {
+        let mut arg: Bytes = list.new()
+        result.unwrap(std.codec.put_u32(8168u32, mut arg))
+        let at = host.mono_ns(clock)
+        result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 0u32, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
+    }
+    if wire_units(s) != 5u64 { return false }
+    for _ in 0u64 .. 5u64 { let _ = wire_take_output(mut s) }
+    if wire_units(s) != 0u64 { return false }
+    // A durable head answer must retain the same unit while its row is unsent.
+    for stream in 0u32 .. 5u32 {
+        let mut arg: Bytes = list.new()
+        result.unwrap(std.codec.put_u32(8164u32, mut arg))
+        let at = host.mono_ns(clock)
+        result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 1u32, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
+        let Req(stream: take named, p: p, key: _, arg: _, digest: _, reply_to: _) = result.unwrap(channel.try_receive(requests))
+        let mut reply_bytes: Bytes = list.new()
+        let body = result.unwrap(w3c_bytes(8164u32))
+        let value: Result[Bytes, u32] = Ok(take body)
+        result.unwrap(std.codec.encode(carried, value, mut reply_bytes))
+        result.unwrap(wire_answer(mut s, mut work, Told(version: 7u64, stream: take named, p: p, outcome: Returned(take reply_bytes))))
+    }
+    if wire_units(s) != 5u64 { return false }
+    for stream in 5u32 .. 10u32 { result.unwrap(wire_refused(mut s, stream, 0u64, Budget(Room(requested: 9u64, available: 8u64)))) }
+    if let Error(1008u16) = wire_refused(mut s, 10u32, 0u64, Overloaded) {} else { return false }
+    let mut retained = 0u64
+    for o in s.output { if let Batch(_, _, _, ds) = o.frame { for d in ds { retained += wire_done_size(d.outcome) } } }
+    if retained != 41140u64 { return false }
+    result.unwrap(wire_reset(mut s, 7u64))
+    let reset = wire_take_output(mut s)
+    let preserved = match take reset {
+        Some(Reset(7u64, take ds)) => {
+            if list.len(ds) != 10u64 { false } else {
+                let mut ok = true
+                let mut count = 0u32
+                for take d in take ds {
+                    if d.stream != count || d.p != 0u64 { ok = false }
+                    if count < 5u32 {
+                        if let Returned(b) = d.outcome { if list.len(b) != 8172u64 || b[0u64] != 0u8 || b[4u64] != 228u8 || b[5u64] != 31u8 || b[8u64] != 3u8 || b[8171u64] != 3u8 { ok = false } } else { ok = false }
+                    } else {
+                        if let Refused(Budget(Room(requested: 9u64, available: 8u64))) = d.outcome {} else { ok = false }
+                    }
+                    count += 1u32
+                }
+                ok
+            }
+        },
+        _ => false,
+    }
+    let no_head = match channel.try_receive(requests) { Error(Empty) => true, _ => false }
+    let freed = wire_units(s) == 0u64 && s.refusals == 0u64 && list.len(s.output) == 0u64
+    let legacy = result.unwrap(w3c_bytes(8173u32))
+    let refused_legacy = match wire_answer(mut s, mut work, Told(version: 9u64, stream: list.new(), p: 0u64, outcome: Returned(take legacy))) { Error(1009u16) => true, _ => false }
+    let unchanged = s.last == 7u64 && list.len(s.output) == 0u64
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    preserved && freed && no_head && refused_legacy && unchanged
+}
+
+pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut reg: Registry[(), ()] = registry()
+    result.unwrap(compute(mut reg, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
+    result.unwrap(transact(mut reg, code.describe(w3c_tx), 65536u64, DEFAULT_STEPS))
+    let (policy, take handle) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
+    let mut policy_handle = take handle
+    let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
+    let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
+    let service = wire_service_seed(take reg, policy, head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let Service(context: take initial, step: _, ready: _, finish: _, check: _) = take service
+    let mut s = take initial
+    let mut work = wire_work()
+    s.phase = 2u8
+    s.principal = Some(take principal)
+    let entry_codec: std.codec.Codec[Result[Bytes, u32]] = std.codec.of()
+    let entry = w3c_key(code.identity(code.describe(w3c_tx)), std.codec.of_u32(), entry_codec)
+    result.unwrap(list.push(mut s.entries, result.unwrap(clone(entry))))
+    let mut unknown: Bytes = list.new()
+    result.unwrap(list.append(mut unknown, string.as_bytes("missing")))
+    let missing = wire_key(Want(identity: take unknown, args_fp: 0u64, result_fp: 0u64))
+    result.unwrap(list.push(mut s.entries, take missing))
+    result.unwrap(list.push(mut s.entries, result.unwrap(clone(entry))))
+    if wire_can_read(s) { return false }
+    if let Ok(Some(Welcome(_, 4u32, 1048576u64, _, _, _))) = wire_step(mut s, mut work, WPoll(true)) {} else { return false }
+    if wire_can_read(s) { return false }
+    if let Ok(Some(Placed(Ready(0u32)))) = wire_step(mut s, mut work, WPoll(true)) {} else { return false }
+    if let Ok(Some(Placed(Gone))) = wire_step(mut s, mut work, WPoll(true)) {} else { return false }
+    if let Ok(Some(Placed(Ready(2u32)))) = wire_step(mut s, mut work, WPoll(true)) {} else { return false }
+    if wire_can_read(s) { return false }
+    let _ = wire_step(mut s, mut work, WPoll(true))
+    if !wire_can_read(s) { return false }
+    if let Error(1008u16) = wire_step(mut s, mut work, WClient(Hello(None, list.new()), 0u64)) {} else { return false }
+    let at = host.mono_ns(clock)
+    result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: 1u32, p: 2u64, slot: 0xffffffffu32, deadline: 10u32, arg: list.new(), at: at, grows: true), true))
+    let refused = match wire_take_output(mut s) { Some(Batch(0u64, _, _, ds)) => list.len(ds) == 1u64 && match ds[0u64].outcome { Refused(NoEntry) => true, _ => false }, _ => false }
+    let empty = match channel.try_receive(requests) { Error(Empty) => true, _ => false }
+    let mut old: Bytes = list.new()
+    result.unwrap(std.codec.put_u32(0u32, mut old))
+    let mut changed: Bytes = list.new()
+    result.unwrap(std.codec.put_u32(1u32, mut changed))
+    let named: Bytes = match s.principal { Some(bound_principal) => wire_stream(bound_principal, 1u32), _ => return false }
+    let digest = store.request_digest(entry, old)
+    result.unwrap(map.insert(mut s.held, slot_key(named, 2u64), WireHeld(stream: 1u32, p: 2u64, digest: digest, forwarded: true, queued: 0u64, owed: list.new())))
+    let mismatched = wire_check_live(s, Call(1u32, 2u64, 0u32, 10u32, take changed)) == Some(1008u16)
+    let joined = wire_check_live(s, Call(1u32, 2u64, 2u32, 20u32, take old)) == None
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    refused && empty && mismatched && joined
+}
+
+@test
+fn test_wire_admission(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_join_cleanup() && law_unread_client(tasks, clock, random) && law_hello_and_slots(tasks, clock, random) { Ok(()) } else { Error(()) }
+}
+
+
+pub fn law_join_cleanup() -> bool {
+    let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(1u64))
+    let (pub_to, from): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(1u64))
+    result.unwrap(channel.try_send(pub_to, PubIn(e: Drained)))
+    let (closing, closed): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let lease = result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(pub_to)))
+    let mut joined: List[Joiner] = list.new()
+    result.unwrap(list.push(mut joined, Joiner(who: 7u64, to: Wire(take to), closed: Some(take closed), ended: list.new(), reset: false, mark: None)))
+    let _ = take lease
+    let mut subs: List[Sub] = list.new()
+    let mut waiting: List[Answer] = list.new()
+    settle(mut subs, mut joined, mut waiting, 0u64)
+    list.len(joined) == 0u64 && match channel.try_receive(from) { Ok(PubIn(e: Drained)) => true, _ => false }
+}

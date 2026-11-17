@@ -29,6 +29,7 @@ import argparse
 import json
 import shlex
 import os
+import sys
 from pathlib import Path
 import shutil
 import subprocess
@@ -785,6 +786,76 @@ def ingress_laws(args, root, work, engines, row):
         row(engine='evaluator', mutant=name, law='ingress_' + law, passed=red, result=report)
 
 
+def admission_laws(args, root, work, engines, row):
+    text = (root / 'core/programs/store/runner.hirsel').read_text()
+    laws = (root / 'core/programs/store/admission-laws.hirsel').read_text()
+    adapted = work / 'admission-runner.hirsel'
+    adapted.write_text(text + '\n' + laws)
+    selected = manifest(root, work, 'admission-laws', adapted)
+    names = args.admission_law or ('unread_client', 'hello_and_slots', 'join_cleanup')
+    qualified = set()
+    if 'evaluator' in engines:
+        for name in names:
+            value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
+            row(engine='evaluator', law=name, passed=value == 1, result=report)
+            if value == 1:
+                qualified.add(name)
+    for engine in (e for e in engines if e != 'evaluator'):
+        definition = 'store@1/runner/test_wire_admission'
+        code, report = native_run(args, engine, selected, work / f'admission-store-{engine}', definition)
+        tests = report.get('tests', [])
+        row(engine=engine, law='wire_admission', passed=code == 0
+            and [t['definition'] for t in tests] == [definition]
+            and all(t.get('passed') for t in tests), result=report)
+    if args.no_mutants or args.part != 'admission':
+        return
+    mutants = (
+        ('slot_freed_at_answer', 'h.queued += count', 'h.queued = 0u64', 'unread_client'),
+        ('refusal_rows_uncapped', 'if s.refusals >= 1u64 + s.config.q { return Error(1008u16) }', 'if false { return Error(1008u16) }', 'unread_client'),
+        ('reset_drops_held', 'wire_queue(mut s, Reset(version, take done), take marks)', 'wire_queue(mut s, Reset(version, list.new()), take marks)', 'unread_client'),
+    )
+    for name, old, new, law in mutants:
+        if args.admission_mutant and name not in args.admission_mutant:
+            continue
+        if law not in qualified:
+            row(engine='evaluator', mutant=name, law=law, passed=False, result='baseline did not qualify; control not executed')
+            continue
+        assert text.count(old) == 1, name
+        changed = work / (name + '.hirsel')
+        changed.write_text(text.replace(old, new) + '\n' + laws)
+        altered = manifest(root, work, name, changed)
+        value, report = evaluate(args.evaluator.resolve(), altered, 'store@1/runner/law_' + law)
+        red = value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
+        row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
+
+
+def socket_laws(args, root, work, engines, row):
+    names = {'hello_order', 'slot_out_of_range', 'gone_slot_v5', 'second_hello_closes',
+             'session_limit_503', 'principal_limit_1013', 'call_rate_overloaded',
+             'request_mismatch_wire', 'held_request_mismatch', 'hello_deadline', 'resume_unknown', 'history_below_latest', 'reply_over_done_max'}
+    for engine in (e for e in engines if e != 'evaluator'):
+        output = work / ('socket-' + engine)
+        command = [sys.executable, str(root / 'tools/tests/wire_build.py'),
+                   '--compiler', str(args.compiler.resolve()), '--runtime', str(args.runtime.resolve()),
+                   '--admission-only', '--backend', engine, '--output', str(output)]
+        if args.cc:
+            command += ['--cc', str(args.cc.resolve())]
+        built = subprocess.run(command, cwd=root, capture_output=True, text=True)
+        if built.returncode:
+            row(engine=engine, law='wire_socket_build', passed=False, result=(built.stdout + built.stderr)[-4000:])
+            continue
+        report = output / 'laws.json'
+        run = subprocess.run([sys.executable, str(root / 'tools/tests/wire_admission.py'),
+                              '--server', str(output / ('admission-' + engine)), '--report', str(report)],
+                             cwd=root, capture_output=True, text=True)
+        cases = json.loads(report.read_text()) if report.is_file() else []
+        for case in cases:
+            row(engine=engine, **case)
+        row(engine=engine, law='wire_socket_selection', passed=run.returncode == 0
+            and len(cases) == len(names) and {r['law'] for r in cases} == names
+            and all(r.get('passed') for r in cases), result=(run.stdout + run.stderr)[-4000:])
+
+
 def l12_values(evaluator, root, work, tag, runner=None):
     """The fingerprint per variant (base twice), or None where a run did not return."""
     values = {}
@@ -880,7 +951,9 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=['reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
     p.add_argument('--session-mutant', action='append', choices=['undersized_reader', 'head_frames_uncounted', 'writer_queue', 'orphan_reader'])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress'])
+    p.add_argument('--admission-law', action='append', choices=['unread_client', 'hello_and_slots', 'join_cleanup'])
+    p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1')
     root = args.root.resolve()
@@ -894,13 +967,17 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
+        if args.part in ('admission', 'wire') or r1:
+            admission_laws(args, root, work, engines, row)
         if args.part == 'ingress' or r1:
             ingress_laws(args, root, work, engines, row)
         if r0 or args.part in ('wire', 'session'):
             session_laws(args, root, work, engines, row)
         if r0 or args.part == 'wire':
             frame_vectors(args, root, work, engines, row)
-        if args.part in ('wire', 'session', 'ingress'):
+        if args.part in ('wire', 'socket'):
+            socket_laws(args, root, work, engines, row)
+        if args.part in ('wire', 'session', 'ingress', 'admission', 'socket'):
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
             for r in rows:

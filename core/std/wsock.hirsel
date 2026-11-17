@@ -642,10 +642,24 @@ pub fn refuse(mut w: WriteHalf, code: u16, deadline: Until) -> Result[(), Error]
     send_head(mut w, b, deadline)
 }
 
+/// Refuses an accepted socket without exposing its halves to a transport caller.
+pub fn refuse_socket(take socket: Socket, code: u16, deadline: Until) -> Result[(), Error] waits {
+    let (input, write) = net.split(take socket)
+    let mut output = take write
+    refuse(mut output, code, deadline)
+}
+
 /// Accept-to-head absolute deadline, sanitized ingress and preserved read-ahead.
 /// The lease is consumed on every error path and returned with success until
 /// Hello acceptance. The accept loop acquires it before spawning session state.
 pub fn server(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64) -> Result[Upgraded, Error] waits {
+    server_with(take socket, take slot, peer, ingress, config, clock, accepted_ns, scoped fn(ip: Ip) -> bool {
+        true
+    })
+}
+
+/// The source policy runs after sanitization and before writing 101.
+pub fn server_with(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
     if !valid(config) {
         return Error(Configuration)
     }
@@ -671,6 +685,13 @@ pub fn server(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[P
                         let _ = refuse(mut output_half, code, deadline)
                         return Error(Http(code))
                     }
+                }
+                if !admit(ip) {
+                    let _ = refuse(mut output_half, 503u16, deadline)
+                    return Error(Http(503u16))
+                }
+                if expired(deadline) {
+                    return Error(Network(TimedOut))
                 }
                 send_head(mut output_half, response, deadline)?
                 return Ok(Upgraded(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame)), writer: Writer(half: take output_half, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
@@ -771,4 +792,9 @@ pub fn finish(take writer: Writer, take reader: Reader, clock: Clock, deadline_n
         Error(Allocation(c)) => Error(Allocation(c)),
         Error(Network(e)) => Error(Network(e))
     }
+}
+
+/// The Hello deadline fixed at completion of the 101 response.
+pub fn hello_deadline(t: Timers) -> Option[u64] {
+    t.hello
 }

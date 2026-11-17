@@ -1,21 +1,26 @@
 // W3b's socket fixture supplies a transport-neutral service without admission.
 // W3c owns the production Hello, principal, entry and durable-call service.
-fn attach(mut context: (), to: Sender[store.runner.WireEvent], to_publisher: Sender[store.runner.PubIn]) {}
+fn ready(context: ()) -> bool { true }
 
-fn dispatch(mut context: (), take frame: store.runner.Frame) -> Result[Option[store.runner.Frame], u16] {
-    match take frame {
-        Call(stream, p, _, _, take arg) => {
+fn step(mut context: (), mut work: store.runner.WireWork, take input: store.runner.ServiceInput) -> Result[Option[store.runner.Frame], u16] {
+    match take input {
+        WClient(Call(stream, p, _, _, take arg), _) => {
             let mut done: List[store.runner.Done] = list.new()
             result.unwrap(list.push(mut done, store.runner.Done(stream: stream, p: p, outcome: Returned(take arg))))
             Ok(Some(Batch(0u64, list.new(), list.new(), take done)))
         },
-        Unsubscribe(_) => Ok(Some(Reset(0u64, list.new()))),
-        _ => Error(1013u16),
+        WClient(Unsubscribe(_), _) => Ok(Some(Reset(0u64, list.new()))),
+        WClient(_, _) => Error(1013u16),
+        _ => Ok(None),
     }
 }
 
+fn inspect(context: (), frame: store.runner.Frame) -> Option[u16] { None }
+
+fn finish(mut context: ()) -> Option[store.runner.PubIn] { None }
+
 fn service() -> store.runner.Service[()] {
-    store.runner.Service(context: (), dispatch: dispatch, attach: attach)
+    store.runner.Service(context: (), step: step, ready: ready, finish: finish, check: inspect)
 }
 
 fn run(n: Net, tasks: Tasks, clock: Clock, config: store.runner.WireConfig) -> Result[(), Exit] waits {

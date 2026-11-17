@@ -190,19 +190,44 @@ and one assembly allowance under that reservation. It runs on the evaluator and
 native engines in `core-runner-r0` after a push, and in `core-runner-wire`.
 
 
-`serve(n, mut listener, tasks, clock, to_publisher, config, max_sessions, ingress, make)` is the
-dormant W3b accept loop. Each accepted connection gets one owner, reader and
-writer. `max_sessions` bounds owner handles and completion records independently
-of `socket.pending_max`; ingress and principal admission remain W3c. Upgrades run
-in their owners, so a stalled upgrade does not block acceptance. `Service[C]`
-provides a context, an attach hook for the owner's inbox and the single
-`Sender[PubIn]`, and a non-waiting `dispatch` callback. The owner holds that
-sender without joining; the W3c service joins lazily on its first Subscribe. The callback is also callable by another transport through
-`runner.dispatch`; it contains no socket operations. W3c supplies Hello, call
-admission, principal binding, dedup, publisher integration and outcome accounting.
+`serve` owns a bounded accept loop and an owner/reader/writer group per connection.
+`serve_admitted` adds the shared `ingress.Ingress` policy before writing 101, after
+`wsock.source` sanitizes the IP. Per-IP sessions and pending capacity produce HTTP
+503 while one of sixteen refusal workers is free, otherwise a bare close.
+`max_sessions` bounds active owner handles independently of `socket.pending_max`.
+
+`ingress.start` owns the shared mint and call buckets, with at most 8192 keys of
+each kind and a 256-item inbox. Every ask has a fresh capacity-one reply, answered
+by `try_send`. Only full inactive buckets retire. Socket leases return on drop;
+Hello binds a 21-byte anonymous bearer or mints one. Defaults are 32 sessions per
+source, ten new principals per minute, and 20 calls/second per principal with
+burst 40. Hello refusal is Close 1013; call refusal is `Refused(Overloaded)`.
+
+`runner.admitted` carries the opaque authenticated principal, attenuated entry
+keys, recorded arrival and decision times, and byte allowances. Pure `prepare`
+resolves current/gone/unknown keys, applies attenuation, decodes under byte and
+step bounds, computes the digest, and forms `principal || u32-BE(stream)`.
+The composition root supplies retained activation keys through `retain_gone`.
+`Send` is opaque. The same policy and preparation functions serve other transports.
+
+`wire_place_service` runs place under `n_place` inside the owner. `Service[C]`
+has synchronous step, readiness and finish callbacks. `WireWork` keeps the owned
+policy and deadline tasks inside that owner. It receives policy results through
+its existing inbox. Welcome and Placed precede calls; a second Hello closes 1008.
+Each send keeps its unit through writer handoff. Gone calls reach V5; out-of-range
+or unknown slots answer NoEntry. The publisher joins lazily on the first Subscribe.
+A close flag plus Drained releases publisher state even if the owner closes before
+the join acknowledgement, or PubIn is full. Unsubscribe drops queued rows locally.
+
+DONE_MAX is 8192, leaving 8172 reply bytes. Transact checks before commit and
+records an oversized reply as Failed(OutOfBytes); compute checks without recording.
+At q=4 the owner retains at most 41140 bytes of outcome rows, including five V1
+refusals. The sixth unsent refusal closes 1008. Reset preserves every held Done.
+Older stored replies above the bound close 1009 without changing stored bytes.
+`max_subs` defaults to 128, with publication rows also bounded by the byte budget.
 
 A read credit is acquired before decoding and returned after dispatch consumes
-the input. Queued, currently dispatched and producer-held frames together use at
+the input. An admission retaining its input keeps that credit until its decision. Queued, currently dispatched and producer-held frames together use at
 most `1+q` credits. The reader owns their allocations even after sending. The
 writer's capacity-one channel is a handoff: the owner waits for `Sent` before
 offering again. Control frames precede queued data after the current frame. Both
@@ -215,14 +240,18 @@ The non-overlapping owner reservation is `reader_bytes + 4096` for the children,
 `(1+q)(8192+36)` for outcomes, `budget` for publication, twice
 `round8(max_frame+14)` for encoding and a pending writer frame, `n_service` and
 `n_place` for service state and the Registry, `round8(300(1+q))` for queue growth,
-and `32768` for upgrade work, control bytes and the Close timer. At defaults this
-is 12,547,870 + n_service + n_place bytes. The exact-bound `session_records` law
+and `32768` for upgrade work, control bytes and the Close timer, plus `4384` for
+the Hello timer and its task record. At defaults this is 12,552,254 + n_service +
+n_place bytes. Service working space includes its bounded admission job, per-send
+deadline tasks and slot metadata. The exact-bound `session_records` law
 checks 426-byte inbox items, 288-byte child records and a 320-byte owner record
 against charge-v1; `writer_one_frame` checks the handoff's exact 88-byte charge.
 Root admission adds the owner record (320), its parent-funded pending lease (56),
 the factory's bounded state (at most n_service) and a copied ingress list
 `round8(25 * prefix_count)` per live owner. Shared listener bookkeeping includes
-the completion channel `64+8*max_sessions`, the pending credit channel (64), and
+the completion channel `64+8*(max_sessions+16)`, the pending credit channel (64), and
 owner-map growth (at most `96*max(4,max_sessions)`); these shared records are counted
-once. Logical reservations, live charge, virtual stacks and RSS are different
+once. At most sixteen refusal tasks each reserve 16384 working bytes and a
+320-byte record. The shared ingress task and its bounded tables have their own
+caller-supplied reservation. Logical reservations, live charge, virtual stacks and RSS are different
 quantities.

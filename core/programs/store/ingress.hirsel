@@ -1,8 +1,8 @@
 // Shared admission for transports. Only this task owns cross-connection policy.
-pub type Config: send { buckets_max: u64, inbox: u64, sessions: u64, mint_burst: u64, mint_period_ns: u64, call_burst: u64, call_period_ns: u64 }
+pub type Config: send { buckets_max: u64, inbox: u64, sessions: u64, mint_burst: u64, mint_window_ns: u64, call_burst: u64, call_period_ns: u64 }
 
 pub fn defaults() -> Config {
-    Config(buckets_max: 8192u64, inbox: 256u64, sessions: 32u64, mint_burst: 10u64, mint_period_ns: 6000000000u64, call_burst: 40u64, call_period_ns: 50000000u64)
+    Config(buckets_max: 8192u64, inbox: 256u64, sessions: 32u64, mint_burst: 10u64, mint_window_ns: 60000000000u64, call_burst: 40u64, call_period_ns: 50000000u64)
 }
 
 type Bucket: send { at: u64, credit: u64 }
@@ -28,7 +28,7 @@ pub opaque type Principal: send { token: Bytes }
 
 pub fn principal(p: Principal) -> View[Bytes] in p { view p.token }
 
-type Source: send { mint: Bucket, free: u64, returned: Receiver[()], to: Sender[()] }
+type Source: send { mints: List[u64], free: u64, returned: Receiver[()], to: Sender[()] }
 type Book: send { config: Config, sources: Map[Bytes, Source], calls: Map[Bytes, Bucket] }
 
 type Kind: send = Open(Bytes) | Hello(Bytes, Option[Bytes]) | Call(Bytes)
@@ -69,8 +69,8 @@ fn retire(mut book: Book, now: u64) {
     for take key in take expired {
         let mut s = option.unwrap(map.remove(mut book.sources, key))
         collect(mut s)
-        s.mint = refill(s.mint, now, c.mint_burst * c.mint_period_ns)
-        if s.free != c.sessions || s.mint.credit != c.mint_burst * c.mint_period_ns {
+        prune_mints(mut s, now, c.mint_window_ns)
+        if s.free != c.sessions || list.len(s.mints) != 0u64 {
             result.unwrap(map.insert(mut book.sources, take key, take s))
         }
     }
@@ -83,7 +83,9 @@ fn ensure_source(mut book: Book, key: Bytes, now: u64) -> bool {
     if map.len(book.sources) >= c.buckets_max { return false }
     let made: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(c.sessions)
     let (to, returned) = match take made { Ok(take pair) => take pair, Error(_) => return false }
-    let source = Source(mint: Bucket(at: now, credit: c.mint_burst * c.mint_period_ns), free: c.sessions, returned: take returned, to: take to)
+    let allocated: Result[List[u64], Capacity] = list.with_capacity(c.mint_burst)
+    let mints = match take allocated { Ok(take times) => take times, Error(_) => return false }
+    let source = Source(mints: take mints, free: c.sessions, returned: take returned, to: take to)
     match map.insert(mut book.sources, result.unwrap(clone(key)), take source) { Ok(()) => true, Error(_) => false }
 }
 
@@ -112,7 +114,10 @@ fn bind(mut book: Book, key: Bytes, take token: Option[Bytes], now: u64, random:
     if !ensure_source(mut book, key, now) { return RejectedPolicy }
     let c = book.config
     let allowed = option.unwrap(map.update(mut book.sources, key, scoped fn(mut s: Source) -> bool {
-        take_credit(mut s.mint, now, c.mint_burst, c.mint_period_ns)
+        prune_mints(mut s, now, c.mint_window_ns)
+        if list.len(s.mints) >= c.mint_burst { false } else {
+            match list.push(mut s.mints, now) { Ok(()) => true, Error(_) => false }
+        }
     }))
     if !allowed { return RejectedPolicy }
     let mut nonce: Bytes = result.unwrap(list.with_capacity(16u64))
@@ -149,7 +154,7 @@ fn policy(take p: Policy) -> () waits {
 }
 
 pub fn start(tasks: Tasks, clock: Clock, random: Random, config: Config, n_policy: u64) -> Result[(Ingress, Task[()]), Capacity] {
-    if config.buckets_max == 0u64 || config.buckets_max > 8192u64 || config.inbox == 0u64 || config.inbox > 256u64 || config.sessions == 0u64 || config.mint_burst == 0u64 || config.call_burst == 0u64 || config.mint_period_ns == 0u64 || config.call_period_ns == 0u64 || config.mint_burst > 0xffffffffffffffffu64 / config.mint_period_ns || config.call_burst > 0xffffffffffffffffu64 / config.call_period_ns {
+    if config.buckets_max == 0u64 || config.buckets_max > 8192u64 || config.inbox == 0u64 || config.inbox > 256u64 || config.sessions == 0u64 || config.mint_burst == 0u64 || config.call_burst == 0u64 || config.mint_window_ns == 0u64 || config.call_period_ns == 0u64 || config.call_burst > 0xffffffffffffffffu64 / config.call_period_ns {
         return Error(Capacity(requested: 1u64, available: 0u64))
     }
     let (to, from): (Sender[Ask], Receiver[Ask]) = channel.new(config.inbox)?
@@ -196,7 +201,13 @@ pub fn law_limits(random: Random) -> bool {
     }
     if let RejectedPolicy = bind(mut book, source, None, 600000000000u64, random) {} else { return false }
     if let RejectedPolicy = bind(mut book, source, Some(list.new()), 600000000000u64, random) {} else { return false }
-    if let Bound(_) = bind(mut book, source, None, 606000000000u64, random) {} else { return false }
+    if let RejectedPolicy = bind(mut book, source, None, 606000000000u64, random) {} else { return false }
+    if let Bound(_) = bind(mut book, source, None, 660000000000u64, random) {} else { return false }
+    let other = source_key(V4(0x7f000002u32))
+    for _ in 0u64 .. 5u64 { if let Bound(_) = bind(mut book, other, None, 700000000000u64, random) {} else { return false } }
+    for _ in 0u64 .. 5u64 { if let Bound(_) = bind(mut book, other, None, 730000000000u64, random) {} else { return false } }
+    for _ in 0u64 .. 5u64 { if let Bound(_) = bind(mut book, other, None, 760000000000u64, random) {} else { return false } }
+    if let RejectedPolicy = bind(mut book, other, None, 760000000000u64, random) {} else { return false }
     true
 }
 
@@ -242,4 +253,22 @@ pub fn law_reply_isolated(tasks: Tasks, clock: Clock, random: Random) -> bool wa
 @test
 fn test_ingress(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
     if law_limits(random) && law_rates_and_expiry() && law_reply_isolated(tasks, clock, random) { Ok(()) } else { Error(()) }
+}
+
+
+pub fn share(i: Ingress) -> Ingress { Ingress(to: channel.sender(i.to)) }
+
+pub fn share_principal(p: Principal) -> Result[Principal, Capacity] {
+    let copied: Bytes = clone(p.token)?
+    Ok(Principal(token: take copied))
+}
+
+
+// Minting has a strict rolling-minute bound, unlike calls' explicit burst/rate.
+fn prune_mints(mut s: Source, now: u64, window: u64) {
+    while list.len(s.mints) != 0u64 {
+        let first = s.mints[0u64]
+        if now < first || now - first < window { break }
+        let _ = list.remove(mut s.mints, 0u64)
+    }
 }

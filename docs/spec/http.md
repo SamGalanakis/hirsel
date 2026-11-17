@@ -1256,7 +1256,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 - RUNNER-SPEC v2.12's PubIn (`place_head` still takes `Receiver[Join]`, runner.hirsel:810);
 - the wire session over `Net` (WIRE-SPEC W3; `connect` still takes `Sender[Down]`, runner.hirsel:1203);
 - runner.md still says v2.4;
-- **retirement marks** (a RUNNER-SPEC followup on v2.13, §2 Publisher retirement): `Joined` may carry a session-owned retirement mark, and after every message the publisher sweeps the marks and retires each session whose mark is closed; an ending session's wake is v2.13's `Drained`. PubIn's variants are unchanged. It must be in RUNNER-SPEC before H6's one-shot reads and H8 start; H4 builds raw streams and the group's subscription plumbing, and its subscription cases run in H8.
+- **retirement marks** (specified in RUNNER-SPEC v2.14, CHANGES-v2.14 and law L25 `retired_without_waiting`; not built; §2 Publisher retirement): `Joined` may carry a session-owned retirement mark, and after every message the publisher sweeps the marks and retires each session whose mark is closed; an ending session's wake is v2.13's `Drained`. PubIn's variants are unchanged. It must be in RUNNER-SPEC before H6's one-shot reads and H8 start; H4 builds raw streams and the group's subscription plumbing, and its subscription cases run in H8.
 
 **Columns.** "Starts" is what must be built before a slice starts. "Lands after" is what must land first, when that differs. Part A (§0-§3, §5-§8) slices never wait on H9 or H12. Part A lands alone; §4 and Part B's rows below are marked unbuilt until they land.
 

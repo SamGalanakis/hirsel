@@ -10,6 +10,7 @@ pub(super) struct Loop {
     pub header: usize,
     nodes: BTreeSet<usize>,
     exits: BTreeSet<usize>,
+    cuts: BTreeMap<(usize, usize), u64>,
     index: ValueId,
     limit: ValueId,
     yes: EdgeId,
@@ -458,6 +459,11 @@ fn path_cost(
         return Some(0);
     }
     if let Some(child) = known.get(&block) {
+        // A trace's cuts are edge-specific. A parent cannot absorb its nodes
+        // as a whole loop without also carrying those cuts and their prefixes.
+        if !child.cuts.is_empty() {
+            return None;
+        }
         let (_, trips) = child.constant?;
         for &node in &child.nodes {
             state.insert(node, Some(0));
@@ -556,6 +562,122 @@ fn exact_cost(
     state.insert(block, Some(cost));
     Some(cost)
 }
+// Keep uniform cheap trips together. Leave a more expensive edge before its
+// next effect and resume the original checked body after refunding the prefix.
+fn minimum_cost(
+    module: &Module,
+    body: &Body,
+    header: usize,
+    exit: usize,
+    block: usize,
+    state: &mut BTreeMap<usize, Option<u64>>,
+    neutral: &[bool],
+) -> Option<u64> {
+    if block == header {
+        return Some(0);
+    }
+    if block == exit {
+        return None;
+    }
+    if let Some(cost) = state.get(&block) {
+        return *cost;
+    }
+    state.insert(block, None);
+    let insts = body.blocks[block].insts.get(&body.insts)?;
+    if !insts.iter().all(|i| region_inst(module, body, i, neutral)) {
+        return None;
+    }
+    let tail = next(body, block)?
+        .into_iter()
+        .filter_map(|b| minimum_cost(module, body, header, exit, b, state, neutral))
+        .min()?;
+    let cost = tail.checked_add(
+        insts
+            .iter()
+            .filter(|i| matches!(i, Inst::Step { .. }))
+            .count() as u64,
+    )?;
+    state.insert(block, Some(cost));
+    Some(cost)
+}
+fn cheap_trace(
+    module: &Module,
+    body: &Body,
+    header: usize,
+    entry: usize,
+    exit: usize,
+    neutral: &[bool],
+) -> Option<(u64, BTreeSet<usize>, BTreeMap<(usize, usize), u64>)> {
+    let mut costs = BTreeMap::new();
+    let cost = minimum_cost(module, body, header, exit, entry, &mut costs, neutral)?;
+    if cost == 0 {
+        return None;
+    }
+    let mut nodes = BTreeSet::from([header]);
+    let mut pending = vec![entry];
+    let mut cuts = BTreeMap::new();
+    while let Some(block) = pending.pop() {
+        if !nodes.insert(block) {
+            continue;
+        }
+        let own = body.blocks[block]
+            .insts
+            .get(&body.insts)?
+            .iter()
+            .filter(|i| matches!(i, Inst::Step { .. }))
+            .count() as u64;
+        let remaining = costs[&block]? - own;
+        let prefix = cost - remaining;
+        for target in next(body, block)? {
+            let tail = if target == header {
+                Some(0)
+            } else {
+                costs.get(&target).copied().flatten()
+            };
+            if tail == Some(remaining) {
+                pending.push(target);
+            } else {
+                cuts.insert((block, target), prefix);
+            }
+        }
+    }
+    // Zero-charge cycles cannot use induction-derived progress. Every kept
+    // cycle must be the counted loop's back edge, so topologically remove the
+    // other nodes before choosing the trace.
+    let mut degrees = nodes
+        .iter()
+        .filter(|&&b| b != header)
+        .map(|&b| (b, 0usize))
+        .collect::<BTreeMap<_, _>>();
+    for &b in &nodes {
+        if b == header {
+            continue;
+        }
+        for target in next(body, b)? {
+            if target != header && !cuts.contains_key(&(b, target)) {
+                *degrees.get_mut(&target)? += 1;
+            }
+        }
+    }
+    let mut ready = degrees
+        .iter()
+        .filter_map(|(&b, &d)| (d == 0).then_some(b))
+        .collect::<Vec<_>>();
+    let mut removed = 0;
+    while let Some(b) = ready.pop() {
+        removed += 1;
+        for target in next(body, b)? {
+            if target != header && !cuts.contains_key(&(b, target)) {
+                let degree = degrees.get_mut(&target)?;
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.push(target);
+                }
+            }
+        }
+    }
+    (removed == nodes.len() - 1).then_some((cost, nodes, cuts))
+}
 pub(super) fn loops(
     module: &Module,
     body: &Body,
@@ -609,7 +731,7 @@ pub(super) fn loops(
             }
             let entry = body.edges[yes.index()].target.index();
             let mut state = BTreeMap::new();
-            let Some(cost) = path_cost(
+            let full_cost = path_cost(
                 module,
                 body,
                 constants,
@@ -619,24 +741,41 @@ pub(super) fn loops(
                 &mut state,
                 &known,
                 neutral,
-            ) else {
+            );
+            let trace = cheap_trace(
+                module,
+                body,
+                header,
+                entry,
+                body.edges[no.index()].target.index(),
+                neutral,
+            )
+            .filter(|(cost, _, _)| full_cost.is_none_or(|full| *cost < full));
+            let (cost, mut nodes, cuts) = if let Some(trace) = trace {
+                trace
+            } else if let Some(cost) = full_cost {
+                (cost, state.keys().copied().collect(), BTreeMap::new())
+            } else {
                 continue;
             };
             if cost == 0 {
                 continue;
             }
-            let mut nodes = state.keys().copied().collect::<BTreeSet<_>>();
             nodes.insert(header);
             if nodes.contains(&body.edges[no.index()].target.index()) {
                 continue;
             }
-            let exits = nodes
-                .iter()
-                .copied()
-                .filter(|&b| b != header)
-                .flat_map(|b| next(body, b).unwrap_or_default())
-                .filter(|b| !nodes.contains(b))
-                .collect::<BTreeSet<_>>();
+            let exits = if cuts.is_empty() {
+                nodes
+                    .iter()
+                    .copied()
+                    .filter(|&b| b != header)
+                    .flat_map(|b| next(body, b).unwrap_or_default())
+                    .filter(|b| !nodes.contains(b))
+                    .collect::<BTreeSet<_>>()
+            } else {
+                BTreeSet::new()
+            };
             // Every back edge advances by the same positive stride. A checked
             // overflow exits through the refund path; zero strides stay checked.
             let inclusive = *comparison == CompareOp::Le;
@@ -701,7 +840,7 @@ pub(super) fn loops(
                         }
                     }
                 }
-                if block != header {
+                if block != header && cuts.is_empty() {
                     for (other, _) in body.blocks.iter().enumerate() {
                         if !nodes.contains(&other)
                             && next(body, other).is_some_and(|n| n.contains(&block))
@@ -718,11 +857,17 @@ pub(super) fn loops(
             else {
                 continue;
             };
+            if !cuts.is_empty() && !matches!(stride, Stride::Constant(_)) {
+                continue;
+            }
             let update = updates[0];
             // Every back edge passes the induction update, including a source
             // continue. Reject a path that could repeat a trip without advancing.
             if nodes.iter().any(|&b| {
-                b != header && next(body, b).is_some_and(|n| n.contains(&header)) && b != update
+                b != header
+                    && next(body, b).is_some_and(|n| n.contains(&header))
+                    && !cuts.contains_key(&(b, header))
+                    && b != update
             }) {
                 continue;
             }
@@ -773,6 +918,7 @@ pub(super) fn loops(
                 None
             };
             let exact = exits.is_empty()
+                && cuts.is_empty()
                 && exact_cost(
                     module,
                     body,
@@ -782,23 +928,25 @@ pub(super) fn loops(
                     &mut BTreeMap::new(),
                     &known,
                 ) == Some(cost);
-            known.insert(
+            let plan = Loop {
                 header,
-                Loop {
-                    header,
-                    nodes,
-                    exits,
-                    index: *index,
-                    limit: *limit,
-                    yes,
-                    no,
-                    cost,
-                    exact,
-                    constant,
-                    stride,
-                    inclusive,
-                },
-            );
+                nodes,
+                exits,
+                cuts,
+                index: *index,
+                limit: *limit,
+                yes,
+                no,
+                cost,
+                exact,
+                constant,
+                stride,
+                inclusive,
+            };
+            if !plan.cuts.is_empty() && iteration_prefixes(body, &plan).is_none() {
+                continue;
+            }
+            known.insert(header, plan);
         }
         if known.len() == before {
             break;
@@ -848,7 +996,9 @@ fn iteration_prefixes(body: &Body, plan: &Loop) -> Option<BTreeMap<usize, u64>> 
                 .count() as u64,
         )?;
         for successor in next(body, block).unwrap_or_default() {
-            pending.push((successor, spent));
+            if !plan.cuts.contains_key(&(block, successor)) {
+                pending.push((successor, spent));
+            }
         }
     }
     plan.nodes
@@ -1069,7 +1219,24 @@ impl FunctionEmitter<'_> {
                     self.cond(&condition, yes, done);
                     self.emit_edge(yes, plan.yes);
                 } else {
+                    let old = plan
+                        .cuts
+                        .keys()
+                        .filter(|&&(from, _)| from == block)
+                        .map(|&(_, to)| {
+                            let label =
+                                trace_cut_label(number, self.body.blocks.len(), block, to, full);
+                            (to, self.step_labels.insert(to, label))
+                        })
+                        .collect::<Vec<_>>();
                     self.term(&self.body.terminators[block])?;
+                    for (to, label) in old {
+                        if let Some(label) = label {
+                            self.step_labels.insert(to, label);
+                        } else {
+                            self.step_labels.remove(&to);
+                        }
+                    }
                 }
             }
             self.step_labels.clear();
@@ -1119,10 +1286,42 @@ impl FunctionEmitter<'_> {
                 self.step_refund();
                 self.br(Label::block(exit));
             }
+            for (&(from, to), &prefix) in &plan.cuts {
+                self.block(trace_cut_label(
+                    number,
+                    self.body.blocks.len(),
+                    from,
+                    to,
+                    full,
+                ));
+                let Stride::Constant(stride) = plan.stride else {
+                    unreachable!();
+                };
+                self.precharge = Some(Precharge::Iteration {
+                    index: plan.index,
+                    start: Value::Local(window.start),
+                    charged: Value::Local(window.charged),
+                    stride,
+                    cost: plan.cost,
+                    prefix,
+                });
+                self.step_refund();
+                self.br(Label::block(to));
+            }
             self.precharge = None;
         }
         Ok(())
     }
+}
+fn trace_cut_label(number: usize, blocks: usize, from: usize, to: usize, full: bool) -> Label {
+    Label::new(
+        if full {
+            "step_full_cut"
+        } else {
+            "step_fast_cut"
+        },
+        (number * blocks + from) * blocks + to,
+    )
 }
 fn trace_exit_label(number: usize, blocks: usize, block: usize, full: bool) -> Label {
     Label::new(

@@ -1816,3 +1816,124 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
         );
     }
 }
+
+#[test]
+fn cheap_loop_traces_refund_before_expensive_effects_and_resume_once() {
+    let source = r#"
+fn scan(mut xs: Inline[u64, 3], n: u64, at: u64, early: bool) -> Result[(), Capacity] {
+    for i in 0u64 .. n {
+        xs[0] += int.widen(1u8)
+        if i == at {
+            xs[1] += int.widen(3u8)
+            if early { return Error(Capacity(requested: 1, available: 0)) }
+            xs[2] += int.widen(4u8)
+        }
+    }
+    Ok(())
+}
+fn probe(s: u64, n: u64, at: u64, mode: u64) -> u64 {
+    let ran = bound steps s {
+        let mut xs: Inline[u64, 3] = [0; 3]
+        let stopped = match scan(mut xs, n, at, mode == 1) { Ok(()) => 0u64, Error(_) => 1u64 }
+        for _ in 0u64 .. 3u64 {}
+        xs[0] + 100000u64 * xs[1] + 1000000u64 * xs[2] + 10000000u64 * stopped
+    }
+    match ran { Ok(v) => 1000000000u64 + v, Error(e) => 2000000000u64 + e.steps }
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let mut cases = Vec::new();
+    for n in [0u64, 1, 8, 32768] {
+        for at in [0, 3, n] {
+            for mode in [0, 1] {
+                let extra = at < n;
+                let early = extra && mode == 1;
+                // One scan call; a normal trip widens once and latches once.
+                // The expensive trip widens two more times. An early trip
+                // widens twice and returns before its latch. Tail = three.
+                let need = if early {
+                    2 * at + 6
+                } else {
+                    2 * n + 4 + 2 * u64::from(extra)
+                };
+                let checksum = if early {
+                    at + 1 + 300000 + 10000000
+                } else {
+                    n + if extra { 4300000 } else { 0 }
+                };
+                for s in [
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    need - 1,
+                    need,
+                    need + 1,
+                    65535,
+                    65536,
+                    65537,
+                ] {
+                    let want = if s < need {
+                        2000000000u64 + s
+                    } else {
+                        1000000000u64 + checksum
+                    };
+                    assert_eq!(
+                        eval::run(&module, names["probe"], &[s, n, at, mode], 1_000_000).outcome,
+                        eval::Outcome::Returned(vec![want]),
+                        "hand count s={s}, n={n}, at={at}, mode={mode}"
+                    );
+                    cases.push(Case {
+                        function: names["probe"],
+                        args: vec![s, n, at, mode],
+                        limit: 1_000_000,
+                        injection: None,
+                    });
+                }
+            }
+        }
+    }
+    for facts in [false, true] {
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                    .unwrap();
+            for (case, report) in cases.iter().zip(execute_object(
+                &module,
+                &cases,
+                "",
+                "",
+                optimization,
+                Some(object),
+            )) {
+                assert_eq!(
+                    report.outcome,
+                    eval::run(&module, case.function, &case.args, case.limit).outcome,
+                    "facts={facts}, args={:?}",
+                    case.args
+                );
+            }
+        }
+    }
+    let object = module.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+    for (case, report) in cases.iter().zip(execute_object(
+        &module,
+        &cases,
+        "",
+        "",
+        Optimization::Speed,
+        Some(object),
+    )) {
+        assert_eq!(
+            report.outcome,
+            eval::run(&module, case.function, &case.args, case.limit).outcome,
+            "split units, args={:?}",
+            case.args
+        );
+    }
+}

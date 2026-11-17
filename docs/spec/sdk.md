@@ -59,3 +59,21 @@ program. Describe and generation errors leave the output destination untouched.
 The CLI uses the driver's shared bounded describe child. Capacity and duplicate
 registration errors retain their typed payloads; an expired child reports
 `PlaceTimedOut` after the launcher kills and reaps it.
+
+## Shared client runtime
+
+`@hirsel/client` lives in `sdk/client`. Its shared state machine consumes the
+generated Frame codec and Want list. Browser storage uses strict IndexedDB
+transactions and generation-scoped Web Locks; Node storage uses durable file
+replacement and `flock` leases. Generation validation and each work send share
+the installation lock. Missing allocated stream records fence the generation;
+lost pending requests never migrate to a new principal.
+
+Pending identity and admission uncertainty are durable before send. Returned
+and Failed outcomes commit together with the next position. A definitive V1
+refusal reuses the position only after a single, unambiguous attempt; otherwise
+the stream retires. HistoryUnavailable retires only a matching pending request,
+while RequestMismatch also fences the generation. Incompatible closes remain
+terminal until an explicit reconnect or bindings reload. Reconnection waits for
+all Placed frames, recovers pending calls, and restores subscriptions using new
+ids. Cache replacement waits for Batch.complete.

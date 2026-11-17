@@ -1,0 +1,14 @@
+{
+  "name": "@hirsel/client",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {"types": "./dist/client.d.ts", "default": "./dist/client.js"},
+    "./browser": {"types": "./dist/browser.d.ts", "default": "./dist/browser.js"},
+    "./node": {"types": "./dist/node.d.ts", "default": "./dist/node.js"}
+  },
+  "files": ["dist"],
+  "scripts": {"build": "tsc -p tsconfig.json"},
+  "devDependencies": {"typescript": "5.9.3", "@types/node": "22.19.1"},
+  "engines": {"node": ">=22"}
+}

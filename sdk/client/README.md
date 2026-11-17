@@ -1,0 +1,55 @@
+# Shared client runtime
+
+Build with `npm install && npm run build` in this directory. The output is
+`dist/client.js` and its declarations, with `browser.js` and `node.js` adapters.
+Build outputs stay untracked. There are no runtime npm dependencies.
+
+```ts
+import {Client} from '@hirsel/client';
+import {BrowserStorage} from '@hirsel/client/browser';
+import {Frame} from './generated/frame.js';
+import {want, identity, bind} from './generated/entries.js';
+
+const client = await Client.open({
+  url: 'wss://example.test/runner', frame: Frame, wants: want, identity,
+  storage: new BrowserStorage(),
+  onDiagnostic: console.warn,
+  onRecovered: outcome => console.log('Recovered request', outcome),
+});
+await client.whenReady();
+const api = bind(client);
+```
+
+Node 22 or later uses the same `Client`, global `WebSocket` and generated
+bindings. Pass `new NodeStorage(stateDirectory)` from `@hirsel/client/node`.
+The Node adapter requires the system `flock` command. It holds the installation
+lock and each stream lease with kernel file locks; no stale lockfile cleanup is
+needed. State replacement writes a private temporary file, syncs it, renames it
+and syncs the directory. Protect the state directory as a bearer credential.
+
+Each client leases one stream and permits one call in flight. Recovering clients
+reject new calls until the durable pending request finishes. `onRecovered`
+receives the outcome of a recovered request whose original promise no longer
+exists. Call arguments and Want bytes are copied before asynchronous work.
+`LocallyUnknown` means the original effect cannot be determined locally.
+`RequestMismatch` fences the installation generation. Neither result causes
+replacement work. Retired streams retain their historical record and are never
+leased again. A later explicit client can allocate another stream.
+
+`Incompatible` is terminal until `reconnect()` or a bindings reload. The original
+pending request survives both. `StorageUnavailable` permits no sends; close the
+client and reopen after storage is available. `close()` releases the stream lease
+and preserves pending durable work. Each send checks the installation generation
+under its lock, so a live client with an older generation cannot send work.
+
+Subscription callbacks receive a complete current array of raw rows after an
+atomic Batch. Reset and reconnect preserve the old cache until the replacement
+id appears in `Batch.complete`, including an empty initial result. Old ids are
+ignored. All subscriptions use `resume: None`. Optional predictions supplied as
+the fourth `call()` argument are removed when a matching outcome row arrives;
+`onPrediction` runs after the complete Batch has been applied.
+
+The scripted laws run as part of `store.codec_frames:ts_frame_vectors` in
+`//:land-core-evaluator`. They use the generated Frame codec and independent
+STORE P1-P3 fixtures. Real `serve` crash/reconnect qualification is deferred to
+W3e; these laws make no claim about that integration.

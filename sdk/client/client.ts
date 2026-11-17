@@ -1,0 +1,502 @@
+export type Option<T> = {tag: 'None'} | {tag: 'Some'; value: T};
+export interface Want { identity: Uint8Array; args_fp: bigint; result_fp: bigint }
+export interface Room { requested: bigint; available: bigint }
+export type Fault = {tag: 'Raised'; value: number} | {tag: 'OutOfBytes'; value: Room}
+  | {tag: 'OutOfTime'; value: bigint} | {tag: 'Gone'};
+export type Refusal = {tag: 'NoEntry' | 'Overloaded' | 'Deadline' | 'NotAllowed' | 'RequestMismatch' | 'HistoryUnavailable'}
+  | {tag: 'Malformed'; value: {kind: number; at: bigint}} | {tag: 'Budget'; value: Room};
+export type Outcome<R> = {tag: 'Returned'; value: R} | {tag: 'Failed'; value: Fault}
+  | {tag: 'Refused'; value: Refusal} | {tag: 'Abandoned' | 'InDoubt' | 'LocallyUnknown' | 'RequestMismatch'};
+export interface Row { sub: number; key: Uint8Array; value: Option<Uint8Array> }
+export interface Done {stream: number; p: bigint; outcome: Outcome<Uint8Array>}
+export type Entry = {tag: 'Ready'; value: number} | {tag: 'Resolve'; values: [number, Uint8Array]} | {tag: 'Gone'};
+export type Frame = {tag: 'Hello'; values: [Option<Uint8Array>, Want[]]}
+  | {tag: 'Call'; values: [number, bigint, number, number, Uint8Array]}
+  | {tag: 'Subscribe'; values: [number, number, Uint8Array, Option<Uint8Array>]}
+  | {tag: 'Unsubscribe'; value: number}
+  | {tag: 'Welcome'; values: [Uint8Array, number, bigint, Uint8Array, string, bigint]}
+  | {tag: 'Placed'; value: Entry}
+  | {tag: 'Batch'; values: [bigint, number[], Row[], Done[]]}
+  | {tag: 'Ended'; values: [number, Outcome<Uint8Array>]}
+  | {tag: 'Reset'; values: [bigint, Done[]]};
+export interface Codec { encode(frame: Frame): Uint8Array; decode(bytes: Uint8Array): Frame }
+export interface Subscription { unsubscribe(): void }
+export interface Transport {
+  call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R): Promise<Outcome<R>>;
+  subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void): Subscription;
+}
+export interface Pending {
+  generation: bigint; stream: number; p: bigint; want: Want; args: Uint8Array;
+  slot: number; attempts: number; possiblyAdmitted: boolean;
+}
+export interface StreamRecord {
+  next: bigint; pending?: Pending; terminal?: {p: bigint; outcome: Outcome<Uint8Array>}; retired: boolean;
+}
+export interface Installation {
+  version: 1; generation: bigint; token: Uint8Array | null;
+  directory: number[]; nextStream: number; streams: Record<string, StreamRecord>;
+}
+export interface Lease { release(): Promise<void>; lost: Promise<void> }
+export interface Storage {
+  lock(name: string, wait: boolean): Promise<Lease | null>;
+  read(): Promise<Installation | null>;
+  write(state: Installation): Promise<void>;
+}
+export type State = 'Connecting' | 'Ready' | 'Backoff' | 'Incompatible' | 'Fenced' | 'Retired' | 'StorageUnavailable' | 'Closed';
+export interface Socket {
+  binaryType: string;
+  onopen: ((event?: unknown) => void) | null;
+  onmessage: ((event: {data: unknown}) => void) | null;
+  onclose: ((event: {code: number}) => void) | null;
+  onerror: ((event?: unknown) => void) | null;
+  send(data: Uint8Array): void; close(code?: number, reason?: string): void;
+}
+export interface Clock {
+  now(): number; random(): number;
+  set(fn: () => void, ms: number): unknown; clear(id: unknown): void;
+}
+export interface Identity {digest: Uint8Array; target: string; n_place: bigint}
+export interface Options {
+  url: string; storage: Storage; frame: Codec; wants: Want[]; identity?: Identity;
+  socket?: (url: string, protocol: string) => Socket; clock?: Clock; deadlineMs?: number;
+  onState?: (state: State) => void;
+  onDiagnostic?: (diagnostic: string) => void;
+  onRecovered?: (outcome: Outcome<Uint8Array>) => void;
+  onBatch?: (version: bigint) => void;
+  onPrediction?: (predictions: ReadonlyMap<bigint, unknown>) => void;
+}
+const clock: Clock = {
+  now: () => Date.now(), random: () => Math.random(),
+  set: (fn, ms) => setTimeout(fn, ms), clear: id => clearTimeout(id as ReturnType<typeof setTimeout>),
+};
+const equal = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i]);
+const sameWant = (a: Want, b: Want) => equal(a.identity, b.identity) && a.args_fp === b.args_fp && a.result_fp === b.result_fp;
+const copyWant = (w: Want): Want => ({identity: w.identity.slice(), args_fp: w.args_fp, result_fp: w.result_fp});
+const key = (b: Uint8Array) => Array.from(b, n => n.toString(16).padStart(2, '0')).join('');
+const fresh = (generation: bigint): Installation => ({version: 1, generation, token: null, directory: [], nextStream: 0, streams: {}});
+export class ClientError extends Error {
+  constructor(public readonly code: string) { super(code); this.name = 'ClientError'; }
+}
+interface Sub {
+  want: Want; args: Uint8Array; onRows: (rows: Row[]) => void; id?: number;
+  complete: boolean; cache: Map<string, Row>; active: boolean;
+}
+
+export class Client implements Transport {
+  state: State = 'Connecting';
+  readonly generation: bigint;
+  readonly stream: number;
+  readonly predictions = new Map<bigint, unknown>();
+  private token: Uint8Array | null;
+  private record: StreamRecord;
+  private streamLease: Lease;
+  private initialLock?: Lease;
+  private initialState?: Installation;
+  private socket?: Socket;
+  private epoch = 0;
+  private work: Promise<void> = Promise.resolve();
+  private wants: Want[];
+  private placed = 0;
+  private welcomed = false;
+  private welcomedAt = 0;
+  private backoff = 100;
+  private timer?: unknown;
+  private stableTimer?: unknown;
+  private clock: Clock;
+  private sent = false;
+  private nextSub = 0;
+  private subs = new Set<Sub>();
+  private version = 0n;
+  private notifications?: Array<() => void>;
+  private resolveCall?: (outcome: Outcome<Uint8Array>) => void;
+  private readyResolve!: () => void;
+  private readyReject!: (error: unknown) => void;
+  private ready: Promise<void>;
+
+  private constructor(private options: Options, state: Installation, stream: number, lease: Lease) {
+    this.generation = state.generation; this.stream = stream; this.streamLease = lease;
+    this.token = state.token; this.record = structuredClone(state.streams[stream]);
+    this.wants = options.wants.map(copyWant);
+    const pending = this.record.pending;
+    if (pending && !this.wants.some(w => sameWant(w, pending.want))) this.wants.push(copyWant(pending.want));
+    this.clock = options.clock ?? clock;
+    this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
+    // A connection may become terminal before an app chooses to await whenReady().
+    void this.ready.catch(() => {});
+    void lease.lost.then(() => this.enqueue(async () => {
+      if (this.state !== 'Closed') await this.stop('Fenced', 'LocallyUnknown');
+    }));
+  }
+
+  static async open(options: Options): Promise<Client> {
+    const lock = await options.storage.lock('install', true);
+    if (!lock) throw new ClientError('StorageUnavailable');
+    let lease: Lease | null = null;
+    try {
+      let state: Installation | null;
+      try { state = await options.storage.read(); }
+      catch (error) {
+        if (!(error instanceof CorruptState)) throw error;
+        state = null;
+      }
+      if (!state || !intact(state)) {
+        const generation = state ? state.generation + 1n : randomGeneration();
+        state = fresh(generation);
+        await options.storage.write(state);
+        options.onRecovered?.({tag: 'LocallyUnknown'});
+      }
+      let stream: number | undefined;
+      for (const n of state.directory) {
+        if (state.streams[n].retired) continue;
+        lease = await options.storage.lock(`stream-${state.generation}-${n}`, false);
+        if (lease) { stream = n; break; }
+      }
+      if (stream === undefined) {
+        stream = state.nextStream;
+        if (stream > 0xffffffff) throw new ClientError('StreamsExhausted');
+        lease = await options.storage.lock(`stream-${state.generation}-${stream}`, false);
+        if (!lease) throw new ClientError('StreamLeaseUnavailable');
+        state.nextStream++; state.directory.push(stream);
+        state.streams[stream] = {next: 0n, retired: false};
+        await options.storage.write(state);
+      }
+      const client = new Client(options, state, stream, lease!);
+      if (!state.token) {
+        // The first Hello mints the installation's bearer token. Keep the install
+        // lock until Welcome is durable, so concurrent open() calls share it.
+        client.initialLock = lock; client.initialState = state;
+      } else await lock.release();
+      client.connect();
+      return client;
+    } catch (error) {
+      await lease?.release(); await lock.release(); throw error;
+    }
+  }
+
+  whenReady(): Promise<void> { return this.ready; }
+  private enqueue(fn: () => Promise<void>): Promise<void> {
+    const next = this.work.then(fn);
+    this.work = next.catch(error => error instanceof ClientError ? undefined : this.unavailable(error));
+    return next;
+  }
+  private setState(state: State): void { this.state = state; this.options.onState?.(state); }
+  private async unavailable(error: unknown): Promise<void> {
+    if (this.state === 'Closed') return;
+    this.options.onDiagnostic?.(String(error));
+    this.setState('StorageUnavailable'); this.cancelTimers(); this.disconnect();
+    this.readyReject(new ClientError('StorageUnavailable'));
+    await this.releaseInitial();
+  }
+  private async releaseInitial(): Promise<void> {
+    const lock = this.initialLock; this.initialLock = undefined; this.initialState = undefined;
+    await lock?.release();
+  }
+  private async installation<T>(fn: (state: Installation) => Promise<T>): Promise<T | undefined> {
+    const lock = await this.options.storage.lock('install', true);
+    if (!lock) throw new ClientError('StorageUnavailable');
+    try {
+      let state: Installation | null;
+      try { state = await this.options.storage.read(); }
+      catch (e) { if (!(e instanceof CorruptState)) throw e; state = null; }
+      if (!state || !intact(state)) {
+        await this.options.storage.write(fresh((state?.generation ?? this.generation) + 1n));
+        await this.stop('Fenced', 'LocallyUnknown'); return;
+      }
+      if (state.generation !== this.generation || !state.token || !this.token || !equal(state.token, this.token)) {
+        await this.stop('Fenced', 'LocallyUnknown'); return;
+      }
+      return await fn(state);
+    } finally { await lock.release(); }
+  }
+  private connect(): void {
+    if (['Closed', 'Fenced', 'Retired', 'Incompatible', 'StorageUnavailable'].includes(this.state)) return;
+    this.setState('Connecting'); this.welcomed = false; this.placed = 0; this.sent = false;
+    for (const sub of this.subs) { sub.id = undefined; sub.complete = false; }
+    const epoch = ++this.epoch;
+    let socket: Socket;
+    try { socket = (this.options.socket ?? ((url, protocol) => new WebSocket(url, protocol) as unknown as Socket))(this.options.url, 'hirsel.1'); }
+    catch { this.transient(); return; }
+    this.socket = socket; socket.binaryType = 'arraybuffer';
+    socket.onopen = () => { void this.enqueue(async () => {
+      if (epoch !== this.epoch) return;
+      const hello = () => this.options.frame.encode({tag: 'Hello', values: [this.token ? {tag: 'Some', value: this.token} : {tag: 'None'}, this.wants]});
+      const sendHello = async () => { try { socket.send(hello()); } catch { this.transient(); } };
+      if (this.initialLock) await sendHello();
+      else await this.installation(sendHello);
+    }); };
+    socket.onmessage = event => { void this.enqueue(async () => {
+      if (epoch !== this.epoch) return;
+      let frame: Frame;
+      try {
+        if (!(event.data instanceof ArrayBuffer) && !(event.data instanceof Uint8Array)) throw new Error('binary Frame required');
+        frame = this.options.frame.decode(event.data instanceof Uint8Array ? event.data : new Uint8Array(event.data));
+      } catch { await this.incompatible(1007); return; }
+      await this.receive(frame);
+    }); };
+    socket.onclose = event => { void this.enqueue(async () => {
+      if (epoch !== this.epoch) return;
+      if ([1007, 1008, 1009].includes(event.code)) await this.incompatible(event.code);
+      else this.transient();
+    }); };
+    socket.onerror = () => { void this.enqueue(async () => { if (epoch === this.epoch) this.transient(); }); };
+  }
+  private disconnect(code = 1000): void {
+    ++this.epoch; const socket = this.socket; this.socket = undefined;
+    socket?.close(code);
+  }
+  private cancelTimers(): void {
+    if (this.timer !== undefined) this.clock.clear(this.timer);
+    if (this.stableTimer !== undefined) this.clock.clear(this.stableTimer);
+    this.timer = undefined; this.stableTimer = undefined;
+  }
+  private transient(): void {
+    this.cancelTimers(); this.disconnect(); this.setState('Backoff');
+    const delay = this.clock.random() * this.backoff;
+    this.backoff = Math.min(10000, this.backoff * 2);
+    this.timer = this.clock.set(() => { this.timer = undefined; void this.enqueue(async () => this.connect()); }, delay);
+  }
+  private async incompatible(code: number): Promise<void> {
+    this.cancelTimers(); this.disconnect(code); this.setState('Incompatible');
+    this.options.onDiagnostic?.(`Incompatible (${code}); reload bindings or reconnect explicitly`);
+    this.readyReject(new ClientError('Incompatible'));
+    await this.releaseInitial();
+  }
+  reconnect(): void {
+    if (this.state !== 'Incompatible' && this.state !== 'Backoff') throw new ClientError(this.state);
+    this.cancelTimers(); this.setState('Connecting');
+    this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
+    void this.ready.catch(() => {});
+    void this.enqueue(async () => {
+      if (!this.token) {
+        const lock = await this.options.storage.lock('install', true);
+        if (!lock) throw new ClientError('StorageUnavailable');
+        const state = await this.options.storage.read();
+        if (!state || !intact(state) || state.generation !== this.generation) {
+          await lock.release(); await this.stop('Fenced', 'LocallyUnknown'); return;
+        }
+        if (state.token) { this.token = state.token; await lock.release(); }
+        else { this.initialLock = lock; this.initialState = state; }
+      }
+      this.connect();
+    });
+  }
+  private async receive(frame: Frame): Promise<void> {
+    if (frame.tag === 'Welcome') {
+      if (this.welcomed) { await this.incompatible(1008); return; }
+      const [token, , , digest, target, n_place] = frame.values;
+      this.compareIdentity({digest, target, n_place});
+      if (this.token && !equal(this.token, token)) { await this.fence('LocallyUnknown'); return; }
+      if (this.initialState) {
+        this.initialState.token = token.slice();
+        await this.options.storage.write(this.initialState);
+        this.token = token.slice(); await this.releaseInitial();
+      } else if (!this.token) { await this.stop('Fenced', 'LocallyUnknown'); return; }
+      this.welcomed = true; this.welcomedAt = this.clock.now();
+      if (this.wants.length === 0) await this.allPlaced();
+      return;
+    }
+    if (frame.tag === 'Placed') {
+      if (!this.welcomed || this.placed >= this.wants.length) { await this.incompatible(1008); return; }
+      if (frame.value.tag === 'Gone') { await this.incompatible(1008); return; }
+      this.placed++;
+      if (this.placed === this.wants.length) await this.allPlaced();
+      return;
+    }
+    if (this.state !== 'Ready') { await this.incompatible(1008); return; }
+    if (frame.tag === 'Batch') {
+      const [version, complete, rows, outcomes] = frame.values;
+      if (version < this.version) { await this.incompatible(1008); return; }
+      const changed = new Map<Sub, Map<string, Row>>();
+      for (const sub of this.subs) if (sub.id !== undefined && complete.includes(sub.id)) changed.set(sub, new Map());
+      for (const row of rows) {
+        const sub = [...this.subs].find(s => s.active && s.id === row.sub);
+        if (!sub) continue;
+        if (!sub.complete && !complete.includes(row.sub)) { await this.incompatible(1008); return; }
+        let cache = changed.get(sub);
+        if (!cache) { cache = new Map(sub.cache); changed.set(sub, cache); }
+        if (row.value.tag === 'None') cache.delete(key(row.key)); else cache.set(key(row.key), structuredClone(row));
+      }
+      this.notifications = [];
+      await this.outcomes(outcomes);
+      this.version = version;
+      for (const [sub, cache] of changed) { sub.cache = cache; sub.complete = true; }
+      this.publish();
+      for (const [sub] of changed) sub.onRows([...sub.cache.values()].map(row => structuredClone(row)));
+      this.options.onBatch?.(version);
+    } else if (frame.tag === 'Reset') {
+      const [version, outcomes] = frame.values;
+      if (version < this.version) { await this.incompatible(1008); return; }
+      this.notifications = [];
+      await this.outcomes(outcomes); this.version = version;
+      for (const sub of this.subs) { sub.id = undefined; sub.complete = false; }
+      this.publish(); await this.subscribeAll();
+    } else if (frame.tag === 'Ended') {
+      const sub = [...this.subs].find(s => s.id === frame.values[0]);
+      if (sub) { sub.active = false; sub.id = undefined; this.subs.delete(sub); }
+    } else await this.incompatible(1008);
+  }
+  private compareIdentity(actual: Identity): void {
+    const expected = this.options.identity;
+    if (actual.digest.length === 0) this.options.onDiagnostic?.('identity unknown');
+    else if (expected && (!equal(expected.digest, actual.digest) || expected.target !== actual.target || expected.n_place !== actual.n_place))
+      this.options.onDiagnostic?.('launch identity mismatch');
+  }
+  private async allPlaced(): Promise<void> {
+    this.setState('Ready'); this.version = 0n;
+    this.stableTimer = this.clock.set(() => {
+      if (this.state === 'Ready' && this.clock.now() - this.welcomedAt >= 30000) this.backoff = 100;
+    }, Math.max(0, 30000 - (this.clock.now() - this.welcomedAt)));
+    // Recovery sends precede subscription restoration and any new API call.
+    await this.sendPending(); await this.subscribeAll(); this.readyResolve();
+  }
+  call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, prediction?: unknown): Promise<Outcome<R>> {
+    const copied = copyWant(want), arg = args.slice();
+    let resolve!: (outcome: Outcome<Uint8Array>) => void;
+    const answer = new Promise<Outcome<Uint8Array>>(r => { resolve = r; });
+    return this.enqueue(async () => {
+      if (this.state !== 'Ready') throw new ClientError(this.state);
+      if (this.record.pending) throw new ClientError('RecoveringOrBusy');
+      const slot = this.wants.findIndex(w => sameWant(w, copied));
+      if (slot < 0) throw new ClientError('UnknownWant');
+      await this.installation(async state => {
+        const record = state.streams[this.stream];
+        const pending: Pending = {generation: this.generation, stream: this.stream, p: record.next,
+          want: copied, args: arg, slot, attempts: 0, possiblyAdmitted: false};
+        record.pending = pending;
+        await this.options.storage.write(state);
+        this.record = structuredClone(record); this.resolveCall = resolve;
+        if (prediction !== undefined) { this.predictions.set(pending.p, prediction); this.options.onPrediction?.(this.predictions); }
+      });
+      if (this.state !== 'Ready') throw new ClientError(this.state);
+      await this.sendPending();
+    }).then(() => answer).then(outcome => outcome.tag === 'Returned' ? {tag: 'Returned', value: decode(outcome.value)} : outcome);
+  }
+  private async sendPending(): Promise<void> {
+    if (this.state !== 'Ready' || !this.record.pending || this.sent) return;
+    await this.installation(async state => {
+      const record = state.streams[this.stream], pending = record.pending!;
+      // Persist possible admission before send. A crash here is conservative:
+      // a later definitive refusal cannot authorize replacing these bytes.
+      pending.attempts++; pending.possiblyAdmitted = pending.attempts > 1 || pending.possiblyAdmitted;
+      pending.slot = this.wants.findIndex(w => sameWant(w, pending.want));
+      await this.options.storage.write(state);
+      this.record = structuredClone(record);
+      this.sent = true;
+      try { this.socket!.send(this.options.frame.encode({tag: 'Call', values: [this.stream, pending.p, pending.slot, this.options.deadlineMs ?? 30000, pending.args]})); }
+      catch { this.transient(); }
+    });
+  }
+  private async outcomes(rows: Done[]): Promise<void> {
+    for (const row of rows) {
+      const pending = this.record.pending;
+      if (!pending || row.stream !== this.stream || row.p !== pending.p) continue;
+      this.dropPrediction(pending.p);
+      const outcome = row.outcome;
+      if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { await this.fence('RequestMismatch'); continue; }
+      if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.retire('LocallyUnknown'); continue; }
+      if (outcome.tag === 'Returned' || outcome.tag === 'Failed') {
+        await this.installation(async state => {
+          const record = state.streams[this.stream];
+          record.terminal = {p: pending.p, outcome: structuredClone(outcome)};
+          delete record.pending;
+          if (pending.p === 0xffffffffffffffffn) record.retired = true; else record.next = pending.p + 1n;
+          await this.options.storage.write(state); this.record = structuredClone(record);
+          this.finish(outcome);
+          if (record.retired) await this.stop('Retired');
+        });
+      } else if (outcome.tag === 'Refused' && ['NoEntry', 'Malformed', 'NotAllowed'].includes(outcome.value.tag)) {
+        if (pending.possiblyAdmitted || pending.attempts !== 1) {
+          await this.retire('LocallyUnknown');
+        } else await this.installation(async state => {
+          const record = state.streams[this.stream];
+          record.terminal = {p: pending.p, outcome: structuredClone(outcome)};
+          delete record.pending;
+          await this.options.storage.write(state); this.record = structuredClone(record); this.finish(outcome);
+        });
+      } else if (outcome.tag === 'Abandoned' || (outcome.tag === 'Refused' && ['Overloaded', 'Deadline', 'Budget'].includes(outcome.value.tag))) {
+        this.sent = false;
+        if (this.timer !== undefined) this.clock.clear(this.timer);
+        this.timer = this.clock.set(() => {
+          this.timer = undefined; void this.enqueue(async () => this.sendPending());
+        }, this.clock.random() * this.backoff);
+        this.backoff = Math.min(10000, this.backoff * 2);
+      } else await this.incompatible(1008);
+    }
+  }
+  private notify(fn: () => void): void {
+    if (this.notifications) this.notifications.push(fn); else fn();
+  }
+  private publish(): void {
+    const notifications = this.notifications ?? []; this.notifications = undefined;
+    for (const fn of notifications) fn();
+  }
+  private dropPrediction(p: bigint): void {
+    if (this.predictions.delete(p)) this.notify(() => this.options.onPrediction?.(this.predictions));
+  }
+  private finish(outcome: Outcome<Uint8Array>): void {
+    this.sent = false;
+    const p = this.record.pending?.p ?? this.record.terminal?.p;
+    if (p !== undefined) this.dropPrediction(p);
+    const resolve = this.resolveCall; this.resolveCall = undefined;
+    this.notify(() => { if (resolve) resolve(outcome); else this.options.onRecovered?.(outcome); });
+  }
+  private async stop(state: 'Fenced' | 'Retired' | 'Closed', outcome?: 'LocallyUnknown' | 'RequestMismatch'): Promise<void> {
+    this.cancelTimers(); this.disconnect(); this.setState(state);
+    if (outcome && this.record.pending) this.finish({tag: outcome});
+    this.readyReject(new ClientError(state)); await this.releaseInitial();
+  }
+  private async retire(outcome: 'LocallyUnknown'): Promise<void> {
+    await this.installation(async state => {
+      state.streams[this.stream].retired = true;
+      await this.options.storage.write(state); await this.stop('Retired', outcome);
+    });
+  }
+  private async fence(outcome: 'LocallyUnknown' | 'RequestMismatch'): Promise<void> {
+    await this.installation(async state => {
+      state.streams[this.stream].retired = true;
+      await this.options.storage.write(state);
+      await this.options.storage.write(fresh(state.generation + 1n));
+      await this.stop('Fenced', outcome);
+    });
+  }
+  subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void): Subscription {
+    if (!this.wants.some(w => sameWant(w, want))) throw new ClientError('UnknownWant');
+    const sub: Sub = {want: copyWant(want), args: args.slice(), onRows, complete: false, cache: new Map(), active: true};
+    this.subs.add(sub);
+    void this.enqueue(async () => this.subscribeAll());
+    return {unsubscribe: () => {
+      sub.active = false; this.subs.delete(sub);
+      void this.enqueue(async () => {
+        if (sub.id !== undefined && this.state === 'Ready') await this.send({tag: 'Unsubscribe', value: sub.id});
+        sub.id = undefined;
+      });
+    }};
+  }
+  private async send(frame: Frame): Promise<void> {
+    await this.installation(async () => {
+      try { this.socket?.send(this.options.frame.encode(frame)); } catch { this.transient(); }
+    });
+  }
+  private async subscribeAll(): Promise<void> {
+    if (this.state !== 'Ready') return;
+    for (const sub of this.subs) {
+      if (this.state !== 'Ready') return;
+      if (!sub.active || sub.id !== undefined) continue;
+      if (this.nextSub > 0xffffffff) { await this.incompatible(1008); return; }
+      sub.id = this.nextSub++; sub.complete = false;
+      await this.send({tag: 'Subscribe', values: [sub.id, this.wants.findIndex(w => sameWant(w, sub.want)), sub.args, {tag: 'None'}]});
+    }
+  }
+  async close(): Promise<void> {
+    await this.enqueue(async () => { await this.stop('Closed', 'LocallyUnknown'); await this.streamLease.release(); });
+  }
+}
+
+export class CorruptState extends Error {}
+function randomGeneration(): bigint {
+  const bytes = crypto.getRandomValues(new Uint32Array(4));
+  return bytes.reduce((n, b) => (n << 32n) | BigInt(b), 0n);
+}
+export function intact(s: Installation): boolean {
+  return s.directory.every(n => Object.hasOwn(s.streams, n));
+}

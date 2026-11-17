@@ -496,6 +496,7 @@ dependencies = [
  "hirsel-core-ir",
  "hirsel-core-layout",
  "hirsel-core-materialize",
+ "hirsel-core-net",
  "hirsel-core-resolve",
  "hirsel-core-syntax",
  "hirsel-cranelift",

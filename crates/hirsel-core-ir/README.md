@@ -16,3 +16,9 @@ The `net` sample uses explicit harness-owned descriptors and grant rules instead
 of ordinary run lines. `src/net_tests.rs` checks descriptor release and zero
 admission on split. The evaluator-only `eval` feature uses the shared socket
 ownership and rule code in `hirsel-core-net`; the data-only build does not.
+
+The evaluator uses core-net's deterministic model for connect, listen, accept,
+recv and send. Network readiness precedes virtual timers, and idle time jumps
+to the next model event or deadline. Network harnesses configure the shared
+model through `Network.sockets`; descriptor-only ownership fixtures remain
+supported by the same registry.

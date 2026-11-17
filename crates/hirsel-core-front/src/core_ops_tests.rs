@@ -24,17 +24,17 @@ fn cap6_ambient_kernels_take_authority() {
 }
 
 #[test]
-fn wire_net_operations_lower_and_refuse_without_fake_success() {
+fn wire_net_operations_lower_and_enforce_authority() {
     let (index, modules) = canonical(
         r#"
 fn denied(n: Net) -> u64 waits {
     match host.connect(n, Addr(ip: V4(134744072u32), port: 80), Never) { Error(Denied) => 1, _ => 0 }
 }
 fn admitted(n: Net) -> u64 waits {
-    match host.connect(n, Addr(ip: V4(2130706433u32), port: 80), Never) { Error(Other(38)) => 1, _ => 0 }
+    match host.connect(n, Addr(ip: V4(2130706433u32), port: 80), Never) { Error(Refused) => 1, _ => 0 }
 }
 fn listening(n: Net) -> u64 waits {
-    match host.listen(n, Addr(ip: V4(2130706433u32), port: 80), 16) { Error(Other(38)) => 1, _ => 0 }
+    match host.listen(n, Addr(ip: V4(2130706433u32), port: 80), 16) { Ok((l, addr)) => if addr.port == 80 { 1 } else { 0 }, _ => 0 }
 }
 fn narrow(n: Net) -> u64 waits {
     match net.narrow(n, Rule(dir: Connect, prefix: V4(2130706433u32), bits: 32, ports: (80u16, 80u16))) {

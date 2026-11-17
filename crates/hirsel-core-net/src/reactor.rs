@@ -87,8 +87,27 @@ pub struct Sockets {
     free: Vec<u32>,
     poller: Option<Arc<Poller>>,
     live: usize,
+    model: Option<crate::model::Model>,
+    model_keys: std::collections::BTreeSet<u64>,
 }
 impl Sockets {
+    pub fn model(&self) -> Option<&crate::model::Model> {
+        self.model.as_ref()
+    }
+    pub fn with_model(model: crate::model::Model) -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+            poller: None,
+            live: 0,
+            model: Some(model),
+            model_keys: Default::default(),
+        }
+    }
+    pub fn adopt_model(&mut self, model: &crate::model::Model, key: u64) {
+        self.model = Some(model.clone());
+        self.model_keys.insert(key & !3);
+    }
     /// Lazily created once per run, at its first real socket operation.
     pub fn poller(&mut self) -> io::Result<Arc<Poller>> {
         if self.poller.is_none() {
@@ -148,6 +167,9 @@ impl Sockets {
         self.record_mut(key).ended = true;
     }
     pub fn split(&mut self, key: u64) -> (u64, u64) {
+        if crate::model::Model::owns(key) {
+            return self.model.as_ref().unwrap().split(key);
+        }
         self.record_mut(key).owners = 6;
         (key | 1, key | 2)
     }
@@ -250,6 +272,14 @@ impl Sockets {
         Ok(count)
     }
     pub fn release(&mut self, key: u64) {
+        if crate::model::Model::owns(key) {
+            let model = self.model.as_ref().unwrap();
+            model.release(key);
+            if !model.contains(key) {
+                self.model_keys.remove(&(key & !3));
+            }
+            return;
+        }
         let r = self.record_mut(key);
         let direction = key & 3;
         if direction == 2 {
@@ -281,14 +311,19 @@ impl Sockets {
         }
     }
     pub fn len(&self) -> usize {
-        self.live
+        self.live + self.model_keys.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.live == 0
+        self.len() == 0
     }
 }
 impl Drop for Sockets {
     fn drop(&mut self) {
+        if let Some(model) = &self.model {
+            for key in std::mem::take(&mut self.model_keys) {
+                model.release_all(key);
+            }
+        }
         for slot in &mut self.slots {
             if let Some(r) = slot.record.take() {
                 if r.registered {

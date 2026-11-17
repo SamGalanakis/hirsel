@@ -228,6 +228,7 @@ struct Scheduler {
     blocked: usize,
     taped: bool,
     net: *mut hirsel_core_net::Sockets,
+    model: Option<hirsel_core_net::model::Model>,
     parked: Parked,
 }
 const HOST_STACK_BYTES: usize = 64 << 10;
@@ -438,7 +439,7 @@ impl Scheduler {
             if self.timers.is_null() {
                 return;
             }
-            let now = crate::os::monotonic_ns();
+            let now = self.now();
             // Detach every expired timer first: a wait that answers Until(now)
             // again re-arms for the next turn, so the other tasks still run.
             let mut expired = ptr::null_mut::<Task>();
@@ -543,7 +544,20 @@ impl Scheduler {
         }
     }
 
+    fn now(&self) -> u64 {
+        self.model
+            .as_ref()
+            .map_or_else(crate::os::monotonic_ns, |m| m.now())
+    }
     fn poll_net(&mut self, timeout: i32) {
+        if let Some(model) = &self.model {
+            // Readiness is taken before timers by take_wakes, including ties.
+            let deadline = unsafe { self.timers.as_ref().and_then(|t| t.timer_deadline) };
+            for token in model.poll(deadline, timeout != 0) {
+                self.readies.push(token);
+            }
+            return;
+        }
         if !self.net.is_null() {
             // SAFETY: the run pins its shared registry; no task runs during polling.
             unsafe { (*self.net).poll(timeout, |token| self.readies.push(token)) }
@@ -557,6 +571,17 @@ impl Scheduler {
         }
         // SAFETY: no task is running while the idle scheduler waits.
         let deadline = unsafe { self.timers.as_ref().and_then(|task| task.timer_deadline) };
+        if self.model.is_some() {
+            let now = self.now();
+            self.poll_net(-1);
+            if !self.readies.pending.load(Ordering::Acquire)
+                && self.now() == now
+                && deadline.is_none_or(|at| at > now)
+            {
+                crate::process::stop(b"Deadlock");
+            }
+            return;
+        }
         // The scheduler thread waits here, never in a provider: readiness from
         // any thread unparks it (hirsel_core_ready).
         match deadline {
@@ -830,6 +855,7 @@ struct Readies {
     pending: AtomicBool,
     worker: std::thread::Thread,
     net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
+    model: Mutex<Option<hirsel_core_net::model::Model>>,
 }
 impl Readies {
     fn new() -> Arc<Self> {
@@ -838,6 +864,7 @@ impl Readies {
             pending: AtomicBool::new(false),
             worker: std::thread::current(),
             net: Mutex::new(None),
+            model: Mutex::new(None),
         })
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<u64>> {
@@ -1234,6 +1261,11 @@ unsafe fn alone(
     impl Drop for AloneNet {
         fn drop(&mut self) {
             self.0.net.lock().unwrap_or_else(|e| e.into_inner()).take();
+            self.0
+                .model
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
         }
     }
     let _network = AloneNet(readies.clone());
@@ -1241,6 +1273,27 @@ unsafe fn alone(
     // Wait until readiness (true) or the deadline (false).
     let block = |deadline: Option<u64>| -> bool {
         loop {
+            let model = readies
+                .model
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(model) = model {
+                let before = model.now();
+                for token in model.poll(deadline, true) {
+                    readies.push(token);
+                }
+                if readies.pending.load(Ordering::Acquire) && readies.take(token) {
+                    return true;
+                }
+                if deadline.is_some_and(|at| at <= model.now()) {
+                    return false;
+                }
+                if model.now() != before {
+                    continue;
+                }
+                crate::process::stop(b"Deadlock");
+            }
             if !unsafe { (*context).host_files }.is_null() {
                 // SAFETY: direct ABI caller pins its registry through this wait.
                 unsafe {
@@ -1470,6 +1523,21 @@ pub(crate) fn current_group() -> Option<crate::tape::schedule::Group> {
     // SAFETY: CURRENT pins its task, or is null outside a task.
     unsafe { task.as_ref().and_then(|t| t.group) }
 }
+pub(crate) fn attach_model(model: &hirsel_core_net::model::Model) {
+    let task = if CURRENT.get().is_null() {
+        CALLBACK_TASK.get()
+    } else {
+        CURRENT.get()
+    };
+    if task.is_null() {
+        ALONE.with(|r| *r.0.model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model.clone()));
+    } else {
+        // SAFETY: the provider callback's task pins its run on this worker.
+        unsafe {
+            (*(*task).run).model = Some(model.clone());
+        }
+    }
+}
 pub(crate) fn attach_net(
     sockets: *mut hirsel_core_net::Sockets,
     poller: Arc<hirsel_core_net::Poller>,
@@ -1682,6 +1750,7 @@ pub unsafe fn run_root(
         blocked: 0,
         taped: false,
         net: ptr::null_mut(),
+        model: None,
         parked: Parked::default(),
     };
     let registered = Registered(run.readies.clone());
@@ -2228,6 +2297,7 @@ mod ready_routing_laws {
                 blocked: 0,
                 taped: false,
                 net: ptr::null_mut(),
+                model: None,
                 parked: Parked::default(),
             };
             let mut context = Context::new(1 << 20);

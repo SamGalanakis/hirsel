@@ -116,6 +116,7 @@ impl Rule {
 
 mod reactor;
 pub use reactor::{Poller, Sockets};
+pub mod model;
 
 #[cfg(test)]
 mod tests {

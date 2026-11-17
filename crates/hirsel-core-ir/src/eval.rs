@@ -555,7 +555,7 @@ enum State {
     Running,
     Blocked,
     /// Parked in a provider operation's W (native `State::Provider`): only its
-    /// timer or a cancellation that takes effect wakes it, never `wake`.
+    /// timer, readiness or a cancellation that takes effect wakes it, never `wake`.
     Provider,
     Ended,
 }
@@ -565,6 +565,7 @@ enum Wait {
     Task,
     /// A sleep until this clock value.
     Sleep(u64),
+    Network(Option<u64>),
 }
 /// A task's scheduler record.
 struct Rec {
@@ -604,13 +605,21 @@ struct Sched {
 }
 impl Sched {
     /// One turn's wakes before its pop (native `take_wakes`): cancellations of
-    /// provider-parked tasks, then every expired timer in deadline order.
-    fn take_wakes(&mut self, now: u64) {
+    /// provider-parked tasks, readiness, then expired timers in deadline order.
+    fn take_wakes(&mut self, now: u64, readies: Vec<u64>) {
         for k in std::mem::take(&mut self.cancels) {
             let r = &mut self.tasks[k];
             if r.state == State::Provider && r.cancel && r.cancellable {
                 r.cancelled = true;
                 r.state = State::Ready;
+                self.timers.retain(|&(_, j)| j != k);
+                self.ready.push_back(k);
+            }
+        }
+        for token in readies {
+            let k = token as usize - 1;
+            if self.tasks[k].state == State::Provider {
+                self.tasks[k].state = State::Ready;
                 self.timers.retain(|&(_, j)| j != k);
                 self.ready.push_back(k);
             }
@@ -789,10 +798,17 @@ pub fn run_injected(
     .0
 }
 /// Harness-owned socket descriptors and explicit rules. Never constructed by source code.
-#[derive(Default)]
 pub struct Network {
     pub grants: BTreeMap<u64, Vec<hirsel_core_net::Rule>>,
     pub sockets: hirsel_core_net::Sockets,
+}
+impl Default for Network {
+    fn default() -> Self {
+        Self {
+            grants: BTreeMap::new(),
+            sockets: hirsel_core_net::Sockets::with_model(Default::default()),
+        }
+    }
 }
 /// Run with the network harness's configured authority and owned descriptors.
 pub fn run_network_into(
@@ -1110,19 +1126,26 @@ fn drive(mach: Machine<'_>) -> (Box<Machine<'_>>, Outcome, Vec<Cause>) {
             }
         };
         loop {
-            let now = baton.world.clock;
+            let model = baton.world.network.sockets.model().cloned().unwrap();
+            model.advance_to(baton.world.clock);
+            let readies = model.poll(None, false);
+            let now = model.now();
+            baton.world.clock = now;
             let s = &mut baton.sched;
-            s.take_wakes(now);
+            s.take_wakes(now, readies);
             if s.ready.is_empty() {
                 std::mem::swap(&mut s.ready, &mut s.deferred);
             }
-            if s.ready.is_empty()
-                && let Some(&(deadline, _)) = s.timers.first()
-            {
-                // Idle until the first deadline (native `idle`): virtual time
-                // jumps there.
-                baton.world.clock = baton.world.clock.max(deadline);
-                continue;
+            if s.ready.is_empty() {
+                let deadline = s.timers.first().map(|&(at, _)| at);
+                let readies = model.poll(deadline, true);
+                baton.world.clock = model.now();
+                s.take_wakes(model.now(), readies);
+                if s.ready.is_empty() && model.now() != now {
+                    // A delivery can move accepted bytes into transit without
+                    // making the receiver ready yet. Continue to its next event.
+                    continue;
+                }
             }
             let Some(k) = s.ready.pop_front() else {
                 baton
@@ -1294,12 +1317,13 @@ impl<'m> Machine<'m> {
     fn park_turn(&mut self, wait: Option<Wait>, poll: bool) {
         let k = self.sched.current;
         match wait {
-            Some(Wait::Sleep(deadline)) => {
+            Some(Wait::Sleep(deadline)) | Some(Wait::Network(Some(deadline))) => {
                 self.sched.tasks[k].state = State::Provider;
                 let s = &mut self.sched;
                 let at = s.timers.partition_point(|&(d, _)| d <= deadline);
                 s.timers.insert(at, (deadline, k));
             }
+            Some(Wait::Network(None)) => self.sched.tasks[k].state = State::Provider,
             Some(Wait::Task) => self.sched.tasks[k].state = State::Blocked,
             None => {
                 self.sched.tasks[k].state = State::Ready;
@@ -1451,6 +1475,105 @@ impl Machine<'_> {
             std::panic::resume_unwind(Box::new(RunStop("DescribeCapability")));
         }
     }
+    fn network_host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+        use hirsel_core_net::model::{Address, Operation, Reply};
+        let model = self.world.network.sockets.model().unwrap().clone();
+        model.advance_to(self.world.clock);
+        let address = || Address {
+            family: a[1] as u8,
+            hi: a[2],
+            lo: a[3],
+            port: a[4] as u16,
+        };
+        let operation = match op {
+            HostOp::Connect | HostOp::Listen => {
+                let address = address();
+                let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rules| {
+                    rules.iter().any(|r| {
+                        r.permits(
+                            u8::from(op == HostOp::Listen),
+                            address.family,
+                            address.hi,
+                            address.lo,
+                            address.port,
+                        )
+                    })
+                });
+                if !allowed {
+                    let mut r = vec![0, 1, 0, 0];
+                    if op == HostOp::Listen {
+                        r.extend([0; 4]);
+                    }
+                    return Ok(r);
+                }
+                if op == HostOp::Connect {
+                    Operation::Connect(address)
+                } else {
+                    Operation::Listen(address, a[5] as u16)
+                }
+            }
+            HostOp::Accept => Operation::Accept(a[0]),
+            HostOp::Recv => Operation::Recv(a[0]),
+            HostOp::Send => Operation::Send(a[0]),
+            _ => unreachable!(),
+        };
+        let (input, data, len, cap) = if matches!(op, HostOp::Recv | HostOp::Send) {
+            self.carrier(a[1])
+        } else {
+            (vec![], 0, 0, 0)
+        };
+        let until = match op {
+            HostOp::Connect => 5,
+            HostOp::Accept => 1,
+            _ => 2,
+        };
+        let deadline = (op != HostOp::Listen && a[until] != 0).then(|| a[until + 2]);
+        let token = t.k as u64 + 1;
+        let reply = loop {
+            if let Some(r) =
+                model.attempt(operation, &input, cap.saturating_sub(len) as usize, token)
+            {
+                break r;
+            }
+            if deadline.is_some_and(|at| at <= model.now()) {
+                break model.abort(token, false);
+            }
+            self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
+            self.park(Some(Wait::Network(deadline)));
+            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                break model.abort(token, true);
+            }
+        };
+        self.world.clock = model.now();
+        let Reply {
+            value,
+            error,
+            code,
+            address,
+            bytes,
+        } = reply;
+        if error == 0 {
+            if matches!(op, HostOp::Connect | HostOp::Listen | HostOp::Accept) {
+                self.world.network.sockets.adopt_model(&model, value);
+            }
+            if op == HostOp::Recv {
+                if !bytes.is_empty() {
+                    self.put(data + len, &bytes);
+                }
+                self.store(a[1] + 8, 8, len + bytes.len() as u64);
+            }
+        }
+        let mut result = vec![value, u64::from(error), u64::from(code), 0];
+        if matches!(op, HostOp::Listen | HostOp::Accept) {
+            result.extend([
+                u64::from(address.family),
+                address.hi,
+                address.lo,
+                u64::from(address.port),
+            ]);
+        }
+        Ok(result)
+    }
     /// A provider row against [`World`]: an outcome `value, error, code, written`.
     fn host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
         self.deny_describe_capability();
@@ -1469,30 +1592,9 @@ impl Machine<'_> {
             self.check_cancel(t)?;
         }
         Ok(match op {
-            HostOp::Connect | HostOp::Listen => {
-                let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rs| {
-                    rs.iter().any(|r| {
-                        r.permits(
-                            u8::from(op == HostOp::Listen),
-                            a[1] as u8,
-                            a[2],
-                            a[3],
-                            a[4] as u16,
-                        )
-                    })
-                });
-                let mut result = if allowed {
-                    vec![0, 8, 38, 0]
-                } else {
-                    vec![0, 1, 0, 0]
-                };
-                if op == HostOp::Listen {
-                    result.extend([0; 4]);
-                }
-                result
+            HostOp::Connect | HostOp::Listen | HostOp::Accept | HostOp::Recv | HostOp::Send => {
+                return self.network_host(t, op, a);
             }
-            HostOp::Accept => vec![0, 8, 38, 0, 0, 0, 0, 0],
-            HostOp::Recv | HostOp::Send => vec![0, 8, 38, 0],
             HostOp::NetSplit => {
                 let (read, write) = self.world.network.sockets.split(a[0]);
                 vec![read, 0, 0, write]
@@ -1565,7 +1667,9 @@ impl Machine<'_> {
                 // The host clock is monotonic (native reads CLOCK_MONOTONIC,
                 // hirsel-core-rt os::monotonic_ns): a read after a sleep to the
                 // maximum deadline stays there instead of wrapping (CONC-7).
-                self.world.clock = self.world.clock.saturating_add(1);
+                let model = self.world.network.sockets.model().unwrap();
+                model.advance_to(self.world.clock);
+                self.world.clock = model.clock_read();
                 vec![self.world.clock]
             }
             HostOp::Stdout | HostOp::Stderr => {

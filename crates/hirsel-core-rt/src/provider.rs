@@ -87,7 +87,9 @@ pub const ABORT_DEADLINE: u8 = 2;
 /// Every callback is required. `wait`, `resume` and `abort` are called by the
 /// scheduler at the moment of a wake, outside any task, and must not block;
 /// `issue` and `deliver` run in the task. `Wait::deadline_ns` and
-/// `Step::deadline_ns` are host CLOCK_MONOTONIC nanoseconds; a step's 0 is none.
+/// `Step::deadline_ns` use the scheduler's monotonic clock domain: host
+/// CLOCK_MONOTONIC for OS runs, simulated nanoseconds for model runs.
+/// A step's 0 is none.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Provider {

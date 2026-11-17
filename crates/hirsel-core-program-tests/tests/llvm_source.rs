@@ -2147,9 +2147,7 @@ fn probe(s: u64, n: u64, at: u64, base: u64) -> u64 {
     }
 }
 
-mod wire_socket {
-    include!("support/wire_socket.rs");
-}
+use hirsel_core_program_tests::wire_socket;
 
 #[test]
 fn wire_socket_loopback_carries_addresses_deadlines_and_bytes() {

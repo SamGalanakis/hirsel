@@ -39,9 +39,7 @@ fn waiting() -> u64 waits {
     execute(&module, &[(names["waiting"], vec![])], false);
 }
 
-mod wire_socket {
-    include!("support/wire_socket.rs");
-}
+use hirsel_core_program_tests::wire_socket;
 #[test]
 fn wire_socket_loopback_carries_addresses_deadlines_and_bytes() {
     let (program, names) =

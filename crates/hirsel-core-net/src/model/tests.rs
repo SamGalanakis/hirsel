@@ -1,0 +1,332 @@
+use super::*;
+fn address() -> Address {
+    Address {
+        lo: 0x7f000001,
+        ..Address::default()
+    }
+}
+fn pair(m: &Model) -> (u64, u64, u64) {
+    let l = m
+        .attempt(Operation::Listen(address(), 1), &[], 0, 1)
+        .unwrap();
+    assert_eq!(l.error, 0);
+    let c = m.attempt(Operation::Connect(l.address), &[], 0, 2).unwrap();
+    assert_eq!(c.error, 0);
+    let s = m.attempt(Operation::Accept(l.value), &[], 0, 3).unwrap();
+    assert_eq!(s.address.lo, 0x7f000001);
+    assert_ne!(s.address.port, 0);
+    (l.value, c.value, s.value)
+}
+fn close(m: &Model, handles: [u64; 3]) {
+    m.repair();
+    for key in handles {
+        m.release(key);
+    }
+    assert_eq!(m.live_handles(), 0);
+    assert_eq!(m.pending(), 0);
+}
+fn put(m: &Model, key: u64, bytes: &[u8]) {
+    let mut at = 0;
+    while at < bytes.len() {
+        let r = m
+            .attempt(Operation::Send(key), &bytes[at..], 0, 10)
+            .unwrap();
+        assert_eq!(r.error, 0);
+        assert!(r.value > 0);
+        at += r.value as usize;
+    }
+}
+#[test]
+fn partition_backpressure_repairs_and_drains_fifo_in_both_directions() {
+    let m = Model::new(Config {
+        queue_bytes: 4,
+        ..Config::default()
+    });
+    let (l, c, s) = pair(&m);
+    m.fault(Fault::Partition {
+        socket: c,
+        blocked: true,
+    });
+    put(&m, c, b"abcd");
+    assert_eq!(m.queued_bytes(c), [4, 0, 0]);
+    assert!(m.attempt(Operation::Send(c), b"e", 0, 11).is_none());
+    assert!(m.attempt(Operation::Recv(s), &[], 4, 12).is_none());
+    // The other direction is live during a directional partition.
+    put(&m, s, b"xy");
+    let mut reverse = vec![];
+    while reverse.len() < 2 {
+        reverse.extend(m.attempt(Operation::Recv(c), &[], 4, 13).unwrap().bytes);
+    }
+    assert_eq!(reverse, b"xy");
+    m.repair();
+    assert_eq!(m.poll(None, true), vec![11, 12]);
+    put(&m, c, b"e");
+    let (_, w) = m.split(c);
+    m.release(w);
+    let mut received = vec![];
+    loop {
+        let r = m.attempt(Operation::Recv(s), &[], 3, 12).unwrap();
+        assert_eq!(r.error, 0);
+        if r.value == 0 {
+            break;
+        }
+        received.extend(r.bytes);
+    }
+    assert_eq!(received, b"abcde");
+    m.release(c | 1);
+    m.release(s);
+    m.release(l);
+    assert_eq!((m.live_handles(), m.pending()), (0, 0));
+}
+#[test]
+fn reset_delivers_readable_bytes_and_drops_only_undelivered_bytes() {
+    let m = Model::new(Config {
+        latency_ns: 1,
+        ..Config::default()
+    });
+    let (l, c, s) = pair(&m);
+    put(&m, c, b"a");
+    assert_eq!(m.queued_bytes(c), [1, 0, 0]);
+    m.poll(None, true);
+    assert_eq!(m.queued_bytes(c), [0, 1, 0]);
+    m.poll(None, true);
+    assert_eq!(m.queued_bytes(c), [0, 0, 1]);
+    put(&m, c, b"b");
+    m.poll(None, true);
+    put(&m, c, b"c");
+    assert_eq!(m.queued_bytes(c), [1, 1, 1]);
+    m.fault(Fault::Reset { socket: c });
+    assert_eq!(m.queued_bytes(c), [0, 0, 1]);
+    assert_eq!(m.attempt(Operation::Send(s), b"z", 0, 4).unwrap().error, 5);
+    let read = m.attempt(Operation::Recv(s), &[], 8, 5).unwrap();
+    assert_eq!((read.error, read.bytes), (0, b"a".to_vec()));
+    assert_eq!(m.attempt(Operation::Recv(s), &[], 8, 6).unwrap().error, 5);
+    assert_eq!(m.attempt(Operation::Recv(c), &[], 8, 7).unwrap().error, 5);
+    close(&m, [l, c, s]);
+}
+#[test]
+fn time_enables_silent_deadline_and_readiness_wins_its_tie() {
+    let m = Model::default();
+    let (l, c, s) = pair(&m);
+    assert!(m.attempt(Operation::Recv(s), &[], 1, 4).is_none());
+    assert!(m.poll(Some(100), true).is_empty());
+    assert_eq!(m.now(), 100);
+    assert_eq!(m.abort(4, false).error, 6);
+    m.fault(Fault::Partition {
+        socket: c,
+        blocked: true,
+    });
+    put(&m, c, b"a");
+    assert!(m.attempt(Operation::Recv(s), &[], 1, 5).is_none());
+    m.schedule(
+        200,
+        Fault::Partition {
+            socket: c,
+            blocked: false,
+        },
+    );
+    assert_eq!(m.poll(Some(200), true), vec![5]);
+    assert_eq!(m.now(), 200);
+    assert_eq!(
+        m.attempt(Operation::Recv(s), &[], 1, 5).unwrap().bytes,
+        b"a"
+    );
+    close(&m, [l, c, s]);
+}
+#[test]
+fn aborted_or_expired_waits_preserve_listener_bytes_and_send_prefix() {
+    for cancelled in [false, true] {
+        let m = Model::new(Config {
+            queue_bytes: 1,
+            ..Config::default()
+        });
+        let abort = |token| {
+            if !cancelled {
+                let at = m.now() + 1;
+                assert!(m.poll(Some(at), true).is_empty());
+                assert_eq!(m.now(), at);
+            }
+            m.abort(token, cancelled)
+        };
+        let signal = if cancelled { 7 } else { 6 };
+        let l = m
+            .attempt(Operation::Listen(address(), 1), &[], 0, 1)
+            .unwrap();
+        assert!(m.attempt(Operation::Accept(l.value), &[], 0, 2).is_none());
+        assert_eq!(abort(2).error, signal);
+        let c = m
+            .attempt(Operation::Connect(l.address), &[], 0, 3)
+            .unwrap()
+            .value;
+        // Backlog full: a cancelled connect takes no pending connection.
+        assert!(
+            m.attempt(Operation::Connect(l.address), &[], 0, 4)
+                .is_none()
+        );
+        assert_eq!(abort(4).error, signal);
+        let s = m
+            .attempt(Operation::Accept(l.value), &[], 0, 5)
+            .unwrap()
+            .value;
+        assert!(m.attempt(Operation::Recv(s), &[], 1, 6).is_none());
+        assert_eq!(abort(6).error, signal);
+        m.fault(Fault::Partition {
+            socket: c,
+            blocked: true,
+        });
+        put(&m, c, b"a");
+        assert!(m.attempt(Operation::Send(c), b"b", 0, 7).is_none());
+        assert_eq!(abort(7).error, signal);
+        m.repair();
+        assert_eq!(
+            m.attempt(Operation::Recv(s), &[], 1, 8).unwrap().bytes,
+            b"a"
+        );
+        assert_eq!(m.attempt(Operation::Recv(s), &[], 0, 8).unwrap().value, 0);
+        assert_eq!(m.attempt(Operation::Send(c), &[], 0, 8).unwrap().value, 0);
+        let (_, w) = m.split(c);
+        m.release(w);
+        assert_eq!(m.attempt(Operation::Recv(s), &[], 1, 8).unwrap().value, 0);
+        // Read EOF leaves the reverse send direction usable.
+        put(&m, s, b"z");
+        assert_eq!(
+            m.attempt(Operation::Recv(c), &[], 1, 9).unwrap().bytes,
+            b"z"
+        );
+        m.release(c | 1);
+        m.release(s);
+        m.release(l.value);
+        assert_eq!((m.live_handles(), m.pending()), (0, 0));
+    }
+}
+/// Reaching a timeout creates a second fault choice absent in the baseline.
+fn retry_scenario(prefix: Vec<usize>, seed: u64) -> (Vec<Decision>, usize) {
+    let m = Model::new(Config {
+        prefix,
+        seed,
+        ..Config::default()
+    });
+    let (l, c, s) = pair(&m);
+    let mut attempts = 0;
+    for retry in 0..2 {
+        attempts += 1;
+        if m.choose(Choice::Fault, 2) == 0 {
+            break;
+        }
+        m.fault(Fault::Partition {
+            socket: c,
+            blocked: true,
+        });
+        if retry == 0 {
+            put(&m, c, b"a");
+        }
+        assert!(m.attempt(Operation::Recv(s), &[], 1, 10).is_none());
+        let at = m.now() + 10;
+        m.poll(Some(at), true);
+        assert_eq!(m.now(), at);
+        assert_eq!(m.abort(10, false).error, 6);
+    }
+    m.repair();
+    // Drain or signal every session even when both fault choices fired.
+    let (_, w) = m.split(c);
+    m.release(w);
+    let mut bytes = vec![];
+    loop {
+        let r = m.attempt(Operation::Recv(s), &[], 8, 11).unwrap();
+        if r.value == 0 {
+            break;
+        }
+        bytes.extend(r.bytes);
+    }
+    assert!(bytes.is_empty() || bytes == b"a");
+    m.release(c | 1);
+    m.release(s);
+    m.release(l);
+    assert_eq!((m.pending(), m.live_handles()), (0, 0));
+    (m.decisions(), attempts)
+}
+#[test]
+fn bounded_choice_prefixes_reach_fault_inside_fault_created_retry_and_replay() {
+    // Dynamic prefix enumeration, adapted from TigerBeetle exhaustigen.zig.
+    let mut prefix = vec![0];
+    let mut explored = 0;
+    let mut retry_fault = false;
+    let mut complete = false;
+    for _ in 0..128 {
+        let (trace, retries) = retry_scenario(prefix.clone(), 1);
+        let exact: Vec<_> = trace.iter().map(|d| d.selected).collect();
+        assert_eq!(retry_scenario(exact, 999), (trace.clone(), retries));
+        retry_fault |= retries == 2
+            && trace
+                .iter()
+                .filter(|d| d.kind == Choice::Fault && d.selected == 1)
+                .count()
+                == 2;
+        explored += 1;
+        let Some(at) = (0..trace.len())
+            .rev()
+            .find(|&i| trace[i].selected + 1 < trace[i].alternatives)
+        else {
+            complete = true;
+            break;
+        };
+        prefix = trace[..=at].iter().map(|d| d.selected).collect();
+        prefix[at] += 1;
+    }
+    eprintln!(
+        "fault-prefix runs={explored}, complete={complete}; bound=128; baseline-only cuts are partial"
+    );
+    assert!(complete, "bounded exploration incomplete");
+    assert!(retry_fault);
+}
+#[test]
+fn seeded_multifault_runs_repair_drain_and_replay_exact_choices() {
+    for seed in 0..32 {
+        let (trace, attempts) = retry_scenario(vec![], seed);
+        assert_eq!(
+            retry_scenario(trace.iter().map(|d| d.selected).collect(), seed ^ 1234),
+            (trace, attempts)
+        );
+    }
+}
+
+#[test]
+fn run_registry_releases_unsplit_and_remaining_directional_owners() {
+    for released in [None, Some(false), Some(true)] {
+        let model = Model::default();
+        let (l, c, s) = pair(&model);
+        {
+            let mut sockets = crate::Sockets::with_model(model.clone());
+            for key in [l, c, s] {
+                sockets.adopt_model(&model, key);
+            }
+            if let Some(write) = released {
+                let (r, w) = sockets.split(c);
+                sockets.release(if write { w } else { r });
+            }
+            assert_eq!(sockets.len(), 3);
+        }
+        assert_eq!((model.live_handles(), model.pending()), (0, 0));
+    }
+}
+
+#[test]
+fn model_identities_never_alias_native_generations_or_wrap_onto_live_handles() {
+    let model = Model::default();
+    model.state().next = LAST_ID;
+    let l = model
+        .attempt(Operation::Listen(address(), 1), &[], 0, 1)
+        .unwrap();
+    assert_eq!(l.error, 0);
+    assert!(l.value < 1 << 34);
+    assert!(Model::owns(l.value));
+    assert!(!Model::owns(1 << 34));
+    assert!(!Model::owns((1 << 63) | 4));
+    let refused = model
+        .attempt(Operation::Connect(l.address), &[], 0, 2)
+        .unwrap();
+    assert_eq!((refused.error, refused.code), (8, 24));
+    assert_eq!(model.live_handles(), 1);
+    model.release(l.value);
+    assert_eq!((model.live_handles(), model.pending()), (0, 0));
+}

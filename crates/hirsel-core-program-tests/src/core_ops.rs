@@ -411,3 +411,94 @@ fn log_boxed_list_append_and_finish_in_evaluator() {
     assert_eq!(run.outcome, eval::Outcome::Returned(vec![1]));
     assert_eq!(run.used, 0);
 }
+
+#[test]
+fn wire_socket_model_carries_addresses_deadlines_and_bytes_on_evaluator() {
+    use hirsel_core_net::{
+        Rule, Sockets,
+        model::{Config, Model},
+    };
+    for latency in [0, 3] {
+        let source = if latency == 0 {
+            crate::wire_socket::SOURCE.to_owned()
+        } else {
+            crate::wire_socket::SOURCE
+                .replace("mut input, At(c, 0)", "mut input, Never")
+                .replace("mut empty, At(c, 0)", "mut empty, At(c, 100)")
+        };
+        let (program, names) = crate::SourceProgram::lower(&source, None);
+        let model = Model::new(Config {
+            latency_ns: latency,
+            prefix: vec![2, 2, 2, 2],
+            ..Config::default()
+        });
+        let mut network = eval::Network {
+            sockets: Sockets::with_model(model.clone()),
+            ..eval::Network::default()
+        };
+        network.grants.insert(
+            1,
+            vec![
+                Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
+                Rule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
+            ],
+        );
+        let report = eval::run_network(&program, names["wire"], &[1, 2], 1 << 20, network);
+        assert_eq!(report.outcome, eval::Outcome::Returned(vec![42]));
+        assert_eq!(report.used, 0);
+        if latency != 0 {
+            assert_eq!(model.now(), 100);
+        }
+        assert_eq!((model.live_handles(), model.pending()), (0, 0));
+    }
+}
+
+#[test]
+fn wire_model_cancellation_after_issue_returns_aborted_without_consuming_bytes() {
+    use hirsel_core_net::Rule;
+    let source = r#"
+type Input: send { r: ReadHalf }
+fn reader(take x: Input) -> (u64, ReadHalf) waits {
+    let Input(r: r0) = take x
+    let mut r = r0
+    let mut empty: Bytes = list.new()
+    let zero = result.unwrap(host.recv(mut r, mut empty, Never))
+    let mut b: Bytes = result.unwrap(list.with_capacity(1))
+    let signal = match host.recv(mut r, mut b, Never) { Error(Aborted) => if list.len(b) == 0 && zero == 0 { 7u64 } else { 0u64 }, _ => 0u64 }
+    (signal, take r)
+}
+fn f(n: Net, c: Clock, tasks: Tasks) -> u64 waits {
+    let (l0, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433u32), port: 0), 1))
+    let mut l = l0
+    let client = result.unwrap(host.connect(n, address, Never))
+    let (server, peer) = result.unwrap(host.accept(mut l, Never))
+    let (cr, cw0) = net.split(take client)
+    let mut cw = cw0
+    let (sr, sw) = net.split(take server)
+    let mut h = result.unwrap(task.spawn(tasks, bytes 4096, Input(r: take sr), reader))
+    host.sleep_until(c, 10)
+    task.cancel(mut h)
+    let payload = result.unwrap(b"x")
+    let sent = result.unwrap(host.send(mut cw, payload, Never))
+    let (signal, r0) = result.unwrap(task.join(take h))
+    let mut r = r0
+    let mut b: Bytes = result.unwrap(list.with_capacity(1))
+    let received = result.unwrap(host.recv(mut r, mut b, At(c, 0)))
+    if signal == 7 && sent == 1 && received == 1 && b[0] == 120u8 { 7u64 } else { 0u64 }
+}
+"#;
+    let (program, names) = crate::SourceProgram::lower(source, None);
+    let mut network = eval::Network::default();
+    let model = network.sockets.model().unwrap().clone();
+    network.grants.insert(
+        1,
+        vec![
+            Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
+            Rule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
+        ],
+    );
+    let report = eval::run_network(&program, names["f"], &[1, 2, 3], 1 << 20, network);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![7]));
+    assert_eq!(report.used, 0);
+    assert_eq!((model.live_handles(), model.pending()), (0, 0));
+}

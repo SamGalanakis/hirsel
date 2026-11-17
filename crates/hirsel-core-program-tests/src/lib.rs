@@ -175,3 +175,8 @@ mod ordered;
 
 #[cfg(test)]
 mod slots;
+
+/// The W3c socket law is shared by the evaluator and both native source suites.
+pub mod wire_socket {
+    include!("../tests/support/wire_socket.rs");
+}

@@ -1291,6 +1291,11 @@ fn box_chain_releases_with_constant_stack() {
             1,
         ),
         (
+            include_str!("../../../hirsel-core-ir/samples/seq-box-chain.core"),
+            0,
+            2,
+        ),
+        (
             include_str!("../../../hirsel-core-ir/samples/resource-chain.core"),
             0,
             2,

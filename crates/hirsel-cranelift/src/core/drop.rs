@@ -110,15 +110,20 @@ impl Glues {
                 buffered.insert(t);
                 return;
             }
-            fn inline(f: &FieldTy, buffered: &mut BTreeSet<usize>) {
+            // A buffer recipe stages each element: an inline element's
+            // type is a drained descendant, a boxed or counted one a root.
+            fn element(f: &FieldTy, roots: &mut BTreeSet<usize>, buffered: &mut BTreeSet<usize>) {
                 match f {
                     FieldTy::Inline(t) => {
                         buffered.insert(t.index());
                     }
-                    FieldTy::Array(e, _) | FieldTy::Seq(e) => inline(e, buffered),
+                    FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+                        roots.insert(t.index());
+                    }
+                    FieldTy::Array(e, _) | FieldTy::Seq(e) => element(e, roots, buffered),
                     FieldTy::Map(k, v) => {
-                        inline(k, buffered);
-                        inline(v, buffered);
+                        element(k, roots, buffered);
+                        element(v, roots, buffered);
                     }
                     _ => {}
                 }
@@ -147,10 +152,7 @@ impl Glues {
                     FieldTy::Array(e, _) => {
                         field(e, layouts, resources, needed, roots, buffered, seen)
                     }
-                    FieldTy::Seq(_) | FieldTy::Map(..) => {
-                        inline(f, buffered);
-                        counted(f, roots);
-                    }
+                    FieldTy::Seq(_) | FieldTy::Map(..) => element(f, roots, buffered),
                     _ => counted(f, roots),
                 }
             }

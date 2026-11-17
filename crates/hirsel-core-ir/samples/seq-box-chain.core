@@ -1,0 +1,84 @@
+; LANG-19 through boxed sequence elements: Node = { kids: List[Box[Node]] }.
+; A buffer recipe stages each boxed element as a drain root, so the element's
+; type needs a descriptor even though no field boxes it directly. f0(n) builds
+; n levels: each level allocates a one-element buffer (capacity 1, charge 8 =
+; one box pointer) and a box (charge 24, Node's three words), moves the current
+; root into the box, puts the box in the buffer and makes the root's kids that
+; buffer. Then the root is dropped. Derived by hand: every block is freed once
+; and refunded, so the run returns n with nothing used and 2n admissions. A
+; refused box leaves the buffer empty; it goes into a spare node, which is
+; dropped.
+; run: f0(0) -> 0 | used 0
+; run: f0(32) -> 32 | used 0
+; run refuse 4: f0(3) -> 1 | used 0
+core v1
+type t0 = own "Node" { kids: seq box t0 }
+sig g0 = (u64) -> (u64)
+inst n0 = test@0/seq_box_chain/run [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  slot s1 = t0                         ; holds a buffer whose box was refused
+  addr a0 = s0 field 0 byte v1 : ptr   ; the root's kids: data
+  addr a1 = s0 field 0 byte v2 : u64   ; length
+  addr a2 = s0 field 0 byte v3 : u64   ; capacity
+  addr a3 = s0 : t0
+  addr a4 = v12 : t0                   ; the new box's payload
+  addr a5 = v9 : ptr                   ; the new buffer's one element
+  addr a6 = s1 field 0 byte v1 : ptr
+  addr a7 = s1 field 0 byte v2 : u64
+  addr a8 = s1 field 0 byte v3 : u64
+  addr a9 = s1 : t0
+b0(v0: u64):
+  live s0
+  v1: u64 = const 0
+  v2: u64 = const 8
+  v3: u64 = const 16
+  v4: u64 = const 24
+  v5: ptr = const 0x0
+  v6: u64 = const 1
+  address a0
+  address a1
+  address a2
+  address a3
+  store a0, v5
+  store a1, v1
+  store a2, v1
+  jump b1(v1)
+b1(v7: u64):
+  v8: bool = lt v7, v0
+  branch v8, b2, b6
+b2:
+  v9: ptr, v10: u64 = alloc for seq box t0 v2 align 8 charge v2
+  v11: bool = ne v9, v5
+  branch v11, b3, b6
+b3:
+  v12: ptr, v13: u64 = alloc for box t0 v4 align 8 charge v4
+  v14: bool = ne v12, v5
+  branch v14, b4, b5
+b4:
+  address a4
+  address a5
+  copy a4, a3, v4                      ; the root moves into the box
+  store a5, v12
+  store a0, v9
+  store a1, v6
+  store a2, v6
+  v15: u64 = wrapping_add v7, v6
+  jump b1(v15)
+b5:
+  live s1
+  address a6
+  address a7
+  address a8
+  address a9
+  store a6, v9
+  store a7, v1
+  store a8, v6
+  drop a9 t0
+  dead s1
+  jump b6
+b6:
+  drop a3 t0
+  dead s0
+  return v7
+}

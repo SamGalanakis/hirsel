@@ -428,6 +428,10 @@ fn box_chain_releases_with_constant_stack() {
             n as usize,
         ),
         (
+            include_str!("../../hirsel-core-ir/samples/seq-box-chain.core"),
+            2 * n as usize,
+        ),
+        (
             include_str!("../../hirsel-core-ir/samples/resource-chain.core"),
             2 * n as usize,
         ),

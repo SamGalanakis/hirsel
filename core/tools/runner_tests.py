@@ -67,7 +67,7 @@ COUNTS = {'calls_runs_once': (7, 5), 'calls_deadline_hung': (7, 32668)}
 HUNG_TOLDS = 3
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
-SUBS = ('subs_main', 'rows_normalized', 'subscribe_order', 'retired_without_waiting')
+SUBS = ('subs_main', 'subs_reset_keeps_diff', 'rows_normalized', 'subscribe_order', 'retired_without_waiting')
 
 
 def counted(name, report):

@@ -662,11 +662,16 @@ fn covered_rows(d: List[store.Change], c: Cover, sub: u32, mut out: List[Row]) -
     Ok(())
 }
 
-// A session Reset loses all its subscriptions and owes nothing else.
-fn reset_session(mut b: List[Sub], mut owes: List[Owe], who: u64, version: u64) {
+// A session Reset loses all its subscriptions. Return the number of already
+// visited subscriptions that survive, so the round resumes at the first unvisited one.
+fn reset_session(mut b: List[Sub], mut owes: List[Owe], who: u64, version: u64, cursor: u64) -> u64 {
     let mut i = 0u64
+    let mut resume = cursor
     while i < list.len(b) {
         if b[i].session == who {
+            if i < resume {
+                resume -= 1u64
+            }
             let _ = list.remove(mut b, i)
         } else {
             i += 1u64
@@ -677,6 +682,7 @@ fn reset_session(mut b: List[Sub], mut owes: List[Owe], who: u64, version: u64) 
     owes[k].rows = list.new()
     owes[k].ended = list.new()
     owes[k].reset = true
+    resume
 }
 
 // G2: one round from the base to the newest snapshot released.
@@ -692,7 +698,7 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
         Error(_) => {
             while list.len(b.subs) > 0u64 {
                 let who = b.subs[0].session
-                reset_session(mut b.subs, mut owes, who, version)
+                let _ = reset_session(mut b.subs, mut owes, who, version, 0u64)
             }
             b.base = take newest
             return take owes
@@ -709,8 +715,7 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
         }
         if !read_hit(b.subs[i].reads, d) {
             if let Error(_) = covered_rows(d, b.subs[i].cover, sub, mut owes[k].rows) {
-                reset_session(mut b.subs, mut owes, who, version)
-                i = 0u64
+                i = reset_session(mut b.subs, mut owes, who, version, i)
                 continue
             }
             i += 1u64
@@ -720,8 +725,7 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
             Covered(take v) => {
                 let Viewed(cover: take c, reads: take reads) = take v
                 if let Error(_) = rerun_rows(b.base, b.subs[i].cover, newest, c, sub, mut owes[k].rows) {
-                    reset_session(mut b.subs, mut owes, who, version)
-                    i = 0u64
+                    i = reset_session(mut b.subs, mut owes, who, version, i)
                     continue
                 }
                 b.subs[i].cover = take c
@@ -733,8 +737,7 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
                 let _ = list.remove(mut b.subs, i)
             },
             Lost(_) => {
-                reset_session(mut b.subs, mut owes, who, version)
-                i = 0u64
+                i = reset_session(mut b.subs, mut owes, who, version, i)
             },
         }
     }
@@ -2194,6 +2197,35 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
         }
     }
     faulted && apply_all(mut cl, take owes) && cached(cl, 0u64, 2u32) == None && holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8))
+}
+
+pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    let h = result.unwrap(subs_handles(mut db))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
+    let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let schema = 7u64
+    let rejected = fn(_ch: store.Change) -> Result[Option[Bytes], store.Error] { Error(Schema(schema)) }
+    let value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = result.unwrap(result.capacity_only(take rejected))
+    b.subs[1].cover.value = take value
+    set(mut db, t, 1u64, 7u64)
+    let owes = step(mut b, db)
+    list.len(owes) == 3u64
+        && owes[0].session == 1u64 && list.len(owes[0].rows) == 1u64
+        && owes[1].session == 2u64 && owes[1].reset
+        && owes[2].session == 3u64 && list.len(owes[2].rows) == 1u64
+}
+
+@test
+fn test_subs_reset_keeps_diff(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_subs_reset_keeps_diff(c, r) { Ok(()) } else { Error(()) }
 }
 
 // L22 (RUNNER-SPEC v2.12, subscribe_order): a Subscribe runs at the version of the last

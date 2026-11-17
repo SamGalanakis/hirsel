@@ -503,6 +503,7 @@ impl FunctionEmitter<'_> {
         debug: Option<(usize, usize)>,
     ) {
         self.debug_location = debug.map(|(_, location)| location);
+        self.view_invariants.clear();
         self.next = 0;
         self.has_status = true;
         self.abi = Return::internal_on_target(self.abi.target, &sig.results);

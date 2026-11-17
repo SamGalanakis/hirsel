@@ -265,6 +265,51 @@ fn loan_facts_and_diagnostic_off_preserve_abi_and_legal_aliases() {
 }
 
 #[test]
+fn viewed_infallible_wrappers_keep_body_tokens_in_the_body() {
+    let module = text::parse(
+        r#"core v1
+type t0 = own "Bytes" { data: seq u8 }
+sig g0 = (&view t0) -> ()
+sig g1 = (&view t0) -> (u64)
+inst n0 = tests@1/view_wrapper/empty [] []
+inst n1 = tests@1/view_wrapper/length [] []
+fn f0 = n0 g0 {
+b0(v0: ptr):
+  return
+}
+fn f1 = n1 g1 {
+  addr a0 = v0 : t0
+  addr a1 = a0 field 0 byte v1 : u64
+b0(v0: ptr):
+  v1: u64 = const 8
+  address a0
+  address a1
+  v2: u64 = read a1
+  return v2
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    let ir = emit_ir_with_facts(&module, false, true).unwrap();
+    verify_ir(&ir);
+    for optimization in [Optimization::None, Optimization::Speed] {
+        emit_object(&module, optimization).unwrap();
+        hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed)).unwrap();
+    }
+    hirsel_llvm_lazy::emit_program(
+        &[hirsel_llvm_lazy::Unit::Core {
+            module: &module,
+            facts: &hirsel_core_ir::roles::Facts::new(&module),
+            observe_charge: false,
+            debug_lines: false,
+        }],
+        &[symbol(&module, FuncId(0)), symbol(&module, FuncId(1))],
+    )
+    .unwrap();
+}
+
+#[test]
 fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
     let mut source = String::from("core v1\n");
     for (i, t) in ["u8", "i8"].iter().enumerate() {

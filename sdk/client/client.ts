@@ -240,9 +240,9 @@ export class Client implements Transport {
     }); };
     socket.onerror = () => { void this.enqueue(async () => { if (epoch === this.epoch) this.transient(); }); };
   }
-  private disconnect(code = 1000): void {
+  private disconnect(): void {
     ++this.epoch; const socket = this.socket; this.socket = undefined;
-    socket?.close(code);
+    socket?.close();
   }
   private cancelTimers(): void {
     if (this.timer !== undefined) this.clock.clear(this.timer);
@@ -256,7 +256,7 @@ export class Client implements Transport {
     this.timer = this.clock.set(() => { this.timer = undefined; void this.enqueue(async () => this.connect()); }, delay);
   }
   private async incompatible(code: number): Promise<void> {
-    this.cancelTimers(); this.disconnect(code); this.setState('Incompatible');
+    this.cancelTimers(); this.disconnect(); this.setState('Incompatible');
     this.options.onDiagnostic?.(`Incompatible (${code}); reload bindings or reconnect explicitly`);
     this.readyReject(new ClientError('Incompatible'));
     await this.releaseInitial();

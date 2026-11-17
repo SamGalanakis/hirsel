@@ -71,7 +71,7 @@ class Server {
           }catch(e){this.errors.push(e);}
         }
       },
-      close:()=>{s.closed=true;},
+      close:(code)=>{if(code!==undefined && code!==1000 && (code<3000 || code>4999))throw new Error('WebSocket.close forbids reserved codes');s.closed=true;},
     };
     this.sockets.push(s);queueMicrotask(()=>s.onopen?.());return s;
   };

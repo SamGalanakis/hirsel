@@ -44,8 +44,8 @@ Invariants:
   unfinished work at every normal or failing exit. Calls qualify only when
   release-wide body summaries prove no nested Steps or scheduling operation;
   short windows execute the original checked path before any source effect.
-  Development objects use checked Steps directly; batching is enabled with
-  optimization, which promotes the additional joins instead of spilling them.
+  Development objects promote the Step joins with `mem2reg` and use LLVM's
+  machine spill-slot coloring to reuse stack slots for disjoint live ranges.
   Straight-line groups use a constant unconsumed suffix, with no dynamic
   progress counter, and keep each source operation in its original order.
 - Objects install 4 KiB stack probes, so native stack exhaustion is a run stop at a probed

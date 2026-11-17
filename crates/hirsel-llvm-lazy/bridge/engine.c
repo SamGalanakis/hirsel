@@ -557,8 +557,9 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     if (LLVMGetTargetFromTriple(triple, &target, &message)) {
         error(out, message); LLVMDisposeMessage(message); return;
     }
+    // Match eager emission: reuse spill slots across disjoint Step live ranges.
     LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, cpu, "",
-        speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
+        speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelLess, LLVMRelocPIC, LLVMCodeModelDefault);
     if (!machine) { error(out, "LLVM could not create the target machine"); return; }
     LLVMContextRef context = NULL;
     int own_context = 1, discard_names = 0;
@@ -670,7 +671,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     }
     if (!speed) {
         // Exact Step versions join through private allocas. Finish SSA
-        // construction at O0 too, instead of retaining each temporary on the
+        // construction in development too, instead of retaining each temporary on the
         // task stack. Keep the eager development pipeline identical.
         LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
         LLVMErrorRef e = LLVMRunPasses(module, "function(mem2reg)", machine, options);

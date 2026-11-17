@@ -417,7 +417,9 @@ impl TargetMachine {
         let level = if optimize {
             LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive
         } else {
-            LLVMCodeGenOptLevel::LLVMCodeGenLevelNone
+            // Use the spill-slot coloring allocator in development too.
+            // The fast allocator leaves a slot for each spilled Step SSA value.
+            LLVMCodeGenOptLevel::LLVMCodeGenLevelLess
         };
         // SAFETY: the target is registered and the strings are NUL-terminated; LLVM copies them.
         let raw = unsafe {

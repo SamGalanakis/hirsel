@@ -17,7 +17,7 @@
         "declarations": 163.67616191904048,
         "body keys/new": 63.85926095164801,
         "body keys/for_body": 192.52037678754454,
-        "body keys": 258.7254196642686,
+        "body keys": 258.41283555939566,
         "image index": 0.0,
         "image read": 0.0,
         "image digest": 0.0
@@ -41,8 +41,8 @@
         "input counts": 8.740458788038307,
         "declarations": 210.6829980532122,
         "body keys/new": 72.43162889201132,
-        "body keys/for_body": 182.10983127839066,
-        "body keys": 255.47155278999534,
+        "body keys/for_body": 181.8360802143379,
+        "body keys": 255.16562474628563,
         "image index": 0.0,
         "image read": 0.0,
         "image digest": 0.0
@@ -66,9 +66,9 @@
         "input counts": 8.46365114063113,
         "declarations": 108.86990617560566,
         "body keys/new": 58.40078420389301,
-        "body keys/for_body": 10.360966313547447,
+        "body keys/for_body": 10.338546045625245,
         "body keys": 68.80548942725109,
-        "image read": 11.714589989350372,
+        "image read": 11.68095958746707,
         "image digest": 3.9795975561907966,
         "image index": 180.10922839938385
       },

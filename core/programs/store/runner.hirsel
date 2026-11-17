@@ -801,7 +801,7 @@ pub opaque type Release: send {
 // without selection, which v1 lacks.
 pub opaque type PubIn: send { e: ToPub }
 
-type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, u64, Bytes, Bytes) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
+type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes, Bytes) | WireSubscribed(u64, u32, u64, Bytes, Bytes) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
 
 // A session's join, on its first Subscribe: where its content goes, and where the
 // publisher answers with the id it mints for the session.
@@ -1279,11 +1279,11 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 let _ = channel.try_send(told, minted)
                 if let Some(sender) = wake { let _ = channel.try_send(sender, wire_event(JoinReady)) }
             },
-            Subscribed(who, sub, generation, take key, take arg) => if let Some(i) = joiner(joined, who) {
-                unend(mut joined[i].ended, sub)
-                let mut owes: List[Owe] = list.new()
-                result.unwrap(list.push(mut owes, at_base(mut b, who, sub, generation, take key, take arg)))
-                deliver(mut b, mut joined, take owes)
+            Subscribed(who, sub, take key, take arg) => {
+                publish_subscription(mut b, mut joined, who, sub, 0u64, take key, take arg)
+            },
+            WireSubscribed(who, sub, generation, take key, take arg) => {
+                publish_subscription(mut b, mut joined, who, sub, generation, take key, take arg)
             },
             Unsubscribed(who, sub) => if let Some(i) = find(b.subs, who, sub) {
                 let _ = list.remove(mut b.subs, i)
@@ -1295,6 +1295,15 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
         }
         sweep(mut b.subs, mut joined)
         settle(mut b.subs, mut joined, mut waiting, at)
+    }
+}
+
+fn publish_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) {
+    if let Some(i) = joiner(joined, who) {
+        unend(mut joined[i].ended, sub)
+        let mut owes: List[Owe] = list.new()
+        result.unwrap(list.push(mut owes, at_base(mut b, who, sub, generation, take key, take arg)))
+        deliver(mut b, mut joined, take owes)
     }
 }
 
@@ -1887,7 +1896,7 @@ fn sessioned[G: send, H: send](s: Session[G, H], r: Registry[G, H], mut id: Opti
                 id = Some(who)
                 // v2.12 item 3: the owner waits only on its own inbox. A full PubIn refuses
                 // this Subscribe, and nothing is registered.
-                match channel.try_send(s.publisher, PubIn(e: Subscribed(who, sub, 0u64, take key, take arg))) {
+                match channel.try_send(s.publisher, PubIn(e: Subscribed(who, sub, take key, take arg))) {
                     Ok(_) => (),
                     Error(Full(_)) => {
                         let _ = channel.send(s.client, Ended(sub, Refused(Overloaded)))
@@ -2283,7 +2292,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let mut queue: List[ToPub] = list.new()
     result.unwrap(list.push(mut queue, Joined(Join(to: Seam(take ev_to), told: take told_to, mark: None, closed: None))))
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
-    result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, 0u64, query_key(code.describe(q1)), no_arg())))
+    result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new()))))
     result.unwrap(list.push(mut queue, Halt))
     for take e in queue {
@@ -2413,8 +2422,8 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     let f = join_as(to, take f_to, None)
     let k1 = query_key(code.describe(q1))
     let mut queue: List[ToPub] = list.new()
-    result.unwrap(list.push(mut queue, Subscribed(l, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())))
-    result.unwrap(list.push(mut queue, Subscribed(m, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())))
+    result.unwrap(list.push(mut queue, Subscribed(l, 1u32, result.unwrap(clone(k1)), no_arg())))
+    result.unwrap(list.push(mut queue, Subscribed(m, 1u32, result.unwrap(clone(k1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
     for take e in queue {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -2430,7 +2439,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
         result.unwrap(list.push(mut quiet, Drained))
     } else {
         result.unwrap(list.push(mut quiet, Unsubscribed(f, 9u32)))
-        result.unwrap(list.push(mut quiet, Subscribed(m, 2u32, 0u64, result.unwrap(clone(k1)), no_arg())))
+        result.unwrap(list.push(mut quiet, Subscribed(m, 2u32, result.unwrap(clone(k1)), no_arg())))
     }
     for take e in quiet {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -2598,7 +2607,7 @@ fn retired_session(c: Clock, tasks: Tasks, end: u64) -> bool waits {
     }
     let PubIn(e: take second) = take subscribing
     let subscribed = match take second {
-        Subscribed(who, sub, _, _, _) => who == 7u64 && sub == 1u32,
+        Subscribed(who, sub, _, _) => who == 7u64 && sub == 1u32,
         _ => false,
     }
     let live = match channel.try_receive(m) {
@@ -3865,7 +3874,7 @@ fn wire_subscribed[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
     let to_pub = wire_publisher(s)
     s.sub_generation += 1u64
     let generation = s.sub_generation
-    let sent = channel.try_send(to_pub, PubIn(e: Subscribed(who, sub, generation, take key, take arg)))
+    let sent = channel.try_send(to_pub, PubIn(e: WireSubscribed(who, sub, generation, take key, take arg)))
     if let Error(_) = take sent { wire_end(mut s, mut work, sub, Refused(Overloaded)); return }
     let mut index = 0u64
     while index < list.len(s.subs) && s.subs[index].0 != sub { index += 1u64 }

@@ -250,11 +250,8 @@ MUTANTS = (
        '                        Ok(take ahead) => {\n'
        '                            let PubIn(e: take next) = take ahead\n'
        '                            match take next {\n'
-       '                                Subscribed(who, sub, generation, take key, take arg) => if let Some(i) = joiner(joined, who) {\n'
-       '                                    unend(mut joined[i].ended, sub)\n'
-       '                                    let mut early: List[Owe] = list.new()\n'
-       '                                    result.unwrap(list.push(mut early, at_base(mut b, who, sub, generation, take key, take arg)))\n'
-       '                                    deliver(mut b, mut joined, take early)\n'
+       '                                Subscribed(who, sub, take key, take arg) => {\n'
+       '                                    publish_subscription(mut b, mut joined, who, sub, 0u64, take key, take arg)\n'
        '                                },\n'
        '                                _ => (),\n'
        '                            }\n'
@@ -264,7 +261,7 @@ MUTANTS = (
        '                }\n')],
      'runner', 'subscribe_order'),
     ('subscribe_past_queue',
-     [('                unend(mut joined[i].ended, sub)\n',
+     [('                publish_subscription(mut b, mut joined, who, sub, 0u64, take key, take arg)\n',
        '                match channel.try_receive(from) {\n'
        '                    Ok(take ahead) => {\n'
        '                        let PubIn(e: take next) = take ahead\n'
@@ -286,7 +283,7 @@ MUTANTS = (
        '                    },\n'
        '                    Error(_) => (),\n'
        '                }\n'
-       '                unend(mut joined[i].ended, sub)\n')],
+       '                publish_subscription(mut b, mut joined, who, sub, 0u64, take key, take arg)\n')],
      'runner', 'subscribe_order'),
     # L24 (owed_ended_delivered, v2.13): the owner never wakes the publisher, so a waiting
     # Ended needs other traffic; and an owner that wakes it once per session, then never.

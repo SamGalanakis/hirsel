@@ -13,8 +13,8 @@
       "whole_process_per_line": 29500
     },
     "product": {
-      "fixed_std_instructions": 2065926,
-      "fixed_core_instructions": 1583328,
+      "fixed_std_instructions": 2065649,
+      "fixed_core_instructions": 1583178,
       "entries": {
         "bfs-idiomatic": {
           "marginal_per_line": 48100

@@ -484,10 +484,11 @@ The budget `n` is set per entry by the place at registration, never by the clien
 
 - **H1. One worker per stream.** A request for the worker's position joins its waiters **if its request digest equals the worker's** (v2.11.3). Otherwise it is answered `Refused(RequestMismatch)` at once as V3, and it never runs. A request for another position waits in the FIFO. When the worker ends, the next waiting request starts.
 - **H2. Start.** The head calls `admit(stream, p)`:
-  - `Admitted(t)` or `Abandoned(t)`: run the entry in `store.run`, with `reply(tx, stream, p, bytes)` (and, in R5, `record`) in the same transaction. The outcome of that run:
+  - `Admitted(t)` or `Abandoned(t)`: run the entry in the store, with `reply_recorded(tx, p, bytes, call)` in the same transaction. The outcome of that run:
     - `Committed`: the effect and the reply share a commit.
-    - `Aborted(u)`: the reply is kept alone in one streams-only commit; the gate waits on `u.ticket`, which is always `Some` because the adapter replies before returning `Error`.
-    - `Failed(c)`: the head commits the reply in a `run` whose body only calls `reply(Failed(..))` (and `record`).
+    - `Aborted(u)` with a ticket: the reply and CALL are kept in one streams-only commit. The gate waits on the ticket.
+    - `Aborted(u)` without a ticket: the head answers the runner's refusal. The stream stays `Admitted(p)`.
+    - `Failed(c)`: the head commits the reply in a `run` whose body only calls `reply_recorded` with the encoded `Failed(..)` outcome.
     - `Refused(c)`: the store refused the commit (resident limit). The answer is `Refused(Overloaded)`, nothing is recorded, and the stream stays `Admitted(p)`. A refused reply-only commit is answered the same way.
     - The head does not wait for the admit ticket: the journal is prefix-ordered, so a durable reply implies a durable admit.
   - `Duplicate(r)`: answer `r`. Under H1 and H3, any reply the head can see at the stream's latest position is durable.
@@ -706,14 +707,14 @@ An upgrade is a process restart on new code.
 
 ## 7. Recording and re-execution (R5), at STORE-SPEC v2.4
 
-- **Recording.** In the same Tx as its `reply`, a transact call runs `store.record(mut tx, CallRecord{key, args, stream})`. The commit's frame then carries a call section. Its position is the stream's op in that frame, and its CallInfo is the frame's.
+- **Recording.** A transact call uses `store.reply_recorded(mut tx, p, bytes, call)` to admit the reply and the CALL section together in the same Tx. The call record contains the key, argument bytes, stream and optional revision. Its position is the stream's op in that frame, and its CallInfo is the frame's.
 - **What each outcome leaves, as `tapes check` sees it** (STORE-SPEC G1 table, adopted):
 
   | Outcome of the position's run | What the store committed | Call record | `tapes check` |
   |---|---|---|---|
   | `Committed` | data, reply and call section, in one frame | yes | `Same`, or `Different(Reply)` / `Different(Writes)` |
   | `Aborted(u)` (the adapter always replies) | reply and call section, one streams-only frame; no data | **yes (G1)** | `Same` when the re-run also returns the error with the same reply bytes and no writes; else `Different(Reply)` |
-  | `Failed(causes)` | nothing from the body; the runner's reply-only `Failed` commit with its own `record` | yes, in the runner's commit | `Same` when the re-run faults the same way, else `Different(Reply)` |
+  | `Failed(causes)` | the runner's `Failed` reply and CALL in a separate commit | yes, in the runner's commit | `Same` when the re-run faults the same way, else `Different(Reply)` |
   | `Refused(c)` | nothing | none | nothing to check: the position re-runs |
   | a gone entry's reply-only `Failed(Gone)` | reply only | **none: the one exception** (below) | `Unknown(NoEntry)` |
   | a record in a compacted segment, or **any record in a `memory` store** | — | `recorded` is None | `Unknown(StateGone)` |
@@ -907,7 +908,7 @@ Each slice is final when it lands, and later slices only add.
 | **R2** | `query`, `cover`, Subscribe, G2/G3 rows in the same batches, read-set re-runs with lookup Points, `Ended`, `budget`, read-set bytes limit, coalescing, Reset | the publisher round (G2 over two Snapshots, interval index, diff) **when S1.1 lands**, tested against `subs22_model.py`'s reference | R1; S1.1; the v2.6/v2.7 follow-up (I1, I3, J1) | L5, L8, L9, L16, L17, L20, and `subs25_model.py`'s 4 scenarios and 10 mutants as law cases |
 | R3 | P3: frames, `hirsel sdk ts` with the bounded `place` run, Hello/Welcome with the launch identity (v2.12: describe mode and Welcome's identity are built, W4a) | when a network transport exists | transport; N8 (re-issued) | L12 generator half |
 | R4 | activation table, gone-key set, Resolve, Gone | after R1 | R1; D2 | L10, L11, L13; `calls25_model.py`'s `upgrade_gone` with mutant `gone_refused_at_session` (v2.5) |
-| R5 | `record`, re-execution, Verdict | after R1 | S3 (call section, `recorded` with its frame's context), S4 (fork, and a Tx on it under a given CallInfo); replay tape join | §7's table as cases, plus an entry whose reply and writes are its `info(mut tx)` fields, which compares `Same` (mutant: the re-run takes the fork's CallInfo) |
+| R5 | `reply_recorded`, re-execution, Verdict | after R1 | S3 (call section, `recorded` with its frame's context), S4 (fork, and a Tx on it under a given CallInfo); replay tape join | §7's table as cases, plus an entry whose reply and writes are its `info(mut tx)` fields, which compares `Same` (mutant: the re-run takes the fork's CallInfo) |
 | R6 | granted over providers, InDoubt | — | provider ABI (provider-abi-fix-1018) | — |
 
 **R0 acceptance (named tests and laws):**

@@ -765,14 +765,13 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
 }
 
 // The stream's reply at p is the Outcome's codec bytes (STORE-SPEC §1.8 reply).
-fn reply(mut tx: store.Tx, stream: Bytes, p: u64, o: Outcome) -> Result[(), store.Error] {
+fn encode_runner_reply(o: Outcome) -> Result[Bytes, store.Error] {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let mut b: Bytes = list.new()
     match std.codec.encode(co, o, mut b) {
-        Ok(()) => (),
-        Error(c) => return Error(Full(c)),
+        Ok(()) => Ok(take b),
+        Error(c) => Error(Full(c)),
     }
-    store.reply(mut tx, stream, p, take b)
 }
 
 // ---- P2: the head (H1-H4) and its gate (V3, V4).
@@ -1046,7 +1045,9 @@ type Kept = Alone(Outcome) | Nothing(Refusal)
 // as separate places, so the body can view the registry and handles while db is lent.
 fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, q: Req) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
     match map.get(r.slots, q.key) {
-        Some(Transact(s, revision, _, go)) => Some(store.run(mut db, Some(s), scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
+        Some(Transact(s, revision, _, go)) => Some(store.run_with_reply(mut db, Some(s), fn(why: Kept) -> bool {
+            match why { Alone(_) => true, Nothing(_) => false }
+        }, scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
             match go(mut tx, h, q.arg) {
                 Commit(take b) => {
                     let o = Returned(take b)
@@ -1067,12 +1068,13 @@ fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, q: Req) -
 // R5 (§7): a run's reply and its call record in one Tx: the requested key, the exact
 // argument bytes, the stream, and the code.revision of the entry that ran.
 fn answered(mut tx: store.Tx, q: Req, o: Outcome, revision: Option[Bytes]) -> Result[(), store.Error] {
-    reply(mut tx, q.stream, q.p, o)?
+    let answer_bytes = encode_runner_reply(o)?
     let rev = match revision {
         Some(b) => Some(copy_bytes(b)?),
         None => None,
     }
-    store.record(mut tx, store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: copy_bytes(q.stream)?, revision: take rev))
+    let recorded = store.CallRecord(key: copy_bytes(q.key)?, args: copy_bytes(q.arg)?, stream: copy_bytes(q.stream)?, revision: take rev)
+    store.reply_recorded(mut tx, q.p, take answer_bytes, take recorded)
 }
 
 fn copy_bytes(b: Bytes) -> Result[Bytes, store.Error] {
@@ -1146,7 +1148,7 @@ fn reply_alone(mut db: store.Db, q: Req, o: Outcome, record: Option[Option[Bytes
     store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         match record {
             Some(revision) => answered(mut tx, q, o, revision),
-            None => reply(mut tx, q.stream, q.p, o),
+            None => store.reply(mut tx, q.stream, q.p, encode_runner_reply(o)?),
         }
     })
 }

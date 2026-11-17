@@ -780,11 +780,21 @@ pub fn run[R, A](mut db: Db, steps: Option[u64], body: scoped[view] fn(mut Tx) -
 }
 
 pub fn run_on[R, A](mut db: Db, b: Branch, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    run_on_with_reply(mut db, b, steps, None, body)
+}
+
+// A runner abort may keep its reply. A runner refusal rolls back the whole Tx.
+pub fn run_with_reply[R, A](mut db: Db, steps: Option[u64], keep_reply: fn(A) -> bool, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    let b = main_branch(db)
+    run_on_with_reply(mut db, b, steps, Some(keep_reply), body)
+}
+
+fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     journal_poll(mut db)?
     healthy(db)?
     let i = branch_index(db, b)?
     let wall = host.wall_ms(db.clock)
-    let outcome: Result[Outcome[R, A], Error] = match stage(mut db, i, wall, steps, body) {
+    let outcome: Result[Outcome[R, A], Error] = match stage(mut db, i, wall, steps, keep_reply, body) {
         Over(take o) => Ok(take o),
         Ran(take ran) => settle_admit(mut db, i, take ran)
     }
@@ -824,12 +834,13 @@ type Ran[R, A] {
 
 type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A])
 
-// What a body left in its Tx.
-type Finished[R, A] {
+type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(Prepared[R, A])
+
+// A successful body or an application error with a reply to commit.
+type Prepared[R, A] {
     outcome: Result[R, A],
     roots: Roots,
     live: u64,
-    refusal: Option[Capacity],
     wrote: bool,
     frame: Option[Bytes],
     ops: std.omap.OMap[Bytes, Option[Bytes]],
@@ -839,7 +850,7 @@ type Finished[R, A] {
 
 // Runs the body on branch `i` inside isolate. Everything but a body that
 // returned Ok, or Error after a reply, is final here.
-fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let read_log: Result[Log[Read], Capacity] = log.new()
     let reads: Log[Read] = match take read_log {
         Ok(take x) => take x,
@@ -855,32 +866,30 @@ fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[v
         let perform = scoped fn() -> Finished[R, A] {
             let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, resident: db.resident, retain_old: retaining(db), reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci, stream_ops: std.omap.new(), extra_bytes: 0, call: None, scope: everything(db.store))
             let outcome = body(mut tx)
-            // F2: a body that returned Error keeps its reply writes and its CALL
-            // section only, so its frame has no data ops.
-            let failed = match outcome {
-                Error(_) => true,
-                Ok(_) => false
-            }
-            if failed {
-                tx.ops = std.omap.new()
-            }
-            let kept = !failed || std.omap.len(tx.stream_ops) != 0
-            let frame: Option[Bytes] = if !kept { None } else {
-                if let Some(_) = db.journal {
-                    let encoded = encode_sections(ci, tx.ops, tx.stream_ops, tx.call, db.file_seq, db.file_end)
-                    match take encoded {
-                        Ok(take raw) => Some(take raw),
-                        Error(c) => {
-                            tx.refusal = Some(c);
-                            None
-                        }
+            if let Some(c) = tx.refusal { return RolledBack(Refused(c)) }
+            let value: Result[R, A] = match take outcome {
+                Ok(take v) => Ok(take v),
+                Error(take a) => {
+                    let keep = match keep_reply { Some(decide) => decide(a), None => true }
+                    if !keep || std.omap.len(tx.stream_ops) == 0 {
+                        return RolledBack(Aborted(Undone(value: take a, ticket: None)))
                     }
-                } else {
-                    None
+                    // F2: only the reply and CALL go into this frame.
+                    tx.ops = std.omap.new()
+                    Error(take a)
                 }
             }
-            let Tx(store: _, roots: take roots, ids: _, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: _, wrote: wrote, ops: take ops, op_ids: _, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call, scope: _) = take tx
-            Finished(outcome: take outcome, roots: take roots, live: live, refusal: no_room, wrote: wrote, frame: take frame, ops: take ops, stream_ops: take stream_ops, call: take call)
+            let frame: Option[Bytes] = if let Some(_) = db.journal {
+                let encoded = encode_sections(ci, tx.ops, tx.stream_ops, tx.call, db.file_seq, db.file_end)
+                match take encoded {
+                    Ok(take raw) => Some(take raw),
+                    Error(c) => return RolledBack(Refused(c))
+                }
+            } else {
+                None
+            }
+            let Tx(store: _, roots: take roots, ids: _, resident: live, retain_old: _, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: wrote, ops: take ops, op_ids: _, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call, scope: _) = take tx
+            Prepared(Prepared(outcome: take value, roots: take roots, live: live, wrote: wrote, frame: take frame, ops: take ops, stream_ops: take stream_ops, call: take call))
         }
         match steps {
             Some(s) => bound steps s { perform() },
@@ -898,16 +907,14 @@ fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[v
         Ok(Ok(Error(e))) => return Over(Stopped(e)),
         Ok(Ok(Ok(take f))) => take f
     }
-    let Finished(outcome: take result, roots: take roots, live: live, refusal: no_room, wrote: wrote, frame: take frame, ops: take ops, stream_ops: take stream_ops, call: take call) = take finished
-    if let Some(c) = no_room {
-        return Over(Refused(c))
+    let prepared = match take finished {
+        RolledBack(take o) => return Over(take o),
+        Prepared(take tx) => take tx
     }
+    let Prepared(outcome: take result, roots: take roots, live: live, wrote: wrote, frame: take frame, ops: take ops, stream_ops: take stream_ops, call: take call) = take prepared
     match take result {
         Ok(take value) => Ran(Ran(value: Ok(take value), roots: take roots, live: live, wrote: wrote, frame: take frame, ops: take ops, stream_ops: take stream_ops, call: take call, info: ci, reads: take seen)),
         Error(take a) => {
-            if std.omap.len(stream_ops) == 0 {
-                return Over(Aborted(Undone(value: take a, ticket: None)))
-            }
             // F2: the base's data and catalog with the body's streams root,
             // charged for the reply writes alone.
             let kept_live = match stream_live(db, i, stream_ops) {
@@ -1011,7 +1018,8 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
 
 // Runs and commits without the I4 settle: the S1 laws' direct entry.
 fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
-    match stage(mut db, i, wall, steps, body) {
+    let keep_reply: Option[fn(A) -> bool] = None
+    match stage(mut db, i, wall, steps, keep_reply, body) {
         Over(take o) => Ok(take o),
         Ran(take ran) => Ok(commit_ran(mut db, i, take ran))
     }
@@ -1349,7 +1357,7 @@ fn stream_state(raw: Bytes) -> Result[StreamState, Error] {
 }
 
 // One write to the streams tree, charged and sized like a data write.
-fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), Error] {
+fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) -> Result[(), Error] {
     if list.len(key) > 4096 {
         return Error(Limit(Key))
     }
@@ -1357,7 +1365,7 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), Er
         return Error(Limit(Value))
     }
     let head = if std.omap.len(tx.stream_ops) == 0 { 5u64 } else { 0u64 }
-    let extra = int.saturating_add(tx.extra_bytes - old_op_size(tx.stream_ops, key), head + 9 + list.len(key) + list.len(value))
+    let extra = int.saturating_add(tx.extra_bytes - old_op_size(tx.stream_ops, key), head + 9 + list.len(key) + list.len(value) + call_size)
     let data_head = if std.omap.len(tx.ops) == 0 { 5u64 } else { 0u64 }
     if int.saturating_add(tx.frame_bytes, extra) - data_head - 16 > 16777280 {
         return Error(Limit(Transaction))
@@ -1392,7 +1400,7 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), Er
     }
 }
 
-pub fn reply(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes) -> Result[(), Error] {
+fn reply_row(tx: Tx, stream: Bytes, p: u64, r: Bytes) -> Result[(Bytes, Bytes), Error] {
     // The reply keeps the digest bound at p (AH1).
     let held = match std.omap.get(tx.roots.streams, stream) {
         Some(raw) => {
@@ -1406,32 +1414,24 @@ pub fn reply(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes) -> Result[(), Err
         None => return Error(Missing("reply"))
     }
     let value = stream_bytes(p, d, 2, r)?
-    stream_write(mut tx, copied(stream)?, take value)
+    Ok((copied(stream)?, take value))
 }
 
-pub fn record(mut tx: Tx, take c: CallRecord) -> Result[(), Error] {
+pub fn reply(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes) -> Result[(), Error] {
+    let (take key, take value) = reply_row(tx, stream, p, r)?
+    stream_write(mut tx, take key, take value, 0)
+}
+
+// G1: admit the entire frame before staging either the reply or the CALL.
+pub fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Result[(), Error] {
     if let Some(_) = tx.call {
         return Error(Exists("call"))
     }
-    let replied = match std.omap.get(tx.stream_ops, c.stream) {
-        Some(op) => match op {
-            Some(raw) => list.len(raw) >= 41 && raw[40] == 2,
-            None => false
-        },
-        None => false
-    }
-    if !replied {
-        return Error(Missing("reply"))
-    }
+    let (take key, take value) = reply_row(tx, c.stream, p, r)?
     call_checked(c)?
-    let revision = match c.revision { Some(r) => list.len(r), None => 0u64 }
+    let revision = match c.revision { Some(rev) => list.len(rev), None => 0u64 }
     let size = 17 + list.len(c.key) + list.len(c.args) + list.len(c.stream) + revision
-    let extra = int.saturating_add(tx.extra_bytes, size)
-    let data_head = if std.omap.len(tx.ops) == 0 { 5u64 } else { 0u64 }
-    if int.saturating_add(tx.frame_bytes, extra) - data_head - 16 > 16777280 {
-        return Error(Limit(Transaction))
-    }
-    tx.extra_bytes = extra
+    stream_write(mut tx, take key, take value, size)?
     tx.call = Some(take c)
     Ok(())
 }
@@ -1494,7 +1494,7 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
     let outcome = run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
         let empty: Bytes = list.new()
         let value = stream_bytes(p, d, 1, empty)?
-        stream_write(mut tx, copied(stream)?, take value)
+        stream_write(mut tx, copied(stream)?, take value, 0)
     })?
     let ticket = match take outcome {
         Committed(done) => done.ticket,
@@ -5438,6 +5438,8 @@ pub fn law_streams(c: Clock) -> bool waits {
     let kept = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) { return Error(1) }
         if let Error(_) = reply(mut tx, s, 1, result.unwrap(copied(string.as_bytes("r1")))) { return Error(2) }
+        // A 95-byte reply frame plus the 5-byte data head and one 29-byte put.
+        if tx_frame(tx) != 129 { return Error(3) }
         Error(7)
     }))
     match take kept {
@@ -5488,14 +5490,13 @@ pub fn law_streams(c: Clock) -> bool waits {
         match result.unwrap(admit(mut db, s, p, d)) { Rejected(2) => {}, _ => return false }
     }
     if db.heads[0].head != 5 { return false }
-    // A reply on a stream never admitted, then record's three refusals.
+    // Recording checks the admission, revision, and one-CALL-per-frame rule.
     let unadmitted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if !missing_is(reply(mut tx, string.as_bytes("t"), 0, list.new()), "reply") { return Error(1) }
-        if !missing_is(record(mut tx, call_for(s, 32)), "reply") { return Error(2) }
-        if let Error(_) = reply(mut tx, s, 2, result.unwrap(copied(string.as_bytes("r2")))) { return Error(3) }
-        if !missing_is(record(mut tx, call_for(s, 31)), "revision") { return Error(4) }
-        if let Error(_) = record(mut tx, call_for(s, 32)) { return Error(5) }
-        match record(mut tx, call_for(s, 32)) { Error(Exists(n)) => if n != "call" { return Error(6) }, _ => return Error(7) }
+        if !missing_is(reply_recorded(mut tx, 3, list.new(), call_for(s, 32)), "reply") { return Error(2) }
+        if !missing_is(reply_recorded(mut tx, 2, list.new(), call_for(s, 31)), "revision") { return Error(3) }
+        if let Error(_) = reply_recorded(mut tx, 2, result.unwrap(copied(string.as_bytes("r2"))), call_for(s, 32)) { return Error(4) }
+        match reply_recorded(mut tx, 2, list.new(), call_for(s, 32)) { Error(Exists(n)) => if n != "call" { return Error(5) }, _ => return Error(6) }
         Ok(())
     }))
     match take unadmitted { Committed(_) => {}, _ => return false }
@@ -5507,11 +5508,10 @@ pub fn law_streams(c: Clock) -> bool waits {
     // 32) + (4 + 16) + (4 + 1) + (4 + 32) = 98 gives 193. A put of a
     // 12-byte key and 8-byte value adds the data head 5 and 29: 227.
     let sized = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
-        if let Error(_) = reply(mut tx, s, 3, result.unwrap(copied(string.as_bytes("ab")))) { return Error(1) }
+        if let Error(_) = reply_recorded(mut tx, 3, result.unwrap(copied(string.as_bytes("ab"))), call_for(s, 32)) { return Error(1) }
         let ci = info(mut tx)
-        let one = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, tx.call, 1, 72)))
-        if tx_frame(tx) != 95 || one != 95 { return Error(2) }
-        if let Error(_) = record(mut tx, call_for(s, 32)) { return Error(3) }
+        let one = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, None, 1, 72)))
+        if one != 95 { return Error(2) }
         let two = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, tx.call, 1, 72)))
         if tx_frame(tx) != 193 || two != 193 { return Error(4) }
         if let Error(_) = put_bytes(mut tx, 1, key_word(4), key_word(44)) { return Error(5) }
@@ -5522,6 +5522,72 @@ pub fn law_streams(c: Clock) -> bool waits {
     match take sized { Committed(_) => {}, _ => return false }
     // The Full admit of e at u bound nothing: d admits there.
     match result.unwrap(admit(mut db, string.as_bytes("u"), 0, d)) { Admitted(_) => true, _ => false }
+}
+
+// G1: a refused run leaves the version and rows unchanged. Readmission
+// of the same position finds the original admit, with no saved reply.
+fn refused_reply(c: Clock, oversized: bool) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    let stream = string.as_bytes("s")
+    let digest = digest_for("request")
+    match result.unwrap(admit(mut db, stream, 0, digest)) {
+        Admitted(t) => if !mark_is(t, 1) { return false },
+        _ => return false
+    }
+    let attempted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        if oversized {
+            // Section 2.4: 26 + 16*21 + 15*1048576 + 1048086
+            // leaves 192 bytes for the streams and CALL sections.
+            for k in 1u64 .. 17 {
+                let size = if k == 16 { 1048086u64 } else { 1048576u64 }
+                let mut v: Bytes = capacity(list.with_capacity(size))?
+                capacity(list.fill(mut v, size, 0u8))?
+                put_bytes(mut tx, 1, key_word(k), v)?
+            }
+        } else {
+            put_bytes(mut tx, 1, key_word(1), key_word(10))?
+        }
+        let mut call = call_for(stream, if oversized { 32u64 } else { 31u64 })
+        if oversized {
+            capacity(list.fill(mut call.args, 1024, 0u8))?
+        }
+        reply_recorded(mut tx, 0, copied(string.as_bytes("success"))?, take call)
+    }))
+    match take attempted {
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => if !oversized { return false },
+        Aborted(Undone(value: Missing(what), ticket: None)) => if oversized || what != "revision" { return false },
+        _ => return false
+    }
+    let head = snapshot(db)
+    if version(head) != 1 { return false }
+    if let Some(_) = result.unwrap(get_bytes(head, 1, key_word(1))) { return false }
+    match result.unwrap(admit(mut db, stream, 0, digest)) {
+        Abandoned(t) => if !mark_is(t, 1) { return false },
+        _ => return false
+    }
+    if oversized { return true }
+    // A runner refusal also discards an already staged reply and CALL.
+    let rejected = result.unwrap(run_with_reply(mut db, None, fn(_error: Error) -> bool { false }, fn(mut tx: Tx) -> Result[(), Error] {
+        reply_recorded(mut tx, 0, copied(string.as_bytes("success"))?, call_for(stream, 32))?
+        Error(Limit(Transaction))
+    }))
+    match take rejected { Aborted(Undone(value: Limit(Transaction), ticket: None)) => {}, _ => return false }
+    if version(snapshot(db)) != 1 { return false }
+    match result.unwrap(admit(mut db, stream, 0, digest)) {
+        Abandoned(t) => mark_is(t, 1),
+        _ => false
+    }
+}
+
+pub fn law_refused_reply(c: Clock) -> bool waits {
+    let frame = refused_reply(c, true)
+    let revision = refused_reply(c, false)
+    frame && revision
+}
+
+@test
+fn test_refused_reply(c: Clock) -> Result[(), ()] waits {
+    if law_refused_reply(c) { Ok(()) } else { Error(()) }
 }
 
 fn digest_hex(d: RequestDigest, hex: String) -> bool {
@@ -9531,7 +9597,7 @@ pub type CallRecord: codec {
     revision: Option[Bytes]
 }
 
-// AD1: record's check. A Some that is not code.revision's 32 bytes is refused
+// AD1: the CALL revision check. A Some that is not code.revision's 32 bytes is refused
 // before anything is committed.
 fn call_checked(c: CallRecord) -> Result[(), Error] {
     if let Some(r) = c.revision {
@@ -10977,8 +11043,7 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
 
 fn settle_body(mut tx: Tx, s: Bytes) -> Result[(), u64] {
     if let Error(_) = put_bytes(mut tx, 1, key_word(9), key_word(5)) { return Error(1) }
-    if let Error(_) = reply(mut tx, s, 2, result.unwrap(copied(string.as_bytes("r2")))) { return Error(2) }
-    if let Error(_) = record(mut tx, call_for(s, 32)) { return Error(3) }
+    if let Error(_) = reply_recorded(mut tx, 2, result.unwrap(copied(string.as_bytes("r2"))), call_for(s, 32)) { return Error(2) }
     Ok(())
 }
 
@@ -11032,8 +11097,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let frames = db.frame_seq
     let effect = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(11)) { return Error(1) }
-        if let Error(_) = reply(mut tx, s, 0, result.unwrap(copied(string.as_bytes("r0")))) { return Error(2) }
-        if let Error(_) = record(mut tx, call_for(s, 32)) { return Error(3) }
+        if let Error(_) = reply_recorded(mut tx, 0, result.unwrap(copied(string.as_bytes("r0"))), call_for(s, 32)) { return Error(2) }
         Ok(())
     }))
     match take effect { Committed(_) => {}, _ => return false }
@@ -11043,8 +11107,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     match result.unwrap(admit(mut db, s, 1, ours)) { Admitted(_) => {}, _ => return false }
     let aborted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) { return Error(1) }
-        if let Error(_) = reply(mut tx, s, 1, result.unwrap(copied(string.as_bytes("r1")))) { return Error(2) }
-        if let Error(_) = record(mut tx, call_for(s, 32)) { return Error(3) }
+        if let Error(_) = reply_recorded(mut tx, 1, result.unwrap(copied(string.as_bytes("r1"))), call_for(s, 32)) { return Error(2) }
         Error(5)
     }))
     let kept = match take aborted { Aborted(Undone(value: 5, ticket: Some(t))) => t, _ => return false }
@@ -11063,7 +11126,8 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     result.unwrap(durable(mut db, kept))
     result.unwrap(durable(mut db, last))
     let wall = host.wall_ms(db.clock)
-    let figure = match stage(mut db, 0, wall, None, fn(mut tx: Tx) -> Result[(), u64] { settle_body(mut tx, s) }) {
+    let keep_reply: Option[fn(u64) -> bool] = None
+    let figure = match stage(mut db, 0, wall, None, keep_reply, fn(mut tx: Tx) -> Result[(), u64] { settle_body(mut tx, s) }) {
         Ran(ran) => admitted(db, ran),
         Over(_) => return false
     }

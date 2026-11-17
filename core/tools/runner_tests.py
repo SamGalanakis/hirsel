@@ -803,7 +803,7 @@ def admission_laws(args, root, work, engines, row):
             if value == 1:
                 qualified.add(name)
     for engine in (e for e in engines if e != 'evaluator'):
-        groups = [('wire_admission', state), ('wire_admission_durable', durable)]
+        groups = [('wire_admission', state), ('durable_wire_admission', durable)]
         for group, members in groups:
             if not any(name in names for name in members):
                 continue

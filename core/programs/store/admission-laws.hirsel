@@ -339,6 +339,6 @@ pub fn law_reply_over_done_max(tasks: Tasks, clock: Clock, random: Random) -> bo
 }
 
 @test
-fn test_wire_admission_durable(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+fn test_durable_wire_admission(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
     if law_gone_slot_v5(tasks, clock, random) && law_request_mismatch_wire(tasks, clock, random) && law_history_below_latest(tasks, clock, random) && law_reply_over_done_max(tasks, clock, random) { Ok(()) } else { Error(()) }
 }

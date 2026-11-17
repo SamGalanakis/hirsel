@@ -17,7 +17,7 @@
         "declarations": 158.73517497193617,
         "body keys/new": 63.85926095164801,
         "body keys/for_body": 192.52037678754454,
-        "body keys": 258.957924988877,
+        "body keys": 258.75262368815595,
         "image index": 0.0,
         "image read": 0.0,
         "image digest": 0.0
@@ -42,7 +42,7 @@
         "declarations": 204.50085591415808,
         "body keys/new": 72.43162889201132,
         "body keys/for_body": 179.60836708279405,
-        "body keys": 255.7008165841937,
+        "body keys": 255.6639357560026,
         "image index": 0.0,
         "image read": 0.0,
         "image digest": 0.0
@@ -63,7 +63,7 @@
         "parse": 444.96008962330205,
         "index": 11.530597955468421,
         "resolve": 254.41534799047753,
-        "input counts": 8.46380058815292,
+        "input counts": 8.46365114063113,
         "declarations": 108.86990617560566,
         "body keys/new": 58.40078420389301,
         "body keys/for_body": 10.175045511833076,

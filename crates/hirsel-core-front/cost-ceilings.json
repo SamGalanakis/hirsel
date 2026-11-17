@@ -3,14 +3,14 @@
   "finished_budget_per_line": 60000,
   "corpora": {
     "m1": {
-      "check_lower_per_line": 18200,
-      "whole_request_per_line": 33200,
-      "whole_process_per_line": 33300
+      "check_lower_per_line": 18100,
+      "whole_request_per_line": 33100,
+      "whole_process_per_line": 33200
     },
     "std": {
       "check_lower_per_line": 15400,
       "whole_request_per_line": 29400,
-      "whole_process_per_line": 29600
+      "whole_process_per_line": 29500
     },
     "product": {
       "fixed_std_instructions": 2541209,
@@ -23,10 +23,10 @@
           "marginal_per_line": 48200
         },
         "generics-idiomatic": {
-          "marginal_per_line": 53100
+          "marginal_per_line": 53000
         },
         "generics-matched": {
-          "marginal_per_line": 53100
+          "marginal_per_line": 53000
         },
         "lru-idiomatic": {
           "marginal_per_line": 45100

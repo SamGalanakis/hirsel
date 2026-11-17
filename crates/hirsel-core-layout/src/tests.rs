@@ -995,9 +995,16 @@ fn several_dataful_cases_share_one_niche_without_touching_it() {
                 ("Variable", vec![field("name", string())]),
                 (
                     "Binary",
-                    vec![field("op", u(Scalar::U8)), field("l", node()), field("r", node())],
+                    vec![
+                        field("op", u(Scalar::U8)),
+                        field("l", node()),
+                        field("r", node()),
+                    ],
                 ),
-                ("Assignment", vec![field("name", string()), field("v", node())]),
+                (
+                    "Assignment",
+                    vec![field("name", string()), field("v", node())],
+                ),
             ],
         ),
         variant(
@@ -1005,7 +1012,10 @@ fn several_dataful_cases_share_one_niche_without_touching_it() {
             Repr::Own,
             vec![
                 ("Two", vec![field("a", u(Scalar::U64))]),
-                ("Three", vec![field("a", u(Scalar::U64)), field("b", u(Scalar::U64))]),
+                (
+                    "Three",
+                    vec![field("a", u(Scalar::U64)), field("b", u(Scalar::U64))],
+                ),
             ],
         ),
     ];
@@ -1018,7 +1028,10 @@ fn several_dataful_cases_share_one_niche_without_touching_it() {
     let sizes = [vec![8], vec![24], vec![1, 8, 8]];
     for (case, widths) in sizes.iter().enumerate() {
         for (&at, &w) in f.offsets[case].iter().zip(widths) {
-            assert!(at + w <= tag.offset || at >= tag.offset + tag.width, "case {case}");
+            assert!(
+                at + w <= tag.offset || at >= tag.offset + tag.width,
+                "case {case}"
+            );
         }
         let word = case_word(&tag, case as u32).unwrap();
         assert_eq!(case_of(&tag, word), case as u32);

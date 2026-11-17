@@ -808,7 +808,12 @@ fn several_dataful(
         return Ok(None);
     }
     let get = |t: TypeRef| done(out, t);
-    let align = measured.iter().flatten().map(|&(_, a, _)| a).max().unwrap_or(1);
+    let align = measured
+        .iter()
+        .flatten()
+        .map(|&(_, a, _)| a)
+        .max()
+        .unwrap_or(1);
     let width = tag_width(rows.len());
     let tagged_align = align.max(width);
     let start = align_up(width, tagged_align);
@@ -840,7 +845,10 @@ fn several_dataful(
     };
     let others: Vec<usize> = identity.iter().copied().filter(|&i| i != carrier).collect();
     let niche_last: Vec<usize> = others.iter().copied().chain([carrier]).collect();
-    let niche_first: Vec<usize> = [carrier].into_iter().chain(others.iter().copied()).collect();
+    let niche_first: Vec<usize> = [carrier]
+        .into_iter()
+        .chain(others.iter().copied())
+        .collect();
     let first = if d == 0 { 1 } else { 0 };
     let last = if d == rows.len() - 1 {
         rows.len() - 2

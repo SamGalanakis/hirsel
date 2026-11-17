@@ -1,0 +1,420 @@
+fn span(start: u64, end: u64) -> http1.Span {
+    http1.Span(start: start, end: end)
+}
+
+fn full(text: String) -> http1.Span {
+    span(0, string.byte_len(text))
+}
+
+fn recomposes(text: String) -> bool {
+    let u = result.unwrap(uri.parse(text))
+    let mut out = string.new()
+    result.unwrap(uri.push(mut out, text, u))
+    out == text
+}
+
+fn shift(s: http1.Span, by: u64) -> http1.Span {
+    span(s.start + by, s.end + by)
+}
+
+fn shift_optional(s: Option[http1.Span], by: u64) -> Option[http1.Span] {
+    match s {
+        Some(p) => Some(shift(p, by)),
+        None => None
+    }
+}
+
+fn shifted(u: uri.Uri, by: u64) -> uri.Uri {
+    let host = match u.host {
+        Some(Name(p)) => Some(Name(shift(p, by))),
+        Some(Ip6(p)) => Some(Ip6(shift(p, by))),
+        None => None
+    }
+    uri.Uri(scheme: shift_optional(u.scheme, by), userinfo: shift_optional(u.userinfo, by), host: host, port: shift_optional(u.port, by), path: shift(u.path, by), query: shift_optional(u.query, by), fragment: shift_optional(u.fragment, by))
+}
+
+fn resolved(base_text: String, reference: String, expected: String, prefix: String) -> bool {
+    let base = result.unwrap(uri.parse(base_text))
+    let r = result.unwrap(uri.parse(reference))
+    let want = result.unwrap(uri.parse(expected))
+    let mut out = result.unwrap(string.from(prefix))
+    let target = result.unwrap(uri.resolve(base_text, base, reference, r, mut out))
+    let at = string.byte_len(prefix)
+    recomposes(reference) && recomposes(expected) && target == shifted(want, at) && string.slice(out, 0, at) == prefix && string.slice(out, at, string.byte_len(out)) == expected
+}
+
+fn rfc_row(reference: String, expected: String, prefix: String) -> bool {
+    resolved("http://a/b/c/d;p?q", reference, expected, prefix)
+}
+
+// RFC 3986 §5.4.1, rfc3986.txt:1967-1991.
+fn rfc_normal_rows(prefix: String) -> bool {
+    rfc_row("g:h", "g:h", prefix) && rfc_row("g", "http://a/b/c/g", prefix) && rfc_row("./g", "http://a/b/c/g", prefix) && rfc_row("g/", "http://a/b/c/g/", prefix) && rfc_row("/g", "http://a/g", prefix) && rfc_row("//g", "http://g", prefix) && rfc_row("?y", "http://a/b/c/d;p?y", prefix) && rfc_row("g?y", "http://a/b/c/g?y", prefix) && rfc_row("#s", "http://a/b/c/d;p?q#s", prefix) && rfc_row("g#s", "http://a/b/c/g#s", prefix) && rfc_row("g?y#s", "http://a/b/c/g?y#s", prefix) && rfc_row(";x", "http://a/b/c/;x", prefix) && rfc_row("g;x", "http://a/b/c/g;x", prefix) && rfc_row("g;x?y#s", "http://a/b/c/g;x?y#s", prefix) && rfc_row("", "http://a/b/c/d;p?q", prefix) && rfc_row(".", "http://a/b/c/", prefix) && rfc_row("./", "http://a/b/c/", prefix) && rfc_row("..", "http://a/b/", prefix) && rfc_row("../", "http://a/b/", prefix) && rfc_row("../g", "http://a/b/g", prefix) && rfc_row("../..", "http://a/", prefix) && rfc_row("../../", "http://a/", prefix) && rfc_row("../../g", "http://a/g", prefix)
+}
+
+// RFC 3986 §5.4.2, rfc3986.txt:1993-2063.
+fn rfc_abnormal_rows(prefix: String) -> bool {
+    rfc_row("../../../g", "http://a/g", prefix) && rfc_row("../../../../g", "http://a/g", prefix) && rfc_row("/./g", "http://a/g", prefix) && rfc_row("/../g", "http://a/g", prefix) && rfc_row("g.", "http://a/b/c/g.", prefix) && rfc_row(".g", "http://a/b/c/.g", prefix) && rfc_row("g..", "http://a/b/c/g..", prefix) && rfc_row("..g", "http://a/b/c/..g", prefix) && rfc_row("./../g", "http://a/b/g", prefix) && rfc_row("./g/.", "http://a/b/c/g/", prefix) && rfc_row("g/./h", "http://a/b/c/g/h", prefix) && rfc_row("g/../h", "http://a/b/c/h", prefix) && rfc_row("g;x=1/./y", "http://a/b/c/g;x=1/y", prefix) && rfc_row("g;x=1/../y", "http://a/b/c/y", prefix) && rfc_row("g?y/./x", "http://a/b/c/g?y/./x", prefix) && rfc_row("g?y/../x", "http://a/b/c/g?y/../x", prefix) && rfc_row("g#s/./x", "http://a/b/c/g#s/./x", prefix) && rfc_row("g#s/../x", "http://a/b/c/g#s/../x", prefix) &&
+    // RFC 3986 §5.4.2 selects its strict spelling.
+    rfc_row("http:g", "http:g", prefix)
+}
+
+fn scheme_rows(prefix: String) -> bool {
+    rfc_row("http://a/b/../c", "http://a/c", prefix) && rfc_row("HTTP:./g", "HTTP:g", prefix)
+}
+
+// U1. RFC 3986 §5.4.1, rfc3986.txt:1967-1991.
+// Mutant: append the reference after the entire base path.
+// expect: run rfc_normal() = true
+fn rfc_normal() -> bool {
+    rfc_normal_rows("")
+}
+
+// U1. RFC 3986 §5.4.2, rfc3986.txt:1993-2063.
+// Mutant: run dot removal over the query or fragment, or split on ';'.
+// expect: run rfc_abnormal() = true
+fn rfc_abnormal() -> bool {
+    rfc_abnormal_rows("")
+}
+
+// U1. RFC 3986 §5.2.2, rfc3986.txt:1745-1796, and Zig Uri.zig:466-471.
+// Mutants: copy a reference with a scheme verbatim, omit '/' on an empty
+// authoritative base path, or collapse ordinary empty path segments.
+// expect: run resolution_branch_edges() = true
+fn resolution_branch_edges() -> bool {
+    scheme_rows("") && resolved("x://h", "g", "x://h/g", "") && resolved("x:a", "g", "x:g", "") && resolved("x:/a/b/c/d", "./../../g", "x:/a/g", "") && resolved("x://h/a//b", "../%2e/x", "x://h/a/%2e/x", "") && resolved("x://h/a//b", "g", "x://h/a//g", "") && resolved("x://h/a?b#c", "?", "x://h/a?", "") && resolved("x://h/a?q", "//u:@[::1]:080/p?#", "x://u:@[::1]:080/p?#", "pre")
+}
+
+// U2. RFC 3986 §4.1, rfc3986.txt:1452-1461. Mutant: collapse empty components.
+// expect: run presence() = true
+fn presence() -> bool {
+    let bare = result.unwrap(uri.parse("http://h"))
+    let empty_query = result.unwrap(uri.parse("http://h?"))
+    let empty_fragment = result.unwrap(uri.parse("http://h#"))
+    let empty_port = result.unwrap(uri.parse("http://h:"))
+    let no_authority = result.unwrap(uri.parse("http:"))
+    let no_scheme = result.unwrap(uri.parse("//h"))
+    bare.host == Some(Name(span(7, 8))) && bare.port == None && bare.query == None && bare.fragment == None && empty_query.query == Some(span(9, 9)) && empty_fragment.fragment == Some(span(9, 9)) && empty_port.port == Some(span(9, 9)) && uri.port_number("http://h:", empty_port) == None && no_authority.host == None && no_authority.path == span(5, 5) && no_scheme.scheme == None && no_scheme.host == Some(Name(span(2, 3))) && recomposes("http://h") && recomposes("http://h?") && recomposes("http://h#") && recomposes("http://h:") && recomposes("http:") && recomposes("//h")
+}
+
+// U2. Go src/net/url/url_test.go:30-665, strict RFC 3986 inputs.
+// Mutants: normalize the scheme or escapes, insert a slash, or drop an empty port.
+// expect: run go_round_trips() = true
+fn go_round_trips() -> bool {
+    recomposes("http://www.google.com") && recomposes("http://www.google.com/") && recomposes("http://www.google.com/file%20one%26two") && recomposes("http://www.google.com/#file%20one%26two") && recomposes("ftp://webmaster@www.google.com/") && recomposes("ftp://john%20doe@www.google.com/") && recomposes("http://www.google.com/?") && recomposes("http://www.google.com/?foo=bar?") && recomposes("http://www.google.com/?q=go+language") && recomposes("http://www.google.com/?q=go%20language") && recomposes("http://www.google.com/a%20b?q=c+d") && recomposes("http:www.google.com/?q=go+language") && recomposes("http:%2f%2fwww.google.com/?q=go+language") && recomposes("mailto:/webmaster@golang.org") && recomposes("mailto:webmaster@golang.org") && recomposes("/foo?query=http://bad") && recomposes("//foo") && recomposes("//user@foo/path?a=b") &&
+    // RFC 3986 keeps the empty authority and all three slashes.
+    recomposes("///threeslashes") && recomposes("http://user:password@google.com") && recomposes("http://www.google.com/?q=go+language#foo") && recomposes("http://www.google.com/?q=go+language#foo&bar") && recomposes("http://www.google.com/?q=go+language#foo%26bar") && recomposes("file:///home/adg/rabbits") && recomposes("file:///C:/FooBar/Baz.txt") &&
+    // The raw scheme keeps its original case.
+    recomposes("MaIlTo:webmaster@golang.org") && recomposes("a/b/c") && recomposes("http://%3Fam:pa%3Fsword@google.com") && recomposes("http://192.168.0.1/") && recomposes("http://192.168.0.1:8080/") && recomposes("http://[fe80::1]/") && recomposes("http://[fe80::1]:8080/") && recomposes("https://[2001:db8::1]:8443/test/path") && recomposes("http://rest.rsc.io/foo%2fbar/baz%2Fquux?alt=media") && recomposes("mysql://a,b,c/bar") && recomposes("scheme://!$&'()*+,;=hello!:1/path") && recomposes("http://192.168.0.2:8080/foo") && recomposes("http://192.168.0.2:/foo") && recomposes("http://[2b01:e34:ef40:7730:8e70:5aff:fefe:edac]:8080/foo") && recomposes("http://[2b01:e34:ef40:7730:8e70:5aff:fefe:edac]:/foo") &&
+    // The raw reg-name keeps the original hex case.
+    recomposes("http://hello.%e4%b8%96%e7%95%8c.com/foo") && recomposes("http://hello.%E4%B8%96%E7%95%8C.com/foo") && recomposes("http://example.com//foo") && recomposes("magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn") && recomposes("mailto:?subject=hi")
+}
+
+fn host_is(text: String, expected: String) -> bool {
+    let u = result.unwrap(uri.parse(text))
+    match u.host {
+        Some(Name(s)) => string.slice(text, s.start, s.end) == expected && recomposes(text),
+        _ => false
+    }
+}
+
+// U2. Zig Uri.zig:541-701, 710-791. Mutants: split userinfo on ':', reject
+// empty authority, or apply a DNS length limit to an RFC 3986 reg-name.
+// expect: run zig_components() = true
+fn zig_components() -> bool {
+    let text = "foo://example.com:8042/over/there?name=ferret#nose"
+    let u = result.unwrap(uri.parse(text))
+    let user = result.unwrap(uri.parse("scheme://username::@a"))
+    let long_host = result.unwrap(string.repeat("Z", 256))
+    let mut long_uri = result.unwrap(string.from("http://"))
+    result.unwrap(string.push(mut long_uri, long_host))
+    u.scheme == Some(span(0, 3)) && u.host == Some(Name(span(6, 17))) && u.port == Some(span(18, 22)) && uri.port_number(text, u) == Some(8042u16) && u.path == span(22, 33) && u.query == Some(span(34, 45)) && u.fragment == Some(span(46, 50)) && user.userinfo == Some(span(9, 19)) && host_is("scheme://username::@a", "a") &&
+    // Userinfo stays one component and a present empty host retains its span.
+    host_is("scheme://userinfo@", "") && host_is("foobar://", "") && host_is("file:///", "") && host_is("file:///an/absolute/path/to/something", "") && host_is("file://localhost/an/absolute/path/to/another/thing/", "localhost") &&
+    // RFC 3986 puts no DNS name-length cap on the reg-name grammar.
+    host_is(long_uri, long_host) &&
+    // DNS and ambiguous numeric hosts are classified by the transport.
+    host_is("http://0x7f.0.0.1", "0x7f.0.0.1") && host_is("scheme://127.0.0.1", "127.0.0.1") && recomposes("https://ziglang.org/download") && recomposes("http://example:1337/") && recomposes("a.b.c:_") && recomposes("http:_") && recomposes("scheme-mee:_") && recomposes("ab+:_") && recomposes("X+++:_") && recomposes("Y+-.:_") && recomposes("scheme://userinfo@hostname:1234") && recomposes("scheme://user:password@hostname:1234") && recomposes("scheme://hostname") && recomposes("scheme://userinfo@hostname") && recomposes("scheme://user:password@hostname") && recomposes("scheme://hostname:1234") && recomposes("scheme://username@a") && recomposes("scheme://username:@a") && recomposes("scheme://username:password@a") && recomposes("scheme://hostname:0") && recomposes("file:/an/absolute/path") && recomposes("file:/foo/bar/baz") && recomposes("urn:example:animal:ferret:nose") && recomposes("https://john.doe@www.example.com:123/forum/questions/?tag=networking&order=newest#top") && recomposes("ldap://[2001:db8::7]/c=GB?objectClass?one") && recomposes("mailto:John.Doe@example.com") && recomposes("news:comp.infosystems.www.servers.unix") && recomposes("tel:+1-816-555-1212") && recomposes("telnet://192.0.2.16:80/") && recomposes("urn:oasis:names:specification:docbook:dtd:xml:4.1.2") && recomposes("https://www.youtube.com/watch?v=dQw4w9WgXcQ&feature=youtu.be&t=0") && recomposes("https://objects.githubusercontent.com/?response-content-type=application%2Foctet-stream")
+}
+
+// U2. Zig Uri.zig:667-690. Mutant: classify bare dotted hosts as bracketed literals.
+// expect: run raw_registered_names() = true
+fn raw_registered_names() -> bool {
+    host_is("scheme://a", "a") && host_is("scheme://a.b", "a.b") && host_is("scheme://example.com", "example.com") && host_is("scheme://www.example.com", "www.example.com") && host_is("scheme://example.org.", "example.org.") && host_is("scheme://www.example.org.", "www.example.org.") && host_is("scheme://xn--nw2a.xn--j6w193g", "xn--nw2a.xn--j6w193g") && host_is("scheme://fe80--1ff-fe23-4567-890as3.ipv6-literal.net", "fe80--1ff-fe23-4567-890as3.ipv6-literal.net") && host_is("scheme://255.255.255.255", "255.255.255.255") && host_is("scheme://0.0.0.0", "0.0.0.0") && host_is("scheme://8.8.8.8", "8.8.8.8") && host_is("scheme://1.2.3.4", "1.2.3.4") && host_is("scheme://192.168.0.1", "192.168.0.1") && host_is("scheme://10.42.0.0", "10.42.0.0")
+}
+
+fn invalid(text: String, at: u64) -> bool {
+    match uri.parse(text) {
+        Error(Invalid(i)) => i == at,
+        _ => false
+    }
+}
+
+// U3. RFC 3986 §§2.1, 3, 4.2, rfc3986.txt:643-673, 885-1278, 1452-1525.
+// Mutants: accept incomplete escapes, permit signed ports, or split userinfo at the last '@'.
+// expect: run rejects_strictly() = true
+fn rejects_strictly() -> bool {
+    invalid("a b", 1) && invalid("%4", 0) && invalid("%G0", 0) && invalid("http://h:65536", 9) && invalid("http://h:+80", 9) && invalid("http://h:-80", 9) && invalid("http://h:8_0", 10) && invalid("http://h:８０", 9) && invalid("http://h:80x", 11) &&
+    // Zig Uri.zig:604-645 accepted repeated unescaped '@' in userinfo.
+    invalid("http://a@b@c", 10) && invalid("scheme://user:p@ssword@hostname:1234", 22) &&
+    // Zig Uri.zig:694-698 accepted RFC 6874 zones.
+    invalid("http://[fe80::1%25en0]", 15) && invalid("scheme://[fe80::1ff:fe23:4567:890a%25eth2]", 34) && invalid("scheme://[fe80::1ff:fe23:4567:890a%253]", 34) && invalid("http://[v1.x]", 8) && invalid("http://[::1", 11) && invalid("http://[::1@x", 11) && invalid("1a:b", 2) && invalid("-:", 1) && invalid("h$:", 2) && invalid(":", 0) && invalid("+hTTp:", 5) && invalid("$:", 1) && invalid("é", 0) && invalid("a\\b", 1) && invalid("a{b", 1) && invalid("a\0b", 1) && invalid("x://ho|st", 6) && invalid("x://u%4@h", 5) && invalid("p?#x#y", 4) && invalid("http://][", 7) && invalid("http://]@[", 7) && invalid("http://lo]s\u{85}hc@[/8\u{10}?0Q", 9) && recomposes("./1a:b") && recomposes("a/b:c")
+}
+
+fn port_is(text: String, expected: u16) -> bool {
+    let u = result.unwrap(uri.parse(text))
+    uri.port_number(text, u) == Some(expected) && recomposes(text)
+}
+
+// U3. RFC 3986 §3.2.3, rfc3986.txt:1158-1182 and retired SEM-3-uri-strict-numeric.
+// Mutants: reject a long string of leading zeros, or truncate at 16 bits.
+// expect: run numeric_ports() = true
+fn numeric_ports() -> bool {
+    port_is("https://example.test:0/", 0) && port_is("https://[::1]:080/", 80) && port_is("https://example.test:0000000000000000000080/", 80) && port_is("https://[::1]:65535/", 65535) && invalid("https://[::1]:65536/", 14) && invalid("https://example.test:999999999999999999999999999999999999/", 21)
+}
+
+fn quote_table(set: uri.Set, oracle: String) -> bool {
+    let mut raw: Bytes = list.new()
+    let mut coded = string.new()
+    let mut decoded: Bytes = list.new()
+    let mut at: u64 = 0
+    for i in 0u64 .. 256 {
+        list.clear(mut raw)
+        result.unwrap(list.push(mut raw, int.narrow(i)))
+        string.truncate(mut coded, 0)
+        list.clear(mut decoded)
+        let end = match string.find(oracle, at, "|") {
+            Some(p) => p,
+            None => string.byte_len(oracle)
+        }
+        result.unwrap(uri.encode(mut coded, raw, set))
+        if coded != string.slice(oracle, at, end) {
+            return false
+        }
+        result.unwrap(uri.decode(coded, full(coded), mut decoded))
+        if decoded != raw {
+            return false
+        }
+        at = end + 1
+    }
+    at == string.byte_len(oracle) + 1
+}
+
+// U4. CPython urllib.parse.quote for every byte, generated by:
+// python3 -I core/tools/uri_reference.py
+// Mutant: leave a slash literal in a segment.
+// expect: run encode_segment() = true
+fn encode_segment() -> bool {
+    quote_table(Segment, "%00|%01|%02|%03|%04|%05|%06|%07|%08|%09|%0A|%0B|%0C|%0D|%0E|%0F|%10|%11|%12|%13|%14|%15|%16|%17|%18|%19|%1A|%1B|%1C|%1D|%1E|%1F|%20|!|%22|%23|$|%25|&|'|(|)|*|+|,|-|.|%2F|0|1|2|3|4|5|6|7|8|9|:|;|%3C|=|%3E|%3F|@|A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|S|T|U|V|W|X|Y|Z|%5B|%5C|%5D|%5E|_|%60|a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z|%7B|%7C|%7D|~|%7F|%80|%81|%82|%83|%84|%85|%86|%87|%88|%89|%8A|%8B|%8C|%8D|%8E|%8F|%90|%91|%92|%93|%94|%95|%96|%97|%98|%99|%9A|%9B|%9C|%9D|%9E|%9F|%A0|%A1|%A2|%A3|%A4|%A5|%A6|%A7|%A8|%A9|%AA|%AB|%AC|%AD|%AE|%AF|%B0|%B1|%B2|%B3|%B4|%B5|%B6|%B7|%B8|%B9|%BA|%BB|%BC|%BD|%BE|%BF|%C0|%C1|%C2|%C3|%C4|%C5|%C6|%C7|%C8|%C9|%CA|%CB|%CC|%CD|%CE|%CF|%D0|%D1|%D2|%D3|%D4|%D5|%D6|%D7|%D8|%D9|%DA|%DB|%DC|%DD|%DE|%DF|%E0|%E1|%E2|%E3|%E4|%E5|%E6|%E7|%E8|%E9|%EA|%EB|%EC|%ED|%EE|%EF|%F0|%F1|%F2|%F3|%F4|%F5|%F6|%F7|%F8|%F9|%FA|%FB|%FC|%FD|%FE|%FF")
+}
+
+// U4. CPython urllib.parse.quote for every byte, generated by:
+// python3 -I core/tools/uri_reference.py
+// Mutant: escape a path separator.
+// expect: run encode_path() = true
+fn encode_path() -> bool {
+    quote_table(Path, "%00|%01|%02|%03|%04|%05|%06|%07|%08|%09|%0A|%0B|%0C|%0D|%0E|%0F|%10|%11|%12|%13|%14|%15|%16|%17|%18|%19|%1A|%1B|%1C|%1D|%1E|%1F|%20|!|%22|%23|$|%25|&|'|(|)|*|+|,|-|.|/|0|1|2|3|4|5|6|7|8|9|:|;|%3C|=|%3E|%3F|@|A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|S|T|U|V|W|X|Y|Z|%5B|%5C|%5D|%5E|_|%60|a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z|%7B|%7C|%7D|~|%7F|%80|%81|%82|%83|%84|%85|%86|%87|%88|%89|%8A|%8B|%8C|%8D|%8E|%8F|%90|%91|%92|%93|%94|%95|%96|%97|%98|%99|%9A|%9B|%9C|%9D|%9E|%9F|%A0|%A1|%A2|%A3|%A4|%A5|%A6|%A7|%A8|%A9|%AA|%AB|%AC|%AD|%AE|%AF|%B0|%B1|%B2|%B3|%B4|%B5|%B6|%B7|%B8|%B9|%BA|%BB|%BC|%BD|%BE|%BF|%C0|%C1|%C2|%C3|%C4|%C5|%C6|%C7|%C8|%C9|%CA|%CB|%CC|%CD|%CE|%CF|%D0|%D1|%D2|%D3|%D4|%D5|%D6|%D7|%D8|%D9|%DA|%DB|%DC|%DD|%DE|%DF|%E0|%E1|%E2|%E3|%E4|%E5|%E6|%E7|%E8|%E9|%EA|%EB|%EC|%ED|%EE|%EF|%F0|%F1|%F2|%F3|%F4|%F5|%F6|%F7|%F8|%F9|%FA|%FB|%FC|%FD|%FE|%FF")
+}
+
+// U4. CPython urllib.parse.quote for every byte, generated by:
+// python3 -I core/tools/uri_reference.py
+// Mutant: escape a literal question mark in a query.
+// expect: run encode_query() = true
+fn encode_query() -> bool {
+    quote_table(Query, "%00|%01|%02|%03|%04|%05|%06|%07|%08|%09|%0A|%0B|%0C|%0D|%0E|%0F|%10|%11|%12|%13|%14|%15|%16|%17|%18|%19|%1A|%1B|%1C|%1D|%1E|%1F|%20|!|%22|%23|$|%25|&|'|(|)|*|+|,|-|.|/|0|1|2|3|4|5|6|7|8|9|:|;|%3C|=|%3E|?|@|A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|S|T|U|V|W|X|Y|Z|%5B|%5C|%5D|%5E|_|%60|a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z|%7B|%7C|%7D|~|%7F|%80|%81|%82|%83|%84|%85|%86|%87|%88|%89|%8A|%8B|%8C|%8D|%8E|%8F|%90|%91|%92|%93|%94|%95|%96|%97|%98|%99|%9A|%9B|%9C|%9D|%9E|%9F|%A0|%A1|%A2|%A3|%A4|%A5|%A6|%A7|%A8|%A9|%AA|%AB|%AC|%AD|%AE|%AF|%B0|%B1|%B2|%B3|%B4|%B5|%B6|%B7|%B8|%B9|%BA|%BB|%BC|%BD|%BE|%BF|%C0|%C1|%C2|%C3|%C4|%C5|%C6|%C7|%C8|%C9|%CA|%CB|%CC|%CD|%CE|%CF|%D0|%D1|%D2|%D3|%D4|%D5|%D6|%D7|%D8|%D9|%DA|%DB|%DC|%DD|%DE|%DF|%E0|%E1|%E2|%E3|%E4|%E5|%E6|%E7|%E8|%E9|%EA|%EB|%EC|%ED|%EE|%EF|%F0|%F1|%F2|%F3|%F4|%F5|%F6|%F7|%F8|%F9|%FA|%FB|%FC|%FD|%FE|%FF")
+}
+
+// U4. CPython urllib.parse.quote for every byte, generated by:
+// python3 -I core/tools/uri_reference.py
+// Mutant: leave plus or ampersand literal.
+// expect: run encode_query_part() = true
+fn encode_query_part() -> bool {
+    quote_table(QueryPart, "%00|%01|%02|%03|%04|%05|%06|%07|%08|%09|%0A|%0B|%0C|%0D|%0E|%0F|%10|%11|%12|%13|%14|%15|%16|%17|%18|%19|%1A|%1B|%1C|%1D|%1E|%1F|%20|!|%22|%23|$|%25|%26|'|(|)|*|%2B|,|-|.|/|0|1|2|3|4|5|6|7|8|9|:|;|%3C|%3D|%3E|?|@|A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|S|T|U|V|W|X|Y|Z|%5B|%5C|%5D|%5E|_|%60|a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z|%7B|%7C|%7D|~|%7F|%80|%81|%82|%83|%84|%85|%86|%87|%88|%89|%8A|%8B|%8C|%8D|%8E|%8F|%90|%91|%92|%93|%94|%95|%96|%97|%98|%99|%9A|%9B|%9C|%9D|%9E|%9F|%A0|%A1|%A2|%A3|%A4|%A5|%A6|%A7|%A8|%A9|%AA|%AB|%AC|%AD|%AE|%AF|%B0|%B1|%B2|%B3|%B4|%B5|%B6|%B7|%B8|%B9|%BA|%BB|%BC|%BD|%BE|%BF|%C0|%C1|%C2|%C3|%C4|%C5|%C6|%C7|%C8|%C9|%CA|%CB|%CC|%CD|%CE|%CF|%D0|%D1|%D2|%D3|%D4|%D5|%D6|%D7|%D8|%D9|%DA|%DB|%DC|%DD|%DE|%DF|%E0|%E1|%E2|%E3|%E4|%E5|%E6|%E7|%E8|%E9|%EA|%EB|%EC|%ED|%EE|%EF|%F0|%F1|%F2|%F3|%F4|%F5|%F6|%F7|%F8|%F9|%FA|%FB|%FC|%FD|%FE|%FF")
+}
+
+// U4. CPython urllib.parse.quote for every byte, generated by:
+// python3 -I core/tools/uri_reference.py
+// Mutant: leave an at-sign literal in userinfo.
+// expect: run encode_user_info() = true
+fn encode_user_info() -> bool {
+    quote_table(UserInfo, "%00|%01|%02|%03|%04|%05|%06|%07|%08|%09|%0A|%0B|%0C|%0D|%0E|%0F|%10|%11|%12|%13|%14|%15|%16|%17|%18|%19|%1A|%1B|%1C|%1D|%1E|%1F|%20|!|%22|%23|$|%25|&|'|(|)|*|+|,|-|.|%2F|0|1|2|3|4|5|6|7|8|9|:|;|%3C|=|%3E|%3F|%40|A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|S|T|U|V|W|X|Y|Z|%5B|%5C|%5D|%5E|_|%60|a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z|%7B|%7C|%7D|~|%7F|%80|%81|%82|%83|%84|%85|%86|%87|%88|%89|%8A|%8B|%8C|%8D|%8E|%8F|%90|%91|%92|%93|%94|%95|%96|%97|%98|%99|%9A|%9B|%9C|%9D|%9E|%9F|%A0|%A1|%A2|%A3|%A4|%A5|%A6|%A7|%A8|%A9|%AA|%AB|%AC|%AD|%AE|%AF|%B0|%B1|%B2|%B3|%B4|%B5|%B6|%B7|%B8|%B9|%BA|%BB|%BC|%BD|%BE|%BF|%C0|%C1|%C2|%C3|%C4|%C5|%C6|%C7|%C8|%C9|%CA|%CB|%CC|%CD|%CE|%CF|%D0|%D1|%D2|%D3|%D4|%D5|%D6|%D7|%D8|%D9|%DA|%DB|%DC|%DD|%DE|%DF|%E0|%E1|%E2|%E3|%E4|%E5|%E6|%E7|%E8|%E9|%EA|%EB|%EC|%ED|%EE|%EF|%F0|%F1|%F2|%F3|%F4|%F5|%F6|%F7|%F8|%F9|%FA|%FB|%FC|%FD|%FE|%FF")
+}
+
+fn decoded_text(raw: String, expected: String) -> bool {
+    let mut out = string.new()
+    result.unwrap(uri.decode_text(raw, full(raw), mut out))
+    out == expected && (match uri.parse(raw) {
+        Ok(_) => recomposes(raw),
+        Error(_) => true
+    })
+}
+
+fn bad_utf8(raw: String, at: u64) -> bool {
+    let mut out = result.unwrap(string.from("pre"))
+    let refused = match uri.decode_text(raw, full(raw), mut out) {
+        Error(NotUtf8(i)) => i == at,
+        _ => false
+    }
+    refused && out == "pre"
+}
+
+// U5. HTTP B-4, docs/spec/http.md, and RFC 3629 §4.
+// Mutants: decode '+' as a space or report a bad continuation at its own offset.
+// expect: run decode_utf8() = true
+fn decode_utf8() -> bool {
+    let raw = "x%FF#"
+    let mut raw_out: Bytes = list.new()
+    result.unwrap(uri.decode(raw, span(1, 4), mut raw_out))
+    raw_out == result.unwrap(b"\xFF") && recomposes(raw) && decoded_text("a+b", "a+b") && decoded_text("a%2Bb", "a+b") && decoded_text("%e2%82%ac", "€") && decoded_text("é%F0%9F%98%80", "é😀") && decoded_text("%00", "\0") && bad_utf8("%FF", 0) && bad_utf8("x%FF", 1) && bad_utf8("ab%e2%82x", 2) && bad_utf8("%e2%82", 0) && bad_utf8("%c0%80", 0) && bad_utf8("%e0%80%80", 0) && bad_utf8("%ed%a0%80", 0) && bad_utf8("%f4%90%80%80", 0)
+}
+
+// U5. Zig Uri.zig:793-834 and RFC 3986 §2.1, rfc3986.txt:643-653.
+// Mutant: copy a dangling '%' or leave a decoded prefix behind on failure.
+// expect: run decode_rejects_atomically() = true
+fn decode_rejects_atomically() -> bool {
+    // RFC 3986 rejects the dangling '%' that Zig copied literally.
+    let raw = "/abc%"
+    let mut raw_out = result.unwrap(b"pre")
+    let mut out = result.unwrap(string.from("pre"))
+    let bad_bytes = match uri.decode(raw, full(raw), mut raw_out) {
+        Error(Invalid(4)) => true,
+        _ => false
+    }
+    let bad_text = match uri.decode_text(raw, full(raw), mut out) {
+        Error(Invalid(4)) => true,
+        _ => false
+    }
+    let many = "%5C%C3%B6%2F%20%C3%A4%C3%B6%C3%9F%20~~.adas-https%3A%2F%2Fcanvas%3A123%2F%23ads%26%26sad"
+    bad_bytes && bad_text && raw_out == result.unwrap(b"pre") && out == "pre" && decoded_text(many, "\\ö/ äöß ~~.adas-https://canvas:123/#ads&&sad")
+}
+
+fn query_row(text: String, expected: String) -> bool {
+    let q = option.unwrap(result.unwrap(uri.parse(text)).query)
+    let mut at = q.start
+    let mut row: u64 = 0
+    let mut key_text = string.new()
+    let mut value_text = string.new()
+    while let Some((key, value, next)) = uri.next_pair(text, q, at) {
+        let Some((line, after)) = string.next_line(expected, row) else {
+            return false
+        }
+        let Some((want_key, want_value)) = string.split_once(line, "|") else {
+            return false
+        }
+        string.truncate(mut key_text, 0)
+        string.truncate(mut value_text, 0)
+        result.unwrap(uri.decode_text(text, key, mut key_text))
+        result.unwrap(uri.decode_text(text, value, mut value_text))
+        if key_text != want_key || value_text != want_value || next <= at {
+            return false
+        }
+        at = next
+        row = after
+    }
+    row == string.byte_len(expected)
+}
+
+// U6. Go src/net/url/url_test.go:1521-1604, with HTTP B-4 literal '+' and ';'.
+// Mutant: delegate to form parsing, losing literal plus signs or rejecting ';'.
+// expect: run go_query_pairs() = true
+fn go_query_pairs() -> bool {
+    query_row("?a=1", "a|1\n") && query_row("?a=1&b=2", "a|1\nb|2\n") && query_row("?a=1&a=2&a=banana", "a|1\na|2\na|banana\n") &&
+    // B-4 keeps the raw '+' in the decoded value.
+    query_row("?ascii=%3Ckey%3A+0x90%3E", "ascii|<key:+0x90>\n") &&
+    // A literal ';' is data in the value.
+    query_row("?a=1;b=2", "a|1;b=2\n") &&
+    // A literal ';' is data in the key.
+    query_row("?a;b=1", "a;b|1\n") && query_row("?a=%3B", "a|;\n") && query_row("?a%3Bb=1", "a;b|1\n") &&
+    // A literal ';' is data in the second value.
+    query_row("?a=1&a=2;a=banana", "a|1\na|2;a=banana\n") &&
+    // A literal ';' is data in a field with an empty value.
+    query_row("?a;b&c=1", "a;b|\nc|1\n") &&
+    // A literal ';' is data in the second value.
+    query_row("?a=1&b=2;a=3&c=4", "a|1\nb|2;a=3\nc|4\n") &&
+    // A literal ';' is data in the second value.
+    query_row("?a=1&b=2;c=3", "a|1\nb|2;c=3\n") &&
+    // A literal ';' forms a key with an empty value.
+    query_row("?;", ";|\n") &&
+    // A trailing ';' is data in the value.
+    query_row("?a=1;", "a|1;\n") &&
+    // A literal ';' forms a second key with an empty value.
+    query_row("?a=1&;", "a|1\n;|\n") &&
+    // A leading ';' is data in the key.
+    query_row("?;a=1&b=2", ";a|1\nb|2\n") &&
+    // A trailing ';' is data in the second value.
+    query_row("?a=1&b=2;", "a|1\nb|2;\n")
+}
+
+// U6. RFC 3986 §3.4, rfc3986.txt:1317-1352, and the retired SEM-3 query pairs.
+// Mutants: split the value at the second '=' or return a field for '&&'.
+// expect: run raw_query_spans() = true
+fn raw_query_spans() -> bool {
+    let text = "/p?&&a%2B=x=y&&flag#f"
+    let q = option.unwrap(result.unwrap(uri.parse(text)).query)
+    let first = uri.next_pair(text, q, q.start)
+    let second = uri.next_pair(text, q, 14)
+    first == Some((span(5, 9), span(10, 13), 14u64)) && second == Some((span(15, 19), span(19, 19), 19u64)) && uri.next_pair(text, q, 19) == None && query_row("?a=1=2", "a|1=2\n") && query_row("?&&", "") && query_row("?&&a&&b=&=x&", "a|\nb|\n|x\n") &&
+    // B-4 leaves the literal '+' in this retired form-decoding row.
+    query_row("?q=%E2%98%BA+%2B%00", "q|☺++\0\n")
+}
+
+fn ip6(text: String, expected: String) -> bool {
+    let u = result.unwrap(uri.parse(text))
+    match u.host {
+        Some(Ip6(s)) => string.slice(text, s.start, s.end) == expected && recomposes(text),
+        _ => false
+    }
+}
+
+// U7. RFC 3986 §3.2.2, rfc3986.txt:1081-1110, all nine alternatives.
+// Mutants: count a dotted tail as one group or count '::' as exactly one.
+// expect: run parses_ipv6() = true
+fn parses_ipv6() -> bool {
+    ip6("//[1:2:3:4:5:6:7:8]", "1:2:3:4:5:6:7:8") && ip6("//[::2:3:4:5:6:7:8]", "::2:3:4:5:6:7:8") && ip6("//[1::3:4:5:6:7:8]", "1::3:4:5:6:7:8") && ip6("//[1:2::4:5:6:7:8]", "1:2::4:5:6:7:8") && ip6("//[1:2:3::5:6:7:8]", "1:2:3::5:6:7:8") && ip6("//[1:2:3:4::6:7:8]", "1:2:3:4::6:7:8") && ip6("//[1:2:3:4:5::7:8]", "1:2:3:4:5::7:8") && ip6("//[1:2:3:4:5:6::8]", "1:2:3:4:5:6::8") && ip6("//[1:2:3:4:5:6:7::]", "1:2:3:4:5:6:7::") && ip6("//[::]", "::") && ip6("//[::1]", "::1") && ip6("//[1::]", "1::") && ip6("//[::ffff:192.0.2.1]:0", "::ffff:192.0.2.1") && ip6("//[1:2:3:4:5:6:0.0.0.0]", "1:2:3:4:5:6:0.0.0.0") && ip6("//[2001:db8:0:0:0:0:2:1]", "2001:db8:0:0:0:0:2:1") && ip6("//[2001:db8::2:1]", "2001:db8::2:1") && ip6("//[2001:db8:0000:1:1:1:1:1]", "2001:db8:0000:1:1:1:1:1") && ip6("//[2001:db8:0:1:1:1:1:1]", "2001:db8:0:1:1:1:1:1") && ip6("//[0:0:0:0:0:0:0:0]", "0:0:0:0:0:0:0:0") && ip6("//[0:0:0:0:0:0:0:1]", "0:0:0:0:0:0:0:1") && ip6("//[fe80::1ff:fe23:4567:890a]", "fe80::1ff:fe23:4567:890a") && ip6("//[2001:db8:85a3:8d3:1319:8a2e:370:7348]", "2001:db8:85a3:8d3:1319:8a2e:370:7348") && ip6("//[fe80:3::1ff:fe23:4567:890a]", "fe80:3::1ff:fe23:4567:890a")
+}
+
+// U7. RFC 3986 §3.2.2, rfc3986.txt:1081-1110.
+// Mutants: allow a second compression run or a decimal octet larger than 255.
+// expect: run rejects_invalid_ipv6() = true
+fn rejects_invalid_ipv6() -> bool {
+    invalid("//[1:2:3:4:5:6:7:8:9]", 18) && invalid("//[1::2::3]", 8) && invalid("//[::ffff:256.0.0.1]", 12) && invalid("//[12345::]", 7) && invalid("//[::1]x", 7) && invalid("//[::ffff:01.2.3.4]", 11) && invalid("//[::ffff:192.0.2.1:7]", 19) && invalid("//[]", 3) && invalid("//[1:2:3:4:5:6:7]", 16) && invalid("//[::1:2:3:4:5:6:7:8]", 18)
+}
+
+// U8. RFC 3986 §5.4, rfc3986.txt:1967-2063, and uri.resolve's output contract.
+// Mutant: return spans measured from the start of the appended target.
+// expect: run output_spans() = true
+fn output_spans() -> bool {
+    rfc_normal_rows("pre") && rfc_abnormal_rows("pre") && scheme_rows("pre")
+}
+
+// U8. uri.resolve's reserve contract and MEM-24 in docs/spec/budgets.md.
+// A 3-byte prefix plus the 20-byte reserve requests a 24-byte charge.
+// Mutants: write before reserving or reserve just enough for the resolved target.
+// expect: run resolve_capacity_is_atomic() = true
+fn resolve_capacity_is_atomic() -> bool {
+    let base_text = "s://a/bbbbbbbbbbb"
+    let r = result.unwrap(uri.parse("/g"))
+    let base = result.unwrap(uri.parse(base_text))
+    let mut out = "pre"
+    result.unwrap(bound bytes 23 {
+        let refused = match uri.resolve(base_text, base, "/g", r, mut out) {
+            Error(Capacity(c)) => c.requested == 24 && c.available == 23,
+            _ => false
+        }
+        refused && out == "pre"
+    })
+}
+
+// U8. RFC 3986 §5.2.2, rfc3986.txt:1745-1796, and uri.resolve's base contract.
+// Mutant: return a reference with a scheme before checking the base.
+// expect: run base_must_be_absolute() = true
+fn base_must_be_absolute() -> bool {
+    let base = result.unwrap(uri.parse("//a/b"))
+    let r = result.unwrap(uri.parse("x:a"))
+    let mut out = "pre"
+    let refused = match uri.resolve("//a/b", base, "x:a", r, mut out) {
+        Error(Relative) => true,
+        _ => false
+    }
+    refused && out == "pre"
+}

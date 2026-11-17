@@ -1,0 +1,715 @@
+// Raw components, recomposition and resolution adapted from Zig lib/std/Uri.zig
+// (bff490a2, MIT). RFC 3986 supplies the component grammar and error locations.
+pub type Host: key = Name(http1.Span) | Ip6(http1.Span)
+
+pub type Uri: key {
+    scheme: Option[http1.Span],
+    userinfo: Option[http1.Span],
+    host: Option[Host],
+    port: Option[http1.Span],
+    path: http1.Span,
+    query: Option[http1.Span],
+    fragment: Option[http1.Span]
+}
+
+pub type Set: key = Segment | Path | Query | QueryPart | UserInfo
+
+pub type Error = Invalid(u64) | NotUtf8(u64) | Relative | Capacity(Capacity)
+
+fn span(start: u64, end: u64) -> http1.Span {
+    http1.Span(start: start, end: end)
+}
+
+fn width(s: http1.Span) -> u64 {
+    s.end - s.start
+}
+
+fn alpha(b: u8) -> bool {
+    b >= b'A' && b <= b'Z' || b >= b'a' && b <= b'z'
+}
+
+fn digit(b: u8) -> bool {
+    b >= b'0' && b <= b'9'
+}
+
+fn hex(b: u8) -> Option[u8] {
+    if digit(b) {
+        Some(b - b'0')
+    } else if b >= b'A' && b <= b'F' {
+        Some(b - b'A' + 10)
+    } else if b >= b'a' && b <= b'f' {
+        Some(b - b'a' + 10)
+    } else {
+        None
+    }
+}
+
+fn unreserved(b: u8) -> bool {
+    alpha(b) || digit(b) || b == b'-' || b == b'.' || b == b'_' || b == b'~'
+}
+
+fn sub_delim(b: u8) -> bool {
+    b == b'!' || b == b'$' || b == b'&' || b == 39 || b == b'(' || b == b')' || b == b'*' || b == b'+' || b == b',' || b == b';' || b == b'='
+}
+
+fn allowed(b: u8, set: Set) -> bool {
+    let user = unreserved(b) || sub_delim(b) || b == b':'
+    let segment = user || b == b'@'
+    let path = segment || b == b'/'
+    let query = path || b == b'?'
+    match set {
+        Segment => segment,
+        Path => path,
+        Query => query,
+        QueryPart => query && b != b'&' && b != b'=' && b != b'+',
+        UserInfo => user
+    }
+}
+
+fn escaped(data: Bytes, i: u64, end: u64) -> Result[u8, Error] {
+    if end - i < 3 {
+        return Error(Invalid(i))
+    }
+    let Some(hi) = hex(data[i + 1]) else {
+        return Error(Invalid(i))
+    }
+    let Some(lo) = hex(data[i + 2]) else {
+        return Error(Invalid(i))
+    }
+    Ok((hi << 4) | lo)
+}
+
+fn scan_part(data: Bytes, start: u64, end: u64, set: Set, query_delimits: bool) -> Result[u64, Error] {
+    let mut i = start
+    while i < end {
+        let b = data[i]
+        if b == b'#' || query_delimits && b == b'?' {
+            break
+        }
+        if b == b'%' {
+            let _ = escaped(data, i, end)?
+            i += 3
+        } else if allowed(b, set) {
+            i += 1
+        } else {
+            return Error(Invalid(i))
+        }
+    }
+    Ok(i)
+}
+
+fn digits_port(data: Bytes, s: http1.Span) -> Result[u16, Error] {
+    let mut value: u32 = 0
+    for i in s.start .. s.end {
+        let b = data[i]
+        if !digit(b) {
+            return Error(Invalid(i))
+        }
+        value = value * 10 + int.widen(b - b'0')
+        if value > 65535 {
+            return Error(Invalid(s.start))
+        }
+    }
+    Ok(int.narrow(value))
+}
+
+fn ipv4_tail(data: Bytes, start: u64, end: u64) -> Result[u64, Error] {
+    let mut i = start
+    for octet in 0u64 .. 4 {
+        let begin = i
+        let mut value: u16 = 0
+        while i < end && digit(data[i]) {
+            if i - begin == 3 || i > begin && data[begin] == b'0' {
+                return Error(Invalid(i))
+            }
+            value = value * 10 + int.widen(data[i] - b'0')
+            if value > 255 {
+                return Error(Invalid(i))
+            }
+            i += 1
+        }
+        if i == begin {
+            return Error(Invalid(i))
+        }
+        if octet < 3 {
+            if i == end || data[i] != b'.' {
+                return Error(Invalid(i))
+            }
+            i += 1
+        }
+    }
+    Ok(i)
+}
+
+// RFC 3986 §3.2.2. Count explicit 16-bit pieces. The optional :: fills one
+// or more pieces, and a final IPv4 address counts as two.
+fn ipv6_end(data: Bytes, start: u64, end: u64) -> Result[u64, Error] {
+    let mut i = start
+    let mut groups: u8 = 0
+    let mut compressed = false
+    if i < end && data[i] == b':' {
+        if end - i < 2 || data[i + 1] != b':' {
+            return Error(Invalid(i))
+        }
+        compressed = true
+        i += 2
+    }
+    while i < end && data[i] != b']' {
+        let begin = i
+        while i < end && hex(data[i]) != None {
+            if i - begin == 4 {
+                return Error(Invalid(i))
+            }
+            i += 1
+        }
+        if i == begin {
+            return Error(Invalid(i))
+        }
+        if i < end && data[i] == b'.' {
+            if groups >= 7 || compressed && groups >= 6 {
+                return Error(Invalid(i))
+            }
+            i = ipv4_tail(data, begin, end)?
+            groups += 2
+            break
+        }
+        groups += 1
+        if i == end || data[i] != b':' {
+            break
+        }
+        if groups == 8 || compressed && groups == 7 {
+            return Error(Invalid(i))
+        }
+        if end - i >= 2 && data[i + 1] == b':' {
+            if compressed {
+                return Error(Invalid(i + 1))
+            }
+            compressed = true
+            i += 2
+        } else {
+            i += 1
+            if i == end || data[i] == b']' {
+                return Error(Invalid(i))
+            }
+        }
+    }
+    if i == end || data[i] != b']' || !compressed && groups != 8 {
+        return Error(Invalid(i))
+    }
+    Ok(i)
+}
+
+fn parse_authority(data: Bytes, start: u64, text_end: u64) -> Result[(Option[http1.Span], Host, Option[http1.Span], u64), Error] {
+    // Until the first @, a colon can belong to userinfo or introduce a port.
+    let may_have_user = start < text_end && data[start] != b'['
+    let mut first_at: Option[u64] = None
+    let mut end = start
+    while end < text_end && data[end] != b'/' && data[end] != b'?' && data[end] != b'#' {
+        if may_have_user && first_at == None && data[end] == b'@' {
+            first_at = Some(end)
+        }
+        end += 1
+    }
+    let mut userinfo: Option[http1.Span] = None
+    let mut host_start = start
+    if let Some(at) = first_at {
+        let _ = scan_part(data, start, at, UserInfo, false)?
+        userinfo = Some(span(start, at))
+        host_start = at + 1
+    }
+    let mut i = host_start
+    let host = if i < end && data[i] == b'[' {
+        let close = ipv6_end(data, i + 1, end)?
+        i = close + 1
+        Ip6(span(host_start + 1, close))
+    } else {
+        while i < end && data[i] != b':' {
+            let b = data[i]
+            if b == b'%' {
+                let _ = escaped(data, i, end)?
+                i += 3
+            } else if unreserved(b) || sub_delim(b) {
+                i += 1
+            } else {
+                return Error(Invalid(i))
+            }
+        }
+        Name(span(host_start, i))
+    }
+    let mut port: Option[http1.Span] = None
+    if i < end {
+        if data[i] != b':' {
+            return Error(Invalid(i))
+        }
+        let s = span(i + 1, end)
+        let _ = digits_port(data, s)?
+        port = Some(s)
+    }
+    Ok((userinfo, host, port, end))
+}
+
+/// Parses an RFC 3986 URI-reference. Components keep their raw bytes and
+/// distinguish absent from empty. Fails: Invalid(i). Alloc: nothing. Cost: O(len).
+/// Ex: `let u = std.uri.parse(s)?`.
+pub fn parse(text: String) -> Result[Uri, Error] {
+    let data = string.as_bytes(text)
+    let end = list.len(data)
+    let mut i: u64 = 0
+    let mut scheme: Option[http1.Span] = None
+    let mut scheme_possible = end > 0 && alpha(data[0])
+    while i < end {
+        let b = data[i]
+        if b == b'/' || b == b'?' || b == b'#' {
+            break
+        }
+        if b == b':' {
+            if !scheme_possible {
+                return Error(Invalid(i))
+            }
+            scheme = Some(span(0, i))
+            i += 1
+            break
+        }
+        scheme_possible = scheme_possible && (alpha(b) || digit(b) || b == b'+' || b == b'-' || b == b'.')
+        if b == b'%' {
+            let _ = escaped(data, i, end)?
+            i += 3
+        } else if allowed(b, Segment) {
+            i += 1
+        } else {
+            return Error(Invalid(i))
+        }
+    }
+    let mut path_start: u64 = if scheme == None {
+        0
+    } else {
+        i
+    }
+    let mut userinfo: Option[http1.Span] = None
+    let mut host: Option[Host] = None
+    let mut port: Option[http1.Span] = None
+    if i == path_start && end - i >= 2 && data[i] == b'/' && data[i + 1] == b'/' {
+        let (user_span, host_span, port_span, path_offset) = parse_authority(data, i + 2, end)?
+        i = path_offset
+        userinfo = user_span
+        host = Some(host_span)
+        port = port_span
+        path_start = i
+    }
+    i = scan_part(data, i, end, Path, true)?
+    let path = span(path_start, i)
+    let mut query: Option[http1.Span] = None
+    let mut fragment: Option[http1.Span] = None
+    if i < end && data[i] == b'?' {
+        let start = i + 1
+        i = scan_part(data, start, end, Query, false)?
+        query = Some(span(start, i))
+    }
+    if i < end {
+        let start = i + 1
+        let stop = scan_part(data, start, end, Query, false)?
+        if stop != end {
+            return Error(Invalid(stop))
+        }
+        fragment = Some(span(start, end))
+    }
+    Ok(Uri(scheme: scheme, userinfo: userinfo, host: host, port: port, path: path, query: query, fragment: fragment))
+}
+
+/// Reads the port value. An absent or empty port gives None. Alloc: nothing.
+/// Cost: O(port length). Ex: `std.uri.port_number(text, u)`.
+pub fn port_number(text: String, u: Uri) -> Option[u16] {
+    if let Some(s) = u.port {
+        if s.start < s.end {
+            if let Ok(value) = digits_port(string.as_bytes(text), s) {
+                return Some(value)
+            }
+        }
+    }
+    None
+}
+
+fn piece(text: String, s: http1.Span, mut out: String) -> Result[http1.Span, Capacity] {
+    let start = string.byte_len(out)
+    string.push(mut out, string.slice(text, s.start, s.end))?
+    Ok(span(start, string.byte_len(out)))
+}
+
+fn optional_piece(text: String, s: Option[http1.Span], delimiter: String, mut out: String) -> Result[Option[http1.Span], Capacity] {
+    if let Some(part) = s {
+        string.push(mut out, delimiter)?
+        return Ok(Some(piece(text, part, mut out)?))
+    }
+    Ok(None)
+}
+
+fn authority(text: String, u: Uri, mut out: String) -> Result[(Option[http1.Span], Option[Host], Option[http1.Span]), Capacity] {
+    let Some(host) = u.host else {
+        return Ok((None, None, None))
+    }
+    string.push(mut out, "//")?
+    let mut userinfo: Option[http1.Span] = None
+    if let Some(s) = u.userinfo {
+        userinfo = Some(piece(text, s, mut out)?)
+        string.push(mut out, "@")?
+    }
+    let written = match host {
+        Name(s) => Name(piece(text, s, mut out)?),
+        Ip6(s) => {
+            string.push(mut out, "[")?
+            let addr = piece(text, s, mut out)?
+            string.push(mut out, "]")?
+            Ip6(addr)
+        }
+    }
+    let port = optional_piece(text, u.port, ":", mut out)?
+    Ok((userinfo, Some(written), port))
+}
+
+fn optional_width(s: Option[http1.Span]) -> u64 {
+    match s {
+        Some(p) => 1 + width(p),
+        None => 0
+    }
+}
+
+/// Recomposes u from text per RFC 3986 §5.3, preserving all delimiters and
+/// exactly reproducing the input of parse. Fails: Capacity, with out unchanged.
+/// Alloc: GROWTH of out after an exact reserve. Cost: O(bytes appended).
+/// Ex: `std.uri.push(mut out, text, u)?`.
+pub fn push(mut out: String, text: String, u: Uri) -> Result[(), Capacity] {
+    let host_width = match u.host {
+        Some(Name(s)) => 2 + width(s),
+        Some(Ip6(s)) => 4 + width(s),
+        None => 0
+    }
+    let mut size = optional_width(u.scheme) + width(u.path) + optional_width(u.query) + optional_width(u.fragment)
+    if u.host != None {
+        size += host_width + optional_width(u.userinfo) + optional_width(u.port)
+    }
+    string.reserve(mut out, size)?
+    if let Some(s) = u.scheme {
+        let _ = piece(text, s, mut out)?
+        string.push(mut out, ":")?
+    }
+    let _ = authority(text, u, mut out)?
+    let _ = piece(text, u.path, mut out)?
+    let _ = optional_piece(text, u.query, "?", mut out)?
+    let _ = optional_piece(text, u.fragment, "#", mut out)?
+    Ok(())
+}
+
+fn after_last_slash(data: Bytes, start: u64, end: u64) -> u64 {
+    let mut i = end
+    while i > start && data[i - 1] != b'/' {
+        i -= 1
+    }
+    i
+}
+
+fn path_byte(prefix: Bytes, tail: Bytes, i: u64) -> u8 {
+    let n = list.len(prefix)
+    if i < n {
+        prefix[i]
+    } else {
+        tail[i - n]
+    }
+}
+
+fn pop_segment(mut out: String, path_start: u64) {
+    let after = after_last_slash(string.as_bytes(out), path_start, string.byte_len(out))
+    let before = if after == path_start {
+        after
+    } else {
+        after - 1
+    }
+    string.truncate(mut out, before)
+}
+
+// RFC 3986 §5.2.4 over the base directory and reference path as one input.
+// Copy each segment directly into out. Removing a segment scans only bytes
+// it discards, so repeated /.. steps still take linear time.
+fn remove_dot_segments(prefix: String, tail: String, mut out: String) -> Result[http1.Span, Capacity] {
+    let head = string.as_bytes(prefix)
+    let data = string.as_bytes(tail)
+    let seam = list.len(head)
+    let end = seam + list.len(data)
+    let start = string.byte_len(out)
+    let mut i: u64 = 0
+    while i < end {
+        let slash = path_byte(head, data, i) == b'/'
+        let segment = if slash {
+            i + 1
+        } else {
+            i
+        }
+        let mut next = segment
+        while next < end && path_byte(head, data, next) != b'/' {
+            next += 1
+        }
+        let dot = next - segment == 1 && path_byte(head, data, segment) == b'.'
+        let dot_dot = next - segment == 2 && path_byte(head, data, segment) == b'.' && path_byte(head, data, segment + 1) == b'.'
+        if dot || dot_dot {
+            if slash {
+                if dot_dot {
+                    pop_segment(mut out, start)
+                }
+                if next == end {
+                    string.push(mut out, "/")?
+                }
+            } else if next < end {
+                next += 1
+            }
+        } else {
+            if i < seam {
+                let stop = if next < seam {
+                    next
+                } else {
+                    seam
+                }
+                let _ = piece(prefix, span(i, stop), mut out)?
+            }
+            if next > seam {
+                let begin: u64 = if i < seam {
+                    0
+                } else {
+                    i - seam
+                }
+                let _ = piece(tail, span(begin, next - seam), mut out)?
+            }
+        }
+        i = next
+    }
+    Ok(span(start, string.byte_len(out)))
+}
+
+fn merge_path(base_text: String, base: Uri, ref_text: String, path: http1.Span, mut out: String) -> Result[http1.Span, Capacity] {
+    let tail = string.slice(ref_text, path.start, path.end)
+    if string.as_bytes(tail)[0] == b'/' {
+        return remove_dot_segments("", tail, mut out)
+    }
+    if base.host != None && width(base.path) == 0 {
+        return remove_dot_segments("/", tail, mut out)
+    }
+    let end = after_last_slash(string.as_bytes(base_text), base.path.start, base.path.end)
+    remove_dot_segments(string.slice(base_text, base.path.start, end), tail, mut out)
+}
+
+/// Appends the RFC 3986 §5.2 target and returns its spans in out. A reference
+/// with a scheme keeps that scheme and still has its dot segments removed.
+/// Fails: Relative when base has no scheme, or Capacity(c). On failure out
+/// is unchanged. Reserves len(base_text) + len(ref_text) + 1 before writing.
+/// Alloc: GROWTH of out. Cost: O(len base + len ref).
+/// Ex: `let t = std.uri.resolve(b, bu, s, su, mut out)?`.
+pub fn resolve(base_text: String, base: Uri, ref_text: String, r: Uri, mut out: String) -> Result[Uri, Error] {
+    let Some(base_scheme) = base.scheme else {
+        return Error(Relative)
+    }
+    let size = string.byte_len(base_text) + string.byte_len(ref_text) + 1
+    capacity_result(string.reserve(mut out, size))?
+    capacity_result(resolve_reserved(base_text, base, base_scheme, ref_text, r, mut out))
+}
+
+fn resolve_reserved(base_text: String, base: Uri, base_scheme: http1.Span, ref_text: String, r: Uri, mut out: String) -> Result[Uri, Capacity] {
+    let scheme = match r.scheme {
+        Some(s) => piece(ref_text, s, mut out)?,
+        None => piece(base_text, base_scheme, mut out)?
+    }
+    string.push(mut out, ":")?
+    let new_authority = r.scheme != None || r.host != None
+    let (userinfo, host, port) = if new_authority {
+        authority(ref_text, r, mut out)?
+    } else {
+        authority(base_text, base, mut out)?
+    }
+    let inherit_path = !new_authority && width(r.path) == 0
+    let path = if new_authority {
+        remove_dot_segments("", string.slice(ref_text, r.path.start, r.path.end), mut out)?
+    } else if inherit_path {
+        piece(base_text, base.path, mut out)?
+    } else {
+        merge_path(base_text, base, ref_text, r.path, mut out)?
+    }
+    let query = if inherit_path && r.query == None {
+        optional_piece(base_text, base.query, "?", mut out)?
+    } else {
+        optional_piece(ref_text, r.query, "?", mut out)?
+    }
+    let fragment = optional_piece(ref_text, r.fragment, "#", mut out)?
+    Ok(Uri(scheme: Some(scheme), userinfo: userinfo, host: host, port: port, path: path, query: query, fragment: fragment))
+}
+
+fn capacity_result[T](take r: Result[T, Capacity]) -> Result[T, Error] {
+    match r {
+        Ok(take value) => Ok(take value),
+        Error(c) => Error(Capacity(c))
+    }
+}
+
+fn decoded_byte(data: Bytes, i: u64, end: u64) -> Result[(u8, u64), Error] {
+    if data[i] == b'%' {
+        Ok((escaped(data, i, end)?, i + 3))
+    } else {
+        Ok((data[i], i + 1))
+    }
+}
+
+/// Appends the bytes of text[s], replacing each %HH by its byte and keeping
+/// all other bytes, including '+'. Fails: Invalid(i) for malformed escapes,
+/// or Capacity(c). Atomic. Alloc: GROWTH of out. Cost: O(span length).
+/// Ex: `std.uri.decode(text, s, mut bytes)?`.
+pub fn decode(text: String, s: http1.Span, mut out: Bytes) -> Result[(), Error] {
+    let data = string.as_bytes(text)
+    let _ = list.slice(data, s.start, s.end)
+    let mut size: u64 = 0
+    let mut i = s.start
+    while i < s.end {
+        let (_, next) = decoded_byte(data, i, s.end)?
+        size += 1
+        i = next
+    }
+    capacity_result(list.reserve(mut out, size))?
+    i = s.start
+    while i < s.end {
+        let (b, next) = decoded_byte(data, i, s.end)?
+        let _ = list.push(mut out, b)
+        i = next
+    }
+    Ok(())
+}
+
+fn decoded_scalar(data: Bytes, start: u64, end: u64) -> Result[(char, u64, u64), Error] {
+    let (b, next) = decoded_byte(data, start, end)?
+    // RFC 3629 §4. The minimum rejects overlong spellings, and from_u32
+    // rejects surrogate code points and values above U+10FFFF.
+    let (octets, bits, minimum): (u64, u8, u32) = if b < 0x80 {
+        (1, b, 0)
+    } else if b >= 0xC2 && b <= 0xDF {
+        (2, b & 0x1F, 0x80)
+    } else if b >= 0xE0 && b <= 0xEF {
+        (3, b & 0x0F, 0x800)
+    } else if b >= 0xF0 && b <= 0xF4 {
+        (4, b & 0x07, 0x10000)
+    } else {
+        return Error(NotUtf8(start))
+    }
+    let mut value: u32 = int.widen(bits)
+    let mut i = next
+    for k in 1u64 .. octets {
+        if i == end {
+            return Error(NotUtf8(start))
+        }
+        let (c, after) = decoded_byte(data, i, end)?
+        if c & 0xC0 != 0x80 {
+            return Error(NotUtf8(start))
+        }
+        value = (value << 6) | int.widen(c & 0x3F)
+        i = after
+    }
+    if value < minimum {
+        return Error(NotUtf8(start))
+    }
+    let Some(scalar) = char.from_u32(value) else {
+        return Error(NotUtf8(start))
+    }
+    Ok((scalar, i, octets))
+}
+
+/// Percent-decodes text[s] into out as UTF-8, keeping literal plus signs.
+/// Fails: as decode, or NotUtf8(i) at the source byte or escape that starts
+/// an invalid UTF-8 sequence. Atomic. Alloc: GROWTH of out. Cost: O(span length).
+/// Ex: `std.uri.decode_text(text, value, mut out)?`.
+pub fn decode_text(text: String, s: http1.Span, mut out: String) -> Result[(), Error] {
+    let data = string.as_bytes(text)
+    let _ = list.slice(data, s.start, s.end)
+    let mut size: u64 = 0
+    let mut i = s.start
+    while i < s.end {
+        let (_, next, octets) = decoded_scalar(data, i, s.end)?
+        size += octets
+        i = next
+    }
+    capacity_result(string.reserve(mut out, size))?
+    i = s.start
+    while i < s.end {
+        let (c, next, _) = decoded_scalar(data, i, s.end)?
+        let _ = string.push_char(mut out, c)
+        i = next
+    }
+    Ok(())
+}
+
+fn ascii(b: u8) -> char {
+    option.unwrap(char.from_u32(int.widen(b)))
+}
+
+/// Appends raw with every byte outside set encoded as uppercase %HH.
+/// All sets keep ALPHA, DIGIT, '-', '.', '_' and '~'. Segment adds sub-delims,
+/// ':' and '@'. Path adds '/' to Segment. Query adds '?' to Path. QueryPart
+/// removes '&', '=' and '+' from Query. UserInfo adds sub-delims and ':' to
+/// the unreserved set. '%' is always escaped. Fails: Capacity, atomically.
+/// Alloc: GROWTH of out after an exact reserve. Cost: O(len raw).
+/// Ex: `std.uri.encode(mut out, bytes, QueryPart)?`.
+pub fn encode(mut out: String, raw: Bytes, set: Set) -> Result[(), Capacity] {
+    let mut size: u64 = 0
+    for b in raw {
+        size += if allowed(b, set) {
+            1
+        } else {
+            3
+        }
+    }
+    string.reserve(mut out, size)?
+    for b in raw {
+        if allowed(b, set) {
+            let _ = string.push_char(mut out, ascii(b))
+        } else {
+            let _ = string.push(mut out, "%")
+            let _ = string.push_char(mut out, hex_upper(b >> 4))
+            let _ = string.push_char(mut out, hex_upper(b & 15))
+        }
+    }
+    Ok(())
+}
+
+fn hex_upper(n: u8) -> char {
+    ascii(if n < 10 {
+        b'0' + n
+    } else {
+        b'A' + (n - 10)
+    })
+}
+
+/// Walks a raw query from at, initially query.start. Splits at '&' and then
+/// the first '=' in each nonempty field. ';' is literal. A field without '='
+/// has an empty value span at its end. Returns raw key, value and next offset,
+/// or None at query.end. Alloc: nothing. Cost: O(bytes visited).
+/// Ex: `while let Some((k, v, n)) = std.uri.next_pair(s, q, at) { at = n }`.
+pub fn next_pair(text: String, query: http1.Span, at: u64) -> Option[(http1.Span, http1.Span, u64)] {
+    let data = string.as_bytes(text)
+    let mut start = at
+    while start < query.end && data[start] == b'&' {
+        start += 1
+    }
+    if start >= query.end {
+        return None
+    }
+    let mut end = start
+    let mut equals: Option[u64] = None
+    while end < query.end && data[end] != b'&' {
+        if equals == None && data[end] == b'=' {
+            equals = Some(end)
+        }
+        end += 1
+    }
+    let (key_end, value_start) = match equals {
+        Some(i) => (i, i + 1),
+        None => (end, end)
+    }
+    let next = if end < query.end {
+        end + 1
+    } else {
+        end
+    }
+    Some((span(start, key_end), span(value_start, end), next))
+}

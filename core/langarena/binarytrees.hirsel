@@ -31,39 +31,38 @@ fn sum(node: Box[Node]) -> u32 {
     total
 }
 
+// Upstream's arena: one Vec of 12-byte nodes, i32 child indices, -1 for none.
 type ArenaNode {
     item: i32,
-    left: Option[std.pool.Id[ArenaNode]],
-    right: Option[std.pool.Id[ArenaNode]]
+    left: i32,
+    right: i32
 }
 
-fn build_arena(mut p: std.pool.Pool[ArenaNode], item: i32, depth: i32) -> Result[std.pool.Id[ArenaNode], helper.Error] {
-    let node = ArenaNode(item: item, left: None, right: None)
-    let id = match std.pool.insert(mut p, take node) {
-        Ok(x) => x,
-        Error((c, take unused)) => return Error(Capacity(c))
+fn build_arena(mut arena: List[ArenaNode], item: i32, depth: i32) -> Result[i32, helper.Error] {
+    let at = list.len(arena)
+    let idx: i32 = int.narrow(at)
+    if let Error((c, _)) = list.push(mut arena, ArenaNode(item: item, left: -1, right: -1)) {
+        return Error(Capacity(c))
     }
     if depth > 0 {
         let offset = 1i32 << (depth - 1)
-        let left = build_arena(mut p, item - offset, depth - 1)?
-        let right = build_arena(mut p, item + offset, depth - 1)?
-        let _ = result.unwrap(std.pool.update(mut p, id, fn(mut n: ArenaNode) {
-            n.left = Some(left);
-            n.right = Some(right)
-        }))
+        let left = build_arena(mut arena, item - offset, depth - 1)?
+        let right = build_arena(mut arena, item + offset, depth - 1)?
+        arena[at].left = left
+        arena[at].right = right
     }
-    Ok(id)
+    Ok(idx)
 }
 
-fn sum_arena(p: std.pool.Pool[ArenaNode], id: std.pool.Id[ArenaNode]) -> u32 {
-    let node = result.unwrap(std.pool.get(p, id))
+fn sum_arena(arena: List[ArenaNode], idx: i32) -> u32 {
+    let node = arena[int.narrow(idx)]
     let item: u32 = int.truncate(node.item)
     let mut total = int.wrapping_add(item, 1u32)
-    if let Some(left) = node.left {
-        total = int.wrapping_add(total, sum_arena(p, left))
+    if node.left >= 0 {
+        total = int.wrapping_add(total, sum_arena(arena, node.left))
     }
-    if let Some(right) = node.right {
-        total = int.wrapping_add(total, sum_arena(p, right))
+    if node.right >= 0 {
+        total = int.wrapping_add(total, sum_arena(arena, node.right))
     }
     total
 }
@@ -79,9 +78,9 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
     let mut total: u32 = 0
     for _ in 0 .. warmup + iterations {
         if name == "Binarytrees::Arena" {
-            let mut p: std.pool.Pool[ArenaNode] = std.pool.new()
-            let root = build_arena(mut p, 0, int.narrow(depth))?
-            total = int.wrapping_add(total, sum_arena(p, root))
+            let mut arena: List[ArenaNode] = list.new()
+            let root = build_arena(mut arena, 0, int.narrow(depth))?
+            total = int.wrapping_add(total, sum_arena(arena, root))
         } else {
             let root = tree(0, int.narrow(depth))?
             total = int.wrapping_add(total, sum(root))

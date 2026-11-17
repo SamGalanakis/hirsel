@@ -1,5 +1,6 @@
-// Reviewed-by: langs-text-921 2026-11-13; Obj boxed nodes and Arena Pool/Id/Slot layout, fresh identity, checked lookup and placeholder/owned-local update lifecycle match; compile with overflow checks.
+// Reviewed-by: langs-text-921 2026-11-13; Obj boxed nodes match; compile with overflow checks. Arena was rewritten by arena-alloc-1131 on 2026-11-18 to upstream's Vec arena and has not been re-reviewed.
 // Matches binarytrees.hirsel Obj: Box nodes with Option children and checked i32 items.
+// Arena: upstream's Vec of 12-byte nodes with i32 links, as the port (arena-alloc-1131).
 #[allow(dead_code)]
 mod support;
 struct Node {
@@ -30,102 +31,36 @@ fn sum(node: &Node) -> u32 {
     }
     total
 }
-#[derive(Clone, Copy)]
-struct Id {
-    pool: u64,
-    index: u64,
-    generation: u64,
-}
-enum Slot {
-    Occupied(u64, ArenaNode),
-    Vacant(u64, u64),
-}
-struct Pool {
-    me: u64,
-    slots: Vec<Slot>,
-    free: u64,
-    live: u64,
-}
 struct ArenaNode {
     item: i32,
-    left: Option<Id>,
-    right: Option<Id>,
+    left: i32,
+    right: i32,
 }
-impl Pool {
-    fn new() -> Self {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let me = NEXT
-            .fetch_update(
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-                |x| x.checked_add(1),
-            )
-            .expect("unique exhausted");
-        Self {
-            me,
-            slots: Vec::new(),
-            free: u64::MAX,
-            live: 0,
-        }
-    }
-    fn insert(&mut self, node: ArenaNode) -> Id {
-        assert_eq!(self.free, u64::MAX);
-        let index = u64::try_from(self.slots.len()).unwrap();
-        self.slots.push(Slot::Occupied(0, node));
-        self.live += 1;
-        Id {
-            pool: self.me,
-            index,
-            generation: 0,
-        }
-    }
-    fn get(&self, id: Id) -> &ArenaNode {
-        assert_eq!(id.pool, self.me);
-        match &self.slots[usize::try_from(id.index).unwrap()] {
-            Slot::Occupied(g, n) if *g == id.generation => n,
-            _ => panic!("Stale"),
-        }
-    }
-    fn update(&mut self, id: Id, left: Id, right: Id) {
-        let _ = self.get(id);
-        let placeholder = Slot::Vacant(id.generation + 1, u64::MAX);
-        let slot = std::mem::replace(
-            &mut self.slots[usize::try_from(id.index).unwrap()],
-            placeholder,
-        );
-        let mut value = match slot {
-            Slot::Occupied(_, value) => value,
-            Slot::Vacant(_, _) => panic!("checked slot vacant"),
-        };
-        self.live -= 1;
-        value.left = Some(left);
-        value.right = Some(right);
-        self.slots[usize::try_from(id.index).unwrap()] = Slot::Occupied(id.generation, value);
-        self.live += 1;
-    }
-}
-fn arena_tree(p: &mut Pool, item: i32, depth: i32) -> Id {
-    let id = p.insert(ArenaNode {
+fn arena_tree(arena: &mut Vec<ArenaNode>, item: i32, depth: i32) -> i32 {
+    let at = arena.len();
+    let idx = i32::try_from(at).unwrap();
+    arena.push(ArenaNode {
         item,
-        left: None,
-        right: None,
+        left: -1,
+        right: -1,
     });
     if depth > 0 {
         let offset = 1i32 << (depth - 1);
-        let left = arena_tree(p, item - offset, depth - 1);
-        let right = arena_tree(p, item + offset, depth - 1);
-        p.update(id, left, right);
+        let left = arena_tree(arena, item - offset, depth - 1);
+        let right = arena_tree(arena, item + offset, depth - 1);
+        arena[at].left = left;
+        arena[at].right = right;
     }
-    id
+    idx
 }
-fn arena_sum(p: &Pool, id: Id) -> u32 {
-    let node = p.get(id);
+fn arena_sum(arena: &[ArenaNode], idx: i32) -> u32 {
+    let node = &arena[usize::try_from(idx).unwrap()];
     let mut total = (node.item as u32).wrapping_add(1);
-    if let Some(left) = node.left {
-        total = total.wrapping_add(arena_sum(p, left));
+    if node.left >= 0 {
+        total = total.wrapping_add(arena_sum(arena, node.left));
     }
-    if let Some(right) = node.right {
-        total = total.wrapping_add(arena_sum(p, right));
+    if node.right >= 0 {
+        total = total.wrapping_add(arena_sum(arena, node.right));
     }
     total
 }
@@ -135,9 +70,9 @@ fn run(c: &support::Config) -> u32 {
     let mut total = 0u32;
     for _ in 0..c.warmup + c.iterations {
         if c.name == "Binarytrees::Arena" {
-            let mut p = Pool::new();
-            let root = arena_tree(&mut p, 0, depth);
-            total = total.wrapping_add(arena_sum(&p, root));
+            let mut arena = Vec::new();
+            let root = arena_tree(&mut arena, 0, depth);
+            total = total.wrapping_add(arena_sum(&arena, root));
         } else {
             total = total.wrapping_add(sum(&tree(0, depth)));
         }

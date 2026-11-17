@@ -1,0 +1,143 @@
+// Module `path`: text operations for names relative to a Dir (core.md, Host).
+/// A fault at a byte offset in the input, or a refused growth of the output string.
+pub type Error = Invalid(u64) | Capacity(Capacity)
+
+fn component_fault(c: String) -> Option[u64] {
+    if c == "" || c == "." || c == ".." {
+        return Some(0)
+    }
+    string.find(c, 0, "\0")
+}
+
+fn first_fault(p: String) -> Option[u64] {
+    let mut at: u64 = 0
+    while let Some((part, next)) = string.next_split(p, at, "/") {
+        if let Some(i) = component_fault(part) {
+            return Some(at + i)
+        }
+        at = next
+    }
+    None
+}
+
+/// Whether p is a valid path relative to a Dir. Fails: never. Alloc: nothing. Cost: O(len).
+/// Ex: `if !std.path.is_valid(key) { return Error(BadRequest) }`
+pub fn is_valid(p: String) -> bool {
+    first_fault(p) == None
+}
+
+/// Checks p and identifies its first fault. Fails: Invalid at the start of an empty, `.`
+/// or `..` component or at a NUL byte. An empty p gives Invalid(0).
+/// Alloc: nothing. Cost: O(len). Ex: `std.path.check(key)?`
+pub fn check(p: String) -> Result[(), Error] {
+    match first_fault(p) {
+        Some(i) => Error(Invalid(i)),
+        None => Ok(()),
+    }
+}
+
+/// Whether c is one valid component, as required by host.mkdtemp. It must be nonempty,
+/// differ from `.` and `..`, and be free of slash and NUL.
+/// Fails: never. Alloc: nothing. Cost: O(len). Ex: `std.path.is_name(upload)`
+pub fn is_name(c: String) -> bool {
+    string.find(c, 0, "/") == None && component_fault(c) == None
+}
+
+/// Appends p, inserting a slash when out is nonempty. Checks p only.
+/// Fails: Invalid at a byte offset in p, or Capacity. Both the check and the reservation
+/// precede any write, so out is unchanged on error.
+/// Alloc: GROWTH of out. Cost: O(len p), plus copying out when it grows.
+/// Ex: `std.path.join(mut p, user)?; std.path.join(mut p, "inbox")?`
+pub fn join(mut out: String, p: String) -> Result[(), Error] {
+    check(p)?
+    let separator: u64 = if string.byte_len(out) == 0 {
+        0
+    } else {
+        1
+    }
+    if let Error(c) = string.reserve(mut out, separator + string.byte_len(p)) {
+        return Error(Capacity(c))
+    }
+    if separator == 1 {
+        let _ = string.push(mut out, "/")
+    }
+    let _ = string.push(mut out, p)
+    Ok(())
+}
+
+fn last_byte(p: String, start: u64, byte: u8) -> Option[u64] {
+    let b = string.as_bytes(p)
+    let mut at = list.len(b)
+    while at > start {
+        at -= 1
+        if b[at] == byte {
+            return Some(at)
+        }
+    }
+    None
+}
+
+fn name_start(p: String) -> u64 {
+    match last_byte(p, 0, b'/') {
+        Some(at) => at + 1,
+        None => 0,
+    }
+}
+
+fn extension_dot(p: String, start: u64) -> Option[u64] {
+    // As in Rust's rsplit_file_at_dot on valid names, a leading dot alone is not a split.
+    last_byte(p, start + 1, b'.')
+}
+
+/// The bytes before the last slash, or None if p has no slash.
+/// Fails: never. View: anchored to p. Alloc: nothing. Cost: O(len) worst case.
+/// Ex: `std.path.parent("a/b/c")` gives `a/b`. `c` has no parent.
+pub fn parent(p: String) -> Option[View[String]] in p {
+    match last_byte(p, 0, b'/') {
+        Some(at) => Some(string.slice(p, 0, at)),
+        None => None,
+    }
+}
+
+/// The bytes after the last slash, or all of p if it has no slash.
+/// Fails: never. View: anchored to p. Alloc: nothing. Cost: O(len) worst case.
+/// Ex: `std.path.name("a/b.txt")` gives `b.txt`.
+pub fn name(p: String) -> View[String] in p {
+    string.slice(p, name_start(p), string.byte_len(p))
+}
+
+/// The bytes of name(p) after its last dot. Gives None if there is no dot or if the only
+/// dot begins the name. Fails: never. View: anchored to p. Alloc: nothing. Cost: O(len) worst case.
+/// Ex: `a.tar.gz` gives `gz`, `.bashrc` gives None, `a.` gives an empty view, and
+/// `.config.toml` gives `toml`.
+pub fn extension(p: String) -> Option[View[String]] in p {
+    match extension_dot(p, name_start(p)) {
+        Some(at) => Some(string.slice(p, at + 1, string.byte_len(p))),
+        None => None,
+    }
+}
+
+/// The name without its final dot and extension, or the whole name if extension gives None.
+/// Fails: never. View: anchored to p. Alloc: nothing. Cost: O(len) worst case.
+/// Ex: `a.tar.gz` gives `a.tar`, `.bashrc` gives `.bashrc`, and `a.` gives `a`.
+pub fn stem(p: String) -> View[String] in p {
+    let start = name_start(p)
+    let end = match extension_dot(p, start) {
+        Some(at) => at,
+        None => string.byte_len(p),
+    }
+    string.slice(p, start, end)
+}
+
+/// The suffix after base and one slash, compared by whole components. Gives None if the
+/// component prefix differs or p equals base.
+/// Fails: never. View: anchored to p. Alloc: nothing. Cost: O(len base).
+/// Ex: `std.path.strip_base("a/b/c", "a")` gives `b/c`, and stripping `a` from `ab/c` gives None.
+pub fn strip_base(p: String, base: String) -> Option[View[String]] in p {
+    let at = string.byte_len(base)
+    let end = string.byte_len(p)
+    if at < end && string.as_bytes(p)[at] == b'/' && string.starts_with(p, base) {
+        return Some(string.slice(p, at + 1, end))
+    }
+    None
+}

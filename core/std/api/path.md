@@ -1,8 +1,6 @@
 # Path
 
-[API overview](../API.md). Specified ahead of its module: the build lane moves each operation
-block below into `core/std/path.hirsel` as that function's `///` contract and cuts this page
-down to the module prose.
+[API overview](../API.md). [Operations and contracts](../path.hirsel).
 
 `std.path` is a set of pure functions over the path text that a `Dir` accepts. It grants no
 authority and does no I/O. A path means the same thing to it as to the host: core's **valid
@@ -17,62 +15,15 @@ path from it. Operations allocate nothing except `join`, which grows a caller-ow
 ## Types
 
 ```
-pub type Error: key = Invalid(u64) | Capacity(Capacity)
+pub type Error = Invalid(u64) | Capacity(Capacity)
 ```
 
 `Invalid(i)` gives the byte offset in the argument where the path stops being valid: the start
 of an empty, `.` or `..` component, or a NUL byte. For an empty argument it is 0.
 
-## Operations
-
-`is_valid(p: String) -> bool`
-: `true` exactly when `p` is a valid path. Cost: O(len). Ex:
-  `if !std.path.is_valid(key) { return Error(BadRequest) }`
-
-`check(p: String) -> Result[(), Error]`
-: `is_valid` with the offset of the first fault: `Invalid(i)` as above. Cost: O(len).
-
-`is_name(c: String) -> bool`
-: `true` exactly when `c` is a valid path of one component: not empty, not `.` or `..`, and
-  free of `/` and NUL. This is the check for a file name that arrives from outside the program.
-  It is the same test `host.mkdtemp` applies to its name (core.md, Host).
-
-`join(mut out: String, p: String) -> Result[(), Error]`
-: Appends `p` to the path in `out`. It writes `/` between them when `out` is not empty, and
-  writes `p` alone when `out` is empty. `p` may have several components, and each must be
-  valid. Fails: `Invalid(i)` (offset in `p`) when `p` is not a valid path, or
-  `Capacity(c)`. Either way `out` is unchanged, because the check and the exact `reserve`
-  both come before the first byte is written. Alloc: GROWTH of `out`. Cost: O(len p). `join`
-  does not check `out`. A path built only by `join`s from an empty String is valid by
-  construction. Ex: `std.path.join(mut p, user)?; std.path.join(mut p, "inbox")?`
-
-`parent(p: String) -> Option[View[String]] in p`
-: The bytes before the last `/`, or `None` when `p` has no `/`. Ex: the parent of `a/b/c` is
-  `a/b`, and `c` has no parent.
-
-`name(p: String) -> View[String] in p`
-: The bytes after the last `/`, or all of `p`. Ex: `a/b.txt` gives `b.txt`.
-
-`extension(p: String) -> Option[View[String]] in p`
-: The bytes of `name(p)` after its last `.`. `None` when the name has no `.`, or when its only
-  `.` is the first byte. Ex: `a.tar.gz` gives `gz`, `.bashrc` gives `None`, `a.` gives the
-  empty view, and `.config.toml` gives `toml` (Rust `Path::extension`).
-
-`stem(p: String) -> View[String] in p`
-: `name(p)` without the `.` and extension, or the whole name when `extension` is `None`. Ex:
-  `a.tar.gz` gives `a.tar`, `.bashrc` gives `.bashrc`, and `a.` gives `a` (Rust
-  `Path::file_stem`).
-
-`strip_base(p: String, base: String) -> Option[View[String]] in p`
-: The rest of `p` after `base` and one `/`, compared by whole components. `None` when `base`
-  is not a leading run of `p`'s components, or when `p` equals `base` (no valid rest).
-  Ex: `strip_base("a/b/c", "a")` gives `b/c`, and `strip_base("ab/c", "a")` gives `None`,
-  where `string.strip_prefix` would give `b/c`.
-
 The text functions `parent`, `name`, `extension`, `stem` and `strip_base` read bytes and do not
-check validity. On a valid path they give valid paths or names. On other text they still
-follow the byte rule above and never fail. Components are walked with
-`string.next_split(p, at, "/")`. This module adds no second walker.
+check validity. On other text they still follow the same byte rules and never fail.
+Validation walks components with `string.next_split(p, at, "/")`.
 
 ## Decisions
 
@@ -80,7 +31,7 @@ follow the byte rule above and never fail. Components are walked with
   `src/path/path.go`) and Rust `std::path` both model absolute paths, `.` and `..`, and
   repeated separators. Rust also models platform prefixes. Hirsel paths have none of these.
   A program builds names inside a `Dir`, and the rule is core's. Rust's
-  `Path::extension`/`file_stem` dot rules are ADOPTED unchanged
+  `Path::extension`/`file_stem` dot rules are ADOPTED for valid paths
   (`library/std/src/path.rs:334 rsplit_file_at_dot`, rust 5f4effd5), and their doc examples
   are the oracle. Go's `path.Ext` (which gives `.bashrc` as the extension of `.bashrc`) is NOT
   TAKEN. A leading dot marks a hidden file, not an extension.
@@ -104,7 +55,9 @@ Absolute paths, `..` resolution, normalization (`clean`), Windows separators and
 globbing, `is_hidden`, `with_extension` (`stem` and two `string.push`es), and any OS-path
 conversion. A path to a file outside every `Dir` is not a value a program can use.
 
-## Laws (planned for the build lane, `core/std/tests/path.hirsel`)
+## Laws
+
+[Contract tests](../tests/path.hirsel).
 
 - **P1 Host differential.** For each row in a table of about 30 strings, `is_valid(p)` is
   true exactly when `file.write(sub, p, ..)` (with parents created) does not return
@@ -131,8 +84,3 @@ conversion. A path to a file outside every `Dir` is not a value a program can us
 - **P6 Component-wise strip.** `strip_base("ab/c", "a")` is `None`, `strip_base("a/b", "a/b")`
   is `None`, and `strip_base("a/b/c", "a/b")` is `c`. Oracle: hand-derived. Bug caught: a
   byte-prefix implementation.
-
-Prior vectors: `771885fb^:stdlib/std@1/path.hir` and
-`c5690b37^:conformance/SEM/SEM-3-path-go-run.hir` and `SEM-3-pathtime-path-run.hir`. The old
-module modelled Go's `Clean`. Keep its rows for `name`, `parent` and `extension` where the
-input is a valid path.

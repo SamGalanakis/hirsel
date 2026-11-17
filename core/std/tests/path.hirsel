@@ -1,0 +1,174 @@
+fn optional_text(actual: Option[View[String]], take expected: Option[String]) -> bool {
+    match take expected {
+        Some(take e) => match actual {
+            Some(a) => a == e,
+            None => false,
+        },
+        None => match actual {
+            Some(_) => false,
+            None => true,
+        },
+    }
+}
+
+// P1. Provider oracle: crates/hirsel-core-rt/src/os.rs:507-518, checked through file.write.
+// Kills accepting empty or trailing components and treating "..." as "..".
+// expect: run host_denied(dir) = true
+fn host_denied(d: Dir) -> bool waits {
+    let mut scratch = result.unwrap(string.with_capacity(32))
+    for (p, parent, grandparent) in[
+    // Empty, repeated, and dot components.
+    ("", "", ""), ("/", "", ""), ("a/", "", ""), ("/a", "", ""), ("a//b", "", ""), (".", "", ""), ("..", "", ""), ("a/./b", "", ""), ("a/../b", "", ""),
+    // Names with dots, NUL, and non-ASCII text.
+    ("...", "", ""), (".a", "", ""), ("a.", "", ""), ("a\0b", "", ""), ("é", "", ""), ("a", "", ""),
+    // Paths that need a parent precreated.
+    ("a/b", "a", ""), ("a/b/c", "a/b", "a"),
+    // Invalid suffixes and prefixed dot components.
+    ("a/b/", "", ""), ("./a", "", ""), ("../a", "", ""), ("a/.", "", ""), ("a/..", "", ""), ("a/b\0", "", ""), ("é/\0", "", ""),
+    // Valid nested Unicode and dotted names.
+    ("é/子/文", "é/子", "é"), ("a/.../b", "a/...", "a"),
+    // Other valid names and a last dot component.
+    ("a\\b", "", ""), ("a b", "", ""), (".config.toml", "", ""), ("..a", "", ""), ("é/.", "", ""),] {
+        if !host_row(d, mut scratch, p, parent, grandparent) {
+            return false
+        }
+    }
+    let long = result.unwrap(string.repeat("x", 255))
+    host_row(d, mut scratch, long, "", "")
+}
+
+fn host_row(d: Dir, mut scratch: String, p: String, parent: String, grandparent: String) -> bool waits {
+    string.clear(mut scratch)
+    let sub = result.unwrap(dir.create_temp(d, mut scratch))
+    if grandparent != "" {
+        result.unwrap(dir.create_dir(sub, grandparent))
+    }
+    if parent != "" {
+        result.unwrap(dir.create_dir(sub, parent))
+    }
+    let actual = file.write(sub, p, string.as_bytes("x"))
+    result.unwrap(dir.remove_all(d, scratch))
+    let valid = path.is_valid(p)
+    match actual {
+        Ok(()) => valid,
+        Error(Denied) => !valid,
+        _ => false,
+    }
+}
+
+// P2. Hand-derived byte offsets from docs/spec/core.md:236-240, Host.
+// Kills an offset at the preceding slash, or counting scalars instead of bytes.
+// expect: run fault_offsets() = true
+fn fault_offsets() -> bool {
+    for (p, offset) in[("", 0u64), ("/a", 0u64), ("a//b", 2u64), ("a/./b", 2u64), ("a/..", 2u64), ("a/", 2u64), ("a/b\0c", 3u64), ("é\0x", 2u64), ("é/..", 3u64), ("a//b\0", 2u64),] {
+        match path.check(p) {
+            Error(Invalid(at)) => {
+                if at != offset {
+                    return false
+                }
+            },
+            _ => return false,
+        }
+    }
+    match path.check(".../é/a.b") {
+        Ok(()) => true,
+        _ => false,
+    }
+}
+
+// P2. Hand-derived from the one-component rule in docs/spec/core.md:267-274.
+// Kills treating any valid multi-component path as a name, or treating a leading dot as invalid.
+// expect: run one_name() = true
+fn one_name() -> bool {
+    path.is_name("...") && path.is_name(".é") && path.is_name("a\\b") && !path.is_name("") && !path.is_name(".") && !path.is_name("..") && !path.is_name("a/b") && !path.is_name("a\0b")
+}
+
+// P3. Join contract in core/std/api/path.md and core/std/path.hirsel.
+// Kills writing the separator before checking p. An owned buffer has room for that write.
+// expect: run join_invalid_is_atomic() = true
+fn join_invalid_is_atomic() -> bool {
+    let mut out = result.unwrap(string.with_capacity(4))
+    result.unwrap(string.push(mut out, "x"))
+    match path.join(mut out, "a/../b") {
+        Error(Invalid(at)) => at == 2 && out == "x",
+        _ => false,
+    }
+}
+
+// P3. MEM-24–26, docs/spec/budgets.md:106,160-192: 4 bytes of room cost 8;
+// the 9-byte result needs a 16-byte growth charge. A 23-byte bound leaves 15.
+// Kills writing the slash into already-owned spare room before growth succeeds.
+// expect: run join_capacity_is_atomic() = true
+fn join_capacity_is_atomic() -> bool {
+    result.unwrap(bound bytes 23 {
+        let mut out = result.unwrap(string.with_capacity(4))
+        result.unwrap(string.push(mut out, "x"))
+        match path.join(mut out, "1234567") {
+            Error(Capacity(c)) => c.requested == 16 && c.available == 15 && out == "x",
+            _ => false,
+        }
+    })
+}
+
+// P3. Join contract in core/std/api/path.md and core/std/path.hirsel.
+// Kills an initial slash, or either replacing the old path or omitting the separator.
+// expect: run join_appends_components() = true
+fn join_appends_components() -> bool {
+    let mut out = string.new()
+    result.unwrap(path.join(mut out, "é/a"))
+    if out != "é/a" {
+        return false
+    }
+    result.unwrap(path.join(mut out, "b/c"))
+    out == "é/a/b/c"
+}
+
+fn dot_row(p: String, stem: String, take extension: Option[String]) -> bool {
+    path.stem(p) == stem && optional_text(path.extension(p), take extension)
+}
+
+// P4. Rust library/std/src/path.rs:2880-2889,2918-2925,2943-2956 and :334-354.
+// Kills splitting at the first dot or returning an extension for a lone leading dot.
+// expect: run rust_dot_rules() = true
+fn rust_dot_rules() -> bool {
+    dot_row("foo.rs", "foo", Some("rs"))
+    // Rust's file_prefix gives "foo". Hirsel's stem uses the last dot, like file_stem.
+        && dot_row("foo.tar.gz", "foo.tar", Some("gz")) && dot_row(".config", ".config", None) && dot_row(".config.toml", ".config", Some("toml")) && dot_row(".bashrc", ".bashrc", None) && dot_row("a.", "a", Some("")) && dot_row(".a.b", ".a", Some("b")) && dot_row("..a", ".", Some("a"))
+}
+
+fn split_row(p: String, take parent: Option[String], name: String) -> bool {
+    optional_text(path.parent(p), take parent) && path.name(p) == name
+}
+
+// P5. Go src/path/path_test.go:100-106,168-181,191-205, restricted to valid paths.
+// Kills returning the slash with the parent or splitting at the first slash.
+// expect: run go_split_tables() = true
+fn go_split_tables() -> bool {
+    // Go Split gives "a/". Hirsel's parent excludes the last slash.
+    split_row("a/b", Some("a"), "b")
+    // Go Split gives an empty directory. There is no parent of a single component.
+        && split_row("a", None, "a")
+    // Go Dir gives ".". There is no parent of a single component.
+        && split_row("abc", None, "abc") && split_row("abc/def", Some("abc"), "def") && split_row("a/b/.x", Some("a/b"), ".x") && split_row("a/b/c.", Some("a/b"), "c.") && split_row("a/b/c.x", Some("a/b"), "c.x")
+}
+
+// P4 and P5. Retired SEM-3-path-go-run.hir:85-89, from Go src/path/path_test.go:152-158.
+// Kills searching the entire path for a dot instead of only its final name.
+// expect: run go_extension_rows() = true
+fn go_extension_rows() -> bool {
+    // Go Ext includes the leading dot. Hirsel returns only the bytes after it.
+    optional_text(path.extension("path.go"), Some("go"))
+    // Go Ext includes the leading dot.
+        && optional_text(path.extension("path.pb.go"), Some("go"))
+    // Go Ext returns an empty string for an absent extension. Hirsel returns None.
+        && optional_text(path.extension("a.dir/b"), None)
+    // Go Ext includes the leading dot.
+        && optional_text(path.extension("a.dir/b.go"), Some("go"))
+}
+
+// P6. Component-prefix rule in core/std/api/path.md and core/std/path.hirsel.
+// Kills accepting a byte prefix that ends within a component or returning an empty rest on equality.
+// expect: run component_strip() = true
+fn component_strip() -> bool {
+    optional_text(path.strip_base("ab/c", "a"), None) && optional_text(path.strip_base("a/b", "a/b"), None) && optional_text(path.strip_base("a/b/c", "a/b"), Some("c")) && optional_text(path.strip_base("a/b/c", "a"), Some("b/c")) && optional_text(path.strip_base("é/子/文", "é/子"), Some("文"))
+}

@@ -1,8 +1,6 @@
 # Csv
 
-[API overview](../API.md). Specified ahead of its module: the build lane moves each operation
-block below into `core/std/csv.hirsel` as that function's `///` contract and cuts this page
-down to the module prose.
+[API overview](../API.md). [Operations and contracts](../csv.hirsel).
 
 `std.csv` reads and writes RFC 4180 comma-separated values. The reader copies nothing. It
 finds one record at a time in a byte buffer the caller owns and reports each field as a span
@@ -18,13 +16,13 @@ count, headers and types is the caller's job.
 pub type Dialect: key { delimiter: u8, crlf: bool }
 pub type Field: key { span: http1.Span, quoted: bool }
 pub type Next: key = Record(u64) | End | Need
-pub type Error: key = Invalid(u64) | NotUtf8(u64) | Capacity(Capacity)
+pub type Error = Invalid(u64) | NotUtf8(u64) | Capacity(Capacity)
 pub opaque type Writer { d: Dialect, fields: u64, empty_first: bool }
 ```
 
 - `Dialect.delimiter` is one ASCII byte other than `"`, CR and LF, such as `,` `;` `\t` or
-  `|`. `crlf` chooses the writer's line end. The reader accepts LF and CRLF whatever it is
-  set to. Plain CSV is `Dialect(delimiter: 44, crlf: false)`.
+  `|`. An invalid delimiter causes Fail. `crlf` chooses the writer's line end. The reader
+  accepts LF and CRLF in either mode. Plain CSV is `Dialect(delimiter: 44, crlf: false)`.
 - `Field.span` indexes the caller's buffer, using the same `Span` type as `std.http1`. For a
   quoted field the span covers the bytes between the quotes, with each `""` still doubled,
   and `quoted` is true. `field_text` undoubles them.
@@ -51,55 +49,6 @@ This is RFC 4180 §2, with the reader's rulings where the RFC is silent.
 - The reader does not strip a byte-order mark, trim space, or treat `#` as a comment. A BOM
   is part of the first field's bytes, so a caller that expects one strips it from the buffer
   first.
-
-## Reading
-
-`record(text: Bytes, at: u64, d: Dialect, eof: bool, mut fields: List[Field]) -> Result[Next, Error]`
-: Clears `fields`, then scans the record that starts at `at`. When `eof` is true, `text` is
-  all the input there is. When it is false, more may follow, and a record whose scan
-  reaches the buffer's end before its LF is reported as `Need`, never as a short record.
-  That includes a record whose last byte is a CR, since the next read may bring its LF. On `Need` the caller
-  appends more input to `text` and calls again with the same `at`. On `Record(next)` the
-  caller passes `next` as the following `at`, and may drop `text[0..at]` once it no longer
-  holds spans into it. Fails: `Invalid(i)`, or `Capacity(c)` when `fields` cannot grow.
-  After a failure `fields` holds an unspecified prefix. Alloc: GROWTH of `fields` only.
-  Cost: O(record length). A record that needs k reads is scanned k times, so a caller grows
-  its buffer geometrically.
-  Ex:
-  ```
-  let d = Dialect(delimiter: 44, crlf: false)
-  let mut at = 0u64
-  loop {
-      match std.csv.record(buf, at, d, true, mut fs)? {
-          Record(next) => { use_row(buf, fs)?; at = next }
-          End | Need => break, // Need occurs only when eof is false
-      }
-  }
-  ```
-
-`field_text(text: Bytes, f: Field, mut out: String) -> Result[(), Error]`
-: Appends the field's value to `out`: its bytes, with `""` undoubled when `quoted`. Fails:
-  `NotUtf8(i)` when the value is not UTF-8, or `Capacity(c)`. It validates and reserves
-  before writing, so on failure `out` is unchanged. Alloc: GROWTH of `out`. Cost: O(span).
-  A caller that wants the raw bytes of an unquoted field uses
-  `list.slice(text, f.span.start, f.span.end)` and copies nothing.
-
-## Writing
-
-`writer(d: Dialect) -> Writer`
-: A writer positioned at the start of a record.
-
-`field(mut w: Writer, mut out: String, value: String) -> Result[(), Capacity]`
-: Appends the delimiter (unless this is the record's first field) and then `value`. The
-  value is written as is, or quoted with each `"` doubled when it contains the delimiter,
-  `"`, CR or LF (Python `QUOTE_MINIMAL`). The empty string is written as nothing, except that
-  a record whose only field is empty is written as `""`, so that it reads back as one field
-  rather than as an empty line. Reserves the exact length first, so on failure `out` and `w`
-  are unchanged. Alloc: GROWTH of `out`. Cost: O(len value).
-
-`end(mut w: Writer, mut out: String) -> Result[(), Capacity]`
-: Appends `""` when the record held one empty field, then LF, or CRLF when `d.crlf` is set,
-  and starts the next record. A record with no fields is an empty line. Atomic, as `field`.
 
 Round trip: for any list of records of Strings, writing them and reading the result back
 gives the same records. This holds for empty records, empty fields, and fields holding the
@@ -135,6 +84,10 @@ delimiter, quotes, CR, LF and CRLF. It is law C1.
     this is `Invalid`.
   - Go drops a trailing CR at the end of the text (`reader.go:268`, test `TrailingCR`). That is the same lone
     CR, so it is also `Invalid`.
+  - Go's CRLF writer inserts CR before embedded LF and drops embedded CR
+    (`writer.go:86-112`). Here the record ending alone changes, so field data round trips.
+  - Go writes a sole empty field as an empty line (`writer.go:150-161`). Here it is
+    quoted to distinguish it from a zero-field record.
   - Go's writer quotes `\.` (for Postgres) and fields that start with a space
     (`writer.go:160-184`). Python does neither, and neither is needed for a round trip.
     These are NOT TAKEN.
@@ -148,7 +101,7 @@ Comments, lazy quotes, space trimming, field-count enforcement, header maps, typ
 (parse each field with `int.parse` or `std.time`), BOM handling, non-ASCII delimiters, writing
 non-UTF-8 bytes, `QUOTE_ALL` and other quoting styles, and escape characters other than `""`.
 
-## Laws (planned for the build lane, `core/std/tests/csv.hirsel`)
+## Laws
 
 - **C1 Round trip.** For about 40 hand-written records, `field`/`end` then `record` reading
   gives the same records. The records cover zero fields, one empty field, `["", ""]`, a field
@@ -175,8 +128,8 @@ non-UTF-8 bytes, `QUOTE_ALL` and other quoting styles, and escape characters oth
   derived by hand. Oracle: Go's table and the grammar above. Bug caught: `""` at the end of a
   quoted field read as a close followed by a bare quote (`EvenQuotes`), or `"a"b` accepted.
 - **C5 Go writer table.** Go `writeTests` (`writer_test.go:14`) with this writer's output,
-  where the deviations are the `\.` and leading-space rows. Oracle: Go's table. Bug caught: a
-  field containing only CR left unquoted.
+  with the deviations listed above. Rows with non-UTF-8 fields are outside the String API.
+  Oracle: Go's table. Bug caught: a field containing only CR left unquoted.
 - **C6 Resumption.** For every split point k of a 200-byte text that has quoted CRLF, an
   empty line and a final record with no line end, feeding `text[0..k]` with `eof = false` and
   then the full text with `eof = true` gives the same records as one call with all of it.
@@ -188,8 +141,3 @@ non-UTF-8 bytes, `QUOTE_ALL` and other quoting styles, and escape characters oth
 - **C8 Atomic field_text.** `field_text` of a quoted field holding `"é"` doubled, with a
   `0xff` byte after it, leaves `out` unchanged and gives `NotUtf8` at the `0xff`. Oracle: the
   contract. Bug caught: undoubling into `out` before validating.
-
-Prior vectors: `771885fb^:stdlib/std@1/csv.hir` and
-`c5690b37^:conformance/SEM/SEM-3-csv-go-read-{1..7}-run.hir`, `SEM-3-csv-go-write-run.hir`
-and `SEM-3-csv-empty-record-16-run.hir`. The old module followed Go and skipped blank lines,
-so its blank-line rows flip to zero-field records.

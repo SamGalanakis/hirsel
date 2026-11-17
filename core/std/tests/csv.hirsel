@@ -1,0 +1,677 @@
+fn dialect(delimiter: u8, crlf: bool) -> csv.Dialect {
+    csv.Dialect(delimiter: delimiter, crlf: crlf)
+}
+
+fn read_is(text: Bytes, d: csv.Dialect, expected: List[List[String]]) -> bool {
+    let mut fields: List[csv.Field] = list.new()
+    let mut at: u64 = 0
+    let mut row: u64 = 0
+    loop {
+        match csv.record(text, at, d, true, mut fields) {
+            Ok(Record(next)) => {
+                if row >= list.len(expected) || list.len(fields) != list.len(expected[row]) {
+                    return false
+                }
+                for i in 0u64 .. list.len(fields) {
+                    let mut value = string.new()
+                    result.unwrap(csv.field_text(text, fields[i], mut value))
+                    if value != expected[row][i] {
+                        return false
+                    }
+                }
+                at = next
+                row += 1
+            },
+            Ok(End) => {
+                return row == list.len(expected) && at == list.len(text) && list.len(fields) == 0
+            },
+            _ => {
+                return false
+            },
+        }
+    }
+}
+
+fn invalid_at(text: Bytes, expected: u64) -> bool {
+    let mut fields: List[csv.Field] = list.new()
+    let mut at: u64 = 0
+    loop {
+        match csv.record(text, at, dialect(44, false), true, mut fields) {
+            Ok(Record(next)) => {
+                at = next
+            },
+            Error(Invalid(i)) => {
+                return i == expected
+            },
+            _ => {
+                return false
+            },
+        }
+    }
+}
+
+fn syntax_error(text: Bytes) -> bool {
+    let mut fields: List[csv.Field] = list.new()
+    let mut at: u64 = 0
+    loop {
+        match csv.record(text, at, dialect(44, false), true, mut fields) {
+            Ok(Record(next)) => {
+                at = next
+            },
+            Error(Invalid(_)) => {
+                return true
+            },
+            _ => {
+                return false
+            },
+        }
+    }
+}
+
+fn write_rows(rows: List[List[String]], d: csv.Dialect) -> Result[String, Capacity] {
+    let mut out = string.new()
+    let mut w = csv.writer(d)
+    for row in rows {
+        for field in row {
+            csv.field(mut w, mut out, field)?
+        }
+        csv.end(mut w, mut out)?
+    }
+    Ok(take out)
+}
+
+fn round_trip(rows: List[List[String]], d: csv.Dialect) -> bool {
+    let out = result.unwrap(write_rows(rows, d))
+    read_is(string.as_bytes(out), d, rows)
+}
+
+fn write_is(rows: List[List[String]], d: csv.Dialect, expected: String) -> bool {
+    result.unwrap(write_rows(rows, d)) == expected
+}
+
+// C6. csv.md, Resumption, and csv-core 0.1.13 src/reader.rs:551-591.
+// Mutant: reject a final CR before the next chunk can supply its LF.
+// expect: run every_split() = true
+fn every_split() -> bool {
+    let text = result.unwrap(b"id,\"a\"\"\"\r\n\n\"embedded\r\nline\",part\r\n\"paired\"\"quotes\",\r\n01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123,last\nend,row")
+    let d = dialect(44, true)
+    let mut full: List[csv.Field] = list.new()
+    let mut resumed: List[csv.Field] = list.new()
+    let n = list.len(text)
+    for k in 0u64 .. n + 1 {
+        let prefix = list.slice(text, 0, k)
+        let mut at: u64 = 0
+        let mut finished = false
+        let mut refill = false
+        while !finished {
+            let want = result.unwrap(csv.record(text, at, d, true, mut full))
+            if !refill {
+                match csv.record(prefix, at, d, false, mut resumed) {
+                    Ok(Record(next)) => {
+                        if next > k || want != Record(next) || full != resumed || text[next - 1] != 10 {
+                            return false
+                        }
+                        at = next
+                        continue
+                    },
+                    Ok(Need) => {
+                        // A complete LF-terminated record already in the prefix must be returned.
+                        if let Record(next) = want {
+                            if next <= k && text[next - 1] == 10 {
+                                return false
+                            }
+                        }
+                        refill = true
+                    },
+                    _ => {
+                        return false
+                    },
+                }
+            }
+            if result.unwrap(csv.record(text, at, d, true, mut resumed)) != want || full != resumed {
+                return false
+            }
+            match want {
+                Record(next) => {
+                    at = next
+                },
+                End => {
+                    finished = true
+                },
+                Need => {
+                    return false
+                },
+            }
+        }
+    }
+    true
+}
+
+// C7. core/std/api/csv.md, Grammar. Mutant: report the field start on syntax errors.
+// expect: run grammar_offsets() = true
+fn grammar_offsets() -> bool {
+    invalid_at(result.unwrap(b"a\"b"), 1) && invalid_at(result.unwrap(b"\"a\"b"), 3) && invalid_at(result.unwrap(b"\"ab"), 0) && invalid_at(result.unwrap(b"a\rb"), 1)
+}
+
+// C8. core/std/api/csv.md, Field and Error. Mutant: append before validating UTF-8.
+// expect: run invalid_utf8_is_atomic() = true
+fn invalid_utf8_is_atomic() -> bool {
+    let text = result.unwrap(b"a,\"\"\"\xc3\xa9\"\"\xff\"")
+    let mut fields: List[csv.Field] = list.new()
+    let d = dialect(44, false)
+    if result.unwrap(csv.record(text, 0, d, true, mut fields)) != Record(11) || list.len(fields) != 2 {
+        return false
+    }
+    let mut out = result.unwrap(string.from("prefix"))
+    let Error(NotUtf8(at)) = csv.field_text(text, fields[1], mut out) else {
+        return false
+    }
+    at == 9 && out == "prefix"
+}
+
+// These tables use ␟ after each field and ␞ after each record. Neither
+// character appears in a test field, and a bare ␞ represents a zero-field row.
+fn fixture_rows(text: String) -> List[List[String]] {
+    let mut rows: List[List[String]] = list.new()
+    let mut at: u64 = 0
+    let field_sep = "␟"
+    let row_sep = "␞"
+    while at < string.byte_len(text) {
+        let end = option.unwrap(string.find(text, at, row_sep))
+        let mut row: List[String] = list.new()
+        while at < end {
+            let field_end = option.unwrap(string.find(text, at, field_sep))
+            let field = result.unwrap(string.from(string.slice(text, at, field_end)))
+            result.unwrap(list.push(mut row, take field))
+            at = field_end + string.byte_len(field_sep)
+        }
+        result.unwrap(list.push(mut rows, take row))
+        at = end + string.byte_len(row_sep)
+    }
+    take rows
+}
+
+// C1 and C3 inputs from `python3 -I core/tools/csv_reference.py`.
+fn comma_rows() -> List[List[String]] {
+    fixture_rows("␞␟␞␟␟␞\"␟␞\r\n␟␞a b␟ a␟\\.␟␞a,b␟␞bare\rreturn␟␞bare\nline␟␞\r␟␞\n␟␞␟a␟␟␞a␟␟␟␞␟␟a␟␞x␟y␟z␟␞a␟b,c␟d␟␞a\"b␟␞\"a\"b\"␟␞\t␟;␟|␟␞  ␟\tleading␟trailing ␟␞#comment␟\u{feff}BOM␟␞é␟λ雪␟😀␟␞é,λ␟雪\r😀␟␞\0␟a\0b␟␞xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx␟␞quote before end\"␟␞")
+}
+
+fn semicolon_rows() -> List[List[String]] {
+    fixture_rows("␞␟␞;␟a;b␟a,b␟␞a␟␟b␟␞\r\n␟a\"b␟␞ é␟雪;\"␟␞\t␟␟␞")
+}
+
+fn tab_rows() -> List[List[String]] {
+    fixture_rows("␞␟␞\t␟a\tb␟␞a,b␟a;b␟a|b␟␞␟␟␞\r␟\n␟\r\n␟␞ 😀␟\\.␟\"␟␞")
+}
+
+// C1. core/std/api/csv.md, round trip. Mutant: collapse a sole empty field to zero fields.
+// expect: run writer_round_trip() = true
+fn writer_round_trip() -> bool {
+    round_trip(comma_rows(), dialect(44, false)) && round_trip(comma_rows(), dialect(44, true)) && round_trip(semicolon_rows(), dialect(59, false)) && round_trip(semicolon_rows(), dialect(59, true)) && round_trip(tab_rows(), dialect(9, false)) && round_trip(tab_rows(), dialect(9, true))
+}
+
+// C2. CPython v3.12.3 Modules/_csv.c:672-865, parse_process_char and parse_reset.
+// Copied from `python3 -I core/tools/csv_reference.py`.
+// Mutants: skip empty lines or normalize CRLF in a quoted field.
+// expect: run python_reader() = true
+fn python_reader() -> bool {
+    let d = dialect(44, false)
+    if !read_is(result.unwrap(b""), d, fixture_rows("")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\n"), d, fixture_rows("␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\r\n"), d, fixture_rows("␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\n\r\n\n"), d, fixture_rows("␞␞␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b","), d, fixture_rows("␟␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b",\n"), d, fixture_rows("␟␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b",,\r\n"), d, fixture_rows("␟␟␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\"\""), d, fixture_rows("␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\"\"\n"), d, fixture_rows("␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\"\",\n"), d, fixture_rows("␟␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b",\"\"\r\n"), d, fixture_rows("␟␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\"\",\"\""), d, fixture_rows("␟␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\"\"\"\""), d, fixture_rows("\"␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\"\"\"\"\"\"\"\"\n"), d, fixture_rows("\"\"\"␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"a,\"b,c\",d\r\n"), d, fixture_rows("a␟b,c␟d␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\"a\rb\",\"a\nb\",\"a\r\nb\"\n"), d, fixture_rows("a\rb␟a\nb␟a\r\nb␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"a,b\r\n\n\"c\",\"d\"\"e\"\nx,y"), d, fixture_rows("a␟b␟␞␞c␟d\"e␟␞x␟y␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"a,\n\"b\","), d, fixture_rows("a␟␟␞b␟␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"a, b,  c\n"), d, fixture_rows("a␟ b␟  c␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"#comment,\"#quoted\"\n"), d, fixture_rows("#comment␟#quoted␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\xef\xbb\xbfa,b\n"), d, fixture_rows("\u{feff}a␟b␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\xc3\xa9,\"\xce\xbb\xe9\x9b\xaa\",\"\xf0\x9f\x98\x80\"\r\n"), d, fixture_rows("é␟λ雪␟😀␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\" trailing space \", leading\n"), d, fixture_rows(" trailing space ␟ leading␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\x00,\"a\x00b\"\n"), d, fixture_rows("\0␟a\0b␟␞")) {
+        return false
+    }
+    if !read_is(result.unwrap(b"\"first\nsecond\nthird\"\n"), d, fixture_rows("first\nsecond\nthird␟␞")) {
+        return false
+    }
+    if !syntax_error(result.unwrap(b"x,\"unterminated")) {
+        return false
+    }
+    if !syntax_error(result.unwrap(b"\"")) {
+        return false
+    }
+    if !syntax_error(result.unwrap(b"\"unclosed\r\nnext line")) {
+        return false
+    }
+    if !syntax_error(result.unwrap(b"\"closed\"x")) {
+        return false
+    }
+    if !syntax_error(result.unwrap(b"\"closed\" x,other\n")) {
+        return false
+    }
+    true
+}
+
+// C3. CPython v3.12.3 Modules/_csv.c:1070-1163,1258-1362, join_append_data and csv_writerow.
+// Copied from `python3 -I core/tools/csv_reference.py`.
+// Mutants: quote leading space, backslash-dot or all empty fields.
+// expect: run python_writer() = true
+fn python_writer() -> bool {
+    if !write_is(comma_rows(), dialect(44, false), "\n\"\"\n,\n\"\"\"\"\n\"\r\n\"\na b, a,\\.\n\"a,b\"\n\"bare\rreturn\"\n\"bare\nline\"\n\"\r\"\n\"\n\"\n,a,\na,,\n,,a\nx,y,z\na,\"b,c\",d\n\"a\"\"b\"\n\"\"\"a\"\"b\"\"\"\n\t,;,|\n  ,\tleading,trailing \n#comment,\u{feff}BOM\né,λ雪,😀\n\"é,λ\",\"雪\r😀\"\n\0,a\0b\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\"quote before end\"\"\"\n") {
+        return false
+    }
+    if !write_is(comma_rows(), dialect(44, true), "\r\n\"\"\r\n,\r\n\"\"\"\"\r\n\"\r\n\"\r\na b, a,\\.\r\n\"a,b\"\r\n\"bare\rreturn\"\r\n\"bare\nline\"\r\n\"\r\"\r\n\"\n\"\r\n,a,\r\na,,\r\n,,a\r\nx,y,z\r\na,\"b,c\",d\r\n\"a\"\"b\"\r\n\"\"\"a\"\"b\"\"\"\r\n\t,;,|\r\n  ,\tleading,trailing \r\n#comment,\u{feff}BOM\r\né,λ雪,😀\r\n\"é,λ\",\"雪\r😀\"\r\n\0,a\0b\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\"quote before end\"\"\"\r\n") {
+        return false
+    }
+    if !write_is(semicolon_rows(), dialect(59, false), "\n\"\"\n\";\";\"a;b\";a,b\na;;b\n\"\r\n\";\"a\"\"b\"\n é;\"雪;\"\"\"\n\t;\n") {
+        return false
+    }
+    if !write_is(semicolon_rows(), dialect(59, true), "\r\n\"\"\r\n\";\";\"a;b\";a,b\r\na;;b\r\n\"\r\n\";\"a\"\"b\"\r\n é;\"雪;\"\"\"\r\n\t;\r\n") {
+        return false
+    }
+    if !write_is(tab_rows(), dialect(9, false), "\n\"\"\n\"\t\"\t\"a\tb\"\na,b\ta;b\ta|b\n\t\n\"\r\"\t\"\n\"\t\"\r\n\"\n 😀\t\\.\t\"\"\"\"\n") {
+        return false
+    }
+    if !write_is(tab_rows(), dialect(9, true), "\r\n\"\"\r\n\"\t\"\t\"a\tb\"\r\na,b\ta;b\ta|b\r\n\t\r\n\"\r\"\t\"\n\"\t\"\r\n\"\r\n 😀\t\\.\t\"\"\"\"\r\n") {
+        return false
+    }
+    true
+}
+
+// C4. Go src/encoding/csv/reader_test.go:40-405 (readTests), and csv.md, Grammar.
+// Mutants: read an even quote pair as two delimiters or accept a stray byte after a close.
+// expect: run go_reader() = true
+fn go_reader() -> bool {
+    // Simple.
+    if !read_is(result.unwrap(b"a,b,c\n"), dialect(44, false), fixture_rows("a␟b␟c␟␞")) {
+        return false
+    }
+    // CRLF.
+    if !read_is(result.unwrap(b"a,b\r\nc,d\r\n"), dialect(44, false), fixture_rows("a␟b␟␞c␟d␟␞")) {
+        return false
+    }
+    // BareCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"a,b\rc,d\r\n"), 3) {
+        return false
+    }
+    // NoEOLTest.
+    if !read_is(result.unwrap(b"a,b,c"), dialect(44, false), fixture_rows("a␟b␟c␟␞")) {
+        return false
+    }
+    // Semicolon.
+    if !read_is(result.unwrap(b"a;b;c\n"), dialect(59, false), fixture_rows("a␟b␟c␟␞")) {
+        return false
+    }
+    // MultiLine.
+    if !read_is(result.unwrap(b"\"two\nline\",\"one line\",\"three\nline\nfield\""), dialect(44, false), fixture_rows("two\nline␟one line␟three\nline\nfield␟␞")) {
+        return false
+    }
+    // BlankLine. Deviation: blank lines are zero-field records.
+    if !read_is(result.unwrap(b"a,b,c\n\nd,e,f\n\n"), dialect(44, false), fixture_rows("a␟b␟c␟␞␞d␟e␟f␟␞␞")) {
+        return false
+    }
+    // LeadingSpace.
+    if !read_is(result.unwrap(b" a,  b,   c\n"), dialect(44, false), fixture_rows(" a␟  b␟   c␟␞")) {
+        return false
+    }
+    // NoComment.
+    if !read_is(result.unwrap(b"#1,2,3\na,b,c"), dialect(44, false), fixture_rows("#1␟2␟3␟␞a␟b␟c␟␞")) {
+        return false
+    }
+    // BadDoubleQuotes.
+    if !invalid_at(result.unwrap(b"a\"\"b,c"), 1) {
+        return false
+    }
+    // BadBareQuote.
+    if !invalid_at(result.unwrap(b"a \"word\",\"b\""), 2) {
+        return false
+    }
+    // BadTrailingQuote.
+    if !invalid_at(result.unwrap(b"\"a word\",b\""), 10) {
+        return false
+    }
+    // ExtraneousQuote. Deviation: the offset is the byte after the closing quote.
+    if !invalid_at(result.unwrap(b"\"a \"word\",\"b\""), 4) {
+        return false
+    }
+    // FieldCount.
+    if !read_is(result.unwrap(b"a,b,c\nd,e"), dialect(44, false), fixture_rows("a␟b␟c␟␞d␟e␟␞")) {
+        return false
+    }
+    // TrailingCommaEOF.
+    if !read_is(result.unwrap(b"a,b,c,"), dialect(44, false), fixture_rows("a␟b␟c␟␟␞")) {
+        return false
+    }
+    // TrailingCommaEOL.
+    if !read_is(result.unwrap(b"a,b,c,\n"), dialect(44, false), fixture_rows("a␟b␟c␟␟␞")) {
+        return false
+    }
+    // NotTrailingComma3.
+    if !read_is(result.unwrap(b"a,b,c, \n"), dialect(44, false), fixture_rows("a␟b␟c␟ ␟␞")) {
+        return false
+    }
+    // CommaFieldTest.
+    if !read_is(result.unwrap(b"x,y,z,w\nx,y,z,\nx,y,,\nx,,,\n,,,\n\"x\",\"y\",\"z\",\"w\"\n\"x\",\"y\",\"z\",\"\"\n\"x\",\"y\",\"\",\"\"\n\"x\",\"\",\"\",\"\"\n\"\",\"\",\"\",\"\"\n"), dialect(44, false), fixture_rows("x␟y␟z␟w␟␞x␟y␟z␟␟␞x␟y␟␟␟␞x␟␟␟␟␞␟␟␟␟␞x␟y␟z␟w␟␞x␟y␟z␟␟␞x␟y␟␟␟␞x␟␟␟␟␞␟␟␟␟␞")) {
+        return false
+    }
+    // StartLine1. Deviation: the offset is the byte after the closing quote.
+    if !invalid_at(result.unwrap(b"a,\"b\nc\"d,e"), 7) {
+        return false
+    }
+    // StartLine2. Deviation: unterminated field errors point to the opening quote.
+    if !invalid_at(result.unwrap(b"a,b\n\"d\n\n,e"), 4) {
+        return false
+    }
+    // CRLFInQuotedField. Deviation: quoted CRLF is preserved.
+    if !read_is(result.unwrap(b"A,\"Hello\r\nHi\",B\r\n"), dialect(44, false), fixture_rows("A␟Hello\r\nHi␟B␟␞")) {
+        return false
+    }
+    // TrailingCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"field1,field2\r"), 13) {
+        return false
+    }
+    // QuotedTrailingCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"\"field\"\r"), 7) {
+        return false
+    }
+    // QuotedTrailingCRCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"\"field\"\r\r"), 7) {
+        return false
+    }
+    // FieldCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"field\rfield\r"), 5) {
+        return false
+    }
+    // FieldCRCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"field\r\rfield\r\r"), 5) {
+        return false
+    }
+    // FieldCRCRLF. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"field\r\r\nfield\r\r\n"), 5) {
+        return false
+    }
+    // FieldCRCRLFCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"field\r\r\n\rfield\r\r\n\r"), 5) {
+        return false
+    }
+    // FieldCRCRLFCRCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"field\r\r\n\r\rfield\r\r\n\r\r"), 5) {
+        return false
+    }
+    // MultiFieldCRCRLFCRCR. Deviation: a lone CR is invalid outside quotes.
+    if !invalid_at(result.unwrap(b"field1,field2\r\r\n\r\rfield1,field2\r\r\n\r\r,"), 13) {
+        return false
+    }
+    // QuotedFieldMultipleLF.
+    if !read_is(result.unwrap(b"\"\n\n\n\n\""), dialect(44, false), fixture_rows("\n\n\n\n␟␞")) {
+        return false
+    }
+    // MultipleCRLF. Deviation: blank lines are zero-field records.
+    if !read_is(result.unwrap(b"\r\n\r\n\r\n\r\n"), dialect(44, false), fixture_rows("␞␞␞␞")) {
+        return false
+    }
+    // QuoteWithTrailingCRLF. Deviation: the offset is the byte after the closing quote.
+    if !invalid_at(result.unwrap(b"\"foo\"bar\"\r\n"), 5) {
+        return false
+    }
+    // DoubleQuoteWithTrailingCRLF.
+    if !read_is(result.unwrap(b"\"foo\"\"bar\"\r\n"), dialect(44, false), fixture_rows("foo\"bar␟␞")) {
+        return false
+    }
+    // EvenQuotes.
+    if !read_is(result.unwrap(b"\"\"\"\"\"\"\"\""), dialect(44, false), fixture_rows("\"\"\"␟␞")) {
+        return false
+    }
+    // OddQuotes. Deviation: unterminated field errors point to the opening quote.
+    if !invalid_at(result.unwrap(b"\"\"\"\"\"\"\""), 0) {
+        return false
+    }
+    true
+}
+
+// C4. BinaryBlobField, Go src/encoding/csv/reader_test.go:263-265.
+// Deviation: preserve raw bytes in the span and refuse their invalid UTF-8 at materialization.
+// Mutant: validate UTF-8 while scanning a record or shorten the invalid field's span.
+// expect: run binary_field() = true
+fn binary_field() -> bool {
+    let text = result.unwrap(b"x09A\xb4\x1c,aktau")
+    let mut fields: List[csv.Field] = list.new()
+    if result.unwrap(csv.record(text, 0, dialect(44, false), true, mut fields)) != Record(12) || list.len(fields) != 2 {
+        return false
+    }
+    let first = fields[0]
+    let raw = list.slice(text, first.span.start, first.span.end)
+    let mut out = string.new()
+    let Error(NotUtf8(at)) = csv.field_text(text, first, mut out) else {
+        return false
+    }
+    raw == result.unwrap(b"x09A\xb4\x1c") && !first.quoted && at == 4
+}
+
+// C4. Go src/encoding/csv/reader_test.go:360-362 (EvenQuotes), csv.md, Field.
+// Mutant: include the outer quotes or collapse a pair in the raw field span.
+// expect: run raw_quoted_span() = true
+fn raw_quoted_span() -> bool {
+    let text = result.unwrap(b"x,\"\"\"\"\"\"\"\"")
+    let mut fields: List[csv.Field] = list.new()
+    let next = result.unwrap(csv.record(text, 0, dialect(44, false), true, mut fields))
+    next == Record(10) && list.len(fields) == 2 && fields[1] == csv.Field(span: http1.Span(start: 3, end: 9), quoted: true)
+}
+
+fn bad_read_delimiter(delimiter: u8) -> bool {
+    let mut fields: List[csv.Field] = list.new()
+    result.unwrap(csv.record(result.unwrap(b"a\n"), 0, dialect(delimiter, false), true, mut fields)) == End
+}
+
+// C4. BadComma1, Go src/encoding/csv/reader_test.go:373-375.
+// Deviation: an invalid dialect causes Fail. Mutant: accept LF as delimiter.
+// expect: run bad_read_lf() = fail Fail
+fn bad_read_lf() -> bool {
+    bad_read_delimiter(10)
+}
+
+// C4. BadComma2, Go src/encoding/csv/reader_test.go:377-379.
+// Deviation: an invalid dialect causes Fail. Mutant: accept CR as delimiter.
+// expect: run bad_read_cr() = fail Fail
+fn bad_read_cr() -> bool {
+    bad_read_delimiter(13)
+}
+
+// C4. BadComma3, Go src/encoding/csv/reader_test.go:381-383.
+// Deviation: an invalid dialect causes Fail. Mutant: accept quote as delimiter.
+// expect: run bad_read_quote() = fail Fail
+fn bad_read_quote() -> bool {
+    bad_read_delimiter(34)
+}
+
+// C4. BadComma4, Go src/encoding/csv/reader_test.go:385-387.
+// Deviation: RuneError cannot be passed as a byte. Use the first non-ASCII byte.
+// Mutant: accept non-ASCII delimiters.
+// expect: run bad_read_non_ascii() = fail Fail
+fn bad_read_non_ascii() -> bool {
+    bad_read_delimiter(128)
+}
+
+// C5. Go src/encoding/csv/writer_test.go:14-50 (writeTests), and csv.md, Decisions.
+// Mutant: omit quotes for a field containing a lone CR.
+// expect: run go_writer() = true
+fn go_writer() -> bool {
+    // writer_test.go:21.
+    if !write_is(fixture_rows("abc␟␞"), dialect(44, false), "abc\n") {
+        return false
+    }
+    // writer_test.go:22.
+    if !write_is(fixture_rows("abc␟␞"), dialect(44, true), "abc\r\n") {
+        return false
+    }
+    // writer_test.go:23.
+    if !write_is(fixture_rows("\"abc\"␟␞"), dialect(44, false), "\"\"\"abc\"\"\"\n") {
+        return false
+    }
+    // writer_test.go:24.
+    if !write_is(fixture_rows("a\"b␟␞"), dialect(44, false), "\"a\"\"b\"\n") {
+        return false
+    }
+    // writer_test.go:25.
+    if !write_is(fixture_rows("\"a\"b\"␟␞"), dialect(44, false), "\"\"\"a\"\"b\"\"\"\n") {
+        return false
+    }
+    // writer_test.go:26. Deviation: leading space stays unquoted.
+    if !write_is(fixture_rows(" abc␟␞"), dialect(44, false), " abc\n") {
+        return false
+    }
+    // writer_test.go:27.
+    if !write_is(fixture_rows("abc,def␟␞"), dialect(44, false), "\"abc,def\"\n") {
+        return false
+    }
+    // writer_test.go:28.
+    if !write_is(fixture_rows("abc␟def␟␞"), dialect(44, false), "abc,def\n") {
+        return false
+    }
+    // writer_test.go:29.
+    if !write_is(fixture_rows("abc␟␞def␟␞"), dialect(44, false), "abc\ndef\n") {
+        return false
+    }
+    // writer_test.go:30.
+    if !write_is(fixture_rows("abc\ndef␟␞"), dialect(44, false), "\"abc\ndef\"\n") {
+        return false
+    }
+    // writer_test.go:31. Deviation: preserve LF inside the quoted field in CRLF mode.
+    if !write_is(fixture_rows("abc\ndef␟␞"), dialect(44, true), "\"abc\ndef\"\r\n") {
+        return false
+    }
+    // writer_test.go:32. Deviation: preserve CR inside the quoted field in CRLF mode.
+    if !write_is(fixture_rows("abc\rdef␟␞"), dialect(44, true), "\"abc\rdef\"\r\n") {
+        return false
+    }
+    // writer_test.go:33.
+    if !write_is(fixture_rows("abc\rdef␟␞"), dialect(44, false), "\"abc\rdef\"\n") {
+        return false
+    }
+    // writer_test.go:34. Deviation: quote a sole empty field to distinguish an empty record.
+    if !write_is(fixture_rows("␟␞"), dialect(44, false), "\"\"\n") {
+        return false
+    }
+    // writer_test.go:35.
+    if !write_is(fixture_rows("␟␟␞"), dialect(44, false), ",\n") {
+        return false
+    }
+    // writer_test.go:36.
+    if !write_is(fixture_rows("␟␟␟␞"), dialect(44, false), ",,\n") {
+        return false
+    }
+    // writer_test.go:37.
+    if !write_is(fixture_rows("␟␟a␟␞"), dialect(44, false), ",,a\n") {
+        return false
+    }
+    // writer_test.go:38.
+    if !write_is(fixture_rows("␟a␟␟␞"), dialect(44, false), ",a,\n") {
+        return false
+    }
+    // writer_test.go:39.
+    if !write_is(fixture_rows("␟a␟a␟␞"), dialect(44, false), ",a,a\n") {
+        return false
+    }
+    // writer_test.go:40.
+    if !write_is(fixture_rows("a␟␟␟␞"), dialect(44, false), "a,,\n") {
+        return false
+    }
+    // writer_test.go:41.
+    if !write_is(fixture_rows("a␟␟a␟␞"), dialect(44, false), "a,,a\n") {
+        return false
+    }
+    // writer_test.go:42.
+    if !write_is(fixture_rows("a␟a␟␟␞"), dialect(44, false), "a,a,\n") {
+        return false
+    }
+    // writer_test.go:43.
+    if !write_is(fixture_rows("a␟a␟a␟␞"), dialect(44, false), "a,a,a\n") {
+        return false
+    }
+    // writer_test.go:44. Deviation: backslash-dot stays unquoted.
+    if !write_is(fixture_rows("\\.␟␞"), dialect(44, false), "\\.\n") {
+        return false
+    }
+    // writer_test.go:47.
+    if !write_is(fixture_rows("a␟a␟␟␞"), dialect(124, false), "a|a|\n") {
+        return false
+    }
+    // writer_test.go:48.
+    if !write_is(fixture_rows(",␟,␟␟␞"), dialect(124, false), ",|,|\n") {
+        return false
+    }
+    // Go writer_test.go:45-46 exercise non-UTF-8 Go strings, outside the String API.
+    // RFC 4180, csv.md, Grammar: a CR by itself still triggers quoting.
+    if !write_is(fixture_rows("\r␟␞"), dialect(44, false), "\"\r\"\n") {
+        return false
+    }
+    true
+}
+
+// C5. Go src/encoding/csv/writer_test.go:49.
+// Deviation: writer reports an invalid dialect as Fail at construction.
+// Mutant: accept a quote as the field delimiter.
+// expect: run bad_write_delimiter() = fail Fail
+fn bad_write_delimiter() -> bool {
+    let mut w = csv.writer(dialect(34, false))
+    let mut out = string.new()
+    result.unwrap(csv.field(mut w, mut out, "foo"))
+    false
+}

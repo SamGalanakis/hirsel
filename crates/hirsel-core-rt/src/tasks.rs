@@ -161,6 +161,49 @@ pub struct Task {
     /// How far the result's cleanup has got.
     cursor: u64,
 }
+#[derive(Clone, Copy, Eq)]
+struct ReadyToken(u64);
+impl PartialEq for ReadyToken {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        ROUTE_WORK.set(ROUTE_WORK.get() + 1);
+        self.0 == other.0
+    }
+}
+impl std::hash::Hash for ReadyToken {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        #[cfg(test)]
+        ROUTE_WORK.set(ROUTE_WORK.get() + 1);
+        self.0.hash(state);
+    }
+}
+#[cfg(test)]
+thread_local! {
+    static ROUTE_WORK: Local<usize> = const { Local::new(0) };
+    static ROUTE_WAKES: Local<usize> = const { Local::new(0) };
+}
+
+#[derive(Default)]
+struct Parked {
+    live: std::collections::HashMap<
+        ReadyToken,
+        *mut Task,
+        std::hash::BuildHasherDefault<std::hash::DefaultHasher>,
+    >,
+}
+impl Parked {
+    fn insert(&mut self, token: u64, task: *mut Task) {
+        self.live.insert(ReadyToken(token), task);
+    }
+    fn take(&mut self, token: u64) -> Option<*mut Task> {
+        self.live.remove(&ReadyToken(token))
+    }
+    #[cfg(test)]
+    fn peek(&self, token: u64) -> Option<*mut Task> {
+        self.live.get(&ReadyToken(token)).copied()
+    }
+}
+
 struct Scheduler {
     deferred: *mut Task,
     deferred_tail: *mut Task,
@@ -185,6 +228,7 @@ struct Scheduler {
     blocked: usize,
     taped: bool,
     net: *mut hirsel_core_net::Sockets,
+    parked: Parked,
 }
 const HOST_STACK_BYTES: usize = 64 << 10;
 impl Task {
@@ -378,27 +422,17 @@ impl Scheduler {
                 }
             }
             if self.readies.pending.swap(false, Ordering::Acquire) {
-                let mut tokens = std::mem::take(&mut *self.readies.lock());
-                // Readies of one token in one turn are one wake, at its first
-                // ready; wakes run in the order the readies arrived.
-                let mut at = 0;
-                while at < tokens.len() {
-                    if tokens[..at].contains(&tokens[at]) {
-                        tokens.remove(at);
-                    } else {
-                        at += 1;
+                let tokens = std::mem::take(&mut *self.readies.lock());
+                // Deactivate the whole turn before callbacks: a resume can repark
+                // the same operation, but a duplicate from this turn cannot wake it again.
+                let mut ready = Vec::new();
+                for token in tokens {
+                    if let Some(task) = self.parked.take(token) {
+                        ready.push(task);
                     }
                 }
-                for token in tokens {
-                    let mut task = self.all;
-                    while !task.is_null() {
-                        let operation = (*task).operation;
-                        if !operation.is_null() && (*operation).token == token {
-                            self.wake_operation(task, Wake::Ready);
-                            break;
-                        }
-                        task = (*task).all;
-                    }
+                for task in ready {
+                    self.wake_operation(task, Wake::Ready);
                 }
             }
             if self.timers.is_null() {
@@ -538,29 +572,24 @@ impl Scheduler {
             None => {
                 // A closed replay cannot await host readiness. An input that
                 // cannot make progress at this coordinate is a schedule fault.
-                let mut task = self.all;
-                // SAFETY: the scheduler owns its task list while idle.
-                unsafe {
-                    while !task.is_null() {
-                        if let Some(group) = (*task).group
-                            && group.replaying()
-                            && (*task).state == State::Provider
-                        {
-                            group.fail();
-                            self.tape_inputs();
-                            return;
+                if self.taped {
+                    let mut task = self.all;
+                    // SAFETY: idle owns the task list; only taped runs need replay-input diagnosis.
+                    unsafe {
+                        while !task.is_null() {
+                            if let Some(group) = (*task).group
+                                && group.replaying()
+                                && (*task).state == State::Provider
+                            {
+                                group.fail();
+                                self.tape_inputs();
+                                return;
+                            }
+                            task = (*task).all;
                         }
-                        task = (*task).all;
                     }
                 }
-                let mut task = self.all;
-                // SAFETY: idle owns the task list and no task is running.
-                let provider = unsafe {
-                    while !task.is_null() && (*task).state != State::Provider {
-                        task = (*task).all;
-                    }
-                    !task.is_null()
-                };
+                let provider = !self.parked.live.is_empty();
                 if self.head.is_null() && self.deferred.is_null() && !provider {
                     crate::process::stop(b"Deadlock");
                 }
@@ -576,6 +605,7 @@ impl Scheduler {
     unsafe fn runnable(&mut self, task: *mut Task, next: Next) {
         // SAFETY: the task is parked; its operation frame is pinned.
         unsafe {
+            self.parked.take((*(*task).operation).token);
             self.remove_timer(task);
             (*(*task).operation).phase = Phase::Runnable;
             (*(*task).operation).next = next;
@@ -592,6 +622,10 @@ impl Scheduler {
         // operation frame lives on the parked task's stack until it delivers.
         unsafe {
             debug_assert!(CURRENT.get().is_null());
+            #[cfg(test)]
+            if wake == Wake::Ready {
+                ROUTE_WAKES.set(ROUTE_WAKES.get() + 1);
+            }
             // A request that may not take effect now changes nothing: no wait,
             // no abort, no issue skipped. It stays pending for the task's next
             // cancellation point (CONC-7, FAIL-11, CONC-8).
@@ -631,6 +665,7 @@ impl Scheduler {
                     match w.kind {
                         WAIT_READY => {
                             if (*op).phase == Phase::Entry {
+                                self.parked.take(token);
                                 (*op).phase = Phase::Runnable;
                                 (*op).next = Next::Issue;
                                 return true;
@@ -652,6 +687,7 @@ impl Scheduler {
                         }
                         _ => crate::process::stop(b"Provider"),
                     }
+                    self.parked.insert(token, task);
                     if wake == Wake::Parked {
                         self.settle(task);
                     }
@@ -687,6 +723,7 @@ impl Scheduler {
             match step.kind {
                 STEP_DONE => self.runnable(task, Next::Deliver(step.outcome)),
                 STEP_PENDING => {
+                    self.parked.insert((*(*task).operation).token, task);
                     self.remove_timer(task);
                     (*(*task).operation).deadline = step.deadline_ns;
                     if step.deadline_ns != 0 {
@@ -1171,6 +1208,9 @@ unsafe fn park_operation(task: *mut Task) {
     // SAFETY: the active task switches to its scheduler, which reads the
     // operation before any other task runs.
     unsafe {
+        (*(*task).run)
+            .parked
+            .insert((*(*task).operation).token, task);
         (*task).state = State::Provider;
         hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle);
     }
@@ -1642,6 +1682,7 @@ pub unsafe fn run_root(
         blocked: 0,
         taped: false,
         net: ptr::null_mut(),
+        parked: Parked::default(),
     };
     let registered = Registered(run.readies.clone());
     WAITERS
@@ -2109,5 +2150,266 @@ pub(crate) unsafe fn host_operation(
 impl Drop for Task {
     fn drop(&mut self) {
         crate::peak::deallocated((self as *const Self).cast());
+    }
+}
+
+#[cfg(test)]
+mod ready_routing_laws {
+    use super::*;
+    use crate::provider::*;
+    use std::{io::Write, os::unix::net::UnixStream};
+    unsafe extern "C" fn no_drop(_: *mut Context, _: *mut u8) -> u8 {
+        0
+    }
+    unsafe extern "C" fn no_body(_: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
+        0
+    }
+    unsafe extern "C" fn wait(_: *mut u8, _: *mut Request, _: u64) -> Wait {
+        Wait::default()
+    }
+    unsafe extern "C" fn resume(state: *mut u8, _: *mut Request, _: u64) -> Step {
+        // SAFETY: the fixture pins its two counters until every callback ends.
+        unsafe {
+            (*state.cast::<[usize; 2]>())[0] += 1;
+        }
+        Step::default()
+    }
+    unsafe extern "C" fn deliver(state: *mut u8, _: *mut Request, outcome: Outcome) -> Outcome {
+        // SAFETY: as resume.
+        unsafe {
+            (*state.cast::<[usize; 2]>())[1] += 1;
+        }
+        outcome
+    }
+    unsafe extern "C" fn abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
+        Outcome::default()
+    }
+    #[test]
+    fn ready_routes_one_and_work_is_independent_of_parked_count() {
+        for n in [3, 10_000] {
+            let mut counters = [0usize; 2];
+            let provider = Provider {
+                state: counters.as_mut_ptr().cast(),
+                wait,
+                issue: resume,
+                resume,
+                abort,
+                deliver,
+            };
+            let mut request = Request {
+                operation: RECV,
+                mode: 0,
+                handle: 0,
+                path: ptr::null(),
+                path_len: 0,
+                buffer: Buffer {
+                    data: ptr::null_mut(),
+                    len: 0,
+                    capacity: 0,
+                },
+                site: 0,
+            };
+            let mut run = Scheduler {
+                deferred: ptr::null_mut(),
+                deferred_tail: ptr::null_mut(),
+                host: None,
+                idle: ptr::null_mut(),
+                head: ptr::null_mut(),
+                tail: ptr::null_mut(),
+                timers: ptr::null_mut(),
+                all: ptr::null_mut(),
+                next: 1,
+                provider: SchedulerProvider::default(),
+                readies: Readies::new(),
+                cancels: Vec::new(),
+                outside_cancels: Vec::new(),
+                blocked: 0,
+                taped: false,
+                net: ptr::null_mut(),
+                parked: Parked::default(),
+            };
+            let mut context = Context::new(1 << 20);
+            let layout = ValueLayout {
+                bytes: 0,
+                align: 1,
+                logical: 0,
+                drop: no_drop,
+            };
+            let mut operations: Vec<_> = (0..n)
+                .map(|i| Operation {
+                    provider,
+                    request: &mut request,
+                    token: i as u64 + 1,
+                    phase: Phase::Issued,
+                    deadline: 0,
+                    next: Next::Issue,
+                    entered: None,
+                })
+                .collect();
+            let mut tasks: Vec<_> = (0..n)
+                .map(|i| {
+                    Box::new(Task {
+                        arc_gate: AtomicBool::new(false),
+                        recorded_refunds: AtomicBool::new(false),
+                        refunds: None,
+                        polls_left: POLLS_PER_TURN,
+                        context: &mut context,
+                        owned_context: None,
+                        run: &mut run,
+                        ready: ptr::null_mut(),
+                        timer_next: ptr::null_mut(),
+                        timer_deadline: None,
+                        operation: &mut operations[i],
+                        all: ptr::null_mut(),
+                        state: State::Provider,
+                        id: i as u64,
+                        group: None,
+                        stack: Stack::new(),
+                        sp: ptr::null_mut(),
+                        body: no_body,
+                        input: Storage::new(0, 1),
+                        result: Storage::new(0, 1),
+                        layout: TaskLayout {
+                            input: layout,
+                            result: layout,
+                        },
+                        failed: 0,
+                        record: None,
+                    })
+                })
+                .collect();
+            for i in 0..n - 1 {
+                tasks[i].all = &mut *tasks[i + 1];
+            }
+            run.all = &mut *tasks[0];
+            let mut sockets = hirsel_core_net::Sockets::default();
+            let mut keys = Vec::new();
+            let mut peers = Vec::new();
+            for (i, task) in tasks.iter_mut().enumerate() {
+                run.parked.insert(i as u64 + 1, &mut **task);
+                let (socket, peer) = UnixStream::pair().unwrap();
+                socket.set_nonblocking(true).unwrap();
+                let key = sockets.insert(socket.into()).unwrap();
+                sockets.arm(key, false, i as u64 + 1).unwrap();
+                keys.push(key);
+                peers.push(peer);
+            }
+            run.net = &mut sockets;
+            assert!(run.parked.peek(1).is_some());
+            let selected = if n == 3 { 1 } else { n - 1 };
+            peers[selected].write_all(b"x").unwrap();
+            ROUTE_WORK.set(0);
+            ROUTE_WAKES.set(0);
+            // SAFETY: task/operation frames and callback storage are pinned; no fiber runs.
+            unsafe {
+                run.take_wakes();
+            }
+            let work = ROUTE_WORK.get();
+            println!(
+                "ready_routes_one parked={n} route_key_operations={work} wakes={} resumes={}",
+                ROUTE_WAKES.get(),
+                counters[0]
+            );
+            assert_eq!(counters[0], 1);
+            assert_eq!(ROUTE_WAKES.get(), 1);
+            assert_eq!(run.head, &mut *tasks[selected] as *mut Task);
+            for (i, task) in tasks.iter().enumerate() {
+                assert!(
+                    task.state
+                        == if i == selected {
+                            State::Ready
+                        } else {
+                            State::Provider
+                        }
+                );
+            }
+            if let Next::Deliver(outcome) = operations[selected].next {
+                // SAFETY: selected operation's task is now runnable for this one delivery.
+                unsafe {
+                    (provider.deliver)(provider.state, &mut request, outcome);
+                }
+            } else {
+                panic!("the ready operation did not deliver");
+            }
+            assert_eq!(counters, [1, 1]);
+            assert_eq!(run.parked.live.len(), n - 1, "entry_kept_after_wake");
+            assert!(
+                work <= 8,
+                "ready routing scanned parked tasks: {work} for {n}"
+            );
+            if n == 3 {
+                // First-arrival dedup and absent tokens are resolved before any resume.
+                for token in [2, 1, 1, 3, u64::MAX] {
+                    run.readies.push(token);
+                }
+                unsafe {
+                    run.take_wakes();
+                }
+                assert_eq!(ROUTE_WAKES.get(), 3, "dedup_dropped");
+                assert_eq!(counters[0], 3);
+                assert!(run.parked.live.is_empty());
+                for i in [0, 2] {
+                    if let Next::Deliver(outcome) = operations[i].next {
+                        unsafe {
+                            (provider.deliver)(provider.state, &mut request, outcome);
+                        }
+                    }
+                }
+                assert_eq!(counters, [3, 3]);
+                unsafe { while !run.pop().is_null() {} }
+                let stale = ((keys[0] >> 34) << 32) | u64::from((keys[0] >> 2) as u32);
+                sockets.release(keys[0]);
+                let (socket, mut peer) = UnixStream::pair().unwrap();
+                socket.set_nonblocking(true).unwrap();
+                let replacement = sockets.insert(socket.into()).unwrap();
+                assert_eq!((keys[0] >> 2) as u32, (replacement >> 2) as u32);
+                assert!(replacement >> 34 > keys[0] >> 34);
+                operations[0].token = 4;
+                operations[0].phase = Phase::Issued;
+                tasks[0].state = State::Provider;
+                run.parked.insert(4, &mut *tasks[0]);
+                sockets.arm(replacement, false, 4).unwrap();
+                sockets
+                    .dispatch(stale, libc::EPOLLIN as u32, |token| run.readies.push(token))
+                    .unwrap();
+                unsafe {
+                    run.take_wakes();
+                }
+                assert_eq!(ROUTE_WAKES.get(), 3, "route_ignores_generation");
+                assert_eq!(run.parked.live.len(), 1);
+                peer.write_all(b"new").unwrap();
+                unsafe {
+                    run.take_wakes();
+                }
+                assert_eq!(ROUTE_WAKES.get(), 4);
+                assert_eq!(counters[0], 4);
+                assert!(run.parked.live.is_empty());
+            } else {
+                ROUTE_WORK.set(0);
+                for token in 1..=n as u64 {
+                    run.readies.push(token);
+                    run.readies.push(token);
+                }
+                unsafe {
+                    run.take_wakes();
+                }
+                println!(
+                    "ready_dedup tokens={} route_key_operations={}",
+                    2 * n,
+                    ROUTE_WORK.get()
+                );
+                assert_eq!(
+                    ROUTE_WAKES.get(),
+                    n,
+                    "linear dedup wakes each parked operation once"
+                );
+                assert_eq!(counters[0], n);
+                assert!(run.parked.live.is_empty());
+                assert!(
+                    ROUTE_WORK.get() <= 16 * n,
+                    "wide-turn dedup must do linear key work"
+                );
+            }
+        }
     }
 }

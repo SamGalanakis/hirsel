@@ -1,0 +1,9 @@
+// Native NET-7 fixture for half-close, drain and the absolute composite deadline.
+pub fn probe(n: Net, c: Clock) -> Result[(), std.net.FinishError] waits {
+    let socket = match host.connect(n, Addr(ip: V4(0x7f000001), port: 18091), Never) {
+        Ok(take s) => take s,
+        Error(error) => return Error(Network(error))
+    }
+    let (r, w) = net.split(take socket)
+    std.net.finish(take w, take r, c, host.mono_ns(c) + 1000000000)
+}

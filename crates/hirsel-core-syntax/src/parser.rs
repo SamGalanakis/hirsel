@@ -289,8 +289,8 @@ impl Parser<'_> {
         required: &str,
         message: impl Into<String>,
     ) -> Parsed<T> {
-        if self.leading_binary() {
-            return self.fail("LANG-4", self.binary_continuation_message());
+        if self.newline() && line_continuation(self.word(0)) {
+            return self.fail("LANG-4", "this position cannot continue across a newline");
         }
         let declared = if self.eof() {
             "end of file"
@@ -334,22 +334,17 @@ impl Parser<'_> {
             },
         )
     }
-    fn leading_binary(&self) -> bool {
-        self.newline()
-            && matches!(continuation(self.word(0)), Some(Continuation::Binary(..)))
-            && !PREFIX.contains(&self.word(0))
-    }
-    fn binary_continuation_message(&self) -> String {
-        format!(
-            "put `{}` at the end of the previous line so the expression continues",
-            self.text_token(self.index())
-        )
-    }
     fn newline(&self) -> bool {
         self.token(0).line_before
     }
     fn continuing(&self) -> bool {
         self.whitespace > 0 || !self.newline()
+    }
+    fn bare_exit(&self, node: NodeId) -> bool {
+        matches!(
+            self.tree.node(node).kind,
+            NodeKind::Return | NodeKind::Break | NodeKind::Continue
+        ) && self.tree.children(node).is_empty()
     }
     #[inline(always)]
     fn node(
@@ -653,10 +648,17 @@ impl Parser<'_> {
             c.push(self.node(st, NodeKind::Fields, None, &fields));
         } else if self.eat(sym::EQ) {
             let st = self.pos;
+            if self.at(sym::PIPE) {
+                return self.fail(
+                    "LANG-4",
+                    "a variant list needs its first variant before `|`",
+                );
+            }
             // LANG-9: a single bare name aliases; payload parentheses or | makes a variant.
             if (self.at(sym::REMOVED) && self.token(1).kind == TokenKind::Ident)
                 || (self.token(0).kind == TokenKind::Ident
-                    && matches!(self.word(1), sym::LPAREN | sym::PIPE))
+                    && (self.word(1) == sym::PIPE
+                        || (self.word(1) == sym::LPAREN && !self.token(1).line_before)))
             {
                 let mut vs: Nodes = smallvec![self.variant()?];
                 while self.eat(sym::PIPE) {
@@ -719,7 +721,7 @@ impl Parser<'_> {
         let n = self.name()?;
         let mut c: Nodes = smallvec![];
         let mut labelled = None;
-        if self.eat(sym::LPAREN) {
+        if self.continuing() && self.eat(sym::LPAREN) {
             c = self.list(sym::RPAREN, |p| {
                 let st = p.pos;
                 let label = if p.token(0).kind == TokenKind::Ident && p.word(1) == sym::COLON {
@@ -805,7 +807,7 @@ impl Parser<'_> {
             }
             let n = self.bump();
             c.push(self.node(st, NodeKind::BoundName, Some(n), &[]));
-            if !self.eat(sym::PLUS) {
+            if !self.continuing() || !self.eat(sym::PLUS) {
                 break;
             }
         }
@@ -954,9 +956,15 @@ impl Parser<'_> {
     }
     #[inline(always)]
     fn path(&mut self, kind: NodeKind) -> Parsed<NodeId> {
+        self.path_inner(kind, false)
+    }
+    fn path_inner(&mut self, kind: NodeKind, expression: bool) -> Parsed<NodeId> {
         let s = self.pos;
         let n = self.name()?;
-        while self.continuing() && self.at(sym::DOT) && self.token(1).kind == TokenKind::Ident {
+        while (self.continuing() || expression)
+            && self.at(sym::DOT)
+            && self.token(1).kind == TokenKind::Ident
+        {
             self.resolution_size.path_extra += 1;
             self.bump();
             self.name()?;
@@ -1050,17 +1058,14 @@ impl Parser<'_> {
                 &c,
             ));
         }
-        if self.leading_binary() {
-            return self.fail("LANG-4", self.binary_continuation_message());
-        }
-        if matches!(
-            self.word(0),
-            sym::PLUS | sym::STAR | sym::SLASH | sym::PERCENT | sym::DOT | sym::QUESTION
-        ) {
-            return self.fail("LANG-4", "continuation after a complete statement");
+        if line_continuation(self.word(0)) || ASSIGN.contains(&self.word(0)) {
+            return self.fail("LANG-4", "a continuation token cannot start a statement");
         }
         let e = self.expr(0)?;
-        if self.continuing() && ASSIGN.contains(&self.word(0)) {
+        if ASSIGN.contains(&self.word(0)) {
+            if self.newline() && self.bare_exit(e) {
+                return self.fail("LANG-4", "a bare exit is complete at its newline");
+            }
             let op = self.bump();
             let v = self.required(|p| p.expr(0))?;
             self.end(false)?;
@@ -1086,7 +1091,10 @@ impl Parser<'_> {
         let mut left = self.primary()?;
         let mut nonassoc = None;
         let mut placed = false;
-        while self.continuing() {
+        while self.continuing() || line_continuation(self.word(0)) {
+            if self.newline() && self.bare_exit(left) {
+                return self.fail("LANG-4", "a bare exit is complete at its newline");
+            }
             let Some(next) = continuation(self.word(0)) else {
                 break;
             };
@@ -1189,7 +1197,7 @@ impl Parser<'_> {
             return Ok(self.node(s, NodeKind::Literal, Some(t), &[]));
         }
         if self.token(0).kind == TokenKind::Ident {
-            return self.path(NodeKind::Path);
+            return self.path_inner(NodeKind::Path, true);
         }
 
         self.compound_primary()
@@ -1485,7 +1493,7 @@ impl Parser<'_> {
         {
             let t = self.bump();
             let left = self.node(s, NodeKind::LiteralPattern, Some(t), &[]);
-            if self.eat(sym::DOTDOTEQ) {
+            if self.continuing() && self.eat(sym::DOTDOTEQ) {
                 let right = self.pattern()?;
                 return Ok(self.node(s, NodeKind::RangePattern, None, &[left, right]));
             }
@@ -1493,7 +1501,7 @@ impl Parser<'_> {
         }
         let p = self.path(NodeKind::Path)?;
         let name = self.tree.node(p).token;
-        if self.eat(sym::LPAREN) {
+        if self.continuing() && self.eat(sym::LPAREN) {
             let mut rest = false;
             let mut c: Nodes = smallvec![p];
             c.extend(self.list(sym::RPAREN, |p| {

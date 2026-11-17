@@ -31,36 +31,39 @@ fn formatted(text: &str, mode: ParseMode) -> String {
             .collect::<Vec<_>>()
     };
     assert_eq!(tokens(text), tokens(&output));
-    let shape = |p: &ParseOutput| {
-        p.syntax
-            .items()
-            .map(|i| {
-                (
-                    i.root.0 - i.range.nodes.start,
-                    i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
-                        .iter()
-                        .flat_map(|n| {
-                            i.tree.edges[n.children.start as usize..n.children.end as usize]
-                                .iter()
-                                .map(|x| x.0 - i.range.nodes.start)
-                        })
-                        .collect::<Vec<_>>(),
-                    i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
-                        .iter()
-                        .map(|n| {
-                            (
-                                n.kind,
-                                n.token.map(|t| i.tree.token_text(&i.text, t).to_owned()),
-                                (n.children.end - n.children.start),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
     assert_eq!(shape(&p), shape(&q));
     output
+}
+
+type NodeShape = (NodeKind, Option<String>, u32);
+type ItemShape = (u32, Vec<u32>, Vec<NodeShape>);
+fn shape(p: &ParseOutput) -> Vec<ItemShape> {
+    p.syntax
+        .items()
+        .map(|i| {
+            (
+                i.root.0 - i.range.nodes.start,
+                i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
+                    .iter()
+                    .flat_map(|n| {
+                        i.tree.edges[n.children.start as usize..n.children.end as usize]
+                            .iter()
+                            .map(|x| x.0 - i.range.nodes.start)
+                    })
+                    .collect::<Vec<_>>(),
+                i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
+                    .iter()
+                    .map(|n| {
+                        (
+                            n.kind,
+                            n.token.map(|t| i.tree.token_text(&i.text, t).to_owned()),
+                            (n.children.end - n.children.start),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>()
 }
 
 #[test]
@@ -133,6 +136,10 @@ fn formatter_preserves_comments_and_literal_bytes() {
         formatted(text, ParseMode::Source),
         "// header\n/// doc\nfn f() {\n    /* before */\n    let x = r##\"a\n  b\"##; // trailing\n    /* alone\n exact */\n    x /* inline */ + 1\n}\n// end\n"
     );
+    assert_eq!(
+        formatted("fn f() { a // continues\n + b }", ParseMode::Source),
+        "fn f() {\n    a // continues\n        + b\n}\n"
+    );
     formatted("fn f() { /* only */ }", ParseMode::Source);
     formatted("// only comment  ", ParseMode::Source);
     formatted(
@@ -203,10 +210,7 @@ fn lang_5_precedence_and_prog_7_relative_arenas() {
 #[test]
 fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
     for (text, rule) in [
-        (
-            include_str!("../../../core/front/cases/LANG-4-continuation.hirsel"),
-            "LANG-4",
-        ),
+        ("fn f() { return\n + a }\nfn next() {}", "LANG-4"),
         (
             include_str!("../../../core/front/cases/LANG-5-nonassociative.hirsel"),
             "LANG-5",
@@ -231,6 +235,158 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
                     .unwrap_or_else(|| panic!("next item hidden: {text} {:?}", p.diagnostics))
             ),
             "next"
+        );
+    }
+    let mut equivalents = Vec::new();
+    for op in [
+        "&&", "||", "==", "!=", "<", "<=", ">", ">=", "+", "*", "/", "%", "&", "|", "^", "<<",
+        ">>", "..", "..=",
+    ] {
+        equivalents.push((
+            format!("fn f() {{ a {op} b }}"),
+            format!("fn f() {{ a // next token continues\n\n /* comment */ {op} b }}"),
+        ));
+    }
+    for op in [
+        "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "|=", "^=",
+    ] {
+        equivalents.push((
+            format!("fn f() {{ x {op} a + b }}"),
+            format!("fn f() {{ x\n {op} a\n + b }}"),
+        ));
+    }
+    for (single, split) in [
+        ("fn f() { a.b.c }", "fn f() { a\n .b\n .c }"),
+        (
+            "fn f() { a().b.0?.c? }",
+            "fn f() { a()\n .b\n .0\n ?\n .c\n ? }",
+        ),
+        (
+            "fn f() { let y: u64 = a + b }",
+            "fn f() { let y: u64\n = a\n + b }",
+        ),
+        (
+            "fn f() { match x { A => a + b, -1 => c } }",
+            "fn f() { match x { A => a\n + b\n -1 => c } }",
+        ),
+        ("type T = A | B(u64) | C", "type T = A\n | B(u64)\n | C"),
+        ("fn f() { return a + b }", "fn f() { return a\n + b }"),
+        (
+            "fn f() { loop { break 'l a + b } }",
+            "fn f() { loop { break 'l a\n + b } }",
+        ),
+        ("fn f() { if a && b {} }", "fn f() { if a\n && b {} }"),
+        ("fn f() { while a && b {} }", "fn f() { while a\n && b {} }"),
+        (
+            "fn f() { match x.kind { A => a } }",
+            "fn f() { match x\n .kind { A => a } }",
+        ),
+        ("fn f() { { a } + b * c }", "fn f() { { a }\n + b\n * c }"),
+        ("fn f() { a - b * c }", "fn f() { a -\n b\n * c }"),
+        (
+            "fn f() { a + b * c == d || e && f }",
+            "fn f() { a\n + b\n * c\n == d\n || e\n && f }",
+        ),
+        (
+            "fn f() {}\nfn g() { a + b }",
+            "fn f() {}\nfn g() { a\n + b }",
+        ),
+        ("fn f() { a + (b\n - c) }", "fn f() { a\n + (b\n - c) }"),
+        ("fn f() { a + b }", "fn f() { a /*\n*/ + b }"),
+        ("fn f() { a - b }", "fn f() { a - // required operand\n b }"),
+        ("fn f() { a + b }", "fn f() { a + // required operand\n b }"),
+        ("fn f() { let y = a + b }", "fn f() { let y\n = a\n + b }"),
+        ("type T { a: u64, b: u64 }", "type T { a: u64\n b: u64 }"),
+    ] {
+        equivalents.push((single.to_owned(), split.to_owned()));
+    }
+    let mut failures = Vec::new();
+    let equivalent_count = equivalents.len();
+    for (single, split) in equivalents {
+        let expected = parse(&single, ParseMode::Source);
+        assert!(
+            expected.diagnostics.is_empty(),
+            "{single}: {:?}",
+            expected.diagnostics
+        );
+        let actual = parse(&split, ParseMode::Source);
+        if !actual.diagnostics.is_empty() || shape(&actual) != shape(&expected) {
+            failures.push(format!("{split:?}: {:?}", actual.diagnostics));
+            continue;
+        }
+        let output = formatted(&split, ParseMode::Source);
+        assert_eq!(
+            shape(&parse(&output, ParseMode::Source)),
+            shape(&expected),
+            "{split}"
+        );
+    }
+    eprintln!(
+        "{equivalent_count} AST equivalence and formatter round-trip cases; {} failed",
+        failures.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} continuation cases failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    for next in ["-b", "!b", "~b", "(b)", "[b]", "{ b }"] {
+        let text = format!("fn f() {{ a\n {next} }}");
+        let p = parse(&text, ParseMode::Source);
+        assert!(p.diagnostics.is_empty(), "{text}: {:?}", p.diagnostics);
+        let item = p.syntax.item(0);
+        let block = *item.tree.children(item.root).last().unwrap();
+        assert_eq!(item.tree.children(block).len(), 2, "{text}");
+        formatted(&text, ParseMode::Source);
+    }
+    for exit in ["return", "break", "break 'l", "continue", "continue 'l"] {
+        for token in ["+", ".", "?", "=", "-=", "&&"] {
+            let text = format!("fn f() {{ {exit}\n {token} a }}");
+            let p = parse(&text, ParseMode::Source);
+            let start = text.find(token).unwrap() as u32;
+            assert!(
+                p.diagnostics.iter().any(|d| d.rule == "LANG-4"
+                    && d.primary.start == start
+                    && d.primary.end == start + token.len() as u32),
+                "{text}: {:?}",
+                p.diagnostics
+            );
+        }
+        let text = format!("fn f() {{ {exit}\n -a }}");
+        let p = parse(&text, ParseMode::Source);
+        assert!(p.diagnostics.is_empty(), "{text}: {:?}", p.diagnostics);
+        formatted(&text, ParseMode::Source);
+    }
+    for (source, site, rule) in [
+        ("fn f() { return\n + a }", "+", "LANG-4"),
+        ("fn f() { break\n .a }", ".", "LANG-4"),
+        ("fn f() { continue\n ? }", "?", "LANG-4"),
+        ("type T =\n | A", "|", "LANG-4"),
+        ("type T { a: u64\n + b: u64 }", "+", "LANG-4"),
+        ("type T { a: u64 = 1\n + 2 }", "+", "LANG-4"),
+        ("type T = A(u64)\n + B", "+", "LANG-4"),
+        ("type T = A(u64)\n .B", ".", "LANG-4"),
+        ("type T = A(u64) | B\n (u32)", "(u32)", "LANG-5"),
+        ("type T = A\n (u64)", "(u64)", "LANG-5"),
+        ("type T: plain\n + shareable {}", "+", "LANG-4"),
+        ("type T = X\n .Y", ".", "LANG-4"),
+        ("fn f() { match x { 1\n ..= 2 => a } }", "..=", "LANG-4"),
+        ("fn f() { match x { A\n (b) => a } }", "(b)", "LANG-5"),
+        ("fn f() {}\n + a", "+", "LANG-4"),
+        ("fn f() { a;\n + b }", "+", "LANG-4"),
+        ("fn f() { a < b\n < c }", "< c", "LANG-5"),
+        ("fn f() { match a\n + {} {} }", "{} {}", "LANG-5"),
+        ("fn f() { match x { a\n .b => c } }", ".", "LANG-4"),
+    ] {
+        let p = parse(source, ParseMode::Source);
+        let at = source.find(site).unwrap() as u32;
+        assert!(
+            p.diagnostics
+                .iter()
+                .any(|d| d.rule == rule && d.primary.start == at),
+            "{source}: {:?}",
+            p.diagnostics
         );
     }
     good("fn f() { let x =\n 1 +\n 2\n if true {}\n else {}\n x }\n");

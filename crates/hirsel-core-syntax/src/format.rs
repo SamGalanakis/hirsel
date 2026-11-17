@@ -134,7 +134,10 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
             out.push('\n');
         }
         if out.is_empty() || out.ends_with('\n') {
-            out.push_str(&"    ".repeat(indent));
+            let continued = !role.line_before
+                && (grammar::line_continuation(token.symbol)
+                    || grammar::ASSIGN.contains(&token.symbol));
+            out.push_str(&"    ".repeat(indent + usize::from(continued)));
         } else if previous.is_some_and(|(kind, before)| {
             comment || kind.is_trivia() || space(kind, before, token.kind, role)
         }) {

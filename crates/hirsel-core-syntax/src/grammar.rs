@@ -53,6 +53,15 @@ pub enum Continuation {
     Placement,
     Binary(u8, bool),
 }
+/// LANG-4's closed set for a complete expression at a newline. Assignment
+/// operators are handled only by the statement grammar, never by expressions.
+pub fn line_continuation(word: Symbol) -> bool {
+    word != sym::MINUS
+        && matches!(
+            continuation(word),
+            Some(Continuation::Binary(..) | Continuation::Projection | Continuation::Try)
+        )
+}
 #[inline]
 pub fn continuation(word: Symbol) -> Option<Continuation> {
     Some(match word {

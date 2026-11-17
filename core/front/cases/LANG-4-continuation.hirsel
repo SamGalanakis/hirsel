@@ -1,5 +1,8 @@
-// LANG-4: a newline ends a complete expression; + cannot start the next statement.
-// expect: refuse LANG-4 at 4:1
-fn f() { let x = 1
-+ 2 }
+// LANG-4: a leading operator continues a complete expression.
+// expect: accept
+fn f() {
+    let x: u64 = 1 // continues
+        + 2
+}
+
 fn next() {}

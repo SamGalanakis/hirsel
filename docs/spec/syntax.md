@@ -169,7 +169,7 @@ fn total(a: u64, b: u64) -> u64 {
   sum
 }
 ```
-```hirsel unbuilt
+```hirsel
 fn total(a: u64, b: u64, c: u64) -> u64 {
   let sum = a
     + b * c                                               // one statement: a + b * c
@@ -181,7 +181,7 @@ fn total(a: u64, b: u64, c: u64) -> u64 {
   }
 }
 ```
-```hirsel unbuilt
+```hirsel
 type Shape = Dot
   | Line(u64)
   | Box(u64, u64)                                         // one definition with three variants

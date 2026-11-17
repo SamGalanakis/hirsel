@@ -664,6 +664,18 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             LLVMDisposeErrorMessage(text); goto done;
         }
     }
+    if (!speed) {
+        // Exact Step versions join through private allocas. Finish SSA
+        // construction at O0 too, instead of retaining each temporary on the
+        // task stack. Keep the eager development pipeline identical.
+        LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+        LLVMErrorRef e = LLVMRunPasses(module, "function(mem2reg)", machine, options);
+        LLVMDisposePassBuilderOptions(options);
+        if (e) {
+            char *text = LLVMGetErrorMessage(e); error(out, text);
+            LLVMDisposeErrorMessage(text); goto done;
+        }
+    }
     LLVMAttributeRef probe = LLVMCreateStringAttribute(context, "probe-stack", 11, "inline-asm", 10);
     LLVMAttributeRef interval = LLVMCreateStringAttribute(context, "stack-probe-size", 16, "4096", 4);
     for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {

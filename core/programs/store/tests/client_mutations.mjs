@@ -10,6 +10,15 @@ function replace(text, from, to) {
   return text.replace(from,to);
 }
 export const controls = {
+  treat_as_superseded: ['history_unavailable_retires', text => replace(text,
+    "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.retire('LocallyUnknown'); continue; }",
+    "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.installation(async state => { const record = state.streams[this.stream]; record.next = pending.p + 1n; delete record.pending; await this.options.storage.write(state); this.record = structuredClone(record); this.finish({tag: 'LocallyUnknown'}); }); continue; }")],
+  drop_pending_answer: ['history_unavailable_retires', text => replace(text,
+    "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { await this.retire('LocallyUnknown'); continue; }",
+    "if (outcome.tag === 'Refused' && outcome.value.tag === 'HistoryUnavailable') { continue; }")],
+  retire_on_stale: ['history_unavailable_retires', text => replace(text,
+    'if (!pending || row.stream !== this.stream || row.p !== pending.p) continue;',
+    "if (row.stream === this.stream && row.outcome.tag === 'Refused' && row.outcome.value.tag === 'HistoryUnavailable' && (!pending || row.p !== pending.p)) { await this.retire('LocallyUnknown'); continue; }\n      if (!pending || row.stream !== this.stream || row.p !== pending.p) continue;")],
   no_directory: ['lost_stream_fences_generation', text => {
     text=replace(text,'if (!state || !intact(state)) {\n        const generation', 'if (!state) {\n        const generation');
     return replace(text,'if (state.streams[n].retired) continue;',

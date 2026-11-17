@@ -1,0 +1,326 @@
+// T1. CPython datetime.date.toordinal(), core/tools/time_reference.py:25-30.
+// Run with python3 -I core/tools/time_reference.py.
+// Mutant: use a common year for year 0 or a leap year for 1900.
+// expect: run days_and_inverse() = true
+fn days_and_inverse() -> bool {
+    let rows: Inline[(u16, u8, u8, i64), 42] =[
+    // Year 0 has 366 days: February 29 is 59 days after January 1, December 31 is 365.
+    (0, 1, 1, -719528), (0, 2, 29, -719469), (0, 12, 31, -719163),
+    // First Gregorian century and the first 400-year boundary.
+    (1, 1, 1, -719162), (99, 12, 31, -683004), (100, 1, 1, -683003), (100, 2, 28, -682945), (100, 3, 1, -682944), (399, 12, 31, -573432), (400, 1, 1, -573431), (400, 2, 29, -573372), (400, 3, 1, -573371), (401, 1, 1, -573065),
+    // Later 400-year boundaries and the Gregorian calendar reform.
+    (799, 12, 31, -427335), (800, 1, 1, -427334), (800, 2, 29, -427275), (1199, 12, 31, -281238), (1200, 1, 1, -281237), (1200, 2, 29, -281178), (1582, 10, 4, -141438), (1582, 10, 15, -141427), (1599, 12, 31, -135141), (1600, 1, 1, -135140), (1600, 2, 29, -135081),
+    // Non-leap centuries and the Unix epoch.
+    (1699, 12, 31, -98616), (1700, 3, 1, -98556), (1799, 12, 31, -62092), (1800, 3, 1, -62032), (1899, 12, 31, -25568), (1900, 2, 28, -25509), (1900, 3, 1, -25508), (1969, 12, 31, -1),
+    // Modern leap years and the upper bound.
+    (1970, 1, 1, 0), (1999, 12, 31, 10956), (2000, 1, 1, 10957), (2000, 2, 29, 11016), (2000, 3, 1, 11017), (2024, 2, 29, 19782), (2100, 3, 1, 47541), (2399, 12, 31, 157053), (2400, 1, 1, 157054), (9999, 12, 31, 2932896),]
+    for i in 0u64 .. 42 {
+        let (y, m, d, n) = rows[i]
+        let value = option.unwrap(time.date(y, m, d))
+        if time.days(value) != n || time.from_days(n) != Some(value) {
+            return false
+        }
+    }
+    time.date(1900, 2, 29) == None && time.date(2100, 2, 29) == None && time.date(10000, 1, 1) == None && time.date(2024, 0, 1) == None && time.date(2024, 1, 0) == None && time.date(2024, 4, 31) == None && time.from_days(-719529) == None && time.from_days(2932897) == None
+}
+
+// T2. CPython datetime.date.weekday(), core/tools/time_reference.py:25-30.
+// Run with python3 -I core/tools/time_reference.py.
+// 0000-01-01 is 366 days before Monday 0001-01-01, hence Saturday.
+// Mutant: use a signed remainder as the weekday index.
+// expect: run weekdays() = true
+fn weekdays() -> bool {
+    time.weekday(option.unwrap(time.date(0, 1, 1))) == Saturday && time.weekday(option.unwrap(time.date(1969, 12, 28))) == Sunday && time.weekday(option.unwrap(time.date(1970, 1, 1))) == Thursday && time.weekday(option.unwrap(time.date(2000, 1, 1))) == Saturday && time.weekday(option.unwrap(time.date(9999, 12, 31))) == Friday
+}
+
+fn stamp(secs: i64, nanos: u32) -> time.Timestamp {
+    option.unwrap(time.from_unix(secs, nanos))
+}
+
+fn parsed(text: String, secs: i64, nanos: u32, offset: i32) -> bool {
+    match time.parse_rfc3339(text) {
+        Ok((t, o)) => t == stamp(secs, nanos) && o == offset,
+        Error(_) => false,
+    }
+}
+
+fn invalid[T](r: Result[T, time.Error], at: u64) -> bool {
+    match r {
+        Error(Invalid(i)) => i == at,
+        _ => false,
+    }
+}
+
+fn out_of_range[T](r: Result[T, time.Error]) -> bool {
+    match r {
+        Error(Range) => true,
+        _ => false,
+    }
+}
+
+// T3. RFC 3339 section 5.8, rfc3339.txt:511-543. Whole seconds come from
+// CPython datetime.fromisoformat(...).timestamp() on whole-second inputs.
+// Mutant: apply the offset with the wrong sign.
+// expect: run rfc_examples() = true
+fn rfc_examples() -> bool {
+    // The two leap seconds are clamped to :59, as specified for std.time.
+    parsed("1985-04-12T23:20:50.52Z", 482196050, 520000000, 0) && parsed("1996-12-19T16:39:57-08:00", 851042397, 0, -480) && parsed("1990-12-31T23:59:60Z", 662687999, 0, 0) && parsed("1990-12-31T15:59:60-08:00", 662687999, 0, -480) && parsed("1937-01-01T12:00:27.87+00:20", -1041337173, 870000000, 20)
+}
+
+// T3. Go src/time/format_test.go:274,283 and jiff 0.2.43
+// src/fmt/temporal/parser.rs:1798-1825,2260-2271. Mutant: round excess digits or
+// admit leap seconds only at the end of a UTC day.
+// expect: run rfc_fraction_and_leap() = true
+fn rfc_fraction_and_leap() -> bool {
+    parsed("2010-02-04T21:00:57-08:00", 1265346057, 0, -480) && parsed("2010-02-04T21:00:57.012345678-08:00", 1265346057, 12345678, -480)
+    // Excess digits are read and dropped. Lowercase z and -00:00 also mean UTC.
+        && parsed("2024-06-01t01:02:03.123456789999z", 1717203723, 123456789, 0) && parsed("2024-06-01t01:02:03Z", 1717203723, 0, 0) && parsed("2024-06-01T01:02:03-00:00", 1717203723, 0, 0)
+    // jiff's bare clock snapshot is given the fixed date 2024-06-01 and Z.
+        && parsed("2024-06-01T01:02:60Z", 1717203779, 0, 0) && parsed("2016-12-31T23:59:60.123456789Z", 1483228799, 123456789, 0) && parsed("2017-01-01T00:59:60+01:00", 1483228799, 0, 60) && parsed("2024-01-01T12:00:60+05:00", 1704092459, 0, 300)
+}
+
+// T3. Go src/time/format_test.go:652-674. Hirsel uses byte positions in
+// place of Go's parse error strings and Range for a numeric field out of range.
+// Mutant: accept a prefix of an otherwise invalid timestamp or variable-width fields.
+// expect: run rfc_refusals() = true
+fn rfc_refusals() -> bool {
+    invalid(time.parse_rfc3339("2006-01-02T15:04:05Z07:00"), 20) && invalid(time.parse_rfc3339("2006-01-02T15:04_abc"), 16) && invalid(time.parse_rfc3339("2006-01-02T15:04:05_abc"), 19) && invalid(time.parse_rfc3339("2006-01-02T15:04:05Z_abc"), 20) && out_of_range(time.parse_rfc3339("2010-02-04T21:00:67.012345678-08:00")) && invalid(time.parse_rfc3339("0000-01-01T00:00:.0+00:00"), 17) && invalid(time.parse_rfc3339("\""), 0) && invalid(time.parse_rfc3339("0000-01-01T00:00:00+00:+0"), 23) && invalid(time.parse_rfc3339("0000-01-01T00:00:00+-0:00"), 20)
+    // Hand-indexed contract cases. The space is allowed by jiff and refused here.
+        && invalid(time.parse_rfc3339("2024-06-01 01:02:03Z"), 10) && invalid(time.parse_rfc3339("00-01-01T00:00:00Z"), 2) && invalid(time.parse_rfc3339("2000-01-01T00:00Z"), 16) && invalid(time.parse_rfc3339("2000-01-01T00:00:00.Z"), 20) && invalid(time.parse_rfc3339("2000-01-01T00:00:00Zé"), 20) && out_of_range(time.parse_rfc3339("2000-01-01T24:00:00Z")) && out_of_range(time.parse_rfc3339("2000-01-01T00:00:00+24:00")) && out_of_range(time.parse_rfc3339("2000-01-01T00:00:00-00:60")) && out_of_range(time.parse_rfc3339("2000-01-01T00:00:61Z")) && out_of_range(time.parse_rfc3339("2023-02-29T00:00:00Z")) && out_of_range(time.parse_rfc3339("0000-01-01T00:00:00+00:01")) && out_of_range(time.parse_rfc3339("9999-12-31T23:59:59-00:01"))
+}
+
+fn written(secs: i64, nanos: u32, offset: i32, digits: u8, expected: String) -> bool {
+    let mut out = string.new()
+    result.unwrap(time.push_rfc3339(mut out, stamp(secs, nanos), offset, digits))
+    out == expected
+}
+
+fn written_bound(secs: i64, nanos: u32, expected: String) -> bool {
+    let mut s = string.new()
+    let t = stamp(secs, nanos)
+    result.unwrap(time.push_rfc3339(mut s, t, 0, 9))
+    s == expected && parsed(s, secs, nanos, 0)
+}
+
+// T4. Go src/time/format_test.go:77-81, then hand-derived truncation and range
+// limits. Mutant: format a UTC clock with the local offset or round the fraction.
+// expect: run rfc_write() = true
+fn rfc_write() -> bool {
+    written(1221681866, 0, 0, 0, "2008-09-17T20:04:26Z") && written(779850266, 0, -300, 0, "1994-09-17T20:04:26-05:00") && written(977777706, 0, 260, 0, "2000-12-26T01:15:06+04:20") && written(0, 999999999, 0, 3, "1970-01-01T00:00:00.999Z") && written(0, 999999999, 0, 0, "1970-01-01T00:00:00Z") && written(0, 999999999, -1, 3, "1969-12-31T23:59:00.999-00:01") && written_bound(-62167219200, 0, "0000-01-01T00:00:00.000000000Z") && written_bound(253402300799, 999999999, "9999-12-31T23:59:59.999999999Z")
+}
+
+// T1/T4. RFC 3339 section 5.6, rfc3339.txt:415-438. Mutant: take an invalid date,
+// emit a variable-width field, or replace the caller's prefix.
+// expect: run full_date() = true
+fn full_date() -> bool {
+    let d = option.unwrap(time.date(0, 2, 29))
+    let mut s = "date="
+    result.unwrap(time.push_date(mut s, d))
+    s == "date=0000-02-29" && result.unwrap(time.parse_date("0000-02-29")) == d && time.year(d) == 0 && time.month(d) == 2 && time.day(d) == 29 && out_of_range(time.parse_date("2023-02-29")) && invalid(time.parse_date("2024-2-29"), 6) && invalid(time.parse_date("2024-02-29Z"), 10)
+}
+
+// T4. Hand-derived write contracts. Mutant: write a prefix before a failed
+// reserve or leave part of the timestamp after discovering a range error.
+// expect: run rfc_atomic() = true
+fn rfc_atomic() -> bool {
+    let mut s = "prefix"
+    let t = stamp(-62167219200, 0)
+    let range = time.push_rfc3339(mut s, t, -1, 3)
+    let cap = bound bytes 0 {
+        time.push_rfc3339(mut s, t, 0, 3)
+    }
+    let date_cap = bound bytes 0 {
+        time.push_date(mut s, option.unwrap(time.date(0, 1, 1)))
+    }
+    out_of_range(range) && s == "prefix" && (match cap {
+        Ok(Error(Capacity(_))) => true,
+        _ => false,
+    }) && (match date_cap {
+        Ok(Error(_)) => true,
+        _ => false,
+    })
+}
+
+// T4. The fraction width is at most nine. Mutant: accept ten as a width.
+// expect: run rfc_digit_bounds() = fail Bounds
+fn rfc_digit_bounds() -> bool {
+    let mut out = string.new()
+    result.unwrap(time.push_rfc3339(mut out, stamp(0, 0), 0, 10))
+    true
+}
+
+// T5. Go src/time/time_test.go:945-1005, all 43 parseDurationTests rows.
+// Mutant: require digits on both sides of a decimal point or accept only ASCII units.
+// expect: run duration_parse_units() = true
+fn duration_parse_units() -> bool {
+    let rows: Inline[(String, i64), 25] =[
+    // Zero and whole seconds.
+    ("0", 0), ("5s", 5000000000), ("30s", 30000000000), ("1478s", 1478000000000),
+    // Signed forms.
+    ("-5s", -5000000000), ("+5s", 5000000000), ("-0", 0), ("+0", 0),
+    // Optional fractional digits.
+    ("5.0s", 5000000000), ("5.6s", 5600000000), ("5.s", 5000000000), (".5s", 500000000), ("1.0s", 1000000000), ("1.00s", 1000000000), ("1.004s", 1004000000), ("1.0040s", 1004000000), ("100.00100s", 100001000000),
+    // Every unit, including both micro signs.
+    ("10ns", 10), ("11us", 11000), ("12µs", 12000), ("12μs", 12000), ("13ms", 13000000), ("14s", 14000000000), ("15m", 900000000000), ("16h", 57600000000000),]
+    for i in 0u64 .. 25 {
+        let (spelling, value) = rows[i]
+        if result.unwrap(time.parse_duration(spelling)) != value {
+            return false
+        }
+    }
+    true
+}
+
+// T5. Go src/time/time_test.go:945-1005. Mutant: round the integer through
+// binary64, use rational truncation for a fractional hour, or reject i64::MIN.
+// expect: run duration_parse_ieee_and_limits() = true
+fn duration_parse_ieee_and_limits() -> bool {
+    let rows: Inline[(String, i64), 18] =[
+    // Several components, in either order.
+    ("3h30m", 12600000000000), ("10.5s4m", 250500000000), ("-2m3.4s", -123400000000), ("1h2m3s4ms5us6ns", 3723004005006), ("39h9m14.425s", 140954425000000),
+    // Integer precision and Go binary64 fractional rounding.
+    ("52763797000ns", 52763797000), ("0.3333333333333333333h", 1200000000000), ("9007199254740993ns", 9007199254740993),
+    // Signed range edges and Go round-trip rows.
+    ("9223372036854775807ns", 9223372036854775807), ("9223372036854775.807us", 9223372036854775807), ("9223372036s854ms775us807ns", 9223372036854775807), ("-9223372036854775808ns", -9223372036854775808), ("-9223372036854775.808us", -9223372036854775808), ("-9223372036s854ms775us808ns", -9223372036854775808), ("-9223372036854775808ns", -9223372036854775808), ("-2562047h47m16.854775808s", -9223372036854775808),
+    // Fraction digits past the accumulator limit.
+    ("0.100000000000000000000h", 360000000000), ("0.830103483285477580700h", 2988372539827),]
+    for i in 0u64 .. 18 {
+        let (spelling, value) = rows[i]
+        if result.unwrap(time.parse_duration(spelling)) != value {
+            return false
+        }
+    }
+    true
+}
+
+// T5. Go src/time/time_test.go:1016-1043. The three invalid UTF-8 rows cannot
+// form a String and are omitted. Hirsel reports the first refused byte rather
+// than Go's text and classifies all seven overflow rows as Range.
+// Mutant: accept an empty number or accumulate overflowing terms.
+// expect: run duration_parse_errors() = true
+fn duration_parse_errors() -> bool {
+    invalid(time.parse_duration(""), 0) && invalid(time.parse_duration("3"), 1) && invalid(time.parse_duration("-"), 1) && invalid(time.parse_duration("s"), 0) && invalid(time.parse_duration("."), 1) && invalid(time.parse_duration("-."), 2) && invalid(time.parse_duration(".s"), 1) && invalid(time.parse_duration("+.s"), 2) && invalid(time.parse_duration("1d"), 1) && invalid(time.parse_duration("�"), 0) && invalid(time.parse_duration("� hello � world"), 0) && out_of_range(time.parse_duration("9223372036854775810ns")) && out_of_range(time.parse_duration("9223372036854775808ns")) && out_of_range(time.parse_duration("-9223372036854775809ns")) && out_of_range(time.parse_duration("9223372036854776us")) && out_of_range(time.parse_duration("3000000h")) && out_of_range(time.parse_duration("9223372036854775.808us")) && out_of_range(time.parse_duration("9223372036854ms775us808ns"))
+    // The mathematical sum exceeds i64. Go's unchecked u64 add wraps to zero here.
+        && out_of_range(time.parse_duration("9223372036854775808ns9223372036854775808ns"))
+    // Range applies to well-formed text. These overflow and then refuse a unit byte.
+        && invalid(time.parse_duration("9223372036854775810xx"), 19) && invalid(time.parse_duration("3000000h2d"), 9)
+}
+
+fn duration_written(d: i64, expected: String) -> bool {
+    let mut out = string.new()
+    result.unwrap(time.push_duration(mut out, d))
+    out == expected
+}
+
+// T6. Go src/time/time_test.go:614-641, all 11 durationTests rows with the
+// negative mirror for positive durations. Mutant: use us, or negate i64::MIN.
+// expect: run duration_write() = true
+fn duration_write() -> bool {
+    let rows: Inline[(String, i64), 11] =[
+    // Zero and subsecond units.
+    ("0s", 0), ("1ns", 1), ("1.1µs", 1100), ("2.2ms", 2200000),
+    // Seconds, minutes, and hours.
+    ("3.3s", 3300000000), ("4m5s", 245000000000), ("4m5.001s", 245001000000), ("5h6m7.001s", 18367001000000), ("8m0.000000001s", 480000000001),
+    // Both i64 endpoints.
+    ("2562047h47m16.854775807s", 9223372036854775807), ("-2562047h47m16.854775808s", -9223372036854775808),]
+    for i in 0u64 .. 11 {
+        let (spelling, value) = rows[i]
+        if !duration_written(value, spelling) {
+            return false
+        }
+        if value > 0 {
+            let mut neg = "-"
+            result.unwrap(string.push(mut neg, spelling))
+            if !duration_written(-value, neg) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// T6. Go src/time/time.go:947-1030 and the atomic append contract.
+// Mutant: write the sign into the caller's String before reserving the entire text.
+// expect: run duration_atomic() = true
+fn duration_atomic() -> bool {
+    let mut s = "prefix"
+    let cap = bound bytes 0 {
+        time.push_duration(mut s, -1500)
+    }
+    if s != "prefix" {
+        return false
+    }
+    match cap {
+        Ok(Error(_)) => {},
+        _ => return false,
+    }
+    result.unwrap(time.push_duration(mut s, -1500))
+    s == "prefix-1.5µs"
+}
+
+// T7. Unix range and nanosecond values derived from the timestamp representation
+// in core/std/api/time.md. Mutant: round a negative timestamp toward zero.
+// expect: run unix_bridges() = true
+fn unix_bridges() -> bool {
+    let last = option.unwrap(time.from_unix_ms(253402300799999))
+    time.unix_secs(last) == 253402300799 && time.subsec_nanos(last) == 999000000 && time.unix_ms(last) == 253402300799999 && time.from_unix_ms(253402300800000) == None && time.unix_ms(stamp(-1, 999999999)) == -1 && time.unix_ms(stamp(-1, 0)) == -1000 && time.from_unix(-62167219201, 0) == None && time.from_unix(253402300800, 0) == None && time.from_unix(0, 1000000000) == None && time.add(stamp(-62167219200, 0), -1) == None && time.add(stamp(253402300799, 999999999), 1) == None && time.add(stamp(0, 0), -1) == Some(stamp(-1, 999999999)) && time.add(stamp(-1, 999999999), 1) == Some(stamp(0, 0))
+}
+
+// T7. Hand-derived from signed i64 nanoseconds. Mutant: reject a fitting
+// distance because its whole-second component overflows before subtracting nanos.
+// expect: run distance_limits() = true
+fn distance_limits() -> bool {
+    let before = stamp(0, 999999999)
+    let after = stamp(9223372037, 854775806)
+    let min = stamp(9223372037, 854775807)
+    time.between(before, after) == Some(9223372036854775807) && time.between(min, before) == Some(-9223372036854775808) && time.between(before, min) == None && time.between(stamp(9223372037, 854775808), before) == None && time.between(stamp(-62167219200, 0), stamp(253402300799, 999999999)) == None && time.between(stamp(0, 3), stamp(0, 2)) == Some(-1)
+}
+
+fn civil_fields(c: time.Civil, d: time.Date, h: u8, m: u8, s: u8, n: u32) -> bool {
+    time.date_of(c) == d && time.hour(c) == h && time.minute(c) == m && time.second(c) == s && time.nanos(c) == n
+}
+
+// T8. Fixed-offset inverse in core/std/api/time.md and hand-derived ends.
+// Mutant: divide a pre-epoch second by 86400 with truncation instead of floor.
+// expect: run civil_round_trip() = true
+fn civil_round_trip() -> bool {
+    let instants: Inline[(i64, u32), 7] =[(-62167219200, 0), (-86401, 0), (-86400, 0), (-1, 999999999), (0, 0), (951782400, 0), (253402300799, 999999999),]
+    let offsets: Inline[i32, 5] =[-1439, -1, 0, 1, 1439]
+    for i in 0u64 .. 7 {
+        let (secs, ns) = instants[i]
+        let t = stamp(secs, ns)
+        for j in 0u64 .. 5 {
+            let offset = offsets[j]
+            match time.civil(t, offset) {
+                Some(c) => {
+                    if (i == 0 && offset < 0) || (i == 6 && offset > 0) || time.timestamp(c, offset) != Some(t) {
+                        return false
+                    }
+                }
+                None => {
+                    if !((i == 0 && offset < 0) || (i == 6 && offset > 0)) {
+                        return false
+                    }
+                }
+            }
+        }
+    }
+    let dec = option.unwrap(time.date(1969, 12, 31))
+    let feb = option.unwrap(time.date(2000, 2, 29))
+    let early = option.unwrap(time.civil(stamp(-1, 999999999), 0))
+    let leap = option.unwrap(time.civil(stamp(951782400, 0), 1))
+    civil_fields(early, dec, 23, 59, 59, 999999999) && civil_fields(leap, feb, 0, 1, 0, 0) && time.at(feb, 24, 0, 0, 0) == None && time.at(feb, 0, 60, 0, 0) == None && time.at(feb, 0, 0, 60, 0) == None && time.at(feb, 0, 0, 0, 1000000000) == None && time.timestamp(option.unwrap(time.at(option.unwrap(time.date(0, 1, 1)), 0, 0, 0, 0)), 1) == None && time.timestamp(option.unwrap(time.at(option.unwrap(time.date(9999, 12, 31)), 23, 59, 59, 999999999)), -1) == None
+}
+
+// T8. Offset contract in core/std/api/time.md. Mutant: permit a 24-hour offset.
+// expect: run civil_offset_bounds() = fail Bounds
+fn civil_offset_bounds() -> bool {
+    time.civil(stamp(0, 0), 1440) == None
+}
+
+// T8. Offset contract in core/std/api/time.md. Mutant: check only the upper bound.
+// expect: run timestamp_offset_bounds() = fail Bounds
+fn timestamp_offset_bounds() -> bool {
+    let c = option.unwrap(time.civil(stamp(0, 0), 0))
+    time.timestamp(c, -1440) == None
+}

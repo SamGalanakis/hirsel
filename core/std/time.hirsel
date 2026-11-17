@@ -1,0 +1,792 @@
+pub opaque type Timestamp: key {
+    secs: i64,
+    nanos: u32
+}
+
+pub opaque type Date: key {
+    year: u16,
+    month: u8,
+    day: u8
+}
+
+pub opaque type Civil: key {
+    date: Date,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanos: u32
+}
+
+pub type Weekday: key = Monday | Tuesday | Wednesday | Thursday | Friday | Saturday | Sunday
+
+pub type Error = Invalid(u64) | Range | Capacity(Capacity)
+
+const MIN_DAY: i64 = -719528
+
+const MAX_DAY: i64 = 2932896
+
+const MIN_SEC: i64 = -62167219200
+
+const MAX_SEC: i64 = 253402300799
+
+const DAY_SECONDS: i64 = 86400
+
+const BILLION: i64 = 1000000000
+
+/// The proleptic Gregorian date. February has 29 days in years divisible by 4,
+/// except centuries not divisible by 400.
+/// Fails: None for a nonexistent date or a year above 9999. Alloc: nothing. Cost: O(1).
+/// Ex: `time.date(2000, 2, 29)` is Some.
+pub fn date(y: u16, m: u8, d: u8) -> Option[Date] {
+    if y > 9999 || m == 0 || m > 12 || d == 0 {
+        return None
+    }
+    let end: u8 = if m == 2 {
+        if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            29
+        } else {
+            28
+        }
+    } else if m == 4 || m == 6 || m == 9 || m == 11 {
+        30
+    } else {
+        31
+    }
+    if d > end {
+        return None
+    }
+    Some(Date(year: y, month: m, day: d))
+}
+
+/// Gregorian year, 0 to 9999. Alloc: nothing. Cost: O(1).
+pub fn year(d: Date) -> u16 {
+    d.year
+}
+
+/// Month, 1 to 12. Alloc: nothing. Cost: O(1).
+pub fn month(d: Date) -> u8 {
+    d.month
+}
+
+/// Day of the month, starting at 1. Alloc: nothing. Cost: O(1).
+pub fn day(d: Date) -> u8 {
+    d.day
+}
+
+fn floor_div(n: i64, divisor: i64) -> i64 {
+    let q = n / divisor
+    if n % divisor < 0 {
+        q - 1
+    } else {
+        q
+    }
+}
+
+/// Days since 1970-01-01. Uses Hinnant's days_from_civil.
+/// Alloc: nothing. Cost: O(1). Ex: `days` of 0000-01-01 is -719528.
+pub fn days(d: Date) -> i64 {
+    let y: i64 = int.widen(d.year)
+    let m: i64 = int.widen(d.month)
+    let dom: i64 = int.widen(d.day)
+    let adjusted = if m <= 2 {
+        y - 1
+    } else {
+        y
+    }
+    let era = floor_div(adjusted, 400)
+    let yoe = adjusted - era * 400
+    let shifted = if m > 2 {
+        m - 3
+    } else {
+        m + 9
+    }
+    let doy = (153 * shifted + 2) / 5 + dom - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+}
+
+/// The inverse of days, using Hinnant's civil_from_days.
+/// Fails: None outside -719528 to 2932896. Alloc: nothing. Cost: O(1).
+pub fn from_days(n: i64) -> Option[Date] {
+    if n < MIN_DAY || n > MAX_DAY {
+        return None
+    }
+    let z = n + 719468
+    let era = floor_div(z, 146097)
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 {
+        mp + 3
+    } else {
+        mp - 9
+    }
+    let y = yoe + era * 400 + (if m <= 2 {
+        1
+    } else {
+        0
+    })
+    Some(Date(year: int.narrow(y), month: int.narrow(m), day: int.narrow(d)))
+}
+
+/// The day of the week. 1970-01-01 is Thursday. Alloc: nothing. Cost: O(1).
+pub fn weekday(d: Date) -> Weekday {
+    let n = days(d) + 3
+    let i: u64 = int.narrow(n - floor_div(n, 7) * 7)
+    let weekdays: Inline[Weekday, 7] =[Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday]
+    weekdays[i]
+}
+
+/// Constructs a timestamp. Fails: None for nanos >= 10^9 or an instant outside
+/// years 0-9999 UTC. Alloc: nothing. Cost: O(1).
+pub fn from_unix(secs: i64, ns: u32) -> Option[Timestamp] {
+    if secs < MIN_SEC || secs > MAX_SEC || ns >= 1000000000 {
+        return None
+    }
+    Some(Timestamp(secs: secs, nanos: ns))
+}
+
+/// Converts the epoch milliseconds from host.wall_ms or CallInfo.at.
+/// Fails: None above 253402300799999. Alloc: nothing. Cost: O(1).
+/// Ex: `let now = time.from_unix_ms(host.wall_ms(c))?`
+pub fn from_unix_ms(ms: u64) -> Option[Timestamp] {
+    if ms > 253402300799999 {
+        return None
+    }
+    from_unix(int.narrow(ms / 1000), int.narrow((ms % 1000) * 1000000))
+}
+
+/// Whole seconds since the Unix epoch, rounded down. Alloc: nothing. Cost: O(1).
+pub fn unix_secs(t: Timestamp) -> i64 {
+    t.secs
+}
+
+/// Nanoseconds since the start of the second. Alloc: nothing. Cost: O(1).
+pub fn subsec_nanos(t: Timestamp) -> u32 {
+    t.nanos
+}
+
+/// Milliseconds since the Unix epoch, rounded toward negative infinity.
+/// Alloc: nothing. Cost: O(1). Ex: `from_unix(-1, 999999999)` is at -1 ms.
+pub fn unix_ms(t: Timestamp) -> i64 {
+    t.secs * 1000 + int.widen(t.nanos / 1000000)
+}
+
+/// Adds d nanoseconds. Fails: None outside the timestamp range. Alloc: nothing. Cost: O(1).
+pub fn add(t: Timestamp, d: i64) -> Option[Timestamp] {
+    let n: i64 = int.widen(t.nanos)
+    let fraction = n + d % BILLION
+    let carry = floor_div(fraction, BILLION)
+    from_unix(t.secs + d / BILLION + carry, int.narrow(fraction - carry * BILLION))
+}
+
+/// Signed distance `to - from` in nanoseconds. Fails: None when it exceeds i64.
+/// Alloc: nothing. Cost: O(1).
+pub fn between(from: Timestamp, to: Timestamp) -> Option[i64] {
+    let mut secs = to.secs - from.secs
+    let end: i64 = int.widen(to.nanos)
+    let start: i64 = int.widen(from.nanos)
+    let mut ns = end - start
+    // Give both terms the same sign so multiplication cannot overflow on a fitting sum.
+    if secs > 0 && ns < 0 {
+        secs -= 1
+        ns += BILLION
+    } else if secs < 0 && ns > 0 {
+        secs += 1
+        ns -= BILLION
+    }
+    int.checked_add(int.checked_mul(secs, BILLION)?, ns)
+}
+
+/// Constructs civil time on d. Fails: None for hour >= 24, minute or second >= 60,
+/// or nanos >= 10^9. Alloc: nothing. Cost: O(1).
+pub fn at(d: Date, h: u8, m: u8, s: u8, ns: u32) -> Option[Civil] {
+    if h >= 24 || m >= 60 || s >= 60 || ns >= 1000000000 {
+        return None
+    }
+    Some(Civil(date: d, hour: h, minute: m, second: s, nanos: ns))
+}
+
+/// The civil date. Alloc: nothing. Cost: O(1).
+pub fn date_of(c: Civil) -> Date {
+    c.date
+}
+
+/// The hour, 0 to 23. Alloc: nothing. Cost: O(1).
+pub fn hour(c: Civil) -> u8 {
+    c.hour
+}
+
+/// The minute, 0 to 59. Alloc: nothing. Cost: O(1).
+pub fn minute(c: Civil) -> u8 {
+    c.minute
+}
+
+/// The second, 0 to 59. Alloc: nothing. Cost: O(1).
+pub fn second(c: Civil) -> u8 {
+    c.second
+}
+
+/// The nanosecond within the second. Alloc: nothing. Cost: O(1).
+pub fn nanos(c: Civil) -> u32 {
+    c.nanos
+}
+
+fn require_bounds(ok: bool) {
+    if !ok {
+        let empty = string.as_bytes("")
+        let _ = empty[0]
+    }
+}
+
+fn offset_seconds(offset: i32) -> i64 {
+    require_bounds(offset >= -1439 && offset <= 1439)
+    let minutes: i64 = int.widen(offset)
+    minutes * 60
+}
+
+/// The wall-clock reading at offset minutes east of UTC.
+/// Fails: Bounds outside -1439..=1439, None when the reading leaves years 0-9999.
+/// Alloc: nothing. Cost: O(1).
+pub fn civil(t: Timestamp, offset: i32) -> Option[Civil] {
+    let secs = t.secs + offset_seconds(offset)
+    let epoch_day = floor_div(secs, DAY_SECONDS)
+    let d = from_days(epoch_day)?
+    let clock = secs - epoch_day * DAY_SECONDS
+    Some(Civil(date: d, hour: int.narrow(clock / 3600), minute: int.narrow(clock / 60 % 60), second: int.narrow(clock % 60), nanos: t.nanos))
+}
+
+/// The UTC instant at which a clock at offset minutes east of UTC reads c.
+/// Fails: Bounds outside -1439..=1439, None outside the timestamp range.
+/// Alloc: nothing. Cost: O(1). Ex: `time.timestamp(time.civil(t, o)?, o) == Some(t)`.
+pub fn timestamp(c: Civil, offset: i32) -> Option[Timestamp] {
+    let east = offset_seconds(offset)
+    let h: i64 = int.widen(c.hour)
+    let m: i64 = int.widen(c.minute)
+    let s: i64 = int.widen(c.second)
+    from_unix(days(c.date) * DAY_SECONDS + h * 3600 + m * 60 + s - east, c.nanos)
+}
+
+fn is_digit(c: u8) -> bool {
+    c >= b'0' && c <= b'9'
+}
+
+fn byte(b: Bytes, i: u64) -> Result[u8, Error] {
+    if i >= list.len(b) {
+        return Error(Invalid(i))
+    }
+    Ok(b[i])
+}
+
+fn expect_byte(b: Bytes, i: u64, c: u8) -> Result[(), Error] {
+    if byte(b, i)? != c {
+        return Error(Invalid(i))
+    }
+    Ok(())
+}
+
+fn digits_at(b: Bytes, start: u64, width: u64) -> Result[u16, Error] {
+    let mut value: u16 = 0
+    for i in start .. start + width {
+        let c = byte(b, i)?
+        if !is_digit(c) {
+            return Error(Invalid(i))
+        }
+        value = value * 10 + int.widen(c - b'0')
+    }
+    Ok(value)
+}
+
+fn date_fields(b: Bytes) -> Result[(u16, u8, u8), Error] {
+    let y = digits_at(b, 0, 4)?
+    expect_byte(b, 4, b'-')?
+    let m: u8 = int.narrow(digits_at(b, 5, 2)?)
+    expect_byte(b, 7, b'-')?
+    let d: u8 = int.narrow(digits_at(b, 8, 2)?)
+    Ok((y, m, d))
+}
+
+/// Parses RFC 3339 full-date, YYYY-MM-DD, with exactly 4, 2 and 2 digits.
+/// Fails: Invalid(i) at the first refused byte, Range for a nonexistent date.
+/// Alloc: nothing. Cost: O(1). Ex: `time.parse_date("2000-02-29")?`.
+pub fn parse_date(s: String) -> Result[Date, Error] {
+    let (y, m, d) = date_fields(string.as_bytes(s))?
+    if string.byte_len(s) != 10 {
+        return Error(Invalid(10))
+    }
+    match date(y, m, d) {
+        Some(value) => Ok(value),
+        None => Error(Range),
+    }
+}
+
+fn write_date(mut out: String, d: Date) -> Result[(), Capacity] {
+    string.push_uint(mut out, int.widen(d.year), 10, 4, '0')?
+    string.push_char(mut out, '-')?
+    string.push_uint(mut out, int.widen(d.month), 10, 2, '0')?
+    string.push_char(mut out, '-')?
+    string.push_uint(mut out, int.widen(d.day), 10, 2, '0')
+}
+
+/// Appends RFC 3339 full-date, YYYY-MM-DD. The append is atomic.
+/// Fails: Capacity. Alloc: reserves 10 bytes of additional room first. Cost: O(1).
+pub fn push_date(mut out: String, d: Date) -> Result[(), Capacity] {
+    string.reserve(mut out, 10)?
+    write_date(mut out, d)
+}
+
+type OffsetFields {
+    end: u64,
+    hours: u16,
+    minutes: u16,
+    negative: bool
+}
+
+fn read_offset(b: Bytes, i: u64) -> Result[OffsetFields, Error] {
+    let marker = byte(b, i)?
+    if marker == b'Z' || marker == b'z' {
+        return Ok(OffsetFields(end: i + 1, hours: 0, minutes: 0, negative: false))
+    }
+    if marker != b'+' && marker != b'-' {
+        return Error(Invalid(i))
+    }
+    let h = digits_at(b, i + 1, 2)?
+    expect_byte(b, i + 3, b':')?
+    let m = digits_at(b, i + 4, 2)?
+    Ok(OffsetFields(end: i + 6, hours: h, minutes: m, negative: marker == b'-'))
+}
+
+/// Parses RFC 3339 section 5.6 date-time with T/t, optional decimal fraction, and
+/// Z/z or a signed hh:mm offset. Fraction digits after the ninth are read and dropped.
+/// Second 60 reads as 59 and keeps its fraction at every local hour and offset (jiff).
+/// -00:00 reads as offset 0. A space in place of T is invalid.
+/// Fails: Invalid(i) at the first refused byte, including incorrect field widths.
+/// Range for a nonexistent date, hour > 23, minute > 59, second > 60, offset hour
+/// > 23 or minute > 59, or a UTC instant outside years 0-9999 after applying the offset.
+/// Alloc: nothing. Cost: O(len). Ex: `let (t, off) = time.parse_rfc3339(s)?`
+pub fn parse_rfc3339(s: String) -> Result[(Timestamp, i32), Error] {
+    let b = string.as_bytes(s)
+    let (y, m, d) = date_fields(b)?
+    let marker = byte(b, 10)?
+    if marker != b'T' && marker != b't' {
+        return Error(Invalid(10))
+    }
+    let h = digits_at(b, 11, 2)?
+    expect_byte(b, 13, b':')?
+    let min = digits_at(b, 14, 2)?
+    expect_byte(b, 16, b':')?
+    let sec = digits_at(b, 17, 2)?
+    let mut i: u64 = 19
+    let mut fraction: u32 = 0
+    if byte(b, i)? == b'.' {
+        i += 1
+        if !is_digit(byte(b, i)?) {
+            return Error(Invalid(i))
+        }
+        let mut count: u8 = 0
+        while i < list.len(b) && is_digit(b[i]) {
+            if count < 9 {
+                fraction = fraction * 10 + int.widen(b[i] - b'0')
+                count += 1
+            }
+            i += 1
+        }
+        while count < 9 {
+            fraction *= 10
+            count += 1
+        }
+    }
+    let zone = read_offset(b, i)?
+    if zone.end != list.len(b) {
+        return Error(Invalid(zone.end))
+    }
+    if h > 23 || min > 59 || sec > 60 || zone.hours > 23 || zone.minutes > 59 {
+        return Error(Range)
+    }
+    let date_value = match date(y, m, d) {
+        Some(value) => value,
+        None => return Error(Range),
+    }
+    let seconds: u8 = if sec == 60 {
+        59
+    } else {
+        int.narrow(sec)
+    }
+    let reading = Civil(date: date_value, hour: int.narrow(h), minute: int.narrow(min), second: seconds, nanos: fraction)
+    let east: i32 = int.widen(zone.hours * 60 + zone.minutes)
+    let offset = if zone.negative {
+        -east
+    } else {
+        east
+    }
+    match timestamp(reading, offset) {
+        Some(t) => Ok((t, offset)),
+        None => Error(Range),
+    }
+}
+
+fn write_clock(mut out: String, c: Civil, digits: u64) -> Result[(), Capacity] {
+    write_date(mut out, c.date)?
+    string.push_char(mut out, 'T')?
+    string.push_uint(mut out, int.widen(c.hour), 10, 2, '0')?
+    string.push_char(mut out, ':')?
+    string.push_uint(mut out, int.widen(c.minute), 10, 2, '0')?
+    string.push_char(mut out, ':')?
+    string.push_uint(mut out, int.widen(c.second), 10, 2, '0')?
+    if digits > 0 {
+        let mut f: u64 = int.widen(c.nanos)
+        for _ in digits .. 9 {
+            f = f / 10
+        }
+        string.push_char(mut out, '.')?
+        string.push_uint(mut out, f, 10, digits, '0')?
+    }
+    Ok(())
+}
+
+fn write_rfc3339(mut out: String, c: Civil, offset: i32, digits: u64) -> Result[(), Capacity] {
+    let fraction_bytes: u64 = if digits == 0 {
+        0
+    } else {
+        digits + 1
+    }
+    let zone_bytes: u64 = if offset == 0 {
+        1
+    } else {
+        6
+    }
+    string.reserve(mut out, 19 + fraction_bytes + zone_bytes)?
+    write_clock(mut out, c, digits)?
+    if offset == 0 {
+        return string.push_char(mut out, 'Z')
+    }
+    let east: u64 = int.narrow(if offset < 0 {
+        -offset
+    } else {
+        offset
+    })
+    string.push_char(mut out, if offset < 0 {
+        '-'
+    } else {
+        '+'
+    })?
+    string.push_uint(mut out, east / 60, 10, 2, '0')?
+    string.push_char(mut out, ':')?
+    string.push_uint(mut out, east % 60, 10, 2, '0')
+}
+
+/// Appends YYYY-MM-DDThh:mm:ss, exactly digits fraction digits (truncated), and Z
+/// for offset zero or signed hh:mm. Omits the dot when digits is zero.
+/// Fails: Bounds when digits > 9 or offset is outside -1439..=1439, Range when the
+/// wall reading leaves years 0-9999, or Capacity(c). The append is atomic.
+/// Alloc: reserves the exact additional length first. Cost: O(1).
+/// Ex: `time.push_rfc3339(mut line, now, 0, 3)?` gives 2026-11-18T09:30:00.250Z.
+pub fn push_rfc3339(mut out: String, t: Timestamp, offset: i32, digits: u8) -> Result[(), Error] {
+    require_bounds(digits <= 9)
+    let c = match civil(t, offset) {
+        Some(value) => value,
+        None => return Error(Range),
+    }
+    match write_rfc3339(mut out, c, offset, int.widen(digits)) {
+        Ok(()) => Ok(()),
+        Error(cap) => Error(Capacity(cap)),
+    }
+}
+
+const DURATION_LIMIT: u64 = 9223372036854775808
+
+const MICROSECOND: u64 = 1000
+
+const MILLISECOND: u64 = 1000000
+
+const SECOND: u64 = 1000000000
+
+const MINUTE: u64 = 60000000000
+
+const HOUR: u64 = 3600000000000
+
+fn leading_int(b: Bytes, start: u64) -> (u64, Option[u64]) {
+    let mut i = start
+    let mut value: u64 = 0
+    while i < list.len(b) && is_digit(b[i]) {
+        if value > DURATION_LIMIT / 10 {
+            break
+        }
+        let next = value * 10 + int.widen(b[i] - b'0')
+        if next > DURATION_LIMIT {
+            break
+        }
+        value = next
+        i += 1
+    }
+    if i == list.len(b) || !is_digit(b[i]) {
+        return (i, Some(value))
+    }
+    while i < list.len(b) && is_digit(b[i]) {
+        i += 1
+    }
+    (i, None)
+}
+
+fn leading_fraction(b: Bytes, start: u64) -> (u64, u64, f64) {
+    let mut i = start
+    let mut value: u64 = 0
+    let mut scale: f64 = 1.0
+    let mut overflow = false
+    while i < list.len(b) && is_digit(b[i]) {
+        if !overflow {
+            if value > (DURATION_LIMIT - 1) / 10 {
+                overflow = true
+            } else {
+                let next = value * 10 + int.widen(b[i] - b'0')
+                if next > DURATION_LIMIT {
+                    overflow = true
+                } else {
+                    value = next
+                    scale *= 10.0
+                }
+            }
+        }
+        i += 1
+    }
+    (i, value, scale)
+}
+
+// Go consumes a unit up to the next number. Report the first byte of that token
+// that cannot complete or extend a recognized unit.
+fn duration_unit(b: Bytes, start: u64, end: u64) -> Result[u64, Error] {
+    if start == end {
+        return Error(Invalid(start))
+    }
+    let c = b[start]
+    let mut i = start + 1
+    let value = if c == b's' {
+        SECOND
+    } else if c == b'h' {
+        HOUR
+    } else if c == b'm' {
+        if i < end && b[i] == b's' {
+            i += 1
+            MILLISECOND
+        } else {
+            MINUTE
+        }
+    } else {
+        let v = if c == b'n' {
+            1u64
+        } else if c == b'u' {
+            MICROSECOND
+        } else if c == 0xc2 || c == 0xce {
+            // The two UTF-8 spellings are C2 B5 and CE BC.
+            let tail: u8 = if c == 0xc2 {
+                0xb5
+            } else {
+                0xbc
+            }
+            if i == end || b[i] != tail {
+                return Error(Invalid(i))
+            }
+            i += 1
+            MICROSECOND
+        } else {
+            return Error(Invalid(start))
+        }
+        if i == end || b[i] != b's' {
+            return Error(Invalid(i))
+        }
+        i += 1
+        v
+    }
+    if i != end {
+        return Error(Invalid(i))
+    }
+    Ok(value)
+}
+
+fn duration_sum(total: Option[u64], whole: Option[u64], f: u64, scale: f64, unit: u64) -> Option[u64] {
+    let running = total?
+    let integer = whole?
+    if integer > DURATION_LIMIT / unit {
+        return None
+    }
+    let mut value = integer * unit
+    if f > 0 {
+        let numerator: f64 = float.from_int(f)
+        let unit_f: f64 = float.from_int(unit)
+        let truncated: Result[u64, FloatError] = float.to_int(numerator * (unit_f / scale))
+        value += result.unwrap(truncated)
+        if value > DURATION_LIMIT {
+            return None
+        }
+    }
+    // Check the remaining magnitude first so two 2^63 terms cannot wrap to zero.
+    if running > DURATION_LIMIT - value {
+        return None
+    }
+    Some(running + value)
+}
+
+/// Parses Go time.ParseDuration text: optional sign and decimal number/unit pairs,
+/// with units ns, us, µs (U+00B5), μs (U+03BC), ms, s, m or h. A fraction may
+/// omit either side of its dot, and 0, +0 and -0 alone need no unit.
+/// Accumulates the fraction as in Go, freezing scale once the integer reaches its
+/// limit. Converts it with IEEE binary64 `truncate(f * (unit / scale))`.
+/// Fails: Invalid(i) at a refused byte or missing unit, Range for i64 overflow.
+/// Alloc: nothing. Cost: O(len). Ex: `time.parse_duration("1h30m")?`.
+pub fn parse_duration(s: String) -> Result[i64, Error] {
+    let b = string.as_bytes(s)
+    let len = list.len(b)
+    let negative = len > 0 && b[0] == b'-'
+    let mut i: u64 = if negative || (len > 0 && b[0] == b'+') {
+        1
+    } else {
+        0
+    }
+    if len - i == 1 && b[i] == b'0' {
+        return Ok(0)
+    }
+    if i == len {
+        return Error(Invalid(i))
+    }
+    let mut total: Option[u64] = Some(0)
+    while i < len {
+        let (whole_end, whole) = leading_int(b, i)
+        let pre = whole_end != i
+        i = whole_end
+        let mut f: u64 = 0
+        let mut scale: f64 = 1.0
+        let mut post = false
+        if i < len && b[i] == b'.' {
+            i += 1
+            let (end, fraction, divisor) = leading_fraction(b, i)
+            post = end != i
+            i = end
+            f = fraction
+            scale = divisor
+        }
+        if !pre && !post {
+            return Error(Invalid(i))
+        }
+        let unit_start = i
+        while i < len && b[i] != b'.' && !is_digit(b[i]) {
+            i += 1
+        }
+        let unit = duration_unit(b, unit_start, i)?
+        // Range is reserved for a well-formed duration. Keep checking the grammar
+        // once the total has overflowed.
+        total = duration_sum(total, whole, f, scale, unit)
+    }
+    let magnitude = match total {
+        Some(n) => n,
+        None => return Error(Range),
+    }
+    if negative {
+        return Ok(int.truncate(int.wrapping_neg(magnitude)))
+    }
+    if magnitude == DURATION_LIMIT {
+        return Error(Range)
+    }
+    Ok(int.narrow(magnitude))
+}
+
+type DurationText {
+    chars: Inline[char, 32],
+    start: u64
+}
+
+fn prepend(mut text: DurationText, c: char) {
+    text.start -= 1
+    text.chars[text.start] = c
+}
+
+fn prepend_digit(mut text: DurationText, digit: u64) {
+    let code: u32 = int.narrow(digit + 48)
+    prepend(mut text, option.unwrap(char.from_u32(code)))
+}
+
+// Go's fmtFrac: walk the fraction from the right, skipping zeros until a digit
+// has been written. Leave the integer part for fmtInt.
+fn duration_fraction(mut text: DurationText, value: u64, precision: u8) -> u64 {
+    let end = text.start
+    let mut n = value
+    for _ in 0u8 .. precision {
+        let digit = n % 10
+        if digit != 0 || end != text.start {
+            prepend_digit(mut text, digit)
+        }
+        n = n / 10
+    }
+    if end != text.start {
+        prepend(mut text, '.')
+    }
+    n
+}
+
+fn duration_integer(mut text: DurationText, value: u64) {
+    let mut n = value
+    loop {
+        prepend_digit(mut text, n % 10)
+        n = n / 10
+        if n == 0 {
+            break
+        }
+    }
+}
+
+/// Appends Go Duration.String text. Below 1s, uses the largest unit with a
+/// nonzero integer part (ns, µs or ms), or writes 0s. Otherwise writes hours,
+/// minutes and seconds, omitting leading zero fields. Strips trailing fraction zeros.
+/// Fails: Capacity. The append is atomic. Alloc: reserves the exact length first.
+/// Cost: O(1). Ex: `time.push_duration(mut out, -1500)?` appends "-1.5µs".
+pub fn push_duration(mut out: String, d: i64) -> Result[(), Capacity] {
+    let bits: u64 = int.truncate(d)
+    let negative = d < 0
+    let value = if negative {
+        int.wrapping_neg(bits)
+    } else {
+        bits
+    }
+    let mut text = DurationText(chars:[' '; 32], start: 32)
+    prepend(mut text, 's')
+    let mut extra_bytes: u64 = 0
+    if value < SECOND {
+        let precision: u8 = if value == 0 {
+            0
+        } else if value < MICROSECOND {
+            prepend(mut text, 'n')
+            0
+        } else if value < MILLISECOND {
+            prepend(mut text, 'µ')
+            extra_bytes = 1
+            3
+        } else {
+            prepend(mut text, 'm')
+            6
+        }
+        let whole = duration_fraction(mut text, value, precision)
+        duration_integer(mut text, whole)
+    } else {
+        let seconds = duration_fraction(mut text, value, 9)
+        duration_integer(mut text, seconds % 60)
+        let minutes = seconds / 60
+        if minutes > 0 {
+            prepend(mut text, 'm')
+            duration_integer(mut text, minutes % 60)
+            let hours = minutes / 60
+            if hours > 0 {
+                prepend(mut text, 'h')
+                duration_integer(mut text, hours)
+            }
+        }
+    }
+    if negative {
+        prepend(mut text, '-')
+    }
+    string.reserve(mut out, 32 - text.start + extra_bytes)?
+    for i in text.start .. 32 {
+        string.push_char(mut out, text.chars[i])?
+    }
+    Ok(())
+}

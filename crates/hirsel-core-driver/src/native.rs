@@ -1916,8 +1916,14 @@ mod tests {
             .unwrap()
         );
         let built = product.build(&entry, &options).unwrap();
-        // LLVM release emits one reached unit so its bodies can inline across calls.
-        assert_eq!(built.compiled, if options.optimize { 1 } else { 3 });
+        // A development build compiles one unit per reached instance. A
+        // release build optimises the program whole and then generates each
+        // out-of-line definition the shared parts cache lacks, so its count
+        // follows what the optimiser leaves out of line; the edit below is
+        // its law.
+        if !options.optimize {
+            assert_eq!(built.compiled, 3);
+        }
         run_clean(&built.executable, 7);
         let edited = record.replace("b: 300u64", "b: 301u64");
         let product = driver
@@ -2050,7 +2056,9 @@ mod tests {
         assert_eq!(installed.rechecked.len(), 1);
         assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), 2);
         // A second application's private native store: development reuses
-        // core's objects; a release build is one whole-program unit and links none.
+        // core's objects and compiles its own entry; a release build links no
+        // library object, and every part of the same program is already in
+        // the shared parts cache, so it generates none.
         let mut other_options = native_options(backend, dir.path());
         other_options.optimize = optimize;
         other_options.store = dir.path().join("another-app-native");
@@ -2065,7 +2073,10 @@ mod tests {
             assert_eq!(core.len(), 2);
             assert!(core.iter().all(|o| !o.compiled));
         }
-        assert_eq!(objects.iter().filter(|o| o.compiled).count(), 1);
+        assert_eq!(
+            objects.iter().filter(|o| o.compiled).count(),
+            if optimize { 0 } else { 1 }
+        );
         // A cached negative body is refused only when this entry reaches it.
         let mut request = source_request(
             "pub fn main()->Result[(),Exit] { let _=unused_bad(); Ok(()) }",

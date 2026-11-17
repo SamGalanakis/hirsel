@@ -638,8 +638,9 @@ fn emit_module(
         e.sink
             .begin_function(&body_name, &signature, &locals, &attrs);
         if body.insts.iter().any(|i| matches!(i, Inst::Step { .. })) {
-            let counter = e.temp(Type::I64);
-            e.step_counter = Some(counter);
+            let counter = Local::Named("hirsel.step.counter");
+            e.sink.alloca(counter, &Type::I64, 8);
+            e.step_counter = Some(counter.into());
             e.reload_steps();
         }
         // Eager and lazy objects use the same exact-metering CFG at every

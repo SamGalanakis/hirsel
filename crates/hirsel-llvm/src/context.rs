@@ -186,27 +186,6 @@ impl<'context> Module<'context> {
         if failed != 0 { Err(message) } else { Ok(()) }
     }
 
-    /// Complete SSA construction for the private value/address join slots used
-    /// by exact Step versions. Their addresses never escape, so they need no
-    /// physical storage even when development code generation skips O3.
-    fn promote_core_joins(&self, machine: &TargetMachine) -> Result<(), String> {
-        let pipeline = c_string("function(mem2reg)");
-        // SAFETY: module and target machine are live; the pass options belong
-        // to this invocation and are disposed after the pass completes.
-        unsafe {
-            let options = LLVMCreatePassBuilderOptions();
-            let error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
-            LLVMDisposePassBuilderOptions(options);
-            if error.is_null() {
-                return Ok(());
-            }
-            let message = LLVMGetErrorMessage(error);
-            let text = borrowed_string(message);
-            LLVMDisposeErrorMessage(message);
-            Err(text)
-        }
-    }
-
     /// Ordinary O3 followed by promotion and local cleanup of arguments whose
     /// properties were inferred late. Revisit constraints after scalar cleanup
     /// exposes checked end offsets. Final DSE removes carrier clears/restores
@@ -309,7 +288,11 @@ impl<'context> Module<'context> {
     /// overflow is always the runtime's stack stop, never a write past the guard.
     pub(crate) fn emit_object(&self, machine: &TargetMachine) -> Result<Vec<u8>, String> {
         if !machine.optimize {
-            self.promote_core_joins(machine)?;
+            unsafe extern "C" {
+                fn hirsel_llvm_promote_development_slots(module: LLVMModuleRef);
+            }
+            // SAFETY: the pass mutates this live module without keeping references.
+            unsafe { hirsel_llvm_promote_development_slots(self.raw) };
         }
         let interval = STACK_PROBE_BYTES.to_string();
         // SAFETY: each function belongs to this live module; LLVM copies the strings.
@@ -417,9 +400,7 @@ impl TargetMachine {
         let level = if optimize {
             LLVMCodeGenOptLevel::LLVMCodeGenLevelAggressive
         } else {
-            // Use the spill-slot coloring allocator in development too.
-            // The fast allocator leaves a slot for each spilled Step SSA value.
-            LLVMCodeGenOptLevel::LLVMCodeGenLevelLess
+            LLVMCodeGenOptLevel::LLVMCodeGenLevelNone
         };
         // SAFETY: the target is registered and the strings are NUL-terminated; LLVM copies them.
         let raw = unsafe {

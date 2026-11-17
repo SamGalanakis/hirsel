@@ -391,6 +391,32 @@ static void inlineLoopHelpers(Module &M) {
     }
   }
 }
+extern "C" void hirsel_llvm_promote_development_slots(void *ModuleRef) {
+  auto &M = *unwrap(static_cast<LLVMModuleRef>(ModuleRef));
+  for (Function &F : M) {
+    if (F.isDeclaration() || F.hasOptNone()) continue;
+    SmallVector<AllocaInst *, 16> Slots;
+    auto collect = [&] {
+      Slots.clear();
+      for (Instruction &I : F.getEntryBlock()) {
+        auto *Slot = dyn_cast<AllocaInst>(&I);
+        // The Step counter already has one home across all call sites. Fast
+        // register allocation can spill each promoted counter value separately.
+        if (Slot && Slot->getName() != "hirsel.step.counter" && isAllocaPromotable(Slot))
+          Slots.push_back(Slot);
+      }
+    };
+    collect();
+    if (Slots.empty()) continue;
+    DominatorTree DT(F);
+    AssumptionCache AC(F);
+    do {
+      PromoteMemToReg(Slots, DT, &AC);
+      collect();
+    } while (!Slots.empty());
+  }
+}
+
 extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
   auto &M = *unwrap(static_cast<LLVMModuleRef>(ModuleRef));
   inlineLoopHelpers(M);

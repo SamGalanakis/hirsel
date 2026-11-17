@@ -16,6 +16,7 @@
 #include "aggregate_phi.h"
 #include "failure_edges.h"
 extern void hirsel_llvm_promote_step_window(void *module);
+extern void hirsel_llvm_promote_development_slots(void *module);
 extern void hirsel_llvm_mark_loop_callbacks(void *module);
 extern void hirsel_llvm_inline_loop_callbacks(void *module);
 extern void hirsel_llvm_guard_read_loops(void *module, void *machine);
@@ -557,9 +558,8 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     if (LLVMGetTargetFromTriple(triple, &target, &message)) {
         error(out, message); LLVMDisposeMessage(message); return;
     }
-    // Match eager emission: reuse spill slots across disjoint Step live ranges.
     LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, cpu, "",
-        speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelLess, LLVMRelocPIC, LLVMCodeModelDefault);
+        speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
     if (!machine) { error(out, "LLVM could not create the target machine"); return; }
     LLVMContextRef context = NULL;
     int own_context = 1, discard_names = 0;
@@ -669,18 +669,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             LLVMDisposeErrorMessage(text); goto done;
         }
     }
-    if (!speed) {
-        // Exact Step versions join through private allocas. Finish SSA
-        // construction in development too, instead of retaining each temporary on the
-        // task stack. Keep the eager development pipeline identical.
-        LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
-        LLVMErrorRef e = LLVMRunPasses(module, "function(mem2reg)", machine, options);
-        LLVMDisposePassBuilderOptions(options);
-        if (e) {
-            char *text = LLVMGetErrorMessage(e); error(out, text);
-            LLVMDisposeErrorMessage(text); goto done;
-        }
-    }
+    if (!speed) hirsel_llvm_promote_development_slots(module);
     LLVMAttributeRef probe = LLVMCreateStringAttribute(context, "probe-stack", 11, "inline-asm", 10);
     LLVMAttributeRef interval = LLVMCreateStringAttribute(context, "stack-probe-size", 16, "4096", 4);
     for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {

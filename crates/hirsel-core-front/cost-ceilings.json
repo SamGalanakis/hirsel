@@ -14,7 +14,7 @@
     },
     "product": {
       "fixed_std_instructions": 2067071,
-      "fixed_core_instructions": 1584463,
+      "fixed_core_instructions": 1584461,
       "entries": {
         "bfs-idiomatic": {
           "marginal_per_line": 48100

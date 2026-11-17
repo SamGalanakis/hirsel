@@ -1066,3 +1066,143 @@ fn strided(s: u64, stride: u64) -> u64 {
         );
     }
 }
+
+#[test]
+fn counted_reference_regions_keep_exact_bounds_and_mutation_prefixes() {
+    let source = r#"
+type Cell { value: u64 }
+fn capacity_only(take r: Result[(), (Capacity, Arc[Cell])]) -> Result[(), Capacity] {
+    match r { Ok(()) => Ok(()), Error((c, _)) => Error(c) }
+}
+fn share_loop(mut xs: List[Arc[Cell]], value: Arc[Cell], n: u64, at: u64) -> Result[(), Capacity] {
+    for i in 0u64 .. n {
+        let held = arc.share(value)
+        capacity_only(list.push(mut xs, take held))?
+        if i == at { return Error(Capacity(requested: 1, available: 0)) }
+    }
+    Ok(())
+}
+fn probe(s: u64, n: u64, at: u64) -> u64 {
+    let ran = bound steps s {
+        let mut xs: List[Arc[Cell]] = list.new()
+        let value = result.unwrap(arc.new(Cell(value: 9u64)))
+        let caught = share_loop(mut xs, value, n, at)
+        for _ in 0u64 .. 3u64 {}
+        let prefix = list.len(xs)
+        match take caught { Ok(()) => 1000000000u64 + prefix, Error(c) => 3000000000u64 + prefix }
+    }
+    match ran {
+        Ok(answer) => answer,
+        Error(e) => 2000000000u64 + e.steps * 100000u64,
+    }
+}
+"#;
+    // Arc event recording holds 4096 entries. Rc covers the slice boundary;
+    // Arc exercises the same classification with its full event trace retained.
+    for atomic in [false, true] {
+        let source = if atomic {
+            source.to_owned()
+        } else {
+            source.replace("Arc[", "Rc[").replace("arc.", "rc.")
+        };
+        let (module, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
+        let mut cases = Vec::new();
+        for n in [0u64, 4, if atomic { 1024 } else { 16384 }] {
+            let bounds = if n < 8 {
+                (0..=4 * n + 13).collect::<Vec<_>>()
+            } else {
+                vec![
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    13,
+                    14,
+                    41,
+                    42,
+                    65535,
+                    65536,
+                    65537,
+                    65538,
+                    65544,
+                    65547,
+                    65548,
+                    8 + 4 * n - 1,
+                    8 + 4 * n,
+                    8 + 4 * n + 1,
+                ]
+            };
+            let positions = [0, 7, n]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            for at in positions {
+                for &s in &bounds {
+                    // Three setup calls and the helper call cost four. Each
+                    // trip shares, pushes, unwraps Capacity and latches. An early
+                    // error skips its latch; the tail is three latches and len.
+                    let need = if at < n { 11 + 4 * at } else { 8 + 4 * n };
+                    let want = if s < need {
+                        2000000000u64 + s * 100000
+                    } else if at < n {
+                        3000000000u64 + at + 1
+                    } else {
+                        1000000000u64 + n
+                    };
+                    assert_eq!(
+                        eval::run(&module, names["probe"], &[s, n, at], 1_000_000).outcome,
+                        eval::Outcome::Returned(vec![want]),
+                        "hand count s={s}, n={n}, at={at}",
+                    );
+                    cases.push(Case {
+                        function: names["probe"],
+                        args: vec![s, n, at],
+                        limit: 1_000_000,
+                        injection: None,
+                    });
+                }
+            }
+        }
+        // A failed growth must retain exactly its already-pushed prefix too.
+        for s in [0, 5, 64, 1024] {
+            cases.push(Case {
+                function: names["probe"],
+                args: vec![s, 128, 128],
+                limit: 512,
+                injection: None,
+            });
+        }
+        for facts in [false, true] {
+            let ir = emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts)
+                .unwrap();
+            verify_ir(&ir);
+            for optimization in [Optimization::None, Optimization::Speed] {
+                let object =
+                    hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                        .unwrap();
+                let got = execute_object(&module, &cases, "", "", optimization, Some(object));
+                for (case, report) in cases.iter().zip(got) {
+                    assert_eq!(
+                        report.outcome,
+                        eval::run(&module, case.function, &case.args, case.limit).outcome,
+                        "facts={facts}, args={:?}, limit={}",
+                        case.args,
+                        case.limit,
+                    );
+                }
+            }
+        }
+        let object = module.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+        let got = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
+        for (case, report) in cases.iter().zip(got) {
+            assert_eq!(
+                report.outcome,
+                eval::run(&module, case.function, &case.args, case.limit).outcome,
+                "split units, args={:?}, limit={}",
+                case.args,
+                case.limit
+            );
+        }
+    }
+}

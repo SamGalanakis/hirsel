@@ -556,6 +556,7 @@ pub(super) enum Inline {
 }
 #[derive(Clone, Debug, Default)]
 pub(super) struct CallAttrs {
+    pub step_neutral: bool,
     pub cold: bool,
     pub tail: bool,
     pub inline: Inline,
@@ -1115,6 +1116,9 @@ impl Sink for TextSink {
                 }
                 if attrs.cold {
                     out.push_str(" cold");
+                }
+                if attrs.step_neutral {
+                    out.push_str(" \"hirsel-step-neutral\"");
                 }
                 scopes(out, &attrs.scopes);
             }

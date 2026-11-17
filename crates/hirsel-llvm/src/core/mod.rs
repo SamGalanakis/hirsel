@@ -1293,7 +1293,9 @@ impl FunctionEmitter<'_> {
         if flush {
             self.flush_steps();
         }
-        let op = Operation::Call(sig, callee, args, attrs);
+        let mut attrs = attrs.clone();
+        attrs.step_neutral |= self.neutral_step_call;
+        let op = Operation::Call(sig, callee, args, &attrs);
         let value = if sig.result.is_void() {
             self.effect(op);
             Value::Poison
@@ -1672,15 +1674,21 @@ impl FunctionEmitter<'_> {
                 self.put(result, &x);
             }
             Inst::Call { call } => {
-                self.neutral_step_call = match self.body.calls[call.index()].callee {
-                    Callee::Direct(f) if self.precharge.is_some() => self.step_neutral[f.index()],
-                    _ => steps::pure(self.module, self.body, self.constants, inst, true),
-                };
+                self.neutral_step_call =
+                    steps::neutral_inst(self.module, self.body, inst, self.step_neutral);
                 let result = self.call_site(&self.body.calls[call.index()]);
                 self.neutral_step_call = false;
                 result?;
             }
-            _ => self.storage(inst, index)?,
+            _ => {
+                // Preserve the same no-Step proof used by region planning through
+                // allocation, growth and inert cleanup runtime calls too.
+                self.neutral_step_call =
+                    steps::neutral_inst(self.module, self.body, inst, self.step_neutral);
+                let result = self.storage(inst, index);
+                self.neutral_step_call = false;
+                result?;
+            }
         }
         Ok(())
     }

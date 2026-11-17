@@ -240,7 +240,8 @@ extern "C" void hirsel_llvm_promote_step_window(void *ModuleRef) {
       if (auto *C = dyn_cast<CallBase>(&I)) {
         if (auto *CI = dyn_cast<CallInst>(C)) {
           if (CI->isMustTailCall()) Supported = false;
-          else if (!isa<IntrinsicInst>(CI)) Calls.push_back(CI);
+          else if (!isa<IntrinsicInst>(CI) &&
+                   !CI->hasFnAttr("hirsel-step-neutral")) Calls.push_back(CI);
         } else Supported = false;
       }
       if (auto *R = dyn_cast<ReturnInst>(&I)) Returns.push_back(R);

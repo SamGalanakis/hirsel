@@ -603,6 +603,17 @@ impl Sink for NativeSink {
                     if attrs.cold {
                         self.attribute(call, FUNCTION, COLD, None, 0);
                     }
+                    if attrs.step_neutral {
+                        let key = "hirsel-step-neutral";
+                        (api.string_attribute)(
+                            u,
+                            call,
+                            key.as_ptr().cast(),
+                            key.len(),
+                            c"".as_ptr(),
+                            0,
+                        );
+                    }
                     self.scopes(call, &attrs.scopes);
                     call
                 }

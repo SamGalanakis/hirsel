@@ -231,7 +231,9 @@ fn inert_field(
         Inline(t) => inert_drop(module, t.index(), seen),
         Seq(e) | Array(e, _) => inert_field(module, e, seen),
         Map(_, _) | Box(_) => false,
-        OwnFn | Handle(_) | Rc(_) | Arc(_) => false,
+        // Counted payloads are shareable; their cleanup runs no user code.
+        Rc(_) | Arc(_) => true,
+        OwnFn | Handle(_) => false,
         _ => true,
     }
 }
@@ -263,11 +265,9 @@ fn neutral_runtime(op: RtOp) -> bool {
             | RtOp::ArgsGet
     )
 }
-fn neutral_inst(module: &Module, body: &Body, inst: &Inst, neutral: &[bool]) -> bool {
+pub(super) fn neutral_inst(module: &Module, body: &Body, inst: &Inst, neutral: &[bool]) -> bool {
     match *inst {
-        Inst::Step { .. } | Inst::Share { .. } | Inst::Release { .. } | Inst::TryUnwrap { .. } => {
-            false
-        }
+        Inst::Step { .. } => false,
         Inst::Drop { ty, .. } => inert_drop(module, ty.index(), &mut BTreeSet::new()),
         Inst::Call { call } => match body.calls[call.index()].callee {
             Callee::Direct(f) => neutral[f.index()],
@@ -333,13 +333,27 @@ fn region_inst(module: &Module, body: &Body, inst: &Inst, neutral: &[bool]) -> b
 #[derive(Clone, Copy)]
 pub(super) struct Window {
     pub end: Local,
+    start: Local,
     spent: Local,
     charged: Local,
 }
 #[derive(Clone)]
 pub(super) enum Precharge {
-    Window { spent: Value, charged: Value },
-    Group { remaining: u64 },
+    Window {
+        spent: Value,
+        charged: Value,
+    },
+    Group {
+        remaining: u64,
+    },
+    Iteration {
+        index: ValueId,
+        start: Value,
+        charged: Value,
+        stride: u64,
+        cost: u64,
+        prefix: u64,
+    },
 }
 impl FunctionEmitter<'_> {
     pub(super) fn step_window(&mut self) -> Window {
@@ -350,6 +364,7 @@ impl FunctionEmitter<'_> {
         };
         Window {
             end: slot(),
+            start: slot(),
             spent: slot(),
             charged: slot(),
         }
@@ -363,6 +378,23 @@ impl FunctionEmitter<'_> {
             None => return,
             Some(Precharge::Group { remaining: 0 }) => return,
             Some(Precharge::Group { remaining }) => int(remaining),
+            Some(Precharge::Iteration {
+                index,
+                start,
+                charged,
+                stride,
+                cost,
+                prefix,
+            }) => {
+                let index = self.step_word(index);
+                let start = self.load(&Type::I64, &start, 8);
+                let distance = self.bin(Binary::Sub, &Type::I64, &index, &start);
+                let trips = self.bin(Binary::UDiv, &Type::I64, &distance, &int(stride));
+                let completed = self.bin(Binary::Mul, &Type::I64, &trips, &int(cost));
+                let spent = self.bin(Binary::Add, &Type::I64, &completed, &int(prefix));
+                let charged = self.load(&Type::I64, &charged, 8);
+                self.bin(Binary::Sub, &Type::I64, &charged, &spent)
+            }
             Some(Precharge::Window { spent, charged }) => {
                 let spent = self.load(&Type::I64, &spent, 8);
                 let charged = self.load(&Type::I64, &charged, 8);
@@ -380,6 +412,23 @@ impl FunctionEmitter<'_> {
             Some(Precharge::Group { remaining }) => {
                 self.precharge = Some(Precharge::Group {
                     remaining: remaining - 1,
+                });
+            }
+            Some(Precharge::Iteration {
+                index,
+                start,
+                charged,
+                stride,
+                cost,
+                prefix,
+            }) => {
+                self.precharge = Some(Precharge::Iteration {
+                    index,
+                    start,
+                    charged,
+                    stride,
+                    cost,
+                    prefix: prefix + 1,
                 });
             }
             Some(Precharge::Window { spent, .. }) => {
@@ -743,6 +792,47 @@ pub(super) fn loops(
         .filter(|p| !nested.contains(&p.header))
         .collect()
 }
+// A successful trip with one prefix at every join needs no running progress
+// counter. Reconstruct its consumed prefix only when leaving the reservation.
+// Cycles other than the latch, unequal joins and unequal back edges retain the
+// general progress path. Failure edges leave before their following effect.
+fn iteration_prefixes(body: &Body, plan: &Loop) -> Option<BTreeMap<usize, u64>> {
+    let Stride::Constant(_) = plan.stride else {
+        return None;
+    };
+    let mut prefixes = BTreeMap::from([(plan.header, 0)]);
+    let mut pending = vec![(body.edges[plan.yes.index()].target.index(), 0u64)];
+    while let Some((block, prefix)) = pending.pop() {
+        if block == plan.header {
+            if prefix != plan.cost {
+                return None;
+            }
+            continue;
+        }
+        if !plan.nodes.contains(&block) {
+            return None;
+        }
+        if let Some(old) = prefixes.insert(block, prefix) {
+            if old != prefix {
+                return None;
+            }
+            continue;
+        }
+        let spent = prefix.checked_add(
+            body.blocks[block]
+                .insts
+                .get(&body.insts)?
+                .iter()
+                .filter(|i| matches!(i, Inst::Step { .. }))
+                .count() as u64,
+        )?;
+        for successor in next(body, block).unwrap_or_default() {
+            pending.push((successor, spent));
+        }
+    }
+    (prefixes.len() == plan.nodes.len()).then_some(prefixes)
+}
+
 impl FunctionEmitter<'_> {
     pub(super) fn step_counter(&mut self) -> Value {
         self.step_counter
@@ -794,6 +884,7 @@ impl FunctionEmitter<'_> {
         self.emit_edge(out, plan.no);
         self.block(reserve);
         let index = self.step_word(plan.index);
+        self.store(&Type::I64, &index, &Value::Local(window.start), 8);
         let limit = self.step_word(plan.limit);
         let gap = self.bin(Binary::Sub, &Type::I64, &limit, &index);
         let stride = match plan.stride {
@@ -881,6 +972,9 @@ impl FunctionEmitter<'_> {
         number: usize,
         location: impl Fn(Option<Anchor>) -> Option<usize>,
     ) -> Result<()> {
+        let prefixes = (!plan.exact)
+            .then(|| iteration_prefixes(self.body, plan))
+            .flatten();
         for full in [true, false] {
             self.step_labels = plan
                 .nodes
@@ -896,6 +990,19 @@ impl FunctionEmitter<'_> {
             let done = Label::new("step_chunk_done", n);
             for &block in &plan.nodes {
                 self.block(self.step_label(block));
+                if let Some(prefixes) = &prefixes {
+                    let Stride::Constant(stride) = plan.stride else {
+                        unreachable!();
+                    };
+                    self.precharge = Some(Precharge::Iteration {
+                        index: plan.index,
+                        start: Value::Local(window.start),
+                        charged: Value::Local(window.charged),
+                        stride,
+                        cost: plan.cost,
+                        prefix: prefixes[&block],
+                    });
+                }
                 let row = &self.body.blocks[block];
                 for (offset, inst) in row.insts.get(&self.body.insts).unwrap().iter().enumerate() {
                     if !matches!(inst, Inst::Const { .. }) {
@@ -929,6 +1036,19 @@ impl FunctionEmitter<'_> {
             self.step_labels.clear();
             self.unchecked_steps = false;
             self.block(done);
+            if prefixes.is_some() {
+                let Stride::Constant(stride) = plan.stride else {
+                    unreachable!();
+                };
+                self.precharge = Some(Precharge::Iteration {
+                    index: plan.index,
+                    start: Value::Local(window.start),
+                    charged: Value::Local(window.charged),
+                    stride,
+                    cost: plan.cost,
+                    prefix: 0,
+                });
+            }
             self.step_refund();
             self.precharge = None;
             if full {

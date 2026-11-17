@@ -108,7 +108,10 @@ pub(super) fn define_compare_bytes(sink: &mut dyn Sink, facts: bool) {
                 &memcmp,
                 &callee,
                 &[a.clone(), b.clone(), length.clone()],
-                &CallAttrs::default(),
+                &CallAttrs {
+                    step_neutral: true,
+                    ..CallAttrs::default()
+                },
             ),
         );
         let zero_cmp = emit(

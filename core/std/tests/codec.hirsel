@@ -78,6 +78,11 @@ pub fn ts_hirsel_differential() -> bool {
         if at - start != list.len(encoded) {
             return false
         }
+        for j in 0u64 .. list.len(encoded) {
+            if supplied[start + j] != encoded[j] {
+                return false
+            }
+        }
         i += 1
     }
     at == list.len(supplied)

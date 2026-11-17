@@ -98,13 +98,17 @@ pub fn run(
     };
     let response = describe(&executable, options.n_place, options.timeout)?;
     let description = Describe::read(&response)?;
-    let schema = frame_schema(work.path(), &options.build)?;
+    let schema = frame_schema(&std::env::current_exe()?, work.path(), &options.build)?;
     write_with_frame(&description, &schema, &options.out)
 }
 
 /// The protocol schema is produced by std.codec from the runner bundled with
 /// this compiler. It is independent of the server's place description.
-pub fn frame_schema(work: &Path, native_options: &[String]) -> Result<Vec<u8>, Error> {
+pub fn frame_schema(
+    compiler: &Path,
+    work: &Path,
+    native_options: &[String],
+) -> Result<Vec<u8>, Error> {
     use hirsel_core_resolve::{CorpusManifest, ModuleSource, PackageManifest};
     let core = crate::package("core");
     let std = crate::package("std");
@@ -173,7 +177,7 @@ pub fn frame_schema(work: &Path, native_options: &[String]) -> Result<Vec<u8>, E
         serde_json::to_vec(&CorpusManifest { core, packages })?,
     )?;
     let executable = work.join("schema-probe");
-    let mut command = Command::new(std::env::current_exe()?);
+    let mut command = Command::new(compiler);
     command
         .args(["build", "--inputs"])
         .arg(&manifest)

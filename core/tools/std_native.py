@@ -190,10 +190,14 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
         if instructions is not None:
             request["instructions"] = instructions
+        if sdk_out is not None:
+            request.update(sdk_out=str(sdk_out), sdk_describe=str(sdk_describe))
+        if sdk_compiler is not None:
+            request.update(sdk_compiler=str(sdk_compiler), sdk_native_options=sdk_native_options)
         try:
             self.process.stdin.write(json.dumps(request).encode() + b'\n')
             self.process.stdin.flush()
@@ -354,6 +358,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
     engines = list(engines)
     typescript_override = typescript
     typescript = typescript or root / 'crates/hirsel-core-driver/src/sdk_codec.js'
+    frame_codegen = typescript_override is None and any(c.package == 'store' and c.call.startswith('ts_frame_') for c in contracts)
+    if frame_codegen and evaluator is None:
+        raise ValueError('Frame codec laws require --evaluator to derive runner.Frame')
     if any(c.evaluator_only for c in contracts) and 'evaluator' not in engines:
         engines.insert(0, 'evaluator')
     if 'evaluator' in engines and evaluator is None:
@@ -363,7 +370,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
     with tempfile.TemporaryDirectory(prefix='hirsel-std-native-') as temporary, contextlib.ExitStack() as processes:
         work = Path(temporary)
         protocol_codec = None
-        resident = processes.enter_context(Evaluator(evaluator)) if 'evaluator' in engines else None
+        resident = processes.enter_context(Evaluator(evaluator)) if 'evaluator' in engines or frame_codegen else None
         for engine in engines:
             started = time.monotonic()
             for index, case in enumerate(contracts):
@@ -397,9 +404,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(', 'ts_frame_vectors(', 'ts_frame_differential(')):
                     frame = case.package == 'store'
                     if frame and protocol_codec is None and typescript_override is None:
-                        if compiler is None or runtime is None:
-                            raise ValueError('Frame codec laws require --compiler and --runtime to generate the SDK')
-                        server = work / 'description-fixture'
+                        description_file = work / 'description.bin'
                         def count(n):
                             return n.to_bytes(4, 'little')
                         def blob(b):
@@ -411,8 +416,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         def record_definition(name, field, ty):
                             return (blob(name.encode()) + count(0) + bytes([0])
                                     + count(1) + bytes([0]) + blob(field.encode()) + ty)
-                        # Scripted per-program entries exercise the real CLI and
-                        # generated stubs. Frame itself always comes from runner.
+                        # Scripted entries exercise the generator and stubs without
+                        # depending on the launch/Describe producer. Frame comes
+                        # from the actual runner declaration through std.codec.
                         returned = (bytes([3]) + count(2) + record_definition('fixture.main.Reply', 'n', bytes([6]))
                                     + record_definition('fixture.main.Problem', 'message', bytes([13]))
                                     + bytes([17, 19]) + count(0) + bytes([19]) + count(1))
@@ -422,13 +428,25 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + count(3)
                                        + exported(0, b'\x01fixture@1/main/toggle(take u64)->u64', b'\x06', b'\x06', 9007199254740993, 7)
                                        + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', b'\x0e\x03', 2, 3) + transaction)
-                        server.write_text('#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(' + repr(description) + ')\n')
-                        server.chmod(0o700)
+                        description_file.write_bytes(description)
                         (work / 'package.json').write_text('{"type":"commonjs"}\n')
-                        generated = work / 'sdk'
-                        built = subprocess.run([str(compiler), 'sdk', 'ts', str(server), '--out', str(generated), '--runtime', str(runtime)], capture_output=True, text=True)
-                        if built.returncode:
-                            raise ValueError('Frame SDK generation failed: ' + built.stdout + built.stderr)
+                        generated = output.with_name(output.stem + '-sdk') if output else work / 'sdk'
+                        probe = work / 'frame-schema.hirsel'
+                        probe.write_text(case.file.read_text())
+                        probe_inputs = work / 'frame-schema.json'
+                        probe_inputs.write_text(json.dumps(manifest(root, case, probe)))
+                        native_options = ['--runtime', str(runtime)] if compiler and runtime else None
+                        if native_options and cc:
+                            native_options += ['--cc', str(cc)]
+                        built = resident.evaluate(probe_inputs, 'store@1/tests/codec_frames/ts_frame_schema',
+                                                  sdk_out=generated, sdk_describe=description_file,
+                                                  sdk_compiler=compiler if native_options else None,
+                                                  sdk_native_options=native_options)
+                        report = json.loads(built.stdout)
+                        if built.returncode or report.get('error'):
+                            resident.errors.seek(0)
+                            detail = resident.errors.read().decode(errors='replace')
+                            raise ValueError('Frame SDK generation failed: ' + str(report) + '\n' + detail)
                         protocol_codec = generated / 'codec.js'
                     module = (typescript_override or protocol_codec) if frame else typescript
                     law = 'vectors' if case.call.startswith(('ts_codec_vectors(', 'ts_frame_vectors(')) else 'differential'

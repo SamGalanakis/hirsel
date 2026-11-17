@@ -29,9 +29,18 @@ fn encoded(f: runner.Frame) -> Bytes {
     take out
 }
 
+pub fn ts_frame_schema(out: Stdout) -> Result[(), Exit] waits {
+    let c: std.codec.Codec[runner.Frame] = std.codec.of()
+    let schema = result.unwrap(std.codec.schema(c))
+    match stdout.write_bytes(out, schema) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 1))
+    }
+}
+
 // expect: run ts_frame_vectors() = true
 pub fn ts_frame_vectors() -> bool {
-    encoded(runner.Hello(None, list.new())) == raw("000000000000000000000000") && encoded(runner.Call(7u32, 9007199254740993u64, 2u32, 3u32, raw("ff"))) == raw("01000000070000000100000000002000020000000300000001000000ff") && encoded(runner.Batch(2u64, list.new(), list.new(), list.new())) == raw("060000000200000000000000000000000000000000000000") && encoded(runner.Batch(2u64, singleton(7u32), list.new(), list.new())) == raw("06000000020000000000000001000000070000000000000000000000") && encoded(runner.Welcome(raw("aa"), 2u32, 3u64, list.new(), "t", 4u64)) == raw("0400000001000000aa0200000003000000000000000000000001000000740400000000000000")
+    encoded(Hello(None, list.new())) == raw("000000000000000000000000") && encoded(Call(7u32, 9007199254740993u64, 2u32, 3u32, raw("ff"))) == raw("01000000070000000100000000002000020000000300000001000000ff") && encoded(Batch(2u64, list.new(), list.new(), list.new())) == raw("060000000200000000000000000000000000000000000000") && encoded(Batch(2u64, singleton(7u32), list.new(), list.new())) == raw("06000000020000000000000001000000070000000000000000000000") && encoded(Welcome(raw("aa"), 2u32, 3u64, list.new(), "t", 4u64)) == raw("0400000001000000aa0200000003000000000000000000000001000000740400000000000000")
 }
 
 fn ts_frame_bytes() -> String {
@@ -42,26 +51,26 @@ fn sample(i: u64, state: u64) -> runner.Frame {
     let p = (state << 32) | i
     let id: u32 = int.truncate(i)
     match i % 9 {
-        0 => runner.Hello(if i % 2 == 0 {
+        0 => Hello(if i % 2 == 0 {
             None
         } else {
             Some(raw("0102"))
         }, singleton(runner.Want(identity: raw("03"), args_fp: state, result_fp: p))),
-        1 => runner.Call(id, p, int.truncate(state % 4), 123u32, singleton(int.truncate(state))),
-        2 => runner.Subscribe(id, 2u32, raw("07"), if i % 2 == 0 {
+        1 => Call(id, p, int.truncate(state % 4), 123u32, singleton(int.truncate(state))),
+        2 => Subscribe(id, 2u32, raw("07"), if i % 2 == 0 {
             None
         } else {
             Some(raw("08"))
         }),
-        3 => runner.Unsubscribe(id),
-        4 => runner.Welcome(raw("0102"), 4u32, state, raw("03"), "t", 16777216u64),
+        3 => Unsubscribe(id),
+        4 => Welcome(raw("0102"), 4u32, state, raw("03"), "t", 16777216u64),
         5 => {
             let entry: runner.Entry = match state % 3 {
-                0 => runner.Ready(id),
-                1 => runner.Resolve(id, raw("09")),
-                _ => runner.Gone
+                0 => Ready(id),
+                1 => Resolve(id, raw("09")),
+                _ => Gone
             }
-            runner.Placed(take entry)
+            Placed(take entry)
         }
         6 => {
             let complete: List[u32] = if state % 2 == 0 {
@@ -70,24 +79,24 @@ fn sample(i: u64, state: u64) -> runner.Frame {
                 list.new()
             }
             let r = runner.Row(sub: 1u32, key: raw("01"), value: Some(raw("03")))
-            let d = runner.Done(stream: id, p: p, outcome: runner.Returned(raw("04")))
-            runner.Batch(state, take complete, singleton(take r), singleton(take d))
+            let d = runner.Done(stream: id, p: p, outcome: Returned(raw("04")))
+            Batch(state, take complete, singleton(take r), singleton(take d))
         }
         7 => {
             let outcome: runner.Outcome = if i % 2 == 0 {
-                runner.Failed(runner.Raised(int.truncate(state)))
+                Failed(Raised(int.truncate(state)))
             } else {
-                runner.Refused(runner.Deadline)
+                Refused(Deadline)
             }
-            runner.Ended(id, take outcome)
+            Ended(id, take outcome)
         }
         _ => {
             let outcome: runner.Outcome = match state % 3 {
-                0 => runner.Superseded,
-                1 => runner.Abandoned,
-                _ => runner.InDoubt
+                0 => Superseded,
+                1 => Abandoned,
+                _ => InDoubt
             }
-            runner.Reset(state, singleton(runner.Done(stream: id, p: p, outcome: take outcome)))
+            Reset(state, singleton(runner.Done(stream: id, p: p, outcome: take outcome)))
         }
     }
 }
@@ -112,6 +121,11 @@ pub fn ts_frame_differential() -> bool {
         }
         if at - start != list.len(expected) {
             return false
+        }
+        for j in 0u64 .. list.len(expected) {
+            if input[start + j] != expected[j] {
+                return false
+            }
         }
     }
     at == list.len(input)

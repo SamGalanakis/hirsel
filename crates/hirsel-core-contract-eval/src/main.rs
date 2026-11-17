@@ -142,14 +142,54 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
         let manifest = input["manifest"].as_str().ok_or("expected manifest")?;
         let entry = DefPath::from_full(input["entry"].as_str().ok_or("expected entry")?)
             .ok_or("invalid entry")?;
-        evaluate(
+        let report = evaluate(
             driver,
             store,
             Path::new(manifest),
             entry,
             input["program_entry"].as_bool().unwrap_or(false),
             input["instructions"].as_u64().unwrap_or(INSTRUCTIONS),
-        )
+        )?;
+        if let Some(out) = input["sdk_out"].as_str() {
+            if report["outcome"] != json!({"kind":"returned","values":[1]}) {
+                return Err(format!("Frame schema export failed: {report}"));
+            }
+            let bytes: Vec<u8> = report["stdout"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b.as_u64().unwrap() as u8)
+                .collect();
+            if let Some(compiler) = input["sdk_compiler"].as_str() {
+                let work = tempfile::tempdir().map_err(|e| e.to_string())?;
+                let options: Vec<String> = input["sdk_native_options"]
+                    .as_array()
+                    .ok_or("expected sdk_native_options")?
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_owned())
+                    .collect();
+                let native = hirsel_core_driver::sdk_command::frame_schema(
+                    Path::new(compiler),
+                    work.path(),
+                    &options,
+                )
+                .map_err(|e| e.to_string())?;
+                if native != bytes {
+                    return Err("native/evaluator Frame schemas differ".into());
+                }
+            }
+            let description = std::fs::read(
+                input["sdk_describe"]
+                    .as_str()
+                    .ok_or("expected sdk_describe")?,
+            )
+            .map_err(|e| e.to_string())?;
+            let description =
+                hirsel_core_driver::sdk::Describe::read(&description).map_err(|e| e.to_string())?;
+            hirsel_core_driver::sdk::write_with_frame(&description, &bytes, Path::new(out))
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(report)
     }));
     match result {
         Ok(Ok(result)) => result,

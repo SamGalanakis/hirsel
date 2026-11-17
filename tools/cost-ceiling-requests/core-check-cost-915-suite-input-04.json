@@ -1,0 +1,12 @@
+{
+  "file": "crates/hirsel-core-front/front-cost-ceilings.json",
+  "cell": [
+    "corpora",
+    "suite-edit",
+    "image_per_token",
+    "records_opened"
+  ],
+  "previous": 0.002828175325584652,
+  "value": 0.0029157558432823276,
+  "reason": "Orchestrator-authorized seven-cell suite input rebase following5276/5279. Authoritative merged5279measurement82bbb00e: same35682own tokens, new image102records/419981read bytes/415901digest bytes and845row demands, versus qualified100/411637/407637/844. Bundled std includes4829f4b6/0f6e1eb9 WebSocket helper growth, absent from the two all-source manifests. Value from front-cost.baseline applied to this measured row; existing2%/whole-event margins, token denominator and60000budget unchanged. Per-unit effects are explicit: read/byte+0.993%, digest/byte-0.009%, for_body/key+1.637%; final key count is not a measure of its variable imported closure/page work. Same-binary pinned explicit-image control confirms595->596library bodies and844->845demands, but does not reproduce the ordinary page crossings or uniquely attribute the entire per-key rise. No claim that all instruction change is linear byte growth. Evidence core-check-cost-915/suite-inputs-20261117/."
+}

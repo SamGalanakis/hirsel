@@ -31,11 +31,12 @@
 //!   writes it, and `case c f` address steps reach a case's payload. Own, resource,
 //!   stable and scoped variants; `Option` and `Result` are ordinary variant rows of
 //!   the type table, one per instantiation. The tag's place and width stay private
-//!   (MEM-13): a producer never names the tag bytes. A variant with one case that
-//!   holds data may keep its other cases in spare values of that payload (a niche,
-//!   `hirsel_core_layout::Encoding::Niche`): then `set_case` of the data case writes
-//!   nothing, since its payload makes the case, and `set_case` of another case writes
-//!   that case's spare word, which overlaps the payload. So a producer writes the
+//!   (MEM-13): a producer never names the tag bytes. A variant may keep its other
+//!   cases in spare values of its largest case's payload (a niche,
+//!   `hirsel_core_layout::Encoding::Niche`); the other cases' fields never overlap
+//!   that word. Then `set_case` of the data case writes nothing, since its payload
+//!   makes the case, and `set_case` of another case writes that case's spare word,
+//!   which overlaps the data case's payload. So a producer writes the
 //!   payload of the data case completely, and sets an empty case only once the
 //!   payload is moved out or was never written.
 //! - Inline arrays `Inline[T, n]` (SEM-9): field type `array n T`, `n` elements at

@@ -72,7 +72,8 @@ pub enum Encoding {
     /// The word is the case ordinal.
     Direct,
     /// The variant is laid out as case `dataful`'s payload, and every other case is
-    /// in `first..=last` and has no data. Case `c != dataful` is the word
+    /// in `first..=last` and keeps its data, if any, wholly before or wholly after the
+    /// tag word. Case `c != dataful` is the word
     /// `start + (c - first)` (mod 2^(8 × width)), a value no payload of `dataful`
     /// holds; any other word is `dataful`, whose case is written by its payload alone.
     Niche {
@@ -705,11 +706,11 @@ pub fn field_niche<'r>(
     }
 }
 
-/// A variant laid out as its one dataful case's payload: that case's index, offsets
-/// from 0, end, and the tag and the variant's own remaining niche. `None` when the
-/// variant does not have exactly one case with data, every other case's fields
-/// zero-sized and without cleanup, or when that case's payload has too few spare
-/// values for the other cases.
+/// A variant laid out as its dataful case's payload: offsets per case, end, and the
+/// tag and the variant's own remaining niche. With one case with data, every other
+/// case's fields must be zero-sized and without cleanup; with several,
+/// [`several_dataful`] decides. `None` when the payload has too few spare values for
+/// the other cases.
 #[allow(clippy::type_complexity)]
 fn niche_layout(
     shapes: &[Shape],
@@ -723,7 +724,7 @@ fn niche_layout(
         .filter(|&r| measured[r].iter().any(|&(size, _, _)| size > 0))
         .collect();
     let &[d] = dataful.as_slice() else {
-        return Ok(None);
+        return several_dataful(shapes, rows, measured, shape, out, &dataful);
     };
     if rows.len() < 2
         || rows
@@ -756,6 +757,135 @@ fn niche_layout(
             }
         })
         .collect();
+    let tag = Tag {
+        offset: niche.offset,
+        width: niche.width,
+        encoding: Encoding::Niche {
+            dataful: d as u32,
+            first: first as u32,
+            last: last as u32,
+            start: niche.start,
+        },
+    };
+    let rest = (niche.count > used).then(|| Niche {
+        start: niche.start.wrapping_add(used),
+        count: niche.count - used,
+        ..niche
+    });
+    Ok(Some((offsets, end, tag, rest)))
+}
+
+/// The fields of `row` placed from 0 in the order `order` (indices into `row`):
+/// offsets in `row`'s order and the end, or `None` past the address range.
+fn place_in_order(m: &[(u64, u64, u64)], order: &[usize]) -> Option<(Vec<u64>, u64)> {
+    let mut offsets = vec![0; m.len()];
+    let mut off = 0u64;
+    for &i in order {
+        let (size, a, _) = m[i];
+        off = checked_align_up(off, a)?;
+        offsets[i] = off;
+        off = off.checked_add(size)?;
+    }
+    Some((offsets, off))
+}
+
+/// rustc's niche filling for a variant with several dataful cases: the largest case
+/// is laid out untagged around its best niche, and every other case fits wholly
+/// before that niche or wholly after it, within the largest case's size. Tried with
+/// the largest case's fields in declaration order, with its niche-carrying field
+/// last and with it first; taken only when strictly smaller than the tagged layout,
+/// so no variant grows.
+#[allow(clippy::type_complexity)]
+fn several_dataful(
+    shapes: &[Shape],
+    rows: &[&[Field]],
+    measured: &[Vec<(u64, u64, u64)>],
+    shape: &Shape,
+    out: &Computed<'_>,
+    dataful: &[usize],
+) -> Result<Option<(Vec<Vec<u64>>, u64, Tag, Option<Niche>)>, LayoutError> {
+    if dataful.len() < 2 {
+        return Ok(None);
+    }
+    let get = |t: TypeRef| done(out, t);
+    let align = measured.iter().flatten().map(|&(_, a, _)| a).max().unwrap_or(1);
+    let width = tag_width(rows.len());
+    let tagged_align = align.max(width);
+    let start = align_up(width, tagged_align);
+    let mut tagged = start;
+    for (m, fields) in measured.iter().zip(rows) {
+        tagged = tagged.max(place_row(shape, fields, m, start)?.1);
+    }
+    let tagged = align_up(tagged, tagged_align);
+    let mut largest: Option<(usize, u64)> = None;
+    for &r in dataful {
+        let Some((_, end)) = place_in_order(&measured[r], &(0..rows[r].len()).collect::<Vec<_>>())
+        else {
+            return Ok(None);
+        };
+        if largest.is_none_or(|(_, e)| end > e) {
+            largest = Some((r, end));
+        }
+    }
+    let (d, _) = largest.unwrap();
+    let identity: Vec<usize> = (0..rows[d].len()).collect();
+    let (declared, _) = place_in_order(&measured[d], &identity).unwrap();
+    let Some(carrier) = best_niche(shapes, rows[d], &declared, &get).and_then(|n| {
+        declared
+            .iter()
+            .zip(&measured[d])
+            .position(|(&at, &(size, _, _))| n.offset >= at && n.offset < at + size.max(1))
+    }) else {
+        return Ok(None);
+    };
+    let others: Vec<usize> = identity.iter().copied().filter(|&i| i != carrier).collect();
+    let niche_last: Vec<usize> = others.iter().copied().chain([carrier]).collect();
+    let niche_first: Vec<usize> = [carrier].into_iter().chain(others.iter().copied()).collect();
+    let first = if d == 0 { 1 } else { 0 };
+    let last = if d == rows.len() - 1 {
+        rows.len() - 2
+    } else {
+        rows.len() - 1
+    };
+    let used = (last - first + 1) as u64;
+    let mut best: Option<(u64, Vec<Vec<u64>>, u64, Niche)> = None;
+    'order: for order in [identity, niche_last, niche_first] {
+        let Some((row, end)) = place_in_order(&measured[d], &order) else {
+            continue;
+        };
+        let Some(niche) = best_niche(shapes, rows[d], &row, &get) else {
+            continue;
+        };
+        if niche.count < used {
+            continue;
+        }
+        let Some(size) = checked_align_up(end, align) else {
+            continue;
+        };
+        let mut offsets = Vec::with_capacity(rows.len());
+        for (r, m) in measured.iter().enumerate() {
+            if r == d {
+                offsets.push(row.clone());
+                continue;
+            }
+            let (before, before_end) = place_row(shape, rows[r], m, 0)?;
+            if before_end <= niche.offset {
+                offsets.push(before);
+                continue;
+            }
+            let (after, after_end) = place_row(shape, rows[r], m, niche.offset + niche.width)?;
+            if after_end > size {
+                continue 'order;
+            }
+            offsets.push(after);
+        }
+        if size < tagged && best.as_ref().is_none_or(|(s, ..)| size < *s) {
+            best = Some((size, offsets, end, niche));
+        }
+    }
+    let Some((_, offsets, end, niche)) = best else {
+        return Ok(None);
+    };
     let tag = Tag {
         offset: niche.offset,
         width: niche.width,

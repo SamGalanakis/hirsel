@@ -975,6 +975,61 @@ fn niche_words_round_trip_through_read_case_and_case_word() {
     );
 }
 
+/// Bug: a variant with several dataful cases stays tagged (Calculator's `Node` at 40
+/// bytes where Rust's is 32), or another case's field overlaps the tag word, so
+/// writing that case's payload rewrites its case. Hand-derived: `Assignment(String,
+/// Box)` is the largest (32); with its String last its capacity at 24 is the niche,
+/// and Number (8), Variable (24) and Binary (u8, Box, Box: 24) fit before it. The
+/// charge stays 8 plus the largest payload, 40 (MEM-24). `Two(u64) | Three(u64, u64)`
+/// has no niche and stays tagged at 24.
+#[test]
+fn several_dataful_cases_share_one_niche_without_touching_it() {
+    let string = || FieldTy::Seq(Box::new(u(Scalar::U8)));
+    let node = || FieldTy::Box(TypeRef(0));
+    let shapes = [
+        variant(
+            "Node",
+            Repr::Own,
+            vec![
+                ("Number", vec![field("n", u(Scalar::I64))]),
+                ("Variable", vec![field("name", string())]),
+                (
+                    "Binary",
+                    vec![field("op", u(Scalar::U8)), field("l", node()), field("r", node())],
+                ),
+                ("Assignment", vec![field("name", string()), field("v", node())]),
+            ],
+        ),
+        variant(
+            "Plain",
+            Repr::Own,
+            vec![
+                ("Two", vec![field("a", u(Scalar::U64))]),
+                ("Three", vec![field("a", u(Scalar::U64)), field("b", u(Scalar::U64))]),
+            ],
+        ),
+    ];
+    let r = compute(&shapes).unwrap();
+    let f = fixed(&r[0]);
+    let tag = f.tag.unwrap();
+    assert_eq!((f.size, tag.offset, tag.width), (32, 24, 8));
+    assert_eq!(r[0].logical_size, Some(40));
+    assert_eq!(f.offsets[3], vec![8, 0]);
+    let sizes = [vec![8], vec![24], vec![1, 8, 8]];
+    for (case, widths) in sizes.iter().enumerate() {
+        for (&at, &w) in f.offsets[case].iter().zip(widths) {
+            assert!(at + w <= tag.offset || at >= tag.offset + tag.width, "case {case}");
+        }
+        let word = case_word(&tag, case as u32).unwrap();
+        assert_eq!(case_of(&tag, word), case as u32);
+    }
+    assert_eq!(case_word(&tag, 3), None);
+    assert_eq!(case_of(&tag, 5), 3);
+    let plain = fixed(&r[1]);
+    assert_eq!(plain.size, 24);
+    assert_eq!(plain.tag.unwrap().encoding, Encoding::Direct);
+}
+
 /// Bug: a niche taken from a record's field other than the first, or the niche's
 /// offset left relative to the field. `Pair { n: u64, b: Box }` has its only niche
 /// in its second field at 8, so `Option[Pair]` is 16 bytes with its tag word at 8.

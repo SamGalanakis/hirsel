@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    abi::{hirsel_core_release_buffer_enqueue, hirsel_core_release_fixed_enqueue},
+    abi::hirsel_core_release_buffer_enqueue,
     abi_layout::{FIXED_POINT_NO_INDEX, NODE_PAYLOAD, fixed_point},
     block::{self, Block, Descriptor, Point},
     counted::{self, Worklist},
@@ -46,7 +46,7 @@ pub(crate) unsafe fn release_leaf(context: *mut Context, node: NonNull<u8>, atom
     // SAFETY: the caller transfers a live holder; the last one owns the node.
     unsafe {
         if counted::decrement(node, atomic) {
-            crate::abi::hirsel_core_release_fixed_last(context, node, &LEAF.descriptor);
+            crate::abi::hirsel_core_release(context, node, &LEAF.descriptor, 0);
         }
     }
 }
@@ -73,7 +73,7 @@ unsafe extern "C" fn chain(
             if let Some(child) = NonNull::new(payload.cast::<*mut u8>().read())
                 && counted::decrement(child, false)
             {
-                hirsel_core_release_fixed_enqueue(work, child, &CHAIN.descriptor, 1);
+                (*work).stage_fixed(child, &CHAIN.descriptor, 1);
                 return false;
             }
         }
@@ -100,7 +100,7 @@ fn counted_chain_releases_with_constant_stack_and_no_admission() {
     unsafe {
         let node = NonNull::new(head).unwrap();
         assert!(counted::decrement(node, false));
-        crate::abi::hirsel_core_release_fixed_last(&mut ctx, node, &CHAIN.descriptor);
+        crate::abi::hirsel_core_release(&mut ctx, node, &CHAIN.descriptor, 0);
     }
     assert_eq!(ctx.available(), 2_000_000);
     assert_eq!(ctx.current.attempts(), 0);
@@ -229,7 +229,7 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
                 if let Some(child) = NonNull::new(child)
                     && counted::decrement(child, false)
                 {
-                    hirsel_core_release_fixed_enqueue(list, child, &TREE.descriptor, *cursor);
+                    (*list).stage_fixed(child, &TREE.descriptor, *cursor);
                     return false;
                 }
             }
@@ -265,7 +265,7 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
     unsafe {
         let one = NonNull::new(one).unwrap();
         assert!(counted::decrement(one, false));
-        crate::abi::hirsel_core_release_fixed_last(&mut ctx, one, &TREE.descriptor);
+        crate::abi::hirsel_core_release(&mut ctx, one, &TREE.descriptor, 0);
     }
     TRACE.with(|t| assert_eq!(*t.borrow(), [3, 4, 2, 1]));
     assert_eq!(ctx.available(), 128);
@@ -375,7 +375,7 @@ unsafe extern "C" fn kids(
             let child = NonNull::new_unchecked(data.add(*cursor as usize).read());
             *cursor += 1;
             if counted::decrement(child, false) {
-                hirsel_core_release_fixed_enqueue(work, child, &HOLDER.descriptor, 0);
+                (*work).stage_fixed(child, &HOLDER.descriptor, 0);
                 return false;
             }
         }
@@ -413,7 +413,7 @@ fn fixed_frames_and_buffer_frames_share_one_nonrecursive_worklist() {
     unsafe {
         let node = head.unwrap();
         assert!(counted::decrement(node, false));
-        crate::abi::hirsel_core_release_fixed_last(&mut ctx, node, &HOLDER.descriptor);
+        crate::abi::hirsel_core_release(&mut ctx, node, &HOLDER.descriptor, 0);
     }
     assert_eq!(ctx.available(), 8_000_000);
     assert_eq!(ctx.current.attempts(), 0);

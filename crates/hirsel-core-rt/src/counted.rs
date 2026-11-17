@@ -30,12 +30,19 @@ pub struct Worklist {
     descriptor: *const Descriptor,
     /// The running fixed block's suspension point for the staged descendant, 1-based.
     point: u64,
+    /// The release's caller site word, passed to finalizers that inherit it.
+    site: u64,
+    /// Nonzero once a finalizer or handle cleaned by this drain has failed;
+    /// recipes OR into it and continue (FAIL-10).
+    failed: u8,
 }
 const _: () = assert!(std::mem::offset_of!(Worklist, head) == crate::abi_layout::WORKLIST_HEAD);
 const _: () = assert!(std::mem::offset_of!(Worklist, node) == crate::abi_layout::WORKLIST_NODE);
 const _: () =
     assert!(std::mem::offset_of!(Worklist, descriptor) == crate::abi_layout::WORKLIST_DESCRIPTOR);
 const _: () = assert!(std::mem::offset_of!(Worklist, point) == crate::abi_layout::WORKLIST_POINT);
+const _: () = assert!(std::mem::offset_of!(Worklist, site) == crate::abi_layout::WORKLIST_SITE);
+const _: () = assert!(std::mem::offset_of!(Worklist, failed) == crate::abi_layout::WORKLIST_FAILED);
 
 type Fixed = (NonNull<u8>, *const Descriptor, u64);
 
@@ -176,7 +183,8 @@ pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
 }
 
 /// Clean and free a dead fixed block and everything it owns, in postorder,
-/// with constant native stack and no allocation.
+/// with constant native stack and no allocation. Returns whether a finalizer
+/// or handle it cleaned failed; cleanup went on regardless (FAIL-10).
 /// # Safety
 /// Count is zero or the block is uniquely owned; the descriptor is exact and
 /// lives as long as the compiled program; the context is live.
@@ -184,12 +192,15 @@ pub(crate) unsafe fn drain(
     context: *mut Context,
     node: NonNull<u8>,
     descriptor: *const Descriptor,
-) {
+    site: u64,
+) -> bool {
     let mut list = Worklist {
         head: 0,
         node: std::ptr::null_mut(),
         descriptor: std::ptr::null(),
         point: 0,
+        site,
+        failed: 0,
     };
     let mut current = Some((node, descriptor, 0));
     // SAFETY: glue keeps unfinished blocks live and hands over one exclusively
@@ -226,7 +237,7 @@ pub(crate) unsafe fn drain(
                 list.head = a as usize | 1;
                 current = list.take();
             } else if list.head == 0 {
-                return;
+                return list.failed != 0;
             } else if list.head & 1 != 0 {
                 let a = (list.head & !1) as *mut u8;
                 let point = a.cast::<*const u8>().read();

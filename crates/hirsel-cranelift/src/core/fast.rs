@@ -572,13 +572,16 @@ pub(super) fn release(
     if let Some(recipe) = cleanup.1 {
         let reference = object.declare_data_in_func(recipe, b.func);
         let recipe = b.ins().symbol_value(types::I64, reference);
+        // A shareable payload holds no resource or finalizer, so its release
+        // cannot fail and needs no site.
+        let zero = b.ins().iconst(types::I64, 0);
         calls.c(
             object,
             b,
-            "hirsel_core_release_fixed_last",
-            &[P, P, P],
-            &[],
-            &[context, node, recipe],
+            "hirsel_core_release",
+            &[P, P, P, U],
+            &[B],
+            &[context, node, recipe, zero],
         )?;
     } else {
         let charge = b.ins().iconst(types::I64, cleanup.0 as i64);

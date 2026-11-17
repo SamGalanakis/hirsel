@@ -58,10 +58,14 @@ pub const FIXED_POINT_DONE: u64 = u64::MAX;
 // A drain's worklist (counted::Worklist), written inline by generated glue to
 // hand over one descendant: node, then descriptor (0 for a GRAPH buffer whose
 // frame stage_buffer wrote), then the running fixed block's point (0 under a buffer).
+// Recipes read the release's site word and OR a failed finalizer or handle into
+// the failed byte, then go on cleaning.
 pub const WORKLIST_HEAD: usize = 0;
 pub const WORKLIST_NODE: usize = 8;
 pub const WORKLIST_DESCRIPTOR: usize = 16;
 pub const WORKLIST_POINT: usize = 24;
+pub const WORKLIST_SITE: usize = 32;
+pub const WORKLIST_FAILED: usize = 40;
 /// Byte offset of point `k` (1-based) from its descriptor.
 pub const fn fixed_point(k: u64) -> usize {
     FIXED_DESCRIPTOR_BYTES + FIXED_POINT_BYTES * (k as usize - 1)

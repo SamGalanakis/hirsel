@@ -210,10 +210,10 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     assert!(ir.contains("call void @hirsel_core_arc_initialized(ptr %context)"));
     assert!(ir.contains("call void @hirsel_core_arc_shared"));
     assert!(ir.contains("call void @hirsel_core_arc_released"));
-    assert!(ir.lines().any(
-        |line| line.contains("call void @hirsel_core_release_fixed_last")
-            && line.ends_with(" cold")
-    ));
+    assert!(
+        ir.lines()
+            .any(|line| line.contains("@hirsel_core_release(") && line.ends_with(" cold"))
+    );
     assert!(ir.contains("!\"branch_weights\""));
 }
 

@@ -82,8 +82,15 @@ impl Glues {
                 seen: &mut BTreeSet<usize>,
             ) {
                 match f {
-                    FieldTy::Inline(t) | FieldTy::Box(t) => {
+                    FieldTy::Inline(t) => {
                         needed.insert(t.index());
+                        normal(t.index(), layouts, needed, roots, seen);
+                    }
+                    // A non-terminal box is released by the drain from its
+                    // descriptor (LANG-19), so its type is a root too.
+                    FieldTy::Box(t) => {
+                        needed.insert(t.index());
+                        roots.insert(t.index());
                         normal(t.index(), layouts, needed, roots, seen);
                     }
                     FieldTy::Array(e, _) | FieldTy::Seq(e) => {
@@ -392,7 +399,12 @@ impl Glues {
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
-        let caller_site = b.ins().iconst(types::I64, 0);
+        let caller_site = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            args[3],
+            memory_layout::WORKLIST_SITE as i32,
+        );
         let mut g = Glue {
             b,
             object,
@@ -403,6 +415,7 @@ impl Glues {
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
             point: None,
+            list: Some(args[3]),
         };
         g.resume_buffer(ty, args[1], args[2], args[3])?;
         let done = g.b.ins().iconst(types::I8, 1);
@@ -437,7 +450,12 @@ impl Glues {
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
         let caller_site = if resume {
-            b.ins().iconst(types::I64, 0)
+            b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                args[3],
+                memory_layout::WORKLIST_SITE as i32,
+            )
         } else {
             args[2]
         };
@@ -451,6 +469,7 @@ impl Glues {
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
             point: resume.then_some(0),
+            list: resume.then(|| args[3]),
         };
         if resume {
             let plan = plan_type(tables, TypeRef(index as u32))?;
@@ -546,6 +565,9 @@ struct Glue<'a, 'b, 'c> {
     /// In fixed resume glue, the suspension points numbered so far, in the
     /// order hirsel_core_layout::frames lists them; None in buffer glue.
     point: Option<u64>,
+    /// In drain recipes, the worklist whose failed byte takes each status as
+    /// it happens; ordinary glue returns its status instead.
+    list: Option<Value>,
 }
 impl Glue<'_, '_, '_> {
     fn icon(&mut self, n: u64) -> Value {
@@ -560,7 +582,15 @@ impl Glue<'_, '_, '_> {
             .load(types::I64, MemFlagsData::trusted(), base, off)
     }
     fn merge(&mut self, status: Value) {
-        self.failed = self.b.ins().bor(self.failed, status);
+        if let Some(list) = self.list {
+            let at = memory_layout::WORKLIST_FAILED as i32;
+            let flags = MemFlagsData::trusted();
+            let before = self.b.ins().load(types::I8, flags, list, at);
+            let after = self.b.ins().bor(before, status);
+            self.b.ins().store(flags, after, list, at);
+        } else {
+            self.failed = self.b.ins().bor(self.failed, status);
+        }
     }
     fn direct(&mut self, f: cranelift_module::FuncId, args: &[Value]) -> Value {
         let f = self.calls.reference(self.object, &mut self.b, f);
@@ -629,6 +659,29 @@ impl Glue<'_, '_, '_> {
     fn field(&mut self, at: Value, t: &FieldTy) -> Result<()> {
         match t {
             FieldTy::Inline(t) => self.drop_type(at, *t),
+            // LANG-19: a block that owns more is released by the constant-stack
+            // drain. A finalizer row is still cleaned whole by its glue.
+            FieldTy::Box(b)
+                if !hirsel_core_layout::terminal(
+                    &self.tables.input.types,
+                    self.tables.layouts,
+                    t,
+                ) && self.tables.input.types[b.index()].repr != Repr::Resource
+                    && self.tables.layouts[b.index()]
+                        .drop
+                        .as_ref()
+                        .is_some_and(|d| d.finalizer.is_none()) =>
+            {
+                let p = self.load(at, 0);
+                let descriptor = self.descriptor(*b, false);
+                let status = self.call(
+                    "hirsel_core_release",
+                    &[P, P, P, U],
+                    &[B],
+                    &[self.ctx, p, descriptor, self.caller_site],
+                )?[0];
+                self.merge(status);
+            }
             FieldTy::Box(t) => {
                 let p = self.load(at, 0);
                 self.drop_type(p, *t);

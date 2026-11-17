@@ -110,8 +110,7 @@ typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_
    buffer), last drains without recursion. Descriptor survives the compiled run. */
 typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; } HirselCoreFixedDescriptor;
 typedef struct { uint64_t back, cursor, a, b, index; } HirselCoreFixedPoint;
-void hirsel_core_release_fixed_last(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *);
-void hirsel_core_release_fixed_enqueue(HirselCoreWorklist *, void *, const HirselCoreFixedDescriptor *, uint64_t point);
+bool hirsel_core_release(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *, uint64_t site);
 /* Inline Arc completion hooks. With task = ctx[CONTEXT_EVENTS] != 0, call
    unwrapped always, and initialized/shared/released only when the acquire
    byte task[TASK_ARC_GATE] is nonzero: set while recording, otherwise exactly

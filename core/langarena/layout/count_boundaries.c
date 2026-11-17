@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
        in generated code) reaches 0, and the last release drains the node. */
     if (atomic) atomic_store((_Atomic uint64_t *)alloc.pointer, 0);
     else *(uint64_t *)alloc.pointer = 0;
-    hirsel_core_release_fixed_last(ctx, alloc.pointer, &scalar);
+    hirsel_core_release(ctx, alloc.pointer, &scalar, 0);
     hirsel_core_context_free(ctx);
     puts("1");
     return 0;

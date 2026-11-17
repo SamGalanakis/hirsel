@@ -77,6 +77,23 @@ impl Glue<'_, '_, '_> {
         });
         self.icon(k)
     }
+    /// Hand one descendant to the drain: written inline into the worklist
+    /// (abi_layout WORKLIST_*), read by the drain when the recipe returns.
+    fn stage(&mut self, list: Value, node: Value, descriptor: Value, point: Value) {
+        let flags = MemFlagsData::trusted();
+        self.b
+            .ins()
+            .store(flags, node, list, memory_layout::WORKLIST_NODE as i32);
+        self.b.ins().store(
+            flags,
+            descriptor,
+            list,
+            memory_layout::WORKLIST_DESCRIPTOR as i32,
+        );
+        self.b
+            .ins()
+            .store(flags, point, list, memory_layout::WORKLIST_POINT as i32);
+    }
     fn enqueue_buffer(
         &mut self,
         field: &FieldTy,
@@ -271,12 +288,7 @@ impl Glue<'_, '_, '_> {
                         } else {
                             let descriptor = self.descriptor(*t, false);
                             let point = self.next_point();
-                            self.call(
-                                "hirsel_core_release_fixed_enqueue",
-                                &[P, P, P, U],
-                                &[],
-                                &[list, node, descriptor, point],
-                            )?;
+                            self.stage(list, node, descriptor, point);
                         }
                     }
                     FieldTy::Rc(t) | FieldTy::Arc(t) => {
@@ -307,12 +319,7 @@ impl Glue<'_, '_, '_> {
                             self.b.switch_to_block(last_block);
                             let descriptor = self.descriptor(*t, true);
                             let point = self.next_point();
-                            self.call(
-                                "hirsel_core_release_fixed_enqueue",
-                                &[P, P, P, U],
-                                &[],
-                                &[list, node, descriptor, point],
-                            )?;
+                            self.stage(list, node, descriptor, point);
                         }
                     }
                     FieldTy::Seq(e) => {

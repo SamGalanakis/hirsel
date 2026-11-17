@@ -557,9 +557,22 @@ impl FunctionEmitter<'_> {
             self.arc_event("hirsel_core_arc_released", &[zeroext(Type::I1, true)]);
         }
         if let Some(recipe) = recipe {
-            self.cold_void(
-                "hirsel_core_release_fixed_last",
-                &[ptr(CONTEXT), ptr(node.clone()), ptr(recipe.clone())],
+            // A shareable payload holds no resource or finalizer, so its
+            // release cannot fail and needs no site.
+            let attrs = CallAttrs {
+                cold: true,
+                ..CallAttrs::default()
+            };
+            self.runtime(
+                "hirsel_core_release",
+                Type::I8,
+                &[
+                    ptr(CONTEXT),
+                    ptr(node.clone()),
+                    ptr(recipe.clone()),
+                    word(int(0)),
+                ],
+                &attrs,
             );
         } else {
             self.free_block(node, &int(charge));

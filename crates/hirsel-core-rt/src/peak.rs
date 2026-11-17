@@ -389,12 +389,7 @@ mod tests {
                     );
                     *cursor += 1;
                     if counted::decrement(child, true) {
-                        crate::abi::hirsel_core_release_fixed_enqueue(
-                            work,
-                            child,
-                            &LEAF.descriptor,
-                            *cursor,
-                        );
+                        (*work).stage_fixed(child, &LEAF.descriptor, *cursor);
                         return false;
                     }
                 }
@@ -447,7 +442,7 @@ mod tests {
         // SAFETY: the root's last holder transfers its exact descriptor.
         unsafe {
             assert!(counted::decrement(parent, false));
-            crate::abi::hirsel_core_release_fixed_last(&mut context, parent, &PARENT.descriptor);
+            crate::abi::hirsel_core_release(&mut context, parent, &PARENT.descriptor, 0);
         }
         assert_eq!(context.available(), 112);
         assert_eq!(
@@ -461,7 +456,7 @@ mod tests {
         // SAFETY: the external shared holder is now the only one left.
         unsafe {
             assert!(counted::decrement(shared, true));
-            crate::abi::hirsel_core_release_fixed_last(&mut context, shared, &LEAF.descriptor);
+            crate::abi::hirsel_core_release(&mut context, shared, &LEAF.descriptor, 0);
         }
         assert_eq!(context.available(), 128);
         assert_eq!(figures(), Figures::default());

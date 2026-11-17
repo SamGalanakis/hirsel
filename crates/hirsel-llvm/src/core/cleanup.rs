@@ -328,15 +328,17 @@ impl FunctionEmitter<'_> {
                         .is_some_and(|d| d.finalizer.is_none()) =>
             {
                 let block = self.load(&Type::Ptr, p, 1);
-                self.runtime_void(
-                    "hirsel_core_release_fixed_last",
+                Some(self.runtime(
+                    "hirsel_core_release",
+                    Type::I8,
                     &[
                         ptr(CONTEXT),
                         ptr(block),
                         ptr(Value::global(format!("core_fixed_own_{}", t.0))),
+                        word(site),
                     ],
-                );
-                None
+                    &CallAttrs::default(),
+                ))
             }
             FieldTy::Box(t) => {
                 let block = self.load(&Type::Ptr, p, 1);
@@ -594,7 +596,6 @@ impl FunctionEmitter<'_> {
         base: u64,
     ) -> Result<()> {
         let i64 = Type::I64;
-        let site = self.site_word();
         let count = mechanical_count(self.module, self.recipes, field)?;
         if count == 0 {
             return Ok(());
@@ -607,20 +608,27 @@ impl FunctionEmitter<'_> {
         self.cond(&here, clean, skip);
         self.block(clean);
         match field {
-            // Its ordinary glue: the finalizer, then the fields. A counted payload
-            // holds no resource, so this cannot fail.
+            // Its ordinary glue: the finalizer, then the fields, under the
+            // release's site. A failure is recorded and cleaning goes on (FAIL-10).
             FieldTy::Inline(t)
                 if self.recipes[t.index()]
                     .drop
                     .as_ref()
                     .is_some_and(|d| d.finalizer.is_some()) =>
             {
-                self.effect(Operation::Call(
+                let list = Value::Local(Local::WORKLIST);
+                let at = self.offset(&list, memory_layout::WORKLIST_SITE as u64);
+                let site = self.load(&i64, &at, 8);
+                let failed = self.call(
                     &drop_signature(),
                     &Value::global(format!("core_drop_{}", t.0)),
                     &[CONTEXT, p.clone(), site],
                     &CallAttrs::default(),
-                ));
+                );
+                let at = self.offset(&list, memory_layout::WORKLIST_FAILED as u64);
+                let before = self.load(&Type::I8, &at, 1);
+                let after = self.bin(Binary::Or, &Type::I8, &before, &failed);
+                self.store(&Type::I8, &after, &at, 1);
                 self.br(Label::plain("resume"));
             }
             FieldTy::Inline(t) => {

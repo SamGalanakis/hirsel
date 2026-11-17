@@ -903,33 +903,23 @@ pub unsafe fn inline_own_free_current(
     }
 }
 
-/// Fixed last-release slow path. No status, admission or extra count/event.
+/// The one release of a block that owns more than terminal storage: a Box, a
+/// last Rc/Arc holder or anything below them, cleaned by the constant-stack
+/// drain (LANG-19). Returns whether a finalizer or handle failed (FAIL-10).
+/// No admission or extra count/event.
 /// # Safety
-/// Count operation/event already transferred exclusive dead fixed ownership;
-/// descriptor is immutable, exact and lives as long as the compiled program.
+/// The caller transfers exclusive dead fixed ownership (for a counted node,
+/// after its count operation and event); the descriptor is immutable, exact and
+/// lives as long as the compiled program.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release_fixed_last(
+pub unsafe extern "C" fn hirsel_core_release(
     context: *mut Context,
     node: NonNull<u8>,
     descriptor: *const crate::block::Descriptor,
-) {
+    site: u64,
+) -> bool {
     // SAFETY: caller transfers the fixed block and its concrete descriptor.
-    unsafe { counted::drain(context, node, descriptor) }
-}
-/// Hand a uniquely owned dead fixed block to the drain from the running fixed
-/// parent's suspension point (0 under a buffer). No status/admission/event.
-/// # Safety
-/// Exclusive live worklist, dead fixed block and immutable exact descriptor;
-/// at most one hand-over per glue run, which then returns false.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release_fixed_enqueue(
-    list: *mut Worklist,
-    node: NonNull<u8>,
-    descriptor: *const crate::block::Descriptor,
-    point: u64,
-) {
-    // SAFETY: generated mechanical glue transfers the uniquely owned descendant.
-    unsafe { (*list).stage_fixed(node, descriptor, point) }
+    unsafe { counted::drain(context, node, descriptor, site) }
 }
 /// Full-new admission, replacement, carrier install, then original-payer refund.
 /// # Safety

@@ -177,13 +177,14 @@ and one assembly allowance under that reservation. It runs on the evaluator and
 native engines in `core-runner-r0` after a push, and in `core-runner-wire`.
 
 
-`serve(n, mut listener, tasks, clock, config, max_sessions, ingress, make)` is the
+`serve(n, mut listener, tasks, clock, to_publisher, config, max_sessions, ingress, make)` is the
 dormant W3b accept loop. Each accepted connection gets one owner, reader and
 writer. `max_sessions` bounds owner handles and completion records independently
 of `socket.pending_max`; ingress and principal admission remain W3c. Upgrades run
 in their owners, so a stalled upgrade does not block acceptance. `Service[C]`
-provides a context, an attach hook for the owner's inbox and a non-waiting
-`dispatch` callback. The callback is also callable by another transport through
+provides a context, an attach hook for the owner's inbox and the single
+`Sender[PubIn]`, and a non-waiting `dispatch` callback. The owner holds that
+sender without joining; the W3c service joins lazily on its first Subscribe. The callback is also callable by another transport through
 `runner.dispatch`; it contains no socket operations. W3c supplies Hello, call
 admission, principal binding, dedup, publisher integration and outcome accounting.
 

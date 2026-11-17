@@ -1,6 +1,6 @@
 // W3b's socket fixture supplies a transport-neutral service without admission.
 // W3c owns the production Hello, principal, entry and durable-call service.
-fn attach(mut context: (), to: Sender[store.runner.WireEvent]) {}
+fn attach(mut context: (), to: Sender[store.runner.WireEvent], to_publisher: Sender[store.runner.PubIn]) {}
 
 fn dispatch(mut context: (), take frame: store.runner.Frame) -> Result[Option[store.runner.Frame], u16] {
     match take frame {
@@ -23,6 +23,8 @@ pub fn main(n: Net, tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
         Ok((take l, _)) => take l,
         Error(_) => return Error(Exit(status: 1u8)),
     }
-    let result = store.runner.serve(n, mut listener, tasks, clock, store.runner.wire_defaults(65536u64, 0u64), 16u64, list.new(), service)
+    let mail = result.unwrap(store.runner.mailbox(64u64))
+    let to_publisher = store.runner.post(mail)
+    let result = store.runner.serve(n, mut listener, tasks, clock, to_publisher, store.runner.wire_defaults(65536u64, 0u64), 16u64, list.new(), service)
     match result { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
 }

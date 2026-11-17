@@ -2325,11 +2325,11 @@ fn wire_decode(b: Bytes) -> Result[Frame, u16] {
 pub const DONE_MAX: u64 = 8192
 
 // WIRE W3b. The service owns principal binding, admission, dedup and outcomes.
-// Its context can carry Sender[PubIn]; another transport calls the same dispatch.
+// Each owner holds the one publisher sender. Another transport calls the same dispatch.
 pub type Service[C: send]: send {
     context: C,
     dispatch: fn(mut C, take Frame) -> Result[Option[Frame], u16],
-    attach: fn(mut C, Sender[WireEvent])
+    attach: fn(mut C, Sender[WireEvent], Sender[PubIn])
 }
 
 pub fn dispatch[C: send](mut service: Service[C], take frame: Frame) -> Result[Option[Frame], u16] {
@@ -2484,12 +2484,12 @@ fn wire_close_payload(code: u16) -> Bytes {
     b
 }
 
-type WireOwner[C: send]: send { upgraded: std.wsock.Upgraded, service: Service[C], config: WireConfig, clock: Clock, tasks: Tasks }
+type WireOwner[C: send]: send { upgraded: std.wsock.Upgraded, service: Service[C], publisher: Sender[PubIn], config: WireConfig, clock: Clock, tasks: Tasks }
 
 // Serves an already upgraded connection. W3c constructs the service at Hello;
 // its sender joins the one publisher inbox lazily at the first Subscribe.
-pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], c: WireConfig, clock: Clock) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
-    let x = WireOwner(upgraded: take upgraded, service: take service, config: c, clock: clock, tasks: tasks)
+pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], to_publisher: Sender[PubIn], c: WireConfig, clock: Clock) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
+    let x = WireOwner(upgraded: take upgraded, service: take service, publisher: channel.sender(to_publisher), config: c, clock: clock, tasks: tasks)
     let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_owner
     match task.spawn(tasks, bytes session_bytes(c), take x, run) {
         Ok(take h) => Ok(take h),
@@ -2498,7 +2498,7 @@ pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded
 }
 
 fn wire_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] waits {
-    let WireOwner(upgraded: take up, service: take initial_service, config: c, clock: clock, tasks: tasks) = take x
+    let WireOwner(upgraded: take up, service: take initial_service, publisher: take pub_to, config: c, clock: clock, tasks: tasks) = take x
     let std.wsock.Upgraded(reader: take reader, writer: take writer, source: _, timers: _, pending: take pending) = take up
     let new_events: Result[(Sender[WireEvent], Receiver[WireEvent]), Capacity] = channel.new(1u64 + c.q)
     let mut lease = Some(take pending)
@@ -2530,7 +2530,7 @@ fn wire_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] wait
         },
     }
     let mut service = take initial_service
-    (service.attach)(mut service.context, channel.sender(to))
+    (service.attach)(mut service.context, channel.sender(to), channel.sender(pub_to))
     let mut busy = false
     let mut queue: List[Frame] = list.new()
     let mut queued_bytes = 0u64
@@ -2660,21 +2660,21 @@ fn wire_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] wait
 // client cannot prevent the listener accepting another connection.
 type WireAccept[C: send]: send {
     socket: Socket, peer: Ip, slot: std.wsock.Pending, ingress: List[std.wsock.Prefix],
-    service: Service[C], c: WireConfig, clock: Clock, tasks: Tasks, done: Sender[u64], id: u64
+    service: Service[C], publisher: Sender[PubIn], c: WireConfig, clock: Clock, tasks: Tasks, done: Sender[u64], id: u64
 }
 
 fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] waits {
     let WireAccept(socket: take socket, peer: peer, slot: take slot, ingress: take ingress,
-        service: take service, c: c, clock: clock, tasks: tasks, done: take done, id: id) = take x
+        service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, done: take done, id: id) = take x
     let result = match std.wsock.server(take socket, take slot, peer, ingress, c.socket, clock, host.mono_ns(clock)) {
-        Ok(take up) => wire_owner(WireOwner(upgraded: take up, service: take service, config: c, clock: clock, tasks: tasks)),
+        Ok(take up) => wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks)),
         Error(e) => Error(e),
     }
     let _ = channel.try_send(done, id)
     result
 }
 
-pub fn serve[C: send](n: Net, mut listener: Listener, tasks: Tasks, clock: Clock, c: WireConfig, max_sessions: u64, ingress: List[std.wsock.Prefix], make: scoped[view] fn() -> Service[C]) -> Result[(), std.wsock.Error] waits {
+pub fn serve[C: send](n: Net, mut listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, ingress: List[std.wsock.Prefix], make: scoped[view] fn() -> Service[C]) -> Result[(), std.wsock.Error] waits {
     if max_sessions == 0u64 { return Error(Configuration) }
     let pool = std.wsock.pending(c.socket)?
     let new_done: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(max_sessions)
@@ -2699,7 +2699,7 @@ pub fn serve[C: send](n: Net, mut listener: Listener, tasks: Tasks, clock: Clock
         let seed = bound bytes c.n_service { make() }
         let made_service = match take seed { Ok(take instance) => take instance, Error(_) => continue }
         let accepted = WireAccept(socket: take socket, peer: peer.ip, slot: take slot, ingress: take copied,
-            service: take made_service, c: c, clock: clock, tasks: tasks, done: channel.sender(done), id: id)
+            service: take made_service, publisher: channel.sender(to_publisher), c: c, clock: clock, tasks: tasks, done: channel.sender(done), id: id)
         let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
         let owner = match task.spawn(tasks, bytes session_bytes(c), take accepted, run) {
             Ok(take h) => take h, Error(_) => continue,

@@ -462,7 +462,7 @@ pub(super) fn module(module: &Module) -> Option<Module> {
         // in a local loop. Use the same bounded exposure at those direct calls.
         let mut hot = (0..original.blocks.len()).collect::<BTreeSet<_>>();
         let mut body = original.clone();
-        let mut budget = 1024;
+        let mut budget = 2048;
         loop {
             let selected = hot.iter().find_map(|&b| {
                 body.blocks[b]
@@ -500,7 +500,7 @@ pub(super) fn module(module: &Module) -> Option<Module> {
             );
             hot.extend(expand(&mut body, b, offset, callee, module, inherits));
         }
-        if budget != 1024 {
+        if budget != 2048 {
             merge_blocks(&mut body);
             let old = std::mem::take(&mut body.insts);
             let anchors = std::mem::take(&mut body.inst_anchors);

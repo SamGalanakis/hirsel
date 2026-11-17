@@ -110,7 +110,7 @@ fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(crash), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(tally), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(named), 16384u64, runner.DEFAULT_STEPS)?
-    runner.transact(mut r, code.describe(flood), 1048576u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(flood), 524288u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(hung), 65536u64, 65536u64)?
     runner.compute(mut r, code.describe(answer), 65536u64, runner.DEFAULT_STEPS)?
     runner.query(mut r, code.describe(everything), 65536u64, runner.DEFAULT_STEPS)

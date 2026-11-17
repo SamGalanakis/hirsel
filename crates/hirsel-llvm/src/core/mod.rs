@@ -593,8 +593,8 @@ fn emit_module(
             inline: match definition.as_str() {
                 "core@1/string/push_char" => Inline::Always,
                 "core@1/string/push_scalar" => Inline::Never,
-                // Opaque scalar loans keep their LLVM call boundary until the
-                // parameter's borrow scope is available to the LLVM inliner.
+                // Revisit bounded scalar loops after borrow-scope emission.
+                // LLVM inlining carries their parameter scopes into the caller.
                 _ if source.batch_steps
                     && body.insts.len() <= 2048
                     && sig.params.iter().any(|p| {

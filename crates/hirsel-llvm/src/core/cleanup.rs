@@ -11,13 +11,14 @@ fn cleanup_dependencies(field: &FieldTy, counted: bool, pending: &mut Vec<(usize
             pending.push((t.index(), true));
         }
         FieldTy::Rc(t) | FieldTy::Arc(t) => pending.push((t.index(), true)),
+        // Seq and Map storage is released by the drain from its buffer recipe
+        // (LANG-19), so its elements are counted cleanup wherever it is held.
         FieldTy::Map(key, value) => {
-            cleanup_dependencies(key, counted, pending);
-            cleanup_dependencies(value, counted, pending);
+            cleanup_dependencies(key, true, pending);
+            cleanup_dependencies(value, true, pending);
         }
-        FieldTy::Array(element, _) | FieldTy::Seq(element) => {
-            cleanup_dependencies(element, counted, pending)
-        }
+        FieldTy::Seq(element) => cleanup_dependencies(element, true, pending),
+        FieldTy::Array(element, _) => cleanup_dependencies(element, counted, pending),
         _ => {}
     }
 }
@@ -176,7 +177,7 @@ pub(super) fn drop_glue(
     }
     let empty = Body::default();
     let payload = Value::Local(Local::PAYLOAD);
-    for t in normal {
+    for &t in &normal {
         let drop_name = format!("core_drop_{t}");
         sink.begin_function(
             &drop_name,
@@ -259,7 +260,7 @@ pub(super) fn drop_glue(
         sink.end_function();
     }
     let mut sequences = Vec::new();
-    for &t in counted.iter().chain(&values) {
+    for &t in counted.iter().chain(&values).chain(&normal) {
         if let Some(drop) = &recipes[t].drop {
             for field in drop.fields.iter().flatten() {
                 collections::collect(&field.ty, &mut sequences);
@@ -354,10 +355,7 @@ impl FunctionEmitter<'_> {
                 self.block(done);
                 None
             }
-            FieldTy::Seq(_) | FieldTy::Map(_, _) => {
-                self.clean_collection(field, p, status)?;
-                None
-            }
+            FieldTy::Seq(_) | FieldTy::Map(_, _) => self.release_collection(field, p),
             FieldTy::OwnFn => {
                 let at = self.offset(p, 8);
                 let environment = self.load(&Type::Ptr, &at, 1);

@@ -921,6 +921,26 @@ pub unsafe extern "C" fn hirsel_core_release(
     // SAFETY: caller transfers the fixed block and its concrete descriptor.
     unsafe { counted::drain(context, node, descriptor, site) }
 }
+/// The one release of non-terminal `Seq` or `Map` storage outside a drain (a
+/// local's, or a field of a value ordinary glue cleans): `recipe` cleans its
+/// elements through the constant-stack drain, then the storage is freed and
+/// refunded (LANG-19). Returns whether a finalizer or handle failed (FAIL-10).
+/// # Safety
+/// The caller transfers the exclusively owned GRAPH buffer of a carrier with
+/// nonzero capacity; the carrier stays put until this returns; charge and
+/// recipe are exact for its element type.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_buffer(
+    context: *mut Context,
+    buffer: NonNull<u8>,
+    charge: u64,
+    carrier: *mut u8,
+    recipe: Recipe,
+    site: u64,
+) -> bool {
+    // SAFETY: the caller transfers the buffer; its carrier outlives the drain.
+    unsafe { counted::drain_buffer(context, buffer, charge, recipe, carrier, site) }
+}
 /// Full-new admission, replacement, carrier install, then original-payer refund.
 /// # Safety
 /// The consuming sequence carrier is exclusively owned and has nonzero capacity.

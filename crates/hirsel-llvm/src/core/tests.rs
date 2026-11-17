@@ -1262,9 +1262,10 @@ fn counted_sequences_destroy_deep_chains_with_constant_stack() {
 }
 
 /// LANG-19: ordinary release of a 10^6-deep `Box` chain, of one whose rows
-/// carry a finalizer, and of a closure whose environment captures a closure
-/// 10^6 deep, completes under the default stack, and every block is refunded
-/// (hand-derived: n + 1 boxes, n environments).
+/// carry a finalizer, of a closure whose environment captures a closure 10^6
+/// deep, and of a node whose List holds the next node 10^6 deep, completes
+/// under the default stack, and every block is refunded (hand-derived: n + 1
+/// boxes, n environments, n buffers).
 #[test]
 fn box_chain_releases_with_constant_stack() {
     for (source, boxes) in [
@@ -1279,6 +1280,10 @@ fn box_chain_releases_with_constant_stack() {
         (
             include_str!("../../../hirsel-core-ir/samples/finalizer-chain.core"),
             1,
+        ),
+        (
+            include_str!("../../../hirsel-core-ir/samples/seq-chain.core"),
+            0,
         ),
     ] {
         let module = text::parse(source).unwrap();

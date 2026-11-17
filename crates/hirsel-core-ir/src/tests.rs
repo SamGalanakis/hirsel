@@ -27,6 +27,7 @@ const SAMPLES: &[(&str, &str)] = &[
         "finalizer-chain",
         include_str!("../samples/finalizer-chain.core"),
     ),
+    ("seq-chain", include_str!("../samples/seq-chain.core")),
     (
         "receiver-chain",
         include_str!("../samples/receiver-chain.core"),

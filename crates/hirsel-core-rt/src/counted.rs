@@ -241,6 +241,28 @@ pub(crate) unsafe fn drain(
     unsafe { run(context, &mut list, Some((node, descriptor, 0))) }
 }
 
+/// Clean the elements of dead non-terminal buffer storage held outside any
+/// drain (a local's or an ordinary value's Seq or Map), then free it, with
+/// constant native stack. Returns whether anything it cleaned failed (FAIL-10).
+/// # Safety
+/// As stage_buffer; the carrier stays put until this returns; the context is live.
+pub(crate) unsafe fn drain_buffer(
+    context: *mut Context,
+    buffer: NonNull<u8>,
+    charge: u64,
+    recipe: Recipe,
+    carrier: *mut u8,
+    site: u64,
+) -> bool {
+    let mut list = Worklist::new(site);
+    // SAFETY: as this function's contract.
+    unsafe {
+        list.stage_buffer(buffer, charge, recipe, carrier, 0);
+        let current = list.take();
+        run(context, &mut list, current)
+    }
+}
+
 /// Run a holder's cleanup, begun by its caller, to the end with constant native
 /// stack. Returns whether anything it cleaned failed (FAIL-10).
 /// # Safety

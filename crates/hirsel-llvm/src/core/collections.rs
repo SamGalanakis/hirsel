@@ -73,63 +73,53 @@ impl FunctionEmitter<'_> {
         let rounded = self.bin(Binary::Add, &i64, &bytes, &int(7));
         self.bin(Binary::And, &i64, &rounded, &int(-8))
     }
-    pub(super) fn clean_collection(
-        &mut self,
-        field: &FieldTy,
-        carrier: &Value,
-        status: &Value,
-    ) -> Result<()> {
+    /// Seq or Map storage held outside a drain: terminal storage is an
+    /// inline free; any other is released by the drain from its buffer recipe
+    /// (LANG-19), whose status this returns. A static carrier (capacity 0)
+    /// owns nothing.
+    pub(super) fn release_collection(&mut self, field: &FieldTy, carrier: &Value) -> Option<Value> {
         // SEM-4: a List of a zero-sized element has no storage to clean.
         if hirsel_core_layout::storage_free(&self.module.types, field) {
-            return Ok(());
+            return None;
         }
-        let i64 = Type::I64;
         let entries = Entries::new(self.module, self.recipes, field);
-        let block = self.load(&Type::Ptr, carrier, 1);
-        let length = self.carrier_word(carrier, 8);
+        let buffer = self.load(&Type::Ptr, carrier, 1);
         let capacity = self.carrier_word(carrier, 16);
-        let index = self.temp(Type::I64);
-        self.store(&i64, &int(0), &index, 0);
+        let allocated = self.cmp(Predicate::Ne, &Type::I64, &capacity, &int(0));
         let n = self.counter();
-        let head = Label::new("collection_head", n);
-        let body = Label::new("collection_body", n);
-        let live = Label::new("collection_live", n);
-        let next_label = Label::new("collection_next", n);
-        let settle = Label::new("collection_settle", n);
-        let free = Label::new("collection_free", n);
-        let done = Label::new("collection_done", n);
-        let owned = self.cmp(Predicate::Ne, &i64, &capacity, &int(0));
-        self.cond(&owned, head, done);
-        self.block(head);
-        let i = self.load(&i64, &index, 0);
-        let more = self.cmp(Predicate::Ult, &i64, &i, &length);
-        self.cond(&more, body, settle);
-        self.block(body);
-        let entry = self.gep(&Type::bytes(entries.stride), &block, &i, false);
-        if entries.map {
-            let state = self.carrier_word(&entry, 8);
-            let is_live = self.cmp(Predicate::Eq, &i64, &state, &int(1));
-            self.cond(&is_live, live, next_label);
-            self.block(live);
-        }
-        for (offset, f) in entries.fields {
-            let at = self.offset(&entry, offset);
-            self.clean_field(f, &at, status)?;
-        }
-        self.br(next_label);
-        self.block(next_label);
-        let next = self.bin(Binary::Add, &i64, &i, &int(1));
-        self.store(&i64, &next, &index, 0);
-        self.br(head);
-        self.block(settle);
-        let allocated = self.cmp(Predicate::Ne, &i64, &capacity, &int(0));
-        self.cond(&allocated, free, done);
-        self.block(free);
+        let present = Label::new("buffer_release", n);
+        let done = Label::new("buffer_released", n);
+        let terminal = hirsel_core_layout::terminal(&self.module.types, self.recipes, field);
+        let status = (!terminal).then(|| {
+            let status = self.temp(Type::I8);
+            self.store(&Type::I8, &int(0), &status, 0);
+            status
+        });
+        self.cond(&allocated, present, done);
+        self.block(present);
         let charge = self.collection_charge(&capacity, entries.logical);
-        self.free_block(&block, &charge);
+        if let Some(status) = &status {
+            let site = self.site_word();
+            let failed = self.runtime(
+                "hirsel_core_release_buffer",
+                Type::I8,
+                &[
+                    ptr(CONTEXT),
+                    ptr(buffer),
+                    word(charge),
+                    ptr(carrier.clone()),
+                    ptr(Value::global(symbol(field))),
+                    word(site),
+                ],
+                &CallAttrs::default(),
+            );
+            self.store(&Type::I8, &failed, status, 0);
+        } else {
+            self.free_block(&buffer, &charge);
+        }
         self.br(done);
         self.block(done);
-        Ok(())
+        status.map(|status| self.load(&Type::I8, &status, 0))
     }
     pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &Value) {
         if hirsel_core_layout::storage_free(&self.module.types, field) {

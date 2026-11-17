@@ -82,54 +82,79 @@ impl Glues {
                 }
             }
         }
+        // Ordinary glue walks only the value it was handed; every owned block
+        // below it is released by the drain (LANG-19): a box from its type's
+        // descriptor, Seq and Map storage by its buffer recipe, whose element
+        // types are therefore drained descendants (`buffered`).
         fn normal(
             t: usize,
             layouts: &[Recipe],
             needed: &mut BTreeSet<usize>,
             roots: &mut BTreeSet<usize>,
+            buffered: &mut BTreeSet<usize>,
             seen: &mut BTreeSet<usize>,
         ) {
             if !seen.insert(t) {
                 return;
+            }
+            fn inline(f: &FieldTy, buffered: &mut BTreeSet<usize>) {
+                match f {
+                    FieldTy::Inline(t) => {
+                        buffered.insert(t.index());
+                    }
+                    FieldTy::Array(e, _) | FieldTy::Seq(e) => inline(e, buffered),
+                    FieldTy::Map(k, v) => {
+                        inline(k, buffered);
+                        inline(v, buffered);
+                    }
+                    _ => {}
+                }
             }
             fn field(
                 f: &FieldTy,
                 layouts: &[Recipe],
                 needed: &mut BTreeSet<usize>,
                 roots: &mut BTreeSet<usize>,
+                buffered: &mut BTreeSet<usize>,
                 seen: &mut BTreeSet<usize>,
             ) {
                 match f {
                     FieldTy::Inline(t) => {
                         needed.insert(t.index());
-                        normal(t.index(), layouts, needed, roots, seen);
+                        normal(t.index(), layouts, needed, roots, buffered, seen);
                     }
                     // A non-terminal box is released by the drain from its
                     // descriptor (LANG-19), so its type is a root too.
                     FieldTy::Box(t) => {
                         needed.insert(t.index());
                         roots.insert(t.index());
-                        normal(t.index(), layouts, needed, roots, seen);
+                        normal(t.index(), layouts, needed, roots, buffered, seen);
                     }
-                    FieldTy::Array(e, _) | FieldTy::Seq(e) => {
-                        field(e, layouts, needed, roots, seen)
-                    }
-                    FieldTy::Map(k, v) => {
-                        field(k, layouts, needed, roots, seen);
-                        field(v, layouts, needed, roots, seen);
+                    FieldTy::Array(e, _) => field(e, layouts, needed, roots, buffered, seen),
+                    FieldTy::Seq(_) | FieldTy::Map(..) => {
+                        inline(f, buffered);
+                        counted(f, roots);
                     }
                     _ => counted(f, roots),
                 }
             }
             if let Some(d) = &layouts[t].drop {
                 for f in d.fields.iter().flatten() {
-                    field(&f.ty, layouts, needed, roots, seen);
+                    field(&f.ty, layouts, needed, roots, buffered, seen);
                 }
             }
         }
         let mut normal_seen = BTreeSet::new();
+        let mut buffered = BTreeSet::new();
         for t in needed.clone() {
-            normal(t, layouts, &mut needed, &mut roots, &mut normal_seen);
+            normal(
+                t,
+                layouts,
+                &mut needed,
+                &mut roots,
+                &mut buffered,
+                &mut normal_seen,
+            );
         }
         // A resource is one counted step, cleaned whole by its ordinary glue,
         // so its fields are not descendants.
@@ -190,7 +215,12 @@ impl Glues {
         let mut visited = BTreeSet::new();
         let mut whole = BTreeSet::new();
         loop {
-            for root in roots.clone().into_iter().chain(values.iter().copied()) {
+            for root in roots
+                .clone()
+                .into_iter()
+                .chain(values.iter().copied())
+                .chain(buffered.iter().copied())
+            {
                 descendants(
                     root,
                     layouts,
@@ -206,7 +236,14 @@ impl Glues {
             }
             for t in fresh {
                 needed.insert(t);
-                normal(t, layouts, &mut needed, &mut roots, &mut normal_seen);
+                normal(
+                    t,
+                    layouts,
+                    &mut needed,
+                    &mut roots,
+                    &mut buffered,
+                    &mut normal_seen,
+                );
             }
         }
         let mut drops = vec![None; layouts.len()];
@@ -346,7 +383,7 @@ impl Glues {
         }
         let mut types = Vec::new();
         for (i, recipe) in layouts.iter().enumerate() {
-            if visited.contains(&i) {
+            if visited.contains(&i) || needed.contains(&i) {
                 if let Some(d) = &recipe.drop {
                     for f in d.fields.iter().flatten() {
                         collect(&f.ty, &mut types);
@@ -797,30 +834,7 @@ impl Glue<'_, '_, '_> {
             }
             // SEM-4: a List of a zero-sized element has no storage to clean.
             FieldTy::Seq(_) if hirsel_core_layout::storage_free(&self.tables.input.types, t) => {}
-            FieldTy::Seq(e) => {
-                let p = self.load(at, 0);
-                let len = self.load(at, 8);
-                let cap = self.load(at, 16);
-                let owned = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
-                let zero = self.icon(0);
-                let owned_len = self.b.ins().select(owned, len, zero);
-                self.array(p, e, owned_len)?;
-                let logical = field_size(&self.tables.input.types, self.tables.layouts, e).2;
-                self.free_buffer(p, cap, logical)?;
-            }
-            FieldTy::Map(k, v) => {
-                let p = self.load(at, 0);
-                let len = self.load(at, 8);
-                let cap = self.load(at, 16);
-                let owned = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
-                let zero = self.icon(0);
-                let owned_len = self.b.ins().select(owned, len, zero);
-                self.map(p, k, v, owned_len)?;
-                let logical = field_size(&self.tables.input.types, self.tables.layouts, k).2
-                    + field_size(&self.tables.input.types, self.tables.layouts, v).2
-                    + 16;
-                self.free_buffer(p, cap, logical)?;
-            }
+            FieldTy::Seq(_) | FieldTy::Map(..) => self.release_buffer(at, t)?,
             FieldTy::Handle(
                 h @ (hirsel_core_layout::Handle::HostFile
                 | hirsel_core_layout::Handle::Tape
@@ -939,44 +953,46 @@ impl Glue<'_, '_, '_> {
         self.b.switch_to_block(done);
         Ok(())
     }
-    fn map(&mut self, base: Value, k: &FieldTy, v: &FieldTy, len: Value) -> Result<()> {
-        let entry =
-            hirsel_core_layout::map_entry(&self.tables.input.types, self.tables.layouts, k, v);
-        let head = self.b.create_block();
-        let body = self.b.create_block();
-        let live = self.b.create_block();
-        let next = self.b.create_block();
+    /// Seq or Map storage: terminal storage is an inline free; any other is
+    /// released by the drain from its buffer recipe (LANG-19). A static
+    /// carrier (capacity 0) owns nothing.
+    fn release_buffer(&mut self, carrier: Value, t: &FieldTy) -> Result<()> {
+        let logical = match t {
+            FieldTy::Seq(e) => field_size(&self.tables.input.types, self.tables.layouts, e).2,
+            FieldTy::Map(k, v) => {
+                field_size(&self.tables.input.types, self.tables.layouts, k).2
+                    + field_size(&self.tables.input.types, self.tables.layouts, v).2
+                    + 16
+            }
+            _ => unreachable!(),
+        };
+        let p = self.load(carrier, 0);
+        let cap = self.load(carrier, 16);
+        if hirsel_core_layout::terminal(&self.tables.input.types, self.tables.layouts, t) {
+            return self.free_buffer(p, cap, logical);
+        }
         let done = self.b.create_block();
-        self.b.append_block_param(head, types::I64);
-        self.b.append_block_param(head, types::I8);
-        self.b.append_block_param(next, types::I8);
+        let free = self.b.create_block();
         self.b.append_block_param(done, types::I8);
-        let zero = self.icon(0);
-        self.b.ins().jump(head, &[zero.into(), self.failed.into()]);
-        self.b.switch_to_block(head);
-        let i = self.b.block_params(head)[0];
-        self.failed = self.b.block_params(head)[1];
-        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        let incoming = self.failed;
+        let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
         self.b
             .ins()
-            .brif(more, body, &[], done, &[self.failed.into()]);
-        self.b.switch_to_block(body);
-        let off = self.b.ins().imul_imm_s(i, entry.stride as i64);
-        let at = self.b.ins().iadd(base, off);
-        let state = self.load(at, 8);
-        self.b
-            .ins()
-            .brif(state, live, &[], next, &[self.failed.into()]);
-        self.b.switch_to_block(live);
-        let key = self.at(at, entry.key);
-        self.field(key, k)?;
-        let value = self.at(at, entry.value);
-        self.field(value, v)?;
-        self.b.ins().jump(next, &[self.failed.into()]);
-        self.b.switch_to_block(next);
-        self.failed = self.b.block_params(next)[0];
-        let i = self.b.ins().iadd_imm_s(i, 1);
-        self.b.ins().jump(head, &[i.into(), self.failed.into()]);
+            .brif(present, free, &[], done, &[incoming.into()]);
+        self.b.switch_to_block(free);
+        let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
+        let charge = self.round8(bytes);
+        let function = self.glues.buffers.iter().find(|(b, _)| b == t).unwrap().1;
+        let reference = self.calls.reference(self.object, &mut self.b, function);
+        let recipe = self.b.ins().func_addr(types::I64, reference);
+        let status = self.call(
+            "hirsel_core_release_buffer",
+            &[P, P, U, P, P, U],
+            &[B],
+            &[self.ctx, p, charge, carrier, recipe, self.caller_site],
+        )?[0];
+        self.merge(status);
+        self.b.ins().jump(done, &[self.failed.into()]);
         self.b.switch_to_block(done);
         self.failed = self.b.block_params(done)[0];
         Ok(())

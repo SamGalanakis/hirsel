@@ -67,6 +67,22 @@ fn frame(name: &str) -> Frame {
             16777216,
         ),
         "done" | "reset_outcome" => Frame::Reset(V, vec![done()]),
+        "done_refused_request_mismatch" => Frame::Reset(
+            V,
+            vec![Done {
+                stream: N,
+                p: V,
+                outcome: Outcome::Refused(Refusal::RequestMismatch),
+            }],
+        ),
+        "done_refused_history_unavailable" => Frame::Reset(
+            V,
+            vec![Done {
+                stream: N,
+                p: V,
+                outcome: Outcome::Refused(Refusal::HistoryUnavailable),
+            }],
+        ),
         "row_removed" => Frame::Batch(
             V,
             vec![],
@@ -98,7 +114,10 @@ fn frame(name: &str) -> Frame {
                 "ended_refused_deadline" => Outcome::Refused(Refusal::Deadline),
                 "ended_refused_budget" => Outcome::Refused(Refusal::Budget(room())),
                 "ended_refused_not_allowed" => Outcome::Refused(Refusal::NotAllowed),
-                "ended_superseded" => Outcome::Superseded,
+                "ended_refused_request_mismatch" => Outcome::Refused(Refusal::RequestMismatch),
+                "ended_refused_history_unavailable" => {
+                    Outcome::Refused(Refusal::HistoryUnavailable)
+                }
                 "ended_abandoned" => Outcome::Abandoned,
                 "ended_in_doubt" => Outcome::InDoubt,
                 _ => panic!("new W3a vector needs a Rust value constructor: {other}"),
@@ -113,7 +132,8 @@ fn frame_vectors_match_w3a_and_decode_strictly() -> Result<()> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../core/programs/store/frame-vectors.json");
     let fixtures: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
-    for vector in fixtures["vectors"].as_array().unwrap() {
+    let vectors = fixtures["vectors"].as_array().unwrap();
+    for vector in vectors {
         let name = vector["name"].as_str().unwrap();
         let mut expected = bytes(vector["hex"].as_str().unwrap());
         // Wrap standalone type vectors in their corresponding Frame fields.
@@ -173,6 +193,7 @@ fn frame_vectors_match_w3a_and_decode_strictly() -> Result<()> {
             );
         }
     }
+    println!("matched {} canonical W3a v2.11.4 vectors", vectors.len());
     assert!(codec::decode(&[255; 16]).is_err());
     assert!(codec::decode(&bytes("0000000000000000ffffffff")).is_err());
     Ok(())

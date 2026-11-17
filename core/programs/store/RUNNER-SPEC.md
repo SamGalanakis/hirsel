@@ -696,11 +696,11 @@ An upgrade is a process restart on new code.
   | a record in a compacted segment, or **any record in a `memory` store** | — | `recorded` is None | `Unknown(StateGone)` |
 
 - **The one exception to "a frame has a call record iff it has a reply written by a run".** The runner's `Failed(Gone)` reply-only commit has a reply and no record, because there is no entry to run. Every other reply the runner writes has a record. STORE-SPEC v2.4's table already gives that row (none, `Unknown(NoEntry)`). But its model law G ("a frame has a call record iff it has a reply written by a run") does not exclude it, although that commit is a `run`. The amended text for law G went to store-spec-1001 in followups.md.
-- **Reading.** `store.recorded(db, b, version)` serves live journal segments only. A compacted commit, and every commit in a `memory` store, reads as None, which is `Unknown(StateGone)`. A memory store keeps no record, because nothing would bound it (STORE-SPEC G3).
+- **Reading.** `store.recorded(db, b, version)` returns the call record with its frame's context: the branch, the version and the frame's `at`, which is the CallInfo the recorded body saw (its seed follows from the store, branch and version). It serves live journal segments only. A compacted commit, and every commit in a `memory` store, reads as None, which is `Unknown(StateGone)`. A memory store keeps no record, because nothing would bound it (STORE-SPEC G3).
 - **Re-execution:**
   1. fork at v-1;
   2. run the candidate's `place` under `n_place`, and its `handles` on the fork (fresh H, current incarnations, I3);
-  3. run the recorded key on the recorded args in a Tx on the fork;
+  3. run the recorded key on the recorded args in a Tx on the fork whose CallInfo is the recorded frame's: its id names the recorded branch and version, its `at` is the recorded `at`, and its seed is derived from those, never from the fork's branch or a fresh clock read. The fork is only where the speculative writes go. So `info(mut tx)` and everything derived from it read the same in the re-run as in the original, and an unchanged entry compares `Same`;
   4. compare the reply bytes and the write ops.
 - `Verdict = Same | Different(Reply | Writes) | Unknown(NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects)`, unchanged.
 - Abandoned positions have no call section beyond their committed reply, so they are `NotRecorded`.
@@ -873,7 +873,7 @@ Each slice is final when it lands, and later slices only add.
 | **R2** | `query`, `cover`, Subscribe, G2/G3 rows in the same batches, read-set re-runs with lookup Points, `Ended`, `budget`, read-set bytes limit, coalescing, Reset | the publisher round (G2 over two Snapshots, interval index, diff) **when S1.1 lands**, tested against `subs22_model.py`'s reference | R1; S1.1; the v2.6/v2.7 follow-up (I1, I3, J1) | L5, L8, L9, L16, L17, L20, and `subs25_model.py`'s 4 scenarios and 10 mutants as law cases |
 | R3 | P3: frames, `hirsel sdk ts` with the bounded `place` run, Hello/Welcome with the launch identity (v2.12: describe mode and Welcome's identity are built, W4a) | when a network transport exists | transport; N8 (re-issued) | L12 generator half |
 | R4 | activation table, gone-key set, Resolve, Gone | after R1 | R1; D2 | L10, L11, L13; `calls25_model.py`'s `upgrade_gone` with mutant `gone_refused_at_session` (v2.5) |
-| R5 | `record`, re-execution, Verdict | after R1 | S3 (call section, `recorded`), S4 (fork); replay tape join | §7's table as cases |
+| R5 | `record`, re-execution, Verdict | after R1 | S3 (call section, `recorded` with its frame's context), S4 (fork, and a Tx on it under a given CallInfo); replay tape join | §7's table as cases, plus an entry whose reply and writes are its `info(mut tx)` fields, which compares `Same` (mutant: the re-run takes the fork's CallInfo) |
 | R6 | granted over providers, InDoubt | — | provider ABI (provider-abi-fix-1018) | — |
 
 **R0 acceptance (named tests and laws):**

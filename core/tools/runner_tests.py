@@ -113,6 +113,10 @@ def charged(args, root, work, engine, module, modes, figure, cc=None, runner=Non
                '--store', str(work / f'store-{name}-{engine}'), '--grant', 'Clock', '--grant', 'Tasks',
                '--grant', 'Random', '--entry', f'store@1/{module}/main',
                '--logical-charge-report', str(charges), '-o', str(binary)]
+    if module == 'runner_rss':
+        command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
+        if engine == 'llvm':
+            command.append('--release')
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
     wait_load()
@@ -120,10 +124,21 @@ def charged(args, root, work, engine, module, modes, figure, cc=None, runner=Non
     if built.returncode != 0:
         return None, built.stderr[-2000:]
     figures = {}
+    rss = {}
     for mode, label in modes:
         charges.unlink(missing_ok=True)
-        run = subprocess.run([str(binary), mode], capture_output=True)
+        command = [str(binary), mode]
+        if module == 'runner_rss':
+            peak = work / f'{name}_{engine}_{label}.rss'
+            command = ['/usr/bin/time', '-f', '%M', '-o', str(peak), *command]
+        run = subprocess.run(command, capture_output=True)
         figures[label] = (run.returncode, figure(json.loads(charges.read_text())) if charges.exists() else None)
+        if module == 'runner_rss':
+            rss[label] = int(peak.read_text().splitlines()[-1])
+            if run.returncode:
+                figures.setdefault('errors', {})[label] = run.stderr.decode(errors='replace')[-2000:]
+    if rss:
+        figures['rss_kib'] = rss
     return figures, None
 
 

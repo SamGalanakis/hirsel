@@ -75,6 +75,8 @@ built `hirsel` does not implement yet; the mark is removed when it does.
 
 The [Net socket declarations and ownership rules](net.md) define the network
 capability and its explicit grant syntax.
+The [HTTP specification](http.md) defines std `http`, the runner's HTTP bindings
+and keyed operations. It is unbuilt design.
 
 ## Glossary
 

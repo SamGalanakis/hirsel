@@ -64,6 +64,7 @@ pub(super) fn glue_emitter<'a>(
         sink,
         items,
         next: 0,
+        fixed_point: None,
     }
 }
 
@@ -502,7 +503,7 @@ pub(super) fn release_lasts(
             FieldTy::Rc(t)
         };
         let recipe = (!hirsel_core_layout::terminal(&module.types, recipes, &edge))
-            .then(|| Value::global(format!("core_static_counted_{}", t.0)));
+            .then(|| Value::global(format!("core_fixed_counted_{}", t.0)));
         e.release_last_body(
             &Value::Local(Local::PAYLOAD),
             charge,
@@ -521,6 +522,7 @@ pub(super) fn mechanical_count(
     field: &FieldTy,
 ) -> Result<u64> {
     Ok(match field {
+        FieldTy::Seq(_) if hirsel_core_layout::storage_free(&module.types, field) => 0,
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
@@ -554,6 +556,13 @@ pub(super) fn mechanical_count(
     })
 }
 impl FunctionEmitter<'_> {
+    /// The next suspension point of fixed glue, or 0 in buffer glue.
+    pub(super) fn next_point(&mut self) -> u64 {
+        self.fixed_point.as_mut().map_or(0, |n| {
+            *n += 1;
+            *n
+        })
+    }
     pub(super) fn mechanical_field(
         &mut self,
         field: &FieldTy,
@@ -674,12 +683,14 @@ impl FunctionEmitter<'_> {
                     }
                     "counted"
                 };
+                let point = self.next_point();
                 self.runtime_void(
-                    "hirsel_core_release_static_own_enqueue",
+                    "hirsel_core_release_fixed_enqueue",
                     &[
                         ptr(Local::WORKLIST),
                         ptr(node),
-                        ptr(Value::global(format!("core_static_{owner}_{}", t.0))),
+                        ptr(Value::global(format!("core_fixed_{owner}_{}", t.0))),
+                        word(int(point)),
                     ],
                 );
                 self.ret(&Type::I1, &FALSE);
@@ -708,6 +719,7 @@ fn counted_glue(
         }
         let logical = recipes[t].logical_size.unwrap();
         let drop_name = format!("core_counted_drop_{t}");
+        let frames = hirsel_core_layout::frames(&module.types, recipes, TypeRef(t as u32));
         for (owner, charge, offset) in [
             (
                 "own",
@@ -720,20 +732,34 @@ fn counted_glue(
                 memory_layout::NODE_PAYLOAD as u64,
             ),
         ] {
-            let ty = Type::structure([Type::Ptr, Type::I64, Type::I64]);
+            // The descriptor, then its points inline (abi_layout::fixed_point).
+            let mut fields = vec![
+                (Type::Ptr, Value::global(drop_name.clone())),
+                (Type::I64, int(charge)),
+                (Type::I64, int(offset)),
+            ];
+            for (k, p) in (1..).zip(&frames.points) {
+                fields.extend(
+                    [
+                        memory_layout::fixed_point(k) as u64,
+                        p.cursor,
+                        p.a,
+                        p.b,
+                        p.index.unwrap_or(memory_layout::FIXED_POINT_NO_INDEX),
+                    ]
+                    .map(|w| (Type::I64, int(w))),
+                );
+            }
+            let ty = Type::structure(fields.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>());
             sink.global(&Global {
-                name: format!("core_static_{owner}_{t}").into(),
+                name: format!("core_fixed_{owner}_{t}").into(),
                 linkage: Linkage::Private,
                 constant: true,
                 externally_initialized: false,
                 ty,
                 init: Some(Value::Struct {
                     packed: false,
-                    fields: vec![
-                        (Type::Ptr, Value::global(drop_name.clone())),
-                        (Type::I64, int(charge)),
-                        (Type::I64, int(offset)),
-                    ],
+                    fields,
                 }),
                 align: 8,
                 absolute_symbol: false,
@@ -764,7 +790,13 @@ fn counted_glue(
         let cursor = e.load(&Type::I64, &cursor_at, 0);
         let next = e.bin(Binary::Add, &Type::I64, &cursor, &int(1));
         e.store(&Type::I64, &next, &cursor_at, 0);
+        e.fixed_point = Some(0);
         e.mechanical_field(&field, &Local::PAYLOAD.into(), &cursor, 0)?;
+        debug_assert_eq!(
+            e.fixed_point,
+            Some(frames.points.len() as u64),
+            "glue and frames number suspension points alike"
+        );
         e.ret(&Type::I1, &true.into());
         drop(e);
         sink.end_function();

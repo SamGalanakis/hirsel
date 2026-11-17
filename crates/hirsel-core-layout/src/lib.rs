@@ -16,11 +16,13 @@
 hirsel_guard::install!();
 
 pub mod charge;
+mod continuation;
 pub mod event;
 mod recipe;
 mod shape;
 mod target;
 
+pub use continuation::{Frames, Point, frames, spare_words};
 pub use target::Target;
 
 /// Reserve a shape before filling its references, using the caller's type identity.

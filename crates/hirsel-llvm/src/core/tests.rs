@@ -1202,6 +1202,26 @@ fn counted_sequences_destroy_deep_chains_with_constant_stack() {
     }
 }
 
+/// A suspended fixed block is found again only through its record: an array
+/// element reuses one record, and two cases of one enum suspend at the same
+/// cursor with different offsets.
+#[test]
+fn counted_frames_recover_the_block_from_the_record() {
+    let source = include_str!("../../../hirsel-core-ir/samples/counted-frames.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let cases = [(1, 0), (2, 0), (2, 1)].map(|(f, k)| Case {
+        function: FuncId(f),
+        args: vec![k],
+        limit: u64::MAX,
+        injection: None,
+    });
+    for (case, got) in cases.iter().zip(execute(&module, &cases)) {
+        assert_eq!(got.outcome, eval::Outcome::Returned(case.args.clone()));
+        assert_eq!(got.used, 0);
+    }
+}
+
 #[test]
 fn text_fixed_span_and_pointer_views_use_packed_unaligned_bytes() {
     let source = include_str!("../../tests/core_runtime/text_span.core");

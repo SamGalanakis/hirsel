@@ -37,11 +37,12 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #define HIRSEL_CORE_PLAIN_PREFIX_BYTES 8
 #define HIRSEL_CORE_GRAPH_PREFIX_BYTES 48
 #define HIRSEL_CORE_RESOURCE_PREFIX_BYTES 16
-#define HIRSEL_CORE_STATIC_PREFIX_BYTES 32
-#define HIRSEL_CORE_STATIC_DESCRIPTOR_RECIPE 0
-#define HIRSEL_CORE_STATIC_DESCRIPTOR_CHARGE 8
-#define HIRSEL_CORE_STATIC_DESCRIPTOR_PAYLOAD_OFFSET 16
-#define HIRSEL_CORE_STATIC_DESCRIPTOR_BYTES 24
+#define HIRSEL_CORE_FIXED_DESCRIPTOR_RECIPE 0
+#define HIRSEL_CORE_FIXED_DESCRIPTOR_CHARGE 8
+#define HIRSEL_CORE_FIXED_DESCRIPTOR_PAYLOAD_OFFSET 16
+#define HIRSEL_CORE_FIXED_DESCRIPTOR_BYTES 24
+#define HIRSEL_CORE_FIXED_POINT_BYTES 40
+#define HIRSEL_CORE_FIXED_POINT_NO_INDEX UINT64_MAX
 #define HIRSEL_CORE_CAUSE_BYTES 32
 #define HIRSEL_CORE_CAUSE_MESSAGE 0
 #define HIRSEL_CORE_CAUSE_MESSAGE_DATA 0
@@ -56,7 +57,6 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #define HIRSEL_CORE_NATIVE_PLAIN 0
 #define HIRSEL_CORE_NATIVE_GRAPH 1
 #define HIRSEL_CORE_NATIVE_RESOURCE 2
-#define HIRSEL_CORE_NATIVE_STATIC 3
 typedef struct HirselCoreContext HirselCoreContext;
 /* MEM-30. StepEnter false leaves the current bound unchanged. StepCatch closes
    its bound and refunds/catches only a chain of that bound's OutOfTime causes. */
@@ -101,12 +101,17 @@ typedef struct HirselCoreWorklist HirselCoreWorklist;
 /* Resumable glue: cursor starts at 0. Advance it, enqueue at most one child,
    return false; return true only after all children and fields are cleaned. */
 typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_t *cursor, HirselCoreWorklist *);
-/* Shared immutable Fixed metadata, not a language allocation. No status or
-   admission for the entries below; enqueue consumes ownership, last drains an
-   intrusive worklist without recursion. Descriptor survives the compiled run. */
-typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; } HirselCoreStaticDescriptor;
-void hirsel_core_release_static_last(HirselCoreContext *, void *, const HirselCoreStaticDescriptor *);
-void hirsel_core_release_static_own_enqueue(HirselCoreWorklist *, void *, const HirselCoreStaticDescriptor *);
+/* Shared immutable Fixed metadata, not a language allocation, followed inline by
+   its suspension points; point k (1-based) at descriptor + 24 + 40(k-1), with
+   back = that distance. A suspended block holds the point address at payload+a,
+   the next link at payload+b and, inside an inline array, the cursor at
+   payload+index. No status or admission for the entries below; enqueue hands
+   one descendant to the drain from the running parent's point (0 under a
+   buffer), last drains without recursion. Descriptor survives the compiled run. */
+typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; } HirselCoreFixedDescriptor;
+typedef struct { uint64_t back, cursor, a, b, index; } HirselCoreFixedPoint;
+void hirsel_core_release_fixed_last(HirselCoreContext *, void *, const HirselCoreFixedDescriptor *);
+void hirsel_core_release_fixed_enqueue(HirselCoreWorklist *, void *, const HirselCoreFixedDescriptor *, uint64_t point);
 /* Inline Arc completion hooks. With task = ctx[CONTEXT_EVENTS] != 0, call
    unwrapped always, and initialized/shared/released only when the acquire
    byte task[TASK_ARC_GATE] is nonzero: set while recording, otherwise exactly
@@ -122,12 +127,6 @@ void hirsel_core_counted_init(void *node, bool atomic);
 void hirsel_core_share(void *node, bool atomic);
 _Noreturn void hirsel_core_count_overflow(void);
 bool hirsel_core_try_unwrap(void *node, bool atomic);
-void hirsel_core_release(HirselCoreContext *, void *node, bool atomic,
-    uint64_t charge, HirselCoreDropRecipe);
-void hirsel_core_release_enqueue(HirselCoreWorklist *, void *node, bool atomic,
-    uint64_t charge, HirselCoreDropRecipe);
-void hirsel_core_release_own_enqueue(HirselCoreWorklist *, void *block,
-    uint64_t charge, HirselCoreDropRecipe);
 HirselCoreAllocation hirsel_core_task_start(HirselCoreContext *);
 HirselCoreAllocation hirsel_core_resource_alloc(const HirselCoreContext *,
     size_t bytes, size_t alignment, uint64_t logical_field_storage, uint64_t grant);
@@ -169,7 +168,6 @@ void hirsel_core_refunds_drain(const HirselCoreContext *);
 /* Bind on resume, null to unbind before transferring execution custody. */
 void hirsel_core_task_bind(const HirselCoreContext *);
 void *hirsel_core_region_refill(HirselCoreRegion *, size_t bytes, size_t alignment);
-void hirsel_core_release_last(HirselCoreContext *, void *node, uint64_t charge, HirselCoreDropRecipe);
 void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_bytes);
 /* Context-aware refund: compare raw payer word with current, direct when equal;
    otherwise use original-payer lookup. No status/admission/allocation. */
@@ -182,7 +180,7 @@ void hirsel_core_native_free(void *base);
 uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *);
 void hirsel_core_free_value(void *, uint64_t);
 /* Recipe borrows its descriptor from the still-live parent frame. */
-void hirsel_core_release_buffer_enqueue(HirselCoreWorklist *, void *buffer, uint64_t charge, void *payload, HirselCoreDropRecipe);
+void hirsel_core_release_buffer_enqueue(HirselCoreWorklist *, void *buffer, uint64_t charge, void *payload, HirselCoreDropRecipe, uint64_t point);
 #include "hirsel_core_rt_host.h"
 #include "hirsel_core_rt_tasks.h"
 #include "hirsel_core_rt_isolate.h"

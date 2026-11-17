@@ -69,6 +69,14 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
     })
 }
 impl Glue<'_, '_, '_> {
+    /// The next suspension point of fixed glue, or 0 in buffer glue.
+    fn next_point(&mut self) -> Value {
+        let k = self.point.as_mut().map_or(0, |n| {
+            *n += 1;
+            *n
+        });
+        self.icon(k)
+    }
     fn enqueue_buffer(
         &mut self,
         field: &FieldTy,
@@ -104,11 +112,12 @@ impl Glue<'_, '_, '_> {
                 .1;
             let reference = self.calls.reference(self.object, &mut self.b, function);
             let recipe = self.b.ins().func_addr(types::I64, reference);
+            let point = self.next_point();
             self.call(
                 "hirsel_core_release_buffer_enqueue",
-                &[P, P, U, P, P],
+                &[P, P, U, P, P, U],
                 &[],
-                &[list, node, charge, carrier, recipe],
+                &[list, node, charge, carrier, recipe, point],
             )?;
             let no = self.b.ins().iconst(types::I8, 0);
             self.b.ins().return_(&[no]);
@@ -227,8 +236,12 @@ impl Glue<'_, '_, '_> {
                 let mut yields = true;
                 match field {
                     // Its ordinary glue: the finalizer, then the fields. A counted
-                    // payload holds no resource, so this cannot fail.
-                    FieldTy::Inline(t) => self.drop_type(base, *t),
+                    // payload holds no resource, so this cannot fail, and it hands
+                    // nothing over.
+                    FieldTy::Inline(t) => {
+                        self.drop_type(base, *t);
+                        yields = false;
+                    }
                     FieldTy::Box(t) => {
                         let charge = self.icon(
                             charge::boxed(
@@ -257,11 +270,12 @@ impl Glue<'_, '_, '_> {
                             yields = false;
                         } else {
                             let descriptor = self.descriptor(*t, false);
+                            let point = self.next_point();
                             self.call(
-                                "hirsel_core_release_static_own_enqueue",
-                                &[P, P, P],
+                                "hirsel_core_release_fixed_enqueue",
+                                &[P, P, P, U],
                                 &[],
-                                &[list, node, descriptor],
+                                &[list, node, descriptor, point],
                             )?;
                         }
                     }
@@ -292,11 +306,12 @@ impl Glue<'_, '_, '_> {
                             self.b.ins().brif(last, last_block, &[], skip, &[]);
                             self.b.switch_to_block(last_block);
                             let descriptor = self.descriptor(*t, true);
+                            let point = self.next_point();
                             self.call(
-                                "hirsel_core_release_static_own_enqueue",
-                                &[P, P, P],
+                                "hirsel_core_release_fixed_enqueue",
+                                &[P, P, P, U],
                                 &[],
-                                &[list, node, descriptor],
+                                &[list, node, descriptor, point],
                             )?;
                         }
                     }

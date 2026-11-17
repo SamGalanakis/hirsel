@@ -149,6 +149,7 @@ impl FunctionEmitter<'_> {
         if hirsel_core_layout::terminal(&self.module.types, self.recipes, field) {
             self.free_block(&buffer, &charge);
         } else {
+            let point = self.next_point();
             self.runtime_void(
                 "hirsel_core_release_buffer_enqueue",
                 &[
@@ -157,6 +158,7 @@ impl FunctionEmitter<'_> {
                     word(charge),
                     ptr(carrier.clone()),
                     ptr(Value::global(symbol(field))),
+                    word(int(point)),
                 ],
             );
             self.ret(&Type::I1, &FALSE);

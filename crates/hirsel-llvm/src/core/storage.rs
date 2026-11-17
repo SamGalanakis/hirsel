@@ -308,9 +308,26 @@ impl FunctionEmitter<'_> {
         // The prefix follows the block's cleanup class (crate docs,
         // "Cleanup classes"): terminal blocks carry only the payer word.
         let native_kind = match kind.cleanup(&self.module.types, self.recipes) {
-            Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
-            Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+            Some(hirsel_core_layout::Cleanup::Terminal | hirsel_core_layout::Cleanup::Fixed) => {
+                memory_layout::NATIVE_PLAIN
+            }
             _ => memory_layout::NATIVE_GRAPH,
+        };
+        // A fixed block's uncharged spare frame words follow its value.
+        let spares = match kind {
+            AllocKind::Own { edge } => {
+                hirsel_core_layout::spare_words(&self.module.types, self.recipes, edge)
+            }
+            _ => 0,
+        };
+        let padded;
+        let size = if spares == 0 {
+            size
+        } else {
+            let up = self.bin(Binary::Add, &Type::I64, size, &int(7));
+            let up = self.bin(Binary::And, &Type::I64, &up, &int(!7u64));
+            padded = self.bin(Binary::Add, &Type::I64, &up, &int(8 * spares));
+            &padded
         };
         let resource = match *kind {
             AllocKind::Resource { grant } => Some(grant),

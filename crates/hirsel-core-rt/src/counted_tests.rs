@@ -1,27 +1,79 @@
 use crate::{
     Context,
-    block::Block,
+    abi::{hirsel_core_release_buffer_enqueue, hirsel_core_release_fixed_enqueue},
+    abi_layout::{FIXED_POINT_NO_INDEX, NODE_PAYLOAD, fixed_point},
+    block::{self, Block, Descriptor, Point},
     counted::{self, Worklist},
 };
 use std::ptr::{self, NonNull};
+
+/// A descriptor with its points inline, as the emitters lay it out.
+#[repr(C)]
+pub(crate) struct Fixed<const N: usize> {
+    pub(crate) descriptor: Descriptor,
+    pub(crate) points: [Point; N],
+}
+
+/// Point `k` (1-based) of a counted fixture: no array index.
+pub(crate) const fn at(k: u64, cursor: u64, a: u64, b: u64) -> Point {
+    Point {
+        back: fixed_point(k) as u64,
+        cursor,
+        a,
+        b,
+        index: FIXED_POINT_NO_INDEX,
+    }
+}
 
 unsafe extern "C" fn empty(_: *mut Context, _: *mut u8, _: *mut u64, _: *mut Worklist) -> bool {
     true
 }
 
+/// A counted 16-byte node whose payload has nothing to clean.
+pub(crate) static LEAF: Fixed<0> = Fixed {
+    descriptor: Descriptor {
+        recipe: empty,
+        charge: 16,
+        payload_offset: NODE_PAYLOAD as u64,
+    },
+    points: [],
+};
+
+/// Release one holder of a LEAF node, as emitted glue does.
+/// # Safety
+/// Transfers one live holder under the Rc/Arc event discipline.
+pub(crate) unsafe fn release_leaf(context: *mut Context, node: NonNull<u8>, atomic: bool) {
+    // SAFETY: the caller transfers a live holder; the last one owns the node.
+    unsafe {
+        if counted::decrement(node, atomic) {
+            crate::abi::hirsel_core_release_fixed_last(context, node, &LEAF.descriptor);
+        }
+    }
+}
+
+/// `{next: Rc[Self]}`: the vacated slot and one spare word hold the frame.
+static CHAIN: Fixed<1> = Fixed {
+    descriptor: Descriptor {
+        recipe: chain,
+        charge: 16,
+        payload_offset: NODE_PAYLOAD as u64,
+    },
+    points: [at(1, 1, 0, 8)],
+};
 unsafe extern "C" fn chain(
     _: *mut Context,
     payload: *mut u8,
     cursor: *mut u64,
     work: *mut Worklist,
 ) -> bool {
-    // SAFETY: this fixture's payload is one initialized child pointer; a child
-    // holder transfers to the intrusive worklist rather than recursive release.
+    // SAFETY: the payload's first word is one child holder or null.
     unsafe {
         if *cursor == 0 {
             *cursor = 1;
-            if let Some(child) = NonNull::new(payload.cast::<*mut u8>().read()) {
-                counted::enqueue(&mut *work, child, false, 16, chain);
+            if let Some(child) = NonNull::new(payload.cast::<*mut u8>().read())
+                && counted::decrement(child, false)
+            {
+                hirsel_core_release_fixed_enqueue(work, child, &CHAIN.descriptor, 1);
                 return false;
             }
         }
@@ -34,7 +86,8 @@ fn counted_chain_releases_with_constant_stack_and_no_admission() {
     let mut ctx = Context::new(2_000_000);
     let mut head = ptr::null_mut();
     for _ in 0..100_000 {
-        let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
+        // Count, one child word and the spare: 24 native bytes, 16 charged.
+        let node = block::allocate(ctx.payer(None), Some(16), 24, 8, block::PLAIN).unwrap();
         // SAFETY: a freshly allocated count/payload pair receives its sole child.
         unsafe {
             counted::initialize(node, false);
@@ -43,9 +96,11 @@ fn counted_chain_releases_with_constant_stack_and_no_admission() {
         head = node.as_ptr();
     }
     ctx.current.inject(1, true);
-    // SAFETY: the fixture transfers the only root holder; chain enqueues children.
+    // SAFETY: the fixture transfers the only root holder; chain hands children over.
     unsafe {
-        counted::release(&mut ctx, NonNull::new(head).unwrap(), false, 16, chain);
+        let node = NonNull::new(head).unwrap();
+        assert!(counted::decrement(node, false));
+        crate::abi::hirsel_core_release_fixed_last(&mut ctx, node, &CHAIN.descriptor);
     }
     assert_eq!(ctx.available(), 2_000_000);
     assert_eq!(ctx.current.attempts(), 0);
@@ -57,20 +112,20 @@ fn exact_rc_and_arc_share_release_and_both_unwrap_event_orders() {
     for atomic in [false, true] {
         for release_first in [false, true] {
             let mut ctx = Context::new(64);
-            let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
+            let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
             // SAFETY: the two explicit holders follow each prescribed event order.
             unsafe {
                 counted::initialize(node, atomic);
                 counted::share(node, atomic);
                 if release_first {
-                    counted::release(&mut ctx, node, atomic, 16, empty);
+                    release_leaf(&mut ctx, node, atomic);
                 }
                 assert_eq!(counted::try_unwrap(node, atomic), release_first);
                 if !release_first {
-                    counted::release(&mut ctx, node, atomic, 16, empty);
+                    release_leaf(&mut ctx, node, atomic);
                     assert!(counted::try_unwrap(node, atomic));
                 }
-                crate::block::free_graph(node, 16);
+                block::free(node, 16);
             }
             assert_eq!(ctx.available(), 64);
             runs += 1;
@@ -88,14 +143,13 @@ fn counted_creation_refusals_preserve_source_and_descendant_charges() {
             ctx.current.inject(k, later);
             if let Ok(source) = Block::new(&ctx, Some(24), 24, 8) {
                 let before = ctx.available();
-                let node = Block::graph(&ctx, Some(16), 16, 8);
-                match node {
+                match Block::new(&ctx, Some(16), 16, 8) {
                     Ok(node) => {
                         let node = node.into_raw();
                         // SAFETY: new node with one holder and no initialized children.
                         unsafe {
                             counted::initialize(node, false);
-                            counted::release(&mut ctx, node, false, 16, empty);
+                            release_leaf(&mut ctx, node, false);
                         }
                     }
                     Err(_) => assert_eq!(ctx.available(), before),
@@ -119,15 +173,13 @@ fn arc_last_release_on_another_task_refunds_the_original_domain() {
         fn release(self) {
             let mut child = Context::new(0);
             // SAFETY: the moved holder is live; its payload has no descendants.
-            unsafe {
-                counted::release(&mut child, self.0, true, 16, empty);
-            }
+            unsafe { release_leaf(&mut child, self.0, true) };
         }
     }
     let mut ctx = Context::new(64);
     let payer = ctx.current.clone();
     ctx.limit_enter(32).unwrap();
-    let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
+    let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
     // SAFETY: initialize a single live holder before moving it to another task.
     unsafe {
         counted::initialize(node, true);
@@ -141,26 +193,6 @@ fn arc_last_release_on_another_task_refunds_the_original_domain() {
 }
 
 #[test]
-fn counted_c_abi_drops_the_last_holder_only() {
-    use crate::abi::*;
-    // SAFETY: C fixtures own two holders, releasing each exactly once.
-    unsafe {
-        let ctx = hirsel_core_context_new(64);
-        let allocation =
-            hirsel_core_alloc(ctx, ptr::null_mut(), 16, 8, 16, false, crate::block::GRAPH);
-        let node = NonNull::new(allocation.pointer).unwrap();
-        hirsel_core_counted_init(node, false);
-        hirsel_core_share(node, false);
-        assert!(!hirsel_core_try_unwrap(node, false));
-        hirsel_core_release(ctx, node, false, 16, empty);
-        assert!(hirsel_core_try_unwrap(node, false));
-        hirsel_core_release(ctx, node, false, 16, empty);
-        assert_eq!((*ctx).available(), 64);
-        hirsel_core_context_free(ctx);
-    }
-}
-
-#[test]
 fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
     use std::cell::RefCell;
     thread_local! { static TRACE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) }; }
@@ -169,7 +201,18 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
         id: u64,
         left: *mut u8,
         right: *mut u8,
+        spare: u64,
     }
+    // Right first, then left (FAIL-8). After right: its slot and the spare;
+    // after left: both vacated slots. `id` stays live: the trace reads it.
+    static TREE: Fixed<2> = Fixed {
+        descriptor: Descriptor {
+            recipe: tree,
+            charge: 32,
+            payload_offset: NODE_PAYLOAD as u64,
+        },
+        points: [at(1, 1, 16, 24), at(2, 2, 8, 16)],
+    };
     unsafe extern "C" fn tree(
         ctx: *mut Context,
         p: *mut u8,
@@ -177,14 +220,16 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
         list: *mut Worklist,
     ) -> bool {
         // SAFETY: each fixture payload contains two live child holders or null;
-        // cursor records which field has completed across the trampoline.
+        // the drain restores the cursor from the point record.
         unsafe {
             let p = &*p.cast::<Payload>();
             while *cursor < 2 {
                 let child = if *cursor == 0 { p.right } else { p.left };
                 *cursor += 1;
-                if let Some(child) = NonNull::new(child) {
-                    counted::enqueue(&mut *list, child, false, 32, tree);
+                if let Some(child) = NonNull::new(child)
+                    && counted::decrement(child, false)
+                {
+                    hirsel_core_release_fixed_enqueue(list, child, &TREE.descriptor, *cursor);
                     return false;
                 }
             }
@@ -199,14 +244,16 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
     TRACE.with(|t| *t.borrow_mut() = Vec::with_capacity(4));
     let mut ctx = Context::new(128);
     let make = |id, left, right| {
-        let node = Block::graph(&ctx, Some(32), 32, 8).unwrap().into_raw();
+        let node = block::allocate(ctx.payer(None), Some(32), 40, 8, block::PLAIN).unwrap();
         // SAFETY: fresh node receives its count and completely initialized payload.
         unsafe {
             counted::initialize(node, false);
-            node.as_ptr()
-                .add(8)
-                .cast::<Payload>()
-                .write(Payload { id, left, right });
+            node.as_ptr().add(8).cast::<Payload>().write(Payload {
+                id,
+                left,
+                right,
+                spare: 0,
+            });
         }
         node.as_ptr()
     };
@@ -216,7 +263,9 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
     let one = make(1, two, three);
     // SAFETY: the sole root holder owns this complete acyclic tree.
     unsafe {
-        counted::release(&mut ctx, NonNull::new(one).unwrap(), false, 32, tree);
+        let one = NonNull::new(one).unwrap();
+        assert!(counted::decrement(one, false));
+        crate::abi::hirsel_core_release_fixed_last(&mut ctx, one, &TREE.descriptor);
     }
     TRACE.with(|t| assert_eq!(*t.borrow(), [3, 4, 2, 1]));
     assert_eq!(ctx.available(), 128);
@@ -226,7 +275,7 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
 fn full_u64_count_is_representable_without_immortalizing_the_node() {
     for atomic in [false, true] {
         let ctx = Context::new(16);
-        let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
+        let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
         // SAFETY: symbolic boundary fixture supplies a live count, then returns
         // its synthetic holders before freeing the otherwise empty node.
         unsafe {
@@ -235,7 +284,7 @@ fn full_u64_count_is_representable_without_immortalizing_the_node() {
             counted::share(node, atomic);
             assert_eq!(node.cast::<u64>().as_ptr().read(), u64::MAX);
             assert!(!counted::try_unwrap(node, atomic));
-            crate::block::free_graph(node, 16);
+            block::free(node, 16);
         }
         assert_eq!(ctx.available(), 16);
     }
@@ -252,9 +301,7 @@ fn remote_refunds_wait_for_the_ordered_handoff_while_local_admission_runs() {
             let mut remote = Context::new(0);
             for node in self.0 {
                 // SAFETY: one transferred Arc holder, with no descendants.
-                unsafe {
-                    counted::release(&mut remote, node, true, 16, empty);
-                }
+                unsafe { release_leaf(&mut remote, node, true) };
             }
         }
     }
@@ -262,7 +309,7 @@ fn remote_refunds_wait_for_the_ordered_handoff_while_local_admission_runs() {
     ctx.limit_enter(3200).unwrap();
     let mut nodes = Nodes(Vec::new());
     for _ in 0..200 {
-        let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
+        let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
         // SAFETY: this task initializes each fresh single-holder Arc.
         unsafe {
             counted::initialize(node, true);
@@ -284,171 +331,90 @@ fn remote_refunds_wait_for_the_ordered_handoff_while_local_admission_runs() {
     assert_eq!(ctx.current.attempts(), 0);
 }
 
-#[test]
-fn counted_parent_frees_plain_owned_children_without_a_resume_frame() {
-    unsafe extern "C" fn parent(
-        ctx: *mut Context,
-        p: *mut u8,
-        cursor: *mut u64,
-        work: *mut Worklist,
-    ) -> bool {
-        // SAFETY: this fixture's parent contains one initialized plain child pointer.
-        unsafe {
-            if *cursor == 0 {
-                *cursor = 1;
-                let child = NonNull::new_unchecked(p.cast::<*mut u8>().read());
-                crate::abi::hirsel_core_release_own_enqueue(work, child, 8, empty);
-                return false;
-            }
-            assert_eq!((*ctx).available(), 48);
-            true
-        }
-    }
-    let mut ctx = Context::new(64);
-    let child = Block::new(&ctx, Some(8), 8, 8).unwrap().into_raw();
-    let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
-    // SAFETY: initialize the sole counted holder and move its plain child into it.
-    unsafe {
-        counted::initialize(node, false);
-        node.as_ptr().add(8).cast::<*mut u8>().write(child.as_ptr());
-        counted::release(&mut ctx, node, false, 16, parent);
-    }
-    assert_eq!(ctx.available(), 64);
-}
-
-#[test]
-fn plain_counted_leaf_frees_without_invoking_a_recipe_or_touching_a_frame() {
-    unsafe extern "C" fn forbidden(
-        _: *mut Context,
-        _: *mut u8,
-        _: *mut u64,
-        _: *mut Worklist,
-    ) -> bool {
-        panic!("terminal payload has no recipe to run")
-    }
-    for atomic in [false, true] {
-        for enqueued in [false, true] {
-            let mut context = Context::new(128);
-            context.limit_enter(32).unwrap();
-            let node = Block::new(&context, Some(16), 16, 8).unwrap().into_raw();
-            // SAFETY: fresh aligned node has exactly count + scalar, no frame.
-            unsafe { counted::initialize(node, atomic) };
-            context.limit_exit();
-            context.current.inject(1, true);
-            // SAFETY: transfer the last holder; terminal cleanup never calls forbidden.
-            unsafe {
-                if enqueued {
-                    let mut work = Worklist { head: None };
-                    counted::enqueue(&mut work, node, atomic, 16, forbidden);
-                    assert!(work.head.is_none());
-                } else {
-                    counted::release(&mut context, node, atomic, 16, forbidden);
-                }
-            }
-            assert_eq!(context.available(), 128);
-            assert_eq!(context.current.attempts(), 0);
-        }
-    }
-}
-
-static FIXED_CHAIN: crate::block::Descriptor = crate::block::Descriptor {
-    recipe: mixed_fixed_chain,
-    charge: 16,
-    payload_offset: crate::abi_layout::NODE_PAYLOAD as u64,
+/// `{kids: List[Rc[Self]]}`: pointer and length stay live while the buffer
+/// drains, so the frame takes the capacity word and one spare.
+static HOLDER: Fixed<1> = Fixed {
+    descriptor: Descriptor {
+        recipe: holder,
+        charge: 24,
+        payload_offset: NODE_PAYLOAD as u64,
+    },
+    points: [at(1, 1, 16, 24)],
 };
-unsafe extern "C" fn mixed_fixed_chain(
+unsafe extern "C" fn holder(
     _: *mut Context,
     payload: *mut u8,
     cursor: *mut u64,
     work: *mut Worklist,
 ) -> bool {
-    // SAFETY: fixture stores one child pointer; both frame classes yield once
-    // before resuming the parent. The child kind determines its prepaid frame.
+    // SAFETY: the payload is a {data, len, capacity} carrier of child holders.
     unsafe {
         if *cursor == 0 {
             *cursor = 1;
-            if let Some(child) = NonNull::new(payload.cast::<*mut u8>().read()) {
-                if crate::block::funding(child).native_tag() & 3 == crate::block::STATIC as usize {
-                    if counted::decrement(child, false) {
-                        crate::abi::hirsel_core_release_static_own_enqueue(
-                            work,
-                            child,
-                            &FIXED_CHAIN,
-                        );
-                    }
-                } else {
-                    counted::enqueue(&mut *work, child, false, 16, mixed_fixed_chain);
-                }
+            let capacity = payload.add(16).cast::<u64>().read();
+            if capacity != 0 {
+                let data = NonNull::new_unchecked(payload.cast::<*mut u8>().read());
+                hirsel_core_release_buffer_enqueue(work, data, capacity * 8, payload, kids, 1);
                 return false;
             }
         }
         true
     }
 }
-#[test]
-fn fixed_and_dynamic_frames_share_one_nonrecursive_worklist() {
-    use crate::{abi_layout::*, block};
-    assert_eq!(size_of::<block::Descriptor>(), STATIC_DESCRIPTOR_BYTES);
-    assert_eq!(
-        std::mem::offset_of!(block::Descriptor, recipe),
-        STATIC_DESCRIPTOR_RECIPE
-    );
-    assert_eq!(
-        std::mem::offset_of!(block::Descriptor, charge),
-        STATIC_DESCRIPTOR_CHARGE
-    );
-    assert_eq!(
-        std::mem::offset_of!(block::Descriptor, payload_offset),
-        STATIC_DESCRIPTOR_PAYLOAD_OFFSET
-    );
-    let mut ctx = Context::new(2_000_000);
-    let mut head = ptr::null_mut();
-    for i in 0..100_000 {
-        let kind = if i % 2 == 0 {
-            block::GRAPH
-        } else {
-            block::STATIC
-        };
-        let node = block::allocate(ctx.payer(None), Some(16), 16, 8, kind).unwrap();
-        // SAFETY: fresh counted node receives one transferred child holder.
-        unsafe {
-            counted::initialize(node, false);
-            node.as_ptr()
-                .add(NODE_PAYLOAD)
-                .cast::<*mut u8>()
-                .write(head);
-        }
-        head = node.as_ptr();
-    }
-    ctx.current.inject(1, true);
-    // SAFETY: the only root holder is transferred; this head uses STATIC32.
+unsafe extern "C" fn kids(
+    _: *mut Context,
+    carrier: *mut u8,
+    cursor: *mut u64,
+    work: *mut Worklist,
+) -> bool {
+    // SAFETY: the parent pins its carrier; each element is one child holder.
     unsafe {
-        let node = NonNull::new(head).unwrap();
-        assert!(counted::decrement(node, false));
-        crate::abi::hirsel_core_release_static_last(&mut ctx, node, &FIXED_CHAIN);
+        let data = carrier.cast::<*const *mut u8>().read();
+        let len = carrier.add(8).cast::<u64>().read();
+        while *cursor < len {
+            let child = NonNull::new_unchecked(data.add(*cursor as usize).read());
+            *cursor += 1;
+            if counted::decrement(child, false) {
+                hirsel_core_release_fixed_enqueue(work, child, &HOLDER.descriptor, 0);
+                return false;
+            }
+        }
+        true
     }
-    assert_eq!(ctx.available(), 2_000_000);
-    assert_eq!(ctx.current.attempts(), 0);
 }
 
 #[test]
-fn fixed_prefix_alignment_like_and_original_payer_refunds() {
-    use crate::block;
-    for align in [8, 16, 64, 1024] {
-        let mut ctx = Context::new(256);
-        ctx.limit_enter(128).unwrap();
-        let node = block::allocate(ctx.payer(None), Some(16), 16, align, block::STATIC).unwrap();
-        assert_eq!(node.as_ptr().addr() % align, 0);
-        // SAFETY: node remains live and pins its initialized payer word.
-        let payer = unsafe { block::funding(node) };
-        let replacement =
-            block::allocate_like(&ctx, Some(payer), Some(32), 32, align, block::STATIC).unwrap();
-        ctx.limit_exit();
-        // SAFETY: two exclusive cleaned allocations retain exact original charges.
+fn fixed_frames_and_buffer_frames_share_one_nonrecursive_worklist() {
+    let mut ctx = Context::new(8_000_000);
+    let mut head: Option<NonNull<u8>> = None;
+    for _ in 0..100_000 {
+        let node = block::allocate(ctx.payer(None), Some(24), 40, 8, block::PLAIN).unwrap();
+        // SAFETY: a fresh counted holder receives a one-element GRAPH buffer
+        // holding the previous node, or an empty static carrier.
         unsafe {
-            block::free(node, 16);
-            block::free(replacement, 32);
+            counted::initialize(node, false);
+            let carrier = node.as_ptr().add(NODE_PAYLOAD).cast::<u64>();
+            if let Some(child) = head {
+                let data = block::allocate(ctx.payer(None), Some(8), 8, 8, block::GRAPH).unwrap();
+                data.as_ptr().cast::<*mut u8>().write(child.as_ptr());
+                carrier.write(data.as_ptr() as u64);
+                carrier.add(1).write(1);
+                carrier.add(2).write(1);
+            } else {
+                carrier.write(8);
+                carrier.add(1).write(0);
+                carrier.add(2).write(0);
+            }
         }
-        assert_eq!(ctx.available(), 256);
+        head = Some(node);
     }
+    ctx.current.inject(1, true);
+    // SAFETY: the only root holder is transferred.
+    unsafe {
+        let node = head.unwrap();
+        assert!(counted::decrement(node, false));
+        crate::abi::hirsel_core_release_fixed_last(&mut ctx, node, &HOLDER.descriptor);
+    }
+    assert_eq!(ctx.available(), 8_000_000);
+    assert_eq!(ctx.current.attempts(), 0);
 }

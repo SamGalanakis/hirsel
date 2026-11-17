@@ -398,6 +398,18 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
     );
 }
 
+/// A suspended fixed block is found again only through its record: an array
+/// element reuses one record, and two cases of one enum suspend at the same
+/// cursor with different offsets.
+#[test]
+fn counted_frames_recover_the_block_from_the_record() {
+    let source = include_str!("../../hirsel-core-ir/samples/counted-frames.core");
+    let module = text::parse(source).unwrap();
+    for optimize in [false, true] {
+        execute(&module, &sample_runs(&module, source), optimize);
+    }
+}
+
 #[test]
 fn string_literals_grow_and_clean_in_dev_and_speed() {
     let source = include_str!("../../hirsel-core-ir/samples/strings.core");
@@ -769,7 +781,8 @@ int main(void) {{
   memset(entries,0xcc,4*32+8);
   for(size_t i=0;i<3;i+=2) {{ entries[4*i+1]=1; entries[4*i+2]=(uintptr_t)leaf(ctx,false); entries[4*i+3]=(uintptr_t)leaf(ctx,true); }}
   entries[5]=0;
-  uint64_t *root=allocate(ctx,32,32,HIRSEL_CORE_NATIVE_STATIC); hirsel_core_counted_init(root,false);
+  /* Count, carrier and one spare frame word: the map keeps pointer and length. */
+  uint64_t *root=allocate(ctx,40,32,HIRSEL_CORE_NATIVE_PLAIN); hirsel_core_counted_init(root,false);
   root[1]=(uintptr_t)entries; root[2]=3; root[3]=4;
   hirsel_core_test_inject(ctx,1,true); attempts=hirsel_core_test_attempts(ctx);
   if({counted}(ctx,root,0)!=0 || hirsel_core_test_available(ctx)!=10000 || hirsel_core_test_attempts(ctx)!=attempts) return 6;

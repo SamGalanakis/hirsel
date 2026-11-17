@@ -1043,6 +1043,88 @@ fn several_dataful_cases_share_one_niche_without_touching_it() {
     assert_eq!(plain.tag.unwrap().encoding, Encoding::Direct);
 }
 
+/// Bug: a suspended fixed block's frame (node-bytes-1076) lands on a word cleanup
+/// still reads, or a shared array record's offsets move with the element, so the
+/// drain recovers an interior base (ATTACK-rev2). Hand-derived from FAIL-8's
+/// reverse field order:
+/// - Node: Binary yields r@16 (op's word 0 and r's vacated word free; l@8 and the
+///   tag@24 live), then l@8. Assignment yields v@0 while name@8..32 (with the
+///   cap niche) is still to clean; a terminal String is freed from its pointer
+///   and capacity, so its length word @16 is free. No spares: 32 native bytes,
+///   a 48-byte chunk with the 8-byte payer word.
+/// - Holder{xs: Inline[Pair, 2]}, Pair{pad, l, r} of stride 24: every word is in
+///   the unfinished array, so A, B and the index are three spares after 48.
+#[test]
+fn suspended_frames_avoid_live_words_and_unfinished_arrays() {
+    use crate::{Point, frames};
+    let string = || FieldTy::Seq(Box::new(u(Scalar::U8)));
+    let node = || FieldTy::Box(TypeRef(0));
+    let tree = || FieldTy::Box(TypeRef(1));
+    let shapes = [
+        variant(
+            "Node",
+            Repr::Own,
+            vec![
+                ("Number", vec![field("n", u(Scalar::I64))]),
+                ("Variable", vec![field("name", string())]),
+                (
+                    "Binary",
+                    vec![
+                        field("op", u(Scalar::U8)),
+                        field("l", node()),
+                        field("r", node()),
+                    ],
+                ),
+                (
+                    "Assignment",
+                    vec![field("name", string()), field("v", node())],
+                ),
+            ],
+        ),
+        variant(
+            "Tree",
+            Repr::Own,
+            vec![("Leaf", vec![]), ("Fork", vec![field("kid", tree())])],
+        ),
+        record(
+            "Pair",
+            Repr::Own,
+            vec![
+                field("pad", u(Scalar::U64)),
+                field("l", tree()),
+                field("r", tree()),
+            ],
+        ),
+        record(
+            "Holder",
+            Repr::Own,
+            vec![field(
+                "xs",
+                FieldTy::Array(Box::new(FieldTy::Inline(TypeRef(2))), 2),
+            )],
+        ),
+    ];
+    let r = compute(&shapes).unwrap();
+    let at = |cursor, a, b, index| Point {
+        cursor,
+        a,
+        b,
+        index,
+    };
+    let f = frames(&shapes, &r, TypeRef(0));
+    // Assignment cleans v@0 while name@8 waits: a terminal String is freed from
+    // its pointer and capacity, so its length word @16 takes the link.
+    assert_eq!(
+        f.points,
+        [at(1, 0, 16, None), at(2, 0, 8, None), at(1, 0, 16, None)]
+    );
+    assert_eq!((f.spares, f.native_bytes(32)), (0, 32));
+    let f = frames(&shapes, &r, TypeRef(3));
+    assert_eq!(fixed(&r[3]).size, 48);
+    assert_eq!(f.points, [at(1, 48, 56, Some(64)), at(2, 48, 56, Some(64))]);
+    assert_eq!(f.native_bytes(48), 72);
+}
+
 /// Bug: a niche taken from a record's field other than the first, or the niche's
 /// offset left relative to the field. `Pair { n: u64, b: Box }` has its only niche
 /// in its second field at 8, so `Option[Pair]` is 16 bytes with its tag word at 8.

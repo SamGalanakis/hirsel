@@ -1,7 +1,9 @@
 //! Exact u64 counts and an intrusive dead-node worklist. The event provider
 //! serializes Arc operations before calling these entry points (CONC-10).
 
-use crate::{Context, block};
+use crate::Context;
+use crate::abi_layout::{FIXED_POINT_NO_INDEX, fixed_point};
+use crate::block::{self, Descriptor, Point};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 
@@ -13,8 +15,70 @@ use std::sync::atomic::{AtomicU64, Ordering, fence};
 /// Never recurse, allocate, fail, run user code, or free the current node.
 pub type Recipe = unsafe extern "C" fn(*mut Context, *mut u8, *mut u64, *mut Worklist) -> bool;
 
+/// A drain's suspended blocks, newest first, and the descendant the running
+/// glue has just handed over. A parent's frame is written only after its glue
+/// returns, so the parent is always linked under the descendant (postorder).
 pub struct Worklist {
-    pub(crate) head: Option<NonNull<u8>>,
+    /// 0 when empty. With bit 0 set, the address of a suspended fixed block's
+    /// A word; otherwise a dead GRAPH buffer's payload.
+    head: usize,
+    pending: Pending,
+    /// The running fixed block's suspension point for `pending`, 1-based.
+    point: u64,
+}
+
+enum Pending {
+    None,
+    Fixed(NonNull<u8>, *const Descriptor),
+    Graph(NonNull<u8>),
+}
+
+type Fixed = (NonNull<u8>, *const Descriptor, u64);
+
+impl Worklist {
+    /// Hand over an exclusively owned dead fixed block from point `point`.
+    /// # Safety
+    /// Glue calls this at most once per run, then returns false.
+    pub(crate) unsafe fn stage_fixed(
+        &mut self,
+        node: NonNull<u8>,
+        descriptor: *const Descriptor,
+        point: u64,
+    ) {
+        debug_assert!(matches!(self.pending, Pending::None));
+        self.pending = Pending::Fixed(node, descriptor);
+        self.point = point;
+    }
+    /// Hand over buffer storage from point `point`; see block::dead_buffer.
+    /// # Safety
+    /// As for stage_fixed, plus block::dead_buffer's contract.
+    pub(crate) unsafe fn stage_buffer(
+        &mut self,
+        buffer: NonNull<u8>,
+        charge: u64,
+        recipe: Recipe,
+        payload: *mut u8,
+        point: u64,
+    ) {
+        debug_assert!(matches!(self.pending, Pending::None));
+        // SAFETY: the caller transfers the exclusively owned buffer.
+        unsafe { block::dead_buffer(buffer, charge, recipe, payload) };
+        self.pending = Pending::Graph(buffer);
+        self.point = point;
+    }
+    /// Link a staged buffer above the head; return a staged fixed block to run.
+    unsafe fn take(&mut self) -> Option<Fixed> {
+        match std::mem::replace(&mut self.pending, Pending::None) {
+            Pending::None => None,
+            Pending::Fixed(node, descriptor) => Some((node, descriptor, 0)),
+            Pending::Graph(buffer) => {
+                // SAFETY: stage_buffer wrote this frame; the buffer is ours.
+                unsafe { (*block::dead(buffer)).next = self.head };
+                self.head = buffer.as_ptr() as usize;
+                None
+            }
+        }
+    }
 }
 
 /// # Safety
@@ -76,31 +140,6 @@ pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
     }
 }
 
-/// # Safety
-/// Consumes one live holder. Charge and recipe describe this node. The recipe
-/// obeys the mechanical, nonrecursive contract above. The list is exclusively used.
-#[inline]
-pub unsafe fn enqueue(
-    list: &mut Worklist,
-    node: NonNull<u8>,
-    atomic: bool,
-    charge: u64,
-    recipe: Recipe,
-) {
-    // SAFETY: caller transfers a live holder under the node's count discipline.
-    let last = unsafe { decrement(node, atomic) };
-    if last {
-        // SAFETY: the last holder owns the dead node exclusively.
-        unsafe {
-            if block::funding(node).native_tag() & 3 == block::PLAIN as usize {
-                block::free(node, charge);
-            } else {
-                block::push_dead(list, node, charge, recipe, 8);
-            }
-        }
-    }
-}
-
 /// Consume one holder, returning whether the emitter must run last-release glue.
 /// # Safety
 /// A live holder is transferred under the Rc/Arc event discipline.
@@ -127,54 +166,76 @@ pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
     }
 }
 
+/// Clean and free a dead fixed block and everything it owns, in postorder,
+/// with constant native stack and no allocation.
 /// # Safety
-/// As for enqueue, plus a live task context. Each generated recipe enqueues
-/// descendants rather than invoking release recursively.
-#[inline(always)]
-pub unsafe fn release(
+/// Count is zero or the block is uniquely owned; the descriptor is exact and
+/// lives as long as the compiled program; the context is live.
+pub(crate) unsafe fn drain(
     context: *mut Context,
     node: NonNull<u8>,
-    atomic: bool,
-    charge: u64,
-    recipe: Recipe,
+    descriptor: *const Descriptor,
 ) {
-    // SAFETY: caller transfers one live holder.
-    if unsafe { decrement(node, atomic) } {
-        // SAFETY: decrement transferred the unique dead node to cleanup.
-        unsafe {
-            release_last(context, node, charge, recipe);
-        }
-    }
-}
-
-/// Slow path after an inline decrement has returned true.
-/// # Safety
-/// Count is zero; caller owns this node, its exact charge and mechanical recipe.
-#[inline(never)]
-pub unsafe fn release_last(context: *mut Context, node: NonNull<u8>, charge: u64, recipe: Recipe) {
-    // SAFETY: a PLAIN counted node's terminal payload has no cleanup to resume.
-    if unsafe { block::funding(node).native_tag() & 3 == block::PLAIN as usize } {
-        // SAFETY: count is zero and caller transfers its exact original charge.
-        unsafe { block::free(node, charge) };
-        return;
-    }
-    let mut list = Worklist { head: None };
-    // SAFETY: caller transfers one holder and its generated mechanical recipe.
+    let mut list = Worklist {
+        head: 0,
+        pending: Pending::None,
+        point: 0,
+    };
+    let mut current = Some((node, descriptor, 0));
+    // SAFETY: glue keeps unfinished blocks live and hands over one exclusively
+    // owned descendant per run; a frame occupies only words its glue no longer
+    // reads (hirsel_core_layout::frames).
     unsafe {
-        block::push_dead(&mut list, node, charge, recipe, 8);
-        drain(context, &mut list);
-    }
-}
-/// # Safety
-/// All list entries carry initialized intrusive frames and exact recipes.
-pub(crate) unsafe fn drain(context: *mut Context, list: &mut Worklist) {
-    // SAFETY: recipes yield at most one descendant and keep unfinished parents live.
-    unsafe {
-        while let Some(node) = list.head {
-            let (recipe, payload, cursor, next, charge) = block::resume_state(node);
-            if recipe(context, payload, cursor, list) {
-                list.head = next;
-                block::free_graph_in(&*context, node, charge);
+        loop {
+            if let Some((node, descriptor, mut cursor)) = current.take() {
+                let d = &*descriptor;
+                let payload = node.as_ptr().add(d.payload_offset as usize);
+                if (d.recipe)(context, payload, &mut cursor, &mut list) {
+                    debug_assert!(matches!(list.pending, Pending::None));
+                    block::free_dead_in(&*context, node, d.charge);
+                    continue;
+                }
+                if matches!(list.pending, Pending::None) {
+                    current = Some((node, descriptor, cursor));
+                    continue;
+                }
+                let point = descriptor.cast::<u8>().add(fixed_point(list.point));
+                let p = &*point.cast::<Point>();
+                debug_assert_eq!(p.back as usize, fixed_point(list.point));
+                debug_assert!(p.index != FIXED_POINT_NO_INDEX || p.cursor == cursor);
+                if p.index != FIXED_POINT_NO_INDEX {
+                    payload.add(p.index as usize).cast::<u64>().write(cursor);
+                }
+                payload.add(p.b as usize).cast::<usize>().write(list.head);
+                let a = payload.add(p.a as usize);
+                a.cast::<*const u8>().write(point);
+                list.head = a as usize | 1;
+                current = list.take();
+            } else if list.head == 0 {
+                return;
+            } else if list.head & 1 != 0 {
+                let a = (list.head & !1) as *mut u8;
+                let point = a.cast::<*const u8>().read();
+                let p = &*point.cast::<Point>();
+                let descriptor = point.sub(p.back as usize).cast::<Descriptor>();
+                let payload = a.sub(p.a as usize);
+                list.head = payload.add(p.b as usize).cast::<usize>().read();
+                let cursor = if p.index == FIXED_POINT_NO_INDEX {
+                    p.cursor
+                } else {
+                    payload.add(p.index as usize).cast::<u64>().read()
+                };
+                let node = payload.sub((*descriptor).payload_offset as usize);
+                current = Some((NonNull::new_unchecked(node), descriptor, cursor));
+            } else {
+                let buffer = NonNull::new_unchecked(list.head as *mut u8);
+                let frame = &mut *block::dead(buffer);
+                if (frame.recipe)(context, frame.payload, &mut frame.cursor, &mut list) {
+                    list.head = frame.next;
+                    block::free_dead_in(&*context, buffer, frame.charge);
+                } else {
+                    current = list.take();
+                }
             }
         }
     }

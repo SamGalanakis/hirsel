@@ -339,14 +339,6 @@ fn grant_growth_overrides_original_payer_and_hands_survivors_back() {
 #[test]
 fn bound_handover_keeps_cells_own_counted_and_region_bytes_within_parent() {
     use crate::{counted, region::Region};
-    unsafe extern "C" fn empty(
-        _: *mut Context,
-        _: *mut u8,
-        _: *mut u64,
-        _: *mut counted::Worklist,
-    ) -> bool {
-        true
-    }
     let mut runs = 0;
     for chunk in [128, 65536] {
         for later in [false, true] {
@@ -379,7 +371,7 @@ fn bound_handover_keeps_cells_own_counted_and_region_bytes_within_parent() {
                     if let Some(node) = node {
                         // SAFETY: transfer the one initialized holder after hand-over.
                         unsafe {
-                            counted::release(&mut ctx, node, false, 16, empty);
+                            crate::counted_tests::release_leaf(&mut ctx, node, false);
                         }
                     }
                     drop(own);

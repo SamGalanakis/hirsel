@@ -118,8 +118,9 @@ impl Function<'_, '_, '_> {
             } => {
                 let ctx = self.context;
                 let native_kind = match kind.cleanup(&self.input.types, self.layouts) {
-                    Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
-                    Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+                    Some(
+                        hirsel_core_layout::Cleanup::Terminal | hirsel_core_layout::Cleanup::Fixed,
+                    ) => memory_layout::NATIVE_PLAIN,
                     _ => memory_layout::NATIVE_GRAPH,
                 };
                 let resource = match *kind {
@@ -129,6 +130,20 @@ impl Function<'_, '_, '_> {
                 let counted = kind.counted();
                 let charge = self.get(charge);
                 let size = self.get(size);
+                // A fixed block's uncharged spare frame words follow its value.
+                let spares = match kind {
+                    AllocKind::Own { edge } => {
+                        hirsel_core_layout::spare_words(&self.input.types, self.layouts, edge)
+                    }
+                    _ => 0,
+                };
+                let size = if spares == 0 {
+                    size
+                } else {
+                    let up = self.b.ins().iadd_imm_s(size, 7);
+                    let up = self.b.ins().band_imm(up, !7);
+                    self.b.ins().iadd_imm_s(up, 8 * spares as i64)
+                };
                 let alignment = align;
                 let align = self.b.ins().iconst(types::I64, align as i64);
                 let payer = match place {
@@ -394,8 +409,10 @@ impl Function<'_, '_, '_> {
                 let native_kind =
                     match hirsel_core_layout::cleanup_class(&self.input.types, self.layouts, &edge)
                     {
-                        Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
-                        Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+                        Some(
+                            hirsel_core_layout::Cleanup::Terminal
+                            | hirsel_core_layout::Cleanup::Fixed,
+                        ) => memory_layout::NATIVE_PLAIN,
                         _ => memory_layout::NATIVE_GRAPH,
                     };
                 let at = self.addr(carrier);

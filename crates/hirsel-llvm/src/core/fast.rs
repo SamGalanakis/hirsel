@@ -420,8 +420,6 @@ impl FunctionEmitter<'_> {
         let fast = self.bin(Binary::And, &i1, &ordinary, &positive);
         let local = Label::new("free_local", n);
         let slow = Label::new("free_slow", n);
-        let fixed_label = Label::new("free_static", n);
-        let generic = Label::new("free_generic", n);
         let freed = Label::new("freed", n);
         self.likely(&fast, local, slow);
         self.block(local);
@@ -443,15 +441,6 @@ impl FunctionEmitter<'_> {
         self.runtime_void("hirsel_core_native_free", &[ptr(base)]);
         self.br(freed);
         self.block(slow);
-        let fixed = self.cmp(Predicate::Eq, &i64, &tag, &int(NATIVE_STATIC));
-        let fixed = self.bin(Binary::And, &i1, &fixed, &positive);
-        self.cond(&fixed, fixed_label, generic);
-        self.block(fixed_label);
-        self.refund(&current, charge);
-        let base = self.offset(pointer, back(STATIC_PREFIX_BYTES));
-        self.runtime_void("hirsel_core_native_free", &[ptr(base)]);
-        self.br(freed);
-        self.block(generic);
         self.cold_void(
             "hirsel_core_free_value",
             &[ptr(pointer.clone()), word(charge.clone())],
@@ -569,7 +558,7 @@ impl FunctionEmitter<'_> {
         }
         if let Some(recipe) = recipe {
             self.cold_void(
-                "hirsel_core_release_static_last",
+                "hirsel_core_release_fixed_last",
                 &[ptr(CONTEXT), ptr(node.clone()), ptr(recipe.clone())],
             );
         } else {

@@ -367,21 +367,9 @@ mod tests {
     }
     #[test]
     fn shared_path_release_keeps_exact_peak_retained_and_child_refund_order() {
+        use crate::counted_tests::{Fixed, LEAF, at};
         use crate::{block, counted};
         use std::ptr::NonNull;
-        unsafe extern "C" fn empty(
-            _: *mut Context,
-            _: *mut u8,
-            _: *mut u64,
-            _: *mut counted::Worklist,
-        ) -> bool {
-            true
-        }
-        static CHILD: block::Descriptor = block::Descriptor {
-            recipe: empty,
-            charge: 16,
-            payload_offset: crate::abi_layout::NODE_PAYLOAD as u64,
-        };
         unsafe extern "C" fn path(
             context: *mut Context,
             payload: *mut u8,
@@ -401,23 +389,37 @@ mod tests {
                     );
                     *cursor += 1;
                     if counted::decrement(child, true) {
-                        crate::abi::hirsel_core_release_static_own_enqueue(work, child, &CHILD);
+                        crate::abi::hirsel_core_release_fixed_enqueue(
+                            work,
+                            child,
+                            &LEAF.descriptor,
+                            *cursor,
+                        );
                         return false;
                     }
                 }
                 true
             }
         }
-        static PARENT: block::Descriptor = block::Descriptor {
-            recipe: path,
-            charge: 40,
-            payload_offset: crate::abi_layout::NODE_PAYLOAD as u64,
+        // Each yield vacates its slot; the first needs one spare word.
+        static PARENT: Fixed<4> = Fixed {
+            descriptor: block::Descriptor {
+                recipe: path,
+                charge: 40,
+                payload_offset: crate::abi_layout::NODE_PAYLOAD as u64,
+            },
+            points: [
+                at(1, 1, 0, 32),
+                at(2, 2, 0, 8),
+                at(3, 3, 0, 8),
+                at(4, 4, 0, 8),
+            ],
         };
         let mut context = Context::new(128);
         let run = Run::start(&context);
-        let shared = block::allocate(context.payer(None), Some(16), 16, 8, block::STATIC).unwrap();
-        let unique = block::allocate(context.payer(None), Some(16), 16, 8, block::STATIC).unwrap();
-        let parent = block::allocate(context.payer(None), Some(40), 40, 8, block::STATIC).unwrap();
+        let shared = block::allocate(context.payer(None), Some(16), 16, 8, block::PLAIN).unwrap();
+        let unique = block::allocate(context.payer(None), Some(16), 16, 8, block::PLAIN).unwrap();
+        let parent = block::allocate(context.payer(None), Some(40), 48, 8, block::PLAIN).unwrap();
         // SAFETY: initialize fresh counted storage and transfer three shared
         // holders and the only unique holder into the four-field parent.
         unsafe {
@@ -432,33 +434,34 @@ mod tests {
                 fields.add(i).write(child.as_ptr());
             }
         }
-        // Charges are 16+16+40. Each STATIC prefix adds 32 native bytes.
+        // Charges are 16+16+40. Each prefix adds 8 native bytes, and the
+        // parent's spare word 8 more, uncharged.
         assert_eq!(
             figures(),
             Figures {
                 charged: 72,
-                retained: 168,
+                retained: 104,
                 slack: 0
             }
         );
         // SAFETY: the root's last holder transfers its exact descriptor.
         unsafe {
             assert!(counted::decrement(parent, false));
-            crate::abi::hirsel_core_release_static_last(&mut context, parent, &PARENT);
+            crate::abi::hirsel_core_release_fixed_last(&mut context, parent, &PARENT.descriptor);
         }
         assert_eq!(context.available(), 112);
         assert_eq!(
             figures(),
             Figures {
                 charged: 16,
-                retained: 48,
+                retained: 24,
                 slack: 0
             }
         );
         // SAFETY: the external shared holder is now the only one left.
         unsafe {
             assert!(counted::decrement(shared, true));
-            crate::abi::hirsel_core_release_static_last(&mut context, shared, &CHILD);
+            crate::abi::hirsel_core_release_fixed_last(&mut context, shared, &LEAF.descriptor);
         }
         assert_eq!(context.available(), 128);
         assert_eq!(figures(), Figures::default());

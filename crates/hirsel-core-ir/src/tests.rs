@@ -19,6 +19,10 @@ const SAMPLES: &[(&str, &str)] = &[
     ("cleanup", include_str!("../samples/cleanup.core")),
     ("admission", include_str!("../samples/admission.core")),
     ("counted", include_str!("../samples/counted.core")),
+    (
+        "counted-frames",
+        include_str!("../samples/counted-frames.core"),
+    ),
     ("custody", include_str!("../samples/custody.core")),
     ("variants", include_str!("../samples/variants.core")),
     ("sequences", include_str!("../samples/sequences.core")),

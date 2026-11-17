@@ -372,48 +372,6 @@ pub(super) fn free(
     calls.c(object, b, "hirsel_core_native_free", &[P], &[], &[base])?;
     b.ins().jump(done, &[]);
     b.switch_to_block(slow);
-    let fixed = b
-        .ins()
-        .icmp_imm_s(IntCC::Equal, tag, i64::from(memory_layout::NATIVE_STATIC));
-    let fixed = b.ins().band(fixed, positive);
-    let fixed_local = b.create_block();
-    let generic = b.create_block();
-    b.set_cold_block(generic);
-    b.ins().brif(fixed, fixed_local, &[], generic, &[]);
-    b.switch_to_block(fixed_local);
-    let available = b.ins().load(
-        types::I64,
-        Flags::trusted(),
-        current,
-        memory_layout::LIMIT_AVAILABLE as i32,
-    );
-    let outstanding = b.ins().load(
-        types::I64,
-        Flags::trusted(),
-        current,
-        memory_layout::LIMIT_OUTSTANDING as i32,
-    );
-    let available = b.ins().iadd(available, charge);
-    let outstanding = b.ins().isub(outstanding, charge);
-    b.ins().store(
-        Flags::trusted(),
-        available,
-        current,
-        memory_layout::LIMIT_AVAILABLE as i32,
-    );
-    b.ins().store(
-        Flags::trusted(),
-        outstanding,
-        current,
-        memory_layout::LIMIT_OUTSTANDING as i32,
-    );
-    let base = b
-        .ins()
-        .iadd_imm_s(pointer, -(memory_layout::STATIC_PREFIX_BYTES as i64));
-    calls.c(object, b, "hirsel_core_native_free", &[P], &[], &[base])?;
-    b.ins().jump(done, &[]);
-    b.switch_to_block(generic);
-
     calls.c(
         object,
         b,
@@ -617,7 +575,7 @@ pub(super) fn release(
         calls.c(
             object,
             b,
-            "hirsel_core_release_static_last",
+            "hirsel_core_release_fixed_last",
             &[P, P, P],
             &[],
             &[context, node, recipe],
@@ -701,8 +659,9 @@ pub(super) fn declare_allocators(
                 let kind = &kind;
                 let align = align.max(8);
                 let native_kind = match kind.cleanup(&input.types, layouts) {
-                    Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
-                    Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+                    Some(
+                        hirsel_core_layout::Cleanup::Terminal | hirsel_core_layout::Cleanup::Fixed,
+                    ) => memory_layout::NATIVE_PLAIN,
                     _ => memory_layout::NATIVE_GRAPH,
                 };
                 let prefix = memory_layout::own_prefix(native_kind) as u64;

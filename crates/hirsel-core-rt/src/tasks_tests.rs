@@ -460,14 +460,6 @@ fn child_results_keep_their_origin_funding_until_joiner_drop() {
     }
     assert_eq!(run(root, ()).0, 16);
 }
-unsafe extern "C" fn empty_recipe(
-    _: *mut Context,
-    _: *mut u8,
-    _: *mut u64,
-    _: *mut crate::counted::Worklist,
-) -> bool {
-    true
-}
 // CONC-11: both unwrap orders and the foreign last refund retain the origin payer.
 #[test]
 fn arc_unwrap_observes_release_order_and_foreign_last_refund() {
@@ -475,7 +467,7 @@ fn arc_unwrap_observes_release_order_and_foreign_last_refund() {
         // SAFETY: child input transfers one Arc holder with immutable u64 payload.
         unsafe {
             let node = std::ptr::NonNull::new(input.cast::<*mut u8>().read()).unwrap();
-            hirsel_core_release(context, node, true, 16, empty_recipe);
+            crate::counted_tests::release_leaf(context, node, true);
         }
         0
     }
@@ -508,7 +500,7 @@ fn arc_unwrap_observes_release_order_and_foreign_last_refund() {
                 assert_eq!(node.as_ptr().add(8).cast::<u64>().read(), 42);
                 hirsel_core_free(node, 16);
             } else {
-                hirsel_core_release(context, node, true, 16, empty_recipe);
+                crate::counted_tests::release_leaf(context, node, true);
             }
             let mut unit = 0u8;
             assert_eq!(hirsel_core_join(context, h.task, &mut unit, 2).kind, 0);
@@ -779,7 +771,7 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
             if arc_gate(context) {
                 hirsel_core_arc_released(context, last);
             }
-            crate::block::free_graph(node, 16);
+            crate::block::free(node, 16);
             out.cast::<u64>().write(u64::from(unique && last));
         }
         0
@@ -833,7 +825,7 @@ fn a_quiet_arc_event_delivers_a_refund_published_while_its_task_runs() {
             std::thread::spawn(move || {
                 let node = node;
                 let mut foreign = Context::new(0);
-                hirsel_core_release(&mut foreign, node.0, true, 16, empty_recipe);
+                crate::counted_tests::release_leaf(&mut foreign, node.0, true);
             })
             .join()
             .unwrap();

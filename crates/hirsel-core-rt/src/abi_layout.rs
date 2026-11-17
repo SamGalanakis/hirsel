@@ -38,29 +38,42 @@ pub const OWN_ALIGNMENT_SHIFT: usize = 2;
 pub const PLAIN_PREFIX_BYTES: usize = 8;
 pub const GRAPH_PREFIX_BYTES: usize = 48;
 pub const RESOURCE_PREFIX_BYTES: usize = 16;
-pub const STATIC_PREFIX_BYTES: usize = 32;
 pub const NATIVE_PLAIN: u8 = 0;
 pub const NATIVE_GRAPH: u8 = 1;
 pub const NATIVE_RESOURCE: u8 = 2;
-pub const NATIVE_STATIC: u8 = 3;
-pub const STATIC_DESCRIPTOR_RECIPE: usize = 0;
-pub const STATIC_DESCRIPTOR_CHARGE: usize = 8;
-pub const STATIC_DESCRIPTOR_PAYLOAD_OFFSET: usize = 16;
-pub const STATIC_DESCRIPTOR_BYTES: usize = 24;
+pub const FIXED_DESCRIPTOR_RECIPE: usize = 0;
+pub const FIXED_DESCRIPTOR_CHARGE: usize = 8;
+pub const FIXED_DESCRIPTOR_PAYLOAD_OFFSET: usize = 16;
+pub const FIXED_DESCRIPTOR_BYTES: usize = 24;
+pub const FIXED_POINT_BACK: usize = 0;
+pub const FIXED_POINT_CURSOR: usize = 8;
+pub const FIXED_POINT_A: usize = 16;
+pub const FIXED_POINT_B: usize = 24;
+pub const FIXED_POINT_INDEX: usize = 32;
+pub const FIXED_POINT_BYTES: usize = 40;
+pub const FIXED_POINT_NO_INDEX: u64 = u64::MAX;
+/// Byte offset of point `k` (1-based) from its descriptor.
+pub const fn fixed_point(k: u64) -> usize {
+    FIXED_DESCRIPTOR_BYTES + FIXED_POINT_BYTES * (k as usize - 1)
+}
 pub const fn own_prefix(kind: u8) -> usize {
     match kind {
         NATIVE_PLAIN => PLAIN_PREFIX_BYTES,
         NATIVE_GRAPH => GRAPH_PREFIX_BYTES,
         NATIVE_RESOURCE => RESOURCE_PREFIX_BYTES,
-        NATIVE_STATIC => STATIC_PREFIX_BYTES,
         _ => panic!("native block kind"),
     }
 }
-// Fixed blocks use STATIC32: next/descriptor/cursor/payer. The immutable
-// descriptor contains recipe/portable charge/payload offset, shared per concrete
-// owning shape. Only dead nodes write a frame. Dynamic buffers retain GRAPH48;
-// terminal blocks PLAIN8, resources their separate prefix. STATIC's tag 3 is
-// deliberately outside OWN_ORDINARY_MAX_TAG: 2 identifies a resource, not graph.
+// Fixed blocks are PLAIN8 like terminal ones: the kind is a physical layout,
+// never a cleanup decision; emitters pick fixed glue from cleanup_class. Each
+// concrete (owner, type) has an immutable descriptor {recipe, charge, payload
+// offset} followed inline by its suspension points, point k at fixed_point(k):
+// {back = fixed_point(k), cursor, a, b, index or FIXED_POINT_NO_INDEX}. When a
+// fixed block's glue yields a descendant at point k, the drain writes the point
+// address at payload+a, the next frame link at payload+b and, for a point
+// inside an inline array, the cursor at payload+index: words that glue never
+// reads again (hirsel_core_layout::frames). Dynamic buffers retain GRAPH48;
+// resources their separate prefix. Kind 3 is unused.
 
 // Arc count mutations are inline under the scheduler's event turn. After the
 // operation, with released before last-release glue, call the context-first
@@ -133,9 +146,6 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 // identity plus ordinary plain/GRAPH native layout. For nonzero charge, refund
 // available/outstanding directly and free(payload - the selected prefix).
 // Otherwise call free_value; it preserves original-payer/remote-event handling.
-// If that first test fails, raw_header XOR current == NATIVE_STATIC, with
-// nonzero charge, proves an ordinary local Fixed block: refund directly and
-// free(payload - STATIC_PREFIX_BYTES). This separate branch excludes Resource2.
 // Outstanding bytes retain the old slot across scope exit and re-entry. Resume
 // only binds/normalizes custody; owner events deliver eligible pending refunds.
 // Ordinary admission does not apply pending refunds or add an event. Refusal
@@ -143,11 +153,11 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 // lookup, poll, drain, lock or atomic update.
 
 // FORM #84/#89: an alloc whose named owning edge is terminal
-// (hirsel_core_layout::cleanup_class) selects PLAIN_PREFIX_BYTES; every other
-// Fixed block, counted or not, STATIC_PREFIX_BYTES; Dynamic uses GRAPH_PREFIX_BYTES. Count stays at NODE_COUNT,
-// payload at NODE_PAYLOAD. A terminal owning edge frees immediately after its last
-// count event; it never borrows a graph frame. The alloc and the cleanup glue read
-// the same edge, so the prefix always fits the cleanup.
+// (hirsel_core_layout::cleanup_class) or a Fixed one selects PLAIN_PREFIX_BYTES;
+// a Fixed block's native payload is Frames::native_bytes of its value, adding
+// uncharged spare words. Dynamic uses GRAPH_PREFIX_BYTES. Count stays at
+// NODE_COUNT, payload at NODE_PAYLOAD. A terminal owning edge frees immediately
+// after its last count event; a Fixed one goes through its descriptor.
 // Like/growth retain the same property and original payer; logical charges and
 // admission/refund ordering are independent of this native prefix selection.
 

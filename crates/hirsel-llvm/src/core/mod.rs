@@ -556,6 +556,7 @@ fn emit_module(
             sink: &mut *sink,
             items: &mut items,
             next: 0,
+            fixed_point: None,
         };
         let body_name = if has_status {
             name.clone()
@@ -1175,6 +1176,9 @@ struct FunctionEmitter<'a> {
     sink: &'a mut dyn Sink,
     items: &'a mut Items,
     next: usize,
+    /// In fixed counted glue, the suspension points numbered so far, in the
+    /// order hirsel_core_layout::frames lists them; None elsewhere.
+    fixed_point: Option<u64>,
 }
 impl FunctionEmitter<'_> {
     /// AAPCS64 leaves narrow C arguments' upper bits unspecified.

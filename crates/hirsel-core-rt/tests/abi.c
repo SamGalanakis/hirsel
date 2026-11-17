@@ -2,12 +2,6 @@
 #include <assert.h>
 #include <string.h>
 
-static bool empty(HirselCoreContext *context, void *payload, uint64_t *cursor,
-                  HirselCoreWorklist *worklist) {
-    (void)context; (void)payload; (void)cursor; (void)worklist;
-    return true;
-}
-
 _Static_assert(sizeof(HirselCoreCause) == HIRSEL_CORE_CAUSE_BYTES, "Cause size");
 _Static_assert(offsetof(HirselCoreCause, message.capacity) == HIRSEL_CORE_CAUSE_KIND, "Cause kind");
 _Static_assert(offsetof(HirselCoreCause, message) == HIRSEL_CORE_CAUSE_MESSAGE, "Cause message");
@@ -62,7 +56,7 @@ int main(void) {
     assert(!hirsel_core_try_unwrap(counted.pointer, false));
     assert(--*count != 0);
     assert(hirsel_core_try_unwrap(counted.pointer, false));
-    if (--*count == 0) hirsel_core_release_last(context, counted.pointer, 16, empty);
+    if (--*count == 0) hirsel_core_free(counted.pointer, 16);
 
     HirselCoreRegion *region = hirsel_core_region_open(128);
     HirselCoreAllocation stable = hirsel_core_region_alloc(context, region, 64, 16, 64, false);

@@ -223,28 +223,42 @@ impl Glues {
                 ] {
                     let id = object
                         .declare_data(
-                            &format!("hirsel.core.static.{owner}.{i}"),
+                            &format!("hirsel.core.fixed.{owner}.{i}"),
                             Linkage::Local,
                             false,
                             false,
                         )
                         .map_err(error)?;
-                    let mut image = vec![0; memory_layout::STATIC_DESCRIPTOR_BYTES];
+                    let frames =
+                        hirsel_core_layout::frames(&input.types, layouts, TypeRef(i as u32));
+                    let points = frames.points.len() as u64;
+                    let mut image = vec![0; memory_layout::fixed_point(points + 1)];
                     let endian = object.isa().endianness();
-                    let encode = |value: u64| match endian {
-                        cranelift_codegen::ir::Endianness::Little => value.to_le_bytes(),
-                        cranelift_codegen::ir::Endianness::Big => value.to_be_bytes(),
+                    let mut put = |at: usize, value: u64| {
+                        image[at..at + 8].copy_from_slice(&match endian {
+                            cranelift_codegen::ir::Endianness::Little => value.to_le_bytes(),
+                            cranelift_codegen::ir::Endianness::Big => value.to_be_bytes(),
+                        })
                     };
-                    let at = memory_layout::STATIC_DESCRIPTOR_CHARGE;
-                    image[at..at + 8].copy_from_slice(&encode(charge));
-                    let at = memory_layout::STATIC_DESCRIPTOR_PAYLOAD_OFFSET;
-                    image[at..at + 8].copy_from_slice(&encode(offset));
+                    put(memory_layout::FIXED_DESCRIPTOR_CHARGE, charge);
+                    put(memory_layout::FIXED_DESCRIPTOR_PAYLOAD_OFFSET, offset);
+                    for (k, p) in (1..).zip(&frames.points) {
+                        let at = memory_layout::fixed_point(k);
+                        put(at + memory_layout::FIXED_POINT_BACK, at as u64);
+                        put(at + memory_layout::FIXED_POINT_CURSOR, p.cursor);
+                        put(at + memory_layout::FIXED_POINT_A, p.a);
+                        put(at + memory_layout::FIXED_POINT_B, p.b);
+                        put(
+                            at + memory_layout::FIXED_POINT_INDEX,
+                            p.index.unwrap_or(memory_layout::FIXED_POINT_NO_INDEX),
+                        );
+                    }
                     let mut data = DataDescription::new();
                     data.define(image.into_boxed_slice());
                     data.set_align(8);
                     let reference = object.declare_func_in_data(function, &mut data);
                     data.write_function_addr(
-                        memory_layout::STATIC_DESCRIPTOR_RECIPE as u32,
+                        memory_layout::FIXED_DESCRIPTOR_RECIPE as u32,
                         reference,
                     );
                     object.define_data(id, &data).map_err(error)?;
@@ -381,6 +395,7 @@ impl Glues {
             caller_site,
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
+            point: None,
         };
         g.resume_buffer(ty, args[1], args[2], args[3])?;
         let done = g.b.ins().iconst(types::I8, 1);
@@ -428,6 +443,7 @@ impl Glues {
             caller_site,
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
+            point: resume.then_some(0),
         };
         if resume {
             let plan = plan_type(tables, TypeRef(index as u32))?;
@@ -436,6 +452,19 @@ impl Glues {
                     .load(types::I64, MemFlagsData::trusted(), args[2], 0);
             let rank = g.icon(0);
             g.resume(&plan, args[1], rank, cursor, args[2], args[3])?;
+            debug_assert_eq!(
+                g.point,
+                Some(
+                    hirsel_core_layout::frames(
+                        &tables.input.types,
+                        tables.layouts,
+                        TypeRef(index as u32)
+                    )
+                    .points
+                    .len() as u64
+                ),
+                "glue and frames number suspension points alike"
+            );
             let done = g.b.ins().iconst(types::I8, 1);
             g.b.ins().return_(&[done]);
         } else {
@@ -507,6 +536,9 @@ struct Glue<'a, 'b, 'c> {
     caller_site: Value,
     failed: Value,
     calls: calls::Calls<'c>,
+    /// In fixed resume glue, the suspension points numbered so far, in the
+    /// order hirsel_core_layout::frames lists them; None in buffer glue.
+    point: Option<u64>,
 }
 impl Glue<'_, '_, '_> {
     fn icon(&mut self, n: u64) -> Value {

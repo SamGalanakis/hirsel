@@ -55,7 +55,7 @@
 //! Inline contract: compare charge with current_limit.available, subtract on
 //! success and add it to outstanding. A plain block's only native word is its
 //! payer pointer at payload-8. Native allocation kind is 0 plain, 1 graph or 2
-//! resource, or 3 fixed (STATIC32). Payload offset is align_up(prefix_bytes, max(alignment,8)); native
+//! resource; fixed blocks are plain. Payload offset is align_up(prefix_bytes, max(alignment,8)); native
 //! size is offset+max(bytes,1). The payer word tags its low five bits: kind in
 //! bits 0..1; bits 2..4 encode log2(max(alignment,8))-3. Index 7 stores the
 //! alignment in one extra word before the prefix. Generic free takes pointer
@@ -76,9 +76,9 @@
 //! takes (region, entry, previous_charge, retained_charge). No object headers.
 //!
 //! Rc uses checked u64 increment and decrement/test at count offset zero; only
-//! the zero result frees a terminal edge directly or calls release_last for a
-//! resumable payload. Arc uses relaxed increment and release decrement plus an
-//! acquire fence before terminal free or release_last. Provider event ordering
+//! the zero result frees a terminal edge directly or calls release_fixed_last
+//! for a fixed payload. Arc uses relaxed increment and release decrement plus an
+//! acquire fence before terminal free or release_fixed_last. Provider event ordering
 //! still surrounds every Arc operation. Arc initialization stores an aligned
 //! atomic u64 value 1 before publication; Rc initialization stores ordinary u64 1.
 //! The immutable u64 event word is at context+CONTEXT_EVENTS (8). Zero means
@@ -478,59 +478,6 @@ pub unsafe extern "C" fn hirsel_core_try_unwrap(node: NonNull<u8>, atomic: bool)
     // SAFETY: the caller owns a live holder in its provider event.
     unsafe { counted::try_unwrap(node, atomic) }
 }
-/// # Safety
-/// Transfers one holder. Context is live; charge/recipe describe node. Generated
-/// glue enqueues descendants and neither recurses nor allocates nor runs user code.
-/// Arc release and its last refund execute within the caller's provider event.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release(
-    context: *mut Context,
-    node: NonNull<u8>,
-    atomic: bool,
-    charge: u64,
-    recipe: Recipe,
-) {
-    // SAFETY: the emitter supplies the node's mechanical recipe and one holder.
-    unsafe {
-        counted::release(context, node, atomic, charge, recipe);
-    }
-}
-/// # Safety
-/// Called only by drop glue with its live worklist, transferring one descendant
-/// holder, its exact charge and its mechanical recipe.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release_enqueue(
-    worklist: *mut Worklist,
-    node: NonNull<u8>,
-    atomic: bool,
-    charge: u64,
-    recipe: Recipe,
-) {
-    // SAFETY: drop glue holds the current worklist exclusively.
-    unsafe {
-        counted::enqueue(&mut *worklist, node, atomic, charge, recipe);
-    }
-}
-/// # Safety
-/// As for release_enqueue, transferring a uniquely owned raw block without a
-/// count word. Its recipe receives payload offset 0. No resources are reachable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release_own_enqueue(
-    worklist: *mut Worklist,
-    node: NonNull<u8>,
-    charge: u64,
-    recipe: Recipe,
-) {
-    // SAFETY: the generated recipe transfers an exclusively owned descendant.
-    unsafe {
-        if crate::block::funding(node).native_tag() & 3 == crate::block::PLAIN as usize {
-            crate::block::free(node, charge);
-        } else {
-            crate::block::push_dead(&mut *worklist, node, charge, recipe, 0);
-        }
-    }
-}
-
 #[repr(C)]
 pub struct Allocation {
     pub pointer: *mut u8,
@@ -683,24 +630,6 @@ pub unsafe extern "C" fn hirsel_core_region_refill(
 ) -> *mut u8 {
     // SAFETY: the emitter already performed the logical admission exactly once.
     unsafe { (*region).refill(bytes, align).as_ptr() }
-}
-
-/// Last-release slow path after the emitted decrement-and-test consumes count 1.
-/// No failure status, allocation or admission. PLAIN payloads are terminal and
-/// do not call the recipe; GRAPH uses the resumable release convention.
-/// # Safety
-/// Exclusive dead PLAIN or GRAPH counted allocation with count zero and exact charge/recipe.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release_last(
-    context: *mut Context,
-    node: NonNull<u8>,
-    charge: u64,
-    recipe: Recipe,
-) {
-    // SAFETY: the emitter transferred the unique dead counted node after decrement.
-    unsafe {
-        counted::release_last(context, node, charge, recipe);
-    }
 }
 
 /// Refund through an original payer after emitted physical deallocation. Remote
@@ -920,6 +849,7 @@ mod destination_tests {
 /// worklist frame and remains alive through this child's depth-first cleanup.
 /// Recipe follows the ordinary resumable mechanical recipe contract. The
 /// carrier capacity is nonzero; a static capacity-zero pointer is not a block.
+/// Point is the running fixed parent's suspension point, or 0 under a buffer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_release_buffer_enqueue(
     list: *mut Worklist,
@@ -927,10 +857,11 @@ pub unsafe extern "C" fn hirsel_core_release_buffer_enqueue(
     charge: u64,
     payload: *mut u8,
     recipe: Recipe,
+    point: u64,
 ) {
     // SAFETY: the emitter transfers the buffer while its parent pins the descriptor.
     unsafe {
-        crate::block::push_buffer(&mut *list, buffer, charge, recipe, payload);
+        (*list).stage_buffer(buffer, charge, recipe, payload, point);
     }
 }
 
@@ -974,34 +905,31 @@ pub unsafe fn inline_own_free_current(
 
 /// Fixed last-release slow path. No status, admission or extra count/event.
 /// # Safety
-/// Count operation/event already transferred exclusive dead STATIC ownership;
+/// Count operation/event already transferred exclusive dead fixed ownership;
 /// descriptor is immutable, exact and lives as long as the compiled program.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release_static_last(
+pub unsafe extern "C" fn hirsel_core_release_fixed_last(
     context: *mut Context,
     node: NonNull<u8>,
     descriptor: *const crate::block::Descriptor,
 ) {
-    let mut list = Worklist { head: None };
     // SAFETY: caller transfers the fixed block and its concrete descriptor.
-    unsafe {
-        crate::block::push_static(&mut list, node, descriptor);
-        counted::drain(context, &mut list);
-    }
+    unsafe { counted::drain(context, node, descriptor) }
 }
-/// Enqueue a uniquely owned Fixed block. No status/admission/event.
+/// Hand a uniquely owned dead fixed block to the drain from the running fixed
+/// parent's suspension point (0 under a buffer). No status/admission/event.
 /// # Safety
-/// Exclusive live worklist, dead STATIC block and immutable exact descriptor.
+/// Exclusive live worklist, dead fixed block and immutable exact descriptor;
+/// at most one hand-over per glue run, which then returns false.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_release_static_own_enqueue(
+pub unsafe extern "C" fn hirsel_core_release_fixed_enqueue(
     list: *mut Worklist,
     node: NonNull<u8>,
     descriptor: *const crate::block::Descriptor,
+    point: u64,
 ) {
     // SAFETY: generated mechanical glue transfers the uniquely owned descendant.
-    unsafe {
-        crate::block::push_static(&mut *list, node, descriptor);
-    }
+    unsafe { (*list).stage_fixed(node, descriptor, point) }
 }
 /// Full-new admission, replacement, carrier install, then original-payer refund.
 /// # Safety

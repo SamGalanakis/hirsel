@@ -8,22 +8,28 @@ use std::ptr::NonNull;
 pub const PLAIN: u8 = crate::abi_layout::NATIVE_PLAIN;
 pub const GRAPH: u8 = crate::abi_layout::NATIVE_GRAPH;
 pub const RESOURCE: u8 = crate::abi_layout::NATIVE_RESOURCE;
-pub const STATIC: u8 = crate::abi_layout::NATIVE_STATIC;
-/// Immutable generated metadata for one concrete fixed owning shape.
+/// Immutable generated metadata for one concrete fixed owning shape, followed
+/// inline by its suspension [`Point`]s (abi_layout::fixed_point).
 #[repr(C)]
 pub struct Descriptor {
     pub recipe: crate::counted::Recipe,
     pub charge: u64,
     pub payload_offset: u64,
 }
+/// Where a suspended fixed block keeps its frame, payload-relative.
 #[repr(C)]
-struct StaticDead {
-    next: Option<NonNull<u8>>,
-    descriptor: *const Descriptor,
-    cursor: u64,
+pub struct Point {
+    /// Distance back to the descriptor.
+    pub back: u64,
+    pub cursor: u64,
+    pub a: u64,
+    pub b: u64,
+    pub index: u64,
 }
-const _: () =
-    assert!(size_of::<StaticDead>() + size_of::<Payer>() == crate::abi_layout::STATIC_PREFIX_BYTES);
+const _: () = assert!(size_of::<Descriptor>() == crate::abi_layout::FIXED_DESCRIPTOR_BYTES);
+const _: () = assert!(size_of::<Point>() == crate::abi_layout::FIXED_POINT_BYTES);
+const _: () = assert!(std::mem::offset_of!(Point, a) == crate::abi_layout::FIXED_POINT_A);
+const _: () = assert!(std::mem::offset_of!(Point, index) == crate::abi_layout::FIXED_POINT_INDEX);
 pub const GRAPH_PREFIX_BYTES: usize = size_of::<Payer>() + size_of::<Frame>();
 #[repr(C)]
 struct Frame {
@@ -31,7 +37,8 @@ struct Frame {
 }
 #[repr(C)]
 pub(crate) struct Dead {
-    pub(crate) next: Option<NonNull<u8>>,
+    /// A worklist link (counted::Worklist).
+    pub(crate) next: usize,
     pub(crate) charge: u64,
     pub(crate) recipe: crate::counted::Recipe,
     pub(crate) payload: *mut u8,
@@ -89,100 +96,32 @@ pub(crate) unsafe fn resource(payload: NonNull<u8>) -> *mut crate::causes::Resou
         }
     }
 }
-pub(crate) unsafe fn push_dead(
-    list: &mut crate::counted::Worklist,
-    payload: NonNull<u8>,
-    charge: u64,
-    recipe: crate::counted::Recipe,
-    payload_offset: usize,
-) {
-    // SAFETY: the last holder owns the GRAPH allocation and its prepaid frame.
-    unsafe {
-        (*frame(payload)).dead.write(Dead {
-            next: list.head,
-            charge,
-            recipe,
-            payload: payload.as_ptr().add(payload_offset),
-            cursor: 0,
-        });
-    }
-    list.head = Some(payload);
-}
-/// Enqueue buffer storage whose recipe borrows a descriptor in its live parent.
+/// Write the frame of buffer storage whose recipe borrows a descriptor in its
+/// live parent; the drain links it.
 /// # Safety
-/// The list is depth first. The parent frame owns the descriptor until this
-/// child finishes, and the buffer is exclusively owned and not already queued.
-/// The emitter has established capacity != 0; a static carrier is never enqueued.
-pub(crate) unsafe fn push_buffer(
-    list: &mut crate::counted::Worklist,
+/// The buffer is exclusively owned and not already queued, and its parent pins
+/// the payload until this child finishes. The emitter has established
+/// capacity != 0; a static carrier is never enqueued.
+pub(crate) unsafe fn dead_buffer(
     block: NonNull<u8>,
     charge: u64,
     recipe: crate::counted::Recipe,
     payload: *mut u8,
 ) {
-    // SAFETY: the buffer owns its native frame and its parent pins the payload.
+    // SAFETY: the buffer owns its prepaid GRAPH frame.
     unsafe {
-        push_dead(list, block, charge, recipe, 0);
-        (*dead(block)).payload = payload;
+        (*frame(block)).dead.write(Dead {
+            next: 0,
+            charge,
+            recipe,
+            payload,
+            cursor: 0,
+        });
     }
 }
 pub(crate) unsafe fn dead(payload: NonNull<u8>) -> *mut Dead {
-    // SAFETY: push_dead initialized this uniquely owned dead graph node's frame.
+    // SAFETY: dead_buffer initialized this uniquely owned dead graph node's frame.
     unsafe { (*frame(payload)).dead.as_mut_ptr() }
-}
-/// # Safety
-/// Exclusive dead STATIC block; descriptor lives for the compiled program.
-pub(crate) unsafe fn push_static(
-    list: &mut crate::counted::Worklist,
-    node: NonNull<u8>,
-    descriptor: *const Descriptor,
-) {
-    // SAFETY: STATIC reserves these three frame words before the payer word.
-    unsafe {
-        let frame = node.as_ptr().sub(prefix(STATIC)).cast::<StaticDead>();
-        frame.write(StaticDead {
-            next: list.head,
-            descriptor,
-            cursor: 0,
-        });
-        list.head = Some(node);
-    }
-}
-/// # Safety
-/// Node is the initialized dead head of an exclusive worklist. Returns its
-/// borrowed recipe state; the frame remains live until that recipe completes.
-pub(crate) unsafe fn resume_state(
-    node: NonNull<u8>,
-) -> (
-    crate::counted::Recipe,
-    *mut u8,
-    *mut u64,
-    Option<NonNull<u8>>,
-    u64,
-) {
-    // SAFETY: the native kind fixes the initialized frame and descriptor layout.
-    unsafe {
-        if funding(node).native_tag() & 3 == STATIC as usize {
-            let frame = &mut *node.as_ptr().sub(prefix(STATIC)).cast::<StaticDead>();
-            let descriptor = &*frame.descriptor;
-            (
-                descriptor.recipe,
-                node.as_ptr().add(descriptor.payload_offset as usize),
-                &mut frame.cursor,
-                frame.next,
-                descriptor.charge,
-            )
-        } else {
-            let frame = &mut *dead(node);
-            (
-                frame.recipe,
-                frame.payload,
-                &mut frame.cursor,
-                frame.next,
-                frame.charge,
-            )
-        }
-    }
 }
 #[inline]
 pub(crate) fn allocate(
@@ -323,18 +262,9 @@ unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>
     }
 }
 /// # Safety
-/// The dead GRAPH node's fields are completely cleaned.
-#[cfg(test)]
-pub(crate) unsafe fn free_graph(payload: NonNull<u8>, charge: u64) {
-    // SAFETY: caller transfers the exclusively owned dead graph block.
-    unsafe {
-        free(payload, charge);
-    }
-}
-/// # Safety
 /// The worklist owns a cleaned node, its exact charge and a live task context.
 #[inline]
-pub(crate) unsafe fn free_graph_in(context: &Context, payload: NonNull<u8>, charge: u64) {
+pub(crate) unsafe fn free_dead_in(context: &Context, payload: NonNull<u8>, charge: u64) {
     // SAFETY: caller transfers exclusive storage; the original payer stays pinned.
     unsafe { free_with(payload, charge, Some(context)) }
 }

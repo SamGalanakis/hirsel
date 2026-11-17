@@ -203,7 +203,6 @@ fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
 fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     let module = text::parse(include_str!("../../../hirsel-core-ir/samples/counted.core")).unwrap();
     let ir = emit_ir(&module).unwrap();
-    assert!(!ir.contains("@hirsel_core_release("));
     assert!(ir.contains("atomicrmw add ptr"));
     assert!(ir.contains("atomicrmw sub ptr"));
     assert!(!ir.contains("@hirsel_core_counted_init"));
@@ -212,7 +211,7 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     assert!(ir.contains("call void @hirsel_core_arc_shared"));
     assert!(ir.contains("call void @hirsel_core_arc_released"));
     assert!(ir.lines().any(
-        |line| line.contains("call void @hirsel_core_release_static_last")
+        |line| line.contains("call void @hirsel_core_release_fixed_last")
             && line.ends_with(" cold")
     ));
     assert!(ir.contains("!\"branch_weights\""));

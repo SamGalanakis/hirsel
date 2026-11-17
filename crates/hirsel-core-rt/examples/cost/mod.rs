@@ -1,15 +1,16 @@
 use hirsel_core_layout::charge;
-use hirsel_core_rt::{
-    Context,
-    block::Block,
-    counted::{self, Worklist},
-    region::Region,
-};
+use hirsel_core_rt::{Context, block::Block, counted, region::Region};
 use std::{hint::black_box, ptr, rc::Rc};
 
 const COUNT: u64 = 1_000_000;
-unsafe extern "C" fn empty(_: *mut Context, _: *mut u8, _: *mut u64, _: *mut Worklist) -> bool {
-    true
+/// Emitted terminal last release: decrement, then free.
+unsafe fn release(node: ptr::NonNull<u8>) {
+    // SAFETY: the caller transfers one live holder of a terminal 16-byte node.
+    unsafe {
+        if counted::decrement(node, false) {
+            hirsel_core_rt::abi::hirsel_core_free(node, 16);
+        }
+    }
 }
 
 fn allocation<const N: usize>(runtime: bool) -> u64 {
@@ -354,8 +355,8 @@ fn region(runtime: bool) -> u64 {
 
 fn counted(runtime: bool) -> u64 {
     if runtime {
-        let mut ctx = Context::new(64);
-        let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
+        let ctx = Context::new(64);
+        let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
         // SAFETY: the fixture owns an initialized immutable u64 and exact holders.
         unsafe {
             counted::initialize(node, false);
@@ -364,9 +365,9 @@ fn counted(runtime: bool) -> u64 {
             for _ in 0..COUNT {
                 counted::share(black_box(node), false);
                 sum += black_box(node).as_ptr().add(8).cast::<u64>().read();
-                counted::release(&mut ctx, black_box(node), false, 16, empty);
+                release(black_box(node));
             }
-            counted::release(&mut ctx, node, false, 16, empty);
+            release(node);
             sum
         }
     } else {

@@ -61,7 +61,7 @@
     "suite-edit": {
       "instructions_per_token": {
         "parse": 444.96008962330205,
-        "index": 6.7260803766605015,
+        "index": 6.703660108738299,
         "resolve": 254.41534799047753,
         "input counts": 8.46365114063113,
         "declarations": 108.86990617560566,

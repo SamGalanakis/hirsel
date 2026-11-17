@@ -62,11 +62,11 @@ def read_frame(s, masked=False):
     return opcode & 15, bytes(x ^ mask[i % 4] for i, x in enumerate(payload))
 
 
-def connect():
+def connect(port=18089):
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
     s.settimeout(8)
-    s.connect(('127.0.0.1', 18089))
+    s.connect(('127.0.0.1', port))
     return s
 
 
@@ -79,11 +79,11 @@ def upgrade(tail=b''):
     return s
 
 
-def wait_ready(process):
+def wait_ready(process, port=18089):
     for _ in range(100):
         assert process.poll() is None, process.returncode
         try:
-            with connect():
+            with connect(port):
                 return
         except OSError:
             time.sleep(.02)
@@ -92,12 +92,75 @@ def wait_ready(process):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--echo', type=Path, required=True)
-    parser.add_argument('--client', type=Path, required=True)
+    parser.add_argument('--echo', type=Path)
+    parser.add_argument('--client', type=Path)
+    parser.add_argument('--session', type=Path)
     parser.add_argument('--cc', default='cc')
     parser.add_argument('--idle-echo', type=Path)
     parser.add_argument('--client-only', action='store_true')
     args = parser.parse_args()
+    if args.session:
+        with tempfile.TemporaryDirectory(prefix='wire-session-') as tmp:
+            shim = Path(tmp) / 'socket.so'
+            subprocess.run([args.cc, '-shared', '-fPIC', str(ROOT/'core/tools/std_socket.c'), '-ldl', '-o', str(shim)], check=True)
+            with (Path(tmp)/'stderr').open('wb') as errors:
+                process = subprocess.Popen([str(args.session.resolve())], env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
+                try:
+                    wait_ready(process, 18094)
+                    with connect(18094) as stalled:
+                        stalled.sendall(b'GET')
+                        with connect(18094) as s:
+                            s.sendall(REQUEST + frame(2, struct.pack('<II', 3, 7)))
+                            assert b'HTTP/1.1 101 ' in head(s)
+                            assert read_frame(s) == (2, struct.pack('<IQI', 8, 0, 0))
+                            s.sendall(frame(9, b'p'))
+                            assert read_frame(s) == (10, b'p')
+                            s.sendall(frame(8, b'\x03\xe8'))
+                            assert read_frame(s) == (8, b'\x03\xe8')
+                            assert s.recv(1) == b''
+                    print('session concurrent upgrades, tail, dispatch, Pong, Close: PASS', flush=True)
+
+                    arg = b'a' * (262144 - 44)
+                    call = struct.pack('<IIQIII', 1, 7, 2, 0, 1000, len(arg)) + arg
+                    batch = struct.pack('<IQIII', 6, 0, 0, 0, 1) + struct.pack('<IQII', 7, 2, 0, len(arg)) + arg
+                    assert len(batch) == 262144
+                    with connect(18094) as s:
+                        s.sendall(REQUEST)
+                        assert b'HTTP/1.1 101 ' in head(s)
+                        s.sendall(frame(2, call) + frame(8, b'\x03\xe8') + b'x' * 65536)
+                        s.shutdown(socket.SHUT_WR)
+                        time.sleep(.1)
+                        assert read_frame(s) == (2, batch)
+                        assert read_frame(s) == (8, b'\x03\xe8')
+                        assert s.recv(1) == b''
+                    print('session Close behind blocked data, unread input drained: PASS', flush=True)
+
+                    with connect(18094) as s:
+                        s.sendall(REQUEST)
+                        assert b'HTTP/1.1 101 ' in head(s)
+                        s.sendall(frame(2, call) + frame(2, struct.pack('<III', 0, 0, 0)) + frame(9, b'late'))
+                        time.sleep(.1)
+                        assert read_frame(s) == (2, batch)
+                        assert read_frame(s) == (8, struct.pack('!H', 1013))
+                        s.sendall(frame(8, struct.pack('!H', 1013)))
+                        s.shutdown(socket.SHUT_WR)
+                        assert s.recv(1) == b''
+                    print('session local Close stays ahead of later Ping: PASS', flush=True)
+
+                    for payload, code in [(struct.pack('<I', 8), 1007), (struct.pack('<III', 0, 0, 0), 1013)]:
+                        with connect(18094) as s:
+                            s.sendall(REQUEST + frame(2, payload))
+                            assert b'HTTP/1.1 101 ' in head(s)
+                            assert read_frame(s) == (8, struct.pack('!H', code))
+                            s.sendall(frame(8, struct.pack('!H', code)))
+                            s.shutdown(socket.SHUT_WR)
+                            assert s.recv(1) == b''
+                        print(f'session Close {code}: PASS', flush=True)
+                finally:
+                    stop_process(process)
+        return 0
+    if args.echo is None or args.client is None:
+        parser.error('--echo and --client are required unless --session is selected')
     with tempfile.TemporaryDirectory(prefix='wire-wsock-') as tmp:
         shim = Path(tmp) / 'socket.so'
         subprocess.run([args.cc, '-shared', '-fPIC', str(ROOT/'core/tools/std_socket.c'), '-ldl', '-o', str(shim)], check=True)

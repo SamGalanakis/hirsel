@@ -667,6 +667,15 @@ def frame_vectors(args, root, work, engines, row):
 
 
 
+def children_joined(report):
+    events = report.get('events', [])
+    children = [e[2] for e in events if e[0] == 0 and e[1] == 0]
+    cancellations = [i for i, e in enumerate(events) if e[0] == 2 and e[1] == 0 and e[2] in children]
+    joins = [i for i, e in enumerate(events) if e[0] == 4 and e[1] == 0 and e[2] in children]
+    return (len(children) == len(cancellations) == len(joins) == 2
+            and max(cancellations) < min(joins))
+
+
 def session_laws(args, root, work, engines, row):
     text = (root / 'core/programs/store/runner.hirsel').read_text()
     laws = (root / 'core/programs/store/session-laws.hirsel').read_text()
@@ -674,11 +683,12 @@ def session_laws(args, root, work, engines, row):
     adapted.parent.mkdir()
     adapted.write_text(text + '\n' + laws)
     selected = manifest(root, work, 'session', adapted)
-    names = ('reader_reservation_holds',)
+    names = args.session_law or ('reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records')
     if 'evaluator' in engines:
         for name in names:
             value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
-            row(engine='evaluator', law=name, passed=value == 1, result=report)
+            holds = value == 1 and (name != 'children_joined_on_close' or children_joined(report))
+            row(engine='evaluator', law=name, passed=holds, result=report)
     for engine in (e for e in engines if e != 'evaluator'):
         definition = 'store@1/runner/test_wire_session'
         code, report = native_run(args, engine, selected, work / f'session-store-{engine}', definition)
@@ -689,20 +699,33 @@ def session_laws(args, root, work, engines, row):
     if args.no_mutants:
         return
     mutants = (
-        ('undersized_reader', ' + 8192u64 + 4096u64', ' + 0u64 + 0u64'),
-        ('head_frames_uncounted', 'let outstanding = 2u64 * (1u64 + c.q)', 'let outstanding = 1u64 * (1u64 + c.q)'),
+        ('undersized_reader', [(' + 8192u64 + 4096u64', ' + 0u64 + 0u64')], 'reader_reservation_holds'),
+        ('head_frames_uncounted', [('let outstanding = 2u64 * (1u64 + c.q)',
+          'let outstanding = 1u64 * (1u64 + c.q)')], 'reader_reservation_holds'),
+        ('writer_queue', [('fn wire_ready(busy: bool) -> bool { !busy }', 'fn wire_ready(busy: bool) -> bool { true }')], 'writer_one_frame'),
+        ('orphan_reader', [('    task.cancel(mut reader)\n    task.cancel(mut writer)\n'
+          '    let _ = task.join(take reader)\n    let _ = task.join(take writer)',
+          '    task.cancel(mut writer)\n    let _ = task.join(take writer)')], 'children_joined_on_close'),
     )
-    for name, old, new in mutants:
-        if text.count(old) != 1:
-            row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
+    for name, edits, law in mutants:
+        if args.session_mutant and name not in args.session_mutant:
             continue
-        changed = work / name / 'runner.hirsel'
-        changed.parent.mkdir()
-        changed.write_text(text.replace(old, new) + '\n' + laws)
-        value, report = evaluate(args.evaluator.resolve(), manifest(root, work, name, changed),
-                                 'store@1/runner/law_reader_reservation_holds')
-        row(engine='evaluator', mutant=name, law='reader_reservation_holds',
-            passed=value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail'], result=report)
+        altered = text
+        for old, new in edits:
+            if altered.count(old) != 1:
+                row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
+                break
+            altered = altered.replace(old, new)
+        else:
+            changed = work / name / 'runner.hirsel'
+            changed.parent.mkdir()
+            changed.write_text(altered + '\n' + laws)
+            value, report = evaluate(args.evaluator.resolve(), manifest(root, work, name, changed),
+                                     'store@1/runner/law_' + law)
+            red = (value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail']
+                   or value == 1 and law == 'children_joined_on_close' and not children_joined(report))
+            row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
+
 
 def l12_values(evaluator, root, work, tag, runner=None):
     """The fingerprint per variant (base twice), or None where a run did not return."""
@@ -797,6 +820,8 @@ def main():
     p.add_argument('--no-mutants', action='store_true')
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
+    p.add_argument('--session-law', action='append', choices=['reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
+    p.add_argument('--session-mutant', action='append', choices=['undersized_reader', 'head_frames_uncounted', 'writer_queue', 'orphan_reader'])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1')

@@ -175,3 +175,40 @@ scratch are separate. At m=262144 and q=4 the child allowance is 10,892,544 byte
 The shared runner harness's `reader_reservation_holds` holds ten maximum Calls
 and one assembly allowance under that reservation. It runs on the evaluator and
 native engines in `core-runner-r0` after a push, and in `core-runner-wire`.
+
+
+`serve(n, mut listener, tasks, clock, config, max_sessions, ingress, make)` is the
+dormant W3b accept loop. Each accepted connection gets one owner, reader and
+writer. `max_sessions` bounds owner handles and completion records independently
+of `socket.pending_max`; ingress and principal admission remain W3c. Upgrades run
+in their owners, so a stalled upgrade does not block acceptance. `Service[C]`
+provides a context, an attach hook for the owner's inbox and a non-waiting
+`dispatch` callback. The callback is also callable by another transport through
+`runner.dispatch`; it contains no socket operations. W3c supplies Hello, call
+admission, principal binding, dedup, publisher integration and outcome accounting.
+
+A read credit is acquired before decoding and returned after dispatch consumes
+the input. Queued, currently dispatched and producer-held frames together use at
+most `1+q` credits. The reader owns their allocations even after sending. The
+writer's capacity-one channel is a handoff: the owner waits for `Sent` before
+offering again. Control frames precede queued data after the current frame. Both
+children are cancelled before either is joined. On graceful Close, the children
+return their socket halves through the inbox; after joining, the owner calls
+`wsock.finish` under the original absolute Close deadline.
+
+The non-overlapping owner reservation is `reader_bytes + 4096` for the children,
+`576` for their task records, `192 + 426(1+q) + 24` for its three channels,
+`(1+q)(8192+36)` for outcomes, `budget` for publication, twice
+`round8(max_frame+14)` for encoding and a pending writer frame, `n_service` and
+`n_place` for service state and the Registry, `round8(300(1+q))` for queue growth,
+and `32768` for upgrade work, control bytes and the Close timer. At defaults this
+is 12,547,870 + n_service + n_place bytes. The exact-bound `session_records` law
+checks 426-byte inbox items, 288-byte child records and a 320-byte owner record
+against charge-v1; `writer_one_frame` checks the handoff's exact 88-byte charge.
+Root admission adds the owner record (320), its parent-funded pending lease (56),
+the factory's bounded state (at most n_service) and a copied ingress list
+`round8(25 * prefix_count)` per live owner. Shared listener bookkeeping includes
+the completion channel `64+8*max_sessions`, the pending credit channel (64), and
+owner-map growth (at most `96*max(4,max_sessions)`); these shared records are counted
+once. Logical reservations, live charge, virtual stacks and RSS are different
+quantities.

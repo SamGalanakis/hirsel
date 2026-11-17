@@ -1,0 +1,24 @@
+// Same evolving image and one-shot digest calls as core/tools/sha256_oracle.rs.
+pub fn main(argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let size_arg = option.unwrap(args.get(argv, 0))
+    let loops_arg = option.unwrap(args.get(argv, 1))
+    let size: u64 = result.unwrap(int.parse(size_arg))
+    let loops: u64 = result.unwrap(int.parse(loops_arg))
+    let mut b: Bytes = result.unwrap(list.with_capacity(size))
+    for i in 0u64 .. size {
+        result.unwrap(list.push(mut b, int.truncate(i * 17 + 3)))
+    }
+    let mut first: u8 = 0
+    for _ in 0u64 .. loops {
+        let digest = std.sha256.hash(b)
+        first = digest[0]
+        b[0] = first
+    }
+    let mut rendered = string.new()
+    result.unwrap(string.push_u64(mut rendered, int.widen(first)))
+    result.unwrap(string.push(mut rendered, "\n"))
+    match stdout.write(out, rendered) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 8))
+    }
+}

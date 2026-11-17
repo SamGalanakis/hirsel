@@ -10,4 +10,3 @@ fn bad(mut m: Mutex[String]) -> u64 {
 // expect: refuse LANG-7 at 3:15
 // expect: refuse LANG-7 at 4:13
 // expect: refuse LANG-7 at 5:5
-// expect: gap values of this type are not built

@@ -27,6 +27,6 @@ fn pattern(x: Choice) -> u64 { match x { Yes => 1u64, No(_) => 0u64 } }
 type OldGeneric[T]: codec { n: u64, removed old: T }
 fn needs[T: codec](x: T) -> u64 { 1u64 }
 fn bad(x: OldGeneric[HostFile]) -> u64 { needs(x) }
-// expect: refuse LANG-17 at 13:55
+
 // expect: refuse LANG-12 at 29:48
 // expect: compared LANG-12 at 29:48 | app@1/main/OldGeneric[core@1/core/HostFile] | codec

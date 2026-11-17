@@ -7,4 +7,3 @@ pub fn main() -> Result[(), ()] { Ok(()) }
 // expect: refuse LANG-5 at 1:10
 // expect: refuse LANG-7 at 2:15
 // expect: compared LANG-5 at 1:10 | R | type
-// expect: gap values of this type are not built

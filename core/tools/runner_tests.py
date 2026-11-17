@@ -55,9 +55,9 @@ CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_dup
 # exactly once, however often that position is re-sent. The evaluator's count comes from
 # its event log; natively, core/tools/runner_count.c is linked into the case's test
 # executable as its event sink and fails the run on any other count.
-# L7 adds32655 sends by the hung body and one marker by the other session's
+# L7 adds32664 sends by the hung body and one marker by the other session's
 # compute body; the marker precedes the head's exhaustion slice (kind21).
-COUNTS = {'calls_runs_once': (7, 1), 'calls_deadline_hung': (7, 32656)}
+COUNTS = {'calls_runs_once': (7, 1), 'calls_deadline_hung': (7, 32665)}
 
 
 def counted(name, report):
@@ -72,10 +72,10 @@ def counted(name, report):
         for at, e in enumerate(events):
             if e[0] == 7:
                 sends.setdefault(e[2], []).append((at, e[1]))
-        if sorted(map(len, sends.values())) != [1, 32655]:
+        if sorted(map(len, sends.values())) != [1, 32664]:
             return False
         marker = next(v[0] for v in sends.values() if len(v) == 1)
-        body = next(v for v in sends.values() if len(v) == 32655)
+        body = next(v for v in sends.values() if len(v) == 32664)
         slices = [(at, e[1]) for at, e in enumerate(events) if e[0] == 21]
         return (len(slices) == 1 and marker[0] < slices[0][0]
                 and marker[1] != slices[0][1] == body[0][1])
@@ -122,7 +122,8 @@ def l4_retained(args, root, work, engine):
 # - release_at_commit_version: a Release at its own commit version, not the group's
 #   durable version;
 # - queue_outside_account: a session that frees a slot when it answers Abandoned.
-# - store_v22_admit: an admit of latest+1 while latest is unreplied.
+# - join_without_digest (L21): a head that joins any request for the running position,
+#   whatever its digest, so other argument bytes get that run's reply.
 # - late_completion_resent: a session that sends the head's answer to a position whose
 #   sends were all answered (Abandoned, not re-sent), a second Outcome for one send.
 # - one_for_joined: one row for a head answer however many sends of the position are owed.
@@ -136,7 +137,7 @@ MUTANTS = (
     ('rerun_on_duplicate',
      [('                Ok(Ok(take o)) => commitless(mut hd, take q, take o),',
        '                Ok(Ok(take o)) => {\n'
-       '                    let _ = effect(mut hd.db, hd.r, hd.h, hd.streams, q)\n'
+       '                    let _ = effect(mut hd.db, hd.r, hd.h, q)\n'
        '                    commitless(mut hd, take q, take o)\n'
        '                },')],
      'runner_calls', 'calls_runs_once'),
@@ -179,7 +180,7 @@ MUTANTS = (
        '    let _ = channel.send(to, Event(e: Answered(Told(version: 0u64, stream: take stream, p: p, outcome: take o))))')],
      'runner_calls', 'calls_duplicate'),
     ('release_at_commit_version',
-     [('let Worker(p: p, version: _, outcome', 'let Worker(p: p, version: wv, outcome'),
+     [('let Worker(p: p, digest: _, version: _, outcome', 'let Worker(p: p, digest: _, version: wv, outcome'),
       ('Release(version: d, snapshot', 'Release(version: wv, snapshot')],
      'runner_calls', 'calls_group_version'),
     ('queue_outside_account',
@@ -191,9 +192,9 @@ MUTANTS = (
        '                    }\n'
        '                    if hit {')],
      'runner_calls', 'calls_held_head'),
-    ('store_v22_admit',
-     [('Some(r) => p == r.p + 1u64 && r.replied,', 'Some(r) => p == r.p + 1u64,')],
-     'runner_calls', 'calls_store_refusal'),
+    ('join_without_digest',
+     [('Some(w) => Some((w.p, w.digest == q.digest)),', 'Some(w) => Some((w.p, true)),')],
+     'runner_calls', 'calls_joiners'),
     ('late_completion_resent',
      [('                if owed > 0u64 {\n                    last = f.version',
        '                if true {\n                    last = f.version')],
@@ -504,7 +505,7 @@ def counting_cc(args, root, work, name):
     support = work / f'count_{name}.o'
     subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
-                    *(['-DHUNG_BODY_SENDS=32655'] if name == 'calls_deadline_hung' else []),
+                    *(['-DHUNG_BODY_SENDS=32664'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '

@@ -44,8 +44,8 @@ names no entry of the kind being asked for gives `NoEntry`.
 
 `transact(mut r, f, n)` registers a body `fn(mut store.Tx, H, take A) -> Result[R, E]`.
 Only the head runs it, in a store run under the entry's n: `Ok` commits and its
-reply is written with the effects; `Error` aborts the effects and the head keeps the
-reply alone (see the S5 stand-in below).
+reply is written with the effects; `Error` aborts the effects and the store keeps the
+reply alone in the aborted run's frame (STORE-SPEC F2).
 
 `place_head(db, place, n_place, handles, inbox, sessions, tasks, n_publisher)` runs on
 the caller's task, because `store.Db` is not send. It runs `place` under `bytes
@@ -53,8 +53,11 @@ n_place` (rule 10) and `handles` twice (rule 12). The head keeps the first H. Th
 publisher, which it spawns under `bytes n_publisher`, runs `place` itself and gets the
 second H; open waits until it has, and a `place` that fails there fails the open with
 `Place`. A second `handles` call that moves the store's version fails the open with
-`HandlesChanged`. The head admits each request against its
-stream's row (one position per stream, H1–H4), runs at most one body per stream,
+`HandlesChanged`. The session computes each request's digest at ingress
+(`store.request_digest` over the key and the exact argument bytes). The head admits
+each request with `store.admit` (one position per stream, H1–H4), answers another
+digest at a position `Refused(RequestMismatch)` without running it, whether the
+position is still running (H1) or the store refuses it (AH1), runs at most one body per stream,
 groups commits and releases a group only after it is durable (V4). Answers that need
 no commit (a duplicate's stored reply, a refusal, `Refused(HistoryUnavailable)` below latest) go in a Release
 without a snapshot and the publisher sends them at its base (V3). The publisher
@@ -89,9 +92,8 @@ is the physical data-tree key, with big-endian table and integer key components;
 its optional value contains the current value codec's bytes without a stored
 schema prefix. The session still uses `Told`; wire serving is a later slice.
 
-S5 (admit and reply) is not on main. A table `runner.streams`, which the head creates
-at open, stands in for it with STORE-SPEC §1.8's rules. An Error reply is kept in a
-reply-only commit, where S5 keeps it in the aborted run's frame. The gate waits on
+The head's stream state is the store's own (STORE-SPEC §1.8, S5 and v2.24's request
+identity): `store.admit` and `store.reply`, with no runner table. The gate waits on
 `store.durable` for the group's last ticket. R1's laws run on memory stores, where
 that returns at once. L1 (R1b) runs on a disk store under the store's W2 crash
 adapter, natively only: at every filesystem cut of two scenarios, the recovered store

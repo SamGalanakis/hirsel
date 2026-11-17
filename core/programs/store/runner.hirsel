@@ -437,93 +437,28 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
     }
 }
 
-// ---- The S5 seam. STORE-SPEC §1.8's `admit` and `reply` are not on main (slice S5). They
-// stand in here with §1.8's rules, S7 included, over a table of the runner's own. Each
-// difference goes when S5 lands:
-// - the table `runner.streams` is created at open, and both take its handle;
-// - an Admission carries no ticket, because the head never waits on one (H2);
-// - S1's abort drops a reply written by a body that returns Error, so the head keeps that
-//   reply in a reply-only commit, where S5 keeps it in the aborted run's one frame (F2).
-type StreamReply: codec { p: u64, replied: bool, reply: Bytes }
-
-type Admission = Admitted | Duplicate(Bytes) | Rejected(u64) | Abandoned
-
-fn streams_table(mut db: store.Db) -> Result[store.Table[Bytes, StreamReply], store.Error] waits {
-    let cu: std.codec.Codec[StreamReply] = std.codec.of()
-    match store.table(mut db, "runner.streams", std.codec.key_bytes(), cu) {
-        Error(Missing(_)) => {
-            let cv: std.codec.Codec[StreamReply] = std.codec.of()
-            let _ = store.create_table(mut db, store.spec("runner.streams", std.codec.key_bytes(), cv))?
-            let cw: std.codec.Codec[StreamReply] = std.codec.of()
-            store.table(mut db, "runner.streams", std.codec.key_bytes(), cw)
-        },
-        take other => take other,
-    }
-}
-
-fn admit(mut db: store.Db, t: store.Table[Bytes, StreamReply], stream: Bytes, p: u64) -> Result[Admission, store.Error] waits {
-    let shape = store.shape(t)
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Result[Admission, store.Error]] {
-        let row = match store.fetch(tx, shape, stream) {
-            Ok(take x) => take x,
-            Error(e) => return Error(Error(e)),
-        }
-        let fresh = match row {
-            None => p == 0u64,
-            Some(r) => p == r.p + 1u64 && r.replied,
-        }
-        if !fresh {
-            return Error(Ok(match row {
-                None => Rejected(0u64),
-                Some(r) => if p == r.p {
-                    if r.replied {
-                        let copied: Result[Bytes, Capacity] = clone(r.reply)
-                        match take copied {
-                            Ok(take b) => Duplicate(take b),
-                            Error(c) => return Error(Error(Full(c))),
-                        }
-                    } else {
-                        Abandoned
-                    }
-                } else {
-                    Rejected(r.p)
-                },
-            }))
-        }
-        match store.put(mut tx, t, stream, StreamReply(p: p, replied: false, reply: list.new())) {
-            Ok(()) => Ok(()),
-            Error(e) => Error(Error(e)),
-        }
-    })?
-    match take ran {
-        Committed(_) => Ok(Admitted),
-        Aborted(take u) => {
-            let store.Undone(value: take v, ticket: _) = take u
-            take v
-        },
-        Failed(_) => fail("runner: admit faulted"),
-        Stopped(_) => fail("runner: admit faulted"),
-        Refused(c) => Error(Full(c)),
-    }
-}
-
-fn reply(mut tx: store.Tx, t: store.Table[Bytes, StreamReply], stream: Bytes, p: u64, o: Outcome) -> Result[(), store.Error] {
+// The stream's reply at p is the Outcome's codec bytes (STORE-SPEC §1.8 reply).
+fn reply(mut tx: store.Tx, stream: Bytes, p: u64, o: Outcome) -> Result[(), store.Error] {
     let co: std.codec.Codec[Outcome] = std.codec.of()
     let mut b: Bytes = list.new()
     match std.codec.encode(co, o, mut b) {
         Ok(()) => (),
         Error(c) => return Error(Full(c)),
     }
-    store.put(mut tx, t, stream, StreamReply(p: p, replied: true, reply: take b))
+    store.reply(mut tx, stream, p, take b)
 }
 
 // ---- P2: the head (H1-H4) and its gate (V3, V4).
 
+// A request at the head. The session computed its digest at ingress (store.request_digest
+// over the requested key and the exact argument bytes, v2.11.3) and never takes one from a
+// client.
 pub opaque type Req: send {
     stream: Bytes,
     p: u64,
     key: Bytes,
     arg: Bytes,
+    digest: store.RequestDigest,
     reply_to: Sender[Event]
 }
 
@@ -542,13 +477,12 @@ pub opaque type Release: send {
 pub opaque type Join: send { to: Sender[Event] }
 
 // A stream's worker, from its commit until the gate releases its group.
-type Worker: send { p: u64, version: u64, outcome: Outcome, waiters: List[Sender[Event]] }
+type Worker: send { p: u64, digest: store.RequestDigest, version: u64, outcome: Outcome, waiters: List[Sender[Event]] }
 
 type Waiting: send { req: Req, parked: bool }
 
 type Head[G: send, H: send] {
     db: store.Db,
-    streams: store.Table[Bytes, StreamReply],
     r: Registry[G, H],
     h: H,
     out: Sender[Release],
@@ -593,10 +527,6 @@ pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Re
         Error(take e) => return Error(Place(take e)),
     }
     let mut owned = take db
-    let streams = match streams_table(mut owned) {
-        Ok(take t) => take t,
-        Error(e) => return Error(Store(e)),
-    }
     let make = code.callable(handles)
     let h = match make(mut owned) {
         Ok(take x) => take x,
@@ -640,9 +570,9 @@ pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Re
     }
     let opened = Release(version: before, snapshot: Some(store.snapshot(owned)), answers: list.new())
     let _ = channel.send(out, take opened)
-    let mut hd = Head(db: take owned, streams: take streams, r: take r, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None)
+    let mut hd = Head(db: take owned, r: take r, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None)
     let served = serve(mut hd, inbox)
-    let Head(db: take kept, streams: _, r: _, h: _, out: _, busy: _, waiting: _, group: _, last: _) = take hd
+    let Head(db: take kept, r: _, h: _, out: _, busy: _, waiting: _, group: _, last: _) = take hd
     let _ = task.join(take publishing)
     match take served {
         Ok(()) => (),
@@ -691,15 +621,19 @@ fn unpark[G: send, H: send](mut hd: Head[G, H]) {
     }
 }
 
-// H1: a request for its stream's worker position joins the waiters; another position waits.
+// H1: a request for its stream's worker position joins the waiters if its digest equals the
+// worker's, and is otherwise answered Refused(RequestMismatch) as V3 without running (v2.11.3);
+// another position waits.
 fn route[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.Error] waits {
     let running = match map.get(hd.busy, q.stream) {
-        Some(w) => Some(w.p),
+        Some(w) => Some((w.p, w.digest == q.digest)),
         None => None,
     }
     match running {
-        Some(p) => if p == q.p {
-            let Req(stream: take stream, p: _, key: _, arg: _, reply_to: take to) = take q
+        Some((p, same)) => if p == q.p && !same {
+            commitless(mut hd, take q, Refused(RequestMismatch))
+        } else if p == q.p {
+            let Req(stream: take stream, p: _, key: _, arg: _, digest: _, reply_to: take to) = take q
             let mut w = match map.remove(mut hd.busy, stream) {
                 Some(take x) => take x,
                 None => return Ok(()),
@@ -729,17 +663,19 @@ fn next_waiting[G: send, H: send](mut hd: Head[G, H]) -> Result[bool, store.Erro
     Ok(false)
 }
 
-// H2. Below latest the store cannot say whether p ran these bytes (STORE AH2), so the
-// answer is Refused(HistoryUnavailable), commitless (V3), and the stream is not marked.
+// H2 on the store's admit (STORE-SPEC v2.24). Below latest the store cannot say whether p
+// ran these bytes (AH2), and at latest another digest is not this request (AH1): both are
+// answered commitless (V3), Refused(HistoryUnavailable) or Refused(RequestMismatch), and
+// neither marks the stream.
 fn begin[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.Error] waits {
-    let a = match admit(mut hd.db, hd.streams, q.stream, q.p) {
+    let a = match store.admit(mut hd.db, q.stream, q.p, q.digest) {
         Ok(take x) => take x,
         Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
         Error(e) => return Error(e),
     }
     match take a {
-        Admitted => execute(mut hd, take q),
-        Abandoned => execute(mut hd, take q),
+        Admitted(_) => execute(mut hd, take q),
+        Abandoned(_) => execute(mut hd, take q),
         Duplicate(b) => {
             let co: std.codec.Codec[Outcome] = std.codec.of()
             match std.codec.decode(co, b) {
@@ -747,33 +683,34 @@ fn begin[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.
                 _ => fail("runner: a stored reply does not decode"),
             }
         },
-        Rejected(l) => if q.p < l {
-            commitless(mut hd, take q, Refused(HistoryUnavailable))
-        } else {
+        Rejected(_) => {
             result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: true)))
             Ok(())
         },
+        HistoryUnavailable => commitless(mut hd, take q, Refused(HistoryUnavailable)),
+        RequestMismatch => commitless(mut hd, take q, Refused(RequestMismatch)),
     }
 }
 
-// What a failed transact run leaves: a reply to keep alone, or a refusal that records nothing.
+// What a failed transact run leaves: its reply, which the store keeps alone in the aborted
+// run's frame (STORE-SPEC F2), or a refusal that records nothing.
 type Kept = Alone(Outcome) | Nothing(Refusal)
 
 // The effect run: the slot's body and its reply in one commit. It takes the head's parts
 // as separate places, so the body can view the registry and handles while db is lent.
-fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, streams: store.Table[Bytes, StreamReply], q: Req) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
+fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, q: Req) -> Option[Result[store.Outcome[Outcome, Kept], store.Error]] waits {
     match map.get(r.slots, q.key) {
         Some(Transact(s, _, go)) => Some(store.run(mut db, Some(s), scoped fn(mut tx: store.Tx) -> Result[Outcome, Kept] {
             match go(mut tx, h, q.arg) {
                 Commit(take b) => {
                     let o = Returned(take b)
-                    match reply(mut tx, streams, q.stream, q.p, o) {
+                    match reply(mut tx, q.stream, q.p, o) {
                         Ok(()) => Ok(take o),
                         Error(_) => Error(Nothing(Overloaded)),
                     }
                 },
-                Abort(take b) => Error(Alone(Returned(take b))),
-                Faulted(take f) => Error(Alone(Failed(take f))),
+                Abort(take b) => keep_reply(mut tx, q, Returned(take b)),
+                Faulted(take f) => keep_reply(mut tx, q, Failed(take f)),
                 Refuse(take why) => Error(Nothing(take why)),
             }
         })),
@@ -781,8 +718,15 @@ fn effect[G: send, H: send](mut db: store.Db, r: Registry[G, H], h: H, streams: 
     }
 }
 
+fn keep_reply(mut tx: store.Tx, q: Req, take o: Outcome) -> Result[Outcome, Kept] {
+    match reply(mut tx, q.stream, q.p, o) {
+        Ok(()) => Error(Alone(take o)),
+        Error(_) => Error(Nothing(Overloaded)),
+    }
+}
+
 fn execute[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.Error] waits {
-    let tried = effect(mut hd.db, hd.r, hd.h, hd.streams, q)
+    let tried = effect(mut hd.db, hd.r, hd.h, q)
     let ran = match take tried {
         Some(take x) => match take x {
             Ok(take y) => take y,
@@ -796,10 +740,12 @@ fn execute[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), stor
             worker(mut hd, take q, take o, t, i.id.version)
         },
         Aborted(take u) => match take u {
-            store.Undone(value: take v, ticket: _) => match take v {
-            Alone(take o) => reply_only(mut hd, take q, take o),
-            Nothing(take why) => commitless(mut hd, take q, Refused(take why)),
+            store.Undone(value: Alone(take o), ticket: Some(t)) => {
+                let version = store.version(store.snapshot(hd.db))
+                worker(mut hd, take q, take o, t, version)
             },
+            store.Undone(value: Alone(_), ticket: None) => fail("runner: an aborted run lost its reply"),
+            store.Undone(value: Nothing(take why), ticket: _) => commitless(mut hd, take q, Refused(take why)),
         },
         Failed(cs) => reply_only(mut hd, take q, Failed(Raised(raised(cs)))),
         Stopped(e) => reply_only(mut hd, take q, Failed(OutOfTime(e.steps))),
@@ -807,15 +753,15 @@ fn execute[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), stor
     }
 }
 
-fn reply_alone(mut db: store.Db, streams: store.Table[Bytes, StreamReply], q: Req, o: Outcome) -> Result[store.Outcome[(), store.Error], store.Error] waits {
+fn reply_alone(mut db: store.Db, q: Req, o: Outcome) -> Result[store.Outcome[(), store.Error], store.Error] waits {
     store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        reply(mut tx, streams, q.stream, q.p, o)
+        reply(mut tx, q.stream, q.p, o)
     })
 }
 
 // A reply with no effect: a run whose body only replies (STORE-SPEC §1.8).
 fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome) -> Result[(), store.Error] waits {
-    let ran = reply_alone(mut hd.db, hd.streams, q, o)?
+    let ran = reply_alone(mut hd.db, q, o)?
     match take ran {
         Committed(d) => worker(mut hd, take q, take o, d.ticket, d.info.id.version),
         Refused(_) => commitless(mut hd, take q, Refused(Overloaded)),
@@ -829,11 +775,11 @@ fn reply_only[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome
 }
 
 fn worker[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
-    let Req(stream: take stream, p: p, key: _, arg: _, reply_to: take to) = take q
+    let Req(stream: take stream, p: p, key: _, arg: _, digest: d, reply_to: take to) = take q
     let mut waiters: List[Sender[Event]] = list.new()
     result.unwrap(list.push(mut waiters, take to))
     let named: Bytes = result.unwrap(clone(stream))
-    result.unwrap(map.insert(mut hd.busy, take named, Worker(p: p, version: version, outcome: take o, waiters: take waiters)))
+    result.unwrap(map.insert(mut hd.busy, take named, Worker(p: p, digest: d, version: version, outcome: take o, waiters: take waiters)))
     result.unwrap(list.push(mut hd.group, take stream))
     hd.last = Some(t)
     Ok(())
@@ -842,7 +788,7 @@ fn worker[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome, t:
 // V3: a commitless answer goes at once, in a snapshot-less Release behind every earlier
 // Release on the one FIFO to the publisher.
 fn commitless[G: send, H: send](mut hd: Head[G, H], take q: Req, take o: Outcome) -> Result[(), store.Error] waits {
-    let Req(stream: take stream, p: p, key: _, arg: _, reply_to: take to) = take q
+    let Req(stream: take stream, p: p, key: _, arg: _, digest: _, reply_to: take to) = take q
     let mut answers: List[Answer] = list.new()
     result.unwrap(list.push(mut answers, Answer(to: take to, stream: take stream, p: p, outcome: take o)))
     let _ = channel.send(hd.out, Release(version: 0u64, snapshot: None, answers: take answers))
@@ -862,7 +808,7 @@ fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
             Some(take x) => take x,
             None => continue,
         }
-        let Worker(p: p, version: _, outcome: take o, waiters: take waiters) = take w
+        let Worker(p: p, digest: _, version: _, outcome: take o, waiters: take waiters) = take w
         let mut answers: List[Answer] = list.new()
         for take to in waiters {
             let s: Bytes = result.unwrap(clone(stream))
@@ -1053,7 +999,8 @@ fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError]
                 // V2: a position already forwarded is joined locally, never forwarded twice.
                 if fresh {
                     let Call(stream: take stream, p: p, key: take key, arg: take arg, deadline: _) = take c
-                    let q = Req(stream: take stream, p: p, key: take key, arg: take arg, reply_to: channel.sender(s.me))
+                    let d = store.request_digest(key, arg)
+                    let q = Req(stream: take stream, p: p, key: take key, arg: take arg, digest: d, reply_to: channel.sender(s.me))
                     if let Error(_) = channel.send(s.head, take q) {
                         return Ok(())
                     }

@@ -28,8 +28,24 @@ pub opaque type Principal: send { token: Bytes }
 
 pub fn principal(p: Principal) -> View[Bytes] in p { view p.token }
 
-type Source: send { mints: List[u64], free: u64, returned: Receiver[()], to: Sender[()] }
-type Book: send { config: Config, sources: Map[Bytes, Source], calls: Map[Bytes, Bucket] }
+type Source: send { mints: List[u64], mint_head: u64, mint_count: u64, free: u64, returned: Receiver[()], to: Sender[()] }
+type Book: send { config: Config, sources: Map[Bytes, Source], calls: Map[Bytes, Bucket], source_order: Deque[Bytes], call_order: Deque[Bytes] }
+
+fn retirement_ring(count: u64) -> Result[Deque[Bytes], Capacity] {
+    let mut ring: Deque[Bytes] = deque.new()
+    // Reserve the fixed ring before the policy task accepts any asks.
+    for _ in 0u64 .. count {
+        if let Error((c, _)) = deque.push_back(mut ring, list.new()) { return Error(c) }
+    }
+    for _ in 0u64 .. count { let _ = deque.pop_front(mut ring) }
+    Ok(take ring)
+}
+
+fn new_book(config: Config) -> Result[Book, Capacity] {
+    let sources = retirement_ring(config.buckets_max)?
+    let calls = retirement_ring(config.buckets_max)?
+    Ok(Book(config: config, sources: map.new(), calls: map.new(), source_order: take sources, call_order: take calls))
+}
 
 type Kind: send = Open(Bytes) | Hello(Bytes, Option[Bytes]) | Call(Bytes)
 type Answer: send = Opened(Lease) | Bound(Principal) | Allowed | RejectedPolicy
@@ -48,30 +64,28 @@ fn source_key(ip: Ip) -> Bytes {
 }
 
 fn collect(mut s: Source) {
-    while let Ok(()) = channel.try_receive(s.returned) { s.free += 1u64 }
+    for _ in 0u64 .. 32u64 {
+        match channel.try_receive(s.returned) { Ok(()) => { s.free += 1u64 }, _ => break }
+    }
 }
 
-// Only fully refilled, inactive keys may retire. Insertion pressure never resets
-// a live limit. The retirement pass is bounded by the configured fixed table.
+// Rust VecDeque's rotating ring bounds maintenance to one key of each kind.
+// Busy sources and non-full buckets return to the ring; only debt-free keys retire.
 fn retire(mut book: Book, now: u64) {
     let c = book.config
-    let mut gone: List[Bytes] = list.new()
-    for (key, b) in book.calls {
-        if refill(b, now, c.call_burst * c.call_period_ns).credit == c.call_burst * c.call_period_ns {
-            result.unwrap(list.push(mut gone, result.unwrap(clone(key))))
-        }
+    if let Some(take key) = deque.pop_front(mut book.call_order) {
+        let full = match map.get(book.calls, key) { Some(b) => refill(b, now, c.call_burst * c.call_period_ns).credit == c.call_burst * c.call_period_ns, _ => fail("ingress: retirement key") }
+        if full {
+            let _ = map.remove(mut book.calls, key)
+        } else { result.unwrap(deque.push_back(mut book.call_order, take key)) }
     }
-    for take key in take gone { let _ = map.remove(mut book.calls, key) }
-    let mut expired: List[Bytes] = list.new()
-    for (key, _) in book.sources {
-        result.unwrap(list.push(mut expired, result.unwrap(clone(key))))
-    }
-    for take key in take expired {
+    if let Some(take key) = deque.pop_front(mut book.source_order) {
         let mut s = option.unwrap(map.remove(mut book.sources, key))
         collect(mut s)
-        prune_mints(mut s, now, c.mint_window_ns)
-        if s.free != c.sessions || list.len(s.mints) != 0u64 {
-            result.unwrap(map.insert(mut book.sources, take key, take s))
+        prune_mints(mut s, now, c.mint_window_ns, c.mint_burst)
+        if s.free != c.sessions || s.mint_count != 0u64 {
+            result.unwrap(map.insert(mut book.sources, result.unwrap(clone(key)), take s))
+            result.unwrap(deque.push_back(mut book.source_order, take key))
         }
     }
 }
@@ -85,8 +99,13 @@ fn ensure_source(mut book: Book, key: Bytes, now: u64) -> bool {
     let (to, returned) = match take made { Ok(take pair) => take pair, Error(_) => return false }
     let allocated: Result[List[u64], Capacity] = list.with_capacity(c.mint_burst)
     let mints = match take allocated { Ok(take times) => take times, Error(_) => return false }
-    let source = Source(mints: take mints, free: c.sessions, returned: take returned, to: take to)
-    match map.insert(mut book.sources, result.unwrap(clone(key)), take source) { Ok(()) => true, Error(_) => false }
+    let source = Source(mints: take mints, mint_head: 0u64, mint_count: 0u64, free: c.sessions, returned: take returned, to: take to)
+    if let Error(_) = map.insert(mut book.sources, result.unwrap(clone(key)), take source) { return false }
+    if let Error(_) = deque.push_back(mut book.source_order, result.unwrap(clone(key))) {
+        let _ = map.remove(mut book.sources, key)
+        return false
+    }
+    true
 }
 
 fn open_source(mut book: Book, key: Bytes, now: u64) -> Answer {
@@ -114,9 +133,14 @@ fn bind(mut book: Book, key: Bytes, take token: Option[Bytes], now: u64, random:
     if !ensure_source(mut book, key, now) { return RejectedPolicy }
     let c = book.config
     let allowed = option.unwrap(map.update(mut book.sources, key, scoped fn(mut s: Source) -> bool {
-        prune_mints(mut s, now, c.mint_window_ns)
-        if list.len(s.mints) >= c.mint_burst { false } else {
-            match list.push(mut s.mints, now) { Ok(()) => true, Error(_) => false }
+        prune_mints(mut s, now, c.mint_window_ns, c.mint_burst)
+        if s.mint_count >= c.mint_burst { false } else {
+            let index = (s.mint_head + s.mint_count) % c.mint_burst
+            if index < list.len(s.mints) { s.mints[index] = now } else {
+                if let Error(_) = list.push(mut s.mints, now) { return false }
+            }
+            s.mint_count += 1u64
+            true
         }
     }))
     if !allowed { return RejectedPolicy }
@@ -134,6 +158,10 @@ fn call_allowed(mut book: Book, key: Bytes, now: u64) -> bool {
         if map.len(book.calls) >= c.buckets_max { retire(mut book, now) }
         if map.len(book.calls) >= c.buckets_max { return false }
         if let Error(_) = map.insert(mut book.calls, result.unwrap(clone(key)), Bucket(at: now, credit: c.call_burst * c.call_period_ns)) { return false }
+        if let Error(_) = deque.push_back(mut book.call_order, result.unwrap(clone(key))) {
+            let _ = map.remove(mut book.calls, key)
+            return false
+        }
     }
     option.unwrap(map.update(mut book.calls, key, scoped fn(mut b: Bucket) -> bool { take_credit(mut b, now, c.call_burst, c.call_period_ns) }))
 }
@@ -143,6 +171,7 @@ fn policy(take p: Policy) -> () waits {
     let mut book = take initial
     while let Ok(take ask) = channel.receive(from) {
         let now = host.mono_ns(clock)
+        retire(mut book, now)
         let Ask(kind: take kind, reply: take reply) = take ask
         let answer = match take kind {
             Open(key) => open_source(mut book, key, now),
@@ -158,7 +187,7 @@ pub fn start(tasks: Tasks, clock: Clock, random: Random, config: Config, n_polic
         return Error(Capacity(requested: 1u64, available: 0u64))
     }
     let (to, from): (Sender[Ask], Receiver[Ask]) = channel.new(config.inbox)?
-    let p = Policy(from: take from, book: Book(config: config, sources: map.new(), calls: map.new()), clock: clock, random: random)
+    let p = Policy(from: take from, book: new_book(config)?, clock: clock, random: random)
     match task.spawn(tasks, bytes n_policy, take p, policy) {
         Ok(take h) => Ok((Ingress(to: take to), take h)),
         Error((c, _)) => Error(c),
@@ -189,7 +218,7 @@ pub fn law_limits(random: Random) -> bool {
     let mut c = defaults()
     c.buckets_max = 2u64
     c.sessions = 2u64
-    let mut book = Book(config: c, sources: map.new(), calls: map.new())
+    let mut book = result.unwrap(new_book(c))
     let source = source_key(V4(0x7f000001u32))
     let a = match open_source(mut book, source, 0u64) { Opened(take l) => take l, _ => return false }
     let b = match open_source(mut book, source, 0u64) { Opened(take l) => take l, _ => return false }
@@ -214,7 +243,7 @@ pub fn law_limits(random: Random) -> bool {
 pub fn law_rates_and_expiry() -> bool {
     let mut c = defaults()
     c.buckets_max = 2u64
-    let mut book = Book(config: c, sources: map.new(), calls: map.new())
+    let mut book = result.unwrap(new_book(c))
     let a = source_key(V4(1u32))
     let b = source_key(V4(2u32))
     let other = source_key(V4(3u32))
@@ -252,7 +281,7 @@ pub fn law_reply_isolated(tasks: Tasks, clock: Clock, random: Random) -> bool wa
 
 @test
 fn test_ingress(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
-    if law_limits(random) && law_rates_and_expiry() && law_reply_isolated(tasks, clock, random) { Ok(()) } else { Error(()) }
+    if law_limits(random) && law_rates_and_expiry() && law_retirement_steps(random) && law_reply_isolated(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
 
@@ -265,10 +294,59 @@ pub fn share_principal(p: Principal) -> Result[Principal, Capacity] {
 
 
 // Minting has a strict rolling-minute bound, unlike calls' explicit burst/rate.
-fn prune_mints(mut s: Source, now: u64, window: u64) {
-    while list.len(s.mints) != 0u64 {
-        let first = s.mints[0u64]
+fn prune_mints(mut s: Source, now: u64, window: u64, burst: u64) {
+    for _ in 0u64 .. 10u64 {
+        if s.mint_count == 0u64 { break }
+        let first = s.mints[s.mint_head]
         if now < first || now - first < window { break }
-        let _ = list.remove(mut s.mints, 0u64)
+        s.mint_head = (s.mint_head + 1u64) % burst
+        s.mint_count -= 1u64
     }
+}
+
+
+pub fn law_retirement_steps(random: Random) -> bool {
+    let mut c = defaults()
+    c.buckets_max = 4u64
+    c.sessions = 1u64
+    let mut state = result.unwrap(new_book(c))
+    for i in 1u32 .. 5u32 { if !call_allowed(mut state, source_key(V4(i)), 0u64) { return false } }
+    // All four are now full. One maintenance step removes exactly one, not a pass.
+    retire(mut state, c.call_period_ns)
+    if map.len(state.calls) != 3u64 || deque.len(state.call_order) != 3u64 { return false }
+    // A backwards read cannot retire any remaining debt, and the cursor still moves.
+    retire(mut state, 0u64)
+    if map.len(state.calls) != 3u64 || deque.len(state.call_order) != 3u64 { return false }
+    for _ in 0u64 .. 3u64 { retire(mut state, c.call_period_ns) }
+    if map.len(state.calls) != 0u64 || deque.len(state.call_order) != 0u64 { return false }
+    let source = source_key(V4(1u32))
+    let lease = match open_source(mut state, source, 0u64) { Opened(take l) => take l, _ => return false }
+    retire(mut state, 600000000000u64)
+    if map.len(state.sources) != 1u64 || deque.len(state.source_order) != 1u64 { return false }
+    if let RejectedPolicy = open_source(mut state, source, 600000000000u64) {} else { return false }
+    let _ = take lease
+    retire(mut state, 600000000000u64)
+    if map.len(state.sources) != 0u64 || deque.len(state.source_order) != 0u64 { return false }
+    // Performance fixtures may raise the configured quotas. Maintenance stays bounded.
+    c.sessions = 64u64
+    c.mint_burst = 20u64
+    let mut larger = result.unwrap(new_book(c))
+    let mut leases: List[Lease] = list.new()
+    for _ in 0u64 .. 64u64 {
+        let opened = match open_source(mut larger, source, 0u64) { Opened(take l) => take l, _ => return false }
+        result.unwrap(list.push(mut leases, take opened))
+    }
+    for _ in 0u64 .. 20u64 { if let Bound(_) = bind(mut larger, source, None, 0u64, random) {} else { return false } }
+    if let RejectedPolicy = bind(mut larger, source, None, 0u64, random) {} else { return false }
+    let _ = take leases
+    retire(mut larger, c.mint_window_ns)
+    let partial = match map.get(larger.sources, source) { Some(s) => s.free == 32u64 && s.mint_count == 10u64, _ => false }
+    if !partial { return false }
+    retire(mut larger, c.mint_window_ns)
+    if map.len(larger.sources) != 0u64 { return false }
+    // Wrap the timestamp ring after one rolling-window half expires.
+    for _ in 0u64 .. 10u64 { if let Bound(_) = bind(mut larger, source, None, 70000000000u64, random) {} else { return false } }
+    for _ in 0u64 .. 10u64 { if let Bound(_) = bind(mut larger, source, None, 100000000000u64, random) {} else { return false } }
+    for _ in 0u64 .. 10u64 { if let Bound(_) = bind(mut larger, source, None, 130000000000u64, random) {} else { return false } }
+    if let RejectedPolicy = bind(mut larger, source, None, 130000000000u64, random) { true } else { false }
 }

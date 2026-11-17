@@ -750,7 +750,7 @@ def session_laws(args, root, work, engines, row):
 
 
 def ingress_laws(args, root, work, engines, row):
-    names = ('limits', 'rates_and_expiry', 'reply_isolated')
+    names = ('limits', 'rates_and_expiry', 'retirement_steps', 'reply_isolated')
     selected = manifest(root, work, 'ingress')
     if 'evaluator' in engines:
         for name in names:
@@ -769,7 +769,7 @@ def ingress_laws(args, root, work, engines, row):
     mutants = (
         ('no_ip_session_limit', 'if s.free == 0u64 { RejectedPolicy }', 'if false { RejectedPolicy }', 'limits'),
         ('no_call_rate', 'if b.credit < period { return false }', 'if b.credit < period { return true }', 'rates_and_expiry'),
-        ('expiry_resets_active', 'if refill(b, now, c.call_burst * c.call_period_ns).credit == c.call_burst * c.call_period_ns {', 'if true {', 'rates_and_expiry'),
+        ('expiry_resets_active', 'if full {', 'if true {', 'rates_and_expiry'),
     )
     for name, old, new, law in mutants:
         assert text.count(old) == 1, name

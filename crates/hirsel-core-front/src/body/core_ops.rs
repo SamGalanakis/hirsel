@@ -803,17 +803,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         args: &[Arg],
         n: NodeId,
     ) -> Option<[ValueId; 4]> {
-        let values = self.runtime_outputs(op, args, n)?;
-        Some(std::array::from_fn(|i| {
-            values.get(i).copied().unwrap_or(ValueId(0))
-        }))
+        self.runtime_outputs(op, args, n)
     }
-    fn runtime_outputs(&mut self, op: RtOp, args: &[Arg], n: NodeId) -> Option<Vec<ValueId>> {
+    fn runtime_outputs<const N: usize>(
+        &mut self,
+        op: RtOp,
+        args: &[Arg],
+        n: NodeId,
+    ) -> Option<[ValueId; N]> {
         if !self.live() {
             return None;
         }
         let signature = self.e.sig(op.signature());
-        let mut output = [ValueId(0); 8];
+        let mut output = [ValueId(0); N];
         let count = self.e.module.signatures[signature.index()].results.len();
         for (i, value) in output.iter_mut().enumerate().take(count) {
             *value = self.value(self.e.module.signatures[signature.index()].results[i]);
@@ -831,7 +833,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             cold: false,
         });
         self.inst(Inst::Call { call }, n);
-        Some(output[..count].to_vec())
+        Some(output)
     }
 
     fn runtime_handle(&mut self, value: ValueId, n: NodeId) -> ValueId {
@@ -3027,7 +3029,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => unreachable!(),
         }
         let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
-        let values = self.runtime_outputs(RtOp::Host(op), &args, n)?;
+        let values = self.runtime_outputs::<8>(RtOp::Host(op), &args, n)?;
         let (value, error, code, written) = (values[0], values[1], values[2], values[3]);
         if op == HostOp::NetSplit {
             self.consume(vals[0], n);

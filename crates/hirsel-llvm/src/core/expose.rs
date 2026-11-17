@@ -422,6 +422,53 @@ fn expand(
     (continuation.index()..body.blocks.len()).collect()
 }
 
+// Inline entry/return jumps are not source charge boundaries. Collapse their
+// single-predecessor, argument-free edges before selecting straight-line groups.
+// Named failure entries remain distinct whenever another edge can reach them.
+fn merge_blocks(body: &mut Body) {
+    let mut incoming = vec![0usize; body.blocks.len()];
+    for (b, row) in body.blocks.iter().enumerate() {
+        for successor in successors(body, b) {
+            incoming[successor] += 1;
+        }
+        for inst in row.insts.get(&body.insts).unwrap() {
+            if let Some(fail) = inst.fail(body) {
+                incoming[fail.index()] += 1;
+            }
+        }
+        if let Terminator::Raise {
+            cleanup: Some(fail),
+            ..
+        } = body.terminators[b]
+        {
+            incoming[fail.index()] += 1;
+        }
+    }
+    incoming[0] += 1;
+    for block in 0..body.blocks.len() {
+        while let Terminator::Jump(edge) = body.terminators[block] {
+            let target = body.edges[edge.index()].target.index();
+            if target == block || incoming[target] != 1 || body.blocks[target].params.len != 0 {
+                break;
+            }
+            let start = body.insts.len() as u32;
+            for b in [block, target] {
+                let range = body.blocks[b].insts;
+                body.insts
+                    .extend_from_within(range.start as usize..(range.start + range.len) as usize);
+                body.inst_anchors
+                    .extend_from_within(range.start as usize..(range.start + range.len) as usize);
+            }
+            body.blocks[block].insts = PoolRange::new(start, body.insts.len() as u32 - start);
+            body.blocks[block].anchor = body.blocks[target].anchor;
+            body.terminators[block] = body.terminators[target].clone();
+            body.blocks[target].insts = PoolRange::EMPTY;
+            body.terminators[target] = Terminator::Unreachable;
+            incoming[target] = 0;
+        }
+    }
+}
+
 pub(super) fn module(module: &Module) -> Option<Module> {
     let eligible = module
         .functions
@@ -443,10 +490,9 @@ pub(super) fn module(module: &Module) -> Option<Module> {
         if original.calls.is_empty() {
             continue;
         }
-        let mut hot = cyclic_blocks(original);
-        if hot.is_empty() {
-            continue;
-        }
+        // A small reader can be hot inside a recursive parser without living
+        // in a local loop. Use the same bounded exposure at those direct calls.
+        let mut hot = (0..original.blocks.len()).collect::<BTreeSet<_>>();
         let mut body = original.clone();
         let mut budget = 1024;
         loop {
@@ -487,6 +533,7 @@ pub(super) fn module(module: &Module) -> Option<Module> {
             hot.extend(expand(&mut body, b, offset, callee, module, inherits));
         }
         if budget != 1024 {
+            merge_blocks(&mut body);
             let old = std::mem::take(&mut body.insts);
             let anchors = std::mem::take(&mut body.inst_anchors);
             for block in &mut body.blocks {

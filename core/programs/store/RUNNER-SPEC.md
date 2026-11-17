@@ -1,0 +1,840 @@
+# RUNNER-SPEC v2.12: entries, calls, sessions and subscriptions of a place (lane runner-spec-1020)
+
+**Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
+
+**Store:** written against **STORE-SPEC v2.7** (/workspace/code/hirsel-briefs/store-spec-1001/STORE-SPEC.md, CHANGES-v2.4 to v2.7: G1–G4, H1–H5, I1–I5, J1). The landed store is S1 (603a2274); S1.1 (`look`, `changes`, Shape reads) is being built.
+
+**Review answered:** runner-spec-review-1028/ADVICE.md (findings 1–7 and every "Model and law gaps" line).
+
+Evidence marks:
+- **RUN**: run or checked here;
+- **READ**: taken from a cited file;
+- **ESTIMATE**: computed from RUN or READ parts;
+- **GUESS**: an estimate with no measured part.
+
+**v2.11** writes the R2 contract that WIRE-SPEC v2 (wire-spec-1059, after wire-attack-1060) needs from this spec. It covers the publisher-to-owner event and its accounting, normalized rows (F10), `complete` (F11), `DONE_MAX` and the outcome reserve (F12), Cover-only retention (F4), and gone-key slots (F9). It **corrects** 1059's reserve: the slot table alone does not bound the outcome rows owed to a session. It adds five laws. R2-g, R2-h and R2-i (admission, launch identity, resume) are not in v2.11. The models were not re-run; the new owner bound is **UNTESTED** until its R1 case. The v2.10 text is RUNNER-SPEC-v2.10.md.
+
+**v2.8** applies Sam's gavel 11 (duplex owned halves, option A; net-proposal-999 §3 as amended by net-proposal-amend-1053): a session is one owned task group per connection. Text only, no model re-run: the models' session is one sequential actor, and the owner task is that actor. The v2.7 text is RUNNER-SPEC-v2.7.md.
+
+**v2.6** rules on L3's oracle (runner-build-1033, followups.md 09:50). v2.5's oracle, a harness `Sender` carried in H, cannot be built: `handles` makes H from the Db alone (rule 12). The law now counts the body's `TRY_SEND` events through the CONC-10 event sink, on every backend. Text only; no model behaviour changed, so no model was re-run. The v2.5 text is RUNNER-SPEC-v2.5.md.
+
+**v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
+
+The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.12 (as built at origin/main e2534995; the orchestrator's PubIn ruling, followups.md 2026-11-17)
+
+v2.12 writes R2-g, R2-h and R2-i as they landed. It does not re-decide them. It also adds the one-inbox publisher that the orchestrator ruled on 2026-11-17 (option (a), runner-build-1033's SPEC GAP). Text only: no model behaviour changed, so no model was re-run. v2.11.4 is RUNNER-SPEC-v2.11.4.md.
+
+| # | Item | Status | What v2.12 says | Basis |
+|---|---|---|---|---|
+| 1 | The publisher's inputs | **RULED (a); signature written here** | The publisher has **one inbox**, `PubIn = Released(Release) \| Joined(Join) \| Subscribed(session, sub, key, arg) \| Unsubscribed(session, sub)`. Nothing else feeds it. The head sends `Released`, and each session sends the other three on its `Sender[PubIn]`. `place_head` takes the inbox's receiver, plus a sender for the head's own `Released`, in place of `sessions: Receiver[Join]`. `connect` takes a `Sender[PubIn]` and a session number (§1.1). | followups.md 2026-11-17 RULED (orchestrator) |
+| 2 | G3's base | **DEFINED by inbox order** | A Subscribe runs at the version of the last `Released` the publisher took from the inbox before that `Subscribed`. Releases taken after it are G2 rounds for that subscription. One FIFO orders a Subscribe against Releases, so no other mechanism is needed (§4 G3). | the ruling |
+| 3 | Session numbers, and a full inbox | **DECIDED here; reversible until R2 is on the wire** | The caller of `connect` passes `session: u64`, unique within the process; the accept loop counts connections. `connect` sends `Joined` before anything else on that sender, so a session's `Subscribed` always follows its `Joined`. The head and `connect` `send` (they may wait); the publisher never waits on a session, so their wait is one drain. The owner `try_send`s `Subscribed` and `Unsubscribed`, because it waits only on its own inbox (v2.8). If the inbox is full, a Subscribe is answered `Ended(sub, Refused(Overloaded))` and nothing is registered. An Unsubscribe that finds the inbox full is applied at the owner: the owner drops that sub's rows, and the publisher keeps the subscription, charged to the session, until a Subscribe of the same sub replaces it or the session ends. The publisher sees a session's end when its `try_send` finds the owner's inbox closed, and drops that session's subscriptions. | runner-build-1033 gap "session id minting"; decision log below |
+| 4 | R2-h, launch identity | **AS BUILT (W4a, docs/spec/launch.md)** | Rule 10's identity is the launch's private metadata: `digest`, the SHA-256 of the executable image; `target`; and `n_place`. The native launcher reads `/proc/self/exe` once, the evaluator hashes the loaded artifact, and an embedder passes the three values. An image that cannot be read gives `Unavailable(reason)`: the digest is empty, and launch does not fail. Describe mode is the first branch of `runner.main`, before any capability use. It answers `Describe{digest, target, n_place, exported}` or `DescribeError` (exit 2). `Welcome` carries `(principal, q, budget, executable, target, n_place)`. A mismatch is a developer diagnostic, never a wire error; an unavailable identity is reported as "identity unknown". | `runner.hirsel` `main`, `Describe`, `Frame.Welcome`; launch.md |
+| 5 | R2-i, resume | **AS BUILT (W4c, sdk/client/README.md)** | Rung 1 mints no resume token. The SDK sends `resume: None` on every Subscribe. A `Some(token)` is always unknown, so it is answered with `Reset`. After a `Reset` or a reconnect, the client keeps its old cache until the new subscription's id appears in a Batch's `complete`, an empty result included. A token naming open, version and subscription state is a later rung; its field and its meaning will be added together. | sdk/client/README.md; WIRE-SPEC D3 |
+| 6 | R2-g, admission | **PART BUILT** | Built: the WebSocket ingress `source(b, peer, ingress)` (ec0b9861). It gives the normalized IP that admission keys on. `X-Forwarded-For` is read only from peers in the trusted `ingress` prefixes; a malformed field is HTTP 400, and an IPv4-mapped IPv6 address shares its IPv4 key. Not on main: the server's per-IP limits (only the bench/wire reference has them). Until they land, WIRE-SPEC's rule governs: per-IP open sessions and pending upgrades are refused at HTTP ingress with 503, and Hello-time limits (new principals per IP, a refused token) with `Close` 1013. §3's "Hello refused `Refused(Overloaded)`" is deleted. | `std.wsock.source`; WIRE-SPEC D2 v2 |
+
+**Decision log (item 3).**
+- The ruling fixed the inbox, not who passes the session number or how a full inbox is met; I decided both here.
+- **/wholehog:** one inbox and one sender per session is the clean end state. No component waits on a session, and every input to the publisher is alike.
+- **Reversible:** until R2 is on the wire. runner-build-1033 builds it, and if the build needs another shape it says so in followups.md.
+
+## CHANGES-v2.11.4 (aligned with STORE-SPEC v2.24 AH1–AH3; orchestrator's ruling)
+
+| # | Item | Ruling | What v2.11.4 says | Basis |
+|---|---|---|---|---|
+| 1 | `Superseded` | **DELETED (/wholehog)** | Below latest the store now answers `HistoryUnavailable` and commits nothing (AH2). It keeps one state per stream, so `p < l` no longer proves that p completed with these bytes. Nothing else proves `Superseded`, so the variant goes, along with every place that derived it: H2's `p < l` row, V3's list and its overtaking proof, the §1.3 row, the frames row, §7's NotRecorded line, L1's clause and C3's clause. `Outcome` is now `Returned \| Failed \| Refused \| Abandoned \| InDoubt`, so `Abandoned` is tag 3 and `InDoubt` tag 4. WIRE-SPEC §3 kept tag 3 reserved "so later tags do not move". /wholehog refuses a dead tag, and no client has shipped. | STORE-SPEC AH2, §1.8 |
+| 2 | The store's admission refusals | **MAPPED 1:1** | The store's `RequestMismatch` is `Refused(RequestMismatch)` (Refusal tag 6), and its `HistoryUnavailable` is `Refused(HistoryUnavailable)` (tag 7). The head delivers both as V3 (commitless). `HistoryUnavailable` is terminal only for the request it answers. It does not mark the stream, so a later latest+1 from its owner still admits (AH2). | STORE-SPEC AH1, AH2 |
+| 3 | The digest | **CITED, not defined here** | The session computes `store.request_digest(key, args)`: SHA-256 (std-sha256-1071) over `u8 17 ‖ "hirsel.request.v1" ‖ u32 len(key) ‖ key ‖ u32 len(args) ‖ args`, little-endian lengths. `key` is the slot's requested 32-byte entry Key, and `args` are the exact argument bytes. The H1 and V2 joins compare this same `RequestDigest` with `==`, and the store compares it at admit. v2.11.3's own description of the encoding is superseded. | STORE-SPEC §1.8 (AH1), L35's vectors |
+| 4 | Model | **RE-RUN** | `models/calls2114_model.py` is calls25 with the head's below-latest answer renamed to `HistoryUnavailable`. C3 now reads "HistoryUnavailable only for a durably replied position", which is S7's proof and still true. `store_v22_admit` is still caught by it (evidence below). | `models/evidence/calls2114*.txt` |
+
+The v2.11.3 text is RUNNER-SPEC-v2.11.3.md.
+
+## CHANGES-v2.11.3 (request identity, the join half; Sam ruled C, DECISIONS 2026-11-17; astra-req-digest/ADVICE.md "two bypasses to close")
+
+| # | Item | Ruling | What v2.11.3 says | Basis |
+|---|---|---|---|---|
+| 1 | The request digest | **ADOPTED** | At ingress the session computes the **request digest** (v2.11.4: this is `store.request_digest`, CHANGES-v2.11.4 item 3): SHA-256 over a versioned, domain-separated, length-delimited encoding of the entry Key (identity, args_fp, result_fp; the slot's requested key, so a gone key has one too) and the exact argument bytes. It excludes the slot, the deadline and the executable. The session puts it in `Req`. The store half (admit stores `(p, digest, Admitted \| Replied)`; `RequestMismatch` at an equal p; `HistoryUnavailable` below latest) is STORE-SPEC v2.24 (store-spec-1001). The runner trusts the digest it computed and never takes one from a client. | ADVICE "C's complete rule" |
+| 2 | **H1 join** compares before sharing | **ADOPTED** | The head keeps the digest in the stream's `Worker`. A request for the worker's position joins its waiters **only if its digest is equal**. Otherwise it is answered `Refused(RequestMismatch)` at once as V3 (commitless). It never runs and never gets the worker's answer. Different sessions therefore get the mismatch for the conflicting request. | ADVICE "two bypasses"; §2 H1 |
+| 3 | **V2 join** compares before sharing | **ADOPTED; a mismatch is a protocol error** | The session keeps the digest of each forwarded position it holds. A later send of that position with an **equal** digest is a local join, as before. One with a **different** digest ends the session: `Close` (1008), with no row for either send. Outcome rows identify only `(stream, p)`, so the two answers could not be told apart. Rule 5 lets a session end lose sends. The other session's case is H1's. | ADVICE "two bypasses"; §2.1 V2 |
+| 4 | Charge | **ADOPTED** | 32 B per held position: in the session's slot table per forwarded position, in each `Req` at the head, and in each `Worker`. It is held while any send or worker holds the position. §3's queue table has the row. | ADVICE "Byte cost" |
+| 5 | The wire | **No new field; two Refusal variants appended** | `Refusal` gains `RequestMismatch` (tag 6) and `HistoryUnavailable` (tag 7), appended, so no existing tag or byte changes. `RequestMismatch`: fix the request, never re-send these bytes at p. `HistoryUnavailable`: terminal, retire the stream (W4c). | §1.1; ADVICE |
+
+**/wholehog:** C is the clean end state. Both join paths and the store compare one digest, so no path shares an answer without it. **Strongest case for the alternative** (no runner check; leave it to the store): the store already compares at admit. But both joins share an answer *before* admit, so the store never sees the second request. That is exactly the bypass astra found.
+
+The v2.11.2 text is RUNNER-SPEC-v2.11.2.md.
+
+## CHANGES-v2.11.2 (an identity gap W4b found; orchestrator's ruling; text only)
+
+| # | Item | Ruling | What v2.11.2 says | Basis |
+|---|---|---|---|---|
+| 1 | A transact entry's Key does not cover E | **RULED: `result` is the type the `Returned` bytes carry** | On main the Key is identity ‖ fp(A) ‖ fp(R) (runner.hirsel:129-139). A transact reply is encoded as `Result[R, E]` (`adapt_transact`, runner.hirsel:274, `put_result` with both codecs). schema(E) reaches only `Described.error` (:304-312), and `code.identity` hashes the nominal path and type arguments, not fields (identity.rs:195-201). So changing a nominal E's fields or variants leaves the Key unchanged: a stale client gets `Ready` and misdecodes `Error(E)`. **Now:** `Described.result` and `result_fp` describe and fingerprint the type the `Returned` bytes carry, for every kind. That is `Result[R, E]` for transact, R for compute and granted, and unchanged for query. `Described.error` is removed, because `result` already holds it. The Hello entry `(identity, args_fp, result_fp)` keeps its shape. **/wholehog:** this is the clean end state. Every kind fingerprints what it actually sends; there is no extra field and no special case for transact. No consumer needs E separately: W4b's stubs already decode the whole `Result`, and E is the error arm of its schema. | W4b (source-only); orchestrator |
+
+**Knock-ons, all on main 45a42d05 unless named:**
+- `core/programs/store/runner.hirsel:15`: `Described` loses `error`.
+- `runner.hirsel:129-139`: `described` takes no `error`, and its R is the reply type.
+- `runner.hirsel:304-312`: `transact` passes `Codec[Result[R, E]]` (`std.codec.of()`) as the result codec and drops the separate `schema(ce)`. `adapt_transact` keeps `cr` and `ce` for encoding. The bytes are the same as `of_result`'s (codec.hirsel:667-669).
+- `core/programs/store/runner_laws.hirsel:171`: the `d.error` checks go.
+- `runner_laws.hirsel:254-264`: the Described round-trip loses `error`.
+- `core/tools/runner_tests.py:147-148`: the `describe_without_schemas` mutant's match text changes.
+- W3a's vectors (be3e9ace): any vector holding `Described` or a transact `result_fp`.
+- W4a's describe capture: the same bytes, with no `error`.
+- W4b's stub generation: it already decodes the full `Result`. It now reads E from `result`'s schema, not from `error`.
+
+The v2.11.1 text is RUNNER-SPEC-v2.11.1.md.
+
+## CHANGES-v2.11.1 (store-spec-1001's two points on STORE-SPEC v2.23 AG3; text only)
+
+| # | Item | Ruling | What v2.11.1 says | Basis |
+|---|---|---|---|---|
+| 1 | Where `published_value` is erased | **RULED: once per Cover, in `cover(t, lo, hi)`** | `cover` is the only place that knows both the table's K and V and the ranges, and a Cover names one table. So the Cover keeps `t` and `published_value` instantiated at that K and V. The publisher calls it on every Change inside the Cover (G2) and on every row from `span_changes` (G3). It has no map from table id to typed Shape. The Cover's size does not depend on its rows, so L20 still holds. **/wholehog:** this is the clean end state, one typed adapter per Cover on both paths. The alternative is a table-id registry of erased adapters, filled from H at open. Its strongest case is one adapter per table rather than per Cover. But it is a second source of truth beside H. | STORE-SPEC v2.23 AG3, §1.5 |
+| 2 | L16's schema numbers | **CORRECTED: two numbers, 0 and 1** | Schema numbers start at 0 (STORE-SPEC §2). The fixture needs one older number with a reader, so the row is stored under schema 0 of a table now at schema 1. v2.11's "schema 1, now 2" was a slip; a third number would test nothing more. | STORE-SPEC §2 |
+
+The v2.11 text is RUNNER-SPEC-v2.11.md.
+
+## CHANGES-v2.11 (the R2 contract; WIRE-SPEC v2 §3 rules 5-8 and §6, wire-spec-1059's R2-a..f in followups.md)
+
+| # | Item | Ruling | What v2.11 says | Basis |
+|---|---|---|---|---|
+| 1 | R2-a: the publisher-to-owner event | **ADOPTED, with its accounting stated** | The publisher never writes to a client-facing sender. It `try_send`s into the session owner's inbox: `Told{version, done: Done}` outcome rows, and per-session content `{version, complete, rows}`. The owner builds every outgoing `Batch`, `Ended` and `Reset` from what it holds (§3, "Where an outcome row lives"). A buffer stays charged to the task that allocated it until its last owner releases it; a channel send never transfers a charge (budgets.md, tasks.md). So `budget` is a ledger the publisher keeps on its own `n_publisher`, and the owner releases each content event as soon as it has folded it into its own outgoing frame. | WIRE-SPEC §3; budgets.md:22, tasks.md:86 |
+| 2 | R2-d: "at most 1+q outcomes owed" | **CORRECTED** | The slot table bounds only forwarded positions the head has not answered. It does not bound rows the owner has made but not yet handed to the writer. Take a client that sends without reading. Slot-full refusals (one row per extra `Call`), `Abandoned` rows, the fan-out rows after a slot frees, and compute replies (they take no slot) all pile up to `budget`. Under that text, 1 MiB of 44 B refusal Batches is about 470 KB of rows, and "Reset fits by construction" is false. Example: q = 0, and two sends of one held position owe two rows at once, the head's answer and the second send's `Refused(Overloaded)`, while the slot table counts one. **Now:** (i) every send, compute and granted included, holds one **unit** of the slot table from arrival until its Outcome row is **handed to the writer**, and a forwarded position holds max(1, its units) until the head answers; (ii) V1 refusals hold no unit, and at most 1+q of them may be unsent at once; a further V1 refusal closes the session (1008). Rule 5 lets a Close lose sends. The owner-side reserve is then (1+q)·`DONE_MAX` + (1+q)·36 B. **/wholehog:** this is the clean end state: one account (the slot table) for every row a send is owed, plus one fixed cap for rows that report no send's work. No second queue and no mode. **Strongest case for the alternative** (free the slot at the head's answer, as built, and bound rows by `budget`): it is simpler, and `budget` already bounds memory. But then the outcome reserve does not exist, a Reset may not fit one frame, and K4 ("Reset drops no outcome") fails under `max_frame`. That is a durability defect, so the alternative is refused. **Reversible:** yes, it is a session-local rule with no wire byte. | review of 1059's text; §2.1 V1, V2; L15's q = 0 case |
+| 3 | R2-d: the reply bound | **ADOPTED; `DONE_MAX` is a constant** | `pub const DONE_MAX: u64 = 8192` in module `runner`, not a runtime config. A config could be lowered across opens, and then a `Duplicate(r)` recorded under the larger bound would break the frame bound or change the bytes p returns (L1). The over-bound outcome is stated for every kind of entry (§1.3). | WIRE-SPEC §3 rule 8 |
+| 4 | R2-b: rows | **ADOPTED** (L16) | `Row.key` is the tree key (table id u32 big-endian ‖ key codec). `Row.value` is the table's current value codec without the stored u16 schema prefix, read through the table's reader. "Current" is fixed per open (rule 12). | WIRE-SPEC §3 rule 6 |
+| 5 | R2-c: `complete` | **ADOPTED** (L17) | Each initial result travels whole in one Batch that names its sub in `complete`, empty results included. No row for a sub precedes that Batch. Initial results that fit one at a time but not together go in separate Batches at the same version. | WIRE-SPEC §3 rule 7 |
+| 6 | R2-e: retention | **ADOPTED** (L20) | Every subscription is Cover-only, because `query` returns a Cover. It retains its Cover and read set, never a copy of covered rows. G2's diff is computed from the old and new Covers over the two snapshots. | WIRE-SPEC §3 "Retained memory" |
+| 7 | R2-f: gone slots | **ADOPTED** (L11 gains the wire case) | A slot keeps the requested entry key. A gone key follows V5 through the head. A Subscribe on a gone slot is answered `Ended(sub, Failed(Gone))` at the session, with nothing recorded. | WIRE-SPEC §3 rule 5 |
+| 8 | R2-g, R2-h, R2-i | **NOT IN v2.11** (v2.12: written as built, CHANGES-v2.12 items 4–6) | Admission, launch identity and resume wait for their own version. WIRE-SPEC's build rules stand until then. | — |
+
+## CHANGES-v2.10 (wire table: `Raised` Tape; step-bounds-1051, orchestrator's ruling)
+
+| # | Item | Ruling | What v2.10 says | Basis |
+|---|---|---|---|---|
+| 1 | `Raised(n)` for `Tape` | **ADDED: Tape 9** | The tape lane (1037) gave `Tape` the number 8 in code, with no row here. OutOfTime has held 8 since v2.7. By the table's own rule, a new kind takes the next unused number, so `Tape` takes **9**. These are wire numbers, not core ordinals, which stay Tape 7 and OutOfTime 8. 1051's E6 moves the code to 9. No other kind is missing: FAIL-2's closed list (main 0c18d366, `docs/spec/failure.md`) has nine causes, and the table now has all nine. | §1.1; FAIL-2; `core/programs/store/runner.hirsel:64` |
+
+The v2.9 text is RUNNER-SPEC-v2.9.md.
+
+## CHANGES-v2.8 (gavel 11: duplex owned halves; net-proposal-amend-1053 REPORT.md "RUNNER-SPEC change line")
+
+| # | Item | Ruling | What v2.8 says | Basis |
+|---|---|---|---|---|
+| 1 | §3 Session: one task per connection | **APPLIED** | A session is **one owned task group per connection**. It has three tasks:<ul><li>an **owner** task with a bounded event inbox;</li><li>a **reader** child that owns the `ReadHalf`;</li><li>a **writer** child that owns the `WriteHalf`.</li></ul>The owner waits only on its inbox. It hands the writer one frame at a time by `try_send`, and only after the writer's `Sent`. To end the session it cancels both children before joining either. The owner is the session the rules name: it holds the slot table, owed sends, timers, Registry and the outgoing queue, it decides V1, and it runs compute entries (P1). Rules 5 and 9, V1–V5 and the models are unchanged, because the models' session is one sequential actor and the owner is that actor. | READ net-proposal-999/PROPOSAL.md §3 (D9, the session sketch); 1053 REPORT.md |
+| 2 | The inbox's charge | **APPLIED, CORRECTED in one point** | Inbox capacity is **1+q events**. Each kind of event is charged to an existing row:<ul><li>**Publisher Batches:** to `budget`. The publisher `try_send`s; on `Full` it applies the slow-reader row (coalesce, then `Reset`, outcomes kept).</li><li>**`Sent`, `Ended` and deadline events:** no payload; their slots are in the record.</li><li>**The writer's frame:** to the per-session max-frame constant.</li></ul>**Correction:** 1053's line charges the reader's frames to the slot table. But a client frame in the inbox has no slot yet. The owner has not decided it, and V1 must read a `Call` to answer `Refused(Overloaded)` when the slots are full. Taking the slot at read time would make that refusal impossible, and it would block a client's `Close`, `Unsubscribe` and pings behind a full slot table. So undecided client frames get **their own queue-table row**: at most 1+q, each ≤ max frame bytes, in the session's account. That is a row, not a new account. "Memory per session" gains (1+q) × max frame bytes for it. | rule 5, V1; queue table |
+| 3 | Transport-provider row | **AGREES; reworded** | The write that waits is now the writer child's `send` on the `WriteHalf`, not the session's. The bound stays one frame per session: the owner hands over the next frame only after `Sent`, so the capacity-1 channel and the writer together hold at most one frame. | PROPOSAL §3 |
+| 4 | Memory per session | **APPLIED** | Two terms are added:<ul><li>the two children's spawn charges, each child's `bytes n`. The reader's must cover one max-size frame plus the WebSocket read-ahead, because the frame it is decoding, or holding while the inbox is full, is inside its own allowance;</li><li>the inbox row (item 2).</li></ul>No new account. | 1053 REPORT.md |
+| 5 | The owner's own cancellation | **NOTED, CONC-8 unchanged (orchestrator's ruling)** | When the owner itself is cancelled, CONC-8 cleans the two child handles one at a time (cancel, wait, next), not both-cancel-then-join. Each child's waits are unshielded, so this is serial but bounded. | orchestrator; PROPOSAL §3 last paragraph |
+
+## CHANGES-v2.7 (D5 ruled (a): step bounds; exec-budget-1047)
+
+| # | Item | Ruling | What v2.7 says | Basis |
+|---|---|---|---|---|
+| 1 | D5 | **RULED (a), Sam 2026-11-16, gavel 5** | The core form is `bound steps s { body }` (MEM-30, landed by exec-budget-1047): a step is each call and each loop back edge; the step past `s` raises the failure `OutOfTime`, which `isolate` does not catch and only that scope catches; waiting takes no steps. While a step bound is current, every 65,536th step is a slice end at which the single worker may run another task. So a hung body neither stops the process nor runs forever: other tasks run at its slice ends, and it ends at step `s`. | docs/spec/budgets.md MEM-30; DESIGN.md in /workspace/code/hirsel-briefs/exec-budget-1047 |
+| 2 | Where `s` comes from | **Registration, as `n`** | Each register function takes `s: u64`, the entry's step bound, beside `n`; the Slot keeps it, outside the key and `Described`. `pub const DEFAULT_STEPS: u64 = 1 << 30` is the value a place passes unless it chooses another (about 0.4 s of a tight loop, about 1 s of typical 920-suite code, and up to about 40 s of allocation-heavy code per call; exec-budget-1047 DESIGN.md §5). Not the call, for D2's reason: the client is untrusted. | D2 (v2.4 item 2) |
+| 3 | Where the scope sits | **Inside the isolate, around the body's own work** | Compute: `bound bytes n { isolate(fn() { bound steps s { decode; body; encode } }) }`. Transact: inside `store.execute`'s isolate, around the Tx's creation, `body(mut tx)` and the frame's encoding, so the Tx is the scope's own (MEM-30 refuses a body that lends `mut` a place from outside); a stop discards the Tx, and with it every write. Query: inside `look`'s isolate around the query call. The steps of decode and encode are the entry's. | MEM-30 "Places outside"; store.hirsel `execute` |
+| 4 | What a stop answers | `Failed(OutOfTime(s))` | Transact: a reply-only commit, as every `Failed` (v2.4 item 5). Query: the subscription ends with that fault, as a query fault does (L8). Compute: the reply. When cleanup added another cause, the failure goes past the step scope to the isolate, and the answer is `Raised(kind of the first cause)` (8 for OutOfTime itself, §1.1). | FAIL-16; MEM-30 "Exhaustion" |
+| 5 | L7/deadline_hung | **A count law, testable now on all three engines** | Stated in §8, L6+L7 row: `TRY_SEND` counts through the CONC-10 sink, hand-derived from MEM-30's step rule. | v2.6 item 1 (the sink) |
+
+## CHANGES-v2.6 (L3's oracle; runner-build-1033 09:50)
+
+| # | Item | Ruling | What v2.6 says | Basis |
+|---|---|---|---|---|
+| 1 | L3's count outside the transaction: (a) count `TRY_SEND` events, or (b) an API that brings a harness value into H | **(a), on every backend. v2.5 was wrong.** | **v2.5's oracle could not be built.** It said "the case's H carries a harness `Sender[u64]`". But `handles` is a StaticFn over the Db (rule 12): it can put into H only values it makes from the store. A channel it made would have no Receiver the harness holds. The head's H and the publisher's H would also be two senders. **Ruling:** the body makes its own channel and `try_send`s once per run. The harness counts `TRY_SEND` through the CONC-10 event sink. **This is not evaluator-only.** Native exposes the same sink: `scheduler.event` in hirsel_core_rt_host.h:89, the kind numbers in the same header, and `core/langarena/layout/arc_events.c`, a per-kind counting sink linked by a `--cc` wrapper, which `core/langarena/layout/service.py` builds on cranelift and on llvm. So cranelift and llvm check the count, not only the Outcomes. The two wrong implementations and what observes each are in the L3 row (§8). **/wholehog: (a).** CONC-10 events are the language's one published observation stream: one table, every engine, already compared between the evaluator and native. (b) adds a production API whose only consumer is our own test (rule 11). It would also open a channel out of a transact body that the store does not record. That breaks §7 (re-execution on a fork would send to it as well) and H4 (re-runs after a crash would too), and it would need its own rule for the head's and the publisher's two H. **Strongest case for (b):** the count becomes a value inside the language. It does not depend on the runtime emitting one event per `try_send` or on a linked sink. A real app could also use the same path for metrics. **Rejected:** that event-per-call property is CONC-10's own law, already checked across engines by test-event-order.py. And an unrecorded side channel from a transact body is exactly what R5's replay forbids. | READ at origin/main a56c9a1c: hirsel_core_rt_host.h:74-89, tasks.rs `event_for` (calls `run.provider.event`), channel.rs:160, arc_events.c, service.py:60-70 (both backends), driver cli.rs `--cc` |
+
+## CHANGES-v2.5 (review 1042; runner-build-1033 08:40 and 08:50)
+
+| # | Item | Ruling | What v2.5 says | Basis |
+|---|---|---|---|---|
+| 1 | What "a send" is, and which Outcome it gets | **DEFINED (rule 5, §1.3, §2.1 V1/V2)** | A send is one `Call` frame the session reads. Two `Call` frames for one `(stream, p)` on one session before an Outcome are **two sends**: the second joins locally (V2) and is owed separately. Each send gets exactly one Outcome: a V1 refusal at arrival; or its own `Abandoned` at its own deadline; or, if it is still owed when the head's answer arrives, that answer (one Batch row per owed send). A head answer for a position with no owed send produces no row and only frees the slot. A send whose session ends (crash, `Close`, exit) gets no Outcome; the client's send after reconnecting is a new send. | review 1042 F1 (R0 at 4a7fe8a9 forwarded a late answer after `Abandoned`); 1033's fix bdf27482 reads rule 5 this way |
+| 2 | One deadline per held position, or one per send | **Per send; CORRECTS bdf27482** | Each send keeps its own deadline (`deadline_ms` is a per-`Call` field and V1 answers at it). bdf27482 keeps one timer per held position at the latest send's deadline, so send A (2 ms) joined by send B (50 ms) on a held head gets `Abandoned` at about 50 ms. **Strongest case for the built form:** one timer and a counter per held position, O(1) state. It is rejected because it answers a send later than the deadline its client set. | V1 |
+| 3 | Joined sends and the slot table | **NEW: a joined send takes a slot** | The slot table counts, per forwarded position, max(1, owed sends), at most 1+q in total. A join that would pass it gets `Refused(Overloaded)` (V1). A re-send of an `Abandoned` position whose slot is still held reuses that slot. **Why:** with per-send deadlines, each owed send is a timer; joins that take no slot are an unbounded queue outside the account (one position sent 10⁶ times). Mutant `join_outside_account`, check C6b. | found while ruling 2; §3 queue table |
+| 4 | Exactly one, as a model check | **NEW: C9 (calls), K8 (subs)** | The calls model now separates the session from the client. The session keeps its owed sends; the client only counts, per (session, stream, p), sends, rows received and sends lost when its session ended. **C9:** at every state rows + lost ≤ sends (at most one); at every terminal state rows + lost = sends (at least one). What a finite history can conclude is in §8.1. **K8** (subs): a frame carrying the Outcome when the client already has one is a second Outcome; subs22's client absorbed it. RUN: calls25 has 14 scenarios, 37,065,845 states and 0 failures; all 14 mutants are CAUGHT, the 4 new ones included. subs25 has 783,594 states and 0 failures; all 10 mutants are CAUGHT. No history that passed v2.2 fails now. | RUN, §8.1, §8.2 |
+| 5 | The law | **NEW: L15** | L15 "one Outcome per send", with four wrong implementations named: forward every head frame (`late_completion_resent`), one row for two joined sends (`one_for_joined`), a joined deadline moved to the latest send's (`latest_deadline`), and joins outside the slot account (`join_outside_account`). Its oracle is the client's per-send count and, for `latest_deadline`, the wall clock. | §8 |
+| 6 | The four laws review 1042 found observed too weakly | **Each re-ruled (§8 rows)** | **L2 peak charge:** the spec's law named the head, but V1 refuses before the head, so the charge is the session's. No model has charges: the models check only "never admitted" (C7). The R1 case is 1033's: the session runs under n_session = idle peak + one hostile decode, 10⁴ `Malformed`, no Budget fault, no `Close`. The wrong implementation is a session that keeps each refused frame's decode storage (v2.4's "allocates and refunds per frame" left the peak unchanged and is removed). **L3 execution count:** the spec's own oracle was wrong. A counter row written by the body rolls back with `Failed`, so it can never see an extra discarded run. The model held L3 by construction, because C1 counts only committed effects. Now: ~~the case's H carries a harness `Sender[u64]`~~ (unbuildable; replaced by v2.6 #1, a `TRY_SEND` count through the CONC-10 sink), and the body `try_send`s once per run before it faults. Model check C10 with mutant `rerun_on_duplicate`. **L4 high-water:** no model; the build's logical bound is a unit test, not L4. The case is the harness's `ru_maxrss` of one binary in two modes (flood, one valid call), limit the call's figure plus one page, in R1. **L6+L7 timed bound:** the wall-clock bound is withdrawn as a law (it is a §8.4 cost figure). In its place is the count form (1033's (2)): an Outcome reporting commit v is in its session's **first** Batch at a version ≥ v. That is rule 9. subs25 K4 observes it; calls25 C5 checks only ≥. | review 1042 F2; 1033 08:40 (2), (3) |
+| 7 | Other properties the models held only by construction | **Three found, two left** | Found and now checked: the session's own owed-send state, which C6 did not count (C6b); a second Outcome in the subscription model (K8); re-execution of a replied position (C10). Left, and stated: the **order** of deadlines (the models have no clock, so `latest_deadline` is a timed R1 case only); a hung body (D5). | review of every check in calls22/subs22 |
+| 8 | 1033's 08:40 (1): `upgrade_gone` in R1 | **ACCEPTED** | `upgrade_gone` and `gone_refused_at_session` move to R4's acceptance; a key is gone only after an upgrade (§6). | §9 |
+
+## CHANGES-v2.4 (R1 gaps from runner-build-1033; STORE-SPEC v2.9; REPLAY-SPEC v2.1)
+
+| # | Gap | Ruling | What v2.4 says | Basis |
+|---|---|---|---|---|
+| 1 | `place_head`'s signature | **ADOPTED in shape, CORRECTED in one point** | Adopted: it runs on the caller's task (a `Db` is not send, so the head is whoever opened it), it spawns the publisher itself (the spec's separate `pub fn publisher` is removed; its channel is internal), it takes `sessions: Receiver[Join]`, `tasks` and `n_publisher` (the publisher task's byte limit). **Corrected:** the two Registry arguments `r` and `pr` become one `place` function and `n_place`; `place_head` runs `place` itself under `n_place`, once on its task and once inside the publisher task, and `connect` takes the same pair for each session. **Why:** rule 10 says every task that runs entries runs `place` itself; with two Registry arguments the head and publisher lists can differ (one caller-built list per task), and with one `place` they cannot. The strongest case for the built form is that the caller can build registries under its own bound; `n_place` gives the same control. Signature in §1.1. | READ 1033's built signature; rule 10 |
+| 2 | Where the per-entry bound `n` comes from | **Registration** | Each register function takes `n: u64` and the Slot keeps it. The adapter runs decode, body and encode under that entry's `n` (rule 4). `call` and `start` lose their `n` parameter; a local caller that wants less wraps its own `bound`. **Not the call:** the client is untrusted (rule 11) and would choose a huge n; and the session reserves 1+q slots from its account, so a single place-wide n forces every slot to reserve the largest entry's bound (a toggle reserving a listing's megabytes) or makes the large entry fail every call. Per-entry n keeps rule 4's purpose (an oversized result fails that call, never the caller) at the cost each entry really needs. `n` is not in the key or in `Described`: changing a bound is not a wire change. `Refused(Budget)` is the session's answer when its account cannot reserve that entry's `n`. | §1.1, §1.2 |
+| 3 | A body that never returns, on the single-worker cooperative scheduler | **v2.2 was wrong for this runtime; the law is split, and the hung half waits on D5** | The runtime is one worker with cooperative tasks (`hirsel-core-rt/src/tasks.rs:1`, "Single-worker cooperative tasks"). A body that never yields stops every task of the process, the sessions and their timers included. So V1 answers deadlines for a **held** request (one waiting in the head's FIFO, behind a group's `durable`, or behind a slow but yielding body), never for a **hung** one. The law now has two cases. **L7/deadline_held (R1, checked now, real head, no stub):** a request for p+1 sent while p is unsent waits in the head's FIFO (S7 `Rejected(p)`); the session answers `Abandoned` at its deadline and keeps the slot; p is then sent and p+1 re-sent, and p+1 runs once and its reply returns. **L7/deadline_hung (stated, UNTESTED until D5 (a)):** a body that never returns is stopped at its execution budget with `Failed(OutOfTime)` in a reply-only commit, and every other request of every session is answered within that budget plus one group plus one publisher round; a request whose deadline passed meanwhile is answered `Abandoned` when its session runs again. Without budgets this law cannot be stated: nothing in the process runs. A stub head that holds the request is a unit test of the session's V1 logic, not the law. The calls model's `body0_hangs` transition is exactly a held head, so its results stand for L7/deadline_held. The same correction applies to P1 (a compute body that never returns blocks every session, not only its own), §5, D5 (b) and D7. | READ tasks.rs at origin/main; review 1028 finding 1 |
+| 4 | The built Frame carries the stream | **ADOPTED** | A session may use several streams of its principal, so every outcome row names its stream. Wire table in §3: Call carries `stream: u32`, and Batch's outcome rows are `(stream: u32, p: u64, Outcome)`. The store's stream key is `principal ‖ stream` (u32 big-endian). The internal Frame `{version, stream, p, outcome}` is the same row. N8 re-issued for TS-SDK. | §3 |
+| 5 | An `Error` reply under the S5 stand-in is a reply-only commit with a version | **CONFIRMED; this is the rule** | **Rule:** every position's `Returned` (including `Returned(Error(e))`) and `Failed` is backed by a durable reply at a version v, and is delivered under V4 in the first frame at d ≥ v. For `Error`, v is the version of the streams-only COMMIT frame that keeps the reply (STORE-SPEC F2, `Undone.ticket`). The stand-in's abort-then-reply-only commit is the store's control `no_d3_two_commits` (0 failures there): the same versions and replies, one more commit, so it is correct until S5 lands and then becomes one commit. `Refused`, `Superseded` and `Abandoned` have no reply and no version of their own (V1, V3). This is REPLAY-SPEC v2.1 R5's rule too: every step outcome commits a reply before `tape.answer`. | READ STORE-SPEC v2.9 F2 and §1.3; REPLAY-SPEC v2.1 R5 |
+| — | STORE-SPEC v2.9 (Q1 a refused checkpoint, Q2 no COMMIT encode in memory, Q3 twins) | **no runner change** | Q1: schema commits, `fork` and `adopt` may now return `Full(c)` when a cut is refused; `handles` passes it up and open fails with `Store(Full)`, as any store error. Q1a: a task's `bytes n` is a root allowance, not a stack size; the "64 KiB stack" in v2.3 is the runtime's fixed fiber stack (`fiber.rs USABLE`), a different thing, so v2.3's text stands. Q2: a memory store's `recorded` is None already (§7). | READ |
+| — | REPLAY-SPEC v2.1 R1: `Unknown(RevisionUnknown)` waits on `code.revision` | **Until it exists**, re-execution "under the recorded code" returns `Unknown(RevisionUnknown)` for every position, and re-execution under an explicitly chosen candidate runs and returns `Same` or `Different`. **No R1 or R2 law depends on it**; only R5 does. | READ |
+
+## CHANGES-v2.3 (from R0, runner-build-1033)
+
+| # | Item | Verdict | What v2.3 says | What was run |
+|---|---|---|---|---|
+| 1 | A key that names a registered entry of another kind (a granted key to `call`, a compute key to `start`) | **ADOPTED as built** | `NoEntry` means "no entry of the kind asked for under this key" (§1.3). A new refusal (say `WrongKind`) was rejected: the caller's fix is the same (call the right function or key), the kind is not part of the key, and one refusal treats every "this key does not resolve here" alike. Over the wire the question cannot arise, because the session dispatches by the registry's kind, not the client's. | READ R0 runner.hirsel:196-212 at bf7cf64f |
+| 2 | The numbering of `Raised(u32)` and `Bad.kind` | **ADOPTED, pinned as tables** | The numbers are now a fixed wire table in §1.1, not "declaration order". `Raised`: Overflow 1, Bounds 2, Division 3, Unwrap 4, Fail 5, Cancelled 6, Capacity 7. `Bad.kind`: Truncated 0, Invalid 1, Utf8 2, Duplicate 3, Trailing 4, Schema 5, Value 6. A new core CauseKind or DecodeError variant takes the next unused number, whatever its declaration position. **Why a u32 and not a typed mirror enum** (as `Room` mirrors Capacity): an old client must decode a frame carrying a kind added after it was built. A u32 decodes, and an unknown number reads as "a fault of a kind this client does not know". A new enum variant would fail to decode the whole Batch. /wholehog: the pinned table is the end state; the typed enum would need a compatibility path for every added kind. | READ R0 runner.hirsel:38-63 (hand tables, matching these) |
+| 3 | Built cost differs from the probes | **ACCEPTED: §1.2, §2, §3, §5, §8.4, D7 now use the built figures** | Local `call` **2,754.5 instr** (was 1,593). `place` **5,289 per entry and 49,504 B (495 B per entry) at 100** (was 5,069 and 45,888 B). The +696 for encoding R inside `bound` + `isolate` is **what rule 4 requires**, not an implementation choice (rule 4 now says why, below). The +420 is runtime drift between fca80e17 and 71b306f0 (p03 itself now 2,013), a core figure, not the runner's. | RUN by runner-build-1033 at bf7cf64f / 71b306f0 (perf stat, LLVM release, one sample per side) |
+| 4 | Rule 4's encode: required or excludable? | **Required** | Encoding R allocates bytes in proportion to R, which is app data with no bound. Outside the call's `bound bytes n`, a body returning a large R exhausts the caller's account: the session or head faults, instead of that call getting `Failed(OutOfBytes)`. The encode also runs codec code (a `via` conversion is app code) that may fault, so it needs `isolate`. The cost is the runtime's settle when the result bytes move out across the bound and the isolate. Lowering it is core's work, not a spec relaxation. New wrong implementation for L4's harness: `encode_outside_bound` (an R whose encoding exceeds n faults the caller instead of giving `Failed(OutOfBytes)`). | READ 1033's decomposition (an outside-encode variant costs 2,058.5) |
+| 5 | `p19_place_twice` at 1,000 entries overflows a 64 KiB task stack in the generic `code.identity` dispatch | **ACCEPTED; N13 split in two** | The generic `code.identity` dispatch scans every function of the program, so its stack and time grow with the function count. **Figures that wait on reuse-history-fault-1031's redesign:** the built R0 at 1,000 entries, and every 10,000-entry figure. The v2.2 figures at 1,000 entries stay RUN at 62f15988 in a standalone program (about 1,000 functions, below the threshold there). **N13 is two defects:** (a) 10,000 functions stop even when `place` registers only 2 entries: that is 1033's dispatch defect (threshold between 3,000 and 10,000 functions at 62f15988, about 1,500 at 71b306f0 in R0's larger program). (b) 3,000 registrations in one function stop, but the same 3,000 split into 30 functions of 100 run: that is a separate per-function limit and stays N13. Per-entry cost grows with the function count (9,531 instr per entry at 3,000), which is the dispatch's linear scan, as evidence for 1031. | RUN at 62f15988, fresh store each: `p19_3000k2` (3,000 fns, 2 registrations) runs; `p19_3000split` runs, 28.6 M instr per `place`; `p19_10000split` and `p19_10000k2` stop (`run stop: Stack`) |
+
+STORE-SPEC is at v2.8: nothing in v2.8 changes the runner. The pending v2.9 items (a checkpoint's Capacity outcome, whether a memory store encodes the COMMIT frame, R1's baseline as a persistent twin) are to be read when it lands.
+
+## CHANGES-v2.2
+
+### Review 1028 findings
+
+| # | Finding | Verdict | What v2.2 does | What was run |
+|---|---|---|---|---|
+| 1 | A parked request's deadline has no delivery when the running body never returns | **ACCEPTED** | **Commitless delivery is rewritten (§2, V1–V5).**<ul><li>**V1.** The session answers what it decides itself, at once, at its last sent version. That covers Malformed, a full slot table, a request already expired on arrival, and the deadline. At the deadline it answers `Abandoned`, which now crosses the wire and means "p may still run; re-send p".</li><li>**V3.** Commitless answers the head decides (Duplicate, Superseded, a store refusal) go behind the Release FIFO, so they never overtake the commit they report.</li></ul>The deadline timer is the session's because a hung transact body stops the whole head task, so no head timer could fire. | Review model re-run unchanged: 8 states, 1 failure (its finding). With V1: 12 states, 5 terminal, **0 failures**. The review's routing (`h3` switch) in the same model: 2 failures. `calls22_model.py` mutant `deadline_rides_release` (v2.1 H3) is CAUGHT (C4). |
+| 2 | Activation writes under a reserved key the store forbids, and "writes nothing" contradicts it | **ACCEPTED** | **A runner-owned ordinary table, `hirsel.runner.activation`, made by `handles` like any table (§6).** It has two rows, `current` and `previous`, each the `describe` bytes. At open, after `handles`, one `run` compares `current` with this registry's bytes. If they are equal, nothing is written. If not, the same commit writes `previous := current, current := new`. A crash before that commit leaves the old rows, and the next open repeats it. A crash after it leaves the new rows, and the next open writes nothing. Open reads both rows through a Shape. The "writes nothing" sentence is removed: it meant that no stream position is written. | Not modelled: one ordinary commit, atomic by the store's crash cuts (STORE-SPEC L1, L3). Law L13 (§8) runs it under those cuts; it is **UNTESTED** until R4. |
+| 3 | §7 and R5 still say STORE-SPEC v2.3 | **ACCEPTED** | §7 is v2.4's: the call record is kept with an `Aborted` reply; the per-outcome tape table is copied; a memory store is always `Unknown(StateGone)`. The runner's reply-only `Failed(Gone)` commit is named as the one exception to "a frame has a call record iff it has a reply written by a run": it has a reply and no record, and `tapes check` gives `Unknown(NoEntry)`. R5's needs are N6 and G1 (both ACCEPTED in STORE-SPEC). N11 is closed. | READ STORE-SPEC G1, G3 and the outcome table. |
+| 4 | The tree header is stale | **ACCEPTED** | The header names 62f15988, where the checker was rebuilt and every v2.2 probe ran. | RUN: `git rev-parse HEAD` gives 62f15988; build EXIT 0. |
+| 5 | The models omit the claims they are cited for | **ACCEPTED** | Two new models with bounded dimensions for every rule in §§2–4 and §6. Laws they still cannot reach are marked **UNTESTED** in §8, each with the harness that will test it.<ul><li>`calls22_model.py` (§8.1) adds: malformed arguments, a store refusal, a fault, a hang, deadlines, the 1+q slot limit, two sessions and two streams, one re-send after Abandoned or Overloaded, upgrade and Gone, durable failure (poison), and crash cuts.</li><li>`subs22_model.py` (§8.2) adds: two sessions; three subscriptions over two queries, one of which faults on a re-run; slow-reader budget and Reset; subscriptions inserted between commit and batch; crash and reopen with a Foreign resume; a fork and `adopt`; an outcome-only session.</li></ul> | `calls22_model.py`: 9 scenarios, 8,012,652 states, 1,701,271 crash cuts, **0 failures**; 10 of 10 mutants CAUGHT. `subs22_model.py`: 4 scenarios, 783,594 states, 68,932 cuts, **0 failures**; 9 of 9 mutants CAUGHT. |
+| 6 | H and `place` qualification is incomplete | **ACCEPTED** | Rules 10 and 12, §1.4, §3 and §5. The probes and figures are in the next table. | RUN p17, p18, p19 on 62f15988. |
+| 7 | `info` needs one normative signature | **ACCEPTED** | **`info(mut tx: Tx) -> CallInfo` is the only signature.** The store API has no `info(Tx)` overload. A `look` body gets a view Tx, so it cannot call `info`; this is the checker's rule (OWN-5), not a run-time check. | READ STORE-SPEC G2 and the probes `info_look_mut` (REFUSED), `info_run_mut` and `info_helper_mut` (ACCEPTED). The review re-ran them. |
+
+### Review 1028 "Model and law gaps"
+
+| Gap line | Verdict | Answer |
+|---|---|---|
+| The models build in a single publisher, one subscription, no branch or reopen identity, and a client that re-sends every unanswered request after every crash | **PARTLY** | **Now modelled:** two sessions, three subscriptions, a fork with `adopt` and crash cuts, and reopen with a Foreign resume token. The client re-sends at most once, and only after `Abandoned` or `Overloaded`. **Kept by design:** a single publisher per place, which rule 9 requires. **Assumed, and stated as liveness's premise:** a client re-sends its unanswered positions after reconnecting (§2). |
+| L6 permits arbitrary delay without L7, and a publisher that never answers passes L6 | **ACCEPTED** | Scenario `outcome_only`: session 0 subscribes to nothing. Mutant `outcome_never` passes K4 (L6) there and is CAUGHT only by K5 (L7). L6 and L7 therefore run together as one law row (§8). |
+| L8 needs an independent full-query oracle, not the same diff | **ACCEPTED** | L8's reference is `query(snapshot)` run from scratch at the batch version: no read sets, no `changes`, no diff. v2.1's harness line "reference = the publisher's own result" is removed. A reference that replays the publisher's own frames equals the client by construction, so it can catch nothing. |
+| L9 measures RSS without saying how provider-owned queues are attributed | **ACCEPTED** | §3 lists every queue and its account. A transport write waits until the provider takes the frame, as `stdout.write` does, so a provider holds at most one frame per session; that frame is counted as max frame bytes. The kernel socket buffer lies outside the process and is set by the OS. Mutants `queue_outside_account` (calls, C6) and `unbounded_queue` (subs, K6) are CAUGHT. |
+| L10 accepts 64-bit fingerprint collisions by fiat and does not test one | **PARTLY** | A real 64-bit collision cannot be found to build a fixture, so that case stays **UNTESTED** and is stated as a bound (2⁻⁶⁴ per pair under one identity). The collision that can be tested is now a fixture: after renaming `f` to `g` and adding a new `f` with other types, an old client's `(identity f, old fingerprints)` gets `Gone`, never `Ready` on the new `f`. The path-only matcher is its mutant. |
+| L12 needs registration-order and schema mutations | **ACCEPTED** | L12's cases are: permute the `register` calls, add a field to an A, change an R. After each, the generator's bytes equal the server binary's `describe` bytes. RUN p19 mode 0 covers the server half: two `place` runs, in two tasks, give equal bytes. The generator half is R3. |
+| Wrong implementations to keep as mutants: a direct-answer path for commitless outcomes, a path-only upgrade matcher, a stale shared subscription cache, a queue outside the session account | **ACCEPTED** | `direct_commitless` CAUGHT (C5 in `cross_session_crash`); `shared_cache` CAUGHT (K1); `queue_outside_account` CAUGHT (C6); `unbounded_queue` CAUGHT (K6). The path-only matcher is L10's fixture mutant, **UNTESTED** until R4, because no model represents matching. |
+
+### H and `place` probes (finding 6; RUN on 62f15988)
+
+| Question | Probe | Result |
+|---|---|---|
+| Do two `place` runs agree? | p19 mode 0: `place` in `main` and in a spawned task (`bytes 64 MiB`), then compare the `describe` bytes | **equal** at 1, 100 and 1,000 entries (exit 0) |
+| Does a `place` that branches give one list? | p19 mode 1: `place_branching` registers `e1` only if `list.with_capacity(8192)` succeeds, run under bounds of 4,096 B and 32 MiB | **different lists** under the two bounds; **equal** under the same bound twice. So the list depends on the bound, which rule 10 now fixes. |
+| `handles` twice | p17 step 1 | same table, and the second call commits nothing |
+| `handles` against a newer schema | p17 step 2: a newer `handles` (Cell plus a defaulted `label`) | appends a schema number; old rows read the default 7 |
+| `handles` against an older schema | p17 step 3: the older `handles` after the newer schema | refused: `table` returns `Schema` |
+| An older H after a newer schema | p17 step 3b: an H made before the newer schema reads a newer row | `Stale`: the row's tag is not in its Readers |
+| An old H after drop and recreate | p17 step 4a | **`Ok(None)` on S1 (62f15988), not `Stale`.** This is STORE-SPEC L16's named wrong implementation ("a read handle checked by store only"), which v2.6 I3 fixes. Evidence passed to store-spec-1001 (followups). |
+| `handles` after drop and recreate | p17 step 4b | a fresh, empty table: the new incarnation |
+| An entry that keeps H | p18 `keep_h` (return `h.cells`) | REFUSED, OWN-14 "only a whole slot is moved" |
+| | p18 `keep_whole` (return `h`) | REFUSED, OWN-7 "`h` is a view parameter" |
+| | p18 `keep_code_r` (an R with a Table field) | REFUSED, OWN-4 "field `t` is not codec" |
+| A query that needs a Table | p18 `query_writes` (`put(mut tx, ..)` in a query) | REFUSED, OWN-5 "`tx` is not writable". A query reads through `store.shape(h.t)`; only `put` and `delete` need the Table. |
+| A query that keeps a Shape | p18 `keep_shape` | ACCEPTED, but a Shape is not codec, so it can never be an entry's R |
+| Registration cost | p19 mode 2, `perf stat -e instructions:u,task-clock`, R = 1 and 11 repetitions, release build, fresh store | **1 entry: 4,123 instr per `place`; 100: 506,897 (5,069 per entry), 0.066 ms; 1,000: 6,421,598 (6,422 per entry), 0.906 ms.** Replaces the v2.1 GUESS. |
+| Registration memory | p19 mode 3: the smallest `bound bytes` in which `place` succeeds (binary search to 64 B) | **896 B at 1 entry; 45,888 B at 100; 419,648 B at 1,000** (about 420 B per entry) |
+| 10,000 entries | p19 at N = 10,000 | **`run stop: Stack` (status 102)** in every mode. 1,000 entries run; 3,000 stop. One function of 10,000 `register(..)?` lines overflows the stack. This is a core gap (followups). The 10,000-entry cost is an ESTIMATE: about 65 M instr, 9 ms and 4.2 MB per `place`. Build: 84.9 s and 1.8 GB with a fresh store, 36.8 s and 808 MB with a warm one. |
+| Same executable | — | Rule 10: server and generator run the same identified launch: digest, target and `n_place` (v2.12, launch.md). |
+
+**A false lead, recorded so nobody chases it.** With one shared `--store` cache across builds of different N, `register` refused with `AlreadyRegistered` from 4 entries up in release builds (e2 read e3's identity), and the debug `run` stopped with status 102. With a fresh store per build, every size registers correctly. This is reuse-history-fault-1031's defect (2026-11-16 06:10 in followups.md): a reused body record of `code.identity`'s pointer dispatch from a program with other functions. Their fix is landing. Until then, runner tests build with a fresh store.
+
+### STORE-SPEC v2.5–v2.7 items that touch the runner
+
+| Item | Runner change | Where |
+|---|---|---|
+| v2.6 I1: `Read = Point(Bytes) \| Span(Bytes, Bytes)` of data-tree keys, compared as bytes | The interval index is keyed on those bytes, the same as `Change.tree_key`. A Change hits a subscription when its key equals a Point or lies in a Span. Cover ranges are encoded the same way. | §4 G2 |
+| v2.6 I3: ids are incarnations; a read through a pre-drop handle is `Stale` | **Within an open**, H is built only at open, and only `handles` may make schema operations. The head runs `handles` twice and checks that the second run commits nothing (rule 12), so no H the place holds can predate a drop. **Across opens**, every H is rebuilt from the current catalog, so `handles` after a drop and recreate names the new incarnation (p17 4b). A query that still reads through an H older than a drop gets `Stale` from the read. The query type has no store error, so the body faults or maps it, and that subscription gets `Ended`. Re-execution builds a fresh H on the fork (§7). | rule 12, §4, §7 |
+| v2.7 J1: `lookup` returns a scoped `IndexRows` and records a Point per row it yields, besides its Span | A query's read set grows with the rows it looks up: 100 B plus 48 B per row, so 148 B, 4.9 KB and 480 KB for 1, 100 and 10,000 rows. The Points are charged to the session `budget` with the rest of the read set (§3), counted in L9, and limited by the per-session read-set bytes (§3). §4 gives what a 10,000-row subscription costs the publisher per commit. | §3, §4, §8 L9 |
+| v2.7 J1: a body must finish iterating a lookup before it writes (OWN-10) | A transact body that updates rows it looked up collects them first, then writes. The checker enforces this (RUN by the store: `ixrows_write` REFUSED). The runner adds nothing. | §1.4 |
+| v2.4 G2: `info(mut tx)` | Finding 7. | §1.1 |
+| v2.4 G1, G3 | Finding 3. | §7 |
+| v2.5 H1–H5 | No runner change: packs and cleanup are below the runner. | — |
+
+**Needs:**
+- N1–N6 are ACCEPTED in STORE-SPEC v2.3/v2.4. N11 was ACCEPTED as G1.
+- **New, N12, store-spec-1001:** state that every schema commit (`create_table`, `create_index`, `drop_table`, `migrate`, and a schema number appended by `table`) advances the branch version, so that "the version did not move" means "nothing was committed". Rule 12's check relies on it. Exact text is in followups.md.
+- **New, N13, core (orchestrator):** narrowed in v2.3 to one function of 3,000 generic registrations stopping on the stack while the same calls split into 30 functions run. The 10,000-entry stop is reuse-history-fault-1031's identity dispatch. Exact text is in followups.md.
+- **N8 is re-issued:** `Abandoned` now crosses the wire, which changes the TS-SDK frame text. Exact text is in followups.md.
+
+## 0. Rules (normative)
+
+1. **The runner is a library.** Its module is `runner`, in package `store`. Core gains no runner declaration.
+2. **An entry is a top-level non-generic function registered by its `StaticFn`.** It has one of four kinds:
+   - **compute:** `fn(take A) -> Result[R, Capacity]`;
+   - **transact:** `fn(mut Tx, H, take A) -> Result[R, E]`;
+   - **query:** `fn(Tx, H, take A) -> Result[Cover, Capacity]`, read-only by type: a view `Tx` cannot `put` (OWN-5, RUN p18 `query_writes`);
+   - **granted:** `fn(G, take A) -> Result[R, Capacity] waits`, only in a `Registry[G, H]`.
+   - `H: send` is the place's handles (its Tables and Indexes), passed by view, so an entry cannot keep it (RUN p18). A, R and E are `codec`. PROG-9 refuses a generic function.
+3. **Key** = `code.identity(f) ++ fingerprint(A) ++ fingerprint(R)`. **A key is registered at most once** (§1.2).
+4. **One generic adapter per kind.** It decodes the argument, calls the body and encodes the result inside `bound bytes n` + `isolate`. The codecs come from `std.codec.of`. The encode is inside both because R is app data with no size bound and its codec may run app code (`via`); outside, a large R faults the caller's task instead of giving that call `Failed(OutOfBytes)`. Built cost: +696 instr per call (v2.3).
+5. **Every send ends in exactly one Outcome on the wire** (§1.3, §2 V1–V5). A send is one `Call` frame the session reads; two `Call` frames for one `(stream, p)` on one session are two sends, even when the second arrives before the first's Outcome (a local join, V2). A send's one Outcome is a V1 refusal at arrival, its own `Abandoned` at its own deadline, or the head's answer if the send is still owed when that answer arrives. A head answer for a position with no owed send goes to no one. A send whose session ends (crash, `Close`, exit) has no Outcome; the client's send after reconnecting is a new send (v2.5). The session refuses a malformed key or argument, a budget it cannot grant, an expired request and a full slot table before forwarding, so those refusals record nothing.
+6. **One worker per stream** (H1–H4). Within one open, the head runs at most one call per `(principal ‖ stream)`. Across opens, LOCK gives a single opener.
+7. **Output gate.** No Outcome reporting a commit, and no batch, carries anything from a commit that is not durable. A Release carries the group's durable version (V4).
+8. **A Cover is re-evaluated when what its query read changes** (G2). A range diff never authorises from a stale query result.
+9. **Versions in order.** Each session's frames carry versions that never decrease. An Outcome that reports a commit is in the session's first frame at a version ≥ that commit's version, never later. Commitless answers the head decides travel behind earlier Releases in the publisher's one inbox (V3, v2.12), and answers the session decides travel at its last sent version (V1).
+10. **One list, one executable.** The capability-free `pub fn place(mut r: Registry[G, H]) -> Result[(), RegisterError]` is the export list. Every task that runs entries (the head, the publisher, each session) runs `place` itself inside `bound bytes n_place`, because an owning closure is never shareable.
+    - `n_place` is the bound the generator used. Server and generator run **the same identified launch** (v2.12, docs/spec/launch.md). Its identity is the launch's private metadata: `digest`, the SHA-256 of the executable image; `target`; and `n_place`.
+      - The native launcher reads `/proc/self/exe` once. The evaluator hashes the loaded artifact; source-only evaluation has no image. An embedded runtime is given all three values by its embedder.
+      - An image that cannot be read gives `Unavailable(reason)`. Its digest is empty, and launch does not fail.
+    - A `place` that branches on Capacity gives different lists under different bounds (RUN p19 mode 1), so the bound is part of the list's identity.
+    - Welcome carries `(principal, q, budget, executable, target, n_place)`, and the generated bindings record the digest, target and `n_place` they were made from. A mismatch is a developer diagnostic, never a wire error. An unavailable identity is reported as "identity unknown", not as a mismatch.
+11. **No guard against our own implementation.** Checks exist only at trust boundaries: client bytes, frames and rates, old writers' schemas, and app code (entries, `place`, `handles`), which may loop, fault or allocate.
+12. **Handles are built only at open.** `pub fn handles(mut db: Db) -> Result[H, store.Error] waits` is the only app code that may make schema operations.
+    - The head calls it twice: it keeps the first H and moves the second to the publisher.
+    - It checks that the second call committed nothing (the version did not move; N12). Otherwise open fails with `HandlesChanged`.
+    - So the two H name the same incarnations. An H never outlives its open, and no H the place holds predates a drop.
+
+## 1. The surface
+
+### 1.1 Declarations
+
+The type declarations are unchanged from v2.1 (RUN p15: accepted, and they round-trip through `std.codec.of`). Only `Outcome`'s meaning of `Abandoned` changes.
+
+```hirsel
+// module runner (package store). Room and Bad mirror Capacity and DecodeError, which are not codec (OWN-4).
+pub type Room: codec + send { requested: u64, available: u64 }
+pub type Bad: codec + send { kind: u32, at: u64 }
+pub type Kind: codec + send = Compute | Transact | Query | Granted
+pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed | RequestMismatch | HistoryUnavailable   // v2.11.3: the last two appended
+pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone
+pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt   // v2.11.4: Superseded deleted (STORE AH2)
+pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }   // v2.11.2: `result` is the schema of what `Returned` carries (Result[R, E] for transact)
+pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes)
+pub type OpenError = Store(store.Error) | Place(RegisterError) | HandlesChanged
+pub opaque type Registry[G: send, H: send]: send   // Map[Bytes, Slot] + List[Described]
+pub opaque type Cover: send                 // data-tree key ranges (I1 bytes), built by `cover`
+pub opaque type Req: send                   // stream, p, key, arg, the session's reply sender
+pub opaque type Release: send               // version, Option[Snapshot], List[(session, p, Outcome)]
+pub opaque type Join: send                  // v2.12: a session's number and its owner's event sender
+pub opaque type PubIn: send                 // v2.12: Released(Release) | Joined(Join) | Subscribed(session, sub, key, arg) | Unsubscribed(session, sub); the publisher's one inbox
+
+pub fn registry[G: send, H: send]() -> Registry[G, H]
+pub const DEFAULT_STEPS: u64 = 1 << 30
+pub const DONE_MAX: u64 = 8192         // v2.11: an encoded `Done` row's bound (§1.3)
+pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]
+pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut Tx, H, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError]
+pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]
+pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError]
+pub fn cover[K, V](t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Cover, Capacity]
+pub fn describe[G: send, H: send](r: Registry[G, H], mut out: Bytes) -> Result[(), Capacity]
+pub fn call[G: send, H: send](r: Registry[G, H], key: Bytes, arg: Bytes) -> Outcome
+pub fn start[G: send, H: send](r: Registry[G, H], tasks: Tasks, take g: G, key: Bytes, take arg: Bytes) -> Result[Task[Outcome], Refusal]
+pub fn finish(take t: Task[Outcome]) -> Outcome waits
+pub fn place_head[G: send, H: send](take db: Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, handles: StaticFn[fn(mut Db) -> Result[H, store.Error] waits], take inbox: Receiver[Req], take publisher: Receiver[PubIn], to_publisher: Sender[PubIn], tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits
+pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], publisher: Sender[PubIn], session: u64, take client: Sender[Down], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity]
+```
+
+- `place_head` runs on the task that opened the `Db` (a `Db` is not send). It runs `place` under `n_place` (rule 10) and `handles` twice (rule 12), writes activation (§6), then spawns the publisher with `bytes n_publisher`. The publisher runs `place` itself, receives the second H and owns the `PubIn` receiver. There is no public `publisher` (v2.4). `connect` takes the same `place` and `n_place` for each session.
+- **One publisher inbox (v2.12, the orchestrator's ruling).** The caller makes one `PubIn` channel; the reference server gives it 64 slots, as main's Release channel has. The receiver goes to `place_head`, which moves it to the publisher. The head sends `Released` on `to_publisher`, and each `connect` gets a sender for its session. A session has no other route to the publisher. The publisher waits on this inbox and nothing else.
+  - `connect` sends `Joined` first, so a session's `Subscribed` and `Unsubscribed` always follow its `Joined`. `session` is the caller's connection number, unique within the process.
+  - The head and `connect` `send`. The publisher never waits on a session, so their wait is at most one drain. The owner `try_send`s, because it waits only on its own inbox (§3).
+- Each register function takes the entry's byte bound `n` (v2.4) and step bound `s` (v2.7; `DEFAULT_STEPS` unless the place chooses). The Slot keeps both; they are in neither the key nor `Described`.
+- `OutOfTime(s)` is the fault of a body its step bound `s` stopped (D5, v2.7). `Gone` is the reply of an admitted position whose entry is gone (§6).
+- **Wire numbers (v2.3, fixed).** `Raised(n)` carries the first cause's kind, and `Bad.kind` the decode error's kind:
+
+  | `Raised(n)` | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | CauseKind | Overflow | Bounds | Division | Unwrap | Fail | Cancelled | Capacity | OutOfTime | Tape (v2.10) |
+
+  | `Bad.kind` | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+  |---|---|---|---|---|---|---|---|
+  | DecodeError | Truncated | Invalid | Utf8 | Duplicate | Trailing | Schema | Value |
+
+  `Bad.at` is the error's byte offset. A kind added to core or std later takes the next unused number, whatever its declaration position. A client reads a number it does not know as a fault, or a decode error, of an unknown kind. That is why these are numbers and not typed mirrors: a new variant in a typed enum would make an old client fail to decode the whole Batch.
+- **The store's `info` is `info(mut tx: Tx) -> CallInfo`, its only signature** (STORE-SPEC G2). No `info(Tx)` overload exists, so a query (view Tx, inside `look`) cannot obtain CallInfo.
+
+### 1.2 What each one does
+
+| Declaration | Allocates | Waits | Records | On main |
+|---|---|---|---|---|
+| `registry`, `compute`, `granted`, `describe` | slot closure, map row, Described: 495 B per entry at 100 (RUN R0, bf7cf64f; probe p19 at 62f15988: 420–460 B) | no | nothing | RUN p13, p02, p09, p19 |
+| any register function, key already present | nothing | no | nothing: `Error(AlreadyRegistered(key))`, registry unchanged | RUN p13 |
+| `transact` | as `compute` | no | nothing | RUN p04, p08, p16 |
+| `query`, `cover` | as `compute` | no | nothing | RUN p16; the rest needs S1.1 (`look`) |
+| `call` | inside `bound bytes n` only | no | nothing | RUN p01 |
+| `start` / `finish` | task stack + `bytes n` | `finish` | nothing | RUN p02 |
+| `place_head` | two H, the gone-key set (§6), one worker record per stream in flight, at most 1+q requests per session (§3) | `handles`, activation, `durable` once per group | admit, then effect + reply (+ record, R5) in one commit | needs S5 |
+| `publisher` (its `PubIn` inbox, v2.12) | per subscription: its Cover and read set (Points included), never a copy of covered rows (v2.11, L20); content waiting for a full inbox; all on its `budget` ledger (§3) | channel | nothing | needs S1.1 |
+
+The budget `n` is set per entry by the place at registration, never by the client or the caller (v2.4). Exhaustion after entry gives `Failed(OutOfBytes)`. A budget the place cannot grant gives `Refused(Budget)`, before forwarding.
+
+### 1.3 Outcomes
+
+| Outcome | Meaning | Recorded | Caller action |
+|---|---|---|---|
+| `Returned(b)` | the entry's answer; for transact, `b` is `Result[R, E]` | effect (unless `Error`) and reply in one commit | final; the same p returns the same bytes |
+| `Failed(f)` | a fault or byte exhaustion after entry, or `Gone` | reply-only commit at p | final |
+| `Refused(r)` | nothing recorded. `NoEntry`: no entry of the kind asked for under this key, which includes a key registered as another kind (a granted key passed to `call`, a compute key to `start`). Rejected at the session, or (`Overloaded` only) the store refused the commit and the body's effects rolled back | nothing | `Overloaded`, `Deadline`, `Budget`: retry the same p. `RequestMismatch` (v2.11.3/4): p is bound to other bytes, so never re-send these bytes at p. `HistoryUnavailable` (v2.11.4): p is below the stream's latest, and the store cannot say whether it ran these bytes; terminal for this request only, the client retires the stream (W4c). Others: fix the call |
+| `Abandoned` | **changed in v2.2: crosses the wire.** This send's deadline passed while it was owed (v2.5: each send has its own deadline). p may still run; its later answer goes only to sends of p still owed then. | whatever finishes | re-send p: the session forwards it again only after the head's first answer, then Duplicate returns the reply, or p runs once |
+| `InDoubt` | granted entries only: an outside operation in provider state I (REPLAY-SPEC §3) | — | observe; never retry blindly |
+
+`Refused(Deadline)` is now only for a request that had already expired when it arrived; it was never forwarded.
+
+**The reply bound (v2.11, F12).** A `Returned(b)` row is encoded as `Done{stream, p, outcome}`: 20 B (stream 4, p 8, Outcome tag 4, Bytes count 4) plus |b|. A reply with |b| > `DONE_MAX − 20` is never sent. It is answered `Failed(OutOfBytes(Room{requested: |b|, available: DONE_MAX − 20}))` instead:
+- **transact:** the check is inside the entry's transaction, before commit. The transaction aborts with no effect, and the head commits the `Failed` reply-only, as for any `Failed` (H2). On the reply-kept-alone path (`Error(E)`), the over-bound `Error` reply is replaced by the same `Failed`, which is kept alone.
+- **compute and granted:** the owner (compute) or the entry's task (granted) checks the encoded reply; nothing is recorded.
+- A recorded reply never exceeds `DONE_MAX`, because `DONE_MAX` changes only with package `store`. So `Duplicate(r)` always fits.
+
+**Sends and their Outcomes (v2.5).** Outcome rows carry `(stream, p)`, not a send identity, so the client counts: it holds n open sends of `(stream, p)`, and each row for `(stream, p)` closes one. Since every send of one position is the same request, rows for that position are interchangeable, except `Abandoned`, which the client matches to the send whose deadline it set to pass first. Example: send A (deadline 2 ms) and send B (50 ms) of p on a held head. A gets `Abandoned` at 2 ms. If the head answers at 10 ms, B gets that answer. If it answers at 60 ms, B got `Abandoned` at 50 ms and the answer goes to no one.
+
+### 1.4 What an entry body may do with the store
+
+- A transact body writes through `h.t` (a Table) and reads through `store.shape(h.t)` or an Index.
+- **A body that updates rows it looked up collects them first, then writes.** `IndexRows` is scoped to the Tx, and the Tx cannot be written while it lives (STORE-SPEC J1, OWN-10).
+- A query reads only. It may build a Cover over any Shape it reads or names.
+- A store error inside a query (`Stale` from a handle older than a drop, which rule 12 makes impossible within an open) has no case in the query's result type. The body faults or maps it, and that subscription gets `Ended`.
+
+## 2. Placements and the call protocol
+
+**P1, same run.**
+- A compute entry runs in the session's owner task (v2.8) under `bound` + `isolate` (RUN R0 at bf7cf64f: 2,754.5 instr per call against 312 direct; v2.2's probe figure 1,593 encoded outside the bound).
+- A granted entry runs as a task (`bytes n`).
+- Compute never runs in the head. A compute body that never returns runs under its step bound `s`: other tasks run at its slice ends, and it is answered `Failed(OutOfTime(s))` at step `s` (D5, v2.7).
+
+**P2, a transact call at a place.** The head task owns the `Db` (own, not send) and its Registry and H. A session validates a request, then sends `Req{stream, p, key, arg, reply_to}`. The head keeps, per stream, `Option[Worker{p, waiters}]` and a FIFO of waiting requests.
+
+- **H1. One worker per stream.** A request for the worker's position joins its waiters **if its request digest equals the worker's** (v2.11.3). Otherwise it is answered `Refused(RequestMismatch)` at once as V3, and it never runs. A request for another position waits in the FIFO. When the worker ends, the next waiting request starts.
+- **H2. Start.** The head calls `admit(stream, p)`:
+  - `Admitted(t)` or `Abandoned(t)`: run the entry in `store.run`, with `reply(tx, stream, p, bytes)` (and, in R5, `record`) in the same transaction. The outcome of that run:
+    - `Committed`: the effect and the reply share a commit.
+    - `Aborted(u)`: the reply is kept alone in one streams-only commit; the gate waits on `u.ticket`, which is always `Some` because the adapter replies before returning `Error`.
+    - `Failed(c)`: the head commits the reply in a `run` whose body only calls `reply(Failed(..))` (and `record`).
+    - `Refused(c)`: the store refused the commit (resident limit). The answer is `Refused(Overloaded)`, nothing is recorded, and the stream stays `Admitted(p)`. A refused reply-only commit is answered the same way.
+    - The head does not wait for the admit ticket: the journal is prefix-ordered, so a durable reply implies a durable admit.
+  - `Duplicate(r)`: answer `r`. Under H1 and H3, any reply the head can see at the stream's latest position is durable.
+  - `Rejected(l)`, p > l: the request waits in the FIFO and is retried when a request arrives or a worker ends.
+  - `HistoryUnavailable` (p < latest) or `RequestMismatch` (p = latest, another digest): `Refused(HistoryUnavailable)` or `Refused(RequestMismatch)`, as V3; nothing is committed and nothing runs (STORE AH1, AH2; v2.11.4).
+  - A gone key (§6): `Admitted`/`Abandoned` gives a reply-only commit of `Failed(Gone)`; `Duplicate(r)` answers `r`.
+- **H3. Gate.** After each group, the head calls `durable` on the group's newest ticket. Then, for each worker in the group, it pushes `Release{version: d, snapshot, outcomes}` and ends the worker. Here d is the durable version the group reached.
+- **H4. Across opens.** An admitted-unreplied position from a crashed open returns `Abandoned` and re-runs. `p+1` arriving first gets `Rejected(p)` from S7 and waits until p is re-sent.
+- **Throughput.** H1 serialises only within a stream. Different streams interleave inside one group commit.
+
+### 2.1 Delivery of every Outcome (V1–V5, new in v2.2)
+
+| Rule | Who decides | Outcome | Delivered how | Frame version |
+|---|---|---|---|---|
+| **V1** | the session | `Refused(Malformed)`, `Refused(NoEntry)`, `Refused(Budget)`; `Refused(Overloaded)` when its slot table (1+q) is full, a join included; `Refused(Deadline)` when the request had expired on arrival; **`Abandoned` when a send's own deadline timer fires** while that send is owed (one timer per send, v2.5) | at once, in a Batch with no rows | the session's last sent version. These report no commit, so rule 9's first clause does not apply. |
+| **V2** | the session | the head's answer, once per owed send | A session forwards a position at most once while the head holds it; a later send of it with an **equal request digest** is a local join, owed separately. One with a different digest ends the session with `Close` (1008), a protocol error, because rows identify only `(stream, p)` (v2.11.3). A forwarded position keeps its slot until the head's answer arrives, even after `Abandoned`. The slot table counts, per forwarded position, max(1, owed sends), at most 1+q (v2.5). When the head's answer arrives, the session sends one row per owed send, then frees the slot; with no owed send it sends nothing. | as the head's answer |
+| **V3** | the head | `Duplicate(r)`, `Refused(RequestMismatch)`, `Refused(HistoryUnavailable)`, store `Refused` → `Refused(Overloaded)` | at once, in a **snapshot-less Release** on the publisher's one inbox (`Released`, v2.12). The publisher sends it in a Batch at its current base without waiting for a round. | the publisher's base, which is ≥ the version these report (below) |
+| **V4** | the head | everything a commit produced | a Release pushed only after `durable`, carrying the group's durable version d ≥ the commit version | d. Releases therefore leave the head in version order, whatever order workers finish in. |
+| **V5** | the head | `Failed(Gone)` | a gone key is forwarded by the session, admitted and replied in a reply-only commit, then delivered as V4 | as V4 |
+
+**Why a commitless answer cannot overtake the commit it reports.**
+- **Duplicate(r).** r's commit was released before the worker that wrote it ended (H3). A Duplicate is decided after that, so its Release sits behind that commit's Release in the FIFO. When the publisher sends it, its base is ≥ that commit's version.
+- **`RequestMismatch` and `HistoryUnavailable`** report no commit (v2.11.4).
+- **After a reopen,** the publisher's first base is the durable version at open, which is ≥ every reply the store holds.
+- **Store `Refused`** reports no commit.
+
+**What v2.1 did wrong, and what the model found.**
+- v2.1 let a commitless outcome ride "the next Release". The review showed that schedule has no next Release when a body hangs. V1 answers the deadline at the session, and V3 sends the head's commitless answers at once.
+- **The first v2.2 run then found a real bug:** a Release carrying its own commit version went backwards with two streams ("publisher version went back 2, 4"). V4's group durable version fixes it. Mutant `release_at_commit_version` is CAUGHT.
+
+**The timer is the session's.** It answers a request the head holds (in its FIFO, behind `durable`, behind a slow body that yields). A body that never returns is D5's case, not V1's: its slice ends let the timers run, and its step bound ends it (v2.7, L7/deadline_hung). The head may drop a waiting request whose deadline has passed; that is an optimisation and is not modelled.
+
+**Poison.** If `durable` returns an error, the head answers nothing and the process exits. Clients re-send after reconnecting. Mutant `poison_answers` is CAUGHT.
+
+**Liveness premise.** A client re-sends every position it has no final answer for (after `Abandoned`, `Overloaded`, or a reconnect). A client that gives up on p leaves p+1 waiting until its own deadline.
+
+**P3, another process.** The session speaks §3's frames. The SDK's one-call-in-flight rule is a latency choice: H1–H4 and V1–V5 hold for any client.
+
+## 3. Sessions, principals and frames
+
+- **Session (v2.8, gavel 11):** one owned task group per connection.
+  - **Owner** task: it waits only on its event inbox, which has capacity 1+q.
+    - Its events are: client frames from the reader; Batches from the publisher (by `try_send`; the publisher never waits on a session); `Sent` and `Ended` from the children; and deadline expiries.
+    - It decides every protocol step: V1, the slot table, owed sends, and the control frames first in its outgoing queue.
+    - It hands the writer the next frame by `try_send`, only after `Sent`, so it never waits on the writer.
+  - **Reader** child: it owns the `ReadHalf`, decodes WebSocket frames and sends them to the inbox. When the inbox is full it waits, which stops reading the socket and pushes back on the client.
+  - **Writer** child: it owns the `WriteHalf` and the pending byte cursor. It takes one frame from a capacity-1 channel, writes it and reports `Sent`.
+  - **Ending:** either child ending (end of stream, a reset, a write error) reports `Ended` and ends the session. To end, the owner cancels both children, then joins them. If the owner is itself cancelled, CONC-8 cleans the two handles one at a time; that is bounded, because the children's waits are unshielded.
+  - The owner holds:
+    - the principal and its stream keys;
+    - the slot table: at most 1+q **units**. Every send holds one unit from arrival until its Outcome row is handed to the writer, and a forwarded position holds max(1, its units) until the head answers (v2.11);
+    - at most 1+q unsent V1 refusals, which hold no unit (v2.11);
+    - the deadline timers, which report to the inbox;
+    - a sender to the head (its requests), a sender to the publisher's inbox (`Joined`, `Subscribed`, `Unsubscribed`; v2.12), and its own event inbox, where the publisher's content arrives;
+    - its own Registry (`place` at connect, under `n_place`, rule 10);
+    - its subscriptions, which the publisher holds and charges to it.
+      - A Subscribe the owner cannot `try_send` because the inbox is full is answered `Ended(sub, Refused(Overloaded))`, and nothing is registered.
+      - An Unsubscribe that meets a full inbox is applied at the owner, which drops that sub's rows. The publisher keeps the subscription, charged to the session, until a Subscribe of the same sub replaces it or the session ends (v2.12).
+- **Principal:** in rung 1, `anon:` plus 16 random bytes, minted at the first Hello and returned in Welcome as a bearer secret. The client sends it as every later Hello's `token`, so a reconnect lands on the same stream keys. JWT is D4.
+- **Frames** (v2.4; exact text for TS-SDK.md in followups.md, N8 re-issued). A session may use several streams of its principal; the store's stream key is `principal ‖ stream` (u32 big-endian).
+
+  | Direction | Frame | Fields |
+  |---|---|---|
+  | client → server | `Hello` | `token: Option[Bytes]`, `entries: List[(identity: Bytes, args_fp: u64, result_fp: u64)]` |
+  | client → server | `Call` | `stream: u32`, `p: u64`, `slot: u32`, `deadline_ms: u32` (relative, read at arrival; 0 or already passed gives `Refused(Deadline)`), `arg: Bytes` |
+  | client → server | `Subscribe` / `Unsubscribe` | `sub: u32`, `slot: u32`, `arg: Bytes`, `resume: Option[Bytes]` / `sub: u32`. Rung 1 mints no token. The SDK sends `None`, and a `Some` is unknown, so it gets `Reset` (v2.12, §4). |
+  | server → client | `Welcome` | `principal: Bytes`, `q: u32`, `budget: u64`, `executable: Bytes` (the launch digest, empty when `Unavailable`), `target: String`, `n_place: u64` (v2.12, as built; rule 10) |
+  | server → client | `Entry` | `Ready(slot) \| Resolve(slot, writer_args: Bytes) \| Gone`, one per Hello entry |
+  | server → client | `Batch` | `version: u64`, `complete: List[u32]` (v2.11, F11), `rows: List[Row]` (v2.11, F10: `{sub, key, value: Option[Bytes]}`), `outcomes: List[Done]`. `Abandoned` crosses; `InDoubt` never does. The declaration is WIRE-SPEC §3's `Frame`. |
+  | server → client | `Ended` | `sub: u32`, `Outcome`, for a subscription whose query faulted or ran out of bytes; the others continue |
+  | server → client | `Reset` / `Close` | §4 / the threat table |
+
+  The head's internal `Told{version, done: Done}` (formerly the seam's Frame) is one Batch outcome row before batching.
+
+- **Rows (v2.11, F10).** `Row.key` is the data-tree key, exactly `Change.tree_key`: the table id as u32 **big-endian**, then the key-codec bytes. `Row.value` is the **published value codec**: the table's current value type's codec bytes at the Batch version, without the store's u16 schema prefix. A value stored under an older schema number is decoded with that schema's reader and re-encoded with the current codec, so stripping two bytes is wrong. "Current" is the value type of the H built at open, fixed for the open (rule 12). `None` means the key left the Cover or was deleted. This **publication adapter** is STORE-SPEC v2.23's `published_value(t, c)` (AG3). It serves both `changes` and the initial rows from `span_changes`. `cover(t, lo, hi)` erases it once per Cover: the Cover keeps `t` and `published_value` at t's K and V (v2.11.1).
+- **Where an outcome row lives (v2.11, R2-a).** Rows are made in three places, and each is reported to the owner:
+  - The head's answers (V2, V4, V5) and the publisher's commitless answers (V3) reach the owner as `Told` events. The publisher holds a `Told` only while the owner's inbox is full, on its `budget` ledger.
+  - The owner makes V1 rows, `Abandoned` rows, and compute replies itself. A granted entry's task reports its reply to the inbox.
+  - The owner keeps every row it holds in its outgoing queue until it hands a frame to the writer.
+  - The owner builds every `Batch`, `Ended` and `Reset`. A `Reset` carries every row the owner holds. Rows held by the publisher reach the owner first: the publisher drains its pending `Told`s for that session before it signals a reset.
+  - So a frame never carries rows beyond the reserve: (1+q) unit rows of at most `DONE_MAX` B each, plus (1+q) V1 refusals of at most 36 B each (`Refused(Budget(Room))`: stream 4, p 8, Outcome tag 4, Refusal tag 4, Room 16).
+- **Frame bounds (v2.11, F12).** At the defaults (`max_frame` 256 KiB, `budget` 1 MiB, q = 4) the reserve is 5·8,192 + 5·36 = 41,140 B. A Batch's envelope is 24 + 4·|complete| B. Rows get `max_frame − reserve − envelope`; with one completing sub that is 262,144 − 41,140 − 28 = 220,976 B, which holds the full checkbox board (179,768 B).
+  - A Subscribe whose initial rows exceed that is `Ended(sub, Refused(Budget(Room{requested: row bytes, available: the rows allowance})))`.
+  - A G2 round whose rows for a session exceed the allowance, or `budget`, becomes `Reset(version, outcomes)`. Reset fits, because the outcomes fit the reserve.
+
+| Threat | Limit | Result |
+|---|---|---|
+| oversized or malformed frame | max frame bytes; strict decode | `Close` |
+| call flood | per session: at most 1+q units; a send holds its unit until its row is handed to the writer, and a forwarded position holds max(1, its units) until the head answers (V2, v2.5; v2.11) | above that: `Refused(Overloaded)`, from the session (V1) |
+| a client that sends without reading (v2.11) | at most 1+q unsent V1 refusals | one more: `Close` (1008) |
+| slow reader | `budget` bytes per session, enforced by the publisher | coalesce; then `Reset`; a second overrun in one resume: `Close` |
+| subscription flood | max subscriptions, and max read-set bytes, per session; both count against `budget` | `Refused(NotAllowed)` on Subscribe; a re-run that passes the read-set bytes ends that subscription with `Ended(sub, Refused(Budget))` |
+| bot sessions | per source IP: at most 10 new principals per minute and 32 open sessions; per principal: 20 calls/s, burst 40 (config defaults, D4 decided 2026-11-16). The IP is `std.wsock.source`'s key: the peer's address, or the `X-Forwarded-For` literal when the peer is in a trusted `ingress` prefix; IPv4-mapped IPv6 shares the IPv4 key (built, ec0b9861) | a malformed `X-Forwarded-For` from a trusted peer: HTTP 400 (built). Open sessions and pending upgrades over the limit: HTTP 503 at ingress, before upgrade. Hello-time limits (new principals per IP, a refused token): `Close` 1013. Calls above rate: `Refused(Overloaded)`. The 503 and 1013 limits are not built on main; WIRE-SPEC D2 v2 governs them until they land (v2.12) |
+
+**Every queue, and the account it is charged to (L9).**
+
+| Queue | Bound | Account |
+|---|---|---|
+| request digests (v2.11.3): 32 B per held position, in the session's held position, in each `Req` and in each `Worker`, kept while any send or worker holds it | 1+q per session; one per worker | the session's slot table (session and `Req`); the head's worker record (`Worker`) |
+| requests at the head (inbox, worker waiters, stream FIFO) | 1+q per session, held until the head answers | the session's slot table (V2); mutant `queue_outside_account` CAUGHT (C6) |
+| owed sends and their deadline timers, in the session | 1+q per session, joins included (v2.5) | the session's slot table; mutant `join_outside_account` CAUGHT (C6b) |
+| Outcome rows the owner holds, not yet handed to the writer (v2.11) | (1+q) unit rows ≤ `DONE_MAX` each, plus 1+q V1 refusals ≤ 36 B each | the session; the units are in the slot table. **UNTESTED** until L19's case |
+| frames waiting for the client: Batches in the owner's inbox and the owner's outgoing queue, control frames included (v2.8) | `budget` | the session; mutant `unbounded_queue` CAUGHT (K6) |
+| the publisher's `PubIn` inbox (v2.12): `Released`, `Joined`, `Subscribed`, `Unsubscribed` | the channel's capacity, 64 in the reference server | the head and `connect` wait while it is full; the owner `try_send`s, and a full inbox ends that Subscribe with `Ended(sub, Refused(Overloaded))` (§3). Per session, subscription traffic is bounded by max subscriptions |
+| subscription state: Cover and read set (per-row lookup Points included, 48 B each, STORE-SPEC J1); never a copy of covered rows (v2.11) | read-set bytes limit, inside `budget` | the publisher's `budget` ledger for the session (v2.11: a send never transfers a charge) |
+| client frames in the owner's inbox, not yet decided (v2.8) | 1+q (the inbox's capacity); each ≤ max frame bytes | the session (a row of its account; not the slot table, because an undecided frame holds no slot) |
+| the frame inside the transport provider | one frame per session: the writer child's `send` on the `WriteHalf` waits until the provider takes it, and the owner hands over the next frame only after `Sent` (v2.8), so the writer's channel and the writer hold at most one | the session's per-session constant: one encoded frame, `round8(max_frame + 14)` B (payload cap plus header, WIRE §2.3) |
+| the session's Registry | `n_place`: about 495 B per entry (RUN R0 at 100 entries) | the session, at connect |
+| the kernel socket buffer | the OS's setting | outside the process |
+
+**Memory per session:** the record (the inbox's 1+q event slots included), plus (1+q) × max frame bytes (requests at the head), plus (1+q) × max frame bytes (undecided client frames in the inbox, v2.8), plus `budget`, plus one frame (the writer's), plus the Registry, plus the reader's and the writer's spawn charges (each child's `bytes n`; the reader's covers one max-size frame plus the WebSocket read-ahead; v2.8). For the checkbox app (tens of entries), the Registry is a few KB. At 100 entries it is 49.5 KB (RUN R0). At 1,000 entries it is about 420–500 KB and 0.9 ms of CPU per connection (RUN p19 at 62f15988; the built R0 at 1,000 waits on the identity-dispatch redesign). D7 says why the Registry stays per session.
+
+## 4. Subscriptions
+
+**Design: the query decides, the diff delivers, and read sets invalidate.**
+
+- **G1. Durable release.** The publisher's one inbox is `PubIn` (v2.12, §1.1). It reads only Releases the head pushed after `durable` (V4), plus snapshot-less Releases (V3), together with the sessions' `Joined`, `Subscribed` and `Unsubscribed`. It drains the inbox in order and takes the newest snapshot, so a slow publisher coalesces. Outcomes are never skipped, because they travel in each Release.
+- **G2. A publisher round** from base snapshot `a` to newest `b`:
+  1. `changes(a, b)` gives `List[Change]`, each a changed data-tree key with its value at `b`: O(k log n) node visits for k keys written, w ≤ k returned (STORE-SPEC H4). Streams-only commits produce none.
+  2. An interval index holds every subscription's read set (Points and Spans) and Cover, all as data-tree key bytes (I1). A Change hits when its `tree_key` equals a Point or lies in a Span, by byte compare. For each subscription hit:
+     - **a changed key in its read set:** re-run the query with `look(b)`.
+       - `Seen{value, reads}`: diff the keys inside the old Cover at `a` against the keys inside the new Cover at `b`, removals included, and send that difference. Then keep the new Cover and read set. The publisher keeps no copy of covered rows; it enumerates them from the snapshots it already holds (v2.11, F4).
+       - `Failed` or `Refused`: send `Ended(sub, ..)` and drop that subscription.
+       - A `look` Error (`Foreign`): Reset.
+     - **otherwise:** send the changed keys inside its Cover, with their values at `b`.
+  3. Each session with rows, or with outcomes from the drained Releases, gets its content `{version: b, complete, rows}` and its `Told`s in its owner's inbox. The owner builds the Batch (§3).
+- **G3. Subscribe** runs the query with `look` at the publisher's base and sends its full result at that version, **whole in one Batch whose `complete` names the sub, an empty result included** (v2.11, F11). No row for that sub is sent before that Batch. When several initial results each fit but do not fit together, they go in separate Batches at the same version. `Failed` or `Refused` answers `Ended`.
+  - **The base is defined by inbox order (v2.12).** It is the version of the last `Released` the publisher took from `PubIn` before this `Subscribed`. Releases taken after it reach this subscription as G2 rounds.
+  - A Subscribe of a (session, sub) that is still live replaces the old subscription, with no `Ended` for the old one.
+- **What is in the read set:** every `fetch` (a Point), `range` (a Span), and `lookup` (a Span, plus one Point per row it yields, J1) the query makes. Rows it only names through `cover` are not in it.
+- **After a drop and recreate:** only across opens (rule 12). Every subscription is then Reset, because a resume token from an earlier open is unknown (`changes` is Foreign across opens), and Subscribe runs against the new H.
+
+**Cost.**
+- **Per commit:** one `changes`, plus O(w log E) to look up E index entries, plus one query run per subscription whose read set is hit.
+- **Memory:** each subscription keeps its Cover and read set, on its session's `budget` ledger. Subscribed memory is flat in the number of covered rows (L20). A per-subscription copy of the full checkbox board would be 273,560 B (2.548 GiB at 10,000 sessions; WIRE-SPEC §3).
+- **Checkbox app:** a toggle hits no read set, so it costs a route plus about 21 B per matching viewer (GUESS, TS-SDK's figure).
+- **A subscription over a query that looks up 10,000 rows** (ESTIMATE, from STORE-SPEC J1b's RUN parts):
+  - Read set: 480 KB (100 B + 10,000 × 48 B), charged to its session's `budget`. The default `budget` must exceed it, or Subscribe is `Refused(NotAllowed)`.
+  - Interval index: 10,001 entries for this subscription.
+  - **A commit that hits none of them** costs the publisher O(w log E) for its w changes, with log₂ E ≈ 14 compares per change at E ≈ 10⁴. This subscription adds nothing beyond its share of E.
+  - **A commit that hits one** (a looked-up row's value changes, or a row enters or leaves the J range) costs a full re-run: about 10,000 × 4.4k ≈ 44 M instructions (index step, primary get, decode, and 400 for recording each Point), roughly 10 ms. On top come removing and re-inserting 10,001 index entries, O(r log E), and diffing old against new results.
+  - So one subscription whose rows change on every commit costs about 10 ms of publisher time per commit, and the publisher coalesces.
+- **Worst case:** every commit writes a key that every query reads. The cost is then design A's: a re-run per subscriber.
+
+**Query code runs in the publisher**, inside `look`'s `isolate`, so a fault or exhaustion ends only its subscription. A query that never returns is stopped at its step bound with `Failed(OutOfTime(s))`, which ends only its subscription; the publisher's other work runs at its slice ends meanwhile (D5, v2.7).
+
+**Reset** is sent when the base is gone, when coalesced rows cannot fit `budget`, when `look` returns an Error, or when a resume token is unknown. A token from an earlier open is always unknown.
+
+**Resume, as built (v2.12, R2-i).**
+- Rung 1 mints no token, so every `Some(token)` is unknown and is answered with `Reset`. The SDK sends `resume: None` on every Subscribe (sdk/client/README.md).
+- After a `Reset` or a reconnect, the client keeps its old cache until the new subscription's id appears in a Batch's `complete`, an empty initial result included (F11). It ignores rows for old ids.
+- A token that names open, version and subscription state, with bounded retention, is a later rung. Its field and its meaning are added together.
+
+## 5. Exported entries, the generator and non-termination
+
+- **D1 (ruled by Sam 2026-11-16, gavel 2; the server half is built, W4a).** `hirsel sdk ts <pkg>` builds the package, then launches **the built server executable** in describe mode (`--hirsel-describe`, with `--hirsel-n-place=<bytes>`, default 16 MiB). Describe is the first branch of `runner.main(a, place, start_server)`, before any store, listener or capability use.
+  - It runs `place` under `n_place` and answers `Describe{digest, target, n_place, exported: List[Exported{described, args_fp, result_fp}]}`.
+  - Or it answers `DescribeError = PlaceCapacity(Room) | AlreadyRegistered(Bytes)` and exits with status 2.
+  - The generator records the digest, target and `n_place` in the bindings (rule 10). Laws `place_run_bounded`, `identity_stable` and `identity_unavailable` (W4a). RUN p09 does this by hand: 447 B for three entries.
+- **Bounding `place`.** The generator runs it in a child process with a wall-clock limit T (default 10 s, GUESS) and the byte limit `n_place`:
+  - on timeout it kills the child and reports `PlaceTimedOut`;
+  - if `n_place` is exhausted, it reports `PlaceCapacity(Room)`;
+  - `AlreadyRegistered` is reported with the identity.
+- **Why one executable, target and bound are required.** `place` is capability-free and has no inputs, so its result depends only on the code it runs and its byte bound. RUN p19 mode 1 shows a `place` that branches on Capacity: its list differs between bounds and is equal under one bound. Another build, another target or another bound may give another list.
+- **Cost of every task running `place`** (release, LLVM, perf stat `instructions:u`):
+
+  | Entries | Built R0 (RUN at bf7cf64f) | Probe p19 (RUN at 62f15988) | Bytes (smallest bound that fits) |
+  |---|---|---|---|
+  | 1 | — | 4,123 instr | 896 (p19) |
+  | 100 | **5,289 instr per entry** | 5,069 per entry, 0.066 ms | **49,504 (R0)**; 45,888 (p19) |
+  | 1,000 | waits on reuse-history-fault-1031 (64 KiB task stack overflow in the identity dispatch) | 6,422 per entry, 0.906 ms | 419,648 (p19) |
+  | 3,000, split into 30 functions | — | 9,531 per entry (28.6 M per `place`) | — |
+  | 10,000 | waits on 1031 | `run stop: Stack` with 10,000 functions even when only 2 are registered | — |
+
+  The cost per entry grows with the program's function count because generic `code.identity` scans every function. 1031's redesign removes that growth, after which the 1,000- and 10,000-entry rows are re-run on the built R0.
+
+- **A transact body or a query that never returns** is stopped at its entry's step bound (D5 ruled (a), v2.7), and other tasks run at its slice ends until then.
+
+**R13 text (N9):** unchanged from v2.1; the text is in followups.md.
+
+## 6. Upgrades
+
+An upgrade is a process restart on new code.
+
+- **Activation (rewritten in v2.2).** The runner owns one ordinary table, `hirsel.runner.activation: Table[u8, Bytes]`. Key 0 holds `current` and key 1 `previous`, each a `describe` byte list. No reserved key space and no store change are involved.
+  1. `place_head` runs `handles` twice (rule 12). The runner's `handles` step also calls `create_table` for its table if the catalog lacks it (a schema commit, first open only), then `table`.
+  2. Open reads both rows through the Shape.
+  3. One `run` writes activation. If `current` equals this registry's `describe` bytes, it writes nothing (a restart on the same code). Otherwise one commit writes `previous := current` and `current := new`.
+  4. Then the head serves.
+- **What a crash leaves:**
+  - before the step-3 commit: the old rows, and the next open repeats step 3;
+  - after it, before serving: the new rows, and the next open writes nothing;
+  - the store's crash cuts never show half a commit, so the pair is always (old previous, old current) or (old current, new).
+- **The gone-key set.** The head computes the keys in `previous ∪ current` minus this registry's keys and gives each session a shareable copy at connect.
+- **Gone keys.** A call whose key is in the gone-key set goes to the head as a gone call; the session does not refuse it (V5). The head runs `admit(p)`: `Admitted` or `Abandoned` gives a reply-only commit of `Failed(Gone)`, and `Duplicate(r)` answers `r`. So the stream passes every gone position with a reply, and a re-send returns it. A key in neither list is `Refused(NoEntry)` at the session, with nothing recorded. **Slots (v2.11, F9):** a session slot keeps the requested entry key from its Hello `Want`, not only its `Entry` answer, so a gone key is still known at `Call`. A slot out of range is `Refused(NoEntry)`. A `Subscribe` on a gone slot is answered `Ended(sub, Failed(Gone))` at the session, with nothing recorded. A pending request is never remapped to a new entry. A stale client costs at most one commit per stream before `Upgrade`. RUN: mutant `gone_refused_at_session` (v1's rule) is CAUGHT (C8).
+- **Matching an old client:**
+  - unchanged: `Ready`;
+  - a defaulted field added to A: `Resolve(slot, writer_args)`;
+  - a changed R or a changed published row: depends on D2;
+  - a renamed or removed entry, a changed type path or a package major: `Gone` + `Upgrade`.
+- **Rollback.** Under D2-K, older code after a newer schema number cannot open: its `handles` gets `Schema` from `table` (RUN p17 step 3). Rolling back therefore needs `migrate` to the older schema, or D2-A.
+
+**D2 (ruled K by Sam 2026-11-16, gavel 3): an old reader against a newer writer's R or row.** Unchanged from v2.1, with one row added.
+
+| | **K: keep SEM-10 strict** (recommended) | **A: skip additive fields, guarded** |
+|---|---|---|
+| Good case | rename `{enabled}` → `{active}`: the old reader gets `Schema`, then `Gone` + reload | add `{label: String = ""}`: old tabs keep working |
+| Bad case | the same additive `label`: every open tab reloads | rename without a tombstone decodes wrongly; guarded by refusing a schema that drops a field without `removed`, with tombstones kept forever |
+| Rollback (new in v2.2) | older code cannot open after an additive schema change (RUN p17 step 3) | older code opens and skips the added field |
+| /wholehog | clean: one rule | clean only if SEM-10 changes everywhere (store and wire) |
+
+**My recommendation: K now.** Reloads are tolerable in rung 1. A is a pure relaxation that can come later with no data rewritten. The rollback row is K's real cost, and it is what would make A worth deciding before rung 2.
+
+## 7. Recording and re-execution (R5), at STORE-SPEC v2.4
+
+- **Recording.** In the same Tx as its `reply`, a transact call runs `store.record(mut tx, CallRecord{key, args, stream})`. The commit's frame then carries a call section. Its position is the stream's op in that frame, and its CallInfo is the frame's.
+- **What each outcome leaves, as `tapes check` sees it** (STORE-SPEC G1 table, adopted):
+
+  | Outcome of the position's run | What the store committed | Call record | `tapes check` |
+  |---|---|---|---|
+  | `Committed` | data, reply and call section, in one frame | yes | `Same`, or `Different(Reply)` / `Different(Writes)` |
+  | `Aborted(u)` (the adapter always replies) | reply and call section, one streams-only frame; no data | **yes (G1)** | `Same` when the re-run also returns the error with the same reply bytes and no writes; else `Different(Reply)` |
+  | `Failed(causes)` | nothing from the body; the runner's reply-only `Failed` commit with its own `record` | yes, in the runner's commit | `Same` when the re-run faults the same way, else `Different(Reply)` |
+  | `Refused(c)` | nothing | none | nothing to check: the position re-runs |
+  | a gone entry's reply-only `Failed(Gone)` | reply only | **none: the one exception** (below) | `Unknown(NoEntry)` |
+  | a record in a compacted segment, or **any record in a `memory` store** | — | `recorded` is None | `Unknown(StateGone)` |
+
+- **The one exception to "a frame has a call record iff it has a reply written by a run".** The runner's `Failed(Gone)` reply-only commit has a reply and no record, because there is no entry to run. Every other reply the runner writes has a record. STORE-SPEC v2.4's table already gives that row (none, `Unknown(NoEntry)`). But its model law G ("a frame has a call record iff it has a reply written by a run") does not exclude it, although that commit is a `run`. The amended text for law G went to store-spec-1001 in followups.md.
+- **Reading.** `store.recorded(db, b, version)` serves live journal segments only. A compacted commit, and every commit in a `memory` store, reads as None, which is `Unknown(StateGone)`. A memory store keeps no record, because nothing would bound it (STORE-SPEC G3).
+- **Re-execution:**
+  1. fork at v-1;
+  2. run the candidate's `place` under `n_place`, and its `handles` on the fork (fresh H, current incarnations, I3);
+  3. run the recorded key on the recorded args in a Tx on the fork;
+  4. compare the reply bytes and the write ops.
+- `Verdict = Same | Different(Reply | Writes) | Unknown(NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects)`, unchanged.
+- Abandoned positions have no call section beyond their committed reply, so they are `NotRecorded`.
+- **No runner rule or law depends on a call section.** Re-sent calls are decided by the streams tree, and gone keys by the activation table and the stream state. Checkpoints keep both.
+
+## 8. Laws, models and measurements
+
+Each law sits in the runner's law suite, beside STORE-SPEC §5's. Each runs against a memory store and a file store under the store's crash cuts.
+
+**Status values:**
+- **MODEL**: checked by a v2.2 model, with the mutant named;
+- **UNTESTED**: no model reaches it yet; the harness and slice that will test it are named.
+
+| Law | Wrong implementation it catches | Oracle | Model check and mutant | Status |
+|---|---|---|---|---|
+| L1: at every crash cut, re-sending p gives byte-equal bytes and the effect once; no Outcome reporting a commit is observed before that commit is durable; `HistoryUnavailable` only for a durably replied position (v2.11.4) | answer before durable; answer on poison; admit of latest+1 while latest is unreplied | durable mark read by the harness | C1, C3: `answer_before_durable`, `poison_answers`, `store_v22_admit` CAUGHT | MODEL |
+| L2: 10⁴ hostile frames before `admit` leave the store version and the streams row unchanged, and the **session's** peak charge stays below its idle peak plus one hostile decode (v2.5: V1 refuses before the head, so the charge is the session's) | a head that decodes after admit; a session that keeps each refused frame's decode storage | the store version and streams row; the session's owner task (v2.8; the reader's WebSocket framing is inside the reader's own spawn bytes) running under n_session = idle peak + one hostile decode, answering 10⁴ `Malformed` with no Budget fault and no `Close` | C7: `decode_after_admit` CAUGHT (no model has charges) | MODEL for "never admitted"; the peak-charge half is **UNTESTED** until R1's case (named in the Oracle cell) |
+| L3: a `Failed` p, re-sent k times, runs the handler exactly once | (i) re-run on Duplicate, then commit; (ii) re-run on Duplicate, then discard the run (fault or roll back), so no version or reply changes | (i) the version and reply bytes, on every backend. (ii) **the CONC-10 event sink** (v2.6): the case's body makes a channel and `try_send`s once per run, then faults; neither the event nor the run rolls back with `Failed`. The harness counts `TRY_SEND` events (kind number from the published header, hirsel_core_rt_host.h). On the evaluator it reads them from the event log. On cranelift and llvm it links a counting sink into `scheduler.event` (hirsel_core_rt_host.h:89) through `hirsel build --cc` with a `-Wl,--wrap` linker wrapper. `core/langarena/layout/arc_events.c` does exactly this, counting events by kind and leaving the scheduler's choice alone, and `core/langarena/layout/service.py` builds it on both cranelift and llvm (llvm with `--release`). Do not use test-event-order.py's recorder.c: it also replaces `choose`. Expected: 1 run of the faulting body for p, hand-derived from the law, which holds because nothing in package `store` calls `try_send` at a56c9a1c (`git grep` over core/programs/store). If a later store or runner change adds one, the harness counts only `TRY_SEND` events whose object is a channel the body made. | C10 (a body run never starts at a position whose reply the store holds): `rerun_on_duplicate` CAUGHT (`same_session_double_send`, `failed_resent`). C1 alone held L3 only by construction (it counts committed effects). | MODEL; an R1 case on all three backends. An "Outcomes only" native run does not count as L3. |
+| L4 (`l4_peak_retained`, v2.9): the runtime's exact `peak_retained_bytes` is equal in two modes, 10⁴ malformed frames and one valid call, with no tolerance | decode storage outside the account; a decoder that keeps each frame (mutant: keep 1 byte per refused frame, which reads 68,104 against 51,712, and only this figure catches it) | the runtime's `peak_retained_bytes`, read in both modes | — (no model has memory) | RUN by runner-build-1033 at b02567be: both engines read 51,712 |
+| L5: each frame's version is ≥ the previous one's, and the rows equal the oracle at that version | a Release at its own commit version; Subscribe at the newest snapshot labelled with the base; two readers sharing a stale result | the K1 reference (full query at the version) | C5, K1, K2: `release_at_commit_version`, `subscribe_at_latest`, `shared_cache` CAUGHT | MODEL |
+| L6+L7 (one row, because L6 alone passes a publisher that never answers): an Outcome reporting commit v is in its session's **first** Batch at a version ≥ v (the count form, v2.5); no frame above the durable version; every send is answered (liveness) | delaying outcomes; a direct commitless path; Reset dropping outcomes; never answering; a deadline riding the next Release; a dropped joiner | version log, durable mark, answer log. No wall clock: the time an Outcome takes is a §8.4 cost figure, not a law (v2.5 withdraws "within one group plus one publisher round") | K4, C5: `reset_drops_outcomes`, `direct_commitless` CAUGHT. K5, C4: `outcome_never` (`outcome_only` scenario: passes K4, CAUGHT by K5), `deadline_rides_release`, `drop_joiner` (`joiners` scenario, no deadlines) CAUGHT. "First" is observed by subs25 K4; calls25 C5 checks only ≥. | MODEL. The R1 case adds the "first" half to `calls_group_version`: no earlier Batch to that session at a version ≥ v. With deadlines and one re-send, a dropped joiner is only slow. The deadline case is two cases. `L7/deadline_held` (a request the head holds) is MODEL (`body0_hangs` is a held head) and an R1 law on the real head. `L7/deadline_hung` (v2.7, a count law; R1 harness, evaluator, cranelift and llvm through the CONC-10 sink): a transact entry registered with step bound `s` whose body is `loop { let _ = try_send(c, 0) }` (one call and one back edge per iteration: 2 steps) is called at p. Oracle, hand-derived from MEM-30: exactly ⌊(s − e + 1)/2⌋ `TRY_SEND` events for p (the k-th call is step e + 2k − 1), where `e` is the steps the entry takes before its loop (counted from the case's source by hand and written in the case); p is answered `Failed(OutOfTime(s))` in a reply-only commit; every other send of every session is answered (L15); and a compute call sent by a second session before p is answered before p's stop in the event order (s > 65,536, so a slice end comes first). Mutants: no back-edge check (p never answered: the run's timeout), a check at function entry only (count 0 or s), slices off (the second session's answer after p's). |
+| L8: the client cache after coalesced batches equals an independent reference that re-runs the query from scratch at the batch version (no diff, no read sets); a query fault ends only its subscription | re-run without retraction; a fault ending the session; Foreign read as no change; a fork's commits released to main | full re-evaluation | K1, K7: `rerun_without_retract`, `fault_ends_session`, `resume_foreign_as_empty`, `release_fork_commits` CAUGHT | MODEL |
+| L9: N stalled readers raise process RSS by at most N × (record + (1+q) × frame + budget + frame + Registry) + a constant, with read sets (lookup Points included) inside budget | a queue outside the session account | RSS delta | C6, K6: `queue_outside_account`, `unbounded_queue` CAUGHT | MODEL for the accounts; the RSS measurement is **UNTESTED** until R2 |
+| L10: fixtures where only the fingerprint differs (a field added to A: `Resolve`; to R: per D2; **v2.11.2:** only a transact entry's nominal E changes its fields or variants: `result_fp` and the Key change, and a stale Hello gets `Placed(Gone)`, never `Ready`; mutant `key_without_e`, the Key over R alone as on main), and a rename collision (`f` renamed `g`, a new `f` with other types: the old client gets `Gone`) | a path-only matcher | hand-built fixtures | none: no model represents matching | **UNTESTED** until R4. A real 64-bit collision is untested by design (2⁻⁶⁴ per pair). |
+| L11: a re-send of an admitted, unreplied p whose key is gone leaves the `Failed(Gone)` reply row at p; p+1 is then admitted; a further re-send returns that reply. **Wire case (v2.11, `gone_slot_v5`):** the same over a Hello slot whose `Placed` is `Gone` | v1's session refusal; dropping p and advancing; a slot keeping only its `Placed` answer (`gone_refused_at_session` over the wire) | streams row read through the store | C8: `gone_refused_at_session` CAUGHT | MODEL; the wire case is W3c's |
+| L12: the generator's bytes equal the server binary's `describe`, across permuted registrations, a field added to an A, a changed R, and two runs in two tasks | a source parser matching one fixture; a generator on another build or bound | `describe` run in the server binary | — | Server half **RUN** (p19 mode 0: equal across two runs and tasks; mode 1: the bound changes the list). Generator half **UNTESTED** until R3. |
+| L13 (new): at every crash cut of open's activation, the next open sees (old previous, old current) or (old current, new), and a gone key is answered `Failed(Gone)` either way | activation written in two commits; a crash leaving `previous` overwritten and `current` old | the two rows read through the store | — | **UNTESTED** until R4 |
+| L14 (new): a `handles` that commits on its second call makes open fail with `HandlesChanged`; one that only resolves opens | two H naming different incarnations | the store version (N12) | — | **UNTESTED** until R1; positive case RUN (p17 step 1) |
+| L16 (v2.11, `rows_normalized`): a Row's key is the table id big-endian ‖ key codec, and its value is the current codec without the schema prefix | `strip_two_bytes` (a fixed strip passes on current-schema rows only); `le_table_id`; `raw_value` | hand-derived bytes. The fixture uses a table whose id has bytes that differ under the two byte orders (e.g. 0x00000102), and a row stored under schema 0 of a table now at schema 1, which adds a defaulted field (v2.11.1). The expected value is written out by hand from the codec, not read from `row_value`. | — | **UNTESTED** until R2 |
+| L17 (v2.11, `complete_marks_empty`): every Subscribe that is not `Ended` is answered by exactly one Batch naming it in `complete`, an empty result included, and no row for it precedes that Batch | `no_complete_on_empty`; `initial_split` (an initial result spread over two Batches) | the client's log per sub id | — | **UNTESTED** until R2 |
+| L18 (v2.11, `reply_over_done_max`): a transact reply over `DONE_MAX − 20` B leaves the store's data unchanged, and p's reply is `Failed(OutOfBytes(Room{requested: \|b\|, available: 8,172}))`; a compute reply is answered the same, with nothing recorded | `commit_then_check` (the effect commits) | the store version and data rows; \|b\| hand-chosen | — | **UNTESTED** until W3c |
+| L19 (v2.11, `unread_client`): a client that sends Calls and never reads holds the session's outcome rows at most at the reserve; the (2+2q)-th unread refusal closes the session; every Reset carries every row held | `slot_freed_at_answer` (rows grow past the reserve); `refusal_rows_uncapped`; `reset_drops_held` | the owner's held-row bytes against the hand-computed reserve; K4 for Reset | — (calls25 has no unread client; its session sends rows at once) | **UNTESTED** until R1's case |
+| L20 (v2.11, `cover_only_retention`): subscribed memory is flat in the number of covered rows | `copy_rows_per_sub` | the runtime's retained bytes (L4's counter), read after the initial Batch is `Sent`. Two fixtures have the same 1,954 stored rows and one subscription each. The query makes no `lookup`; its Cover spans 10 rows in one fixture and 1,954 in the other. The two figures are equal. | — | **UNTESTED** until R2 |
+| L21 (v2.11.3, `join_digest`): an answer is shared only between sends with equal request digests. **H1 case:** session A sends (stream, p, args x) to a held head, and session B, on the same principal, sends (stream, p, args y). B gets `Refused(RequestMismatch)`, A gets its reply, and the body ran once, with x. **V2 case:** one session sends p with x, then p with y while p is held: the session closes with 1008 and sends no row for either. **Control:** p re-sent with x under another slot and deadline joins. | `join_without_digest` on H1 (B gets A's reply); `join_without_digest` on V2 (the second send joins and gets x's answer); `mismatch_row_in_session` (a `RequestMismatch` row at a live position instead of Close); `digest_over_slot_or_deadline` (the control is refused) | the client's row log; the body writes its argument to a table, and the store's data row shows x only; hand-derived | — (no model has request bytes) | **UNTESTED** until R1's case (H1, V2 on the in-process seam; W3c over the wire) |
+| L22 (v2.12, `subscribe_order`): a Subscribe's initial result is at the version of the last `Released` taken before its `Subscribed`, and every later Release reaches it as a G2 round | `subscribe_at_latest` (runs at the newest durable version, not at the inbox's); `second_receiver` (Subscribe on its own channel, read before queued Releases) | a session sends one Subscribe while a commit's Release is queued ahead of it, and another while one is queued behind it. The first sees the commit in its initial Batch, and the second sees it as a round. | — | **UNTESTED** until runner-build-1033's `subs_main` harness has the case |
+| L15 (new in v2.5): every send gets exactly one Outcome (rule 5). At most one: no row reaches a client for a send it already has an Outcome for. At least one: a send whose session stays up is answered. Each send is answered at its own deadline, never later. | forward every head frame (R0 at 4a7fe8a9; `late_completion_resent`); one row for two joined sends (`one_for_joined`); a joined deadline moved to the latest send's (`latest_deadline`, bdf27482); joins outside the slot account (`join_outside_account`) | the client's count per `(stream, p)`: sends, rows, sends lost at a session end; the wall clock for deadline order | C9: `late_completion_resent` (`abandoned_no_resend`), `one_for_joined` (`same_session_double_send`, at least once) CAUGHT. C6b: `join_outside_account` (`join_overflow`) CAUGHT. subs25 K8: `outcome_repeated` CAUGHT. `latest_deadline`: no model has a clock. | MODEL, except deadline order. R1 cases: 1033's `drive_one_outcome_per_send`; send A (`deadline_ms` 2) then send B (50) of one position on a held head, A's `Abandoned` first and before B's deadline; q = 0, two sends of one held position, the second `Refused(Overloaded)`. |
+
+### 8.1 `calls25_model.py` (RUN; `models/evidence/calls25.txt`)
+
+A BFS over sessions, the head, the journal (group commit, prefix-ordered crash cuts), the Release FIFO and the publisher. v2.5 builds it from `calls22_model.py` (kept, with its evidence `calls22.txt`).
+
+**What v2.5 changed in the model, and why.** In calls22 the session gave a head frame only to requests the client still had in flight, and a client held one Outcome per request. So a second Outcome for one send could not be expressed, and no check could fail on it (review 1042; 1033 08:50). Now the session and the client are separate:
+- the session keeps its owed sends, one per `Call` frame, each with its own deadline transition;
+- it emits wire rows: V1 refusals, `Abandoned` per send, and one row per owed send when the head answers;
+- the client only counts, per (session, stream, p), its sends, the rows it received, and its open sends lost when the session ended.
+
+**Checks:**
+- C1: an effect at most once;
+- C3: every reply-bearing answer equals the durable reply, and `HistoryUnavailable` only for a replied position (v2.11.4, calls2114);
+- C4: liveness;
+- C5: every frame's version is ≥ the commit version it reports, and a session's frames never go back;
+- C6: the head holds at most 1+q requests of a session;
+- C6b (v2.5): the session's slots (per forwarded position, max(1, owed sends)) and its owed sends stay ≤ 1+q;
+- C7: a malformed request's position is never admitted;
+- C8: a gone position is never left admitted without a reply;
+- **C9 (v2.5): exactly one Outcome per send.** At every state, rows + lost ≤ sends (at most one). At every terminal state, rows + lost = sends (at least one). A terminal state is one where no step but a crash or poison is enabled and nothing is poisoned.
+- C10 (v2.5): a body run never starts at a position whose reply the store holds (L3).
+
+**What C9 can and cannot conclude.**
+- The at-most-one half is a safety check: it fails at the first state with an extra row, on any history.
+- The at-least-one half is checked only at terminal states. At a non-terminal state, rows + lost < sends proves nothing, because a row may still come. That is why `one_for_joined` with deadlines is caught at the terminal state, not at the delivery.
+- The search is finite: bounded sends, one re-send per request, bounded crashes and poisons. Sends, versions and epochs only grow, so the state graph has no cycles, and every maximal history ends in a terminal state. So "a send never answered while the session stays up" is checked on every history the bounds allow. It is not checked for a history the bounds cut off (a third re-send, a second crash where the scenario allows one).
+- The model has no clock. Deadlines fire in any order, so a deadline answered later than its own (`latest_deadline`) is not observable. L15's timed R1 case covers it.
+
+| Scenario | What it adds | States | Crash cuts | Terminal | Failures |
+|---|---|---|---|---|---|
+| review_deadline | review 1028's sequence: p=1 sent while p=0 runs; p=0 may hang | 2,471 | 0 | 20 | 0 |
+| two_sessions_two_streams | Release order across streams (three requests) | 802,208 | 0 | 936 | 0 |
+| cross_session_crash | two sessions on one position, typed errors, one crash | 35,249,805 | 1,595,017 | 9,591 | 0 |
+| out_of_order_two_sessions | p+1 before p from another session, faults, two crashes | 297,160 | 87,189 | 1,939 | 0 |
+| refusals | store refusal, fault, a malformed request, q = 0, one crash | 36,282 | 6,070 | 536 | 0 |
+| slots_and_deadline | the 1+q slot limit with q = 0 and deadlines | 1,261 | 0 | 34 | 0 |
+| upgrade_gone (R4) | a gone key after restart | 15,021 | 1,578 | 158 | 0 |
+| joiners | two sessions send one position, no deadlines | 71 | 0 | 1 | 0 |
+| poison | a durable error | 633,473 | 139,010 | 2,661 | 0 |
+| abandoned_no_resend (v2.5) | p1 alone, then p0 after p1's Outcome, then p2 (1033; equal to 1033's copy: 19,529 states) | 19,529 | 0 | 59 | 0 |
+| same_session_double_send (v2.5) | one session sends one position twice; ok or fault; one crash | 5,639 | 1,015 | 75 | 0 |
+| same_session_join_nodeadline (v2.5) | the same, no deadlines | 39 | 0 | 1 | 0 |
+| join_overflow (v2.5) | the same with q = 0: the join is refused while the first is owed | 751 | 0 | 15 | 0 |
+| failed_resent (v2.5) | a Failed p re-sent after its Outcome; one crash | 2,135 | 450 | 36 | 0 |
+| **total** | | **37,065,845** | **1,830,329** | | **0** |
+
+The v2.2 scenarios now have more states than in calls22 (for example poison 180,490 → 633,473), because the client's counts and the session's owed sends are now state. No history that passed v2.2 fails now: **0 failures in every scenario.**
+
+**Mutants, all CAUGHT** (each stops at its first failing scenario; small scenarios first; cross_session_crash takes 1,422 s and 26 GB for the correct rules):
+
+| Mutant | Scenario | Check that catches it |
+|---|---|---|
+| `deadline_rides_release` | review_deadline | C9 (at least one; C4 also) |
+| `answer_before_durable` | review_deadline | C3 |
+| `queue_outside_account` | review_deadline | C6 |
+| `poison_answers` | poison | C3 |
+| `gone_refused_at_session` (R4) | upgrade_gone | C8 |
+| `decode_after_admit` | refusals | C7 |
+| `store_v22_admit` | out_of_order_two_sessions | C3 |
+| `direct_commitless` | joiners | C5 |
+| `release_at_commit_version` | poison | C5 (publisher version went back) |
+| `drop_joiner` | joiners | C9 (at least one; C4 also) |
+| `late_completion_resent` (v2.5; R0 at 4a7fe8a9) | review_deadline (and abandoned_no_resend) | **C9 at most one** |
+| `one_for_joined` (v2.5) | same_session_double_send | **C9 at least one**, at the terminal state |
+| `join_outside_account` (v2.5; bdf27482's join) | join_overflow | C6b |
+| `rerun_on_duplicate` (v2.5) | out_of_order_two_sessions (and same_session_double_send) | C10 |
+
+`late_completion_resent` passes every v2.2 check: it cannot be expressed in calls22. Controls (RUN): with C9's per-state half removed, it is still caught by C9's terminal equality. With C9 removed entirely, it is NOT CAUGHT in any scenario but cross_session_crash, which the control skipped for its size.
+
+### 8.2 `subs25_model.py` (RUN; `models/evidence/subs25.txt`)
+
+v2.5: `subs22_model.py` plus K8. The v2.2 numbers below are unchanged in the re-run.
+
+Keys `perm`, `row0` and `row1`. Q1 reads `perm` and covers both rows. Qf reads `row1` and faults when `row1 == 2`. Commits are revoke, grant, w0 and call (with an outcome), plus a fork's commit and `adopt`. Budget is 2. Reset carries outcomes, and the client re-subscribes. There is one crash, then reopen with a Foreign resume.
+
+**Checks:**
+- K1: the cache equals a from-scratch `query(snapshot)`;
+- K2: versions never decrease;
+- K3: nothing above the durable version;
+- K4: an outcome is in the first frame at ≥ its version;
+- K5: liveness;
+- K6: queue ≤ budget;
+- K7: one query's fault ends only its subscription;
+- K8 (v2.5): at most one Outcome per send. The client sends the call once, and again after reopen only when it has no Outcome, so a frame carrying the Outcome when it already has one is a second Outcome. subs22's client absorbed it silently.
+
+| Scenario | States | Crash cuts | Terminal | Failures |
+|---|---|---|---|---|
+| main_two_sessions (subs (0,Q1), (0,Qf), (1,Q1)) | 635,530 | 0 | 408 | 0 |
+| restart_resume | 122,513 | 57,198 | 294 | 0 |
+| branch_adopt | 25,346 | 11,734 | 24 | 0 |
+| outcome_only (session 0 has no subscription) | 205 | 0 | 3 | 0 |
+| **total** | **783,594** | **68,932** | | **0** |
+
+**Mutants, all CAUGHT:** `subscribe_at_latest` (K1), `shared_cache` (K1), `fault_ends_session` (K7), `unbounded_queue` (K6), `reset_drops_outcomes` (K4), `resume_foreign_as_empty` (K1), `release_fork_commits` (K1), `outcome_never` (K4 in main_two_sessions; **K5 only** in outcome_only), `rerun_without_retract` (K1), and (v2.5) `outcome_repeated` (K8 in main_two_sessions; NOT CAUGHT with K8 removed, RUN as a control).
+
+**Checkpoints:** not modelled as a runner transition. A checkpoint changes no version and publishes nothing, and `changes` is not Foreign across one (STORE-SPEC L23).
+
+### 8.3 Review 1028's models, re-run (RUN; `models/evidence/review1028_rerun.txt`)
+
+| Model | Rules | States | Failures |
+|---|---|---|---|
+| `model_runner_v24.py`, unchanged | v2.1 | 8 (1 cut) | 1: its finding |
+| `model_subscriptions_v24.py`, unchanged | v2.1 = v2.2 for fault isolation and restart Reset | 16 (5 cuts) | 0 |
+| `review1028_runner_on_v22.py`: the same model with V1's transition and a body that may hang | v2.2 | 12 (5 terminal) | **0** |
+| the same, with switch `h3` (the review's routing) | v2.1 | 13 | 2 |
+
+### 8.4 Measurements
+
+| Measurement | Value | Baseline | Mark |
+|---|---|---|---|
+| Local call, registry in the caller's task | **2,754.5 instr per call** (+420 runtime drift since p03, +696 rule 4's encode inside the bound, +46 the rest) | direct call 312 | RUN R0 at bf7cf64f (runner-build-1033); p03 at 71b306f0: 2,013 |
+| Through a head task | 3,980–4,152 instr per call | control p14: 2,042 | RUN |
+| `place` per entry | **5,289 instr at N=100** (R0); probe: 4,123 (N=1), 5,069 (N=100), 6,422 (N=1,000), 9,531 (N=3,000 split) | — | RUN R0 at bf7cf64f; RUN p19 at 62f15988 |
+| Registry bytes | **49.5 KB at 100 entries** (R0); probe: 896 B / 45.9 KB / 419.6 KB at 1 / 100 / 1,000 | — | RUN R0 at bf7cf64f; RUN p19 at 62f15988 |
+| `place` at 1,000 (built) and 10,000 entries | `run stop: Stack` in the identity dispatch | — | RUN; waits on reuse-history-fault-1031 |
+| Read set of a lookup query | 148 B / 4.9 KB / 480 KB at 1 / 100 / 10,000 rows | — | READ STORE-SPEC J1b (ESTIMATE there) |
+| Publisher re-run of a 10,000-row lookup query | about 44 M instr, about 10 ms | — | ESTIMATE from J1b's RUN parts |
+| Calls per second with a store commit | not a target until S5 | durable commit twin 659 instr, 77 µs | GUESS; READ baseline |
+| Recorded one-row transact commit | 205 B, of which the call section is 69 B | — | READ STORE-SPEC F7 |
+
+## 9. Build brief
+
+Each slice is final when it lands, and later slices only add.
+
+**Today's base:** S1 is landed (603a2274; std.omap, `run`, tables, `lookup`, Snapshots). S1.1 (`look`, `changes`, Shape reads) is being built. The v2.6/v2.7 S1 follow-up (I1 tree-key reads, I3 liveness on reads, J1 `IndexRows` with Points) is specified and not landed.
+
+| Slice | Content | Can start | Waits for to land | Acceptance |
+|---|---|---|---|---|
+| **R0** | §1.1 types (final), `Registry[G, H]`, `compute`, `granted`, duplicate refusal, `describe`, `call`, `start`/`finish`, `place` under `n_place` | **today** | N9 (R13 text) lands with it. Tests build with a fresh `--store` until reuse-history-fault-1031's fix lands. Landed bf7cf64f (runner-build-1033). Its 1,000-entry `p19_place_twice` and every 10,000-entry place wait on reuse-history-fault-1031's identity redesign; a single function of 3,000 registrations waits on N13. | See R0 acceptance below |
+| **R1** | `transact`, `handles` with rule 12, `place_head` (H1–H4, V2–V5), sessions as owned task groups (owner, reader and writer, v2.8; V1, slot table, deadline timer), the publisher with outcome-only batches (G1, V3), a Hirsel test client in the same run | **today**, against the spec and S1's memory store for `run`; admit and reply code waits for S5 | **S5** (`admit` with S7, `reply` kept on `Aborted`), S3 (tickets, `durable`), N12 | See R1 acceptance below |
+| **R2** | `query`, `cover`, Subscribe, G2/G3 rows in the same batches, read-set re-runs with lookup Points, `Ended`, `budget`, read-set bytes limit, coalescing, Reset | the publisher round (G2 over two Snapshots, interval index, diff) **when S1.1 lands**, tested against `subs22_model.py`'s reference | R1; S1.1; the v2.6/v2.7 follow-up (I1, I3, J1) | L5, L8, L9, L16, L17, L20, and `subs25_model.py`'s 4 scenarios and 10 mutants as law cases |
+| R3 | P3: frames, `hirsel sdk ts` with the bounded `place` run, Hello/Welcome with the launch identity (v2.12: describe mode and Welcome's identity are built, W4a) | when a network transport exists | transport; N8 (re-issued) | L12 generator half |
+| R4 | activation table, gone-key set, Resolve, Gone | after R1 | R1; D2 | L10, L11, L13; `calls25_model.py`'s `upgrade_gone` with mutant `gone_refused_at_session` (v2.5) |
+| R5 | `record`, re-execution, Verdict | after R1 | S3 (call section, `recorded`), S4 (fork); replay tape join | §7's table as cases |
+| R6 | granted over providers, InDoubt | — | provider ABI (provider-abi-fix-1018) | — |
+
+**R0 acceptance (named tests and laws):**
+- `runner/cases/p01_call`, `p02_start_finish`, `p09_describe`, `p13_duplicate_refused` (negative control exits 1), `p15_types_roundtrip`.
+- `runner/cases/p19_place_twice`: two `place` runs, in two tasks, give equal `describe` bytes at 1, 100 and 1,000 entries.
+- `runner/cases/p19_place_bound`: a branching `place` gives one list under one bound.
+- **L4** (malformed-flood peak, local `call`).
+- **L12, server half**: permuted registrations, an added A field and a changed R each change `describe`, and two runs of one build agree.
+
+**R1 acceptance (named tests and laws):**
+- **L1**, **L2** (both halves; the peak is the session's charge), **L3** (`TRY_SEND` events through the CONC-10 sink, on the evaluator, cranelift and llvm; v2.6), **L4** (`l4_peak_retained`: exact `peak_retained_bytes`, equal across two modes), **L6+L7** (eventual liveness and the count form: the first Batch at ≥ v), **L14** (`handles` twice), **L19** (the owner's held rows within the reserve, v2.11), **L15** (one Outcome per send: `drive_one_outcome_per_send`, the timed deadline-order case, the q = 0 join refusal).
+- `calls25_model.py`'s scenarios as the runner's model case, except `upgrade_gone` (R4), with its mutants each still CAUGHT (`gone_refused_at_session` moves to R4).
+- `L7/deadline_held` on the real head: p+1 sent while p is unsent waits in the FIFO; `Abandoned` at its deadline with the slot kept; then p sent and p+1 re-sent runs once. `L7/deadline_hung` as in §8 (v2.7), once core's `bound steps` is built (exec-budget slices).
+
+**What no slice may do:** give a send a second Outcome or none (C9, L15); answer a commitless outcome outside V1/V3 (mutant `direct_commitless`); release at a commit version (mutant `release_at_commit_version`); hold a request outside the session's slot table (mutant `queue_outside_account`).
+
+## 10. Decisions
+
+| # | Decision | Options | Recommendation | /wholehog |
+|---|---|---|---|---|
+| D1 | How the generator learns entries | it runs the server executable's `place` (RULED 2026-11-16) / a declared list (LANG-20 refuses one) / a manifest file | it runs `place`, bounded, in the same executable (rule 10) | same: one list, one path |
+| D2 | An old reader against a newer R or row | K or A (§6) | **K now**; the rollback row is K's cost | both clean; A must be global |
+| D3 | Typed error | one commit / two commits | one commit (ACCEPTED as STORE-SPEC F2) | one commit |
+| D4 | Principals and limits | anon only / JWT | anon in rung 1; the numbers are Sam's | — |
+| D5 (RULED (a) 2026-11-16, gavel 5; v2.7: MEM-30 `bound steps`, per-entry `s`, `DEFAULT_STEPS`) | A transact body or a query that never returns | (a) core's step bound (MEM-30), `OutOfTime` already declared; (b) ship R1 without it: a body that never yields stops the single worker, so the whole process stops (every session, the head, the publisher) until a watchdog restarts it (v2.4 corrects v2.2, which said sessions keep answering under (b)) | **(a)**; R1 is not blocked, but L7/deadline_hung can be stated and tested only under (a) | (a) is the end state |
+| D6 | Where `runner` lives | package `store` | module `runner` in package `store` | one package |
+| D7 (new) | Where compute entries run, given that each needs a Registry | **(a)** each session runs `place` and holds its own Registry (495 B per entry, built; 0.9 ms per connection at 1,000 entries, probe); **(b)** a pool of k compute tasks, each with one Registry, shared by all sessions | **(a)**: the Registry is in the session's account, so memory is bounded per session, and no compute request waits in a queue shared with other sessions. (b) bounds Registry memory by k instead of by connections, at the price of a cross-session queue. v2.4: hang isolation was no argument on the single-worker runtime; v2.7: with D5 (a) built a hung body stops only its own call, so it favours (a). | (a) treats compute like the head treats transact: one account per caller. Revisit only if a place has thousands of entries and thousands of sessions (1,000 × 1,000 ≈ 500 MB). |
+
+**ENDSTATE corrections:** ENDSTATE-TEXT.md in this directory. Its v2.2 section lists each sentence v2.2 changes, with the replacement.
+
+## 11. Prior art (each source opened; notes in prior-art/)
+
+Unchanged from v2.1. v2.2 takes no new mechanism from outside. V1's session timer and V3's ordered channel are consequences of the output gate (ADOPTED below) and the single publisher. The activation table is an ordinary table of the place.
+
+| Mechanism | Source | Mark |
+|---|---|---|
+| output gate | Durable Objects io-gate.h:18-21, actor-cache.c++:2272-2288 | ADOPTED as H3/G1/V4 |
+| one event at a time per object | DO input gate, io-gate.h:64,173-177 | ADAPTED as H1 (per stream, not per object) |
+| release at the confirmed durable offset | SpacetimeDB `confirmed_reads`, client_connection.rs:79-83,97-112 | ADOPTED as G1 |
+| dedup row in the effect's transaction | Convex session_requests/mod.rs:96-113; Temporal Update ID | ADOPTED via store streams + N2 |
+| query read sets invalidate subscriptions | Convex reads.rs:97-100, subscription.rs:355-378 | ADOPTED for the query's own reads, per-row Points included (J1) |
+| stale-attempt fencing | Temporal activity_util.go:68-69 | NOT TAKEN: H1 prevents a second attempt |
+| self-description run by host and codegen, 60 s child timeout | SpacetimeDB schema_extract.rs:15-52 | ADOPTED: child process + timeout, same executable (§5) |
+| caller-action errors; reached-entry split | Cap'n Proto rpc.capnp:1265-1316; gRPC A6 | ADAPTED / ADOPTED (§1.3) |
+| breaking schema policy | SpacetimeDB auto_migrate.rs:61-121 | ADAPTED as D2-K |
+| types-only contract | tRPC | NOT TAKEN |
+| per-handler adapter | Hirsel dispatch spool | REPLACED by one adapter per kind |

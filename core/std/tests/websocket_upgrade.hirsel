@@ -21,7 +21,7 @@ fn status(b: Bytes) -> u16 {
 fn client_status(b: Bytes, offered: bool) -> u16 {
     match result.unwrap(websocket.client(b, challenge(), offered)) {
         Pending => 0,
-        Ready(_) => 101,
+        Ready(_, _) => 101,
         Failed(s) => s
     }
 }
@@ -95,25 +95,34 @@ fn client_checks() -> bool {
     client_status(response_bytes(), false) == 101 && client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\t\r\nUpgrade: WebSocket\r\nConnection: keep-alive, upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"), false) == 101 && client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"), false) == 400 && client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-WebSocket-Accept: wrong\r\n\r\n"), false) == 400 && client_status(result.unwrap(b"HTTP/1.1 200 OK\r\nUpgrade: websocket\r\nConnection: upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"), false) == 400
 }
 
-// Mutant: allow_unsolicited_extension.
+// RFC 6455 section 4.1: an offer may be declined. The runner requires its
+// protocol through its own configuration, not through the generic machine.
+// Mutants: allow_unsolicited_extension, require_offered_protocol.
 // expect: run client_negotiation_tail() = true
 fn client_negotiation_tail() -> bool {
     let mut b = response_bytes()
     let end = list.len(b)
     result.unwrap(list.append(mut b, result.unwrap(b"\x82\x00")))
     let tail = match result.unwrap(websocket.client(b, challenge(), false)) {
-        Ready(at) => at == end && list.len(b) - at == 2,
+        Ready(at, false) => at == end && list.len(b) - at == 2,
         _ => false
     }
     let mut protocol_response: Bytes = list.new()
     let response = response_bytes()
     result.unwrap(list.append(mut protocol_response, list.slice(response, 0, list.len(response) - 2)))
     result.unwrap(list.append(mut protocol_response, result.unwrap(b"Sec-WebSocket-Protocol: hirsel.1\r\n\r\n")))
-    let offered = client_status(protocol_response, true) == 101 && client_status(protocol_response, false) == 400
+    let offered = match result.unwrap(websocket.client(protocol_response, challenge(), true)) {
+        Ready(_, selected) => selected,
+        _ => false
+    }
+    let declined = match result.unwrap(websocket.client(response_bytes(), challenge(), true)) {
+        Ready(_, selected) => !selected,
+        _ => false
+    }
     let mut extension: Bytes = list.new()
     result.unwrap(list.append(mut extension, list.slice(response, 0, list.len(response) - 2)))
     result.unwrap(list.append(mut extension, result.unwrap(b"Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n")))
-    tail && offered && client_status(response_bytes(), true) == 400 && client_status(extension, true) == 400
+    tail && offered && declined && client_status(protocol_response, false) == 400 && client_status(extension, true) == 400
 }
 
 // Mutant: wrong_client_nonce, inject_host.

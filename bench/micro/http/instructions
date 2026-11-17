@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""B1 server-only Callgrind instructions for http1-plaintext-keepalive."""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import select
+import shlex
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = Path(__file__).resolve().parent
+REQUEST = b'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n'
+RESPONSE = (b'HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n'
+            b'content-length: 12\r\n\r\nHello, world')
+ALLOWED_CPUS = set(range(12)) | set(range(16, 28))
+
+
+def build(server):
+    command = ['cargo', 'build', '--manifest-path', str(HERE / 'Cargo.toml'),
+               '--workspace', '--all-targets', '--release', '--locked',
+               '--message-format=json']
+    result = subprocess.run(command, cwd=HERE, text=True, stdout=subprocess.PIPE, check=True)
+    for line in result.stdout.splitlines():
+        artifact = json.loads(line)
+        if (artifact.get('reason') == 'compiler-artifact'
+                and artifact['target']['name'] == f'http-b1-{server}'
+                and not artifact['profile']['test'] and artifact.get('executable')):
+            return [artifact['executable']]
+    raise RuntimeError(f'build did not produce http-b1-{server}')
+
+
+def stop(process):
+    # Only the Popen child owned by this invocation can reach this function.
+    for force in (False, True):
+        if process.poll() is not None:
+            return
+        name = subprocess.run(['ps', '-o', 'comm=', '-p', str(process.pid)],
+                              text=True, stdout=subprocess.PIPE, check=False).stdout.strip()
+        if not name:
+            process.wait()
+            return
+        if name in {'systemd', 'dbus-daemon', 'sshd', 'tmux', 't3', 'orca-ide',
+                    'claude', 'codex'}:
+            raise RuntimeError(f'refusing to stop protected process {name}')
+        process.kill() if force else process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def exchange(command, requests, timeout=900):
+    """One connection, no readiness probe connection and no measured client."""
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen([*command, '--requests', str(requests), '--port', '0'],
+                                   stdout=subprocess.PIPE, stderr=errors, bufsize=0)
+        try:
+            deadline = time.monotonic() + timeout
+            if not select.select([process.stdout], [], [], min(30, timeout))[0]:
+                raise RuntimeError('server did not announce its listener')
+            ready = process.stdout.readline().decode().strip()
+            if not ready.startswith('LISTEN 127.0.0.1:'):
+                raise RuntimeError(f'unexpected server announcement: {ready!r}')
+            port = int(ready.rsplit(':', 1)[1])
+            with socket.create_connection(('127.0.0.1', port), timeout=30) as stream:
+                stream.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                with stream.makefile('rb') as replies:
+                    for index in range(requests):
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError('sample exceeded 15 minutes executing')
+                        stream.settimeout(min(30, remaining))
+                        stream.sendall(REQUEST)
+                        reply = replies.read(len(RESPONSE))
+                        if reply != RESPONSE:
+                            raise RuntimeError(f'response {index + 1} differs: {reply!r}')
+                    stream.shutdown(socket.SHUT_WR)
+                    if replies.read(1):
+                        raise RuntimeError('unexpected bytes after final response')
+            output, _ = process.communicate(timeout=30)
+            if process.returncode or output.strip() != f'SERVED {requests}'.encode():
+                raise RuntimeError(f'server exited {process.returncode}: {output!r}')
+        except BaseException:
+            stop(process)
+            errors.seek(0)
+            sys.stderr.write(errors.read().decode(errors='replace'))
+            raise
+        finally:
+            process.stdout.close()
+
+
+def instructions(path):
+    events = None
+    with Path(path).open() as profile:
+        for line in profile:
+            if line.startswith('events:'):
+                events = line.split()[1:]
+            elif line.startswith('summary:') and events is not None:
+                return int(line.split()[1:][events.index('Ir')])
+    raise ValueError(f'no Callgrind instruction summary in {path}')
+
+
+def per_request(low, high, small, large):
+    if large <= small or small < 1:
+        raise ValueError('request counts must satisfy 0 < small < large')
+    if high <= low:
+        raise ValueError('nonpositive instruction delta; sample is inconclusive')
+    return (high - low) / (large - small)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('server', help='tokio, hyper, or a label with --command')
+    parser.add_argument('--command', help='server command, accepting --requests and --port')
+    parser.add_argument('--small', type=int, default=1024)
+    parser.add_argument('--large', type=int, default=8192)
+    parser.add_argument('--cpu', type=int, help='one allowed CPU; default first inherited CPU')
+    parser.add_argument('--check', action='store_true', help='check 3 replies without Callgrind')
+    args = parser.parse_args()
+    if not 0 < args.small < args.large:
+        parser.error('request counts must satisfy 0 < small < large')
+    available = ALLOWED_CPUS & os.sched_getaffinity(0)
+    cpu = min(available) if args.cpu is None and available else args.cpu
+    if cpu not in available:
+        parser.error('CPU must be inherited and in 0-11 or 16-27')
+    os.sched_setaffinity(0, {cpu})
+    if not args.command and args.server not in {'tokio', 'hyper'}:
+        parser.error('a custom server requires --command')
+    command = shlex.split(args.command) if args.command else build(args.server)
+    if not command:
+        parser.error('--command must not be empty')
+    if args.check:
+        exchange(command, 3)
+        print(f'{args.server}: 3/3 byte-identical replies on one connection, CPU {cpu}')
+        return
+    counts = []
+    # Each profile includes initialization, accept and EOF teardown. Their
+    # difference removes those fixed costs; the client never runs in Valgrind.
+    with tempfile.TemporaryDirectory(prefix='http-b1-') as directory:
+        for requests in (args.small, args.large):
+            profile = Path(directory) / f'{requests}.callgrind'
+            with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                exchange(['valgrind', '--tool=callgrind', '--quiet',
+                          f'--callgrind-out-file={profile}', *command], requests)
+            counts.append(instructions(profile))
+    cost = per_request(*counts, args.small, args.large)
+    print('workload                    server   cpu  small  large       Ir_small        Ir_large     Ir/request')
+    print(f'http1-plaintext-keepalive    {args.server:<8} {cpu:>3} {args.small:>6} {args.large:>6}'
+          f' {counts[0]:>14} {counts[1]:>15} {cost:>14.2f}')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        sys.exit(f'instructions: {error}')

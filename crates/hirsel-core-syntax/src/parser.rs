@@ -312,23 +312,27 @@ impl Parser<'_> {
         if self.token(0).kind == TokenKind::Ident && !self.at(sym::UNDERSCORE) {
             Ok(self.bump())
         } else {
-            self.fail_expected(
-                if self.token(0).kind.is_keyword() {
-                    "LANG-2"
-                } else {
-                    "LANG-5"
-                },
-                "non-keyword identifier",
-                if self.token(0).kind.is_keyword() {
-                    format!(
-                        "`{}` is a reserved word and cannot be used as a name",
-                        self.text_token(self.index())
-                    )
-                } else {
-                    format!("expected a name, found `{}`", self.text_token(self.index()))
-                },
-            )
+            self.name_error()
         }
+    }
+    #[cold]
+    fn name_error(&mut self) -> Parsed<TokenId> {
+        self.fail_expected(
+            if self.token(0).kind.is_keyword() {
+                "LANG-2"
+            } else {
+                "LANG-5"
+            },
+            "non-keyword identifier",
+            if self.token(0).kind.is_keyword() {
+                format!(
+                    "`{}` is a reserved word and cannot be used as a name",
+                    self.text_token(self.index())
+                )
+            } else {
+                format!("expected a name, found `{}`", self.text_token(self.index()))
+            },
+        )
     }
     fn leading_binary(&self) -> bool {
         self.newline()

@@ -1,0 +1,12 @@
+{
+  "file": "crates/hirsel-core-front/front-cost-ceilings.json",
+  "cell": [
+    "corpora",
+    "m1",
+    "instructions_per_token",
+    "declarations"
+  ],
+  "previous": 158.73517497193617,
+  "value": 163.67616191904048,
+  "reason": "Orchestrator-authorized W1a input-only rebase. One same-binary pass on4531f84e, reversing only1eae7a8d/1b870e1d input edits and retaining later sources, makes this cell green. M1/std gain284tokens from11Net declarations and7extern signatures, with no new completed body. The separate dbd41e46 Parser::name inlining regression is fixed in code and its parse ceilings are not raised. Value from cold-name-report.json via unchanged front-cost.baseline. Per-token normalization, phase targets and60000budget unchanged. Evidence core-check-cost-915/w1a-pass-20261117/."
+}

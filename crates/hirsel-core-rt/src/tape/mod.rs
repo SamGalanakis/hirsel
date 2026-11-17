@@ -101,6 +101,7 @@ pub enum Refusal {
     Arg,
     Limit,
     Damaged(u64),
+    HeaderTooLarge,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenError {
@@ -176,7 +177,7 @@ struct Object {
 }
 
 struct Recorder {
-    sink: Inner,
+    sink: ProviderFile,
     tape_id: [u8; 16],
     encoder: Encoder,
     buffer: Vec<u8>,
@@ -184,7 +185,7 @@ struct Recorder {
 }
 
 struct Replayer {
-    bytes: Vec<u8>,
+    source: ProviderFile,
     blocks: Blocks,
     decoder: Decoder,
     frames: VecDeque<Frame>,
@@ -332,55 +333,97 @@ fn failed(o: &Outcome) -> Option<IoError> {
         None
     }
 }
-unsafe fn write_all(p: Inner, bytes: &[u8]) -> Result<(), IoError> {
-    let mut r = request(
-        WRITE,
-        0,
-        0,
-        &[],
-        Buffer {
-            data: bytes.as_ptr().cast_mut(),
-            len: bytes.len(),
-            capacity: 0,
-        },
-    );
-    r.path = ptr::null();
-    // SAFETY: forwarded.
-    let o = unsafe { sink(p, r) };
-    failed(&o).map_or(Ok(()), Err)
+/// Owns a file from successful OPEN until CLOSE. The provider must remain
+/// pinned in its run for the owner's lifetime.
+struct ProviderFile(Option<Inner>);
+
+impl ProviderFile {
+    unsafe fn open(dir: Inner, mode: u8, name: &[u8]) -> Result<Self, IoError> {
+        // SAFETY: the opener owns the pinned provider.
+        let o = unsafe { sink(dir, request(OPEN, mode, 0, name, empty_buffer())) };
+        match failed(&o) {
+            Some(e) => Err(e),
+            None => Ok(Self(Some(Inner {
+                provider: dir.provider,
+                handle: o.value,
+            }))),
+        }
+    }
+
+    fn write(&self, bytes: &[u8]) -> Result<(), IoError> {
+        let mut r = request(
+            WRITE,
+            0,
+            0,
+            &[],
+            Buffer {
+                data: bytes.as_ptr().cast_mut(),
+                len: bytes.len(),
+                capacity: 0,
+            },
+        );
+        r.path = ptr::null();
+        // SAFETY: the file and the borrowed input are pinned through delivery.
+        let o = unsafe { sink(self.0.unwrap(), r) };
+        failed(&o).map_or(Ok(()), Err)
+    }
+
+    fn read(&self, bytes: &mut [u8]) -> Result<usize, IoError> {
+        let mut r = request(
+            READ,
+            0,
+            0,
+            &[],
+            Buffer {
+                data: bytes.as_mut_ptr(),
+                len: 0,
+                capacity: bytes.len(),
+            },
+        );
+        r.path = ptr::null();
+        // SAFETY: the file and the writable buffer are pinned through delivery.
+        let o = unsafe { sink(self.0.unwrap(), r) };
+        failed(&o).map_or(Ok(o.value as usize), Err)
+    }
+
+    fn close(&mut self) -> Result<(), IoError> {
+        let Some(file) = self.0.take() else {
+            return Ok(());
+        };
+        // SAFETY: the file remains pinned through delivery.
+        let o = unsafe { sink(file, request(CLOSE, 0, 0, &[], empty_buffer())) };
+        failed(&o).map_or(Ok(()), Err)
+    }
+}
+impl Drop for ProviderFile {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
 }
 
 impl Recorder {
     /// Append one frame and its DATA continuations, closing the block at
     /// 64 KiB between frames, never inside one.
-    unsafe fn frame(&mut self, f: &Frame) -> Result<(), IoError> {
+    fn frame(&mut self, f: &Frame) -> Result<(), IoError> {
         let (head, rest) = self.encoder.frame(f);
         self.buffer.extend_from_slice(&head);
         for d in rest {
             if self.buffer.len() >= CLOSE_AT {
-                // SAFETY: forwarded.
-                unsafe { self.close(0)? };
+                self.close(0)?;
             }
             self.buffer.extend_from_slice(&d);
         }
         if self.buffer.len() >= CLOSE_AT {
-            // SAFETY: forwarded.
-            unsafe { self.close(0)? };
+            self.close(0)?;
         }
         Ok(())
     }
-    unsafe fn close(&mut self, flags: u8) -> Result<(), IoError> {
+    fn close(&mut self, flags: u8) -> Result<(), IoError> {
         let b = block(&self.tape_id, flags, self.seq, &self.buffer);
         self.seq += 1;
         self.buffer.clear();
         self.encoder.new_block();
-        // SAFETY: forwarded.
-        unsafe { write_all(self.sink, &b) }
-    }
-    unsafe fn close_file(&mut self) -> Result<(), IoError> {
-        // SAFETY: forwarded.
-        let o = unsafe { sink(self.sink, request(CLOSE, 0, 0, &[], empty_buffer())) };
-        failed(&o).map_or(Ok(()), Err)
+        self.sink.write(&b)
     }
 }
 
@@ -400,8 +443,9 @@ impl Replayer {
                 return Ok(f);
             }
             let at = self.taken + 1;
-            match self.blocks.next(&self.bytes) {
-                Err(s) => return Err(Fault::stopped(s, at)),
+            match self.blocks.next(|bytes| self.source.read(bytes)) {
+                Err(ReadError::Format(s)) => return Err(Fault::stopped(s, at)),
+                Err(ReadError::Source(e)) => return Err(Fault::Io(e)),
                 Ok(None) => return Err(self.diverged_next(Mismatch::Extra)),
                 Ok(Some((flags, payload))) => {
                     let frames = self.decoder.block(payload, flags & END != 0)?;
@@ -486,10 +530,6 @@ impl Tape {
         header: &Header,
         expect: &Expect,
     ) -> Result<(Tape, Vec<u8>), OpenError> {
-        let header = &Header {
-            revision,
-            ..header.clone()
-        };
         let dir = Inner {
             provider: dir.0,
             handle: dir.1,
@@ -497,23 +537,19 @@ impl Tape {
         let mut differs = false;
         let (live, arg) = match mode {
             Mode::Record => {
+                let buffer = header
+                    .encode(revision)
+                    .map_err(|_| OpenError::Refused(Refusal::HeaderTooLarge))?;
                 // SAFETY: forwarded.
-                let o = unsafe { sink(dir, request(OPEN, 3, 0, name, empty_buffer())) };
-                if let Some(e) = failed(&o) {
-                    return Err(OpenError::Io(e));
-                }
+                let sink = unsafe { ProviderFile::open(dir, 3, name) }.map_err(OpenError::Io)?;
                 let mut recorder = Recorder {
-                    sink: Inner {
-                        provider: dir.provider,
-                        handle: o.value,
-                    },
+                    sink,
                     tape_id: header.tape_id,
                     encoder: Encoder::default(),
-                    buffer: header.encode(),
+                    buffer,
                     seq: 0,
                 };
-                // SAFETY: forwarded.
-                unsafe { recorder.close(0) }.map_err(OpenError::Io)?;
+                recorder.close(0).map_err(OpenError::Io)?;
                 let live = Live {
                     waiting: BTreeMap::new(),
                     pending: BTreeMap::new(),
@@ -529,18 +565,21 @@ impl Tape {
             }
             Mode::Replay => {
                 // SAFETY: forwarded.
-                let bytes = unsafe { read_file(dir, name) }.map_err(OpenError::Io)?;
-                let (blocks, stored) = match Blocks::open(&bytes) {
+                let source = unsafe { ProviderFile::open(dir, 0, name) }.map_err(OpenError::Io)?;
+                let (blocks, stored) = match Blocks::open(|bytes| source.read(bytes)) {
                     Ok(b) => b,
-                    Err(Stop::Damaged(k)) => {
+                    Err(ReadError::Source(e)) => return Err(OpenError::Io(e)),
+                    Err(ReadError::Format(Stop::Damaged(k))) => {
                         return Err(OpenError::Refused(Refusal::Damaged(k)));
                     }
-                    Err(s) => return Err(OpenError::Unreadable(Fault::stopped(s, 0))),
+                    Err(ReadError::Format(s)) => {
+                        return Err(OpenError::Unreadable(Fault::stopped(s, 0)));
+                    }
                 };
                 if stored.identity != expect.identity {
                     return Err(OpenError::Refused(Refusal::Code));
                 }
-                if stored.revision != header.revision && !expect.across {
+                if stored.revision != revision && !expect.across {
                     return Err(OpenError::Refused(Refusal::Revision));
                 }
                 if expect.arg.is_some_and(|a| a != stored.arg) {
@@ -549,7 +588,7 @@ impl Tape {
                 if stored.limit != expect.limit || stored.charge_policy != expect.charge_policy {
                     return Err(OpenError::Refused(Refusal::Limit));
                 }
-                differs = stored.revision != header.revision;
+                differs = stored.revision != revision;
                 let live = Live {
                     waiting: BTreeMap::new(),
                     pending: BTreeMap::new(),
@@ -560,7 +599,7 @@ impl Tape {
                     clocks: BTreeMap::new(),
                     recorder: None,
                     replayer: Some(Replayer {
-                        bytes,
+                        source,
                         blocks,
                         decoder: Decoder::default(),
                         frames: VecDeque::new(),
@@ -640,8 +679,7 @@ impl Tape {
                     kind,
                     args: args.clone(),
                 };
-                // SAFETY: called in a task of the tape's run.
-                if let Err(e) = unsafe { rec.frame(&frame) } {
+                if let Err(e) = rec.frame(&frame) {
                     live.fault = Some(refuse(Fault::Io(e)));
                     return Err(Fault::Io(e));
                 }
@@ -711,19 +749,15 @@ impl Tape {
             }));
         }
         if let Some(rec) = live.recorder.as_mut() {
-            // SAFETY: end and drop run in a task of the tape's run.
-            let written = unsafe {
-                if let Some(e) = end {
-                    rec.frame(&Frame::End(e.clone()))
-                        .and_then(|()| rec.close(format::END))
-                } else if rec.buffer.is_empty() {
-                    Ok(())
-                } else {
-                    rec.close(0)
-                }
+            let written = if let Some(e) = end {
+                rec.frame(&Frame::End(e.clone()))
+                    .and_then(|()| rec.close(format::END))
+            } else if rec.buffer.is_empty() {
+                Ok(())
+            } else {
+                rec.close(0)
             };
-            // SAFETY: as above.
-            let closed = unsafe { rec.close_file() };
+            let closed = rec.sink.close();
             if result.is_ok() {
                 result = written.and(closed).map_err(Fault::Io);
             }
@@ -752,6 +786,10 @@ impl Tape {
                 Err(f) => Err(f),
             };
         }
+        if let Some(rep) = live.replayer.as_mut() {
+            let closed = rep.source.close().map_err(Fault::Io);
+            result = result.and(closed);
+        }
         FREE.with_borrow_mut(|f| f.push(self.cell));
         result
     }
@@ -759,49 +797,6 @@ impl Tape {
 impl Drop for Tape {
     fn drop(&mut self) {
         let _ = self.finish(None);
-    }
-}
-
-unsafe fn read_file(dir: Inner, name: &[u8]) -> Result<Vec<u8>, IoError> {
-    // SAFETY: the sink runs in the opener's task.
-    unsafe {
-        let o = sink(dir, request(OPEN, 0, 0, name, empty_buffer()));
-        if let Some(e) = failed(&o) {
-            return Err(e);
-        }
-        let file = Inner {
-            provider: dir.provider,
-            handle: o.value,
-        };
-        let mut bytes: Vec<u8> = Vec::with_capacity(64 * 1024);
-        let result = loop {
-            if bytes.len() == bytes.capacity() {
-                bytes.reserve(bytes.capacity());
-            }
-            let mut r = request(
-                READ,
-                0,
-                0,
-                &[],
-                Buffer {
-                    data: bytes.as_mut_ptr(),
-                    len: bytes.len(),
-                    capacity: bytes.capacity(),
-                },
-            );
-            r.path = ptr::null();
-            let o = sink(file, r);
-            if let Some(e) = failed(&o) {
-                break Err(e);
-            }
-            if o.value == 0 {
-                break Ok(());
-            }
-            bytes.set_len(bytes.len() + o.value as usize);
-        };
-        let o = sink(file, request(CLOSE, 0, 0, &[], empty_buffer()));
-        result?;
-        failed(&o).map_or(Ok(bytes), Err)
     }
 }
 
@@ -883,9 +878,7 @@ unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
         let mut s = cell.state.lock().unwrap();
         let live = s.live.as_mut().unwrap();
         if live.waiting.insert(key, task).is_none() {
-            // SAFETY: callback runs on the tape's owning thread.
-            if let Err(e) = unsafe { live.recorder.as_mut().unwrap().frame(&Frame::Wait { task }) }
-            {
+            if let Err(e) = live.recorder.as_mut().unwrap().frame(&Frame::Wait { task }) {
                 live.fault = Some(refuse(Fault::Io(e)));
                 return Wait::default();
             }
@@ -970,8 +963,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         args: Args::of(&args),
     };
     if step.kind == STEP_PENDING {
-        // SAFETY: the run's callback thread owns the sink.
-        if let Err(e) = unsafe { live.recorder.as_mut().unwrap().frame(&own) } {
+        if let Err(e) = live.recorder.as_mut().unwrap().frame(&own) {
             live.fault = Some(refuse(Fault::Io(e)));
             return done(REFUSED);
         }
@@ -1004,8 +996,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         args,
         out,
     };
-    // SAFETY: the run owns the tape sink.
-    if let Err(e) = unsafe { live.recorder.as_mut().unwrap().frame(&frame) } {
+    if let Err(e) = live.recorder.as_mut().unwrap().frame(&frame) {
         live.fault = Some(refuse(Fault::Io(e)));
     }
     live.schedule.events += 1;

@@ -229,17 +229,24 @@ fn run_case(bytes: Option<&[u8]>, chooser: u8, pending: bool, gap_case: bool) ->
     }
     run
 }
-fn frames(bytes: &[u8]) -> (Header, Vec<Frame>) {
-    let (mut blocks, header) = Blocks::open(bytes).unwrap();
+fn frames(mut bytes: &[u8]) -> (Header, Vec<Frame>) {
+    use std::io::Read;
+
+    let (mut blocks, header) = Blocks::open(|buf| bytes.read(buf)).unwrap();
     let mut decoder = Decoder::default();
     let mut frames = Vec::new();
-    while let Some((flags, payload)) = blocks.next(bytes).unwrap() {
+    while let Some((flags, payload)) = blocks.next(|buf| bytes.read(buf)).unwrap() {
         frames.extend(decoder.block(payload, flags & format::END != 0).unwrap());
     }
     (header, frames)
 }
 fn encode(header: &Header, frames: &[Frame]) -> Vec<u8> {
-    let mut out = block(&header.tape_id, 0, 0, &header.encode());
+    let mut out = block(
+        &header.tape_id,
+        0,
+        0,
+        &header.encode(header.revision).unwrap(),
+    );
     let mut encoder = Encoder::default();
     let mut payload = Vec::new();
     for frame in frames {

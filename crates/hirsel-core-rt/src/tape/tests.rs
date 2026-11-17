@@ -5,7 +5,7 @@
 //! results from sections 5 and 8.
 use super::*;
 use crate::os::OsProvider;
-use std::cell::Cell as Shared;
+use std::{cell::Cell as Shared, io::Read};
 
 /// The code revision the tests open tapes as.
 pub(super) const REVISION: [u8; 32] = {
@@ -159,6 +159,10 @@ pub(super) struct Store {
     pub(super) files: BTreeMap<Vec<u8>, Vec<u8>>,
     open: BTreeMap<u64, (Vec<u8>, usize)>,
     next: u64,
+    write_error: Option<IoError>,
+    read_meter: Option<hirsel_guard::admission::Owner>,
+    read_peak: u64,
+    bytes_read: usize,
 }
 impl Store {
     fn with(bytes: &[u8]) -> Box<Self> {
@@ -188,6 +192,7 @@ impl Store {
                         }
                     }
                 }
+                WRITE if st.write_error.is_some() => o.error = st.write_error.unwrap(),
                 WRITE => {
                     let (name, _) = &st.open[&r.handle];
                     let bytes = unsafe { std::slice::from_raw_parts(r.buffer.data, r.buffer.len) };
@@ -197,7 +202,13 @@ impl Store {
                 READ => {
                     let (name, at) = st.open.get_mut(&r.handle).unwrap();
                     let f = &st.files[name];
-                    let n = (r.buffer.capacity - r.buffer.len).min(f.len() - *at);
+                    let mut n = (r.buffer.capacity - r.buffer.len).min(f.len() - *at);
+                    if let Some(meter) = &st.read_meter {
+                        st.read_peak = st.read_peak.max(meter.bytes());
+                        // Exercise short reads of both metadata and payload.
+                        n = n.min(509);
+                    }
+                    st.bytes_read += n;
                     unsafe {
                         ptr::copy_nonoverlapping(
                             f[*at..].as_ptr(),
@@ -568,18 +579,19 @@ fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
     };
     let b3 = payload(&[Frame::End(outcome.clone())], &mut e);
     let tape = [
-        block(&h.tape_id, 0, 0, &h.encode()),
+        block(&h.tape_id, 0, 0, &h.encode(h.revision).unwrap()),
         block(&h.tape_id, 0, 1, &b1),
         block(&h.tape_id, 0, 2, &b2),
         block(&h.tape_id, END, 3, &b3),
     ]
     .concat();
     assert_eq!(tape, MODEL);
-    let (mut blocks, read) = Blocks::open(MODEL).unwrap();
+    let mut bytes = MODEL;
+    let (mut blocks, read) = Blocks::open(|buf| bytes.read(buf)).unwrap();
     assert_eq!(read, h);
     let mut d = Decoder::default();
     let mut frames = Vec::new();
-    while let Some((flags, p)) = blocks.next(MODEL).unwrap() {
+    while let Some((flags, p)) = blocks.next(|buf| bytes.read(buf)).unwrap() {
         frames.extend(d.block(p, flags & END != 0).unwrap());
     }
     assert_eq!(frames[1], mono(1_000_000_123));
@@ -592,8 +604,13 @@ fn the_encoder_writes_the_format_2_model_tape_byte_for_byte() {
 /// reader that still accepts format 1 beside format 2.
 #[test]
 fn a_format_1_tape_is_corrupt() {
-    assert_eq!(Blocks::open(MODEL_F1).err(), Some(Stop::Corrupt));
-    assert!(Blocks::open(MODEL).is_ok());
+    let mut older = MODEL_F1;
+    assert!(matches!(
+        Blocks::open(|buf| older.read(buf)),
+        Err(ReadError::Format(Stop::Corrupt))
+    ));
+    let mut current = MODEL;
+    assert!(Blocks::open(|buf| current.read(buf)).is_ok());
 }
 
 /// Wrong implementation caught: Record writing anything other than the
@@ -606,6 +623,193 @@ fn record_writes_the_hand_encoded_tape() {
     assert_eq!(obs[0].value, 1_700_000_000_000);
     assert_eq!(obs[7].value, 5, "the opened file is ordinal 5");
     assert_eq!(obs[8].bytes.len(), 70_000);
+}
+
+/// CAP-9 and replay format §5.2: validate only block zero on open, then
+/// replay with a measured buffer allowance independent of the tape's length.
+#[test]
+fn replay_reads_and_allocates_by_block() {
+    use hirsel_guard::admission::{Owner, OwnerKind};
+
+    let input = vec![0x5a; CLOSE_AT];
+    let mut encoder = Encoder::default();
+    let mut start = encoder
+        .frame(&Frame::Grant {
+            kind: crate::entry::DIR,
+            args: None,
+        })
+        .0;
+    start.extend(
+        encoder
+            .frame(&Frame::Op {
+                task: 0,
+                op: OPEN,
+                object: 1,
+                args: Args::of(b"\0data"),
+                out: Out {
+                    value: 2,
+                    ..Out::default()
+                },
+            })
+            .0,
+    );
+    encoder.new_block();
+    let (read, data) = encoder.frame(&Frame::Op {
+        task: 0,
+        op: READ,
+        object: 2,
+        args: Args::of(&(input.len() as u64).to_le_bytes()),
+        out: Out {
+            value: input.len() as u64,
+            payload: input.clone(),
+            ..Out::default()
+        },
+    });
+    assert!(data.is_empty());
+    let end = encoder.frame(&Frame::End(ending())).0;
+    let header_end = boundaries(HAND)[1];
+    let h = header(REVISION);
+    let mut samples = [(0, 0, 0); 2];
+
+    for (sample, count) in samples.iter_mut().zip([4, 128u64]) {
+        let mut store = Store::with(&HAND[..header_end]);
+        let file = store.files.get_mut(b"t".as_slice()).unwrap();
+        file.extend(block(&h.tape_id, 0, 1, &start));
+        for seq in 2..count + 2 {
+            file.extend(block(&h.tape_id, 0, seq, &read));
+        }
+        file.extend(block(&h.tape_id, END, count + 2, &end));
+        let host = Counted::new(None);
+
+        let meter = Owner::new(OwnerKind::Ledger);
+        store.read_meter = Some(meter.clone());
+        let refused = {
+            let _measure = meter.enter();
+            unsafe { Tape::open([0; 32], store.dir(), b"t", Mode::Replay, &h, &expect()) }
+        };
+        assert_eq!(refused.err(), Some(OpenError::Refused(Refusal::Revision)));
+        let reads_on_refusal = store.bytes_read;
+        assert!(store.open.is_empty());
+        store.bytes_read = 0;
+        store.read_peak = 0;
+
+        let (tape, _) = {
+            let _measure = meter.enter();
+            unsafe { Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()) }
+        }
+        .unwrap();
+        let reads_on_open = store.bytes_read;
+        {
+            let _measure = meter.enter();
+            let dir = tape
+                .on_tape(crate::entry::DIR, (host.provider(), 0))
+                .unwrap();
+            let opened = plain(dir, OPEN, 0, b"data");
+            assert_eq!(opened.value, 2);
+            let file = (dir.0, handle_like(dir.1, opened.value));
+            for _ in 0..count {
+                let got = spare(file, READ, &[], input.len());
+                assert_eq!(got.status, 0);
+                assert_eq!(got.bytes, input);
+            }
+            tape.end(&ending()).unwrap();
+        }
+        *sample = (reads_on_refusal, reads_on_open, store.read_peak);
+        assert_eq!(host.calls.get(), 0);
+        assert!(store.open.is_empty());
+        assert_eq!(store.bytes_read, store.file().len());
+    }
+
+    // One maximum-size block plus 128 KiB for the READ carrier, provider
+    // bookkeeping and tape state. The 8 MiB input lives outside the meter.
+    let allowance = (MAX_LEN + 2 * CLOSE_AT) as u64;
+    eprintln!("block-zero bytes and peak live allocations (short, long): {samples:?}");
+    for (reads_on_refusal, reads_on_open, peak) in samples {
+        assert_eq!(
+            reads_on_refusal, header_end,
+            "read bytes beyond refused header"
+        );
+        assert_eq!(
+            reads_on_open, header_end,
+            "read bytes beyond accepted header"
+        );
+        assert!((CLOSE_AT as u64..=allowance).contains(&peak), "{samples:?}");
+    }
+
+    let mut trailing = HAND.to_vec();
+    trailing.push(0);
+    let (_, _, result) = replay(&trailing, 70_000, Variant::Same, &ending()).unwrap();
+    assert_eq!(
+        result,
+        Err(Fault::Damaged((boundaries(HAND).len() - 1) as u64))
+    );
+
+    let mut store = Store::with(HAND);
+    let (tape, _) =
+        unsafe { Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()) }.unwrap();
+    drop(tape);
+    assert!(store.open.is_empty());
+    assert_eq!(store.bytes_read, header_end);
+}
+
+#[test]
+fn record_closes_the_file_when_the_header_write_fails() {
+    let error = IoError {
+        tag: 5,
+        code: libc::ENOSPC as u32,
+    };
+    let mut store = Box::new(Store {
+        write_error: Some(error),
+        ..Store::default()
+    });
+    let result = unsafe {
+        Tape::open(
+            REVISION,
+            store.dir(),
+            b"t",
+            Mode::Record,
+            &header(REVISION),
+            &expect(),
+        )
+    };
+    assert_eq!(result.err(), Some(OpenError::Io(error)));
+    assert!(
+        store.open.is_empty(),
+        "the provider still owns the opened file"
+    );
+}
+
+#[test]
+fn record_refuses_a_header_that_overflows_block_zero_before_creating_the_file() {
+    let mut h = header(REVISION);
+    // 73 fixed bytes, 14 identity bytes + 1 length byte, the argument's
+    // 3-byte length and a 1-byte empty grants count.
+    h.arg = vec![0; MAX_LEN - 92];
+    let mut store = Box::<Store>::default();
+    let (tape, _) =
+        unsafe { Tape::open(REVISION, store.dir(), b"t", Mode::Record, &h, &expect()) }.unwrap();
+    tape.end(&ending()).unwrap();
+    assert_eq!(
+        boundaries(store.file())[1],
+        BLOCK_HEAD + MAX_LEN + BLOCK_CHECK
+    );
+
+    h.arg.push(0);
+    let result = unsafe {
+        Tape::open(
+            REVISION,
+            store.dir(),
+            b"oversized",
+            Mode::Record,
+            &h,
+            &expect(),
+        )
+    };
+    assert_eq!(
+        result.err(),
+        Some(OpenError::Refused(Refusal::HeaderTooLarge))
+    );
+    assert!(!store.files.contains_key(b"oversized".as_slice()));
 }
 
 /// The bypass law. Wrong implementation caught: a Replay that forwards any

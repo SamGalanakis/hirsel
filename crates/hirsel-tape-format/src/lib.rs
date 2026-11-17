@@ -198,23 +198,46 @@ pub struct Header {
     pub arg: Vec<u8>,
     pub grants: Vec<u8>,
 }
+/// The complete encoded header does not fit in block zero.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeaderTooLarge;
+
 impl Header {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+    pub fn encoded_len(
+        identity: usize,
+        arg: usize,
+        grants: usize,
+    ) -> Result<usize, HeaderTooLarge> {
+        let mut len = 2 + 1 + 1 + 16 + 32 + 4 + 8 + 8 + 1;
+        for field in [identity, arg, grants] {
+            if field > MAX_LEN {
+                return Err(HeaderTooLarge);
+            }
+            let bits = usize::BITS - field.leading_zeros();
+            len += field + bits.div_ceil(7).max(1) as usize;
+        }
+        if len > MAX_LEN {
+            return Err(HeaderTooLarge);
+        }
+        Ok(len)
+    }
+
+    pub fn encode(&self, revision: [u8; 32]) -> Result<Vec<u8>, HeaderTooLarge> {
+        let len = Self::encoded_len(self.identity.len(), self.arg.len(), self.grants.len())?;
+        let mut out = Vec::with_capacity(len);
         out.extend_from_slice(&FORMAT.to_le_bytes());
         out.push(self.kind);
         out.push(self.mode);
         out.extend_from_slice(&self.tape_id);
         put_bytes(&mut out, &self.identity);
-        out.extend_from_slice(&self.revision);
+        out.extend_from_slice(&revision);
         out.extend_from_slice(&self.charge_policy.to_le_bytes());
         out.extend_from_slice(&self.limit.to_le_bytes());
         out.extend_from_slice(&self.bound.to_le_bytes());
         out.push(self.chooser);
         put_bytes(&mut out, &self.arg);
-        put_varint(&mut out, self.grants.len() as u64);
-        out.extend_from_slice(&self.grants);
-        out
+        put_bytes(&mut out, &self.grants);
+        Ok(out)
     }
     pub fn decode(payload: &[u8]) -> Result<Self, Corrupt> {
         let mut c = Cursor::new(payload);
@@ -295,30 +318,47 @@ impl From<Corrupt> for Stop {
     }
 }
 
-/// Sequential block discovery from offset 0 over a tape's bytes, which every
-/// call passes in (the reader owns them; this is only the position).
+#[derive(Debug)]
+pub enum ReadError<E> {
+    Source(E),
+    Format(Stop),
+}
+impl<E> From<Stop> for ReadError<E> {
+    fn from(stop: Stop) -> Self {
+        Self::Format(stop)
+    }
+}
+
+type Block<'a> = (u8, &'a [u8]);
+
+/// Sequential block discovery. The reader reuses storage for one checked
+/// block and never reads beyond that block until the next call.
 pub struct Blocks {
-    at: usize,
+    bytes: Vec<u8>,
     seq: u64,
     tape_id: [u8; 16],
     ended: bool,
 }
 impl Blocks {
-    /// Read block 0 and decode the header. Block 0 carries flags 0.
-    pub fn open(bytes: &[u8]) -> Result<(Self, Header), Stop> {
-        let (flags, payload, next) = frame(bytes, 0, 0)?;
+    /// Read and validate block zero before requesting any later bytes.
+    pub fn open<E>(
+        mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
+    ) -> Result<(Self, Header), ReadError<E>> {
+        let mut bytes = Vec::new();
+        read_block(&mut bytes, 0, &mut read)?;
+        let payload = &bytes[BLOCK_HEAD..bytes.len() - BLOCK_CHECK];
         let Some(id) = payload.get(TAPE_ID_AT..TAPE_ID_AT + 16) else {
-            return Err(Stop::Damaged(0));
+            return Err(Stop::Damaged(0).into());
         };
-        let tape_id: [u8; 16] = id.try_into().unwrap();
-        check(bytes, 0, payload.len(), &tape_id, 0)?;
-        if flags != 0 {
-            return Err(Stop::Damaged(0));
+        let tape_id = id.try_into().unwrap();
+        check(&bytes, &tape_id, 0)?;
+        if bytes[0] != 0 {
+            return Err(Stop::Damaged(0).into());
         }
-        let header = Header::decode(payload)?;
+        let header = Header::decode(payload).map_err(Stop::from)?;
         Ok((
             Self {
-                at: next,
+                bytes,
                 seq: 1,
                 tape_id,
                 ended: false,
@@ -326,60 +366,80 @@ impl Blocks {
             header,
         ))
     }
-    /// The next validated block's flags and payload, `None` after the END
-    /// block at the end of the file.
-    pub fn next<'a>(&mut self, bytes: &'a [u8]) -> Result<Option<(u8, &'a [u8])>, Stop> {
+
+    /// Read the next checked block, or confirm EOF after END.
+    pub fn next<E>(
+        &mut self,
+        mut read: impl FnMut(&mut [u8]) -> Result<usize, E>,
+    ) -> Result<Option<Block<'_>>, ReadError<E>> {
         if self.ended {
-            if self.at == bytes.len() {
-                return Ok(None);
-            }
-            return Err(Stop::Damaged(self.seq));
+            return if read(&mut [0]).map_err(ReadError::Source)? == 0 {
+                Ok(None)
+            } else {
+                Err(Stop::Damaged(self.seq).into())
+            };
         }
-        let (flags, payload, next) = frame(bytes, self.at, self.seq)?;
-        check(bytes, self.at, payload.len(), &self.tape_id, self.seq)?;
-        self.at = next;
+        read_block(&mut self.bytes, self.seq, &mut read)?;
+        check(&self.bytes, &self.tape_id, self.seq)?;
         self.seq += 1;
+        let flags = self.bytes[0];
         self.ended = flags & END != 0;
-        Ok(Some((flags, payload)))
+        Ok(Some((
+            flags,
+            &self.bytes[BLOCK_HEAD..self.bytes.len() - BLOCK_CHECK],
+        )))
     }
 }
-/// Block `k` at `at`: its flags, payload and the offset after it, with every
-/// check but the checksum (which needs the tape id).
-fn frame(bytes: &[u8], at: usize, k: u64) -> Result<(u8, &[u8], usize), Stop> {
-    let rest = &bytes[at..];
-    if rest.is_empty() {
-        return Err(Stop::Missing);
+
+fn fill<E>(
+    mut bytes: &mut [u8],
+    read: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
+) -> Result<usize, ReadError<E>> {
+    let len = bytes.len();
+    while !bytes.is_empty() {
+        let n = read(bytes).map_err(ReadError::Source)?;
+        if n == 0 {
+            break;
+        }
+        bytes = &mut bytes[n..];
     }
-    if rest.len() < BLOCK_HEAD {
-        return Err(Stop::Truncated);
+    Ok(len - bytes.len())
+}
+
+fn read_block<E>(
+    bytes: &mut Vec<u8>,
+    seq: u64,
+    read: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
+) -> Result<(), ReadError<E>> {
+    if bytes.len() < BLOCK_HEAD {
+        bytes.resize(BLOCK_HEAD, 0);
     }
-    let len = u32::from_le_bytes(rest[12..16].try_into().unwrap()) as usize;
+    match fill(&mut bytes[..BLOCK_HEAD], read)? {
+        0 => return Err(Stop::Missing.into()),
+        BLOCK_HEAD => {}
+        _ => return Err(Stop::Truncated.into()),
+    }
+    let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
     if len > MAX_LEN {
-        return Err(Stop::Damaged(k));
+        return Err(Stop::Damaged(seq).into());
     }
-    if rest.len() < BLOCK_HEAD + len + BLOCK_CHECK {
-        return Err(Stop::Truncated);
+    let size = BLOCK_HEAD + len + BLOCK_CHECK;
+    bytes.reserve_exact(size.saturating_sub(bytes.len()));
+    bytes.resize(size, 0);
+    if fill(&mut bytes[BLOCK_HEAD..], read)? != len + BLOCK_CHECK {
+        return Err(Stop::Truncated.into());
     }
-    if rest[1..4] != MAGIC || rest[0] & !(BARRIER | END) != 0 {
-        return Err(Stop::Damaged(k));
-    }
-    Ok((
-        rest[0],
-        &rest[BLOCK_HEAD..BLOCK_HEAD + len],
-        at + BLOCK_HEAD + len + BLOCK_CHECK,
-    ))
+    Ok(())
 }
-/// Block `k` at `at`: its sequence number is `k` and its check matches.
-fn check(bytes: &[u8], at: usize, len: usize, id: &[u8; 16], k: u64) -> Result<(), Stop> {
-    let body = &bytes[at..at + BLOCK_HEAD + len];
-    let stored = u64::from_le_bytes(
-        bytes[at + BLOCK_HEAD + len..at + BLOCK_HEAD + len + BLOCK_CHECK]
-            .try_into()
-            .unwrap(),
-    );
-    let seq = u64::from_le_bytes(body[4..12].try_into().unwrap());
-    if seq != k || xxh3(&[id, body]) != stored {
-        return Err(Stop::Damaged(k));
+
+fn check(bytes: &[u8], id: &[u8; 16], seq: u64) -> Result<(), Stop> {
+    let (body, stored) = bytes.split_at(bytes.len() - BLOCK_CHECK);
+    if body[1..4] != MAGIC
+        || body[0] & !(BARRIER | END) != 0
+        || u64::from_le_bytes(body[4..12].try_into().unwrap()) != seq
+        || xxh3(&[id, body]) != u64::from_le_bytes(stored.try_into().unwrap())
+    {
+        return Err(Stop::Damaged(seq));
     }
     Ok(())
 }

@@ -1,17 +1,39 @@
 //! Standalone tape inspection uses the same format decoder as replay. Sites
 //! are diagnostic source bindings, not stored fields, so show has no site column.
-use hirsel_tape_format::{self as format, Blocks, Decoder, Frame, Header};
-use std::{io, path::Path};
+use hirsel_tape_format::{self as format, Blocks, Decoder, Frame, Header, ReadError};
+use std::{
+    fs::File,
+    io::{self, Read},
+    path::Path,
+};
 fn damaged(error: impl std::fmt::Debug) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("tape: {error:?}"))
 }
+fn block_error(error: ReadError<io::Error>) -> io::Error {
+    match error {
+        ReadError::Source(e) => e,
+        ReadError::Format(stop) => damaged(stop),
+    }
+}
+
+fn read(file: &mut File, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        match file.read(buf) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
+
 pub(crate) fn header(path: &Path) -> io::Result<Header> {
-    let bytes = std::fs::read(path)?;
-    Blocks::open(&bytes).map(|(_, h)| h).map_err(damaged)
+    let mut file = File::open(path)?;
+    Blocks::open(|buf| read(&mut file, buf))
+        .map(|(_, h)| h)
+        .map_err(block_error)
 }
 pub(crate) fn show(path: &Path) -> io::Result<()> {
-    let bytes = std::fs::read(path)?;
-    let (mut blocks, h) = Blocks::open(&bytes).map_err(damaged)?;
+    let mut file = File::open(path)?;
+    let (mut blocks, h) = Blocks::open(|buf| read(&mut file, buf)).map_err(block_error)?;
     println!(
         "format {}  kind {}  mode {}",
         format::FORMAT,
@@ -44,7 +66,10 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
     println!("arg {:?}  grants {:?}", h.arg, h.grants);
     let mut decoder = Decoder::default();
     let mut at = 0;
-    while let Some((flags, payload)) = blocks.next(&bytes).map_err(damaged)? {
+    while let Some((flags, payload)) = blocks
+        .next(|buf| read(&mut file, buf))
+        .map_err(block_error)?
+    {
         for frame in decoder
             .block(payload, flags & format::END != 0)
             .map_err(damaged)?

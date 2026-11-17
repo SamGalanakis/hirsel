@@ -11,7 +11,7 @@
 //! Open and end report in one word, which core's `tape.hirsel` decodes:
 //! bits 0-7 a tag, bits 8-15 a sub-kind, bits 16-63 a value.
 //! - open: 0 opened; 1 Refused (sub 0 Code, 1 Revision, 2 Arg, 3 Limit,
-//!   4 Damaged(value)); 2 Io (sub the `IoError` tag 1-5, value `Other`'s code).
+//!   4 Damaged(value); 5 HeaderTooLarge); 2 Io (sub the `IoError` tag 1-5, value `Other`'s code).
 //! - end: 0 Sealed; 1 Diverged (sub the mismatch: 0 Op, 1 Object, 2 Arg,
 //!   3 Missing, 4 Extra, 5 Outcome; value `at`); 2 Truncated(value);
 //!   3 Damaged(value); 4 Corrupt; 5 Io (as open's).
@@ -103,17 +103,28 @@ pub unsafe extern "C" fn hirsel_core_tape_open(
         tape_id[..8].copy_from_slice(&id0.to_le_bytes());
         tape_id[8..].copy_from_slice(&id1.to_le_bytes());
         let (identity, arg) = (bytes(identity), bytes(arg));
+        let record = mode == 0;
+        if record && Header::encoded_len(identity.len(), arg.len(), 0).is_err() {
+            return Opened {
+                tape: 0,
+                code: word(1, 5, 0),
+            };
+        }
         let header = Header {
             kind: 1,
             mode: 1,
             tape_id,
-            identity: identity.to_vec(),
+            identity: if record {
+                identity.to_vec()
+            } else {
+                Vec::new()
+            },
             revision: [0; 32],
             charge_policy: 0,
             limit,
             bound: 0,
             chooser: crate::tasks::recorded_chooser(),
-            arg: arg.to_vec(),
+            arg: if record { arg.to_vec() } else { Vec::new() },
             grants: vec![],
         };
         let expect = super::Expect {
@@ -123,11 +134,7 @@ pub unsafe extern "C" fn hirsel_core_tape_open(
             arg: Some(arg),
             across: mode == 2,
         };
-        let mode = if mode == 0 {
-            Mode::Record
-        } else {
-            Mode::Replay
-        };
+        let mode = if record { Mode::Record } else { Mode::Replay };
         let code = match Tape::open(
             *revision,
             (provider, handle),
@@ -146,6 +153,7 @@ pub unsafe extern "C" fn hirsel_core_tape_open(
                 Refusal::Arg => word(1, 2, 0),
                 Refusal::Limit => word(1, 3, 0),
                 Refusal::Damaged(k) => word(1, 4, k),
+                Refusal::HeaderTooLarge => word(1, 5, 0),
             },
             Err(OpenError::Io(e)) => word(2, e.tag, u64::from(e.code)),
             // A header block that is cut or breaks the grammar is block 0

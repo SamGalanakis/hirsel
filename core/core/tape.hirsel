@@ -19,10 +19,10 @@ pub type Header {
 
 // Open refuses, before anything runs, a tape whose identity (Code), revision
 // (except Across), argument or limit differs from the opener's, or whose header
-// block is damaged.
+// block is damaged. Record refuses a header too large for block zero.
 pub type OpenError = Refused(Refusal) | Io(IoError)
 
-pub type Refusal = Code | Revision | Arg | Limit | Damaged(u64)
+pub type Refusal = Code | Revision | Arg | Limit | Damaged(u64) | HeaderTooLarge
 
 // A tape ends Sealed, or with the fault that stopped it. A replay that diverged
 // names the frame it was checked against (its position after the header).
@@ -116,6 +116,8 @@ fn open_error(code: u64) -> OpenError {
         Arg
     } else if sub == 3 {
         Limit
+    } else if sub == 5 {
+        HeaderTooLarge
     } else {
         Damaged(value)
     })

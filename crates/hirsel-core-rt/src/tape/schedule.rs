@@ -207,8 +207,7 @@ impl Live {
             _ => unreachable!(),
         }
         self.schedule.last = self.schedule.events;
-        // SAFETY: scheduler and tape callbacks execute on the owning run thread.
-        if let Err(e) = unsafe { self.recorder.as_mut().unwrap().frame(&frame) } {
+        if let Err(e) = self.recorder.as_mut().unwrap().frame(&frame) {
             self.fault = Some(refuse(Fault::Io(e)));
         }
     }

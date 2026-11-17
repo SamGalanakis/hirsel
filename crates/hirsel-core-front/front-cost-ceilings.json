@@ -11,7 +11,7 @@
     "m1": {
       "instructions_per_token": {
         "parse": 427.8149250817512,
-        "index": 7.475862068965517,
+        "index": 6.957794818254911,
         "resolve": 159.08216879569866,
         "input counts": 8.621247528312061,
         "declarations": 163.67616191904048,
@@ -35,8 +35,8 @@
     },
     "std": {
       "instructions_per_token": {
-        "parse": 450.47890188103713,
-        "index": 9.224935107073328,
+        "parse": 449.6671267354063,
+        "index": 8.677031744743038,
         "resolve": 150.87679011314768,
         "input counts": 8.740458788038307,
         "declarations": 210.6829980532122,
@@ -61,7 +61,7 @@
     "suite-edit": {
       "instructions_per_token": {
         "parse": 444.96008962330205,
-        "index": 12.056499075163948,
+        "index": 6.91385012050894,
         "resolve": 254.41534799047753,
         "input counts": 8.46365114063113,
         "declarations": 108.86990617560566,
@@ -70,15 +70,15 @@
         "body keys": 68.80548942725109,
         "image read": 11.68095958746707,
         "image digest": 3.9795975561907966,
-        "image index": 180.10922839938385
+        "image index": 176.80062776750182
       },
       "image_per_token": {
         "records_opened": 0.0029157558432823276,
         "bytes_read": 12.005510341348579,
         "digests": 0.0029157558432823276,
         "digest_bytes": 11.888880107617286,
-        "index_calls": 0.993260887830836,
-        "key_probes": 0.09782943565326985,
+        "index_calls": 0.9857827476038338,
+        "key_probes": 0.09230368252900623,
         "row_demands": 0.024126450311081217,
         "nodes_decoded": 5.601456378658451e-05
       }

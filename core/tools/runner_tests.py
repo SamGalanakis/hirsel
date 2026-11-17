@@ -324,6 +324,11 @@ MUTANTS = (
      [('                Error(Closed) => true,\n                _ => false,\n            },\n            None => false,',
        '                Error(_) => true,\n                _ => false,\n            },\n            None => false,')],
      'runner', 'retired_without_waiting'),
+    # L25: only the session's own end code offers a Drained, so a failed or cancelled
+    # session in a quiet place is kept.
+    ('no_joiner_wake',
+     [('    let _ = channel.try_send(to_publisher, PubIn(e: Drained))\n', '')],
+     'runner', 'retired_without_waiting'),
     # L17 on the wire (v2.12's one publisher inbox): an initial result split from the Batch
     # that names its sub, and an Unsubscribe the publisher ignores.
     ('initial_split',

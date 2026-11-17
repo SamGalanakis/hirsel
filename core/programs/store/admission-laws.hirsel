@@ -168,3 +168,177 @@ pub fn law_join_cleanup() -> bool {
     settle(mut subs, mut joined, mut waiting, 0u64)
     list.len(joined) == 0u64 && match channel.try_receive(from) { Ok(PubIn(e: Drained)) => true, _ => false }
 }
+
+type W3cHandles: send { data: store.Table[u64, u32] }
+
+fn w3c_put(mut tx: store.Tx, h: W3cHandles, take value: u32) -> Result[u64, u32] {
+    if let Error(_) = store.put(mut tx, h.data, 0u64, value) { return Error(1u32) }
+    Ok(store.info(mut tx).id.version)
+}
+
+fn w3c_large(mut tx: store.Tx, h: W3cHandles, take count: u32) -> Result[Bytes, u32] {
+    if let Error(_) = store.put(mut tx, h.data, 0u64, 99u32) { return Error(1u32) }
+    match w3c_bytes(count) { Ok(take b) => Ok(take b), Error(_) => Error(2u32) }
+}
+
+fn w3c_registry() -> Registry[(), W3cHandles] {
+    let mut r: Registry[(), W3cHandles] = registry()
+    result.unwrap(transact(mut r, code.describe(w3c_put), 65536u64, DEFAULT_STEPS))
+    result.unwrap(transact(mut r, code.describe(w3c_large), 65536u64, DEFAULT_STEPS))
+    result.unwrap(compute(mut r, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
+    result.unwrap(retain_gone(mut r, w3c_retired()))
+    r
+}
+
+fn w3c_retired() -> Bytes {
+    let mut key: Bytes = list.new()
+    result.unwrap(list.append(mut key, string.as_bytes("retired")))
+    result.unwrap(std.codec.put_u64(0u64, mut key))
+    result.unwrap(std.codec.put_u64(0u64, mut key))
+    key
+}
+
+type W3cRig {
+    head: Head[(), W3cHandles], owner: WireSession[(), W3cHandles], work: WireWork,
+    requests: Receiver[Req], releases: Receiver[PubIn], inbox: Receiver[WireEvent], policy: Task[()]
+}
+
+// The real wire owner, head and publisher delivery path, stepped without sockets.
+// One pre-admitted unreplied gone call gives the same version oracle as the socket fixture.
+fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
+    let mut db = store.memory(clock, random, store.defaults())
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
+    let data = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
+    let (policy, take h) = result.unwrap(ingress.start(tasks, clock, random, ingress.defaults(), 1048576u64))
+    let principal = option.unwrap(ingress.hello(policy, V4(1u32), None))
+    let stream = wire_stream(principal, 77u32)
+    let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(w3c_retired(), list.new())))
+    let (to_head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(5u64))
+    let (to_pub, releases): (Sender[PubIn], Receiver[PubIn]) = result.unwrap(channel.new(5u64))
+    let (to_owner, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
+    let service = wire_service_seed(w3c_registry(), policy, to_head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
+    let Service(context: take initial, step: _, ready: _, finish: _, check: _) = take service
+    let mut owner = take initial
+    owner.phase = 3u8
+    owner.principal = Some(take principal)
+    owner.me = Some(take to_owner)
+    let put_codec: std.codec.Codec[Result[u64, u32]] = std.codec.of()
+    let large_codec: std.codec.Codec[Result[Bytes, u32]] = std.codec.of()
+    let big_codec: std.codec.Codec[Bytes] = std.codec.of()
+    result.unwrap(list.push(mut owner.entries, w3c_key(code.identity(code.describe(w3c_put)), std.codec.of_u32(), put_codec)))
+    result.unwrap(list.push(mut owner.entries, w3c_key(code.identity(code.describe(w3c_large)), std.codec.of_u32(), large_codec)))
+    result.unwrap(list.push(mut owner.entries, w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), big_codec)))
+    result.unwrap(list.push(mut owner.entries, w3c_retired()))
+    let head = Head(db: take db, r: w3c_registry(), h: W3cHandles(data: data), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None)
+    W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox, policy: take h)
+}
+
+fn w3c_arg(n: u32) -> Bytes {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_u32(n, mut b))
+    b
+}
+
+fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) -> Frame waits {
+    let at = host.mono_ns(rig.owner.clock)
+    result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, WirePending(stream: stream, p: p, slot: slot, deadline: 10000u32, arg: take arg, at: at, grows: true), true))
+    if let Some(take out) = wire_take_output(mut rig.owner) { return take out }
+    let q = result.unwrap(channel.try_receive(rig.requests))
+    result.unwrap(route(mut rig.head, take q))
+    if list.len(rig.head.group) != 0u64 { result.unwrap(gate(mut rig.head)) }
+    let release = result.unwrap(channel.try_receive(rig.releases))
+    let PubIn(e: take released) = take release
+    let answers = match take released { Released(Release(version: _, snapshot: _, answers: take a)) => take a, _ => fail("W3c: expected release") }
+    let mut waiting: List[Answer] = list.new()
+    let version = store.version(store.snapshot(rig.head.db))
+    for take a in take answers { tell_owner(mut waiting, take a, version) }
+    let WireEvent(e: take event) = result.unwrap(channel.try_receive(rig.inbox))
+    let delivered = match take event { FromRunner(take message) => take message, _ => fail("W3c: expected runner event") }
+    result.unwrap(wire_step(mut rig.owner, mut rig.work, WRunner(take delivered)))
+    option.unwrap(wire_take_output(mut rig.owner))
+}
+
+fn w3c_answer(frame: Frame, version: u64, stream: u32, p: u64, expected: Outcome) -> bool {
+    match frame {
+        Batch(v, complete, rows, done) => {
+            if v != version || list.len(complete) != 0u64 || list.len(rows) != 0u64 || list.len(done) != 1u64 { return false }
+            let got = done[0u64]
+            let codec: std.codec.Codec[Outcome] = std.codec.of()
+            let mut a: Bytes = list.new()
+            let mut b: Bytes = list.new()
+            result.unwrap(std.codec.encode(codec, got.outcome, mut a))
+            result.unwrap(std.codec.encode(codec, expected, mut b))
+            got.stream == stream && got.p == p && a == b
+        },
+        _ => false,
+    }
+}
+
+fn w3c_ok(version: u64) -> Outcome {
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.put_u32(0u32, mut b))
+    result.unwrap(std.codec.put_u64(version, mut b))
+    Returned(take b)
+}
+
+fn w3c_close(take rig: W3cRig) -> () waits {
+    let W3cRig(head: take hd, owner: _, work: _, requests: _, releases: _, inbox: _, policy: take policy) = take rig
+    let mut h = take policy
+    task.cancel(mut h)
+    let _ = task.join(take h)
+    let Head(db: take db, r: _, h: _, out: _, busy: _, waiting: _, group: _, last: _) = take hd
+    result.unwrap(store.close(take db))
+}
+
+pub fn law_gone_slot_v5(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut rig = w3c_rig(tasks, clock, random)
+    let mut ok = true
+    for (p, v) in [(0u64, 3u64), (0u64, 3u64), (1u64, 5u64), (1u64, 5u64)] {
+        let out = w3c_send(mut rig, 77u32, p, 3u32, list.new())
+        ok = w3c_answer(out, v, 77u32, p, Failed(Gone)) && ok
+    }
+    ok = store.version(store.snapshot(rig.head.db)) == 5u64 && ok
+    w3c_close(take rig)
+    ok
+}
+
+pub fn law_request_mismatch_wire(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut rig = w3c_rig(tasks, clock, random)
+    let first = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(7u32))
+    let mut ok = w3c_answer(first, 4u64, 0u32, 0u64, w3c_ok(4u64))
+    let changed = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(8u32))
+    ok = w3c_answer(changed, 4u64, 0u32, 0u64, Refused(RequestMismatch)) && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(store.snapshot(rig.head.db), store.shape(rig.head.h.data), 0u64)) == Some(7u32) && ok
+    w3c_close(take rig)
+    ok
+}
+
+pub fn law_history_below_latest(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut rig = w3c_rig(tasks, clock, random)
+    let mut ok = true
+    for (p, v) in [(0u64, 4u64), (1u64, 6u64)] {
+        let out = w3c_send(mut rig, 0u32, p, 0u32, w3c_arg(7u32))
+        ok = w3c_answer(out, v, 0u32, p, w3c_ok(v)) && ok
+    }
+    let old = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(9u32))
+    ok = w3c_answer(old, 6u64, 0u32, 0u64, Refused(HistoryUnavailable)) && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 6u64 && result.unwrap(store.get(store.snapshot(rig.head.db), store.shape(rig.head.h.data), 0u64)) == Some(7u32) && ok
+    w3c_close(take rig)
+    ok
+}
+
+pub fn law_reply_over_done_max(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut rig = w3c_rig(tasks, clock, random)
+    let large = w3c_send(mut rig, 1u32, 0u64, 1u32, w3c_arg(8165u32))
+    let mut ok = w3c_answer(large, 4u64, 1u32, 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8172u64))))
+    let big = w3c_send(mut rig, 2u32, 0u64, 2u32, w3c_arg(8169u32))
+    ok = w3c_answer(big, 4u64, 2u32, 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8172u64)))) && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(store.snapshot(rig.head.db), store.shape(rig.head.h.data), 0u64)) == None && ok
+    w3c_close(take rig)
+    ok
+}
+
+@test
+fn test_wire_admission_durable(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_gone_slot_v5(tasks, clock, random) && law_request_mismatch_wire(tasks, clock, random) && law_history_below_latest(tasks, clock, random) && law_reply_over_done_max(tasks, clock, random) { Ok(()) } else { Error(()) }
+}

@@ -792,7 +792,9 @@ def admission_laws(args, root, work, engines, row):
     adapted = work / 'admission-runner.hirsel'
     adapted.write_text(text + '\n' + laws)
     selected = manifest(root, work, 'admission-laws', adapted)
-    names = args.admission_law or ('unread_client', 'hello_and_slots', 'join_cleanup')
+    durable = ('gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max')
+    state = ('unread_client', 'hello_and_slots', 'join_cleanup')
+    names = args.admission_law or (*state, *durable)
     qualified = set()
     if 'evaluator' in engines:
         for name in names:
@@ -801,12 +803,16 @@ def admission_laws(args, root, work, engines, row):
             if value == 1:
                 qualified.add(name)
     for engine in (e for e in engines if e != 'evaluator'):
-        definition = 'store@1/runner/test_wire_admission'
-        code, report = native_run(args, engine, selected, work / f'admission-store-{engine}', definition)
-        tests = report.get('tests', [])
-        row(engine=engine, law='wire_admission', passed=code == 0
-            and [t['definition'] for t in tests] == [definition]
-            and all(t.get('passed') for t in tests), result=report)
+        groups = [('wire_admission', state), ('wire_admission_durable', durable)]
+        for group, members in groups:
+            if not any(name in names for name in members):
+                continue
+            definition = 'store@1/runner/test_' + group
+            code, report = native_run(args, engine, selected, work / f'{group}-store-{engine}', definition)
+            tests = report.get('tests', [])
+            row(engine=engine, law=group, passed=code == 0
+                and [t['definition'] for t in tests] == [definition]
+                and all(t.get('passed') for t in tests), result=report)
     if args.no_mutants or args.part != 'admission':
         return
     mutants = (
@@ -951,7 +957,8 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=['reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
     p.add_argument('--session-mutant', action='append', choices=['undersized_reader', 'head_frames_uncounted', 'writer_queue', 'orphan_reader'])
-    p.add_argument('--admission-law', action='append', choices=['unread_client', 'hello_and_slots', 'join_cleanup'])
+    p.add_argument('--admission-law', action='append', choices=['unread_client', 'hello_and_slots', 'join_cleanup',
+                   'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket'])
     args = p.parse_args()

@@ -16,15 +16,7 @@ fn place(mut r: Reg) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(observe_fixture.record), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn entry() -> Bytes {
-    let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
-    let cr: std.codec.Codec[Result[observe_fixture.Recorded, u32]] = std.codec.of()
-    let mut b: Bytes = list.new()
-    result.unwrap(list.append(mut b, code.identity(code.describe(observe_fixture.record))))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut b))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut b))
-    b
-}
+fn entry() -> Bytes { observe_fixture.entry() }
 
 fn stream(id: u64) -> Bytes {
     let mut b: Bytes = list.new()
@@ -104,7 +96,10 @@ fn receive(c: Conn) -> Got waits {
 }
 
 fn frame(c: Conn, trace: Log[observe.Obs]) -> Got waits {
-    let f = receive(c)
+    record_reply(c, trace, receive(c))
+}
+
+fn record_reply(c: Conn, trace: Log[observe.Obs], take f: Got) -> Got waits {
     // A Recorded reply is the fixture's committed ran-table row. Duplicate
     // carries the original row too, so changed-byte clients cannot rewrite it.
     if let Returned(b) = f.outcome {
@@ -208,6 +203,102 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
     let (_, joins) = result.unwrap(take joined)
     let input = Drive(head: take head, clock: clock, tasks: tasks, out: out, err: err, seed: seed, mix: mix)
     let body = match task.spawn(tasks, bytes 33554432u64, take input, drive) {
+        Ok(take t) => take t,
+        Error(_) => return false,
+    }
+    host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), take inbox, take joins, tasks, 1048576u64)
+    let driven = task.join(take body)
+    match opened { Ok(()) => (), Error(_) => return false }
+    match driven { Ok(()) => true, Error(_) => false }
+}
+
+
+pub type JoinCase: codec + send = CrossSession | AfterAbandoned | AfterAbandonedSame
+type JoinDrive: send { drive: Drive, scenario: JoinCase }
+
+fn join_verdicts(err: Stderr, take events: List[observe.Obs]) -> () waits {
+    let mut state = observe.state()
+    for e in events { observe.step(mut state, e) }
+    let h = observe.Header(has_clock: true, has_digest: true, has_ran: true, complete: true)
+    let c: std.codec.Codec[List[observe.Verdict]] = std.codec.of()
+    let mut b: Bytes = list.new()
+    result.unwrap(std.codec.encode(c, observe.finish(state, h), mut b))
+    result.unwrap(stderr.write_bytes(err, b))
+}
+
+// A correct session ends after y. A mutant may answer it; record that reply so
+// J1, rather than a driver assertion, diagnoses the identity violation.
+fn mismatch_result(take c: Conn, trace: Log[observe.Obs]) -> () waits {
+    match channel.receive(c.from) {
+        Ok(Batched(take b)) => {
+            if b.version == NEVER {
+                let Conn(id: id, clock: clock, out: out, to: _, from: _, task: take session, dog: _) = take c
+                match task.join(take session) { Ok(Ok(())) => (), _ => fail("observe join: session did not end cleanly") }
+                emit(out, trace, Closed(observe.Close(conn: id, code: 1008u64, at: host.mono_ns(clock))))
+            } else {
+                if list.len(b.rows) != 0u64 || list.len(b.outcomes) != 1u64 { fail("observe join: one outcome per Batch") }
+                let runner.KeyedBatch(version: v, complete: _, rows: _, outcomes: take outcomes) = take b
+                for take answer in outcomes {
+                    let runner.KeyedDone(stream: take received_stream, p: p, outcome: take o) = take answer
+                    let _ = record_reply(c, trace, Got(version: v, stream: take received_stream, p: p, outcome: take o))
+                }
+                close(take c, trace)
+            }
+        },
+        _ => fail("observe join: expected Batch or watchdog"),
+    }
+}
+
+fn drive_join(take input: JoinDrive) -> () waits {
+    let JoinDrive(drive: take d, scenario: scenario) = take input
+    let trace: Log[observe.Obs] = result.unwrap(log.new())
+    let a = connect(d, 0u64)
+    let original = args(0u64, 0u64, 0u64, 1u64)
+    let other = args(0u64, 0u64, 0u64, 2u64)
+    let key = entry()
+    match scenario {
+        CrossSession => {
+            let b = connect(d, 1u64)
+            ask(a, trace, original, key, LATER)
+            ask(b, trace, other, key, LATER)
+            let _ = frame(a, trace)
+            let _ = frame(b, trace)
+            close(take a, trace)
+            close(take b, trace)
+        },
+        _ => {
+            ask(a, trace, original, key, 2000000u64)
+            let _ = frame(a, trace)
+            if let AfterAbandonedSame = scenario {
+                ask(a, trace, original, key, LATER)
+                let _ = frame(a, trace)
+                close(take a, trace)
+            } else {
+                ask(a, trace, other, key, LATER)
+                mismatch_result(take a, trace)
+            }
+            // Recover the actual original fixture row even after a Close 1008.
+            let b = connect(d, 1u64)
+            ask(b, trace, original, key, LATER)
+            let _ = frame(b, trace)
+            close(take b, trace)
+        },
+    }
+    join_verdicts(d.err, log.finish(take trace))
+}
+
+pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, scenario: JoinCase) -> bool waits {
+    let mut db = store.memory(clock, random, store.defaults())
+    let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
+    let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
+    let (head, inbox) = result.unwrap(take made)
+    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
+    let (_, joins) = result.unwrap(take joined)
+    let d = Drive(head: take head, clock: clock, tasks: tasks, out: out, err: err, seed: 0u64, mix: Correct)
+    let input = JoinDrive(drive: take d, scenario: scenario)
+    let body = match task.spawn(tasks, bytes 33554432u64, take input, drive_join) {
         Ok(take t) => take t,
         Error(_) => return false,
     }

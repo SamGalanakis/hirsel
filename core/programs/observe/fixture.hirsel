@@ -3,6 +3,16 @@ pub type Request: codec + send { stream: Bytes, p: u64, arg: Bytes }
 pub type Handles: send { ran: store.Table[Bytes, Request] }
 pub type Recorded: codec + send { request: Request, version: u64 }
 
+pub fn entry() -> Bytes {
+    let ca: std.codec.Codec[Request] = std.codec.of()
+    let cr: std.codec.Codec[Result[Recorded, u32]] = std.codec.of()
+    let mut b: Bytes = list.new()
+    result.unwrap(list.append(mut b, code.identity(code.describe(record))))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut b))
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut b))
+    b
+}
+
 // STORE v2.24 section 1.8. This hashes fixture inputs, not store-private state.
 pub fn digest(key: Bytes, args: Bytes) -> Bytes {
     let mut input: Bytes = list.new()
@@ -68,7 +78,7 @@ pub fn law_record(out: Stdout, c: Clock, r: Random) -> bool waits {
     let held = store.snapshot(db)
     match store.get(held, store.shape(h.ran), observe.key(0u64, a.stream, a.p)) {
         Ok(Some(saved)) => {
-            let e: observe.Obs = Ran(observe.Run(stream: observe.own(saved.stream), p: saved.p, digest: list.new(), version: store.version(held)))
+            let e: observe.Obs = Ran(observe.Run(stream: observe.own(saved.stream), p: saved.p, digest: digest(entry(), encoded(saved)), version: store.version(held)))
             let co: std.codec.Codec[observe.Obs] = std.codec.of()
             let mut b: Bytes = list.new()
             result.unwrap(std.codec.encode(co, e, mut b))

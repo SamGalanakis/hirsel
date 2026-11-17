@@ -153,7 +153,7 @@ pub fn step(mut s: State, e: Obs) {
             let k = key(a.conn, a.stream, a.p)
             let n = number(s.pending, k)
             let row = list.len(s.sends)
-            result.unwrap(list.push(mut s.sends, Tracked(key: own(k), at: s.index, done: false, slot: key(0u64, a.stream, a.p), digest: own(a.digest))))
+            result.unwrap(list.push(mut s.sends, Tracked(key: own(k), at: s.index, done: false, slot: key(0u64, a.stream, a.p), digest: result.unwrap(clone(a.digest)))))
             let mut rows = match map.remove(mut s.by_conn, a.conn) { Some(take old) => take old, None => list.new() }
             result.unwrap(list.push(mut rows, row))
             result.unwrap(map.insert(mut s.by_conn, a.conn, take rows))
@@ -295,7 +295,7 @@ pub fn write_verdicts(err: Stderr, take events: List[Obs], end: Obs) -> () waits
     let mut s = state()
     for e in events { step(mut s, e) }
     step(mut s, end)
-    let h = Header(has_clock: true, has_digest: false, has_ran: false, complete: true)
+    let h = Header(has_clock: true, has_digest: true, has_ran: false, complete: true)
     let v = finish(s, h)
     let conn = match end { Closed(a) => a.conn, _ => 0u64 }
     let a = Assessment(conn: conn, verdicts: take v)

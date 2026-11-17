@@ -593,18 +593,14 @@ fn emit_module(
             inline: match definition.as_str() {
                 "core@1/string/push_char" => Inline::Always,
                 "core@1/string/push_scalar" => Inline::Never,
-                // Revisit bounded scalar loops after borrow-scope emission.
+                // Revisit bounded mutable loops after borrow-scope emission.
                 // LLVM inlining carries their parameter scopes into the caller.
                 _ if source.batch_steps
-                    && body.insts.len() <= 2048
+                    && body.insts.len() <= 4096
                     && sig.params.iter().any(|p| {
-                        matches!(
-                            p,
-                            Param::Address {
-                                place: PlaceTy::Value(Ty::Scalar(_)),
-                                loan: Loan::Mut
-                            }
-                        )
+                        matches!(p, Param::Address { place, loan: Loan::Mut }
+                            if matches!(place, PlaceTy::Value(Ty::Scalar(_)))
+                                || matches!(place, PlaceTy::Declared(t) if hirsel_core_ir::roles::carrier(module, *t)))
                     })
                     && !empty::loop_free(body) =>
                 {

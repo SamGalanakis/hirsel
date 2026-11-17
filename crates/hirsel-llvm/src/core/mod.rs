@@ -712,6 +712,13 @@ fn emit_module(
         let mut forwarding = forward::Forwarding::new(body);
         for (i, b) in body.blocks.iter().enumerate() {
             e.block(Label::block(i));
+            if let Some((number, plan)) = step_loops
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.reserve == i && p.reserve != p.header)
+            {
+                e.step_dispatch(plan, step_ends[number], number);
+            }
             if let Some((number, plan)) =
                 step_regions.iter().enumerate().find(|(_, p)| p.header == i)
             {
@@ -753,8 +760,10 @@ fn emit_module(
             if !returned {
                 e.anchor = b.anchor;
                 e.debug_location = function_debug.map(|d| d.location(b.anchor));
-                if let Some((number, plan)) =
-                    step_loops.iter().enumerate().find(|(_, p)| p.header == i)
+                if let Some((number, plan)) = step_loops
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| p.header == i && p.reserve == i)
                 {
                     e.step_dispatch(plan, step_ends[number], number);
                 } else {

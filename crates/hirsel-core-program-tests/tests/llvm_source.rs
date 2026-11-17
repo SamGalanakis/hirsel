@@ -2239,6 +2239,34 @@ fn probe(s: u64, n: u64, d: u64) -> u64 {
     }
     match ran { Ok(v) => 1000000000u64 + v, Error(e) => 2000000000u64 + e.steps }
 }
+fn scan(s: u64, n: u64, stop: u64) -> u64 {
+    let ran = bound steps s {
+        let mut cursor = 0u64
+        twice(scoped fn(d: u64) -> u64 {
+            while cursor < n {
+                if cursor == stop { break }
+                cursor += 1
+            }
+            cursor + d
+        }, 3) + 100 * cursor
+    }
+    match ran { Ok(v) => 1000000000u64 + v, Error(e) => 2000000000u64 + e.steps }
+}
+fn scan_prefixed(s: u64, n: u64, stop: u64) -> u64 {
+    let ran = bound steps s {
+        let mut cursor = 0u64
+        let input: Inline[u8, 8] = [0; 8]
+        twice(scoped fn(d: u64) -> u64 {
+            while cursor < n {
+                let byte: u64 = int.widen(input[cursor % 8])
+                if byte + cursor == stop { break }
+                cursor += 1
+            }
+            cursor + d
+        }, 3) + 100 * cursor
+    }
+    match ran { Ok(v) => 1000000000u64 + v, Error(e) => 2000000000u64 + e.steps }
+}
 "#;
     let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let mut cases = Vec::new();
@@ -2280,6 +2308,72 @@ fn probe(s: u64, n: u64, d: u64) -> u64 {
             }
         }
     }
+    for (n, stop) in [(0, 0), (1, 0), (8, 3), (8, 20), (65540, 65538)] {
+        let cursor = n.min(stop);
+        let need = 3 + cursor; // twice, two callback calls and one latch per increment.
+        for s in [0, 1, 2, need - 1, need, need + 1, 65535, 65536, 65537] {
+            let want = if s < need {
+                2000000000 + s
+            } else {
+                1000000006 + 102 * cursor
+            };
+            assert_eq!(
+                eval::run(&module, names["scan"], &[s, n, stop], 1_000_000).outcome,
+                eval::Outcome::Returned(vec![want]),
+                "scan({s}, {n}, {stop})"
+            );
+            cases.push(Case {
+                function: names["scan"],
+                args: vec![s, n, stop],
+                limit: 1_000_000,
+                injection: None,
+            });
+        }
+    }
+    for (n, stop) in [
+        (0, 0),
+        (1, 0),
+        (8, 3),
+        (8, 20),
+        (65540, 65538),
+        (65540, 100000),
+    ] {
+        let cursor = n.min(stop);
+        // Three calls, a widening and latch per increment, plus a widening
+        // on each callback's break test when the byte stops the scan.
+        let need = 3 + 2 * cursor + if cursor < n { 2 } else { 0 };
+        for s in [
+            0,
+            1,
+            2,
+            need - 1,
+            need,
+            need + 1,
+            65535,
+            65536,
+            65537,
+            131071,
+            131072,
+            131073,
+        ] {
+            let want = if s < need {
+                2000000000 + s
+            } else {
+                1000000006 + 102 * cursor
+            };
+            assert_eq!(
+                eval::run(&module, names["scan_prefixed"], &[s, n, stop], 1_000_000).outcome,
+                eval::Outcome::Returned(vec![want]),
+                "scan_prefixed({s}, {n}, {stop})"
+            );
+            cases.push(Case {
+                function: names["scan_prefixed"],
+                args: vec![s, n, stop],
+                limit: 1_000_000,
+                injection: None,
+            });
+        }
+    }
     for facts in [false, true] {
         let ir =
             emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
@@ -2303,7 +2397,12 @@ fn probe(s: u64, n: u64, d: u64) -> u64 {
         Target::X86_64Linux,
         false,
         false,
-        &[names["probe"], names["widths"]],
+        &[
+            names["probe"],
+            names["widths"],
+            names["scan"],
+            names["scan_prefixed"],
+        ],
     );
     let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
     for (case, report) in cases.iter().zip(reports) {

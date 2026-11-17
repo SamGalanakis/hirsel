@@ -8,6 +8,8 @@ pub(super) use regions::plans as regions;
 #[derive(Clone)]
 pub(super) struct Loop {
     pub header: usize,
+    pub reserve: usize,
+    prefix: u64,
     nodes: BTreeSet<usize>,
     exits: BTreeSet<usize>,
     cuts: BTreeMap<(usize, usize), u64>,
@@ -150,6 +152,65 @@ fn local(body: &Body, mut address: AddressId) -> bool {
             AddressBase::Value(_) => return false,
         }
     }
+}
+// A borrowed cursor can be induction too. Its pointer must be fixed before the
+// trip, and the trip may write only that exact place. This needs no alias claim
+// about any other pointer: all other writes and effectful calls stay checked.
+fn borrowed_index(
+    module: &Module,
+    body: &Body,
+    constants: &[Option<u64>],
+    address: AddressId,
+    header: usize,
+    nodes: &BTreeSet<usize>,
+) -> bool {
+    let place = &body.addresses[address.index()];
+    let AddressBase::Value(pointer) = place.base else {
+        return false;
+    };
+    if place.steps.len != 0 {
+        return false;
+    }
+    let flow = flow::Flow::new(body);
+    let fixed = body.blocks[0].params.get(&body.pools.values).unwrap().contains(&pointer)
+        || body.blocks.iter().enumerate().any(|(b, row)| {
+            !nodes.contains(&b) && row.insts.get(&body.insts).unwrap().iter().enumerate().any(|(n, i)| {
+                matches!(*i, Inst::Read { result, .. } | Inst::Pointer { result, .. } if result == pointer)
+                    && flow.available((b, n), (header, 0))
+            })
+        });
+    fixed
+        && nodes.iter().all(|&b| {
+            body.blocks[b]
+                .insts
+                .get(&body.insts)
+                .unwrap()
+                .iter()
+                .all(|i| match *i {
+                    Inst::Store {
+                        address: target, ..
+                    } => target == address,
+                    Inst::Call { .. } => pure(module, body, constants, i, false),
+                    Inst::Const { .. }
+                    | Inst::ReadStatic { .. }
+                    | Inst::FunctionRef { .. }
+                    | Inst::DescriptorRef { .. }
+                    | Inst::Unary { .. }
+                    | Inst::Binary { .. }
+                    | Inst::Compare { .. }
+                    | Inst::Convert { .. }
+                    | Inst::IntArith { .. }
+                    | Inst::MulAdd { .. }
+                    | Inst::ScalarUnary { .. }
+                    | Inst::Address { .. }
+                    | Inst::Read { .. }
+                    | Inst::UpdateMask { .. }
+                    | Inst::Pointer { .. }
+                    | Inst::Case { .. }
+                    | Inst::Step { .. } => true,
+                    _ => false,
+                })
+        })
 }
 pub(super) fn pure(
     module: &Module,
@@ -769,8 +830,7 @@ pub(super) fn loops(
             if !matches!(
                 body.values[index.index()],
                 Ty::Scalar(Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64)
-            ) || !local(body, *index_slot)
-            {
+            ) {
                 continue;
             }
             let Terminator::Branch {
@@ -834,7 +894,11 @@ pub(super) fn loops(
             // Every back edge advances by the same positive stride. A checked
             // overflow exits through the refund path; zero strides stay checked.
             let inclusive = *comparison == CompareOp::Le;
-            if escapes(body, *index_slot) {
+            if if local(body, *index_slot) {
+                escapes(body, *index_slot)
+            } else {
+                !borrowed_index(module, body, constants, *index_slot, header, &nodes)
+            } {
                 continue;
             }
             let mut delta = None;
@@ -983,8 +1047,10 @@ pub(super) fn loops(
                     &mut BTreeMap::new(),
                     &known,
                 ) == Some(cost);
-            let plan = Loop {
+            let mut plan = Loop {
                 header,
+                reserve: header,
+                prefix: 0,
                 nodes,
                 exits,
                 cuts,
@@ -1001,6 +1067,16 @@ pub(super) fn loops(
             };
             if !plan.cuts.is_empty() && iteration_prefixes(body, &plan).is_none() {
                 continue;
+            }
+            if !local(body, *index_slot) && update != header {
+                if !flow::Flow::new(body).block_dominates(header, update) {
+                    continue;
+                }
+                let Some(prefixes) = iteration_prefixes(body, &plan) else {
+                    continue;
+                };
+                plan.reserve = update;
+                plan.prefix = prefixes[&update];
             }
             known.insert(header, plan);
         }
@@ -1101,18 +1177,21 @@ impl FunctionEmitter<'_> {
         }
     }
     pub(super) fn step_dispatch(&mut self, plan: &Loop, window: Window, number: usize) {
-        let condition = match self.body.terminators[plan.header] {
-            Terminator::Branch { condition, .. } => condition,
-            _ => unreachable!(),
-        };
-        let value = self.numeric(condition);
-        let exists = self.cmp(Predicate::Ne, &Type::I8, &value, &int(0));
         let n = self.counter();
-        let reserve = Label::new("step_reserve", n);
-        let out = self.edge_label(plan.no);
-        self.cond(&exists, reserve, out);
-        self.emit_edge(out, plan.no);
-        self.block(reserve);
+        let gated = plan.reserve != plan.header;
+        if !gated {
+            let condition = match self.body.terminators[plan.header] {
+                Terminator::Branch { condition, .. } => condition,
+                _ => unreachable!(),
+            };
+            let value = self.numeric(condition);
+            let exists = self.cmp(Predicate::Ne, &Type::I8, &value, &int(0));
+            let reserve = Label::new("step_reserve", n);
+            let out = self.edge_label(plan.no);
+            self.cond(&exists, reserve, out);
+            self.emit_edge(out, plan.no);
+            self.block(reserve);
+        }
         let index = self.step_word(plan.index);
         self.store(&Type::I64, &index, &Value::Local(window.start), 8);
         let limit = self.step_word(plan.limit);
@@ -1163,37 +1242,51 @@ impl FunctionEmitter<'_> {
             &int(i64::MAX as u64 / plan.cost),
         );
         // Equality remains checked so the final Step yields before its effect.
-        let full = self.cmp(Predicate::Sgt, &Type::I64, &before, &charge);
+        let remaining = self.bin(Binary::Sub, &Type::I64, &charge, &int(plan.prefix));
+        let full = self.cmp(Predicate::Sgt, &Type::I64, &before, &remaining);
         let full = self.bin(Binary::And, &Type::I1, &full, &eligible);
         let full = self.bin(Binary::And, &Type::I1, &full, &charge_fits);
         let whole = Label::new("step_whole", n);
         let partial = Label::new("step_partial", n);
         self.likely(&full, whole, partial);
         self.block(whole);
-        let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
+        let after = self.bin(Binary::Sub, &Type::I64, &before, &remaining);
         self.store_steps(&after, &counter);
         if !plan.exact {
             self.reserve_progress(window, &charge);
+            self.store(
+                &Type::I64,
+                &int(plan.prefix),
+                &Value::Local(window.spent),
+                8,
+            );
         }
         self.br(version_label(
             number,
             self.body.blocks.len(),
-            plan.header,
+            plan.reserve,
             true,
         ));
         self.block(partial);
         // Equality must take checked execution: its last Step yields before
         // the following source effect. A fast region never reaches that boundary.
         let spare = self.cmp(Predicate::Sgt, &Type::I64, &before, &int(1));
-        let room = self.bin(Binary::Sub, &Type::I64, &before, &int(1));
+        let room = self.bin(Binary::Add, &Type::I64, &before, &int(plan.prefix));
+        let room = self.bin(Binary::Sub, &Type::I64, &room, &int(1));
         let room = self.select(&Type::I64, &spare, &room, &int(0));
         let quota = self.bin(Binary::UDiv, &Type::I64, &room, &int(plan.cost));
         let quota = self.select(&Type::I64, &eligible, &quota, &int(0));
         let any = self.cmp(Predicate::Ne, &Type::I64, &quota, &int(0));
         let chunk = Label::new("step_chunk", n);
-        let checked = self.edge_label(plan.yes);
+        let checked = if gated {
+            Label::new("step_body", n)
+        } else {
+            self.edge_label(plan.yes)
+        };
         self.cond(&any, chunk, checked);
-        self.emit_edge(checked, plan.yes);
+        if !gated {
+            self.emit_edge(checked, plan.yes);
+        }
         self.block(chunk);
         // This edge has a nonzero quota below trips. Its stop index fits;
         // a whole remaining loop uses the original checked induction instead.
@@ -1201,17 +1294,27 @@ impl FunctionEmitter<'_> {
         let stop = self.bin(Binary::Add, &Type::I64, &index, &span);
         self.store(&Type::I64, &stop, &Value::Local(window.end), 8);
         let charge = self.bin(Binary::Mul, &Type::I64, &quota, &int(plan.cost));
-        let after = self.bin(Binary::Sub, &Type::I64, &before, &charge);
+        let remaining = self.bin(Binary::Sub, &Type::I64, &charge, &int(plan.prefix));
+        let after = self.bin(Binary::Sub, &Type::I64, &before, &remaining);
         self.store_steps(&after, &counter);
         if !plan.exact {
             self.reserve_progress(window, &charge);
+            self.store(
+                &Type::I64,
+                &int(plan.prefix),
+                &Value::Local(window.spent),
+                8,
+            );
         }
         self.br(version_label(
             number,
             self.body.blocks.len(),
-            plan.header,
+            plan.reserve,
             false,
         ));
+        if gated {
+            self.block(checked);
+        }
     }
     pub(super) fn step_versions(
         &mut self,

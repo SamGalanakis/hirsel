@@ -1,0 +1,12 @@
+{
+  "file": "crates/hirsel-core-front/front-cost-ceilings.json",
+  "cell": [
+    "corpora",
+    "std",
+    "instructions_per_token",
+    "body keys/for_body"
+  ],
+  "previous": 179.60836708279405,
+  "value": 183.28955138778585,
+  "reason": "Orchestrator-authorized corpus rebase on main9402225a. Same current compiler green on old corpus; compiler algorithms unchanged. Std sources grew from47595tokens/277body keys at3069ec97 to49107tokens/283body keys through omap1057 and tape1037. Value re-derived by front-cost.baseline from one current-main guard observation with its existing2percent/whole-event rule. No extra slack or target/budget changes. Evidence: core-check-cost-915/corpus-rebase-20261117/."
+}

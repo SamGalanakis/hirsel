@@ -405,16 +405,22 @@ fn upgrade_frame_handoff() -> bool {
 fn mask_word_tail() -> bool {
     let plain = result.unwrap(b"Hello, world!")
     let wire = unhex("82 8d 37 fa 21 3d 7f 9f 4d 51 58 d6 01 4a 58 88 4d 59 16")
-    let mask: Inline[u8, 4] = [0x37, 0xfa, 0x21, 0x3d]
+    let mask: Inline[u8, 4] =[0x37, 0xfa, 0x21, 0x3d]
     let mut enc = websocket.encoder(Client, 256)
     let mut out: Bytes = list.new()
-    if result.unwrap(websocket.encode(mut enc, true, 2, plain, mask, mut out)) != Ok(()) || out != wire { return false }
+    if result.unwrap(websocket.encode(mut enc, true, 2, plain, mask, mut out)) != Ok(()) || out != wire {
+        return false
+    }
     for cut in 0u64 .. list.len(wire) {
         let mut dec = websocket.decoder(Server, 256)
         let mut at: u64 = 0
-        if event(result.unwrap(websocket.next(mut dec, list.slice(wire, 0, cut), mut at))) != 0 { return false }
+        if event(result.unwrap(websocket.next(mut dec, list.slice(wire, 0, cut), mut at))) != 0 {
+            return false
+        }
         at = 0
-        if !payload(result.unwrap(websocket.next(mut dec, list.slice(wire, cut, list.len(wire)), mut at)), plain) { return false }
+        if !payload(result.unwrap(websocket.next(mut dec, list.slice(wire, cut, list.len(wire)), mut at)), plain) {
+            return false
+        }
     }
     true
 }

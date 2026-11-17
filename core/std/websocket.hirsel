@@ -566,7 +566,7 @@ pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity
             let start = list.len(d.message)
             let input = list.slice(b, cursor, cursor + count)
             if d.masked {
-                let mut mask: Inline[u8, 4] = [0; 4]
+                let mut mask: Inline[u8, 4] =[0; 4]
                 for i in 0u64 .. 4u64 {
                     mask[i] = d.header[d.length_end + i]
                 }

@@ -26,6 +26,10 @@ extern void *hirsel_llvm_composer(LLVMModuleRef module);
 extern int hirsel_llvm_compose(void *composer, LLVMModuleRef unit);
 extern void hirsel_llvm_composer_free(void *composer);
 extern void hirsel_llvm_merge_glue(LLVMModuleRef module);
+typedef int (*HirselLlvmReuse)(void *, const char *, size_t, const uint8_t *, size_t);
+typedef void (*HirselLlvmDeliver)(void *, const uint8_t *, size_t);
+extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine,
+    HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, char **error);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
@@ -538,7 +542,9 @@ static int public_body(LLVMValueRef f) {
 
 static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
+                          uint8_t speed, const char *triple, const char *cpu,
+                          HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
+                          HirselLlvmOutput *out) {
     pthread_once(&initialized, initialize);
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
@@ -667,9 +673,19 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         }
     }
     buffer = NULL; message = NULL;
-    failed = LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, &message, &buffer);
-    if (failed || !buffer) { error(out, message ? message : "LLVM object emission failed"); }
-    else { copy(out, LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer), 0); LLVMDisposeMemoryBuffer(buffer); }
+    // A program is generated as parts, one per definition; a standalone
+    // module, which keeps its order, as one object.
+    if (export_count) failed = hirsel_llvm_emit_parts(module, machine, reuse, deliver, receiver, &message);
+    else {
+        failed = LLVMTargetMachineEmitToMemoryBuffer(machine, module, LLVMObjectFile, &message, &buffer);
+        if (!failed && buffer) {
+            if (deliver) deliver(receiver, (const uint8_t *)LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer));
+            else copy(out, LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer), 0);
+            LLVMDisposeMemoryBuffer(buffer);
+        }
+    }
+    if (failed) error(out, message ? message : "LLVM object emission failed");
+    else if (deliver) copy(out, "", 0, 0);
     if (message) LLVMDisposeMessage(message);
 done:
     if (composer) hirsel_llvm_composer_free(composer);
@@ -678,16 +694,21 @@ done:
     if (discard_names && !own_context) LLVMContextSetDiscardValueNames(context, 0);
     if (own_context) LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
+// Emit units as parts (exports given) or as one standalone object: `deliver`
+// gets each object generated, `reuse` is asked first for each part, and `out`
+// is empty or holds the error.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v3(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v4(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
-    emit_program(units, count, exports, export_count, speed, triple, cpu, out);
+                          uint8_t speed, const char *triple, const char *cpu,
+                          HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *receiver,
+                          HirselLlvmOutput *out) {
+    emit_program(units, count, exports, export_count, speed, triple, cpu, reuse, deliver, receiver, out);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, NULL };
-    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, out);
+    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, NULL, NULL, NULL, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

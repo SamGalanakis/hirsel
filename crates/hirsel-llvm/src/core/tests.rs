@@ -989,12 +989,15 @@ b2:
         assert_eq!(oracle.outcome, eval::Outcome::Returned(vec![expected]));
         let facts = hirsel_core_ir::roles::Facts::program(&[&module], &[]);
         let ir = carrier_ir(&module, &facts[0], target, false);
-        let object = hirsel_llvm_lazy::emit_program_for_target(
-            &[hirsel_llvm_lazy::Unit::Text(&ir)],
-            &[symbol(&module, case.function)],
+        let object = relocatable(
+            hirsel_llvm_lazy::emit_program_for_target(
+                &[hirsel_llvm_lazy::Unit::Text(&ir)],
+                &[symbol(&module, case.function)],
+                target,
+            )
+            .unwrap(),
             target,
-        )
-        .unwrap();
+        );
         // f0 is infallible, so its body and twin carry the `.infallible` name.
         let twin = format!("{}.infallible.words", symbol(&module, FuncId(0)));
         assert_eq!(
@@ -2390,8 +2393,10 @@ fn private_register_results_keep_the_public_destination_and_failure_abi() {
             .enumerate()
             .map(|(i, _)| symbol(&module, FuncId(i as u32)))
             .collect::<Vec<_>>();
-        let bytes =
-            hirsel_llvm_lazy::emit_program(&[hirsel_llvm_lazy::Unit::Text(&ir)], &exports).unwrap();
+        let bytes = relocatable(
+            hirsel_llvm_lazy::emit_program(&[hirsel_llvm_lazy::Unit::Text(&ir)], &exports).unwrap(),
+            Target::X86_64Linux,
+        );
         let cases = [0, 1, 2, 3, 123].map(|value| Case {
             function,
             args: vec![value],

@@ -14,7 +14,7 @@ cxx_library(
 
 cxx_library(
     name = "compose",
-    srcs = ["compose.cpp", "builder.cpp"],
+    srcs = ["compose.cpp", "builder.cpp", "parts.cpp"],
     headers = {"builder.h": "builder.h"},
     header_namespace = "",
     compiler_flags = [

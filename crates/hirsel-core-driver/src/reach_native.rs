@@ -200,6 +200,46 @@ fn reach_two_images_and_a_shadowing_name() {
     ]);
 }
 
+/// The two cores under the release build, where a part's object is keyed by
+/// its post-O3 bitcode and core parts live in the shared cache: a core body
+/// edit with the same signature must reach the executable (the exits are
+/// hand-derived: 7 + bump), and an unchanged rebuild whose unit record is
+/// gone generates no part and links the same bytes.
+#[test]
+#[ignore = "explicit native integration target"]
+fn reach_two_cores_release() {
+    const APP: &str = "pub fn main() -> Result[(), Exit] { Error(exit_with(7u8)) }\n";
+    let dir = tempfile::tempdir().unwrap();
+    let [a, b] = [("core-a", 0), ("core-b", 1)].map(|(name, bump)| reach_core(dir.path(), name, bump));
+    let mut options = native_options(Backend::Llvm, dir.path());
+    options.optimize = true;
+    let store = Store::new(&options.store).unwrap();
+    for (n, (core, exit)) in [(&a, 7), (&b, 8), (&a, 7), (&b, 8)].into_iter().enumerate() {
+        let product = record_check(APP, core, dir.path(), "store");
+        let (built, bytes, status) = reach_build(&product, &options);
+        assert_eq!(status, Some(exit), "core {n}");
+        if n >= 2 {
+            assert_eq!(built.compiled, 0, "core {n}: built before");
+        }
+        let mut units = 0;
+        for entry in std::fs::read_dir(&options.store).unwrap() {
+            let path = entry.unwrap().path();
+            let Some(key) = path.file_name().and_then(|n| n.to_str()).and_then(|n| {
+                let bytes = (0..32).map(|i| u8::from_str_radix(n.get(i * 2..i * 2 + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?;
+                Some(ContentHash(bytes.try_into().ok()?))
+            }) else { continue };
+            if store.get(key).unwrap().is_some_and(|p| super::release::is_unit_record(&p)) {
+                std::fs::remove_file(path).unwrap();
+                units += 1;
+            }
+        }
+        assert!(units >= 1, "core {n}: a unit record");
+        let (again, again_bytes, _) = reach_build(&product, &options);
+        assert_eq!(again.compiled, 0, "core {n}: every part is reused");
+        assert!(again_bytes == bytes, "core {n}: the same executable");
+    }
+}
+
 /// The reach records a native store holds: files named by an address whose
 /// checked record reads as one, with their payloads.
 fn reach_records(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {

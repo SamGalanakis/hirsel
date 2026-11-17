@@ -214,9 +214,9 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
             let exports = (0..shapes.len())
                 .map(|i| format!("probe_{i}"))
                 .collect::<Vec<_>>();
-            let mut objects = vec![lazy];
+            let mut programs = vec![vec![lazy]];
             if speed {
-                objects.push(
+                programs.push(
                     hirsel_llvm_lazy::emit_program_for_target(
                         &[hirsel_llvm_lazy::Unit::Text(&ir)],
                         &exports,
@@ -225,17 +225,19 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                     .unwrap(),
                 );
             }
-            for object in objects {
-                std::fs::write(dir.join("probe.o"), object).unwrap();
+            for objects in programs {
                 let compiler = match target {
                     Target::X86_64Linux => llvm_prefix.join("bin/clang"),
                     Target::Aarch64Linux => arm_cc.clone(),
                 };
-                run(Command::new(compiler)
-                    .arg(dir.join("probe.c"))
-                    .arg(dir.join("probe.o"))
-                    .arg("-o")
-                    .arg(dir.join("probe")));
+                let mut link = Command::new(compiler);
+                link.arg(dir.join("probe.c"));
+                for (k, object) in objects.iter().enumerate() {
+                    let path = dir.join(format!("probe-{k}.o"));
+                    std::fs::write(&path, object).unwrap();
+                    link.arg(path);
+                }
+                run(link.arg("-o").arg(dir.join("probe")));
                 match target {
                     Target::X86_64Linux => run(&mut Command::new(dir.join("probe"))),
                     Target::Aarch64Linux => run(Command::new(&qemu)

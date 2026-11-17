@@ -1,7 +1,12 @@
 //! Release composition consumes the existing reachable/materialized products.
 //! The release unit is the whole program: every reached body, the program's and
-//! each library's alike, is an internal definition of this one LLVM module.
+//! each library's alike, is an internal definition of one LLVM module that the
+//! whole-program pipeline optimises. Code generation then runs per part, one
+//! per out-of-line definition, and a part's object is keyed by the part's
+//! bitcode: an unchanged definition is generated once, whichever program and
+//! build reached it.
 use super::*;
+use serde::{Deserialize, Serialize};
 
 /// The release unit's key: its inputs and the role facts each unit consumed.
 fn unit_key(
@@ -9,9 +14,48 @@ fn unit_key(
     consumed: &[&[hirsel_core_ir::roles::BodyFacts]],
 ) -> io::Result<ContentHash> {
     crate::native::key(
-        "hirsel.core-release-unit.v3",
+        "hirsel.core-release-unit.v4",
         &(hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs),
     )
+}
+
+/// A part's key: the code generator (`generator`: compiler, libLLVM, target,
+/// debug lines) and the part's bitcode, which is all a part's object is a
+/// function of.
+fn part_key(generator: &impl serde::Serialize, bitcode: &[u8]) -> io::Result<ContentHash> {
+    crate::native::key(
+        "hirsel.core-release-part.v1",
+        &(generator, ContentHash::of_bytes(bitcode)),
+    )
+}
+
+/// The release unit's record: its parts in link order, each by its key and
+/// whether it is in the shared tier.
+#[derive(Serialize, Deserialize)]
+struct Parts {
+    schema: u32,
+    parts: Vec<(bool, ContentHash)>,
+}
+const PARTS_SCHEMA: u32 = 1;
+/// Whether a stored payload is a release unit's record.
+#[cfg(test)]
+pub(crate) fn is_unit_record(payload: &[u8]) -> bool {
+    decode::<Parts>(payload).is_some_and(|r| r.schema == PARTS_SCHEMA)
+}
+
+/// A part of a monomorphic core or std instance carries no program type, so
+/// its object goes to the user's shared cache; every other part (generic and
+/// closure-bound instances, glue, the program's own code) to the store.
+fn shared_symbols(reached: &[Identity]) -> std::collections::HashSet<String> {
+    reached
+        .iter()
+        .filter(|i| {
+            i.dictionaries.is_empty()
+                && i.closures.is_empty()
+                && (i.definition.0.package.name_is("core") || i.definition.0.package.name_is("std"))
+        })
+        .map(Identity::symbol)
+        .collect()
 }
 
 impl CheckProduct {
@@ -92,12 +136,12 @@ impl CheckProduct {
             .iter()
             .find(|i| &i.definition == entry)
             .expect("reached entry");
-        let object_key = unit_key(
+        let target = hirsel_core_layout::Target::from_triple(&options.target)
+            .expect("supported native target");
+        let generator = (compiler, llvm, &options.target, options.debug_lines);
+        let unit = unit_key(
             &(
-                compiler,
-                llvm,
-                &options.target,
-                options.debug_lines,
+                &generator,
                 options.logical_charge_report.is_some(),
                 !hirsel_llvm_lazy::core::facts_enabled(),
                 runtime,
@@ -106,64 +150,119 @@ impl CheckProduct {
             ),
             &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
         )?;
-        let (identity, object, compiled) =
-            if let Some((bare, object, file)) = crate::native_object::load(store, object_key)? {
-                ((bare, file), object, false)
-            } else {
-                let units = modules
-                    .iter()
-                    .zip(&facts)
-                    .map(|(module, facts)| hirsel_llvm_lazy::Unit::Core {
-                        module,
-                        facts,
-                        observe_charge: options.logical_charge_report.is_some(),
-                        debug_lines: options.debug_lines,
-                    })
-                    .collect::<Vec<_>>();
-                let bytes = hirsel_llvm_lazy::emit_program_for_target(
-                    &units,
-                    &[instance.symbol()],
-                    hirsel_core_layout::Target::from_triple(&options.target)
-                        .expect("supported native target"),
-                )
-                .map_err(|message| NativeStop::Emit {
-                    definition: entry.clone(),
-                    message,
-                })?;
-                let object = hirsel_llvm_lazy::core::finish_native_object(
-                    bytes,
-                    object_key,
-                    options.debug_lines,
-                )
-                .map_err(|message| NativeStop::Emit {
-                    definition: entry.clone(),
-                    message,
-                })?;
-                (
-                    crate::native_object::publish(store, object_key, &object)?,
-                    object,
-                    true,
-                )
-            };
-        Ok(vec![ObjectProduct {
-            private_variants: modules
+        let shared = Store::new(&crate::PackageProduct::default_cache().join("release-parts"))?;
+        let tier = |in_shared: bool| if in_shared { &shared } else { store };
+        let emit = |message: String| NativeStop::Emit {
+            definition: entry.clone(),
+            message,
+        };
+        // An unchanged rebuild reads the unit's record and every part it names.
+        let mut held = Vec::new();
+        if let Some(record) = store.get(unit)?.and_then(|b| decode::<Parts>(&b))
+            && record.schema == PARTS_SCHEMA
+        {
+            for &(in_shared, key) in &record.parts {
+                match crate::native_object::load(tier(in_shared), key)? {
+                    Some((bare, object, file)) => {
+                        held.push((tier(in_shared), bare, object, file, false))
+                    }
+                    None => break,
+                }
+            }
+            if held.len() != record.parts.len() {
+                held.clear();
+            }
+        }
+        if held.is_empty() {
+            let units = modules
                 .iter()
-                .map(|m| {
-                    m.code_variants
-                        .keys()
-                        .filter(|f| m.functions[f.index()].body.is_some())
-                        .count()
+                .zip(&facts)
+                .map(|(module, facts)| hirsel_llvm_lazy::Unit::Core {
+                    module,
+                    facts,
+                    observe_charge: options.logical_charge_report.is_some(),
+                    debug_lines: options.debug_lines,
                 })
-                .sum(),
-            instance: instance.clone(),
-            path: crate::native_object::path(store, identity.0.address),
-            identity: identity.0.address,
-            check: identity.0.check,
-            held: Some(identity.1),
-            debug: object.debug,
-            debug_record: None,
-            compiled,
-        }])
+                .collect::<Vec<_>>();
+            let symbols = shared_symbols(reached);
+            let mut parts = Vec::new();
+            let mut failure = None;
+            let objects = hirsel_llvm_lazy::emit_program_parts(
+                &units,
+                &[instance.symbol()],
+                target,
+                &mut |name, bitcode| {
+                    let in_shared = symbols.contains(name.get(..65).unwrap_or(name));
+                    let loaded = part_key(&generator, bitcode).and_then(|key| {
+                        parts.push((in_shared, key));
+                        crate::native_object::load(tier(in_shared), key)
+                    });
+                    match loaded {
+                        Ok(Some(hit)) => {
+                            held.push((tier(in_shared), hit.0, hit.1, hit.2, false));
+                            true
+                        }
+                        Ok(None) => false,
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                            true
+                        }
+                    }
+                },
+            )
+            .map_err(emit)?;
+            if let Some(error) = failure {
+                return Err(error.into());
+            }
+            // Objects generated now join the hits in part order.
+            let mut hits = std::mem::take(&mut held).into_iter();
+            for (&(in_shared, key), object) in parts.iter().zip(objects) {
+                held.push(match object {
+                    None => hits.next().expect("a reused part was loaded"),
+                    Some(bytes) => {
+                        let object = hirsel_llvm_lazy::core::finish_native_object(
+                            bytes,
+                            key,
+                            options.debug_lines,
+                        )
+                        .map_err(emit)?;
+                        let (bare, file) =
+                            crate::native_object::publish(tier(in_shared), key, &object)?;
+                        (tier(in_shared), bare, object, file, true)
+                    }
+                });
+            }
+            store.put_keyed(
+                unit,
+                &encode(&Parts {
+                    schema: PARTS_SCHEMA,
+                    parts,
+                })?,
+            )?;
+        }
+        let mut private_variants = modules
+            .iter()
+            .map(|m| {
+                m.code_variants
+                    .keys()
+                    .filter(|f| m.functions[f.index()].body.is_some())
+                    .count()
+            })
+            .sum();
+        Ok(held
+            .into_iter()
+            .map(|(store, bare, object, file, compiled)| ObjectProduct {
+                private_variants: std::mem::take(&mut private_variants),
+                instance: instance.clone(),
+                path: crate::native_object::path(store, bare.address),
+                identity: bare.address,
+                check: bare.check,
+                held: Some(file),
+                debug: object.debug,
+                debug_record: None,
+                compiled,
+            })
+            .collect())
     }
 }
 

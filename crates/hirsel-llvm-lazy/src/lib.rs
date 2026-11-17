@@ -35,18 +35,38 @@ pub enum Unit<'a> {
     },
     Text(&'a str),
 }
-/// One release codegen unit. LLVM resolves instance symbols, internalizes all
-/// owned definitions except `exports`, then runs the ordinary O3 pipeline.
-pub fn emit_program(units: &[Unit<'_>], exports: &[String]) -> Result<Vec<u8>, String> {
+/// A release program's part objects, every part generated: LLVM resolves
+/// instance symbols, internalizes all owned definitions except `exports`, runs
+/// the ordinary O3 pipeline over the whole program, then generates code once
+/// per definition ([`emit_program_parts`]).
+pub fn emit_program(units: &[Unit<'_>], exports: &[String]) -> Result<Vec<Vec<u8>>, String> {
     emit_program_for_target(units, exports, hirsel_core_layout::Target::X86_64Linux)
 }
 
-/// Compose a release unit for the requested native target.
+/// [`emit_program`] for the requested native target.
 pub fn emit_program_for_target(
     units: &[Unit<'_>],
     exports: &[String],
     target: hirsel_core_layout::Target,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<Vec<u8>>, String> {
+    Ok(
+        emit_program_parts(units, exports, target, &mut |_, _| false)?
+            .into_iter()
+            .map(|part| part.expect("every part generated"))
+            .collect(),
+    )
+}
+
+/// Compose a release program for `target` and generate it in parts, one per
+/// out-of-line definition after whole-program optimisation. `reuse` sees each
+/// part's definition name and bitcode, in order; a part it answers true for
+/// is `None` (the caller holds its object), any other is its object.
+pub fn emit_program_parts(
+    units: &[Unit<'_>],
+    exports: &[String],
+    target: hirsel_core_layout::Target,
+    reuse: &mut dyn FnMut(&str, &[u8]) -> bool,
+) -> Result<Vec<Option<Vec<u8>>>, String> {
     let context = units
         .iter()
         .any(|unit| matches!(unit, Unit::Core { .. }))
@@ -83,7 +103,7 @@ pub fn emit_program_for_target(
             Unit::Text(ir) => lowered.push(loader::ProgramUnit::Text(ir)),
         }
     }
-    loader::program(lowered, exports, target)
+    loader::program(lowered, exports, target, reuse)
 }
 
 #[cfg(test)]

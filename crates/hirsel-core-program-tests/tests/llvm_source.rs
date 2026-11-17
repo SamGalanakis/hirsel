@@ -1054,7 +1054,10 @@ fn strided(s: u64, stride: u64) -> u64 {
         "straight",
     ]
     .map(|name| symbol(&module, names[name]));
-    let object = hirsel_llvm_lazy::emit_program(&units, &exports).unwrap();
+    let object = relocatable(
+        hirsel_llvm_lazy::emit_program(&units, &exports).unwrap(),
+        Target::X86_64Linux,
+    );
     let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
     for (case, report) in cases.iter().zip(reports) {
         assert_eq!(

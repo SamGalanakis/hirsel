@@ -93,6 +93,17 @@ fn main() {
         .arg("-I").arg(prefix.join("include"))
         .arg("-c").arg(&builder).arg("-o").arg(&builder_object)
         .status().unwrap().success());
+    let parts = source.with_file_name("parts.cpp");
+    println!("cargo:rerun-if-changed={}", parts.display());
+    let parts_object = out.join("parts.o");
+    assert!(Command::new(prefix.join("bin/hirsel-clang++"))
+        .args(["-std=c++17", "-O2", "-fPIC", "-fvisibility=hidden", "-fno-exceptions", "-fno-rtti", "-nostdinc++"])
+        .arg(format!("--sysroot={}", sysroot.display()))
+        .arg("-isystem").arg(sysroot.join("usr/include/c++/13"))
+        .arg("-isystem").arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
+        .arg("-I").arg(prefix.join("include"))
+        .arg("-c").arg(&parts).arg("-o").arg(&parts_object)
+        .status().unwrap().success());
     let component = out.join("libhirsel_llvm_engine.so");
     assert!(
         Command::new(prefix.join("bin/hirsel-clang"))
@@ -111,6 +122,7 @@ fn main() {
             .arg(&copy_object)
             .arg(&compose_object)
             .arg(&builder_object)
+            .arg(&parts_object)
             .arg("-l:libstdc++.so.6")
             .arg("-L")
             .arg(prefix.join("lib"))

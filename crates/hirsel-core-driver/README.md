@@ -134,6 +134,14 @@ or std instance's, whether its package arrived as source or by signature, is an
 internal definition of the one release unit, and no library object is linked.
 The unit's key covers every reached module and the sealed and place-blind
 parameter facts its emitter consumed, with the fact schema.
+After the whole-program pipeline, code generation runs per part: one per
+out-of-line definition, with the declarations it references and the constants
+it uses, its local names derived from content. A part's object is keyed by the
+code generator (compiler, libLLVM, target, debug lines) and the part's bitcode,
+so an unchanged definition is generated once whichever program reached it.
+Parts of monomorphic core and std instances go to the user's cache
+(`release-parts`), every other part to the store; the unit's record in the
+store lists its parts, and an unchanged rebuild loads them all.
 Release builds cache the program-wide role facts by their complete content
 inputs. An unchanged build restores the same consumed rows; an edit in the
 fixpoint's input set derives them again. Native object keys retain the exact

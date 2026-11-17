@@ -25,6 +25,27 @@ define void @narrow() {
 }
 "#;
 
+/// The machine code `object` defines for `name`, each relocated field zeroed.
+fn code(object: &[u8], name: &str) -> Option<Vec<u8>> {
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    let file = object::File::parse(object).ok()?;
+    let symbol = file
+        .symbols()
+        .find(|s| s.is_definition() && s.name() == Ok(name))?;
+    let section = file.section_by_index(symbol.section_index()?).ok()?;
+    let start = symbol.address() - section.address();
+    let end = start + symbol.size();
+    let mut bytes = section.data().ok()?[start as usize..end as usize].to_vec();
+    for (offset, relocation) in section.relocations() {
+        if (start..end).contains(&offset) {
+            let at = (offset - start) as usize;
+            let stop = (at + usize::from(relocation.size() / 8)).min(bytes.len());
+            bytes[at..stop].fill(0);
+        }
+    }
+    Some(bytes)
+}
+
 /// The value of `name` in each defined function's attribute group, by function name.
 fn defined_attribute(text: &str, name: &str) -> Vec<(String, Option<String>)> {
     let key = format!("\"{name}\"=\"");
@@ -76,12 +97,21 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
         let lazy = hirsel_llvm_lazy::compile_ir(IR, speed).unwrap();
         assert_eq!(lazy, direct, "lazy probe interval, speed={speed}");
         if speed {
-            let composed = hirsel_llvm_lazy::emit_program(
+            // Release composition generates each function in a part of its
+            // own: the same code, probes included, up to relocated fields.
+            let parts = hirsel_llvm_lazy::emit_program(
                 &[hirsel_llvm_lazy::Unit::Text(IR)],
                 &["wide".into(), "narrow".into()],
             )
             .unwrap();
-            assert_eq!(composed, direct, "release composition probe interval");
+            for name in ["wide", "narrow"] {
+                let composed = parts.iter().find_map(|part| code(part, name));
+                assert_eq!(
+                    composed,
+                    code(&direct, name),
+                    "release composition probe interval: {name}"
+                );
+            }
         }
     }
     let core_ir = hirsel_core_ir::text::parse(

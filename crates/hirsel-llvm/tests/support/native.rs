@@ -25,6 +25,36 @@ fn output(command: &mut Command) -> String {
     );
     String::from_utf8(out.stdout).unwrap()
 }
+/// A release program's part objects linked into one relocatable object.
+fn relocatable(parts: Vec<Vec<u8>>, target: Target) -> Vec<u8> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "hirsel-core-parts-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prefix =
+        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").expect("pinned LLVM prefix"));
+    let mut link = match target {
+        Target::X86_64Linux => {
+            let mut command = Command::new(prefix.join("bin/clang"));
+            command.arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()));
+            command
+        }
+        Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
+    };
+    link.args(["-r", "-nostdlib"]);
+    for (i, part) in parts.iter().enumerate() {
+        let path = dir.join(format!("part-{i}.o"));
+        std::fs::write(&path, part).unwrap();
+        link.arg(path);
+    }
+    output(link.arg("-o").arg(dir.join("program.o")));
+    let object = std::fs::read(dir.join("program.o")).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    object
+}
 fn cty(t: Ty) -> &'static str {
     match t {
         Ty::Ptr => "void *",

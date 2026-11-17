@@ -258,7 +258,6 @@ std::unique_ptr<Module> part(const Module &m, Function &f, const StringMap<std::
         if (g->hasLocalLinkage()) copy->setVisibility(GlobalValue::HiddenVisibility);
         map[g] = copy;
     }
-    for (auto &[from, to] : constants) to->setInitializer(MapValue(from->getInitializer(), map));
     Function *own = Function::Create(f.getFunctionType(), f.getLinkage(), f.getAddressSpace(),
                                      f.getName(), p.get());
     own->copyAttributesFrom(&f);
@@ -267,6 +266,8 @@ std::unique_ptr<Module> part(const Module &m, Function &f, const StringMap<std::
         own->setVisibility(GlobalValue::HiddenVisibility);
     }
     map[&f] = own;
+    // After `f` is mapped: a constant may point back at it.
+    for (auto &[from, to] : constants) to->setInitializer(MapValue(from->getInitializer(), map));
     auto to = own->arg_begin();
     for (Argument &a : f.args()) map[&a] = &*to++;
     SmallVector<ReturnInst *, 8> returns;

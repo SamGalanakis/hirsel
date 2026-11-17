@@ -240,6 +240,21 @@ fn reach_two_cores_release() {
     }
 }
 
+/// A recursive shared type under the release build: its release function's
+/// descriptor constant points back at the function, so the function's part
+/// holds a constant that names the part's own definition (922-graph crashed
+/// writing that part). Exit hand-derived: 1 + 2 + 3 + 4 = 10.
+#[test]
+#[ignore = "explicit native integration target"]
+fn release_part_constant_names_its_own_function() {
+    const APP: &str = "type N: shareable + send {\n    value: u64,\n    tail: Option[Arc[N]]\n}\nfn sum(node: Arc[N]) -> u64 {\n    node.value + match node.tail {\n        Some(t) => sum(t),\n        None => 0u64\n    }\n}\npub fn main() -> Result[(), Exit] {\n    let mut root: Option[Arc[N]] = None\n    for i in 1u64 .. 5u64 {\n        let old = replace(mut root, None)\n        root = match arc.new(N(value: i, tail: take old)) {\n            Ok(a) => Some(a),\n            Error(_) => None\n        }\n    }\n    let total = match root {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    Error(Exit(status: int.truncate(total)))\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = native_options(Backend::Llvm, dir.path());
+    options.optimize = true;
+    let (_, _, status) = reach_build(&record_check(APP, &core_sources(), dir.path(), "store"), &options);
+    assert_eq!(status, Some(10));
+}
+
 /// The reach records a native store holds: files named by an address whose
 /// checked record reads as one, with their payloads.
 fn reach_records(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {

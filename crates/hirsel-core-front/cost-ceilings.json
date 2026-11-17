@@ -8,7 +8,7 @@
       "whole_process_per_line": 33300
     },
     "std": {
-      "check_lower_per_line": 15500,
+      "check_lower_per_line": 15400,
       "whole_request_per_line": 29400,
       "whole_process_per_line": 29600
     },
@@ -17,7 +17,7 @@
       "fixed_core_instructions": 2066028,
       "entries": {
         "bfs-idiomatic": {
-          "marginal_per_line": 48200
+          "marginal_per_line": 48100
         },
         "bfs-matched": {
           "marginal_per_line": 48200
@@ -32,7 +32,7 @@
           "marginal_per_line": 45100
         },
         "lru-matched": {
-          "marginal_per_line": 45200
+          "marginal_per_line": 45100
         },
         "files-idiomatic": {
           "marginal_per_line": 56700
@@ -41,10 +41,10 @@
           "marginal_per_line": 56700
         },
         "json-idiomatic": {
-          "marginal_per_line": 39600
+          "marginal_per_line": 39500
         },
         "json-matched": {
-          "marginal_per_line": 39600
+          "marginal_per_line": 39500
         },
         "pipeline-idiomatic": {
           "marginal_per_line": 51000
@@ -53,10 +53,10 @@
           "marginal_per_line": 51000
         },
         "request-scratch-idiomatic": {
-          "marginal_per_line": 50400
+          "marginal_per_line": 50300
         },
         "request-scratch-matched": {
-          "marginal_per_line": 50400
+          "marginal_per_line": 50300
         },
         "rope-idiomatic": {
           "marginal_per_line": 47800

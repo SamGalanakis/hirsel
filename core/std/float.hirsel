@@ -127,7 +127,46 @@ type Scanned {
     mantissa: u64,
     exponent: i64,
     many: bool,
-    at: u64
+    at: u64,
+    written: WrittenExponent
+}
+
+type WrittenExponent {
+    magnitude: u64,
+    negative: bool,
+}
+
+// Beyond this margin both conversion paths have settled overflow or underflow.
+const EXPONENT_MARGIN: u64 = 400
+
+fn add_written(point: i64, written: WrittenExponent) -> i64 {
+    if written.magnitude == 0 {
+        return point
+    }
+    let mut negative = point < 0
+    let magnitude: u64 = int.narrow(if negative {
+        -point
+    } else {
+        point
+    })
+    let combined = if negative == written.negative {
+        int.saturating_add(magnitude, written.magnitude)
+    } else if magnitude < written.magnitude {
+        negative = written.negative
+        written.magnitude - magnitude
+    } else {
+        magnitude - written.magnitude
+    }
+    let bounded: i64 = if combined > EXPONENT_MARGIN {
+        int.narrow(EXPONENT_MARGIN)
+    } else {
+        int.narrow(combined)
+    }
+    if negative {
+        -bounded
+    } else {
+        bounded
+    }
 }
 
 /// Scans s against the grammar: '-'?, '0' or a non-zero digit and digits, then optionally
@@ -174,25 +213,30 @@ fn scan(s: String) -> Result[Scanned, ParseError] {
         let places: i64 = int.narrow(i - first)
         exponent = -places
     }
-    let mut written: i64 = 0
+    let mut written = WrittenExponent(magnitude: 0, negative: false)
     if i < n && (b[i] == b'e' || b[i] == b'E') {
         i += 1
-        let minus = i < n && b[i] == b'-'
+        written.negative = i < n && b[i] == b'-'
         if i < n && (b[i] == b'-' || b[i] == b'+') {
             i += 1
         }
         if i >= n || !is_digit(b[i]) {
             return Error(Invalid(i))
         }
+        // A point displacement cannot exceed the number of significand digits.
+        // A magnitude past this limit stays out of range after any cancellation.
+        let limit = count + EXPONENT_MARGIN
         while i < n && is_digit(b[i]) {
-            if written < 65536 {
-                let x: i64 = int.widen(b[i] - b'0')
-                written = 10 * written + x
+            if written.magnitude < limit {
+                let digit: u64 = int.widen(b[i] - b'0')
+                let next = int.saturating_add(int.saturating_mul(written.magnitude, 10), digit)
+                written.magnitude = if next > limit {
+                    limit
+                } else {
+                    next
+                }
             }
             i += 1
-        }
-        if minus {
-            written = -written
         }
     }
     if i < n {
@@ -211,7 +255,7 @@ fn scan(s: String) -> Result[Scanned, ParseError] {
             return Ok(long(b, negative, at, written))
         }
     }
-    Ok(Scanned(negative: negative, mantissa: mantissa, exponent: exponent + written, many: false, at: at))
+    Ok(Scanned(negative: negative, mantissa: mantissa, exponent: add_written(exponent, written), many: false, at: at, written: written))
 }
 
 /// The digits of b from i accumulated onto x, wrapping (the caller rescans past 19
@@ -253,7 +297,7 @@ fn eight(w: u64) -> u64 {
 /// A number of more than 19 significant digits, already checked against the grammar,
 /// scanned again as Rust's: its first 19 significant digits (leading zeros leave the
 /// mantissa 0), the exponent they leave, and `many`; `written` is the explicit exponent.
-fn long(b: Bytes, negative: bool, at: u64, written: i64) -> Scanned {
+fn long(b: Bytes, negative: bool, at: u64, written: WrittenExponent) -> Scanned {
     let n = list.len(b)
     let mut x: u64 = 0
     let mut i = at
@@ -282,7 +326,7 @@ fn long(b: Bytes, negative: bool, at: u64, written: i64) -> Scanned {
         let places: i64 = int.narrow(i - first)
         exponent = -places
     }
-    Scanned(negative: negative, mantissa: x, exponent: exponent + written, many: true, at: at)
+    Scanned(negative: negative, mantissa: x, exponent: add_written(exponent, written), many: true, at: at, written: written)
 }
 
 fn is_digit(x: u8) -> bool {
@@ -305,7 +349,7 @@ fn decide(fmt: Format, s: String, n: Scanned) -> (u64, i64) {
             return (m, e)
         }
     }
-    slow(fmt, string.as_bytes(s), n.at)
+    slow(fmt, string.as_bytes(s), n.at, n.written)
 }
 
 const ALL_ONES: u64 = 0xffffffffffffffff
@@ -421,8 +465,8 @@ fn shift_for(n: i64) -> u64 {
     }
 }
 
-fn slow(fmt: Format, b: Bytes, at: u64) -> (u64, i64) {
-    let mut d = decimal(b, at)
+fn slow(fmt: Format, b: Bytes, at: u64, written: WrittenExponent) -> (u64, i64) {
+    let mut d = decimal(b, at, written)
     if d.count == 0 || d.point < -324 {
         return (0, 0)
     }
@@ -491,7 +535,7 @@ fn slow(fmt: Format, b: Bytes, at: u64) -> (u64, i64) {
 }
 
 /// The digits of b[at..], which `scan` accepted, as a Decimal.
-fn decimal(b: Bytes, at: u64) -> Decimal {
+fn decimal(b: Bytes, at: u64, written: WrittenExponent) -> Decimal {
     let mut d = Decimal(digits:[0; 768], count: 0, point: 0, truncated: false)
     let n = list.len(b)
     let mut i = at
@@ -537,26 +581,7 @@ fn decimal(b: Bytes, at: u64) -> Decimal {
             d.count = DIGITS
         }
     }
-    if i < n && (b[i] == b'e' || b[i] == b'E') {
-        i += 1
-        let minus = i < n && b[i] == b'-'
-        if i < n && (b[i] == b'-' || b[i] == b'+') {
-            i += 1
-        }
-        let mut written: i64 = 0
-        while i < n && is_digit(b[i]) {
-            if written < 65536 {
-                let x: i64 = int.widen(b[i] - b'0')
-                written = 10 * written + x
-            }
-            i += 1
-        }
-        d.point += if minus {
-            -written
-        } else {
-            written
-        }
-    }
+    d.point = add_written(d.point, written)
     d
 }
 

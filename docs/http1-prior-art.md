@@ -136,3 +136,12 @@ ADOPTED; repeated scanning is NOT TAKEN. Field offsets stay in the fixed Head.
 The existing request corpus checks every split plus one-byte fragments against
 the independent single-shot parser, including initialized fields on Partial
 and errors. The counter increments at the only buffer read in resume.
+
+## HTTP-4 request framing
+
+ADAPTED Go `46b6249`, `src/net/http/transfer.go:637`: select a body boundary once.
+Goose HTTP `9b5b951`, `message.goose:170`, combines head and body policy in its scanner,
+which avoids another pass but rescans growing input and accepts equal
+repeated lengths. Hirsel reads the saved Head offsets once and follows
+HTTP-4's refusal of every duplicate or listed length and TE+CL. Go's
+duplicate coalescing and HTTP/1.0 TE tolerance are NOT TAKEN.

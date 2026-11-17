@@ -1,0 +1,67 @@
+// HTTP-4 / L2. Expected statuses are hand-derived from RFC 9112 sections
+// 6.3 and 7, with Hirsel's stricter rules in docs/spec/http.md HTTP-4.
+// All refusals close. Successful request framing alone does not force close.
+fn frame_case(raw: Bytes, limit: u64, expected: Result[http.Framing, http.BodyError]) -> bool {
+    let mut h = http1.head()
+    http1.request(raw, mut h) == Complete && http.framing(raw, h, limit) == expected
+}
+
+fn refused(status: u16) -> Result[http.Framing, http.BodyError] {
+    Error(http.BodyError(status: status, close: true))
+}
+
+// RFC 9112 section 6.3(7): requests without either field have no body.
+// expect: run no_body() = true
+fn no_body() -> bool {
+    frame_case(result.unwrap(b"GET / HTTP/1.1\r\nHost: a\r\n\r\nNEXT"), 0, Ok(Empty)) && frame_case(result.unwrap(b"POST / HTTP/1.0\r\n\r\n"), 0, Ok(Empty))
+}
+
+// RFC 9112 section 6.3(6), HTTP-4(2): one decimal length, OWS trimmed by Head.
+// expect: run content_length() = true
+fn content_length() -> bool {
+    frame_case(result.unwrap(b"POST / HTTP/1.1\r\ncOnTeNt-LeNgTh:\t3 \t\r\n\r\nabcNEXT"), 3, Ok(ContentLength(3))) && frame_case(result.unwrap(b"POST / HTTP/1.0\r\nContent-Length: 0\r\n\r\n"), 0, Ok(ContentLength(0))) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 9999999999999999999\r\n\r\n"), 18446744073709551615, Ok(ContentLength(9999999999999999999)))
+}
+
+// RFC 9112 section 6.2's 1*DIGIT; HTTP-4(2) fixes a 19-digit lexical bound.
+// expect: run invalid_lengths() = true
+fn invalid_lengths() -> bool {
+    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length:\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: +3\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: -1\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3x\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 00000000000000000000\r\n\r\n"), 99, refused(400))
+}
+
+// HTTP-4(2): valid numeric size above the route bound is 413 and close.
+// expect: run large_length() = true
+fn large_length() -> bool {
+    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n"), 3, refused(413))
+}
+
+// RFC 9112 section 6.3(3) permits refusal; HTTP-4(1) requires it even
+// when the length is invalid. Mutant: te_wins_over_cl.
+// expect: run te_and_cl() = true
+fn te_and_cl() -> bool {
+    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: bad\r\nTransfer-Encoding: gzip\r\n\r\n"), 99, refused(400))
+}
+
+// HTTP-4(2) takes section 6.3(5)'s refusal option even for equal values.
+// Mutant: accept_equal_dup_cl.
+// expect: run duplicate_lengths() = true
+fn duplicate_lengths() -> bool {
+    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3\r\ncontent-length: 3\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nContent-Length: 3, 3\r\n\r\n"), 99, refused(400))
+}
+
+// HTTP-4(3) permits exactly one chunked coding, case-insensitive.
+// expect: run chunked_framing() = true
+fn chunked_framing() -> bool {
+    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: ChUnKeD\r\n\r\n"), 99, Ok(Chunked))
+}
+
+// RFC 9112 section 6.1 prohibits TE in HTTP/1.0; HTTP-4(3) answers 400.
+// expect: run te_in_10() = true
+fn te_in_10() -> bool {
+    frame_case(result.unwrap(b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n"), 99, refused(400)) && frame_case(result.unwrap(b"POST / HTTP/1.0\r\nTransfer-Encoding: gzip\r\n\r\n"), 99, refused(400))
+}
+
+// HTTP-4(3)'s one-coding policy uses 501 for unknown, lists or repeats.
+// expect: run unsupported_codings() = true
+fn unsupported_codings() -> bool {
+    frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n"), 99, refused(501)) && frame_case(result.unwrap(b"POST / HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n"), 99, refused(501))
+}

@@ -1,0 +1,67 @@
+// HTTP-4: pure request framing over http1's parsed offsets. I/O belongs to
+// the connection. ADAPTED Go net/http/transfer.go and internal/chunked.go;
+// strict duplicate refusal and extension grammar follow docs/spec/http.md.
+pub type Framing: key = Empty | ContentLength(u64) | Chunked
+
+pub type BodyError: key {
+    status: u16,
+    close: bool
+}
+
+fn failure(status: u16) -> BodyError {
+    BodyError(status: status, close: true)
+}
+
+/// Selects a request body boundary from the already parsed Head. No allocation.
+/// HTTP-4 refuses ambiguous framing before interpreting any body bytes.
+/// Ex: `http.framing(bytes, h, 1048576)`.
+pub fn framing(b: Bytes, h: http1.Head, body_max: u64) -> Result[Framing, BodyError] {
+    let mut lengths: u64 = 0
+    let mut encodings: u64 = 0
+    let mut length = http1.Span(start: 0, end: 0)
+    let mut encoding = length
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        let name = list.slice(b, f.name.start, f.name.end)
+        if http1.equal_ascii(name, string.as_bytes("content-length")) {
+            lengths += 1
+            length = f.value
+        }
+        if http1.equal_ascii(name, string.as_bytes("transfer-encoding")) {
+            encodings += 1
+            encoding = f.value
+        }
+    }
+    if lengths > 0 && encodings > 0 || lengths > 1 {
+        return Error(failure(400))
+    }
+    if encodings > 0 {
+        if h.version == 0 {
+            return Error(failure(400))
+        }
+        if encodings != 1 || !http1.equal_ascii(list.slice(b, encoding.start, encoding.end), string.as_bytes("chunked")) {
+            return Error(failure(501))
+        }
+        return Ok(Chunked)
+    }
+    if lengths == 0 {
+        return Ok(Empty)
+    }
+    let n = length.end - length.start
+    if n == 0 || n > 19 {
+        return Error(failure(400))
+    }
+    let mut size: u64 = 0
+    for i in length.start .. length.end {
+        let c = b[i]
+        if !int.is_ascii_digit(c) {
+            return Error(failure(400))
+        }
+        let digit: u64 = int.widen(c - b'0')
+        size = size * 10 + digit
+    }
+    if size > body_max {
+        return Error(failure(413))
+    }
+    Ok(ContentLength(size))
+}

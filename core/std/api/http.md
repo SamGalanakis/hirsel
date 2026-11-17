@@ -2,7 +2,7 @@
 
 [API overview](../API.md). [Specification](../../../docs/spec/http.md).
 
-The module is not built yet. Its rules are HTTP-1 to HTTP-15 and the stream
+The pure HTTP-4 request framing selector is built; the server is not built yet. Its rules are HTTP-1 to HTTP-15 and the stream
 ownership rules of the [HTTP specification](../../../docs/spec/http.md).
 
 `serve(take listeners, clock, cfg, router, state)` serves HTTP/1.1 and
@@ -28,3 +28,10 @@ nothing.
 Runner bindings (one transport-neutral ingress, `HttpBinding` values, JSON
 forms, statuses, the HTTP relay and SSE subscriptions) are rules B-1 to B-12.
 Keyed operations (K-1 to K-10) are a separate, unbuilt part.
+
+`framing(bytes, head, body_max)` reads the parsed field offsets once and returns
+`Empty`, `ContentLength(n)` or `Chunked`. It rejects TE+CL, repeated or listed
+lengths, invalid decimal lengths, HTTP/1.0 TE and unsupported codings with a
+`BodyError { status, close: true }`. Framing syntax refusals are 400, a valid
+length above the body cap is 413, and unsupported HTTP/1.1 codings are 501.
+The selector allocates nothing and performs no I/O.

@@ -827,7 +827,14 @@ def first_party(meta: dict) -> str:
                             host=True,
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/core-observe-runner/hirsel-core-contract-eval"],
                             bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py"]) + ["core/programs/store/manifest.json", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py"]')))
+    for model in ("calls", "store", "subs"):
+        target = "core-observe-model-" + model
+        out.append("\n" + call("hirsel_script_test", name=target, script="core/tools/observe_model_tests.py", full=False,
+                                host=True,
+                                args=["--evaluator", "buck-out/tmp/cargo-bin-exe/" + target + "/hirsel-core-contract-eval", "--model", model],
+                                bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
+                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/observe/*.hirsel", "core/programs/observe/models/*.py"]) + ["core/programs/store/manifest.json", "core/tools/observe_tests.py", "core/tools/std_native.py", "core/tools/store_tests.py", "core/tools/runner_tests.py", "core/tools/store_crash_tests.py"]')))
     # The laws whose entry takes a host capability (land-core-evaluator runs the
     # Clock and Tasks ones too, and reports the Dir, Stdout and Stderr ones
     # native-only), on both engines; on the invoking host for the Dir laws' openat2.

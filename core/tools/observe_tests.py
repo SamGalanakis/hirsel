@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import sys
 import tempfile
 
 from runner_tests import CALLS, LAWS, MUTANTS, evaluate, manifest, p19_module, l12_module, L12, l12_holds
@@ -58,11 +59,11 @@ def traced_calls(root, work):
                    '    record(cn, Sent(observe.Send(conn: cn.id, stream: observe.own(c.stream), p: c.p, digest: list.new(), deadline: c.deadline, at: host.mono_ns(clock))))\n'
                    '    if let Error(_) = channel.send(cn.to, runner.ask(take c)) {')
     text = replace(text, '            want(f.version != NEVER,',
-                   '            if f.version != NEVER { record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(f.stream), p: f.p, version: f.version, outcome: observe.own(f.outcome), at: host.mono_ns(cn.clock)))) }\n'
+                   '            if f.version != NEVER { record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(f.stream), p: f.p, version: f.version, outcome: observe.from_runner(f.outcome), at: host.mono_ns(cn.clock)))) }\n'
                    '            want(f.version != NEVER,')
     text = replace(text, '            Ok(f) => f.version == 0u64 && match f.outcome {',
                    '            Ok(f) => {\n'
-                   '                if f.version != NEVER { record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(f.stream), p: f.p, version: f.version, outcome: observe.own(f.outcome), at: host.mono_ns(cn.clock)))) }\n'
+                   '                if f.version != NEVER { record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(f.stream), p: f.p, version: f.version, outcome: observe.from_runner(f.outcome), at: host.mono_ns(cn.clock)))) }\n'
                    '                let valid = f.version == 0u64 && match f.outcome {')
     text = replace(text, '            Error(_) => false,\n        }\n        i += 1u64',
                    '                valid\n            },\n            Error(_) => false,\n        }\n        i += 1u64')
@@ -166,7 +167,7 @@ class Codec:
             elif tag == 3:
                 e.update(stream=self.blob(), p=self.uint(), digest=self.blob(), version=self.uint())
             elif tag == 4:
-                e.update(stream=self.blob(), latest=self.uint(), state=self.uint(4))
+                e.update(stream=self.blob(), latest=self.uint(), state=self.uint(4), digest=self.blob())
             elif tag == 5:
                 e.update(event=self.uint(4), task=self.uint(), object=self.uint(), value=self.uint())
             else:
@@ -174,12 +175,12 @@ class Codec:
             events.append(e)
         return events
 
-    def verdicts(self):
+    def verdicts(self, clauses=CLAUSES):
         results = []
         n = self.uint(4)
-        if n != len(CLAUSES):
-            raise ValueError(f'expected {len(CLAUSES)} clause verdicts, got {n}')
-        for clause in CLAUSES:
+        if n != len(clauses):
+            raise ValueError(f'expected {len(clauses)} clause verdicts, got {n}')
+        for clause in clauses:
             tag = self.uint(4)
             v = dict(clause=clause, status=('Held', 'Vacuous', 'Failed', 'Incomplete', 'Unavailable')[tag])
             if tag == 0:
@@ -204,6 +205,13 @@ class Codec:
         return results
 
 
+def shown_key(raw):
+    codec = Codec(raw)
+    conn, stream, p = codec.uint(), codec.blob(), codec.uint()
+    name = str(int.from_bytes(bytes(stream), 'little')) if len(stream) == 8 else bytes(stream).hex()
+    return f'(conn {conn}, s{name}, p{p})'
+
+
 def trace(report):
     events = Codec(report.get('stdout', [])).events()
     events += [dict(kind='Task', event=e[0], task=e[1], object=e[2], value=e[3])
@@ -226,34 +234,37 @@ def observed_manifest(root, work):
     return path
 
 
-def check_trace(evaluator, root, work, t, name):
-    """Feed live test observations to the independent Hirsel machine, never a .obs artifact."""
+def trace_source(t, name, observer):
+    """Construct a test entry from live observations, never a .obs artifact."""
+    observer_module = 'observe' if observer == 'joins' else observer
+    clauses = (CLAUSES if observer == 'joins' else ('V',) if observer == 'versions'
+               else ('W3', 'W4', 'W5') if observer == 'session' else ('H', 'I', 'M', 'HU', 'AH2'))
     blobs = {}
 
     def blob(value):
         key = tuple(value)
         if key not in blobs:
-            blobs[key] = 'b' + str(len(blobs))
+            blobs[key] = name + '_b' + str(len(blobs))
         return blobs[key] + '()'
 
     def outcome(o):
         kind, p = o['kind'], o.get('payload', [])
         if kind == 'Returned':
-            return 'Returned(' + blob(p) + ')'
+            return 'ObsReturned(' + blob(p) + ')'
         if kind == 'Failed':
             payload = (f'Raised({p[1]}u32)' if p[0] == 0 else
                        f'OutOfBytes(runner.Room(requested: {p[1]}u64, available: {p[2]}u64))' if p[0] == 1 else
                        f'OutOfTime({p[1]}u64)' if p[0] == 2 else 'Gone')
-            return f'Failed({payload})'
+            return f'ObsFailed({payload})'
         if kind == 'Refused':
             payload = ('NoEntry' if p[0] == 0 else
                        f'Malformed(runner.Bad(kind: {p[1]}u32, at: {p[2]}u64))' if p[0] == 1 else
                        'Overloaded' if p[0] == 2 else 'Deadline' if p[0] == 3 else
-                       f'Budget(runner.Room(requested: {p[1]}u64, available: {p[2]}u64))' if p[0] == 4 else 'NotAllowed')
-            return f'Refused({payload})'
-        return kind
+                       f'Budget(runner.Room(requested: {p[1]}u64, available: {p[2]}u64))' if p[0] == 4 else 'NotAllowed' if p[0] == 5 else 'RequestMismatch' if p[0] == 6 else 'HistoryUnavailable')
+            return f'ObsRefused(Obs{payload})'
+        return 'Obs' + kind
 
-    lines = ['pub fn check(out: Stdout) -> bool waits {', '    let mut s = observe.state()']
+    lines = [f'fn {name}(out: Stdout) -> bool waits {{', f'    let mut s = {observer_module}.state()']
     for e in t['obs']:
         kind = e['kind']
         if kind == 'Sent':
@@ -264,13 +275,17 @@ def check_trace(evaluator, root, work, t, name):
             value = f'Closed(observe.Close(conn: {e["conn"]}u64, code: {e["code"]}u64, at: {e["at"]}u64))'
         elif kind == 'Ran':
             value = f'Ran(observe.Run(stream: {blob(e["stream"])}, p: {e["p"]}u64, digest: {blob(e["digest"])}, version: {e["version"]}u64))'
+        elif kind == 'Pos':
+            value = f'Pos(observe.Position(stream: {blob(e["stream"])}, latest: {e["latest"]}u64, state: {e["state"]}u32, digest: {blob(e["digest"])}))'
         elif kind == 'Task':
             value = f'Task(observe.TaskEvent(kind: {e["event"]}u32, task: {e["task"]}u64, object: {e["object"]}u64, value: {e["value"]}u64))'
+        elif kind in ('Tx', 'Rx'):
+            value = f'{kind}(observe.Wire(conn: {e["conn"]}u64, frame: {blob(e["frame"])}))'
         else:
             raise ValueError(f'unsupported trace observation {kind}')
-        lines.append(f'    observe.step(mut s, {value})')
+        lines.append(f'    {observer_module}.step(mut s, {value})')
     fields = ', '.join(f'{k}: {str(v).lower()}' for k, v in t['header'].items())
-    lines += [f'    let h = observe.Header({fields})', '    let v = observe.finish(s, h)',
+    lines += [f'    let h = observe.Header({fields})', f'    let v = {observer_module}.finish(s, h)',
               '    let c: std.codec.Codec[List[observe.Verdict]] = std.codec.of()',
               '    let mut b: Bytes = list.new()', '    result.unwrap(std.codec.encode(c, v, mut b))',
               '    result.unwrap(stdout.write_bytes(out, b))', '    true', '}']
@@ -278,18 +293,38 @@ def check_trace(evaluator, root, work, t, name):
         lines += [f'fn {fn}() -> Bytes {{', '    let mut b: Bytes = list.new()']
         lines += [f'    result.unwrap(list.push(mut b, {x}u8))' for x in data]
         lines += ['    b', '}']
+    return '\n'.join(lines) + '\n', clauses
+
+
+def check_traces(evaluator, root, work, plans, name):
+    sources, selections = [], []
+    main = ['pub fn check(out: Stdout) -> bool waits {']
+    for index, (observer, t) in enumerate(plans):
+        function = 'case_' + str(index)
+        text, clauses = trace_source(t, function, observer)
+        sources.append(text)
+        selections.append(clauses)
+        main.append(f'    if !{function}(out) {{ return false }}')
+    main += ['    true', '}']
     source = work / (name + '.hirsel')
-    source.write_text('\n'.join(lines) + '\n')
-    m = manifest(root, work, name, extra=[(root / 'core/programs/observe/observe.hirsel', 'observe'),
-                                         (source, 'observe_input')])
+    source.write_text('\n'.join(sources + main) + '\n')
+    modules = ('observe', 'positions', 'versions', 'session')
+    m = manifest(root, work, name, extra=[
+        *((root / f'core/programs/observe/{module}.hirsel', module) for module in modules),
+        (source, 'observe_input')])
     value, report = evaluate(evaluator, m, 'store@1/observe_input/check')
     if value != 1:
-        raise ValueError(f'observer evaluation failed: {report}')
-    c = Codec(report['stdout'])
-    results = c.verdicts()
-    if c.at != len(c.data):
+        (work / (name + '-error.json')).write_text(json.dumps(report, indent=2) + '\n')
+        raise ValueError(f'observer evaluation failed; see {work / (name + "-error.json")}: {report.get("error", report.get("outcome"))}')
+    codec = Codec(report['stdout'])
+    results = [codec.verdicts(clauses) for clauses in selections]
+    if codec.at != len(codec.data):
         raise ValueError('trailing verdict bytes')
     return results
+
+
+def check_trace(evaluator, root, work, t, name, observer='joins'):
+    return check_traces(evaluator, root, work, [(observer, t)], name)[0]
 
 
 def main():
@@ -302,10 +337,13 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
     root, evaluator = args.root.resolve(), args.evaluator.resolve()
+    sys.path.insert(0, str(root / 'core/programs/observe/models'))
+    import handoffs
     args.artifacts.mkdir(parents=True, exist_ok=True)
     rows = []
     coverage = dict.fromkeys(CLAUSES, 0)
     unavailable = set()
+    inventories = {}
     with tempfile.TemporaryDirectory(prefix='hirsel-observe-') as tmp:
         work = Path(tmp)
         m = observed_manifest(root, work)
@@ -322,6 +360,7 @@ def main():
         for case, module, selected in cases:
             value, report = evaluate(evaluator, selected, f'store@1/{module}/law_' + case)
             t = trace(report)
+            handoffs.record_visible(t, inventories)
             verdicts = Codec(report.get('stderr', [])).assessments()
             if value != 1 and t['obs'] and not verdicts:
                 verdicts = check_trace(evaluator, root, work, t, 'prefix_' + case)
@@ -337,7 +376,7 @@ def main():
             for v in failures:
                 indices = [i for i, e in enumerate(t['obs']) if e.get('conn') == v['conn']] if 'conn' in v else []
                 start, end = (indices[v[k]] if v[k] < len(indices) else v[k] for k in ('start', 'end'))
-                print(f'OBSERVER joins FAILED clause={v["clause"]} key={v["key"]} obs #{start}..#{end} case={case} trace={args.artifacts / (case + ".obs")}', flush=True)
+                print(f'OBSERVER joins FAILED clause={v["clause"]} key={shown_key(v["key"])} obs #{start}..#{end} case={case} trace={args.artifacts / (case + ".obs")}', flush=True)
             if not good:
                 (args.artifacts / (case + '.obs')).write_text(json.dumps(t, indent=2) + '\n')
                 (args.artifacts / (case + '.log')).write_text(json.dumps(report, indent=2) + '\n')
@@ -392,6 +431,12 @@ def main():
                 (args.artifacts / (case.split('/')[1] + '.log')).write_text(json.dumps(report, indent=2) + '\n')
             rows.append(good)
     bodies = len(rows) - (0 if args.case else 1)  # l12's cross-run comparison is not another body.
+    rows.append(handoffs.compare(inventories, ('join', 'wake', 'cancel')))
+    if not args.case:
+        exercised = all(coverage[c] for c in ('J2', 'J3', 'J5'))
+        rows.append(exercised)
+        if not exercised:
+            print('OBSERVER joins coverage gap: ' + ', '.join(c for c in ('J2', 'J3', 'J5') if not coverage[c]))
     for clause, needs in sorted(unavailable):
         print(f'OBSERVER joins UNAVAILABLE clause={clause} needs={needs}')
     print('VACUOUS: ' + ', '.join(c for c in CLAUSES if not coverage[c] and not any(u[0] == c for u in unavailable)))

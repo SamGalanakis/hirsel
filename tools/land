@@ -103,6 +103,7 @@ CORE_ACCEPTANCE = (
 # event naming the landed tickets, and blocks no one.
 POST_PUSH = (
     '//:core-observe-runner',
+    '//:core-observe-model-calls', '//:core-observe-model-store', '//:core-observe-model-subs',
     '//:hirsel-core-program-tests-unittest',
     '//:hirsel-core-program-tests-test-cranelift_source',
     '//:hirsel-core-program-tests-test-cranelift_source_aarch64',

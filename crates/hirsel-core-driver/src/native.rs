@@ -268,6 +268,7 @@ fn emit_unit(
     symbols: impl FnOnce() -> Vec<String>,
     options: &NativeOptions,
     object_key: ContentHash,
+    instance: &Identity,
 ) -> Result<hirsel_core_ir::source::NativeObject, String> {
     // Slots whose needed ranges never meet share a home before any engine sees
     // the module (hirsel_core_ir::extent). Stored bodies and this object's key are
@@ -289,7 +290,11 @@ fn emit_unit(
             &hirsel_core_layout::compute(&module.types).expect("producer layouts"),
             &hirsel_cranelift::core::Options {
                 target: &options.target,
-                optimize: options.optimize,
+                // Library bodies share the image's per-instance object cache.
+                // Optimise them once while retaining cheap user-code emission.
+                optimize: options.optimize
+                    || instance.definition.package_is("core", "1")
+                    || instance.definition.package_is("std", "1"),
                 debug_lines: options.debug_lines,
             },
             object_key,
@@ -594,13 +599,12 @@ impl CheckProduct {
                 }
                 let module = materialized.get(instance).ir()?;
                 let symbols = materialized.link_symbols(instance, &mut names)?;
-                let object =
-                    emit_unit(module, || symbols, options, object_key).map_err(|message| {
-                        NativeStop::Emit {
-                            definition: instance.definition.clone(),
-                            message,
-                        }
-                    })?;
+                let object = emit_unit(module, || symbols, options, object_key, instance).map_err(
+                    |message| NativeStop::Emit {
+                        definition: instance.definition.clone(),
+                        message,
+                    },
+                )?;
                 let fields = &materialized.fields[instance];
                 let record = crate::native_object::Instance {
                     schema: crate::native_object::INSTANCE_SCHEMA,
@@ -674,13 +678,12 @@ impl CheckProduct {
                 ((bare, file), object, false)
             } else {
                 let symbols = materialized.link_symbols(instance, &mut names)?;
-                let object =
-                    emit_unit(module, || symbols, options, object_key).map_err(|message| {
-                        NativeStop::Emit {
-                            definition: instance.definition.clone(),
-                            message,
-                        }
-                    })?;
+                let object = emit_unit(module, || symbols, options, object_key, instance).map_err(
+                    |message| NativeStop::Emit {
+                        definition: instance.definition.clone(),
+                        message,
+                    },
+                )?;
                 (
                     crate::native_object::publish(store, object_key, &object)?,
                     object,
@@ -959,11 +962,17 @@ impl CheckProduct {
             {
                 ((bare, file), object, false)
             } else {
-                let object = emit_unit(&module, || module.link_symbols(), options, object_key)
-                    .map_err(|message| NativeStop::Emit {
-                        definition: entry.clone(),
-                        message,
-                    })?;
+                let object = emit_unit(
+                    &module,
+                    || module.link_symbols(),
+                    options,
+                    object_key,
+                    &cleanup_identity(&module),
+                )
+                .map_err(|message| NativeStop::Emit {
+                    definition: entry.clone(),
+                    message,
+                })?;
                 (
                     crate::native_object::publish(&store, object_key, &object)?,
                     object,
@@ -1054,12 +1063,17 @@ impl CheckProduct {
                 .1
                 .ok_or_else(|| NativeStop::Entry("entry cleanup is unavailable".into()))?,
         };
-        let object = emit_unit(&module, || module.link_symbols(), options, object_key).map_err(
-            |message| NativeStop::Emit {
-                definition: entry.clone(),
-                message,
-            },
-        )?;
+        let object = emit_unit(
+            &module,
+            || module.link_symbols(),
+            options,
+            object_key,
+            &identity,
+        )
+        .map_err(|message| NativeStop::Emit {
+            definition: entry.clone(),
+            message,
+        })?;
         let record = crate::native_object::Instance {
             schema: crate::native_object::INSTANCE_SCHEMA,
             identity: identity.clone(),

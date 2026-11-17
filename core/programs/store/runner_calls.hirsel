@@ -472,6 +472,44 @@ pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     served(c, r, tasks, drive_joiners)
 }
 
+// L21/V2 (join_digest): one session sends p with x, then p with y while p is held. The
+// session ends, Close (1008) on this seam, and sends no row for either: the first thing
+// its client receives is the 5 s watchdog's batch, and its task has ended. Another session
+// then gets x's reply at p, so the body ran once, with x.
+fn drive_session_mismatch(take d: Drive) -> () waits {
+    let s0 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(6u64), LATER)
+    match channel.receive(s0.from) {
+        Ok(Batched(b)) => want(b.version == NEVER, "session_mismatch: a row after the mismatch"),
+        _ => fail("session_mismatch: a frame other than the watchdog's"),
+    }
+    want(session_closed(take s0), "session_mismatch: the session did not end")
+    let s1 = conn(d.tasks, d.head, d.clock, 1u64)
+    ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    want(ok_value(frame(s1).outcome) == Some(3u64), "session_mismatch: x ran once, at 3")
+    hang(take s1)
+}
+
+// The session ended by itself (Close 1008 on the wire): its task has returned.
+fn session_closed(take cn: Conn) -> bool waits {
+    let Conn(to: _, from: _, dog: _, session: take s) = take cn
+    let ended = task.join(take s)
+    match ended {
+        Ok(Ok(())) => true,
+        _ => false,
+    }
+}
+
+pub fn law_calls_session_mismatch(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    served(c, r, tasks, drive_session_mismatch)
+}
+
+@test
+fn test_calls_session_mismatch(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_calls_session_mismatch(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
 // V3 and C3/C5 (direct_commitless): a re-send from another session gets the stored reply,
 // byte-equal, in a frame at or above its commit; an older position gets Refused(HistoryUnavailable).
 fn drive_duplicate(take d: Drive) -> () waits {

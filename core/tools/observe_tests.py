@@ -80,6 +80,11 @@ def traced_calls(root, work):
                    '    let _ = task.join(take s)\n'
                    '    emit(out, Closed(observe.Close(conn: id, code: 1000u64, at: host.mono_ns(clock))))\n'
                    '    observe.write_verdicts(err, log.finish(take entries), Closed(observe.Close(conn: id, code: 1000u64, at: host.mono_ns(clock))))')
+    text = replace(text, '    let Conn(to: _, from: _, dog: _, session: take s) = take cn\n    let ended = task.join(take s)',
+                   '    let Conn(id: id, clock: clock, out: out, err: err, log: take entries, to: _, from: _, dog: _, session: take s) = take cn\n'
+                   '    let ended = task.join(take s)\n'
+                   '    emit(out, Closed(observe.Close(conn: id, code: 1008u64, at: host.mono_ns(clock))))\n'
+                   '    observe.write_verdicts(err, log.finish(take entries), Closed(observe.Close(conn: id, code: 1008u64, at: host.mono_ns(clock))))')
     text = text.replace('let Conn(to: _, from: _, dog: _, session: take s) = take cn',
                         'let Conn(to: _, from: _, dog: _, session: take s, ..) = take cn')
     text += '''

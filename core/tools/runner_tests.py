@@ -47,7 +47,7 @@ CHUNK = 500
 N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles')
+         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch')
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
 # L3's tally handler is the only caller of try_send (TRY_SEND is kind 7 in
@@ -124,6 +124,10 @@ def l4_retained(args, root, work, engine):
 # - queue_outside_account: a session that frees a slot when it answers Abandoned.
 # - join_without_digest (L21): a head that joins any request for the running position,
 #   whatever its digest, so other argument bytes get that run's reply.
+# - session_join_without_digest (L21): a session that joins any send of a held position,
+#   so a send with other bytes gets the first send's answer.
+# - mismatch_row_in_session (L21): a session that answers other bytes at a held position
+#   with a Refused(RequestMismatch) row instead of ending (Close 1008).
 # - late_completion_resent: a session that sends the head's answer to a position whose
 #   sends were all answered (Abandoned, not re-sent), a second Outcome for one send.
 # - one_for_joined: one row for a head answer however many sends of the position are owed.
@@ -184,9 +188,9 @@ MUTANTS = (
       ('Release(version: d, snapshot', 'Release(version: wv, snapshot')],
      'runner_calls', 'calls_group_version'),
     ('queue_outside_account',
-     [('                    result.unwrap(map.insert(mut held, take k, take owed))\n                    if hit {',
-       '                    if !hit || list.len(owed) > 0u64 {\n'
-       '                        result.unwrap(map.insert(mut held, take k, take owed))\n'
+     [('                    result.unwrap(map.insert(mut held, take k, take h))\n                    if hit {',
+       '                    if !hit || list.len(h.owed) > 0u64 {\n'
+       '                        result.unwrap(map.insert(mut held, take k, take h))\n'
        '                    } else {\n'
        '                        used -= 1u64\n'
        '                    }\n'
@@ -195,6 +199,17 @@ MUTANTS = (
     ('join_without_digest',
      [('Some(w) => Some((w.p, w.digest == q.digest)),', 'Some(w) => Some((w.p, true)),')],
      'runner_calls', 'calls_joiners'),
+    ('session_join_without_digest',
+     [('Some(h) => (false, list.len(h.owed), h.digest == d),', 'Some(h) => (false, list.len(h.owed), true),')],
+     'runner_calls', 'calls_session_mismatch'),
+    ('mismatch_row_in_session',
+     [('                if !same {\n                    return Ok(())\n                }\n',
+       '                if !same {\n'
+       '                    let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c\n'
+       '                    tell(s.client, last, take stream, p, Refused(RequestMismatch));\n'
+       '                    continue\n'
+       '                }\n')],
+     'runner_calls', 'calls_session_mismatch'),
     ('late_completion_resent',
      [('                if owed > 0u64 {\n                    last = f.version',
        '                if true {\n                    last = f.version')],
@@ -203,8 +218,8 @@ MUTANTS = (
      [('                    for _ in 1u64 .. owed {', '                    for _ in 1u64 .. 1u64 {')],
      'runner_calls', 'calls_one_outcome_per_send'),
     ('latest_deadline',
-     [('                        if owed[i].generation == t.generation {',
-       '                        if owed[list.len(owed) - 1u64].generation == t.generation {')],
+     [('                        if h.owed[i].generation == t.generation {',
+       '                        if h.owed[list.len(h.owed) - 1u64].generation == t.generation {')],
      'runner_calls', 'calls_held_head'),
     ('refused_frames_kept',
      [('    let mut used = 0u64\n', '    let mut used = 0u64\n    let mut kept: List[Bytes] = list.new()\n'),

@@ -76,7 +76,9 @@ under the entry's n (`Malformed`), an n its account cannot grant (`Budget`), and
 full slot table (`Overloaded`). It forwards the rest to the head and holds each
 forwarded position in a slot until the head's answer arrives. Every send gets exactly
 one Outcome. A send of a position already held joins its slot without being forwarded
-again. Each send has its own deadline timer, which answers that send alone with
+again if its request digest equals the held one (32 B per held position); with another
+digest the session ends with no row for either send, which is Close (1008) on the wire
+(v2.11.3 V2). Each send has its own deadline timer, which answers that send alone with
 `Abandoned`. The head's answer goes once to each send still unanswered, so to none
 when the position was Abandoned and not sent again. The slot table counts, per held
 position, the larger of 1 and its unanswered sends, at most 1 + q in all: a joined

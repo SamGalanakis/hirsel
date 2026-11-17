@@ -52,15 +52,12 @@ unsafe extern "C" fn abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcom
 unsafe extern "C" fn deliver(_: *mut u8, _: *mut Request, o: Outcome) -> Outcome {
     o
 }
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 fn value<T>() -> ValueLayout {
     ValueLayout {
         bytes: size_of::<T>(),
         align: align_of::<T>(),
         logical: 0,
-        drop: inert,
+        clean: None,
     }
 }
 #[derive(Clone, Copy)]

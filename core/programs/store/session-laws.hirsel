@@ -118,11 +118,11 @@ pub fn law_session_records(tasks: Tasks) -> bool waits {
         wire_join(take reader, take writer)
         let _ = task.join(take owner)
         let owner_closed = match channel.try_send(end, ()) { Error(Closed(_)) => true, _ => false }
-        let _ = channel.try_send(events, Sent)
+        let _ = channel.try_send(events, wire_event(Sent))
         let _ = channel.try_send(writes, list.new())
         let _ = channel.try_send(credit, ())
         let live = match (channel.try_receive(hear), channel.try_receive(read_writes), channel.try_receive(read_credit)) {
-            (Ok(Sent), Ok(_), Ok(())) => true,
+            (Ok(WireEvent(e: Sent)), Ok(_), Ok(())) => true,
             _ => false,
         }
         let closed = match (channel.try_send(a, ()), channel.try_send(b, ())) {

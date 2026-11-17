@@ -38,3 +38,11 @@ splits the UTF-8 section into bounded invocations. `--resume` retains completed
 sections when report cleanup or the runner is interrupted. Use a new report
 directory after changing protocol behavior. Compression sections are excluded.
 The proxy examples have their own real-container check in tools/tests/wire_proxy.py.
+
+W3b's dormant runner session has a service fixture in `session.hirsel`. Build it
+with the same compiler, runtime and linker, using `wire_build.py --session-only`
+and either native backend. It listens on loopback port 18094 under a 64 MiB
+logical root. Run `wire_wsock.py --session <output>/session-<backend>` for
+concurrent upgrades, strict Frame decoding, blocked output and bounded Close.
+Its test service returns deterministic Batches and Resets and refuses Hello;
+production Hello and call admission belong to W3c.

@@ -2351,7 +2351,11 @@ pub fn session_bytes(c: WireConfig) -> u64 {
     reader_bytes(c) + writer_bytes() + 576u64 + channels + outcomes + c.budget + encode + c.n_service + c.n_place + 32768u64 + wire_round(3u64 * units * 100u64)
 }
 
-pub type WireEvent: send = Input(Frame) | Published(Frame) | Control(u8, std.websocket.Control) | Sent | ReadClosed(std.websocket.Control, std.wsock.Reader) | WriteClosed(std.wsock.Writer) | Ended(u16)
+pub opaque type WireEvent: send { e: WireInput }
+
+fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
+
+type WireInput: send = Input(Frame) | Published(Frame) | Control(u8, std.websocket.Control) | Sent | ReadClosed(std.websocket.Control, std.wsock.Reader) | WriteClosed(std.wsock.Writer) | Ended(u16)
 
 // Read credits cover both the inbox and a reader blocked on publication. They
 // are acquired before decoding, so no extra reader-funded producer item exists.
@@ -2372,21 +2376,21 @@ fn wire_read(take x: WireRead) -> () waits {
                     probing = false
                     match wire_decode(b) {
                         Ok(take f) => break Input(take f),
-                        Error(code) => { let _ = channel.send(to, ReadClosed(wire_close_control(code), take r)); return },
+                        Error(code) => { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(code), take r))); return },
                     }
                 },
                 Ok(Ping(control)) => { probing = false; break Control(10u8, control) },
-                Ok(Closed(control)) => { let _ = channel.send(to, ReadClosed(control, take r)); return },
-                Ok(Reject(code)) => { let _ = channel.send(to, ReadClosed(wire_close_control(code), take r)); return },
+                Ok(Closed(control)) => { let _ = channel.send(to, wire_event(ReadClosed(control, take r))); return },
+                Ok(Reject(code)) => { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(code), take r))); return },
                 Error(Network(TimedOut)) => {
-                    if probing { let _ = channel.send(to, ReadClosed(wire_close_control(1008u16), take r)); return }
+                    if probing { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(1008u16), take r))); return }
                     probing = true
                     break Control(9u8, std.websocket.Control(data: [0u8; 125], len: 0u64))
                 },
-                _ => { let _ = channel.send(to, ReadClosed(wire_close_control(1001u16), take r)); return },
+                _ => { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(1001u16), take r))); return },
             }
         }
-        if let Error(_) = channel.send(to, take next) { return }
+        if let Error(_) = channel.send(to, wire_event(take next)) { return }
     }
 }
 
@@ -2406,14 +2410,14 @@ fn wire_write(take x: WireWrite) -> () waits {
             match std.wsock.flush(mut writer, mut out, deadline) {
                 Ok(true) => break,
                 Ok(false) => {},
-                Error(_) => { let _ = channel.send(to, Ended(1001u16)); return },
+                Error(_) => { let _ = channel.send(to, wire_event(Ended(1001u16))); return },
             }
         }
         if is_close {
-            let _ = channel.send(to, WriteClosed(take writer))
+            let _ = channel.send(to, wire_event(WriteClosed(take writer)))
             return
         }
-        if let Error(_) = channel.send(to, Sent) { return }
+        if let Error(_) = channel.send(to, wire_event(Sent)) { return }
     }
 }
 
@@ -2441,7 +2445,7 @@ fn wire_join(take first: Task[()], take second: Task[()]) -> () waits {
 }
 
 pub fn wire_publish(to: Sender[WireEvent], take frame: Frame) -> Result[(), SendError[WireEvent]] {
-    channel.try_send(to, Published(take frame))
+    channel.try_send(to, wire_event(Published(take frame)))
 }
 
 fn wire_payload(take frame: Frame, max: u64) -> Result[Bytes, std.wsock.Error] {
@@ -2461,7 +2465,7 @@ type WireAlarm: send { clock: Clock, at: u64, to: Sender[WireEvent] }
 
 fn wire_alarm(take a: WireAlarm) -> () waits {
     host.sleep_until(a.clock, a.at)
-    let _ = channel.send(a.to, Ended(1001u16))
+    let _ = channel.send(a.to, wire_event(Ended(1001u16)))
 }
 
 fn wire_close_control(code: u16) -> std.websocket.Control {
@@ -2542,7 +2546,8 @@ fn wire_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] wait
     // either child's Ended. Cancellation uses CONC-8 on the two owned handles.
     let result: Result[(), std.wsock.Error] = loop {
         let event = match channel.receive(inbox) { Ok(take e) => take e, Error(_) => break Ok(()) }
-        let frame = match take event {
+        let WireEvent(e: take received) = take event
+        let frame = match take received {
             Input(take f) => {
                 if closing { let _ = channel.try_send(credit, ()); continue }
                 let handled = dispatch(mut service, take f)

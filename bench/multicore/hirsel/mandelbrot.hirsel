@@ -1,0 +1,64 @@
+const BLOCKS: u64 = 32
+
+type Job: send { width: u64, start: u64, end: u64 }
+
+fn inside(cr: f64, ci: f64) -> bool {
+    let mut zr = cr
+    let mut zi = ci
+    for _ in 0u64 .. 50 {
+        let rr = zr * zr
+        let ii = zi * zi
+        if float.total_order(rr + ii, 4.0) == Greater { return false }
+        zi = (zr + zr) * zi + ci
+        zr = rr - ii + cr
+    }
+    true
+}
+
+fn render(take job: Job) -> Bytes {
+    let width = job.width
+    let width_float: f64 = float.from_int(width)
+    let inverse = 2.0 / width_float
+    let mut block: Bytes = result.unwrap(list.with_capacity((job.end - job.start) * (width / 8)))
+    for y in job.start .. job.end {
+        let y_float: f64 = float.from_int(y)
+        let ci = inverse * y_float - 1.0
+        for x in 0 .. width / 8 {
+            let mut byte: u8 = 0
+            for bit in 0u64 .. 8 {
+                let x_float: f64 = float.from_int(x * 8 + bit)
+                let cr = inverse * x_float - 1.5
+                byte <<= 1u8
+                if inside(cr, ci) { byte |= 1u8 }
+            }
+            result.unwrap(list.push(mut block, byte))
+        }
+    }
+    take block
+}
+
+pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(number) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let width: u64 = result.unwrap(int.parse(number))
+    if width == 0 || width % 8 != 0 { return Error(Exit(status: 2)) }
+    let mut jobs: List[Task[Bytes]] = result.unwrap(list.with_capacity(BLOCKS))
+    for index in 0 .. BLOCKS {
+        let block = BLOCKS - index - 1
+        let job = Job(width: width, start: block * width / BLOCKS, end: (block + 1) * width / BLOCKS)
+        let h = result.unwrap(task.spawn(tasks, bytes 1048576, job, render))
+        result.unwrap(list.push(mut jobs, take h))
+    }
+    let mut header = result.unwrap(string.from("P4\n"))
+    result.unwrap(string.push_u64(mut header, width))
+    result.unwrap(string.push(mut header, " "))
+    result.unwrap(string.push_u64(mut header, width))
+    result.unwrap(string.push(mut header, "\n"))
+    result.unwrap(stdout.write(out, header))
+    let mut image: Bytes = result.unwrap(list.with_capacity(width * (width / 8)))
+    while let Some(take h) = list.pop(mut jobs) {
+        let block = result.unwrap(task.join(take h))
+        result.unwrap(list.append(mut image, block))
+    }
+    result.unwrap(stdout.write_bytes(out, image))
+    Ok(())
+}

@@ -1,0 +1,85 @@
+// The Benchmarks Game Go #3 starts each chunk by factoradic rank.
+const BLOCKS: u64 = 64
+type Job: send { n: u64, first: u64, last: u64 }
+type Score: send { checksum: i64, flips: u64 }
+
+fn factorial(n: u64) -> u64 {
+    let mut result: u64 = 1
+    for i in 2 .. n + 1 { result *= i }
+    result
+}
+
+fn chunk(take job: Job) -> Score {
+    let n = job.n
+    let mut perm: Inline[u64, 16] = [0u64; 16]
+    let mut count: Inline[u64, 16] = [0u64; 16]
+    for i in 0 .. n { perm[i] = i }
+    let mut rank = job.first
+    for offset in 1 .. n {
+        let i = n - offset
+        let fact = factorial(i)
+        let digit = rank / fact
+        rank %= fact
+        count[i] = digit
+        let previous = perm
+        for j in 0 .. i + 1 { perm[j] = previous[(j + digit) % (i + 1)] }
+    }
+    let mut score = Score(checksum: 0, flips: 0)
+    for index in job.first .. job.last {
+        let mut work = perm
+        let mut flips: u64 = 0
+        while work[0] != 0 {
+            let end = work[0]
+            for i in 0 .. (end + 1) / 2 {
+                let value = work[i]
+                work[i] = work[end - i]
+                work[end - i] = value
+            }
+            flips += 1
+        }
+        if flips > score.flips { score.flips = flips }
+        let signed: i64 = int.narrow(flips)
+        if index % 2 == 0 { score.checksum += signed } else { score.checksum -= signed }
+        if index + 1 < job.last {
+            let mut i: u64 = 1
+            loop {
+                let first = perm[0]
+                for j in 0 .. i { perm[j] = perm[j + 1] }
+                perm[i] = first
+                count[i] += 1
+                if count[i] <= i { break }
+                count[i] = 0
+                i += 1
+            }
+        }
+    }
+    score
+}
+
+pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(number) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let n: u64 = result.unwrap(int.parse(number))
+    if n < 2 || n > 16 { return Error(Exit(status: 2)) }
+    let total = factorial(n)
+    let mut jobs: List[Task[Score]] = result.unwrap(list.with_capacity(BLOCKS))
+    for block in 0 .. BLOCKS {
+        let job = Job(n: n, first: total * block / BLOCKS, last: total * (block + 1) / BLOCKS)
+        let h = result.unwrap(task.spawn(tasks, bytes 65536, job, chunk))
+        result.unwrap(list.push(mut jobs, take h))
+    }
+    let mut score = Score(checksum: 0, flips: 0)
+    while let Some(take h) = list.pop(mut jobs) {
+        let part = result.unwrap(task.join(take h))
+        score.checksum += part.checksum
+        if part.flips > score.flips { score.flips = part.flips }
+    }
+    let mut line = string.new()
+    result.unwrap(std.string.push_i64(mut line, score.checksum))
+    result.unwrap(string.push(mut line, "\nPfannkuchen("))
+    result.unwrap(string.push_u64(mut line, n))
+    result.unwrap(string.push(mut line, ") = "))
+    result.unwrap(string.push_u64(mut line, score.flips))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(stdout.write(out, line))
+    Ok(())
+}

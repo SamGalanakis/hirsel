@@ -1,0 +1,114 @@
+const LANES: u64 = 16
+const TASK_BYTES: u64 = 65536
+
+fn identity(take value: u64) -> u64 { value }
+
+fn spawn_join(tasks: Tasks, rounds: u64, lane: u64) -> u64 waits {
+    let mut sum: u64 = 0
+    for i in 0 .. rounds {
+        let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, lane * rounds + i + 1, identity))
+        sum += result.unwrap(task.join(take h))
+    }
+    sum
+}
+
+type Chain: send {
+    tasks: Tasks,
+    rounds: u64,
+    lane: u64
+}
+
+fn chain(take job: Chain) -> u64 waits { spawn_join(job.tasks, job.rounds, job.lane) }
+
+fn spawn_chain(tasks: Tasks, rounds: u64) -> u64 waits {
+    let mut jobs: List[Task[u64]] = list.new()
+    for lane in 0 .. LANES {
+        let job = Chain(tasks: tasks, rounds: rounds, lane: lane)
+        let h = result.unwrap(task.spawn(tasks, bytes 131072, take job, chain))
+        result.unwrap(list.push(mut jobs, take h))
+    }
+    let mut sum: u64 = 0
+    while let Some(take h) = list.pop(mut jobs) {
+        sum += result.unwrap(task.join(take h))
+    }
+    sum
+}
+
+type Echo: send {
+    requests: Receiver[u64],
+    replies: Sender[u64],
+    rounds: u64
+}
+
+fn echo(take job: Echo) -> () waits {
+    for _ in 0 .. job.rounds {
+        let value = result.unwrap(channel.receive(job.requests))
+        result.unwrap(channel.send(job.replies, value + 1))
+    }
+}
+
+fn ping_pong(tasks: Tasks, rounds: u64) -> u64 waits {
+    let (take send, take requests): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let (take replies, take receive): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1))
+    let job = Echo(requests: take requests, replies: take replies, rounds: rounds)
+    let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, echo))
+    let mut sum: u64 = 0
+    for i in 0 .. rounds {
+        result.unwrap(channel.send(send, i))
+        sum += result.unwrap(channel.receive(receive))
+    }
+    result.unwrap(task.join(take h))
+    sum
+}
+
+type Producer: send {
+    send: Sender[u64],
+    rounds: u64,
+    lane: u64
+}
+
+fn produce(take job: Producer) -> () waits {
+    for i in 0 .. job.rounds {
+        result.unwrap(channel.send(job.send, job.lane * job.rounds + i + 1))
+    }
+}
+
+fn fan_in(tasks: Tasks, rounds: u64) -> u64 waits {
+    let (take send, take receive): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(64))
+    let mut jobs: List[Task[()]] = list.new()
+    for lane in 0 .. LANES {
+        let job = Producer(send: channel.sender(send), rounds: rounds, lane: lane)
+        let h = result.unwrap(task.spawn(tasks, bytes TASK_BYTES, take job, produce))
+        result.unwrap(list.push(mut jobs, take h))
+    }
+    let mut sum: u64 = 0
+    for _ in 0 .. LANES * rounds {
+        sum += result.unwrap(channel.receive(receive))
+    }
+    while let Some(take h) = list.pop(mut jobs) {
+        result.unwrap(task.join(take h))
+    }
+    sum
+}
+
+pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(case) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let Some(number) = args.get(argv, 1) else { return Error(Exit(status: 2)) }
+    let rounds: u64 = result.unwrap(int.parse(number))
+    let sum = if case == "spawn_join" {
+        spawn_join(tasks, rounds, 0)
+    } else if case == "spawn_chain" {
+        spawn_chain(tasks, rounds)
+    } else if case == "ping_pong" {
+        ping_pong(tasks, rounds)
+    } else if case == "fan_in" {
+        fan_in(tasks, rounds)
+    } else {
+        return Error(Exit(status: 2))
+    }
+    let mut line = result.unwrap(string.from(""))
+    result.unwrap(string.push_u64(mut line, sum))
+    result.unwrap(string.push(mut line, "\n"))
+    result.unwrap(stdout.write(out, line))
+    Ok(())
+}

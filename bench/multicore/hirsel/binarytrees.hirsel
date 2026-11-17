@@ -1,0 +1,73 @@
+const BLOCKS: u64 = 16
+
+type Node { children: Option[(Box[Node], Box[Node])] }
+type Job: send { depth: u64, iterations: u64 }
+
+fn tree(depth: u64) -> Box[Node] {
+    let children: Option[(Box[Node], Box[Node])] = if depth == 0 { None } else { Some((tree(depth - 1), tree(depth - 1))) }
+    result.unwrap(box.new(Node(children: take children)))
+}
+
+fn check(node: Box[Node]) -> u64 {
+    if let Some((left, right)) = node.children {
+        1 + check(left) + check(right)
+    } else {
+        1
+    }
+}
+
+fn batch(take job: Job) -> u64 {
+    let mut sum: u64 = 0
+    for _ in 0 .. job.iterations {
+        let root = tree(job.depth)
+        sum += check(root)
+    }
+    sum
+}
+
+pub fn main(tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(number) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let requested: u64 = result.unwrap(int.parse(number))
+    let maximum = if requested > 6 { requested } else { 6 }
+    let stretch = maximum + 1
+    let stretching = tree(stretch)
+    let mut stretch_line = result.unwrap(string.from("stretch tree of depth "))
+    result.unwrap(string.push_u64(mut stretch_line, stretch))
+    result.unwrap(string.push(mut stretch_line, "\t check: "))
+    result.unwrap(string.push_u64(mut stretch_line, check(stretching)))
+    result.unwrap(string.push(mut stretch_line, "\n"))
+    result.unwrap(stdout.write(out, stretch_line))
+    let _ = take stretching
+    let long_lived = tree(maximum)
+    let mut depth: u64 = 4
+    while depth <= maximum {
+        let iterations = 1u64 << (maximum - depth + 4)
+        let mut jobs: List[Task[u64]] = result.unwrap(list.with_capacity(BLOCKS))
+        for _ in 0 .. BLOCKS {
+            let job = Job(depth: depth, iterations: iterations / BLOCKS)
+            let allowance = (1u64 << (depth + 1)) * 96 + 65536
+            let h = result.unwrap(task.spawn(tasks, bytes allowance, job, batch))
+            result.unwrap(list.push(mut jobs, take h))
+        }
+        let mut sum: u64 = 0
+        while let Some(take h) = list.pop(mut jobs) {
+            sum += result.unwrap(task.join(take h))
+        }
+        let mut line = string.new()
+        result.unwrap(string.push_u64(mut line, iterations))
+        result.unwrap(string.push(mut line, "\t trees of depth "))
+        result.unwrap(string.push_u64(mut line, depth))
+        result.unwrap(string.push(mut line, "\t check: "))
+        result.unwrap(string.push_u64(mut line, sum))
+        result.unwrap(string.push(mut line, "\n"))
+        result.unwrap(stdout.write(out, line))
+        depth += 2
+    }
+    let mut long_line = result.unwrap(string.from("long lived tree of depth "))
+    result.unwrap(string.push_u64(mut long_line, maximum))
+    result.unwrap(string.push(mut long_line, "\t check: "))
+    result.unwrap(string.push_u64(mut long_line, check(long_lived)))
+    result.unwrap(string.push(mut long_line, "\n"))
+    result.unwrap(stdout.write(out, long_line))
+    Ok(())
+}

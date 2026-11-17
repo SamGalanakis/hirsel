@@ -199,6 +199,8 @@ static bool stepWord(Instruction &I, Value *Context, const DataLayout &DL) {
 // Metering expands tiny helpers with checked slow paths before the ordinary
 // inliner prices them. Revisit direct loop calls after O3 has simplified those
 // paths, sharing one finite expansion budget across introduced helper calls.
+// The whole expansion budget prices each helper too: a separate small-callee
+// cutoff would still reject the hot body of a metered structured helper.
 static void inlineLoopHelpers(Module &M) {
   for (Function &F : M) {
     if (F.isDeclaration()) continue;
@@ -215,7 +217,6 @@ static void inlineLoopHelpers(Module &M) {
       if (!Target || Target->isDeclaration() || Target == &F ||
           Target->hasFnAttribute(Attribute::NoInline) ||
           Call->hasFnAttr(Attribute::NoInline) ||
-          Target->getInstructionCount() > 256 ||
           Target->getInstructionCount() > Budget) continue;
       unsigned Cost = Target->getInstructionCount();
       InlineFunctionInfo Info;

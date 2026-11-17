@@ -2205,6 +2205,22 @@ fn probe(s: u64, n: u64, d: u64, mode: u64) -> u64 {
 fn captured_cursor_and_writer_state_keep_exact_prefixes() {
     let source = r#"
 fn twice(f: scoped fn(u64) -> u64, d: u64) -> u64 { f(d) + f(d) }
+fn bump(mut n: u8) { n += 1 }
+fn widths(n: u64) -> u64 {
+    let mut cursor = 0u8
+    let mut flag = false
+    let scale = 1.5f64
+    let end: u8 = int.narrow(n)
+    let input = "xy"
+    twice(scoped fn(d: u64) -> u64 {
+        while cursor < end {
+            bump(mut cursor)
+            flag = !flag
+        }
+        if float.to_bits64(scale) == 4609434218613702656 && flag { string.byte_len(input) + d + int.widen(cursor) }
+        else { d + int.widen(cursor) }
+    }, 3)
+}
 fn probe(s: u64, n: u64, d: u64) -> u64 {
     let ran = bound steps s {
         let mut cursor = 0u64
@@ -2226,6 +2242,19 @@ fn probe(s: u64, n: u64, d: u64) -> u64 {
 "#;
     let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let mut cases = Vec::new();
+    for (n, want) in [(0, 6), (1, 12), (2, 10), (7, 24)] {
+        assert_eq!(
+            eval::run(&module, names["widths"], &[n], 1_000_000).outcome,
+            eval::Outcome::Returned(vec![want]),
+            "widths({n})"
+        );
+        cases.push(Case {
+            function: names["widths"],
+            args: vec![n],
+            limit: 1_000_000,
+            injection: None,
+        });
+    }
     for n in [0u64, 1, 7, 32768] {
         let need = 6 + 2 * n; // twice, its two callbacks, n widenings/latches, three tail latches.
         for d in [0, 1] {
@@ -2270,7 +2299,12 @@ fn probe(s: u64, n: u64, d: u64) -> u64 {
             }
         }
     }
-    let object = module.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+    let object = module.llvm_program(
+        Target::X86_64Linux,
+        false,
+        false,
+        &[names["probe"], names["widths"]],
+    );
     let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
     for (case, report) in cases.iter().zip(reports) {
         assert_eq!(

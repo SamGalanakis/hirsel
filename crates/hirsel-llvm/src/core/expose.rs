@@ -440,6 +440,61 @@ fn merge_blocks(body: &mut Body) {
     }
 }
 
+// LLVM transfers a mutable parameter's noalias scope when it inlines the
+// call. Preserve that boundary for a loop reached through an opaque capture;
+// direct scalar parameters and local slots already retain their caller root.
+fn scalar_root(body: &Body, signature: &Signature, mut address: AddressId) -> bool {
+    loop {
+        let at = &body.addresses[address.index()];
+        match at.base {
+            AddressBase::Slot(_) => return true,
+            AddressBase::Address(parent) => address = parent,
+            AddressBase::Value(value) => {
+                if let Some(Inst::Pointer {
+                    address: parent, ..
+                }) = body
+                    .insts
+                    .iter()
+                    .find(|i| matches!(i, Inst::Pointer { result, .. } if *result == value))
+                {
+                    address = *parent;
+                    continue;
+                }
+                let params = body.blocks[0].params.get(&body.pools.values).unwrap();
+                return signature
+                    .params
+                    .iter()
+                    .zip(params.iter().skip(usize::from(signature.dest.is_some())))
+                    .any(|(parameter, &v)| {
+                        v == value
+                            && matches!(
+                                parameter,
+                                Param::Address {
+                                    place: PlaceTy::Value(Ty::Scalar(_)),
+                                    loan: Loan::Mut
+                                }
+                            )
+                    });
+            }
+        }
+    }
+}
+fn opaque_scalar_loop(
+    module: &Module,
+    body: &Body,
+    signature: &Signature,
+    call: &CallSite,
+    callee: &Body,
+) -> bool {
+    if empty::loop_free(callee) {
+        return false;
+    }
+    let target = &module.signatures[call.signature.index()];
+    target.params.iter().zip(call.args.get(&body.pools.args).unwrap().iter().skip(usize::from(target.dest.is_some())))
+        .any(|(parameter, argument)| matches!(parameter, Param::Address { place: PlaceTy::Value(Ty::Scalar(_)), loan: Loan::Mut })
+            && !matches!(argument, Arg::Address(address) if scalar_root(body, signature, *address)))
+}
+
 pub(super) fn module(module: &Module) -> Option<Module> {
     // Marks have no runtime meaning. Remove them before eligibility, budgets
     // or block merging can let one change the exposed program.
@@ -524,6 +579,15 @@ pub(super) fn module(module: &Module) -> Option<Module> {
                             return None;
                         };
                         let callee = eligible[f.index()]?;
+                        if opaque_scalar_loop(
+                            module,
+                            &body,
+                            &module.signatures[module.functions[i].signature.index()],
+                            call,
+                            callee,
+                        ) {
+                            return None;
+                        }
                         (!call.cold && f.index() != i && callee.insts.len().max(1) <= budget)
                             .then_some((b, offset, callee))
                     })

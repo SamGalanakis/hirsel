@@ -593,6 +593,23 @@ fn emit_module(
             inline: match definition.as_str() {
                 "core@1/string/push_char" => Inline::Always,
                 "core@1/string/push_scalar" => Inline::Never,
+                // Opaque scalar loans keep their LLVM call boundary until the
+                // parameter's borrow scope is available to the LLVM inliner.
+                _ if source.batch_steps
+                    && body.insts.len() <= 2048
+                    && sig.params.iter().any(|p| {
+                        matches!(
+                            p,
+                            Param::Address {
+                                place: PlaceTy::Value(Ty::Scalar(_)),
+                                loan: Loan::Mut
+                            }
+                        )
+                    })
+                    && !empty::loop_free(body) =>
+                {
+                    Inline::Always
+                }
                 _ if (module.code_variants.contains_key(&FuncId(i as u32))
                     || body.calls.len() <= 1)
                     && empty::loop_free(body) =>

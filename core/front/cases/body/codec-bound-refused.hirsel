@@ -66,3 +66,6 @@ type Restricted[T: codec]: codec { x: T }
 type Denied = Restricted[HostFile]
 // expect: refuse LANG-12 at 66:26
 // expect: compared LANG-12 at 66:26 | core@1/core/HostFile | codec
+
+// expect: cause OWN-4 at 7:27 from 7:6 7:19 7:27 5:15
+// expect: cause OWN-4 at 8:31 from 8:6 8:16 8:23 8:31 6:13

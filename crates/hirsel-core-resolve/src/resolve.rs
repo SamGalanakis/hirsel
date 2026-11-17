@@ -979,6 +979,44 @@ impl<'a> Resolver<'a, '_> {
             self.visit(n);
         }
     }
+    fn indexed_callee(&mut self, n: NodeId) {
+        if self.depth >= RESOLVE_NESTING_LIMIT {
+            self.out.resource_refusal = Some((self.site(n), RESOLVE_NESTING_LIMIT));
+            return;
+        }
+        self.depth += 1;
+        let c = self.item.tree.children(n);
+        let before = self.out.names.len();
+        self.visit(c[0]);
+        let target = self.out.names[before..]
+            .iter()
+            .find(|u| u.node == c[0])
+            .map(|u| u.target);
+        if matches!(target, Some(Target::Definition(id)) if self.index.get(id).kind == DefinitionKind::Function)
+        {
+            let base = self.item.tree.node(c[0]);
+            let bracket = self.item.tree.tokens[base.origin.tokens.end as usize..]
+                .iter()
+                .find(|t| t.symbol == sym::LBRACKET)
+                .unwrap();
+            let mut site = self.site(n);
+            site.span.start = bracket.span.start - self.item.file_offset;
+            // Carry the refusal into semantic recovery so this callee is not
+            // checked again as a generic function value.
+            self.out.names[before..]
+                .iter_mut()
+                .find(|u| u.node == c[0])
+                .unwrap()
+                .target = Target::Missing;
+            self.out.diagnostics.push(Refusal::new("LANG-12", site,
+            "type arguments are not written at a call; give the type in the result annotation, e.g. `let value: ResultType = callee()`, or in a typed value argument"));
+        } else {
+            for &child in &c[1..] {
+                self.visit(child);
+            }
+        }
+        self.depth -= 1;
+    }
     fn visit(&mut self, mut n: NodeId) {
         let initial_depth = self.depth;
         loop {
@@ -1105,6 +1143,8 @@ impl<'a> Resolver<'a, '_> {
                         let before = self.out.names.len();
                         if self.item.tree.node(callee).kind == NodeKind::Path {
                             self.use_path::<false, true>(callee);
+                        } else if self.item.tree.node(callee).kind == NodeKind::Index {
+                            self.indexed_callee(callee);
                         } else {
                             self.visit(callee);
                         }

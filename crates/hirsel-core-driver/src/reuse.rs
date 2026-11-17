@@ -644,6 +644,9 @@ impl Keys {
         }
         for g in incomplete {
             capture(&g.primary);
+            for site in &g.causal {
+                capture(site);
+            }
         }
         anchors
     }

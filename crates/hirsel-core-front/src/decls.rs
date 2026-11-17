@@ -2270,18 +2270,25 @@ impl Program<'_> {
                 let missing = field_bounds & !have;
                 if missing != 0 {
                     let b = bound_names(missing);
-                    out.push(
-                        refusal(
-                            if missing & SEND != 0 {
-                                "CONC-2"
-                            } else {
-                                "OWN-4"
-                            },
-                            f.site,
-                            format!("field `{}` is not {b}", f.name),
-                        )
-                        .with_comparison(canonical(&self.decls, &self.types, f.ty), b),
-                    );
+                    let mut r = refusal(
+                        if missing & SEND != 0 {
+                            "CONC-2"
+                        } else {
+                            "OWN-4"
+                        },
+                        f.site,
+                        format!("field `{}` is not {b}", f.name),
+                    )
+                    .with_comparison(canonical(&self.decls, &self.types, f.ty), b);
+                    if missing & CODEC != 0 {
+                        for (site, explanation) in
+                            missing_codec_declarations(&self.decls, &self.types, f.ty, &params)
+                        {
+                            r.causal.push(site);
+                            r.message += &format!("; {explanation}");
+                        }
+                    }
+                    out.push(r);
                 }
             }
             self.refusals.extend(out);
@@ -2771,6 +2778,69 @@ pub fn copyable(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params
         },
         _ => false,
     }
+}
+
+/// The nominal declarations that prevent this field type from satisfying `codec`.
+fn missing_codec_declarations(
+    decls: &crate::Rows<TypeDecl>,
+    types: &impl TyRead,
+    ty: TyId,
+    params: &[u16],
+) -> Vec<(Site, String)> {
+    fn visit(
+        decls: &crate::Rows<TypeDecl>,
+        types: &impl TyRead,
+        ty: TyId,
+        params: &[u16],
+        out: &mut Vec<(Site, String)>,
+    ) {
+        if has_bounds(decls, types, ty, params) & CODEC != 0 {
+            return;
+        }
+        match types.kind(ty) {
+            TyKind::Adt(d, args) => {
+                let decl = &decls[d.index()];
+                if decl.role.is_none() && !decl.structural && decl.declared & CODEC == 0 {
+                    if !out.iter().any(|(s, _)| *s == decl.site) {
+                        let name = &decl.path.0.name;
+                        let explanation = if decl.repr == Repr::Own {
+                            format!("`{name}` is missing `: codec` at its declaration")
+                        } else {
+                            format!(
+                                "`{name}` has a {} representation, which cannot be codec",
+                                match decl.repr {
+                                    Repr::Own => "own",
+                                    Repr::Stable => "stable",
+                                    Repr::Resource => "resource",
+                                    Repr::Scoped => "scoped",
+                                }
+                            )
+                        };
+                        out.push((decl.site, explanation));
+                    }
+                } else {
+                    for (i, &arg) in args.iter().enumerate() {
+                        if decl.structural
+                            || matches!(decl.role, Some(Role::List | Role::Map))
+                            || decl.summary.bound_params.contains(&(i as u32))
+                        {
+                            visit(decls, types, arg, params, out);
+                        }
+                    }
+                }
+            }
+            TyKind::Tuple(args) => {
+                for &arg in args {
+                    visit(decls, types, arg, params, out);
+                }
+            }
+            TyKind::Anchored(inner, _) => visit(decls, types, *inner, params, out),
+            _ => {}
+        }
+    }
+    let mut out = vec![];
+    visit(decls, types, ty, params, &mut out);
+    out
 }
 
 /// The bounds a type has (OWN-4, SEM-7).

@@ -782,12 +782,24 @@ fn finish(
                 "{} {} {}..{}: {}",
                 d.rule, d.primary.module, d.primary.span.start, d.primary.span.end, d.message
             );
+            for site in &d.causal {
+                eprintln!(
+                    "  caused by {} {}..{}",
+                    site.module, site.span.start, site.span.end
+                );
+            }
         }
         for g in &output.incomplete {
             eprintln!(
                 "incomplete {} {}..{}: {}",
                 g.primary.module, g.primary.span.start, g.primary.span.end, g.message
             );
+            for site in &g.causal {
+                eprintln!(
+                    "  caused by {} {}..{}",
+                    site.module, site.span.start, site.span.end
+                );
+            }
         }
         for r in &output.resources {
             eprintln!(

@@ -3430,7 +3430,8 @@ fn codec_of_without_the_bound_is_refused_at_the_call() {
 // field; a default of another type, at the default) and the generated ones are dropped; a
 // gap only the generated items meet (`of` at a recursive type the frame loop does not take,
 // a member on both sides of a Result) is reported once, at the
-// declaration's name. Spans by hand from the source.
+// authored field, with the declaration and operation as causal sites.
+// Spans by hand from the source.
 #[test]
 fn derived_codec_refusals_point_at_the_declaration() {
     let dir = tempfile::tempdir().unwrap();
@@ -3486,6 +3487,12 @@ fn derived_codec_refusals_point_at_the_declaration() {
     let gap = "the codec of this type is not built".to_string();
     assert_eq!(
         gaps,
-        vec![(span("Pairs"), gap.clone()), (span("std.codec.of()"), gap)]
+        vec![
+            (
+                span("t: Both"),
+                format!("deriving encode for Pairs, field/variant path t: {gap}")
+            ),
+            (span("std.codec.of()"), gap)
+        ]
     );
 }

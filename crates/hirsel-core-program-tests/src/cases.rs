@@ -3,9 +3,7 @@ use crate::{Checked, repo};
 use hirsel_core_front::*;
 use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_ir::{FuncId, Identity, Module, Param, Ty, eval, wf};
-use hirsel_core_resolve::{
-    CorpusManifest, ModulePath, ModuleSource, NameIndex, PackageManifest, Site,
-};
+use hirsel_core_resolve::{ModulePath, NameIndex, Site};
 use hirsel_core_syntax::Span;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,23 +35,9 @@ fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<Mod
     let files = tempfile::tempdir().unwrap();
     let path = files.path().join("input.hirsel");
     std::fs::write(&path, source).unwrap();
-    let corpus = CorpusManifest {
-        core: package("core"),
-        packages: vec![
-            PackageManifest::directory(core_dir, package("core"), true).unwrap(),
-            PackageManifest {
-                package: package("app"),
-                dependencies: vec![package("core")],
-                sources: vec![ModuleSource {
-                    file: path,
-                    modules: vec![module.into()],
-                    signatures: false,
-                }],
-            },
-        ],
-    }
-    .load()
-    .unwrap();
+    let corpus = crate::source_manifest(source, path, core_dir, module)
+        .load()
+        .unwrap();
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);
     let modules = corpus
@@ -438,6 +422,63 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         let words: Vec<&str> = e.split_whitespace().collect();
         match words.as_slice() {
             ["accept"] => {}
+            ["cached"] => {
+                let warm = crate::Driver::default()
+                    .check(
+                        crate::CheckRequest {
+                            manifest: None,
+                            inputs: checked.corpus.manifest.clone(),
+                            store: checked._files.path().join("store"),
+                            library: crate::LibraryInput::Sources,
+                            entry: p.entry.clone(),
+                        },
+                        &mut crate::Meter::new(false),
+                    )
+                    .unwrap();
+                let sites = |xs: &[hirsel_core_driver::SourceSite]| {
+                    xs.iter()
+                        .map(|s| (s.module.clone(), s.span))
+                        .collect::<Vec<_>>()
+                };
+                let diagnostic_rows = |p: &hirsel_core_driver::CheckProduct| {
+                    p.machine_diagnostics()
+                        .unwrap()
+                        .into_iter()
+                        .map(|d| {
+                            (
+                                d.rule.to_owned(),
+                                d.primary.module,
+                                d.primary.span,
+                                sites(&d.causal),
+                                d.declared.map(str::to_owned),
+                                d.required.map(str::to_owned),
+                                d.message.to_owned(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let gap_rows = |p: &hirsel_core_driver::CheckProduct| {
+                    p.machine_incomplete()
+                        .unwrap()
+                        .into_iter()
+                        .map(|g| {
+                            (
+                                g.primary.module,
+                                g.primary.span,
+                                sites(&g.causal),
+                                g.message.to_owned(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                if diagnostic_rows(product) != diagnostic_rows(&warm)
+                    || gap_rows(product) != gap_rows(&warm)
+                {
+                    failures.push(
+                        "cached diagnostic provenance differs from the source request".into(),
+                    );
+                }
+            }
             ["refuse", rule, "at", at] => want_refusals.push(format!("{rule} at {at}")),
             ["cause", rule, "at", at, "from", from @ ..] => {
                 want_causes.push(format!("{rule} at {at} from {}", from.join(" ")))
@@ -449,6 +490,40 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                 )),
                 _ => failures.push(format!("unreadable expectation `{e}`")),
             },
+            ["message", rule, "at", at, "|", text @ ..] => {
+                let text = text.join(" ");
+                if !refusals.iter().any(|r| {
+                    r.rule == *rule
+                        && line_col(&modules, &r.primary) == *at
+                        && r.message.contains(&text)
+                }) {
+                    failures.push(format!("missing message {rule} at {at}: {text}"));
+                }
+            }
+            ["gap-cause", "at", at, "from", from @ ..] => {
+                let wanted = from.join(" ");
+                if !gaps.iter().any(|g| {
+                    line_col(&modules, &g.primary) == *at
+                        && g.causal
+                            .iter()
+                            .map(|s| line_col(&modules, s))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            == wanted
+                }) {
+                    failures.push(format!("missing gap cause at {at} from {wanted}"));
+                }
+            }
+            ["gap-site", "at", at] => {
+                if !gaps.iter().any(|g| line_col(&modules, &g.primary) == *at) {
+                    failures.push(format!(
+                        "missing gap at {at}; got {:?}",
+                        gaps.iter()
+                            .map(|g| (line_col(&modules, &g.primary), &g.message))
+                            .collect::<Vec<_>>()
+                    ));
+                }
+            }
             ["gap", what @ ..] => want_gaps.push(what.join(" ")),
             ["resource", "at", at] => want_resources.push(at.to_string()),
             ["kind", ty, k] | ["holds", ty, k] | ["size", ty, k] => {

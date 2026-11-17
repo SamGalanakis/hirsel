@@ -3,7 +3,7 @@
 //! checks the file (EXPANSION.md section 0). Their names hold `$`, which only generated text
 //! may lex, so no program names them or collides with them; `codec.of` reaches the maker
 //! `D$codec` through the checker, and a site in a generated item is reported at its
-//! declaration `D`.
+//! authored field or variant, with its declaration and operation as causal sites.
 //!
 //! The text is generated from the syntax alone: field and payload types, default literals
 //! and the declared bounds are copied as written, and each codec a field needs comes from a
@@ -35,7 +35,7 @@ pub fn derive(
     {
         return output;
     }
-    let generated = generate(&output.syntax, d);
+    let (generated, mut origins) = generate(&output.syntax, d);
     if generated.is_empty() {
         return output;
     }
@@ -45,7 +45,13 @@ pub fn derive(
     }
     let from = text.len();
     text.push_str(&generated);
-    parser::parse_derived(&text, mode, symbols, from)
+    for origin in &mut origins {
+        origin.generated.start += from as u32;
+        origin.generated.end += from as u32;
+    }
+    let mut parsed = parser::parse_derived(&text, mode, symbols, from);
+    parsed.syntax.generated_origins = origins;
+    parsed
 }
 
 /// The declaration a generated item `D$..` was made for: `D`, whose site reports it.
@@ -53,9 +59,9 @@ pub fn derived_from(name: &str) -> Option<&str> {
     name.split_once('$').map(|(d, _)| d)
 }
 
-/// Where a site in item `item` of `syntax` is reported when the derive generated that
-/// item: the item declaring its type, and the span of the type's name in it. None for an
-/// item someone wrote.
+/// The declaration and name span for a generated item. `codec_context` also
+/// identifies the authored field or variant behind a particular expression.
+/// None for an item someone wrote.
 pub fn declaration_of(syntax: &SyntaxFile, item: usize) -> Option<(usize, Span)> {
     let named = |i: &Item<'_>| {
         let token = syntax.tree.node(i.root).token?;
@@ -76,6 +82,243 @@ pub fn declaration_of(syntax: &SyntaxFile, item: usize) -> Option<(usize, Span)>
         let (token, name) = named(&other)?;
         (name == declared).then(|| (i, other.token_span(token)))
     })
+}
+
+/// A generated expression's byte range and the authored construct that produced it.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GeneratedOrigin {
+    pub generated: Span,
+    pub source: Span,
+}
+
+/// The ordered source path for a codec operation. Declaration and operation spans
+/// use `owner`; primary and path spans use `item`; arguments carry their own items.
+pub struct DeriveContext {
+    pub owner: usize,
+    pub item: usize,
+    pub primary: Span,
+    pub declaration: Span,
+    pub arguments: Vec<(usize, Span)>,
+    pub operation: Span,
+    pub path: Vec<Span>,
+    pub description: String,
+}
+
+/// Recover an authored field/variant path for both declaration checks and generated code.
+pub fn codec_context(syntax: &SyntaxFile, item: usize, span: Span) -> Option<DeriveContext> {
+    let current = syntax.items.get(item)?;
+    let generated = declaration_of(syntax, item);
+    let owner = generated.map_or(item, |(i, _)| i);
+    let authored = syntax.item(owner);
+    let tree = &syntax.tree;
+    let name_token = tree.node(authored.root).token?;
+    let name = tree.token_text(&syntax.source, name_token);
+    let children = tree.children(authored.root);
+    let bound = children.iter().find_map(|&n| {
+        (tree.node(n).kind == NodeKind::Bounds)
+            .then(|| {
+                tree.children(n).iter().copied().find(|&b| {
+                    tree.node(b)
+                        .token
+                        .is_some_and(|t| tree.token_text(&syntax.source, t) == "codec")
+                })
+            })
+            .flatten()
+    })?;
+    let operation = tree.node(bound).origin.span;
+    let mut arguments = vec![];
+    for &n in children {
+        if tree.node(n).kind == NodeKind::Generics {
+            arguments.extend(
+                tree.children(n)
+                    .iter()
+                    .map(|&g| (owner, tree.node(g).origin.span)),
+            );
+        }
+    }
+    let operation_name = if generated.is_some() {
+        let token = tree.node(current.root).token?;
+        tree.token_text(&syntax.source, token)
+            .split_once('$')?
+            .1
+            .to_owned()
+    } else {
+        "codec bound".into()
+    };
+    let absolute = Span {
+        start: current.file_offset + span.start,
+        end: current.file_offset + span.end,
+    };
+    let origin = generated.and_then(|_| {
+        syntax
+            .generated_origins
+            .iter()
+            .filter(|o| o.generated.start <= absolute.start && absolute.start < o.generated.end)
+            .min_by_key(|o| o.generated.end - o.generated.start)
+    });
+    let source_item = origin.map_or(owner, |origin| {
+        syntax
+            .items
+            .iter()
+            .position(|item| {
+                item.file_offset <= origin.source.start && origin.source.end <= item.end
+            })
+            .unwrap()
+    });
+    let source = syntax.item(source_item);
+    let mapped = origin.map_or_else(
+        || {
+            if generated.is_some() {
+                authored.token_span(name_token)
+            } else {
+                span
+            }
+        },
+        |o| Span {
+            start: o.source.start - source.file_offset,
+            end: o.source.end - source.file_offset,
+        },
+    );
+    fn path(
+        syntax: &SyntaxFile,
+        n: NodeId,
+        at: Span,
+        spans: &mut Vec<Span>,
+        names: &mut Vec<String>,
+    ) {
+        let node = syntax.tree.node(n);
+        if node.origin.span.start > at.start || node.origin.span.end < at.end {
+            return;
+        }
+        if matches!(
+            node.kind,
+            NodeKind::Field
+                | NodeKind::RemovedField
+                | NodeKind::Variant
+                | NodeKind::RemovedVariant
+                | NodeKind::Payload
+        ) {
+            spans.push(node.origin.span);
+            names.push(node.token.map_or_else(
+                || "payload".into(),
+                |t| syntax.tree.token_text(&syntax.source, t).into(),
+            ));
+        }
+        for &child in syntax.tree.children(n) {
+            path(syntax, child, at, spans, names);
+        }
+    }
+    let mut spans = vec![];
+    let mut names = vec![];
+    if source_item != owner {
+        names.push(
+            tree.token_text(&syntax.source, tree.node(source.root).token?)
+                .to_owned(),
+        );
+    }
+    path(syntax, source.root, mapped, &mut spans, &mut names);
+    let primary = spans.last().copied().unwrap_or(mapped);
+    for n in source.range.nodes.clone() {
+        let node = tree.node(NodeId(n));
+        if node.kind == NodeKind::TypeArguments
+            && primary.start <= node.origin.span.start
+            && node.origin.span.end <= primary.end
+        {
+            for &arg in &tree.children(NodeId(n))[1..] {
+                let span = tree.node(arg).origin.span;
+                if !arguments.contains(&(source_item, span)) {
+                    arguments.push((source_item, span));
+                }
+            }
+        }
+    }
+
+    let type_name = children
+        .iter()
+        .find(|&&n| tree.node(n).kind == NodeKind::Generics)
+        .map_or_else(
+            || name.to_owned(),
+            |&n| {
+                let generic = tree.node(n).origin.span;
+                format!(
+                    "{name}{}",
+                    &syntax.source[(authored.file_offset + generic.start) as usize
+                        ..(authored.file_offset + generic.end) as usize]
+                )
+            },
+        );
+    let description = if names.is_empty() {
+        format!("deriving {operation_name} for {type_name}")
+    } else {
+        format!(
+            "deriving {operation_name} for {type_name}, field/variant path {}",
+            names.join(".")
+        )
+    };
+    Some(DeriveContext {
+        owner,
+        item: source_item,
+        primary,
+        declaration: authored.token_span(name_token),
+        arguments,
+        operation,
+        path: spans,
+        description,
+    })
+}
+
+/// Nested generator fragments retain their source range through ordinary string formatting.
+/// The temporary delimiter is absent from the input, including comments and literals.
+struct MappedText<'a> {
+    source: &'a str,
+    delimiter: String,
+    spans: std::cell::RefCell<Vec<Span>>,
+}
+impl<'a> MappedText<'a> {
+    fn new(source: &'a str) -> Self {
+        let mut delimiter = "\0".to_owned();
+        while source.contains(&delimiter) {
+            delimiter.push('\0');
+        }
+        Self {
+            source,
+            delimiter,
+            spans: Default::default(),
+        }
+    }
+    fn mark(&self, source: &'a str, text: String) -> String {
+        let start = (source.as_ptr() as usize - self.source.as_ptr() as usize) as u32;
+        let mut spans = self.spans.borrow_mut();
+        let id = spans.len();
+        spans.push(Span {
+            start,
+            end: start + source.len() as u32,
+        });
+        let d = &self.delimiter;
+        format!("{d}{id}{d}{text}{d}-{d}")
+    }
+    fn finish(self, text: String) -> (String, Vec<GeneratedOrigin>) {
+        let mut out = String::new();
+        let mut origins = vec![];
+        let mut stack = vec![];
+        for (i, part) in text.split(&self.delimiter).enumerate() {
+            if i % 2 == 0 {
+                out.push_str(part);
+            } else if part == "-" {
+                let (id, start) = stack.pop().unwrap();
+                origins.push(GeneratedOrigin {
+                    generated: Span {
+                        start,
+                        end: out.len() as u32,
+                    },
+                    source: self.spans.borrow()[id],
+                });
+            } else {
+                stack.push((part.parse::<usize>().unwrap(), out.len() as u32));
+            }
+        }
+        (out, origins)
+    }
 }
 
 struct Decl<'a> {
@@ -101,6 +344,7 @@ enum Body<'a> {
 }
 struct Entry<'a> {
     name: &'a str,
+    source: &'a str,
     /// The type as written, for a default's codec.
     text: &'a str,
     ty: Ty<'a>,
@@ -109,11 +353,13 @@ struct Entry<'a> {
 }
 struct Variant<'a> {
     name: &'a str,
+    source: &'a str,
     payload: Vec<Payload<'a>>,
     removed: bool,
 }
 struct Payload<'a> {
     label: Option<&'a str>,
+    source: &'a str,
     /// The type as written, for a frame's.
     text: &'a str,
     ty: Ty<'a>,
@@ -122,7 +368,8 @@ struct Payload<'a> {
 enum Ty<'a> {
     /// `put_X`, `take_X`, `schema_X` and the width X encodes to.
     Scalar(&'static str, u64),
-    List(&'a str),
+    /// Element type and its source: Bytes synthesizes u8 from the written Bytes.
+    List(&'a str, &'a str),
     Map(&'a str, &'a str),
     Option(&'a str),
     Result(&'a str, &'a str),
@@ -168,13 +415,13 @@ impl<'a> File<'a> {
                 "f32" => Ty::Scalar("f32", 4),
                 "f64" => Ty::Scalar("f64", 8),
                 "String" => Ty::Scalar("string", 4),
-                "Bytes" => Ty::List("u8"),
+                "Bytes" => Ty::List("u8", self.text(item, n)),
                 other => Ty::With(other),
             },
             NodeKind::TypeArguments => {
                 let arg = |i: usize| self.text(item, c[i]);
                 match (self.text(item, c[0]), c.len()) {
-                    ("List", 2) => Ty::List(arg(1)),
+                    ("List", 2) => Ty::List(arg(1), arg(1)),
                     ("Option", 2) => Ty::Option(arg(1)),
                     ("Map", 3) => Ty::Map(arg(1), arg(2)),
                     ("Result", 3) => Ty::Result(arg(1), arg(2)),
@@ -233,6 +480,7 @@ impl<'a> File<'a> {
                         self.mentions(item, fc[0], &mut mentions);
                         Entry {
                             name: self.name(f),
+                            source: self.text(item, f),
                             text: self.text(item, fc[0]),
                             ty: self.ty(item, fc[0]),
                             default: fc.get(1).map(|&d| self.text(item, d)),
@@ -244,6 +492,7 @@ impl<'a> File<'a> {
                 NodeKind::Variants => {
                     let variants = self.children(c).iter().map(|&v| Variant {
                         name: self.name(v),
+                        source: self.text(item, v),
                         payload: self
                             .children(v)
                             .iter()
@@ -252,6 +501,7 @@ impl<'a> File<'a> {
                                 self.mentions(item, t, &mut mentions);
                                 Payload {
                                     label: self.syntax.tree.node(p).token.map(|_| self.name(p)),
+                                    source: self.text(item, p),
                                     text: self.text(item, t),
                                     ty: self.ty(item, t),
                                 }
@@ -283,7 +533,8 @@ impl<'a> File<'a> {
 /// The generated text for every type of `syntax` that declares `codec`. A member of a
 /// recursive group decodes by a frame loop (SEM-10); a group the loop cannot take (see
 /// [`Group::new`]) is not derived, so `of` at its members is refused as a gap.
-fn generate(syntax: &SyntaxFile, d: &Derive) -> String {
+fn generate(syntax: &SyntaxFile, d: &Derive) -> (String, Vec<GeneratedOrigin>) {
+    let mapped = MappedText::new(&syntax.source);
     let file = File { syntax };
     let decls: Vec<_> = syntax.items().filter_map(|item| file.decl(&item)).collect();
     let names: BTreeMap<_, _> = decls.iter().enumerate().map(|(i, d)| (d.name, i)).collect();
@@ -307,16 +558,16 @@ fn generate(syntax: &SyntaxFile, d: &Derive) -> String {
     let mut out = String::new();
     for (i, decl) in decls.iter().enumerate() {
         match group_of[i] {
-            None => Gen::new(d, decl).items(&mut out),
+            None => Gen::new(d, decl, &mapped).items(&mut out),
             Some(Some((g, at))) => {
-                let mut w = Gen::new(d, decl);
+                let mut w = Gen::new(d, decl, &mapped);
                 w.group = Some((&groups[g], at));
                 w.items(&mut out)
             }
             Some(None) => {}
         }
     }
-    out
+    mapped.finish(out)
 }
 
 /// Whether `from`'s fields reach `to` through this module's codec declarations.
@@ -355,6 +606,7 @@ struct Shape<'a> {
     steps: Vec<Step<'a>>,
 }
 struct Step<'a> {
+    source: &'a str,
     /// The record field's name or the payload's label.
     label: Option<&'a str>,
     /// The type as written.
@@ -411,13 +663,13 @@ impl<'a> Group<'a> {
                 Some(_) => Err(()),
             }
         };
-        let step = |label, text: &'a str, ty: &'a Ty<'a>| -> Option<Step<'a>> {
+        let step = |label, source: &'a str, text: &'a str, ty: &'a Ty<'a>| -> Option<Step<'a>> {
             let edge = if !named(text) {
                 None
             } else {
                 Some(match *ty {
                     Ty::With(t) => (Edge::Direct, member(t).ok()??),
-                    Ty::List(e) => (Edge::List, member(e).ok()??),
+                    Ty::List(e, _) => (Edge::List, member(e).ok()??),
                     Ty::Option(e) => (Edge::Option, member(e).ok()??),
                     Ty::Map(k, e) if !named(k) => (Edge::Map(k), member(e).ok()??),
                     Ty::Result(t, e) if !named(e) => (Edge::Ok(e), member(t).ok()??),
@@ -426,6 +678,7 @@ impl<'a> Group<'a> {
                 })
             };
             Some(Step {
+                source,
                 label,
                 text,
                 ty,
@@ -441,7 +694,7 @@ impl<'a> Group<'a> {
                     steps: entries
                         .iter()
                         .filter(|e| !e.removed)
-                        .map(|e| step(Some(e.name), e.text, &e.ty))
+                        .map(|e| step(Some(e.name), e.source, e.text, &e.ty))
                         .collect::<Option<_>>()?,
                 }],
                 Body::Sum(variants) => variants
@@ -452,7 +705,7 @@ impl<'a> Group<'a> {
                         } else {
                             v.payload
                                 .iter()
-                                .map(|p| step(p.label, p.text, &p.ty))
+                                .map(|p| step(p.label, p.source, p.text, &p.ty))
                                 .collect::<Option<_>>()?
                         };
                         Some(Shape {
@@ -480,7 +733,7 @@ impl<'a> Group<'a> {
             (Some((Edge::Option | Edge::Ok(_) | Edge::Error(_), _)), _) => Some(4),
             (Some(_), _) => Some(4),
             (None, Ty::Scalar(_, n)) => Some(*n),
-            (None, Ty::List(_) | Ty::Map(..)) => Some(4),
+            (None, Ty::List(..) | Ty::Map(..)) => Some(4),
             (None, Ty::Option(_) | Ty::Result(..)) => Some(4),
             (None, Ty::With(_)) => None,
         };
@@ -714,7 +967,7 @@ impl<'a> Machine<'a> {
             Some(n) => n.to_string(),
             None => {
                 let g: &'a Group<'a> = self.g;
-                let o = w.of(&g.members[m].1);
+                let o = w.of_at(&g.members[m].1, w.decl.name);
                 format!("{}least({o})", w.c)
             }
         }
@@ -741,7 +994,8 @@ impl<'a> Machine<'a> {
         for (k, step) in shape.steps.iter().enumerate().skip(from) {
             let text = step.text;
             let Some((edge, child)) = step.edge else {
-                let _ = writeln!(s, "let {pre}{k}$ = {}", w.take(step.ty));
+                let code = w.take(step.ty);
+                let _ = writeln!(s, "let {pre}{k}$ = {}", w.mapped.mark(step.source, code));
                 continue;
             };
             let r = self.resume_at(m, v, k);
@@ -906,6 +1160,7 @@ impl<'a> Machine<'a> {
 
 struct Gen<'a> {
     c: &'a str,
+    mapped: &'a MappedText<'a>,
     path: String,
     decl: &'a Decl<'a>,
     /// `D[P1, ..]`, `[P1: codec + .., ..]`.
@@ -918,7 +1173,7 @@ struct Gen<'a> {
     group: Option<(&'a Group<'a>, usize)>,
 }
 impl<'a> Gen<'a> {
-    fn new(d: &'a Derive, decl: &'a Decl<'a>) -> Self {
+    fn new(d: &'a Derive, decl: &'a Decl<'a>, mapped: &'a MappedText<'a>) -> Self {
         let params: Vec<_> = decl.generics.iter().map(|(n, _)| *n).collect();
         let (ty, generics) = if params.is_empty() {
             (decl.name.to_owned(), String::new())
@@ -939,6 +1194,7 @@ impl<'a> Gen<'a> {
         };
         Gen {
             c: &d.codec,
+            mapped,
             path: format!("{}.{}", d.path, decl.name),
             decl,
             ty,
@@ -950,13 +1206,18 @@ impl<'a> Gen<'a> {
     }
     /// The local holding `of[t]()`, let at the top of the current function.
     fn of(&mut self, t: &'a str) -> String {
+        self.of_at(t, t)
+    }
+    fn of_at(&mut self, t: &'a str, source: &'a str) -> String {
         let n = self.lets.len();
         let c = self.c;
         let text = &mut self.let_text;
+        let mapped = self.mapped;
         self.lets
             .entry(t)
             .or_insert_with(|| {
-                writeln!(text, "    let c${n}: {c}Codec[{t}] = {c}of()").unwrap();
+                let call = mapped.mark(source, format!("{c}of()"));
+                writeln!(text, "    let c${n}: {c}Codec[{t}] = {call}").unwrap();
                 format!("c${n}")
             })
             .clone()
@@ -971,7 +1232,7 @@ impl<'a> Gen<'a> {
         let c = self.c;
         match *ty {
             Ty::Scalar(x, _) => format!("{c}put_{x}({v}, mut out$)"),
-            Ty::List(e) => format!("{c}put_list({v}, {}, mut out$)", self.of(e)),
+            Ty::List(e, source) => format!("{c}put_list({v}, {}, mut out$)", self.of_at(e, source)),
             Ty::Option(e) => format!("{c}put_option({v}, {}, mut out$)", self.of(e)),
             Ty::Map(k, w) => format!("{c}put_map({v}, {}, {}, mut out$)", self.of(k), self.of(w)),
             Ty::Result(t, e) => format!(
@@ -986,7 +1247,7 @@ impl<'a> Gen<'a> {
         let c = self.c;
         match *ty {
             Ty::Scalar(x, _) => format!("{c}take_{x}(b$, mut at$)?"),
-            Ty::List(e) => format!("{c}take_list(b$, mut at$, {})?", self.of(e)),
+            Ty::List(e, source) => format!("{c}take_list(b$, mut at$, {})?", self.of_at(e, source)),
             Ty::Option(e) => format!("{c}take_option(b$, mut at$, {})?", self.of(e)),
             Ty::Map(k, w) => format!("{c}take_map(b$, mut at$, {}, {})?", self.of(k), self.of(w)),
             Ty::Result(t, e) => format!(
@@ -1001,7 +1262,9 @@ impl<'a> Gen<'a> {
         let c = self.c;
         match *ty {
             Ty::Scalar(x, _) => format!("    {c}schema_{x}(mut s$)?\n"),
-            Ty::List(e) => format!("    {c}schema_list(mut s$, {})?\n", self.of(e)),
+            Ty::List(e, source) => {
+                format!("    {c}schema_list(mut s$, {})?\n", self.of_at(e, source))
+            }
             Ty::Option(e) => format!("    {c}schema_option(mut s$, {})?\n", self.of(e)),
             Ty::Map(k, w) => format!(
                 "    {c}schema_map(mut s$, {}, {})?\n",
@@ -1020,7 +1283,7 @@ impl<'a> Gen<'a> {
     fn least(&mut self, ty: &Ty<'a>) -> Least {
         match *ty {
             Ty::Scalar(_, n) => Least::fixed(n),
-            Ty::List(_) | Ty::Map(..) => Least::fixed(4),
+            Ty::List(..) | Ty::Map(..) => Least::fixed(4),
             Ty::Option(_) | Ty::Result(..) => Least::fixed(4),
             Ty::With(t) => {
                 let c = self.of(t);
@@ -1090,7 +1353,10 @@ impl<'a> Gen<'a> {
         let steps: Vec<_> = entries
             .iter()
             .filter(|e| !e.removed)
-            .map(|e| self.put(&e.ty, &format!("x$.{}", e.name)))
+            .map(|e| {
+                let code = self.put(&e.ty, &format!("x$.{}", e.name));
+                self.mapped.mark(e.source, code)
+            })
             .collect();
         Self::sequence(&steps, "    ")
     }
@@ -1099,7 +1365,14 @@ impl<'a> Gen<'a> {
         let args: String = entries
             .iter()
             .filter(|e| !e.removed)
-            .map(|e| format!("        {}: {},\n", e.name, self.take(&e.ty)))
+            .map(|e| {
+                let code = self.take(&e.ty);
+                format!(
+                    "        {}: {},\n",
+                    e.name,
+                    self.mapped.mark(e.source, code)
+                )
+            })
             .collect();
         format!("    Ok({}(\n{args}    ))\n", self.decl.name)
     }
@@ -1107,13 +1380,15 @@ impl<'a> Gen<'a> {
         let c = self.c;
         let mut arms = String::new();
         for (tag, v) in variants.iter().enumerate().filter(|(_, v)| !v.removed) {
+            let start = arms.len();
             let mut steps = vec![format!("{c}put_tag({tag}, mut out$)")];
             let binds: Vec<_> = v
                 .payload
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
-                    steps.push(self.put(&p.ty, &format!("p${i}")));
+                    let code = self.put(&p.ty, &format!("p${i}"));
+                    steps.push(self.mapped.mark(p.source, code));
                     p.label.map_or(format!("p${i}"), |l| format!("{l}: p${i}"))
                 })
                 .collect();
@@ -1131,6 +1406,8 @@ impl<'a> Gen<'a> {
                     Self::sequence(&steps, "            ")
                 );
             }
+            let code = arms.split_off(start);
+            arms += &self.mapped.mark(v.source, code);
         }
         format!("    match x$ {{\n{arms}    }}\n")
     }
@@ -1159,12 +1436,14 @@ impl<'a> Gen<'a> {
                     .payload
                     .iter()
                     .map(|p| {
-                        let take = self.take(&p.ty);
+                        let code = self.take(&p.ty);
+                        let take = self.mapped.mark(p.source, code);
                         p.label.map_or(take.clone(), |l| format!("{l}: {take}"))
                     })
                     .collect();
                 format!("Ok({}({}))", v.name, args.join(", "))
             };
+            let value = self.mapped.mark(v.source, value);
             let _ = match (tag, tag == last) {
                 (0, true) => writeln!(body, "    {value}"),
                 (0, false) => writeln!(body, "    if tag$ == 0 {{\n        {value}"),
@@ -1207,6 +1486,7 @@ impl<'a> Gen<'a> {
         match &decl.body {
             Body::Record(entries) => {
                 for e in entries {
+                    let start = s.len();
                     match (e.removed, e.default) {
                         (true, _) => {
                             let _ = writeln!(s, "    {c}removed_field(mut s$, \"{}\")?", e.name);
@@ -1225,10 +1505,13 @@ impl<'a> Gen<'a> {
                             s += &self.schema(&e.ty);
                         }
                     }
+                    let code = s.split_off(start);
+                    s += &self.mapped.mark(e.source, code);
                 }
             }
             Body::Sum(variants) => {
                 for v in variants {
+                    let start = s.len();
                     let call = if v.removed {
                         "removed_variant"
                     } else {
@@ -1241,8 +1524,11 @@ impl<'a> Gen<'a> {
                         v.payload.len()
                     );
                     for p in &v.payload {
-                        s += &self.schema(&p.ty);
+                        let code = self.schema(&p.ty);
+                        s += &self.mapped.mark(p.source, code);
                     }
+                    let code = s.split_off(start);
+                    s += &self.mapped.mark(v.source, code);
                 }
             }
         }

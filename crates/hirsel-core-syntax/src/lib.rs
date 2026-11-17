@@ -10,7 +10,9 @@ mod package_format;
 mod parser;
 mod symbols;
 mod token;
-pub use derive::{Derive, declaration_of, derive, derived_from};
+pub use derive::{
+    Derive, DeriveContext, GeneratedOrigin, codec_context, declaration_of, derive, derived_from,
+};
 pub use format::format;
 pub use lexer::{LexOutput, lex};
 pub use literals::{byte_value, character_value};
@@ -343,6 +345,7 @@ pub struct SyntaxFile {
     pub tree: Tree,
     pub items: Vec<ItemRange>,
     pub trailing_start: u32,
+    pub generated_origins: Vec<GeneratedOrigin>,
 }
 impl SyntaxFile {
     /// Recover every source byte, including whitespace gaps between token spans.

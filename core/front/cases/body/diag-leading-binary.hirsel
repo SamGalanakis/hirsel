@@ -1,0 +1,7 @@
+fn f(a: bool, b: bool) -> bool {
+    a
+    && b
+}
+// LANG-4 ends the expression at the newline; put && before that newline.
+// expect: refuse LANG-4 at 3:5
+// expect: message LANG-4 at 3:5 | put `&&` at the end of the previous line

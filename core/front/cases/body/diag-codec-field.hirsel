@@ -1,0 +1,12 @@
+type Location { x: u64 }
+type Parcel: codec { at: Location }
+// OWN-4 requires the field type to declare codec, at its declaration (PROG-7).
+// expect: refuse OWN-4 at 2:22
+// expect: cause OWN-4 at 2:22 from 2:6 2:14 2:22 1:6
+// expect: compared OWN-4 at 2:22 | app@1/main/Location | codec
+// expect: message OWN-4 at 2:22 | `Location` is missing `: codec`
+type Nested: codec { at: List[Location] }
+// expect: refuse OWN-4 at 8:22
+// expect: cause OWN-4 at 8:22 from 8:6 8:31 8:14 8:22 1:6
+// expect: compared OWN-4 at 8:22 | core@1/core/List[app@1/main/Location] | codec
+// expect: cached

@@ -1,0 +1,13 @@
+// library: std
+type Both: codec { r: List[Result[Both, Both]] }
+type Envelope[T]: codec { value: T, at: Both }
+// SEM-10's unsupported recursive shape stops generated operations at the field.
+// expect: gap deriving encode for Envelope[T], field/variant path at: the codec of this type is not built
+// expect: gap-site at 3:37
+// expect: gap-cause at 3:37 from 3:6 3:15 3:19 3:37
+// expect: cached
+type Event[T]: codec = Empty | At(tag: T, place: Both)
+// expect: gap deriving encode for Event[T], field/variant path At.place: the codec of this type is not built
+// expect: gap-site at 9:43
+// expect: gap-cause at 9:43 from 9:6 9:12 9:16 9:32 9:43
+type BytePacket: codec { body: Bytes }

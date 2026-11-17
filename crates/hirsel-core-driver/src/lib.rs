@@ -204,6 +204,7 @@ pub struct FileProduct {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Incomplete {
     pub primary: Site,
+    pub causal: Vec<Site>,
     pub message: String,
 }
 /// The implementation's resource refusal (PROG-6): a parser, resolver, layout or
@@ -509,6 +510,7 @@ impl<'a> DiskCheckRef<'a> {
         let mut incomplete = d.incomplete.clone();
         for g in &mut incomplete {
             canonical(&mut g.primary);
+            g.causal.iter_mut().for_each(canonical);
         }
         Ok(Self {
             anchors,
@@ -907,6 +909,7 @@ impl Driver {
             result.diagnostics.extend(p.refusals.iter().cloned());
             result.incomplete.extend(p.gaps.iter().map(|g| Incomplete {
                 primary: g.site,
+                causal: vec![],
                 message: g.what.into(),
             }));
             result
@@ -948,6 +951,7 @@ impl Driver {
                         .incomplete
                         .extend(check.gaps.into_iter().map(|g| Incomplete {
                             primary: g.site,
+                            causal: vec![],
                             message: g.what.into(),
                         }));
                 }
@@ -1030,6 +1034,7 @@ impl Driver {
                         .iter()
                         .map(|g| Incomplete {
                             primary: g.site,
+                            causal: vec![],
                             message: g.what.into(),
                         })
                         .collect();
@@ -1060,6 +1065,9 @@ impl Driver {
                 for g in &product.incomplete {
                     let mut g = g.clone();
                     keys.bind_site(&product.anchors, &mut g.primary);
+                    for site in &mut g.causal {
+                        keys.bind_site(&product.anchors, site);
+                    }
                     result.incomplete.push(g);
                 }
                 // A duplicate definition's copies (LANG-7) share the path,
@@ -1266,55 +1274,109 @@ fn file_record(
     }
     record
 }
-/// A site in an item the codec derive generated (EXPANSION section 0) is reported at its
-/// declaration's name, once, and not at all when the declaration has a refusal of its own:
-/// the declaration's checks already refuse, at the field, a field that is not codec and a
-/// default of another type, which the generated items would repeat at text no one wrote.
+/// Publish codec failures through the same declaration/arguments/operation/member path,
+/// retaining the underlying type declaration that made a field lack `codec`.
 fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
-    let at = |site: &Site| {
-        let m = modules.iter().find(|m| Some(m.source) == site.source)?;
-        let (item, span) = hirsel_core_syntax::declaration_of(&m.syntax, site.item as usize)?;
-        Some(Site {
-            module: site.module,
-            source: site.source,
-            item: item as u32,
-            span,
-        })
+    let context = |site: &Site| {
+        let module = modules.iter().find(|m| Some(m.source) == site.source)?;
+        hirsel_core_syntax::codec_context(&module.syntax, site.item as usize, site.span)
+    };
+    let generated = |site: &Site| {
+        modules
+            .iter()
+            .find(|m| Some(m.source) == site.source)
+            .and_then(|m| hirsel_core_syntax::declaration_of(&m.syntax, site.item as usize))
+            .is_some()
     };
     let own: std::collections::HashSet<_> = result
         .diagnostics
         .iter()
-        .filter(|r| at(&r.primary).is_none())
+        .filter(|r| !generated(&r.primary))
         .map(|r| (r.primary.source, r.primary.item))
         .collect();
+    let apply =
+        |primary: &mut Site, causal: &mut Vec<Site>, ctx: &hirsel_core_syntax::DeriveContext| {
+            primary.item = ctx.item as u32;
+            primary.span = ctx.primary;
+            let at = |span| Site { span, ..*primary };
+            let owner = |span| Site {
+                item: ctx.owner as u32,
+                span,
+                ..*primary
+            };
+            let mut path = vec![owner(ctx.declaration)];
+            path.extend(ctx.arguments.iter().map(|&(item, span)| Site {
+                item: item as u32,
+                span,
+                ..*primary
+            }));
+            path.push(owner(ctx.operation));
+            path.extend(ctx.path.iter().copied().map(at));
+            for &cause in causal.iter() {
+                let cause = if generated(&cause) {
+                    context(&cause).map_or(cause, |c| Site {
+                        item: c.item as u32,
+                        span: c.primary,
+                        ..cause
+                    })
+                } else {
+                    cause
+                };
+                if !path.contains(&cause) {
+                    path.push(cause);
+                }
+            }
+            *causal = path;
+        };
     let mut seen = std::collections::HashSet::new();
     result.diagnostics.retain_mut(|r| {
-        let Some(site) = at(&r.primary) else {
+        let is_generated = generated(&r.primary);
+        if !is_generated
+            && !(r.rule == "OWN-4"
+                && !r.causal.is_empty()
+                && r.required.as_deref().is_some_and(|b| b.contains("codec")))
+        {
+            return true;
+        }
+        let Some(ctx) = context(&r.primary) else {
             return true;
         };
-        r.primary = site;
-        for causal in &mut r.causal {
-            if let Some(site) = at(causal) {
-                *causal = site;
-            }
+        if is_generated && own.contains(&(r.primary.source, ctx.owner as u32)) {
+            return false;
         }
-        !own.contains(&(site.source, site.item))
-            && seen.insert((
-                r.rule.clone(),
-                site.source,
-                site.item,
-                site.span.start,
-                r.message.clone(),
-            ))
+        apply(&mut r.primary, &mut r.causal, &ctx);
+        let keep = seen.insert((
+            r.rule.clone(),
+            r.primary.source,
+            r.primary.item,
+            r.primary.span,
+            r.message.clone(),
+        ));
+        if is_generated {
+            r.message = format!("{}: {}", ctx.description, r.message);
+        }
+        keep
     });
     let mut seen = std::collections::HashSet::new();
     result.incomplete.retain_mut(|g| {
-        let Some(site) = at(&g.primary) else {
+        if !generated(&g.primary) {
+            return true;
+        }
+        let Some(ctx) = context(&g.primary) else {
             return true;
         };
-        g.primary = site;
-        !own.contains(&(site.source, site.item))
-            && seen.insert((site.source, site.item, site.span.start, g.message.clone()))
+        if own.contains(&(g.primary.source, ctx.owner as u32)) {
+            return false;
+        }
+        apply(&mut g.primary, &mut g.causal, &ctx);
+        let keep = seen.insert((
+            g.primary.source,
+            g.primary.item,
+            g.primary.span,
+            g.message.clone(),
+        ));
+        g.message = format!("{}: {}", ctx.description, g.message);
+        keep
     });
 }
 
@@ -1339,6 +1401,9 @@ fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) 
     }
     for g in &mut product.incomplete {
         bind(&mut g.primary);
+        for site in &mut g.causal {
+            bind(site);
+        }
     }
     product.anchors = anchors
         .into_values()

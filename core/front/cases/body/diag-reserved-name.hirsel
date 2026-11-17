@@ -1,0 +1,15 @@
+fn f() {
+    let copy = 1u64
+}
+fn view() {}
+type Row { return: u64 }
+// LANG-2 forbids keywords as identifiers. Each failed construct has one diagnostic.
+// expect: refuse LANG-2 at 2:9
+// expect: compared LANG-2 at 2:9 | copy | non-keyword identifier
+// expect: message LANG-2 at 2:9 | `copy` is a reserved word
+// expect: refuse LANG-2 at 4:4
+// expect: compared LANG-2 at 4:4 | view | non-keyword identifier
+// expect: message LANG-2 at 4:4 | `view` is a reserved word
+// expect: refuse LANG-2 at 5:12
+// expect: compared LANG-2 at 5:12 | return | non-keyword identifier
+// expect: message LANG-2 at 5:12 | `return` is a reserved word

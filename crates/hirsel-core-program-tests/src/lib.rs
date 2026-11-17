@@ -15,6 +15,36 @@ pub fn package(name: &str) -> hirsel_core_ids::PackageId {
     hirsel_core_driver::package(name)
 }
 
+/// A fixture opts into std when its diagnostic exercises codec derivation.
+pub(crate) fn source_manifest(
+    source: &str,
+    path: PathBuf,
+    core: &Path,
+    module: &str,
+) -> CorpusManifest {
+    let mut dependencies = vec![package("core")];
+    let mut packages = vec![PackageManifest::directory(core, package("core"), true).unwrap()];
+    if source.lines().any(|line| line == "// library: std") {
+        dependencies.push(package("std"));
+        packages.push(
+            PackageManifest::directory(&repo().join("core/std"), package("std"), false).unwrap(),
+        );
+    }
+    packages.push(PackageManifest {
+        package: package("app"),
+        dependencies,
+        sources: vec![ModuleSource {
+            file: path,
+            modules: vec![module.into()],
+            signatures: false,
+        }],
+    });
+    CorpusManifest {
+        core: package("core"),
+        packages,
+    }
+}
+
 /// A source request and its immutable products, keeping their private store alive.
 /// Native and evaluator laws use the same request and instance collection.
 pub struct Checked {
@@ -30,21 +60,7 @@ impl Checked {
         let files = tempfile::tempdir().unwrap();
         let path = files.path().join("main.hirsel");
         std::fs::write(&path, source).unwrap();
-        let inputs = CorpusManifest {
-            core: package("core"),
-            packages: vec![
-                PackageManifest::directory(core, package("core"), true).unwrap(),
-                PackageManifest {
-                    package: package("app"),
-                    dependencies: vec![package("core")],
-                    sources: vec![ModuleSource {
-                        file: path,
-                        modules: vec!["main".into()],
-                        signatures: false,
-                    }],
-                },
-            ],
-        };
+        let inputs = source_manifest(source, path, core, "main");
         Self::check(inputs, files, entry)
     }
     pub fn corpus(corpus: &Corpus) -> Self {

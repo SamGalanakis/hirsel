@@ -21,6 +21,7 @@ pub struct Diagnostic<'a> {
 #[derive(Serialize)]
 pub struct IncompleteDiagnostic<'a> {
     pub primary: SourceSite,
+    pub causal: Vec<SourceSite>,
     pub message: &'a str,
 }
 /// A resource refusal (PROG-6) names no rule: only its site and the limit it passes.
@@ -116,6 +117,11 @@ impl CheckProduct {
             .map(|g| {
                 Ok(IncompleteDiagnostic {
                     primary: self.source_site(&g.primary)?,
+                    causal: g
+                        .causal
+                        .iter()
+                        .map(|s| self.source_site(s))
+                        .collect::<io::Result<_>>()?,
                     message: &g.message,
                 })
             })

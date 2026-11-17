@@ -326,7 +326,7 @@ impl Value {
             incomplete: answer
                 .incomplete
                 .iter()
-                .map(|g| row("", &g.primary, &[], None, None, g.message))
+                .map(|g| row("", &g.primary, &g.causal, None, None, g.message))
                 .collect(),
             resources: answer
                 .resources
@@ -412,6 +412,7 @@ impl Hit {
                 .iter()
                 .map(|r| IncompleteDiagnostic {
                     primary: self.site(&r.primary),
+                    causal: r.causal.iter().map(|s| self.site(s)).collect(),
                     message: &r.message,
                 })
                 .collect(),

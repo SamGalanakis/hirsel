@@ -289,6 +289,9 @@ impl Parser<'_> {
         required: &str,
         message: impl Into<String>,
     ) -> Parsed<T> {
+        if self.leading_binary() {
+            return self.fail("LANG-4", self.binary_continuation_message());
+        }
         let declared = if self.eof() {
             "end of file"
         } else {
@@ -316,9 +319,27 @@ impl Parser<'_> {
                     "LANG-5"
                 },
                 "non-keyword identifier",
-                "expected a non-keyword name",
+                if self.token(0).kind.is_keyword() {
+                    format!(
+                        "`{}` is a reserved word and cannot be used as a name",
+                        self.text_token(self.index())
+                    )
+                } else {
+                    format!("expected a name, found `{}`", self.text_token(self.index()))
+                },
             )
         }
+    }
+    fn leading_binary(&self) -> bool {
+        self.newline()
+            && matches!(continuation(self.word(0)), Some(Continuation::Binary(..)))
+            && !PREFIX.contains(&self.word(0))
+    }
+    fn binary_continuation_message(&self) -> String {
+        format!(
+            "put `{}` at the end of the previous line so the expression continues",
+            self.text_token(self.index())
+        )
     }
     fn newline(&self) -> bool {
         self.token(0).line_before
@@ -1024,6 +1045,9 @@ impl Parser<'_> {
                 None,
                 &c,
             ));
+        }
+        if self.leading_binary() {
+            return self.fail("LANG-4", self.binary_continuation_message());
         }
         if matches!(
             self.word(0),

@@ -457,6 +457,27 @@ fn room(mut d: Decoder, arriving: u64) -> Result[(), Capacity] {
     Ok(())
 }
 
+// ADAPTED from tungstenite frame/mask.rs:25-48: checked unaligned u64
+// operations replace its unsafe aligned u32 view. phase follows read splits.
+fn append_masked(mut out: Bytes, input: Bytes, mask: Inline[u8, 4], phase: u64) -> Result[(), Capacity] {
+    let mut word: u64 = 0
+    for i in 0u64 .. 8u64 {
+        let x: u64 = int.widen(mask[(phase + i) % 4])
+        word |= x << (i * 8)
+    }
+    let n = list.len(input)
+    let mut i: u64 = 0
+    while n - i >= 8 {
+        list.put_word_le(mut out, list.word_le(input, i) ^ word)?
+        i += 8
+    }
+    while i < n {
+        let _ = list.push(mut out, input[i] ^ mask[(phase + i) % 4])
+        i += 1
+    }
+    Ok(())
+}
+
 fn finish_frame(mut d: Decoder) -> Event {
     d.ready = false
     d.have = 0
@@ -531,23 +552,34 @@ pub fn next(mut d: Decoder, b: Bytes, mut cursor: u64) -> Result[Event, Capacity
         } else {
             remaining
         }
-        if d.opcode < 8 {
-            room(mut d, count)?
-        }
-        for i in 0u64 .. count {
-            let mask: u8 = if d.masked {
-                d.header[d.length_end + ((d.received + i) % 4)]
-            } else {
-                0
-            }
-            let x = b[cursor + i] ^ mask
-            if d.opcode >= 8 {
-                d.control.data[d.received + i] = x
-            } else {
-                if d.text && !utf8_byte(mut d.utf8, x) {
-                    return Ok(reject(mut d, 1007))
+        if d.opcode >= 8 {
+            for i in 0u64 .. count {
+                let mask: u8 = if d.masked {
+                    d.header[d.length_end + ((d.received + i) % 4)]
+                } else {
+                    0
                 }
-                let _ = list.push(mut d.message, x)
+                d.control.data[d.received + i] = b[cursor + i] ^ mask
+            }
+        } else {
+            room(mut d, count)?
+            let start = list.len(d.message)
+            let input = list.slice(b, cursor, cursor + count)
+            if d.masked {
+                let mut mask: Inline[u8, 4] = [0; 4]
+                for i in 0u64 .. 4u64 {
+                    mask[i] = d.header[d.length_end + i]
+                }
+                append_masked(mut d.message, input, mask, d.received % 4)?
+            } else {
+                list.append(mut d.message, input)?
+            }
+            if d.text {
+                for i in start .. list.len(d.message) {
+                    if !utf8_byte(mut d.utf8, d.message[i]) {
+                        return Ok(reject(mut d, 1007))
+                    }
+                }
             }
         }
         d.received += count
@@ -675,13 +707,10 @@ pub fn encode(mut e: Encoder, fin: bool, opcode: u8, payload: Bytes, mask: Inlin
             let _ = list.push(mut out, mask[i])
         }
     }
-    for i in 0u64 .. n {
-        let x = payload[i] ^ if masked {
-            mask[i % 4]
-        } else {
-            0
-        }
-        let _ = list.push(mut out, x)
+    if masked {
+        append_masked(mut out, payload, mask, 0)?
+    } else {
+        list.append(mut out, payload)?
     }
     if opcode < 8 {
         e.fragmented = !fin

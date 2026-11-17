@@ -1,5 +1,5 @@
 {
-  "policy": "Land lowers measured ceilings only, with the existing 2% margin. New cells start at their measured margin. Regressions are reported per ticket. Request an increase with a reviewed tools/cost-ceiling-requests/<lane>.json containing file, cell, previous, value and reason. The fixed budget stays 60000.",
+  "policy": "Land lowers measured ceilings only, with the existing 2% margin and measured residual floors. New cells start at their measured margin. Regressions are reported per ticket. Request an increase with a reviewed tools/cost-ceiling-requests/<lane>.json containing file, cell, previous, value and reason. The fixed budget stays 60000.",
   "suite_targets_instructions": {
     "parse": 8000000,
     "resolve": 7000000,

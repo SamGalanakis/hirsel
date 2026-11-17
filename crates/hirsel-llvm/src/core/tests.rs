@@ -2157,10 +2157,10 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
     }
     for &op in HostOp::ALL {
         let params: &[&str] = match op {
-            HostOp::Connect => &["u64", "u8", "u64", "u64", "u16", "ptr"],
+            HostOp::Connect => &["u64", "u8", "u64", "u64", "u16", "u8", "u64", "u64"],
             HostOp::Listen => &["u64", "u8", "u64", "u64", "u16", "u16"],
-            HostOp::Accept => &["u64", "ptr"],
-            HostOp::Recv | HostOp::Send => &["u64", "ptr", "ptr"],
+            HostOp::Accept => &["u64", "u8", "u64", "u64"],
+            HostOp::Recv | HostOp::Send => &["u64", "ptr", "u8", "u64", "u64"],
             HostOp::NetNarrow => &["u64", "u8", "u8", "u64", "u64", "u8", "u16", "u16"],
             HostOp::NetSplit => &["u64"],
             HostOp::Open => &["u64", "ptr", "u8"],
@@ -2174,6 +2174,8 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
         };
         let results: &[&str] = if op == HostOp::Random {
             &[]
+        } else if matches!(op, HostOp::Listen | HostOp::Accept) {
+            &["u64", "u8", "u32", "u64", "u8", "u64", "u64", "u16"]
         } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {
             &["u64", "u8", "u32", "u64"]
         } else {
@@ -2228,7 +2230,12 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             .unwrap()
             .verify()
             .unwrap();
-        assert!(ir.contains("sret([32 x i8])"));
+        let storage = if matches!(op, HostOp::Listen | HostOp::Accept) {
+            "sret([56 x i8])"
+        } else {
+            "sret([32 x i8])"
+        };
+        assert!(ir.contains(storage), "{}: {storage}", op.name());
         // Every provider row branches on its status: a tape can refuse any of them.
         assert!(ir.contains("icmp ne i8"), "{} status", op.name());
     }

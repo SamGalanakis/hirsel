@@ -17,7 +17,7 @@
 /// selected provider and its local designation to core provider adapters.
 /// args_len/get take (context, Args handle [, index]); views remain run-owned.
 /// Stdin/Env/Process have no v1 operations. Net has explicit rule lists and
-/// declared socket entries, refused with Other(38) until W1b. Tasks authorizes the
+/// try-first socket operations over a per-run epoll driver. Tasks authorizes the
 /// source spawn; its FORM row omits the designation. No handle contains an
 /// address or reveals a descriptor to source code.
 ///

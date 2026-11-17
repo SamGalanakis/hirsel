@@ -1481,13 +1481,18 @@ impl Machine<'_> {
                         )
                     })
                 });
-                if allowed {
+                let mut result = if allowed {
                     vec![0, 8, 38, 0]
                 } else {
                     vec![0, 1, 0, 0]
+                };
+                if op == HostOp::Listen {
+                    result.extend([0; 4]);
                 }
+                result
             }
-            HostOp::Accept | HostOp::Recv | HostOp::Send => vec![0, 8, 38, 0],
+            HostOp::Accept => vec![0, 8, 38, 0, 0, 0, 0, 0],
+            HostOp::Recv | HostOp::Send => vec![0, 8, 38, 0],
             HostOp::NetSplit => {
                 let (read, write) = self.world.network.sockets.split(a[0]);
                 vec![read, 0, 0, write]

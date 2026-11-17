@@ -803,11 +803,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         args: &[Arg],
         n: NodeId,
     ) -> Option<[ValueId; 4]> {
+        let values = self.runtime_outputs(op, args, n)?;
+        Some(std::array::from_fn(|i| {
+            values.get(i).copied().unwrap_or(ValueId(0))
+        }))
+    }
+    fn runtime_outputs(&mut self, op: RtOp, args: &[Arg], n: NodeId) -> Option<Vec<ValueId>> {
         if !self.live() {
             return None;
         }
         let signature = self.e.sig(op.signature());
-        let mut output = [ValueId(0); 4];
+        let mut output = [ValueId(0); 8];
         let count = self.e.module.signatures[signature.index()].results.len();
         for (i, value) in output.iter_mut().enumerate().take(count) {
             *value = self.value(self.e.module.signatures[signature.index()].results[i]);
@@ -825,7 +831,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             cold: false,
         });
         self.inst(Inst::Call { call }, n);
-        Some(output)
+        Some(output[..count].to_vec())
     }
 
     fn runtime_handle(&mut self, value: ValueId, n: NodeId) -> ValueId {
@@ -2867,6 +2873,95 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let values = self.block_params(join);
         Some([family, values[0], values[1]])
     }
+    fn net_until(&mut self, ty: TyId, value: ValueId, n: NodeId) -> Option<[ValueId; 3]> {
+        let (_, at) = self.runtime_place(ty, Some(value), n)?;
+        let tag = self.net_case(at, n);
+        let never = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 0, n)?;
+        let u = Ty::Scalar(Scalar::U64);
+        let k = Ty::Scalar(Scalar::U8);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[k, u, u]);
+        self.runtime_branch(never, yes, no, n);
+        self.start(yes);
+        let zero = self.konst(u, 0, n)?;
+        let off = self.konst(k, 0, n)?;
+        self.jump(join, &[off, zero, zero], n);
+        self.start(no);
+        let mut fields = Vec::new();
+        for field in 0..2 {
+            let field = self.address(
+                AddressBase::Address(at),
+                &[Step::CaseField { case: 1, field }],
+                PlaceTy::Value(u),
+                n,
+            );
+            fields.push(self.read_bits(field, u, n));
+        }
+        let on = self.konst(k, 1, n)?;
+        self.jump(join, &[on, fields[0], fields[1]], n);
+        self.start(join);
+        let values = self.block_params(join);
+        Some([values[0], values[1], values[2]])
+    }
+    fn net_store_address(&mut self, to: AddressId, ty: TyId, values: &[ValueId], n: NodeId) {
+        let Some((_, ip)) = self.net_field(ty, to, 0, n) else {
+            return;
+        };
+        let v4 = self
+            .runtime_compare(Ty::Scalar(Scalar::U8), values[0], 0, n)
+            .unwrap();
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.runtime_branch(v4, yes, no, n);
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: ip,
+                case: 0,
+            },
+            n,
+        );
+        let lo = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Convert {
+                result: lo,
+                flag: None,
+                operand: values[2],
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        self.runtime_store(
+            ip,
+            &[Step::CaseField { case: 0, field: 0 }],
+            Ty::Scalar(Scalar::U32),
+            lo,
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: ip,
+                case: 1,
+            },
+            n,
+        );
+        for field in 0..2 {
+            self.runtime_store(
+                ip,
+                &[Step::CaseField { case: 1, field }],
+                Ty::Scalar(Scalar::U64),
+                values[field as usize + 1],
+                n,
+            );
+        }
+        self.jump(join, &[], n);
+        self.start(join);
+        self.runtime_store(to, &[Step::Field(1)], Ty::Scalar(Scalar::U16), values[3], n);
+    }
     fn runtime_net(
         &mut self,
         op: HostOp,
@@ -2914,19 +3009,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.push(self.net_read_field(pair, ports, 1, n)?);
                 } else {
                     operands.push(self.net_read_field(ty, at, 1, n)?);
-                    operands.push(vals[2]?);
+                    if op == HostOp::Connect {
+                        operands.extend(self.net_until(self.p.fns[f].params[2].ty, vals[2]?, n)?);
+                    } else {
+                        operands.push(vals[2]?);
+                    }
                 }
             }
-            HostOp::Accept => operands.push(vals[1]?),
+            HostOp::Accept => {
+                operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
+            }
             HostOp::Recv | HostOp::Send => {
                 operands.push(vals[1]?);
-                operands.push(vals[2]?);
+                operands.extend(self.net_until(self.p.fns[f].params[2].ty, vals[2]?, n)?);
             }
             HostOp::NetSplit => {}
             _ => unreachable!(),
         }
         let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
-        let [value, error, code, written] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        let values = self.runtime_outputs(RtOp::Host(op), &args, n)?;
+        let (value, error, code, written) = (values[0], values[1], values[2], values[3]);
         if op == HostOp::NetSplit {
             self.consume(vals[0], n);
             let id = self.runtime_type(result, n)?;
@@ -2949,9 +3051,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     {
                         cx.runtime_store(at, &[], u, value, n);
                     }
+                } else if matches!(op, HostOp::Listen | HostOp::Accept) {
+                    if let Some(pair) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        cx.runtime_store(pair, &[Step::Field(0)], u, value, n);
+                        if let Some((addr_ty, addr)) = cx.net_field(ty, pair, 1, n) {
+                            cx.net_store_address(addr, addr_ty, &values[4..], n);
+                        }
+                    }
                 }
-                // W1a's provider never produces a Socket/Listener success.
-                // W1b supplies the accepted/bound address with its OS attempts.
             },
             |cx, to, ty| {
                 if let Some(at) =

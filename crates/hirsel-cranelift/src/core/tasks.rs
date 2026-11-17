@@ -68,7 +68,7 @@ impl Function<'_, '_, '_> {
                 Arg::Address(a) => self.addr(a),
             };
         }
-        let mut outputs = [Value::from_u32(0); 4];
+        let mut outputs = [Value::from_u32(0); 8];
         let site = match op {
             RtOp::Host(_)
             | RtOp::CheckCancel
@@ -267,12 +267,11 @@ impl Function<'_, '_, '_> {
                         let mut operands = vec![self.context];
                         operands.extend_from_slice(&args[..count]);
                         operands.push(site);
-                        self.c_call(
-                            op.net_symbol(),
-                            &params,
-                            &[U, K, Ty::Scalar(Scalar::U32), U, K],
-                            &operands,
-                        )?
+                        let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
+                        if matches!(op, HostOp::Listen | HostOp::Accept) {
+                            results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
+                        }
+                        self.c_call(op.net_symbol(), &params, &results, &operands)?
                     }
                     HostOp::Rename => self.c_call(
                         "hirsel_core_host_rename",
@@ -305,7 +304,14 @@ impl Function<'_, '_, '_> {
                 for i in 0..n {
                     outputs[i] = values[i];
                 }
-                n
+                if matches!(op, HostOp::Listen | HostOp::Accept) {
+                    for i in 4..8 {
+                        outputs[i] = values[i + 1];
+                    }
+                    8
+                } else {
+                    n
+                }
             }
             RtOp::CompareBytes => {
                 outputs[0] = self.c_call(

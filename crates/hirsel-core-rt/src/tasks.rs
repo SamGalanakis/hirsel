@@ -184,6 +184,7 @@ struct Scheduler {
     /// `wake` unblocks, readying every one, so a wake with none is a no-op.
     blocked: usize,
     taped: bool,
+    net: *mut hirsel_core_net::Sockets,
 }
 const HOST_STACK_BYTES: usize = 64 << 10;
 impl Task {
@@ -366,6 +367,7 @@ impl Scheduler {
                 self.tape_inputs();
             }
         }
+        self.poll_net(0);
         // SAFETY: no task is running; every parked operation's frame is pinned.
         unsafe {
             if !self.cancels.is_empty() {
@@ -507,6 +509,14 @@ impl Scheduler {
         }
     }
 
+    fn poll_net(&mut self, timeout: i32) {
+        if !self.net.is_null() {
+            // SAFETY: the run pins its shared registry; no task runs during polling.
+            unsafe { (*self.net).poll(timeout, |token| self.readies.push(token)) }
+                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+        }
+    }
+
     fn idle(&mut self) {
         if self.readies.pending.load(Ordering::Acquire) || !self.cancels.is_empty() {
             return;
@@ -516,9 +526,15 @@ impl Scheduler {
         // The scheduler thread waits here, never in a provider: readiness from
         // any thread unparks it (hirsel_core_ready).
         match deadline {
-            Some(deadline) => std::thread::park_timeout(Duration::from_nanos(
-                deadline.saturating_sub(crate::os::monotonic_ns()),
-            )),
+            Some(deadline) => {
+                if !self.net.is_null() {
+                    self.poll_net(poll_timeout(Some(deadline)));
+                } else {
+                    std::thread::park_timeout(Duration::from_nanos(
+                        deadline.saturating_sub(crate::os::monotonic_ns()),
+                    ));
+                }
+            }
             None => {
                 // A closed replay cannot await host readiness. An input that
                 // cannot make progress at this coordinate is a schedule fault.
@@ -548,7 +564,11 @@ impl Scheduler {
                 if self.head.is_null() && self.deferred.is_null() && !provider {
                     crate::process::stop(b"Deadlock");
                 }
-                std::thread::park();
+                if !self.net.is_null() {
+                    self.poll_net(-1);
+                } else {
+                    std::thread::park();
+                }
             }
         }
     }
@@ -772,6 +792,7 @@ struct Readies {
     tokens: Mutex<Vec<u64>>,
     pending: AtomicBool,
     worker: std::thread::Thread,
+    net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
 }
 impl Readies {
     fn new() -> Arc<Self> {
@@ -779,6 +800,7 @@ impl Readies {
             tokens: Mutex::new(Vec::new()),
             pending: AtomicBool::new(false),
             worker: std::thread::current(),
+            net: Mutex::new(None),
         })
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<u64>> {
@@ -788,6 +810,9 @@ impl Readies {
         self.lock().push(token);
         self.pending.store(true, Ordering::Release);
         self.worker.unpark();
+        if let Some(net) = self.net.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            net.wake();
+        }
     }
     /// Take `token` if it was readied; other tokens are not this waiter's.
     fn take(&self, token: u64) -> bool {
@@ -1155,7 +1180,7 @@ unsafe fn park_operation(task: *mut Task) {
 /// no task, as under a scheduler. Cancellation is checked only at entry: no
 /// task exists to request it later.
 unsafe fn alone(
-    _context: *mut Context,
+    context: *mut Context,
     provider: &crate::provider::Provider,
     request: *mut crate::provider::Request,
     token: u64,
@@ -1165,12 +1190,45 @@ unsafe fn alone(
     // from inside `wait` or `issue` is not lost. The token is fresh, so the
     // stale tokens cleared here are other operations'.
     let readies = ALONE.with(|r| r.0.clone());
+    struct AloneNet(Arc<Readies>);
+    impl Drop for AloneNet {
+        fn drop(&mut self) {
+            self.0.net.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+    }
+    let _network = AloneNet(readies.clone());
     readies.take(0);
     // Wait until readiness (true) or the deadline (false).
     let block = |deadline: Option<u64>| -> bool {
         loop {
+            if !unsafe { (*context).host_files }.is_null() {
+                // SAFETY: direct ABI caller pins its registry through this wait.
+                unsafe {
+                    (*(*context).host_files)
+                        .sockets
+                        .poll(0, |token| readies.push(token))
+                }
+                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+            }
             if readies.pending.load(Ordering::Acquire) && readies.take(token) {
                 return true;
+            }
+            let network = readies
+                .net
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
+            if network {
+                if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+                    return false;
+                }
+                unsafe {
+                    (*(*context).host_files)
+                        .sockets
+                        .poll(poll_timeout(deadline), |token| readies.push(token))
+                }
+                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                continue;
             }
             match deadline {
                 Some(at) => {
@@ -1284,6 +1342,15 @@ unsafe fn drain_refunds(task: *mut Task) {
 /// before scheduling; never observe cancellation or change that result here.
 #[inline(always)]
 unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
+    // SAFETY: this synchronous poll only queues tokens, never invokes task callbacks.
+    unsafe {
+        if !(*(*task).run).net.is_null() {
+            (*(*task).run).poll_net(0);
+            if (&(*(*task).run).readies).pending.load(Ordering::Acquire) {
+                checkpoint(false);
+            }
+        }
+    }
     if hirsel_core_layout::event::is_poll(kind, value) {
         // SAFETY: the active task exclusively owns its counter and event turn.
         unsafe {
@@ -1363,6 +1430,33 @@ pub(crate) fn current_group() -> Option<crate::tape::schedule::Group> {
     // SAFETY: CURRENT pins its task, or is null outside a task.
     unsafe { task.as_ref().and_then(|t| t.group) }
 }
+pub(crate) fn attach_net(
+    sockets: *mut hirsel_core_net::Sockets,
+    poller: Arc<hirsel_core_net::Poller>,
+) {
+    let mut task = CURRENT.get();
+    if task.is_null() {
+        task = CALLBACK_TASK.get();
+    }
+    let readies = if task.is_null() {
+        ALONE.with(|r| r.0.clone())
+    } else {
+        // SAFETY: the callback/task pins the run and its shared registry.
+        unsafe {
+            (*(*task).run).net = sockets;
+            (*(*task).run).readies.clone()
+        }
+    };
+    *readies.net.lock().unwrap_or_else(|e| e.into_inner()) = Some(poller);
+}
+fn poll_timeout(deadline: Option<u64>) -> i32 {
+    deadline.map_or(-1, |at| {
+        at.saturating_sub(crate::os::monotonic_ns())
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u64) as i32
+    })
+}
+
 pub(crate) fn attach_tape(group: crate::tape::schedule::Group) {
     let task = CURRENT.get();
     if !task.is_null() {
@@ -1547,6 +1641,7 @@ pub unsafe fn run_root(
         outside_cancels: Vec::new(),
         blocked: 0,
         taped: false,
+        net: ptr::null_mut(),
     };
     let registered = Registered(run.readies.clone());
     WAITERS
@@ -1797,10 +1892,10 @@ pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
         (*(*task).context)
             .cancel_requested
             .store(true, Ordering::Release);
-        event(CANCEL, (*task).id, 0);
         if (*task).state == State::Provider {
             (*(*task).run).cancels.push(task);
         }
+        event(CANCEL, (*task).id, 0);
         wake();
     }
 }

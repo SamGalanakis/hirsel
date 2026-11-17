@@ -1049,7 +1049,9 @@ impl RtOp {
                             V(u64_),
                             V(u64_),
                             V(Ty::Scalar(Scalar::U16)),
-                            V(p),
+                            V(u8_),
+                            V(u64_),
+                            V(u64_),
                         ],
                         outcome,
                     ),
@@ -1062,10 +1064,33 @@ impl RtOp {
                             V(Ty::Scalar(Scalar::U16)),
                             V(Ty::Scalar(Scalar::U16)),
                         ],
-                        outcome,
+                        vec![
+                            u64_,
+                            u8_,
+                            Ty::Scalar(Scalar::U32),
+                            u64_,
+                            u8_,
+                            u64_,
+                            u64_,
+                            Ty::Scalar(Scalar::U16),
+                        ],
                     ),
-                    HostOp::Accept => (vec![V(u64_), V(p)], outcome),
-                    HostOp::Recv | HostOp::Send => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::Accept => (
+                        vec![V(u64_), V(u8_), V(u64_), V(u64_)],
+                        vec![
+                            u64_,
+                            u8_,
+                            Ty::Scalar(Scalar::U32),
+                            u64_,
+                            u8_,
+                            u64_,
+                            u64_,
+                            Ty::Scalar(Scalar::U16),
+                        ],
+                    ),
+                    HostOp::Recv | HostOp::Send => {
+                        (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
                     HostOp::NetNarrow => (
                         vec![
                             V(u64_),

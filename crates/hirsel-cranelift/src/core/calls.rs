@@ -169,7 +169,7 @@ impl<'a> Calls<'a> {
         let len = b.inst_results(inst).len();
         returned[..len].copy_from_slice(b.inst_results(inst));
         let mut out = NativeValues {
-            values: [Value::from_u32(0); 8],
+            values: [Value::from_u32(0); 9],
             len: 0,
         };
         signature.unpack(b, &returned[..len], storage, |value| {
@@ -214,7 +214,7 @@ impl<'a> Calls<'a> {
 // Runtime rows have a small, frozen result list. Internal function rows use the
 // reusable dynamically sized buffer above and have no source-level arity cap.
 pub(super) struct NativeValues {
-    values: [Value; 8],
+    values: [Value; 9],
     len: usize,
 }
 impl Index<usize> for NativeValues {

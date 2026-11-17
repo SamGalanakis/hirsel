@@ -85,9 +85,6 @@ impl OsProvider {
             valid_path(path)?;
         }
         match request.operation {
-            CONNECT | LISTEN | ACCEPT | RECV | SEND => {
-                out.error = IoError { tag: 8, code: 38 };
-            }
             OPEN => {
                 let flags = match request.mode {
                     0 => libc::O_RDONLY,
@@ -396,10 +393,21 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
         }
     }
 }
-/// Every OS issue is Done at once (SLEEP_UNTIL has no effect to issue).
+/// Files and clocks finish immediately; sockets may park after a not-ready attempt.
 /// # Safety
 /// As `wait`.
-pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, _: u64) -> Step {
+pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
+    if unsafe {
+        matches!(
+            (*request).operation,
+            CONNECT | LISTEN | ACCEPT | RECV | SEND
+        )
+    } {
+        let step = unsafe { crate::os_net::step(request, token, true) };
+        #[cfg(test)]
+        probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
+        return step;
+    }
     let outcome = unsafe { crate::tasks::host_operation(state, request, issue_on_stack) };
     #[cfg(test)]
     probe::note(probe::ISSUE, request, probe::answer(&outcome));
@@ -439,13 +447,12 @@ pub(crate) mod probe {
         });
     }
 }
-/// The OS provider never answers Pending, so the scheduler never resumes or
-/// aborts one of its operations.
-unsafe extern "C" fn resume(_: *mut u8, _: *mut Request, _: u64) -> Step {
-    unreachable!("the OS provider never answers Pending")
+/// Only socket operations enter I under the OS provider.
+unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
+    unsafe { crate::os_net::step(request, token, false) }
 }
-unsafe extern "C" fn abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
-    unreachable!("the OS provider never answers Pending")
+unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason: u8) -> Outcome {
+    unsafe { crate::os_net::abort(request, token, reason) }
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.

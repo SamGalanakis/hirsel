@@ -2,11 +2,7 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
-use std::{
-    collections::BTreeMap,
-    net::IpAddr,
-    os::fd::{AsRawFd, OwnedFd},
-};
+use std::net::IpAddr;
 
 /// The public grant spelling, also used in configuration diagnostics.
 pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>]";
@@ -118,50 +114,8 @@ impl Rule {
     }
 }
 
-struct Record {
-    fd: OwnedFd,
-    owners: u8,
-}
-/// One record created on connect/accept/listen; split never inserts or admits.
-#[derive(Default)]
-pub struct Sockets {
-    next: u64,
-    live: BTreeMap<u64, Record>,
-}
-impl Sockets {
-    /// Transfer an engine-owned descriptor. Providers and Rust harnesses only.
-    pub fn insert(&mut self, fd: OwnedFd) -> Option<u64> {
-        let id = self.next.checked_add(4)?;
-        self.next = id;
-        self.live.insert(id, Record { fd, owners: 1 });
-        Some(id)
-    }
-    pub fn split(&mut self, key: u64) -> (u64, u64) {
-        self.live.get_mut(&key).unwrap().owners = 6;
-        (key | 1, key | 2)
-    }
-    pub fn release(&mut self, key: u64) {
-        let base = key & !3;
-        let record = self.live.get_mut(&base).unwrap();
-        let direction = key & 3;
-        if direction == 2 {
-            // SAFETY: the record owns this connected descriptor until final release.
-            unsafe {
-                libc::shutdown(record.fd.as_raw_fd(), libc::SHUT_WR);
-            }
-        }
-        record.owners &= !(1 << direction);
-        if record.owners == 0 {
-            self.live.remove(&base);
-        }
-    }
-    pub fn len(&self) -> usize {
-        self.live.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.live.is_empty()
-    }
-}
+mod reactor;
+pub use reactor::{Poller, Sockets};
 
 #[cfg(test)]
 mod tests {

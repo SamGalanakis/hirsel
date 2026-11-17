@@ -168,12 +168,21 @@ const HirselCoreProcessConfig *hirsel_core_os_process_config(const HirselCoreOsP
 void hirsel_core_os_process_free(HirselCoreOsProcess *);
 #include "hirsel_core_rt_sites.h"
 
-/* W1a provider entries refuse with Other(38). Split has no replay point. */
-HirselCoreHostOutcome hirsel_core_host_connect(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, const uint8_t *, uint64_t);
-HirselCoreHostOutcome hirsel_core_host_listen(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint16_t, uint64_t);
-HirselCoreHostOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, const uint8_t *, uint64_t);
-HirselCoreHostOutcome hirsel_core_host_recv(HirselCoreContext *, uint64_t, HirselCoreBuffer *, const uint8_t *, uint64_t);
-HirselCoreHostOutcome hirsel_core_host_send(HirselCoreContext *, uint64_t, HirselCoreBuffer *, const uint8_t *, uint64_t);
+/* Until is lowered to kind (0 Never, 1 At), Clock capability, absolute ns.
+   Listen/accept append normalized address scalars. Split has no replay point. */
+typedef struct {
+    uint64_t value;
+    HirselCoreIoError error;
+    uint64_t written;
+    uint8_t status, family;
+    uint64_t hi, lo;
+    uint16_t port;
+} HirselCoreAddressOutcome;
+HirselCoreHostOutcome hirsel_core_host_connect(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreAddressOutcome hirsel_core_host_listen(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint16_t, uint64_t);
+HirselCoreAddressOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_recv(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_send(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);
 void hirsel_core_socket_drop(HirselCoreContext *, uint64_t);

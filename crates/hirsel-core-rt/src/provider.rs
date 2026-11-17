@@ -203,14 +203,6 @@ pub(crate) unsafe fn drive(
                 ..Outcome::default()
             };
         }
-        // W1a declares these entries, but no network operation issues yet.
-        // W1b replaces this refusal with its OS attempts and provider events.
-        if matches!(operation, CONNECT | LISTEN | ACCEPT | RECV | SEND) {
-            return Outcome {
-                error: IoError { tag: 8, code: 38 },
-                ..Outcome::default()
-            };
-        }
         let outcome = crate::tasks::provider_operation(context, &*provider, request, issued);
         if outcome.status == STATUS_REFUSED {
             causes::record(&mut *context, causes::Cause::new(causes::TAPE, site));

@@ -61,7 +61,10 @@ impl FunctionEmitter<'_> {
         let operand = args.get(1).cloned().unwrap_or(Value::Null);
         let mode = args.get(2).cloned().unwrap_or(int(0));
         let at = self.site_word();
-        let results = [U, K, Ty::Scalar(Scalar::U32), U, K];
+        let mut results = vec![U, K, Ty::Scalar(Scalar::U32), U, K];
+        if matches!(op, HostOp::Listen | HostOp::Accept) {
+            results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
+        }
         let mut values = match op {
             HostOp::Connect
             | HostOp::Listen
@@ -121,7 +124,7 @@ impl FunctionEmitter<'_> {
         };
         // Every provider row returns its status last (`runtime_call` branches on it):
         // a tape refuses any of them before issue (CAP-9).
-        let status = values.pop().unwrap();
+        let status = values.remove(4);
         match op {
             HostOp::WallMs | HostOp::MonoNs => values.truncate(1),
             HostOp::Random => values.clear(),

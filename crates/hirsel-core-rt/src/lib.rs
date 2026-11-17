@@ -24,6 +24,7 @@ pub mod latest;
 pub mod limit;
 pub mod net;
 pub mod os;
+mod os_net;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
 pub mod process;

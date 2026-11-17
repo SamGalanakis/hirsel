@@ -1,4 +1,4 @@
-//! NET-6 checks precede issue. W1a declares the provider but makes no OS attempt.
+//! Network operand adapters. Authority checks precede issue; buffers stay caller-owned.
 use crate::{
     Context,
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
@@ -35,16 +35,73 @@ impl Drop for Grant {
     }
 }
 #[repr(C)]
-pub(crate) struct Address {
-    family: u8,
-    hi: u64,
-    lo: u64,
-    port: u16,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Address {
+    pub family: u8,
+    pub hi: u64,
+    pub lo: u64,
+    pub port: u16,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AddressOutcome {
+    pub value: u64,
+    pub error: IoError,
+    pub written: u64,
+    pub status: u8,
+    pub family: u8,
+    pub hi: u64,
+    pub lo: u64,
+    pub port: u16,
+}
+impl AddressOutcome {
+    fn new(o: Outcome, a: Address) -> Self {
+        Self {
+            value: o.value,
+            error: o.error,
+            written: o.written,
+            status: o.status,
+            family: a.family,
+            hi: a.hi,
+            lo: a.lo,
+            port: a.port,
+        }
+    }
+    fn outcome(self) -> Outcome {
+        Outcome {
+            value: self.value,
+            error: self.error,
+            written: self.written,
+            status: self.status,
+        }
+    }
+}
+/// Borrowed through delivery. Providers may fill address, but own no byte buffer.
+pub(crate) struct NetworkRequest {
+    pub address: Address,
+    pub sockets: *mut hirsel_core_net::Sockets,
+    pub until: Option<(Provider, u64, u64)>,
+    pub backlog: u16,
+    pub connecting: Option<u64>,
+}
+unsafe fn deadline(
+    context: *mut Context,
+    kind: u8,
+    clock: u64,
+    at: u64,
+) -> Option<(Provider, u64, u64)> {
+    (kind != 0).then(|| unsafe {
+        (
+            *hirsel_core_capability_provider(context, clock),
+            hirsel_core_capability_handle(context, clock),
+            at,
+        )
+    })
 }
 pub(crate) unsafe fn permitted(request: &Request) -> bool {
     // SAFETY: network adapters pin the scalar address and the grant's Rules.
     unsafe {
-        let address = &*request.path.cast::<Address>();
+        let address = &(*request.path.cast::<NetworkRequest>()).address;
         let rules = &*(request.handle as *const Rules);
         rules.as_slice().iter().any(|r| {
             r.permits(
@@ -75,10 +132,28 @@ pub unsafe extern "C" fn hirsel_core_host_connect(
     hi: u64,
     lo: u64,
     port: u16,
-    until: *const u8,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
     site: u64,
 ) -> Outcome {
-    unsafe { address_op(context, CONNECT, n, family, hi, lo, port, until, 0, site) }
+    unsafe {
+        address_op(
+            context,
+            CONNECT,
+            n,
+            family,
+            hi,
+            lo,
+            port,
+            until_kind,
+            clock,
+            deadline_ns,
+            0,
+            site,
+        )
+        .outcome()
+    }
 }
 /// # Safety
 /// Live run and typed Net grant.
@@ -93,19 +168,10 @@ pub unsafe extern "C" fn hirsel_core_host_listen(
     port: u16,
     backlog: u16,
     site: u64,
-) -> Outcome {
+) -> AddressOutcome {
     unsafe {
         address_op(
-            context,
-            LISTEN,
-            n,
-            family,
-            hi,
-            lo,
-            port,
-            ptr::null(),
-            backlog,
-            site,
+            context, LISTEN, n, family, hi, lo, port, 0, 0, 0, backlog, site,
         )
     }
 }
@@ -118,10 +184,12 @@ unsafe fn address_op(
     hi: u64,
     lo: u64,
     port: u16,
-    _until: *const u8,
-    _backlog: u16,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
+    backlog: u16,
     site: u64,
-) -> Outcome {
+) -> AddressOutcome {
     unsafe {
         let address = Address {
             family,
@@ -129,41 +197,67 @@ unsafe fn address_op(
             lo,
             port,
         };
+        let mut network = NetworkRequest {
+            address,
+            sockets: &mut (*(*context).host_files).sockets,
+            until: deadline(context, until_kind, clock, deadline_ns),
+            backlog,
+            connecting: None,
+        };
         let mut request = Request {
             operation: op,
             mode: 0,
             handle: hirsel_core_capability_handle(context, n),
-            path: (&address as *const Address).cast(),
-            path_len: size_of::<Address>(),
+            path: (&mut network as *mut NetworkRequest).cast(),
+            path_len: size_of::<NetworkRequest>(),
             buffer: buffer(),
             site,
         };
-        hirsel_core_host(
+        let outcome = hirsel_core_host(
             context,
             hirsel_core_capability_provider(context, n),
             &mut request,
-        )
+        );
+        AddressOutcome::new(outcome, network.address)
     }
 }
+#[allow(clippy::too_many_arguments)]
 unsafe fn owned_op(
     context: *mut Context,
     op: u8,
     key: u64,
-    _operand: *mut Buffer,
-    _until: *const u8,
+    operand: *mut Buffer,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
     site: u64,
-) -> Outcome {
+) -> AddressOutcome {
     unsafe {
+        let mut network = NetworkRequest {
+            address: Address::default(),
+            sockets: &mut (*(*context).host_files).sockets,
+            until: deadline(context, until_kind, clock, deadline_ns),
+            backlog: 0,
+            connecting: None,
+        };
         let mut request = Request {
             operation: op,
             mode: 0,
             handle: key,
-            path: ptr::null(),
-            path_len: 0,
-            buffer: buffer(),
+            path: (&mut network as *mut NetworkRequest).cast(),
+            path_len: size_of::<NetworkRequest>(),
+            buffer: if operand.is_null() {
+                buffer()
+            } else {
+                *operand
+            },
             site,
         };
-        hirsel_core_host(context, (*(*context).run).provider, &mut request)
+        let outcome = hirsel_core_host(context, (*(*context).run).provider, &mut request);
+        if op == RECV {
+            (*operand).len = request.buffer.len;
+        }
+        AddressOutcome::new(outcome, network.address)
     }
 }
 /// # Safety
@@ -172,34 +266,77 @@ unsafe fn owned_op(
 pub unsafe extern "C" fn hirsel_core_host_accept(
     context: *mut Context,
     key: u64,
-    until: *const u8,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
     site: u64,
-) -> Outcome {
-    unsafe { owned_op(context, ACCEPT, key, ptr::null_mut(), until, site) }
+) -> AddressOutcome {
+    unsafe {
+        owned_op(
+            context,
+            ACCEPT,
+            key,
+            ptr::null_mut(),
+            until_kind,
+            clock,
+            deadline_ns,
+            site,
+        )
+    }
 }
 /// # Safety
 /// Live read half, mutable caller buffer and borrowed Until carrier.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_recv(
     context: *mut Context,
     key: u64,
     operand: *mut Buffer,
-    until: *const u8,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
     site: u64,
 ) -> Outcome {
-    unsafe { owned_op(context, RECV, key, operand, until, site) }
+    unsafe {
+        owned_op(
+            context,
+            RECV,
+            key,
+            operand,
+            until_kind,
+            clock,
+            deadline_ns,
+            site,
+        )
+        .outcome()
+    }
 }
 /// # Safety
 /// Live write half, immutable caller buffer and borrowed Until carrier.
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_send(
     context: *mut Context,
     key: u64,
     operand: *mut Buffer,
-    until: *const u8,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
     site: u64,
 ) -> Outcome {
-    unsafe { owned_op(context, SEND, key, operand, until, site) }
+    unsafe {
+        owned_op(
+            context,
+            SEND,
+            key,
+            operand,
+            until_kind,
+            clock,
+            deadline_ns,
+            site,
+        )
+        .outcome()
+    }
 }
 /// # Safety
 /// Consumes the sole Socket carrier. No allocation, admission or replay point.

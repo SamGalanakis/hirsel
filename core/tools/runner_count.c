@@ -1,7 +1,7 @@
 /* L3's native count (RUNNER-SPEC v2.6): linked through
  * --wrap=hirsel_core_os_run_with_sources into the test executable of one case, it counts
- * CONC-10 TRY_SEND events (the case's body is the only caller of try_send, once per run)
- * and fails the run (status 105) unless there are exactly TRY_SENDS. */
+ * CONC-10 TRY_SEND events (the case's body, once per run, and the publisher, once per
+ * answer it tells) and fails the run (status 105) unless there are exactly TRY_SENDS. */
 #include "hirsel_core_rt_host.h"
 #include <stdio.h>
 #ifndef TRY_SENDS
@@ -9,7 +9,7 @@
 #endif
 static uint64_t try_sends;
 #ifdef HUNG_BODY_SENDS
-static struct { uint64_t object, task, count; int before_slice; } senders[2];
+static struct { uint64_t object, task, count; int before_slice; } senders[3];
 static size_t sender_count;
 static uint64_t slice_task, slices;
 static int too_many_senders;
@@ -21,7 +21,7 @@ static void event(void *state, HirselCoreEvent e) {
 #ifdef HUNG_BODY_SENDS
         size_t i = 0;
         while (i < sender_count && senders[i].object != e.object) i++;
-        if (i == 2) { too_many_senders = 1; return; }
+        if (i == 3) { too_many_senders = 1; return; }
         if (i == sender_count) {
             sender_count++;
             senders[i].object = e.object;
@@ -49,12 +49,16 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
             (unsigned long long)TRY_SENDS);
     if (status) return status;
 #ifdef HUNG_BODY_SENDS
-    if (too_many_senders || sender_count != 2 || slices != 1) return 105;
-    size_t body = senders[0].count == HUNG_BODY_SENDS ? 0 : 1;
-    size_t marker = 1 - body;
-    if (senders[body].count != HUNG_BODY_SENDS || senders[marker].count != 1 ||
+    if (too_many_senders || sender_count != 3 || slices != 1) return 105;
+    size_t body = 3, marker = 3, told = 3;
+    for (size_t k = 0; k < 3; k++) {
+        if (senders[k].count == HUNG_BODY_SENDS) body = k;
+        else if (senders[k].count == 1) marker = k;
+        else if (senders[k].count == HUNG_TOLDS) told = k;
+    }
+    if (body == 3 || marker == 3 || told == 3 ||
         senders[body].task != slice_task || senders[marker].task == slice_task ||
-        !senders[marker].before_slice) return 105;
+        senders[told].task == slice_task || !senders[marker].before_slice) return 105;
 #endif
     return try_sends == TRY_SENDS ? 0 : 105;
 }

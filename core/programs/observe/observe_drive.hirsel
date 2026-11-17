@@ -2,7 +2,7 @@
 // runner's in-process API; it adds no observer hooks to the runner or store.
 pub type Mix: codec + send = Correct | ReuseWhileLive | RecoverNewBytes | NoDirectory | AdvanceOnRefusal
 type Reg = runner.Registry[(), observe_fixture.Handles]
-type Drive: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks, out: Stdout, err: Stderr, seed: u64, mix: Mix }
+type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, out: Stdout, err: Stderr, seed: u64, mix: Mix }
 type Conn {
     id: u64, clock: Clock, out: Stdout, to: Sender[runner.Event], from: Receiver[runner.Down],
     task: Task[Result[(), runner.RegisterError]], dog: Task[()]
@@ -61,7 +61,7 @@ fn connect(d: Drive, id: u64) -> Conn {
         Ok(take t) => take t,
         Error(_) => fail("observe drive watchdog"),
     }
-    let (send, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), N_PLACE, d.head, take to, d.clock, 8u64, 2097152u64))
+    let (send, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), N_PLACE, d.head, d.post, take to, d.clock, 8u64, 2097152u64))
     Conn(id: id, clock: d.clock, out: d.out, to: take send, from: take from, task: take session, dog: take dog)
 }
 
@@ -199,15 +199,14 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
-    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
-    let (_, joins) = result.unwrap(take joined)
-    let input = Drive(head: take head, clock: clock, tasks: tasks, out: out, err: err, seed: seed, mix: mix)
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let input = Drive(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, out: out, err: err, seed: seed, mix: mix)
     let body = match task.spawn(tasks, bytes 33554432u64, take input, drive) {
         Ok(take t) => take t,
         Error(_) => return false,
     }
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), take inbox, take joins, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
     match opened { Ok(()) => (), Error(_) => return false }
     match driven { Ok(()) => true, Error(_) => false }
@@ -294,16 +293,15 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
-    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
-    let (_, joins) = result.unwrap(take joined)
-    let d = Drive(head: take head, clock: clock, tasks: tasks, out: out, err: err, seed: 0u64, mix: Correct)
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let d = Drive(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, out: out, err: err, seed: 0u64, mix: Correct)
     let input = JoinDrive(drive: take d, scenario: scenario)
     let body = match task.spawn(tasks, bytes 33554432u64, take input, drive_join) {
         Ok(take t) => take t,
         Error(_) => return false,
     }
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), take inbox, take joins, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(observe_fixture.handles), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
     match opened { Ok(()) => (), Error(_) => return false }
     match driven { Ok(()) => true, Error(_) => false }

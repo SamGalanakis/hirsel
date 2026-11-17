@@ -287,8 +287,7 @@ fn client(take c: Client) -> String waits {
 fn served(take db: store.Db, c: Clock, tasks: Tasks, out: Stdout, sessions: u64, take calls: List[Pos]) -> (Result[(), runner.OpenError], String) waits {
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
-    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
-    let (_, joins) = result.unwrap(take joined)
+    let mail = result.unwrap(runner.mailbox(4u64))
     let mut from: List[Receiver[runner.Down]] = list.new()
     let mut to: List[Sender[runner.Event]] = list.new()
     let mut mine: List[Sender[runner.Event]] = list.new()
@@ -296,7 +295,7 @@ fn served(take db: store.Db, c: Clock, tasks: Tasks, out: Stdout, sessions: u64,
     for _ in 0u64 .. sessions {
         let pair: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
         let (tx, rx) = result.unwrap(take pair)
-        let (s, t) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, take tx, c, 4u64, 2097152u64))
+        let (s, t) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, runner.post(mail), take tx, c, 4u64, 2097152u64))
         result.unwrap(list.push(mut mine, channel.sender(s)))
         result.unwrap(list.push(mut to, take s))
         result.unwrap(list.push(mut from, take rx))
@@ -308,7 +307,7 @@ fn served(take db: store.Db, c: Clock, tasks: Tasks, out: Stdout, sessions: u64,
     }
     let cl = Client(from: take from, to: take to, calls: take calls, out: out)
     let reading = result.unwrap(task.spawn(tasks, bytes 4194304u64, take cl, client))
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), take inbox, take joins, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     for s in mine {
         let _ = channel.send(s, runner.hang_up())
     }

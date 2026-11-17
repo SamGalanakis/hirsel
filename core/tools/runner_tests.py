@@ -47,17 +47,20 @@ CHUNK = 500
 N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded')
+         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks')
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
-# L3's tally handler is the only caller of try_send (TRY_SEND is kind 7 in
-# crates/hirsel-core-layout/src/event.rs), and calls_runs_once runs it for one position:
-# exactly once, however often that position is re-sent. The evaluator's count comes from
+# L3's tally handler and the publisher, once per answer it tells (L23), are the only
+# callers of try_send (TRY_SEND is kind 7 in crates/hirsel-core-layout/src/event.rs).
+# calls_runs_once runs tally for one position exactly once, however often that position is
+# re-sent, and its four sends get four answers: 1 + 4. The evaluator's count comes from
 # its event log; natively, core/tools/runner_count.c is linked into the case's test
 # executable as its event sink and fails the run on any other count.
 # L7 adds32664 sends by the hung body and one marker by the other session's
-# compute body; the marker precedes the head's exhaustion slice (kind21).
-COUNTS = {'calls_runs_once': (7, 1), 'calls_deadline_hung': (7, 32665)}
+# compute body; the marker precedes the head's exhaustion slice (kind21). The head's three
+# answers to s0 (the stop, its duplicate, the write) are three Told sends to s0's inbox.
+COUNTS = {'calls_runs_once': (7, 5), 'calls_deadline_hung': (7, 32668)}
+HUNG_TOLDS = 3
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
 SUBS = ('subs_main', 'rows_normalized')
@@ -75,13 +78,15 @@ def counted(name, report):
         for at, e in enumerate(events):
             if e[0] == 7:
                 sends.setdefault(e[2], []).append((at, e[1]))
-        if sorted(map(len, sends.values())) != [1, 32664]:
+        if sorted(map(len, sends.values())) != [1, HUNG_TOLDS, 32664]:
             return False
+        told = next(v for v in sends.values() if len(v) == HUNG_TOLDS)
         marker = next(v[0] for v in sends.values() if len(v) == 1)
         body = next(v for v in sends.values() if len(v) == 32664)
         slices = [(at, e[1]) for at, e in enumerate(events) if e[0] == 21]
         return (len(slices) == 1 and marker[0] < slices[0][0]
-                and marker[1] != slices[0][1] == body[0][1])
+                and marker[1] != slices[0][1] == body[0][1]
+                and all(t != slices[0][1] for _, t in told))
     return True
 
 
@@ -175,6 +180,27 @@ MUTANTS = (
      [('    let rev = match revision {\n        Some(b) => Some(copy_bytes(b)?),\n',
        '    let rev: Option[Bytes] = match revision {\n        Some(_) => None,\n')],
      'runner_calls', 'calls_recorded'),
+    # L23 (publisher_never_blocks): the publisher sends to an owner and waits.
+    ('publisher_blocks_on_full_session',
+     [('fn offer(to: Sender[Event], take e: Event) -> Offered {\n    match channel.try_send(to, take e) {\n        Ok(_) => Took,\n        Error(Full(take x)) => Bounced(take x),\n        Error(Closed(_)) => Shut,\n    }\n',
+       'fn offer(to: Sender[Event], take e: Event) -> Offered waits {\n    match channel.send(to, take e) {\n        Ok(_) => Took,\n        Error(_) => Shut,\n    }\n'),
+      ('take a: Answer, at: u64) {\n', 'take a: Answer, at: u64) -> () waits {\n'),
+      ('mut waiting: List[Answer], at: u64) {\n    let mut i', 'mut waiting: List[Answer], at: u64) -> () waits {\n    let mut i'),
+      ('fn catch_up(mut j: Joiner, at: u64) -> Ledger {', 'fn catch_up(mut j: Joiner, at: u64) -> Ledger waits {'),
+      ('fn retell(mut waiting: List[Answer], at: u64) {', 'fn retell(mut waiting: List[Answer], at: u64) -> () waits {'),
+      ('take owes: List[Owe]) {\n', 'take owes: List[Owe]) -> () waits {\n')],
+     'runner_calls', 'publisher_never_blocks'),
+    # L17 on the wire (v2.12's one publisher inbox): an initial result split from the Batch
+    # that names its sub, and an Unsubscribe the publisher ignores.
+    ('initial_split',
+     [('        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: list.new())))\n',
+       '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: list.new(), outcomes: list.new())))\n'
+       '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: list.new(), rows: take rows, outcomes: list.new())))\n')],
+     'runner_calls', 'subs_wired'),
+    ('unsubscribe_ignored',
+     [('            Unsubscribed(who, sub) => if let Some(i) = find(b.subs, who, sub) {\n                let _ = list.remove(mut b.subs, i)\n            },',
+       '            Unsubscribed(_, _) => (),')],
+     'runner_calls', 'subs_wired'),
     # L17 (RUNNER-SPEC §8.2, complete_marks_empty): an empty initial result names its sub in
     # no Batch's complete, so the client never learns that sub is current.
     ('no_complete_on_empty',
@@ -225,7 +251,7 @@ MUTANTS = (
     ('direct_commitless',
      [('    let mut answers: List[Answer] = list.new()\n'
        '    result.unwrap(list.push(mut answers, Answer(to: take to, stream: take stream, p: p, outcome: take o)))\n'
-       '    let _ = channel.send(hd.out, Release(version: 0u64, snapshot: None, answers: take answers))',
+       '    let _ = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))',
        '    let _ = channel.send(to, Event(e: Answered(Told(version: 0u64, stream: take stream, p: p, outcome: take o))))')],
      'runner_calls', 'calls_duplicate'),
     ('release_at_commit_version',
@@ -248,7 +274,7 @@ MUTANTS = (
      [('Some(h) => (false, list.len(h.owed), h.digest == d),', 'Some(h) => (false, list.len(h.owed), true),')],
      'runner_calls', 'calls_session_mismatch'),
     ('mismatch_row_in_session',
-     [('                if !same {\n                    return Ok(())\n                }\n',
+     [('                if !same {\n                    return\n                }\n',
        '                if !same {\n'
        '                    let Call(stream: take stream, p: p, key: _, arg: _, deadline: _) = take c\n'
        '                    tell(s.client, last, take stream, p, Refused(RequestMismatch));\n'
@@ -605,7 +631,7 @@ def counting_cc(args, root, work, name):
     support = work / f'count_{name}.o'
     subprocess.run([str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
                     '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
-                    *(['-DHUNG_BODY_SENDS=32664'] if name == 'calls_deadline_hung' else []),
+                    *(['-DHUNG_BODY_SENDS=32664', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '

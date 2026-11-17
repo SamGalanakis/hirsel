@@ -56,7 +56,7 @@ is `Failed(Gone)`, whose entry no longer exists: its reply has no record.
 `store.recorded(db, branch, v)` reads a record back from a disk store; a memory store
 keeps none.
 
-`place_head(db, place, n_place, handles, inbox, sessions, tasks, n_publisher)` runs on
+`place_head(db, place, n_place, handles, inbox, mail, tasks, n_publisher)` runs on
 the caller's task, because `store.Db` is not send. It runs `place` under `bytes
 n_place` (rule 10) and `handles` twice (rule 12). The head keeps the first H. The
 publisher, which it spawns under `bytes n_publisher`, runs `place` itself and gets the
@@ -89,10 +89,29 @@ difference between the old and the new Cover's rows, a removal being a row with 
 and for an unchanged Cover only the changed keys inside it (G2). Every row's value is the
 table's published value (F10). A query that faults or runs out ends its subscription
 with `Ended(sub, Failed(..))`. A session Reset drops all of that session's
-subscriptions. Sessions do not yet send Subscribe to the publisher; until then the
-publisher's subscriptions are exercised through the law `subs_main`.
+subscriptions.
 
-`connect(tasks, place, n_place, head, client, clock, q, n_session)` spawns a session
+The publisher has one inbox, a `Mailbox` made by `mailbox(n)` with room for n
+messages; `place_head` takes the mailbox and `post(mail)` gives the `Sender[PubIn]`
+each session holds. Every message to the publisher goes through it in one order: the
+head's Releases, a session's Join, its Subscribes and Unsubscribes, and its leaving.
+So a Subscribe sent after a session saw version v runs at a base no older than v (G3)
+with no other machinery. A session joins the publisher at its first Subscribe and
+leaves when it ends; the publisher drops a session whose client channel is gone. A
+client sends `subscribe(sub, key, arg)` and `unsubscribe(sub)` as session events. A
+Subscribe whose key is not a query entry ends at once with `Ended(sub,
+Refused(NoEntry))`. The publisher never blocks on a session (L23): every send to a
+session is a `try_send`. A closed inbox drops that session's subscriptions. A full one ends
+each subscription whose content did not fit with `Ended(sub, Refused(Overloaded))`, and the
+client resubscribes. That Ended, and any answer that did not fit, waits in the publisher until
+the inbox takes it, retried after every message the publisher handles and before that
+session's next content; a retried answer is told at the publisher's current base. The
+publisher keeps no subscription content for a full inbox. Not built yet: a waiting Ended
+moves only when the publisher next gets a message, so in a place that goes quiet the client
+lacks the rows it missed and has no Ended until then; and the budget ledger that bounds
+these bytes (R2-a).
+
+`connect(tasks, place, n_place, head, publisher, client, clock, q, n_session)` spawns a session
 task under `bytes n_session` and returns its inbox sender and its task. The session
 runs `place` itself under n_place, and its task ends with that `RegisterError` if it
 fails. The session answers by itself what V1 lets it: a passed deadline (`Deadline`),

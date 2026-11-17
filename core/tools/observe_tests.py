@@ -53,7 +53,7 @@ def traced_calls(root, work):
     for name in ('conn', 'conn_in', 'served', 'served_in', 'served_on'):
         text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ' + ('id: u64, ' if name.startswith('conn') else ''))
     text = re.sub(r'(?<!fn )\bserved_on\(', 'served_on(out, err, ', text)
-    text = replace(text, '    conn_in(tasks, head, clock, q,', '    conn_in(out, err, id, tasks, head, clock, q,')
+    text = replace(text, '    conn_in(tasks, head, post, clock, q,', '    conn_in(out, err, id, tasks, head, post, clock, q,')
     text = re.sub(r'(pub fn law_\w+\()', r'\1out: Stdout, err: Stderr, ', text)
     text = re.sub(r'(?m)^(\s*)served(_in)?\(c,', r'\1served\2(out, err, c,', text)
     next_id = 0
@@ -110,7 +110,8 @@ def traced_calls(root, work):
 pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Tasks) -> bool waits {
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
-    let mut cn = conn(out, err, 99u64, tasks, head, c, 1u64)
+    let mail = result.unwrap(runner.mailbox(64u64))
+    let mut cn = conn(out, err, 99u64, tasks, head, runner.post(mail), c, 1u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
     ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 50000000u64)
     let _ = frame(cn)

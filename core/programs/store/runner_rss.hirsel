@@ -49,7 +49,7 @@ fn string_arg(n: u64, trailing: bool) -> Bytes {
 
 const FAR: u64 = 18000000000000000000u64
 
-type D: send { head: Sender[runner.Req], clock: Clock, tasks: Tasks, flood: u64 }
+type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, flood: u64 }
 
 fn answer(rx: Receiver[runner.Down]) -> runner.Outcome waits {
     match channel.receive(rx) {
@@ -69,7 +69,7 @@ fn answer(rx: Receiver[runner.Down]) -> runner.Outcome waits {
 fn drive(take d: D) -> () waits {
     let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
     let (tx, rx) = result.unwrap(take made)
-    let (to, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), 1048576u64, d.head, take tx, d.clock, 1u64, 2097152u64))
+    let (to, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), 1048576u64, d.head, d.post, take tx, d.clock, 1u64, 2097152u64))
     let key = k_named()
     let bad = string_arg(4096u64, true)
     for _ in 0u64 .. d.flood {
@@ -106,14 +106,13 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args) -> Result[()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let made: Result[(Sender[runner.Req], Receiver[runner.Req]), Capacity] = channel.new(64u64)
     let (head, inbox) = result.unwrap(take made)
-    let joined: Result[(Sender[runner.Join], Receiver[runner.Join]), Capacity] = channel.new(4u64)
-    let (_, joins) = result.unwrap(take joined)
-    let d = D(head: take head, clock: clock, tasks: tasks, flood: flood)
+    let mail = result.unwrap(runner.mailbox(4u64))
+    let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, flood: flood)
     let driving = match task.spawn(tasks, bytes 33554432u64, take d, drive) {
         Ok(take t) => take t,
         Error(_) => return Error(Exit(status: 3)),
     }
-    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), take inbox, take joins, tasks, 1048576u64) {
+    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }

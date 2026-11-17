@@ -178,7 +178,13 @@ fn plan_field(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64) -> No
             }
         }
         FieldTy::Handle(_) => whole(8),
-        FieldTy::OwnFn => whole(field_size(shapes, recipes, ty).0),
+        // An owned closure hands its environment, when it has one, to the drain
+        // under the descriptor the environment names; only that pointer is read.
+        FieldTy::OwnFn => Node::Leaf {
+            at,
+            live: vec![(at + 8, 8)],
+            yields: Some(false),
+        },
         FieldTy::Scalar(_)
         | FieldTy::Stable(_)
         | FieldTy::Fn

@@ -1168,7 +1168,7 @@ fn owning_callable_and_failure_message_transfer_match_the_evaluator() {
             injection: None,
         },
         Case {
-            function: FuncId(3),
+            function: FuncId(2),
             args: vec![],
             limit: 256,
             injection: None,
@@ -1196,7 +1196,7 @@ fn owning_callable_and_failure_message_transfer_match_the_evaluator() {
         assert_eq!(got.admissions, expected.admissions);
         assert_eq!(
             got.messages,
-            if case.function.0 == 3 {
+            if case.function.0 == 2 {
                 vec!["686921".to_string()]
             } else {
                 vec![]
@@ -1208,7 +1208,7 @@ fn owning_callable_and_failure_message_transfer_match_the_evaluator() {
     agree_cases(
         &module,
         &[Case {
-            function: FuncId(3),
+            function: FuncId(2),
             args: vec![],
             limit: 256,
             injection: None,
@@ -1357,7 +1357,7 @@ fn counted_strings_release_their_dynamic_byte_buffer() {
     agree_cases(
         &module,
         &[Case {
-            function: FuncId(3),
+            function: FuncId(2),
             args: vec![],
             limit: 256,
             injection: None,

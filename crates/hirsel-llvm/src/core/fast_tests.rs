@@ -147,14 +147,16 @@ b8:
 
 #[test]
 fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
-    let mut source = String::from("core v1\nsig g0 = (u64) -> (bool, u64)\n");
+    let mut source = String::from(
+        "core v1\ntype t0 = own \"Captures\" { x: u64 }\nsig g0 = (u64) -> (bool, u64)\n",
+    );
     for (i, (kind, align)) in [
         ("for seq u8", 8),
-        ("for ownfn", 8),
+        ("env t0", 8),
         ("for seq u8", 16),
-        ("for ownfn", 16),
+        ("env t0", 16),
         ("for seq u8", 512),
-        ("for ownfn", 512),
+        ("env t0", 512),
         ("for seq u8", 1024),
     ]
     .into_iter()

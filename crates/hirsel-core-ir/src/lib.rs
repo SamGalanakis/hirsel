@@ -51,12 +51,16 @@
 //!   `charge::standalone` and `charge::span_builder` (MEM-24). Span builders are
 //!   ordinary code over these: `alloc .. in`, `copy`.
 //! - Callable environments: an `own fn` is a code pointer and an environment
-//!   pointer (logically 16). The environment block is one word naming its drop
-//!   glue, then the captures in the order the body first names them; it is
-//!   charged `charge::closure_env` of the captures' sizes (the glue word is never
-//!   charged, MEM-24) and its glue cleans the captures in reverse, frees the block
-//!   and refunds it. A captureless `own fn` has a null environment. Captures hold
-//!   no resource, so this cleanup never fails and runs no finalizer.
+//!   pointer (logically 16). The environment block (`alloc env tN`) is one word
+//!   naming row `tN`'s fixed descriptor, then the captures from offset 8 laid out
+//!   as row `tN`, a record of them in the order the body first names them. It is
+//!   charged `charge::closure_env` of that row's logical size (the descriptor word
+//!   is never charged, MEM-24). Releasing the `own fn` hands the environment to
+//!   the constant-stack drain under that descriptor, like any fixed block: the
+//!   row's recipe cleans the captures in reverse (LANG-14), then the block is
+//!   freed and refunded. No glue function is generated for it. A captureless `own fn` has a
+//!   null environment. Captures hold no resource, so this cleanup never fails and
+//!   runs no finalizer.
 //!   Every callable code pointer takes the environment pointer first; a plain
 //!   `fn` value's code receives null and ignores it, so a plain `fn` fits `own fn`
 //!   and `scoped fn` as `(code, null)`.
@@ -681,8 +685,10 @@
 //!
 //! An ordinary allocation names the owning edge that will hold its pointer:
 //! `alloc for <edge>` (`AllocKind::Own { edge }`), where the edge is a `box`,
-//! `rc`, `arc`, `seq`, `map` or `ownfn` field type. Region storage is `alloc
-//! stable` (no edge cleans it) and a resource block is `alloc resource grant N`.
+//! `rc`, `arc`, `seq` or `map` field type. An `own fn` environment is `alloc env
+//! tN` (its `ownfn` edge names no row, so the block names its own). Region
+//! storage is `alloc stable` (no edge cleans it) and a resource block is `alloc
+//! resource grant N`.
 //! Everything else about the block is derived from that edge and the module's
 //! recipes, never stored: `hirsel_core_layout::cleanup_class(shapes, recipes,
 //! edge)` gives its class.
@@ -691,9 +697,8 @@
 //!   recipe, or `List`/`Map` storage whose elements, keys and values need no drop: a
 //!   `String`, a scalar `List` buffer, a `Box` of a type with no owned child.
 //! - **Fixed**: a box or counted payload whose type has a drop recipe (a `Box` of a
-//!   type holding a `Box`).
-//! - **Dynamic**: `List`/`Map` storage whose entries need a drop (a `List[String]`),
-//!   and `own fn` environments.
+//!   type holding a `Box`), and every `own fn` environment.
+//! - **Dynamic**: `List`/`Map` storage whose entries need a drop (a `List[String]`).
 //! - **Resource**: a box of a resource type, and every `alloc resource`.
 //!
 //! An `rc` or `arc` edge makes the block a counted node (count set to 1 at the

@@ -112,10 +112,20 @@ pub(super) fn drop_glue(
     // The values runtime holders keep (a task's result, a channel's item, a
     // Latest's root), cleaned in place on the active drain.
     let mut values = BTreeSet::new();
+    // The capture rows of own-fn environments, released by the drain from
+    // their descriptors.
+    let mut environments = BTreeSet::new();
     let mut pending = Vec::new();
     for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
             match inst {
+                Inst::Alloc {
+                    kind: AllocKind::Environment { ty },
+                    ..
+                } => {
+                    environments.insert(ty.index());
+                    pending.push((ty.index(), true));
+                }
                 Inst::Drop { ty, .. } => pending.push((ty.index(), false)),
                 Inst::Release { ty, .. } => pending.push((ty.index(), true)),
                 Inst::Call { call } => match body.calls[call.index()].callee {
@@ -292,7 +302,15 @@ pub(super) fn drop_glue(
         }
     }
     counted_glue(
-        module, target, recipes, failures, facts, &counted, sink, items,
+        module,
+        target,
+        recipes,
+        failures,
+        facts,
+        &counted,
+        &environments,
+        sink,
+        items,
     )?;
     value_glue(
         module, target, recipes, failures, facts, &values, sink, items,
@@ -388,13 +406,18 @@ impl FunctionEmitter<'_> {
                 let done = Label::new("closure_done", label);
                 self.cond(&allocated, drop, done);
                 self.block(drop);
-                let glue = self.load(&Type::Ptr, &environment, 1);
-                self.effect(Operation::Call(
-                    &drop_signature(),
-                    &glue,
-                    &[CONTEXT, environment, site],
+                // LANG-19: the environment is a drained block; word 0 names
+                // its fixed descriptor.
+                let descriptor = self.load(&Type::Ptr, &environment, 8);
+                let failed = self.runtime(
+                    "hirsel_core_release",
+                    Type::I8,
+                    &[ptr(CONTEXT), ptr(environment), ptr(descriptor), word(site)],
                     &CallAttrs::default(),
-                ));
+                );
+                let old = self.load(&Type::I8, status, 0);
+                let both = self.bin(Binary::Or, &Type::I8, &old, &failed);
+                self.store(&Type::I8, &both, status, 0);
                 self.br(done);
                 self.block(done);
                 None
@@ -659,7 +682,27 @@ impl FunctionEmitter<'_> {
                 self.block(handed);
                 self.ret(&Type::I1, &FALSE);
             }
-            FieldTy::Handle(_) | FieldTy::OwnFn => self.clean_whole(field, p)?,
+            FieldTy::Handle(_) => self.clean_whole(field, p)?,
+            // An environment is a fixed block whose word 0 names its
+            // descriptor; a captureless closure has none.
+            FieldTy::OwnFn => {
+                let at = self.offset(p, 8);
+                let environment = self.load(&Type::Ptr, &at, 1);
+                let present = self.cmp(Predicate::Ne, &Type::Ptr, &environment, &Value::Null);
+                let staged = Label::new("environment", n);
+                self.cond(&present, staged, Label::plain("resume"));
+                self.block(staged);
+                let descriptor = self.load(&Type::Ptr, &environment, 8);
+                let point = self.next_point();
+                let list = Value::Local(Local::WORKLIST);
+                let at = self.offset(&list, memory_layout::WORKLIST_NODE as u64);
+                self.store(&Type::Ptr, &environment, &at, 0);
+                let at = self.offset(&list, memory_layout::WORKLIST_DESCRIPTOR as u64);
+                self.store(&Type::Ptr, &descriptor, &at, 0);
+                let at = self.offset(&list, memory_layout::WORKLIST_POINT as u64);
+                self.store(&Type::I64, &int(point), &at, 0);
+                self.ret(&Type::I1, &FALSE);
+            }
             FieldTy::Inline(t) => {
                 let drop = self.recipes[t.index()].drop.as_ref().unwrap();
                 let tag = self.fixed(TypeId(t.0)).tag;
@@ -868,6 +911,7 @@ fn counted_glue(
     failures: &failure::Failures,
     facts: bool,
     demanded: &BTreeSet<usize>,
+    environments: &BTreeSet<usize>,
     sink: &mut dyn Sink,
     items: &mut Items,
 ) -> Result<()> {
@@ -879,18 +923,23 @@ fn counted_glue(
         let logical = recipes[t].logical_size.unwrap();
         let drop_name = format!("core_counted_drop_{t}");
         let frames = hirsel_core_layout::frames(&module.types, recipes, TypeRef(t as u32));
-        for (owner, charge, offset) in [
-            (
-                "own",
-                hirsel_core_layout::charge::boxed(logical).unwrap(),
-                0,
-            ),
+        let owners = [
+            ("own", hirsel_core_layout::charge::boxed(logical), 0),
             (
                 "counted",
-                hirsel_core_layout::charge::counted(logical).unwrap(),
+                hirsel_core_layout::charge::counted(logical),
                 memory_layout::NODE_PAYLOAD as u64,
             ),
-        ] {
+            // The captures start after the descriptor word.
+            ("env", hirsel_core_layout::charge::closure_env(logical), 8),
+        ];
+        let owners = if environments.contains(&t) {
+            &owners[..]
+        } else {
+            &owners[..2]
+        };
+        for &(owner, charge, offset) in owners {
+            let charge = charge.unwrap();
             // The descriptor, then its points inline (abi_layout::fixed_point).
             let mut fields = vec![
                 (Type::Ptr, Value::global(drop_name.clone())),

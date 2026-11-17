@@ -67,7 +67,9 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
         ),
         FieldTy::Handle(hirsel_core_layout::Handle::Capability) => Plan::Empty,
         // Cleaned whole by ordinary glue in one step that never yields.
-        FieldTy::Handle(_) | FieldTy::OwnFn => Plan::Leaf(t.clone()),
+        FieldTy::Handle(_) => Plan::Leaf(t.clone()),
+        // Its environment, when present, is staged from its descriptor.
+        FieldTy::OwnFn => Plan::Leaf(t.clone()),
         FieldTy::Text
         | FieldTy::FixedSpan(_)
         | FieldTy::SeqSpan(_)
@@ -293,10 +295,21 @@ impl Glue<'_, '_, '_> {
                         self.b.ins().brif(staged, handed, &[], skip, &[]);
                         self.b.switch_to_block(handed);
                     }
-                    // A handle or an owned closure is released whole in place.
-                    FieldTy::Handle(_) | FieldTy::OwnFn => {
+                    // A handle is released whole in place.
+                    FieldTy::Handle(_) => {
                         self.field(base, field)?;
                         yields = false;
+                    }
+                    // An environment is a fixed block whose word 0 names its
+                    // descriptor; a captureless closure has none.
+                    FieldTy::OwnFn => {
+                        let env = self.load(base, 8);
+                        let present = self.b.create_block();
+                        self.b.ins().brif(env, present, &[], skip, &[]);
+                        self.b.switch_to_block(present);
+                        let descriptor = self.load(env, 0);
+                        let point = self.next_point();
+                        self.stage(list, env, descriptor, point);
                     }
                     FieldTy::Box(t) => {
                         let charge = self.icon(

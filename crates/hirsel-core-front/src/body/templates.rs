@@ -950,8 +950,15 @@ fn fill(
         };
         // The alloc names its owning edge; its cleanup class is derived from the
         // instance's recipes wherever it is needed, so only the edge is remapped.
-        if let AllocKind::Own { edge } = kind {
-            *edge = s.field(edge, false);
+        match kind {
+            AllocKind::Own { edge } => *edge = s.field(edge, false),
+            AllocKind::Environment { ty } => {
+                let FieldTy::Inline(row) = s.field(&FieldTy::Inline(*ty), false) else {
+                    unreachable!("an inline row remaps to an inline row")
+                };
+                *ty = row;
+            }
+            _ => {}
         }
         let Some(&ty) = allocations.get(result) else {
             continue;

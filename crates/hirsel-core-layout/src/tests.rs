@@ -1205,7 +1205,7 @@ fn cleanup_classes_follow_what_cleaning_the_block_drops() {
         (map(u(Scalar::U64), FieldTy::Inline(row(0))), Some(T)),
         (map(u(Scalar::U64), string()), Some(D)),
         (map(string(), u(Scalar::U64)), Some(D)),
-        (FieldTy::OwnFn, Some(D)),
+        (FieldTy::OwnFn, Some(F)),
         (u(Scalar::U64), None),
         (FieldTy::Inline(row(4)), None),
     ] {

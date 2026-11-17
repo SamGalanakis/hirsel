@@ -1148,9 +1148,20 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 need(
                     matches!(
                         edge,
-                        F::Box(_) | F::Rc(_) | F::Arc(_) | F::Seq(_) | F::Map(..) | F::OwnFn
+                        F::Box(_) | F::Rc(_) | F::Arc(_) | F::Seq(_) | F::Map(..)
                     ),
                     || format!("allocation edge {edge:?} is not an own block's edge"),
+                )?;
+            }
+            // An environment's captures are a record of ordinary data from offset
+            // 8, behind the uncharged descriptor word.
+            if let AllocKind::Environment { ty } = kind {
+                need(
+                    c.m.types.get(ty.index()).is_some_and(|t| {
+                        t.repr == hirsel_core_layout::Repr::Own
+                            && matches!(t.body, hirsel_core_layout::Body::Record(_))
+                    }),
+                    || format!("environment row {ty:?} is not an own record"),
                 )?;
             }
             need(align.is_power_of_two(), || {

@@ -665,7 +665,7 @@ fn fixed_span_payload_pointers_and_scalar_reads_match_evaluator() {
 #[test]
 fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
     let module = text::parse(include_str!("support/callable.core")).unwrap();
-    let runs = [(FuncId(0), vec![12345]), (FuncId(3), vec![])];
+    let runs = [(FuncId(0), vec![12345]), (FuncId(2), vec![])];
     let reports = [
         eval::Report {
             outcome: Outcome::Returned(vec![12345]),

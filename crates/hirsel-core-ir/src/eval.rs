@@ -117,6 +117,9 @@ const TASK_BASE: u64 = 0x20_0000;
 const CHAN_BASE: u64 = 0x30_0000;
 /// Handle of `Latest` root `i` (CONC-13).
 const LATEST_BASE: u64 = 0x40_0000;
+/// Word 0 of an `own fn` environment whose captures are row `t`: the model's
+/// name for that row's fixed descriptor.
+const ENV_BASE: u64 = 0x70_0000;
 
 /// One cause of a chain: its `CauseKind` case and, for `Fail`, the message's
 /// `String` carrier `{data, length, capacity}`, which the cause owns (FAIL-10).
@@ -2273,14 +2276,27 @@ impl Machine<'_> {
                 }
                 failed
             }
+            // The environment names its captures' row; they are cleaned as that
+            // row from offset 8, then the block is freed (crate docs, "Callable
+            // environments").
             FieldTy::OwnFn => {
                 let environment = self.load(at + 8, 8);
-                if environment != 0 {
-                    let glue = FuncId((self.load(environment, 8) - FN_BASE) as u32);
-                    self.call(t, glue, &[environment])
-                        .expect("mechanical closure cleanup");
+                if environment == 0 {
+                    return false;
                 }
-                false
+                self.edge(environment, ty, "an environment");
+                let row = TypeRef(
+                    u32::try_from(self.load(environment, 8) - ENV_BASE).expect("an environment"),
+                );
+                let failed = self.drop_value(t, environment + 8, row);
+                let size = 8 + self.fixed(row).size.next_multiple_of(8);
+                self.free_as(
+                    environment,
+                    charge::closure_env(self.logical(row)),
+                    Some(size),
+                    "an environment",
+                );
+                failed
             }
             FieldTy::Rc(x) | FieldTy::Arc(x) => {
                 let node = self.load(at, 8);
@@ -3627,6 +3643,9 @@ impl Machine<'_> {
                         let p = self.block(vals[size.index()], Some(l), n, res);
                         if matches!(place, AllocPlace::Like(_)) {
                             self.foreign_charge(l, n);
+                        }
+                        if let AllocKind::Environment { ty } = kind {
+                            self.store(p, 8, ENV_BASE + u64::from(ty.0));
                         }
                         if let Some(count) = kind.counted() {
                             self.mem[split(p).0].counted = Some(count);

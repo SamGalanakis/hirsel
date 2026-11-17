@@ -14,6 +14,9 @@ pub(super) struct Glues {
     pub values: Vec<Option<cranelift_module::FuncId>>,
     pub resumes: Vec<Option<cranelift_module::FuncId>>,
     pub fixed: Vec<Option<[cranelift_module::DataId; 2]>>,
+    /// An own-fn environment's fixed descriptor, by its capture row: the
+    /// environment's word 0 names it (core-ir crate docs, "Callable environments").
+    pub environments: Vec<Option<cranelift_module::DataId>>,
     pub buffers: Vec<(FieldTy, cranelift_module::FuncId)>,
 }
 const P: Ty = Ty::Ptr;
@@ -43,9 +46,19 @@ impl Glues {
         let mut needed = BTreeSet::new();
         let mut descriptors = BTreeSet::new();
         let mut values = BTreeSet::new();
+        let mut environments = BTreeSet::new();
         for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
             for inst in &body.insts {
                 match inst {
+                    // The drain releases an environment from its descriptor.
+                    Inst::Alloc {
+                        kind: c::AllocKind::Environment { ty },
+                        ..
+                    } => {
+                        environments.insert(ty.index());
+                        roots.insert(ty.index());
+                        needed.insert(ty.index());
+                    }
                     Inst::Drop { ty, .. } => {
                         needed.insert(ty.index());
                     }
@@ -239,18 +252,28 @@ impl Glues {
             }
         }
         let mut fixed = vec![None; layouts.len()];
+        let mut environment = vec![None; layouts.len()];
         for (i, function) in resumes.iter().enumerate() {
             if let Some(function) = *function {
                 let logical = layouts[i].logical_size.unwrap();
                 let mut ids = Vec::new();
-                for (owner, charge, offset) in [
-                    ("own", charge::boxed(logical).unwrap(), 0),
+                let owners = [
+                    ("own", charge::boxed(logical), 0),
                     (
                         "counted",
-                        charge::counted(logical).unwrap(),
+                        charge::counted(logical),
                         memory_layout::NODE_PAYLOAD as u64,
                     ),
-                ] {
+                    // The captures start after the descriptor word.
+                    ("env", charge::closure_env(logical), 8),
+                ];
+                let owners = if environments.contains(&i) {
+                    &owners[..]
+                } else {
+                    &owners[..2]
+                };
+                for &(owner, charge, offset) in owners {
+                    let charge = charge.unwrap();
                     let id = object
                         .declare_data(
                             &format!("hirsel.core.fixed.{owner}.{i}"),
@@ -302,6 +325,7 @@ impl Glues {
                     ids.push(id);
                 }
                 fixed[i] = Some([ids[0], ids[1]]);
+                environment[i] = ids.get(2).copied();
             }
         }
         let mut buffers = Vec::new();
@@ -350,6 +374,7 @@ impl Glues {
             values: cleans,
             resumes,
             fixed,
+            environments: environment,
             buffers,
         })
     }
@@ -826,14 +851,23 @@ impl Glue<'_, '_, '_> {
                 let env = self.load(at, 8);
                 let yes = self.b.create_block();
                 let done = self.b.create_block();
-                let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, env, 0);
-                self.b.ins().brif(present, yes, &[], done, &[]);
+                self.b.append_block_param(done, types::I8);
+                let incoming = self.failed;
+                self.b.ins().brif(env, yes, &[], done, &[incoming.into()]);
                 self.b.switch_to_block(yes);
-                let code = self.load(env, 0);
-                let sig = self.calls.own_fn_cleanup(self.object, &mut self.b);
-                self.b.ins().call_indirect(sig, code, &[self.ctx, env]);
-                self.b.ins().jump(done, &[]);
+                // LANG-19: the environment is a drained block; word 0 names
+                // its fixed descriptor.
+                let descriptor = self.load(env, 0);
+                let status = self.call(
+                    "hirsel_core_release",
+                    &[P, P, P, U],
+                    &[B],
+                    &[self.ctx, env, descriptor, self.caller_site],
+                )?[0];
+                self.merge(status);
+                self.b.ins().jump(done, &[self.failed.into()]);
                 self.b.switch_to_block(done);
+                self.failed = self.b.block_params(done)[0];
             }
             FieldTy::Scalar(_)
             | FieldTy::Stable(_)

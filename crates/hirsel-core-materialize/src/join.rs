@@ -78,6 +78,10 @@ impl Remap {
                 } => {
                     edge.map_refs(&mut |r| TypeRef(self.types[r.index()].0));
                 }
+                Inst::Alloc {
+                    kind: AllocKind::Environment { ty },
+                    ..
+                } => *ty = TypeRef(self.types[ty.index()].0),
                 _ => {}
             }
         }

@@ -643,7 +643,7 @@ pub(super) fn declare_allocators(
         for inst in &body.insts {
             let (kind, align) = match inst {
                 Inst::Alloc {
-                    kind: kind @ AllocKind::Own { .. },
+                    kind: kind @ (AllocKind::Own { .. } | AllocKind::Environment { .. }),
                     align,
                     place: AllocPlace::Current | AllocPlace::Like(_),
                     ..

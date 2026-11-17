@@ -1202,10 +1202,11 @@ pub enum Cleanup {
     /// Cleaning the block drops nothing: a free alone, nothing to resume, no frame.
     Terminal,
     /// A non-terminal `Box`, `Rc` or `Arc` payload: one fixed-size root whose recipe,
-    /// charge and payload offset the edge's type fixes.
+    /// charge and payload offset the edge's type fixes. Also every `own fn`
+    /// environment: its first word names its own fixed descriptor, since the edge
+    /// does not fix its captures.
     Fixed,
-    /// Non-terminal `Seq` or `Map` storage, or an `own fn` environment: its extent (or,
-    /// for an environment, its captures) is not fixed by the edge.
+    /// Non-terminal `Seq` or `Map` storage: its extent is not fixed by the edge.
     Dynamic,
     /// A `Box`, `Rc` or `Arc` of a resource type: the resource block, with its own
     /// prefix and cleanup.
@@ -1239,7 +1240,8 @@ pub fn cleanup_class(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> Op
         FieldTy::Map(k, v) if !drops(shapes, k, &drop) && !drops(shapes, v, &drop) => {
             Cleanup::Terminal
         }
-        FieldTy::Seq(_) | FieldTy::Map(..) | FieldTy::OwnFn => Cleanup::Dynamic,
+        FieldTy::Seq(_) | FieldTy::Map(..) => Cleanup::Dynamic,
+        FieldTy::OwnFn => Cleanup::Fixed,
         _ => return None,
     })
 }

@@ -135,6 +135,9 @@ impl Function<'_, '_, '_> {
                     AllocKind::Own { edge } => {
                         hirsel_core_layout::spare_words(&self.input.types, self.layouts, edge)
                     }
+                    AllocKind::Environment { ty } => {
+                        hirsel_core_layout::frames(&self.input.types, self.layouts, *ty).spares
+                    }
                     _ => 0,
                 };
                 let size = if spares == 0 {
@@ -267,6 +270,24 @@ impl Function<'_, '_, '_> {
                             memory_layout::NODE_COUNT as i32,
                         );
                     }
+                    self.b.ins().jump(ready, &[]);
+                    self.b.switch_to_block(ready);
+                }
+                // Word 0 of an environment names its fixed descriptor.
+                if let AllocKind::Environment { ty } = *kind {
+                    let init = self.b.create_block();
+                    let ready = self.b.create_block();
+                    self.b.ins().brif(refused, ready, &[], init, &[]);
+                    self.b.switch_to_block(init);
+                    let id = self.glues.environments[ty.index()].unwrap();
+                    let reference = self.object.declare_data_in_func(id, self.b.func);
+                    let descriptor = self.b.ins().symbol_value(types::I64, reference);
+                    self.b.ins().store(
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        descriptor,
+                        values[0],
+                        0,
+                    );
                     self.b.ins().jump(ready, &[]);
                     self.b.switch_to_block(ready);
                 }

@@ -76,13 +76,6 @@ impl<'a> Calls<'a> {
             .entry(key)
             .or_insert_with(|| b.import_signature(signature.clone()))
     }
-    pub fn own_fn_cleanup(&mut self, object: &ObjectModule, b: &mut FunctionBuilder<'_>) -> SigRef {
-        *self.indirect.entry(usize::MAX).or_insert_with(|| {
-            b.import_signature(
-                abi::Signature::c(object, &[Ty::Ptr, Ty::Ptr], &[Ty::Scalar(Scalar::Bool)]).clif,
-            )
-        })
-    }
     pub fn storage(&mut self, b: &mut FunctionBuilder<'_>, size: u32) -> Value {
         let size = size.max(8).next_multiple_of(8);
         let slot = if let Some(slot) = self.slot {

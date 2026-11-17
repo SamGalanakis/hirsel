@@ -621,13 +621,19 @@ pub enum Inst {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum AllocKind {
     /// Own storage for the owning edge that will hold it (crate docs, "Cleanup
-    /// classes"): `box tN`, `seq E`, `map K V`, `ownfn` (an `own fn` environment), or
+    /// classes"): `box tN`, `seq E`, `map K V`, or
     /// `rc tN` / `arc tN`, a counted node: the count (u64, starting at 1) at offset 0,
     /// the payload at 8. `arc` makes the node with the atomic count every later
     /// `share`, `release` and `try_unwrap` of it uses (MEM-15); its operations name the
     /// same kind. The edge's [`hirsel_core_layout::cleanup_class`] fixes the block's
     /// native prefix.
     Own { edge: FieldTy },
+    /// An `own fn` environment (`alloc env tN`, crate docs "Callable
+    /// environments"): word 0 names row `tN`'s fixed environment descriptor and
+    /// the captures follow from offset 8, laid out as row `tN`. The alloc writes
+    /// word 0 (an engine writes the descriptor's address); it is never charged
+    /// (MEM-24). Its class is Fixed: the drain cleans it from that descriptor.
+    Environment { ty: TypeRef },
     /// Region storage (MEM-1): freed when its region closes, never by an edge. Only
     /// `in` a region, and every region allocation is stable.
     Stable,
@@ -653,6 +659,7 @@ impl AllocKind {
     pub fn cleanup(&self, shapes: &[Shape], recipes: &[Recipe]) -> Option<Cleanup> {
         match self {
             AllocKind::Own { edge } => cleanup_class(shapes, recipes, edge),
+            AllocKind::Environment { .. } => Some(Cleanup::Fixed),
             AllocKind::Stable => None,
             AllocKind::Resource { .. } => Some(Cleanup::Resource),
         }

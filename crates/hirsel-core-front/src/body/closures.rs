@@ -1078,7 +1078,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             environment: None,
             owning: !scoped,
             physical: 8,
-            logical: 0,
             send: true,
         });
         for (slot, fact) in written_anchors.into_iter().enumerate() {
@@ -1242,7 +1241,6 @@ pub(super) struct CaptureFrame {
     owning: bool,
     view_only: bool,
     physical: u64,
-    logical: u64,
     send: bool,
 }
 
@@ -1639,30 +1637,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
             }
         }
-        let (size, align, logical) = match self.rep(original.ty) {
-            Ok(Rep::None) => (0, 1, 0),
+        let (size, align) = match self.rep(original.ty) {
+            Ok(Rep::None) => (0, 1),
             Ok(Rep::Scalar(ty)) => {
                 let size = match ty {
                     Ty::Ptr => 8,
                     Ty::Scalar(s) => s.size(),
                 };
-                (size, size, size)
+                (size, size)
             }
             Ok(Rep::Place(id)) => {
                 let Layout::Fixed(layout) = &self.e.recipes[id.index()].layout else {
                     unreachable!()
                 };
-                (
-                    layout.size,
-                    layout.align,
-                    self.e.recipes[id.index()]
-                        .logical_size
-                        .unwrap_or(layout.size),
-                )
+                (layout.size, layout.align)
             }
             Err(what) => {
                 self.gap(n, what);
-                (0, 1, 0)
+                (0, 1)
             }
         };
         let send = has_bounds(&self.p.decls, &self.t, original.ty, &self.params) & crate::SEND != 0;
@@ -1675,7 +1667,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             offset
         };
         frame.physical = offset + size;
-        frame.logical += logical;
         frame.send &= send;
         frame.by_slot[slot as usize] = Some(index);
         frame.captures.push(Capture {
@@ -2656,7 +2647,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
-        let Some(charge) = hirsel_core_layout::charge::closure_env(frame.logical) else {
+        // The environment is the captures' record from offset 8, behind the word
+        // naming its fixed descriptor (core-ir crate docs, "Callable environments").
+        let record = self.t.mk(TyKind::Tuple(types.clone()));
+        let row = match self.rep(record) {
+            Ok(Rep::Place(row)) => row,
+            Ok(_) => unreachable!("a tuple of captures is carried by address"),
+            Err(what) => {
+                self.gap(n, what);
+                return (result, None);
+            }
+        };
+        let recipe = &self.e.recipes[row.index()];
+        let Layout::Fixed(layout) = &recipe.layout else {
+            unreachable!("a carried row is fixed")
+        };
+        // The body reads each capture where the capture pass placed it.
+        assert!(
+            layout.align <= 8
+                && frame
+                    .captures
+                    .iter()
+                    .zip(&layout.offsets[0])
+                    .all(|(capture, &at)| capture.offset == 8 + at),
+            "an environment's captures are where its record places them"
+        );
+        let logical = recipe.logical_size.expect("a fixed row's logical size");
+        let Some(charge) = hirsel_core_layout::charge::closure_env(logical) else {
             self.refuse("OWN-2", n, "closure charge exceeds u64");
             return (ERROR, None);
         };
@@ -2664,17 +2681,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (result, None);
         }
         let code = code.unwrap();
-        let Some(glue) = self.environment_drop(frame, &types, charge, n) else {
-            return (result, None);
-        };
-        let glue_value = self.value(Ty::Ptr);
-        self.inst(
-            Inst::FunctionRef {
-                result: glue_value,
-                function: glue,
-            },
-            n,
-        );
         let id = match self.rep(callable) {
             Ok(Rep::Place(id)) => id,
             Ok(_) => unreachable!("an owning callable has a carrier"),
@@ -2685,8 +2691,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let allocation = admission::OwnedAllocation {
             layout: None,
-            kind: AllocKind::Own {
-                edge: FieldTy::OwnFn,
+            kind: AllocKind::Environment {
+                ty: hirsel_core_layout::TypeRef(row.0),
             },
             charge,
             size: (frame.physical + 7) & !7,
@@ -2694,7 +2700,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let value =
             self.admit_with_handback(result, allocation, &reps, &values, n, |cx, to, block| {
-                cx.store_word(block, 0, glue_value, n);
                 for (i, capture) in frame.captures.iter().enumerate() {
                     if let Some(place) = reps[i].stored() {
                         let offset = cx
@@ -2716,81 +2721,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 cx.store_word(carrier, 8, block, n);
             });
         (result, value)
-    }
-    fn environment_drop(
-        &mut self,
-        frame: &CaptureFrame,
-        types: &[TyId],
-        charge: u64,
-        n: NodeId,
-    ) -> Option<FuncId> {
-        let mut child = Cx::new(self.p, self.definition, self.e);
-        let mut fd = self.fd.as_ref().clone();
-        fd.params.clear();
-        fd.result = UNIT;
-        fd.generics.clear();
-        fd.drop_of = None;
-        fd.clone_of = None;
-        fd.waits = false;
-        fd.body = None;
-        fd.path.0.name = format!(
-            "{}$environment{}",
-            fd.path.0.name,
-            n.0 - self.item.range.nodes.start
-        );
-        child.fd = std::borrow::Cow::Owned(fd);
-        child.entry = false;
-        child.inherited_refusal = self.inherited_refusal || !self.out.refusals.is_empty();
-        std::mem::swap(&mut child.t, &mut self.t);
-        let function = child.e.function(
-            &child.fd.path,
-            Signature {
-                params: vec![Param::Value(Ty::Ptr)],
-                results: vec![],
-                dest: None,
-                never: false,
-            },
-        );
-        child.func = Some(function);
-        let entry = child.new_block(&[Ty::Ptr]);
-        child.start(entry);
-        let environment = child.block_params(entry)[0];
-        for (capture, &ty) in frame.captures.iter().zip(types).rev() {
-            let place = match child.rep(ty) {
-                Ok(rep) => rep.stored(),
-                Err(what) => {
-                    child.gap(n, what);
-                    None
-                }
-            };
-            if let Some(place) = place {
-                let offset = child
-                    .konst(Ty::Scalar(Scalar::U64), capture.offset, n)
-                    .unwrap();
-                let at = child.address(
-                    AddressBase::Value(environment),
-                    &[Step::Byte(offset)],
-                    place,
-                    n,
-                );
-                child.drop_at(at, ty, n);
-            }
-        }
-        let charge = child.konst(Ty::Scalar(Scalar::U64), charge, n).unwrap();
-        child.inst(
-            Inst::Free {
-                block: environment,
-                charge,
-            },
-            n,
-        );
-        child.end(Terminator::Return(PoolRange::EMPTY), Some(n));
-        std::mem::swap(&mut child.t, &mut self.t);
-        let out = child.finish();
-        self.out.refusals.extend(out.refusals);
-        self.out.gaps.extend(out.gaps);
-        self.out.counts += out.counts;
-        out.function
     }
 }
 

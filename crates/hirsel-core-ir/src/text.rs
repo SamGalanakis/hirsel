@@ -600,6 +600,7 @@ impl Printer {
                     } => {
                         let kind = match kind {
                             AllocKind::Own { edge } => format!("for {}", field_ty(edge)),
+                            AllocKind::Environment { ty } => format!("env t{}", ty.0),
                             AllocKind::Stable => "stable".into(),
                             AllocKind::Resource { grant } => format!("resource grant {grant}"),
                         };
@@ -1421,6 +1422,7 @@ impl BodyParser {
                 "for" => AllocKind::Own {
                     edge: l.field_ty()?,
                 },
+                "env" => AllocKind::Environment { ty: l.tref()? },
                 "stable" => AllocKind::Stable,
                 "resource" => {
                     l.expect("grant")?;

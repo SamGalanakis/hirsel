@@ -318,6 +318,9 @@ impl FunctionEmitter<'_> {
             AllocKind::Own { edge } => {
                 hirsel_core_layout::spare_words(&self.module.types, self.recipes, edge)
             }
+            AllocKind::Environment { ty } => {
+                hirsel_core_layout::frames(&self.module.types, self.recipes, *ty).spares
+            }
             _ => 0,
         };
         let padded;
@@ -520,6 +523,23 @@ impl FunctionEmitter<'_> {
                     } else {
                         self.store(&Type::I64, &int(1), &block, 8);
                     }
+                    self.br(allocated);
+                    self.block(allocated);
+                }
+                // Word 0 of an environment names its fixed descriptor.
+                if let AllocKind::Environment { ty } = kind {
+                    let missing = self.cmp(Predicate::Eq, &Type::Ptr, &block, &Value::Null);
+                    let n = self.counter();
+                    let allocated = Label::new("environment_allocated", n);
+                    let named = Label::new("environment_named", n);
+                    self.cond(&missing, allocated, named);
+                    self.block(named);
+                    self.store(
+                        &Type::Ptr,
+                        &Value::global(format!("core_fixed_env_{}", ty.0)),
+                        &block,
+                        8,
+                    );
                     self.br(allocated);
                     self.block(allocated);
                 }

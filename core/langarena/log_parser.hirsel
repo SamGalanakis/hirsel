@@ -227,6 +227,41 @@ fn matched(b: Bytes, i: u64, pattern: u64) -> Option[u64] {
     None
 }
 
+// Conservative prefix filters, as in a regex search: the matcher still
+// chooses the first successful alternative and the end of the match.
+fn candidate(log: String, b: Bytes, start: u64, pattern: u64) -> Option[u64] {
+    let literal = match pattern {
+        0 => " ",
+        4 => "/api/",
+        5 => "POST ",
+        6 => "/",
+        9 => "password=",
+        11 => "session",
+        12 => "[",
+        _ => "",
+    }
+    if literal != "" {
+        return std.string.find(log, start, literal)
+    }
+    for i in start .. list.len(b) {
+        let c = b[i]
+        let folded = lower(c)
+        let can_start = match pattern {
+            1 => folded == b'b' || folded == b'c' || folded == b's' || folded == b'i' || folded == b'r',
+            2 => folded == b'e' || folded == b'w' || c == b'.',
+            3 => digit(c),
+            7 => folded == b'g' || folded == b'p',
+            8 => email_local(c),
+            10 => c == b't' || c == b'a',
+            _ => false,
+        }
+        if can_start {
+            return Some(i)
+        }
+    }
+    None
+}
+
 fn scan(log: String) -> Result[u32, helper.Error] {
     let names: Inline[String, 13] =["errors", "bots", "suspicious", "ips", "api_calls", "post_requests", "auth_attempts", "methods", "emails", "passwords", "tokens", "sessions", "peak_hours"]
     let b = string.as_bytes(log)
@@ -235,14 +270,14 @@ fn scan(log: String) -> Result[u32, helper.Error] {
         let key = helper.mem(string.from(names[pattern]))?
         helper.mem(result.capacity_only(map.insert(mut counts, take key, 0u64)))?
         let mut i: u64 = 0
-        while i < list.len(b) {
-            if let Some(end) = matched(b, i, pattern) {
+        while let Some(start) = candidate(log, b, i, pattern) {
+            if let Some(end) = matched(b, start, pattern) {
                 let _ = map.update(mut counts, names[pattern], fn(mut count: u64) {
                     count += 1
                 })
                 i = end
             } else {
-                i += 1
+                i = start + 1
             }
         }
     }

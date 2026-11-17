@@ -2158,9 +2158,6 @@ mod ready_routing_laws {
     use super::*;
     use crate::provider::*;
     use std::{io::Write, os::unix::net::UnixStream};
-    unsafe extern "C" fn no_drop(_: *mut Context, _: *mut u8) -> u8 {
-        0
-    }
     unsafe extern "C" fn no_body(_: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
         0
     }
@@ -2233,7 +2230,7 @@ mod ready_routing_laws {
                 bytes: 0,
                 align: 1,
                 logical: 0,
-                drop: no_drop,
+                clean: None,
             };
             let mut operations: Vec<_> = (0..n)
                 .map(|i| Operation {
@@ -2275,6 +2272,8 @@ mod ready_routing_laws {
                         },
                         failed: 0,
                         record: None,
+                        holder: std::mem::MaybeUninit::uninit(),
+                        cursor: 0,
                     })
                 })
                 .collect();

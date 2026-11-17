@@ -22,6 +22,8 @@ fn echo(req: http.Request, mut b: http.Body, clock: Clock) -> Result[http.Outcom
     let raw_path = http.path(req)
     if raw_path == string.as_bytes("/large") {
         result.unwrap(list.fill(mut out, 160, b'x'))
+    } else if raw_path == string.as_bytes("/direct") {
+        result.unwrap(list.fill(mut out, 2048, b'Z'))
     } else if raw_path == string.as_bytes("/when") {
         let mut time = string.new()
         result.unwrap(string.push_u64(mut time, host.mono_ns(clock)))
@@ -471,4 +473,59 @@ fn http_handler_starts_after_commit(n: Net, c: Clock, tasks: Tasks) -> bool wait
         Ok(at) => at >= read_start,
         Error(_) => false,
     }
+}
+
+// L6. The live handler scope reserves its whole 4096 B. The connection has
+// only 1152 B of spare J and hand-off allowance, so the 128-byte writer
+// cannot grow to hold this 2048-byte body. Direct sends must still finish.
+// expect: run http_large_body_fits_connection(network) = true
+fn http_large_body_fits_connection(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let (server, addr) = listen_for_law(n, c, tasks, test_config())
+    let socket = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take socket)
+    let mut input = take r
+    let mut output = take w
+    let end = At(c, after_ms(host.mono_ns(c), 60))
+    if !client_send(mut output, string.as_bytes("GET /direct HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"), end) {
+        return false
+    }
+    let mut received: Bytes = result.unwrap(list.with_capacity(4096))
+    if !client_end(mut input, mut received, end) {
+        return false
+    }
+    let mut h = http1.head()
+    if http1.response(received, mut h) != Complete || h.status != 200 || list.len(received) != h.end + 2048 {
+        return false
+    }
+    for i in h.end .. list.len(received) {
+        if received[i] != b'Z' {
+            return false
+        }
+    }
+    true
+}
+
+// HTTP-1/3. Configured bounds below the parser's fixed ceilings are still
+// enforced. A long request line gets 414. Excess fields get 431.
+// expect: run http_configured_head_bounds(network) = true
+fn http_configured_head_bounds(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let mut cfg = test_config()
+    cfg.head_max = 40
+    cfg.fields_max = 1
+    let (server, addr) = listen_for_law(n, c, tasks, take cfg)
+    let first = result.unwrap(host.connect(n, addr, Never))
+    let (r, w) = net.split(take first)
+    let mut input = take r
+    let mut output = take w
+    let until = after_ms(host.mono_ns(c), 60)
+    let long = string.as_bytes("GET /abcdefghijklmnopqrstuvwxyzabcdefghijklmnop HTTP/1.1\r\n")
+    if empty_get(mut output, mut input, long, c, until) != 414 {
+        return false
+    }
+    let second = result.unwrap(host.connect(n, addr, Never))
+    let (r2, w2) = net.split(take second)
+    let mut next_in = take r2
+    let mut next_out = take w2
+    let extra = string.as_bytes("GET / HTTP/1.1\r\nHost: a\r\nX: y\r\n\r\n")
+    empty_get(mut next_out, mut next_in, extra, c, until) == 431
 }

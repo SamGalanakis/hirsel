@@ -5,7 +5,11 @@ use hirsel_core_layout::{FieldTy, Repr, TypeRef, field_size};
 
 fn cleanup_dependencies(field: &FieldTy, counted: bool, pending: &mut Vec<(usize, bool)>) {
     match field {
-        FieldTy::Inline(t) | FieldTy::Box(t) => pending.push((t.index(), counted)),
+        FieldTy::Inline(t) => pending.push((t.index(), counted)),
+        FieldTy::Box(t) => {
+            pending.push((t.index(), counted));
+            pending.push((t.index(), true));
+        }
         FieldTy::Rc(t) | FieldTy::Arc(t) => pending.push((t.index(), true)),
         FieldTy::Map(key, value) => {
             cleanup_dependencies(key, counted, pending);
@@ -315,6 +319,25 @@ impl FunctionEmitter<'_> {
                 &[CONTEXT, p.clone(), site],
                 &CallAttrs::default(),
             )),
+            FieldTy::Box(t)
+                if !hirsel_core_layout::terminal(&self.module.types, self.recipes, field)
+                    && self.module.types[t.index()].repr != Repr::Resource
+                    && self.recipes[t.index()]
+                        .drop
+                        .as_ref()
+                        .is_some_and(|d| d.finalizer.is_none()) =>
+            {
+                let block = self.load(&Type::Ptr, p, 1);
+                self.runtime_void(
+                    "hirsel_core_release_fixed_last",
+                    &[
+                        ptr(CONTEXT),
+                        ptr(block),
+                        ptr(Value::global(format!("core_fixed_own_{}", t.0))),
+                    ],
+                );
+                None
+            }
             FieldTy::Box(t) => {
                 let block = self.load(&Type::Ptr, p, 1);
                 let failed = self.call(
@@ -662,6 +685,9 @@ impl FunctionEmitter<'_> {
                     self.block(skip);
                     return Ok(());
                 }
+                if matches!(field, FieldTy::Box(_)) {
+                    self.clean_flat_cases(&node, *t, charge, n)?;
+                }
                 let owner = if matches!(field, FieldTy::Box(_)) {
                     "own"
                 } else {
@@ -683,16 +709,20 @@ impl FunctionEmitter<'_> {
                     }
                     "counted"
                 };
+                // Stage the descendant inline (abi_layout WORKLIST_*).
                 let point = self.next_point();
-                self.runtime_void(
-                    "hirsel_core_release_fixed_enqueue",
-                    &[
-                        ptr(Local::WORKLIST),
-                        ptr(node),
-                        ptr(Value::global(format!("core_fixed_{owner}_{}", t.0))),
-                        word(int(point)),
-                    ],
+                let list = Value::Local(Local::WORKLIST);
+                let at = self.offset(&list, memory_layout::WORKLIST_NODE as u64);
+                self.store(&Type::Ptr, &node, &at, 0);
+                let at = self.offset(&list, memory_layout::WORKLIST_DESCRIPTOR as u64);
+                self.store(
+                    &Type::Ptr,
+                    &Value::global(format!("core_fixed_{owner}_{}", t.0)),
+                    &at,
+                    0,
                 );
+                let at = self.offset(&list, memory_layout::WORKLIST_POINT as u64);
+                self.store(&Type::I64, &int(point), &at, 0);
                 self.ret(&Type::I1, &FALSE);
             }
             _ => unreachable!(),
@@ -701,6 +731,83 @@ impl FunctionEmitter<'_> {
         Ok(())
     }
 }
+impl FunctionEmitter<'_> {
+    /// Whether cleaning `field` frees at most terminal storage and yields nothing.
+    fn flat(&self, field: &FieldTy) -> bool {
+        match field {
+            FieldTy::Box(_)
+            | FieldTy::Rc(_)
+            | FieldTy::Arc(_)
+            | FieldTy::Seq(_)
+            | FieldTy::Map(..) => {
+                hirsel_core_layout::terminal(&self.module.types, self.recipes, field)
+            }
+            FieldTy::Inline(t) => self.recipes[t.index()].drop.is_none(),
+            FieldTy::Array(e, _) => self.flat(e),
+            FieldTy::Scalar(_)
+            | FieldTy::Stable(_)
+            | FieldTy::Fn
+            | FieldTy::Borrow
+            | FieldTy::View(_)
+            | FieldTy::Locator(_) => true,
+            _ => false,
+        }
+    }
+    /// A boxed child in a case that owns only terminal storage is that case's
+    /// whole recipe: its fields are freed and the block refunded here, with no
+    /// hand-over. Other cases fall through to the hand-over.
+    fn clean_flat_cases(&mut self, node: &Value, t: TypeRef, charge: u64, n: usize) -> Result<()> {
+        let Some(drop) = &self.recipes[t.index()].drop else {
+            return Ok(());
+        };
+        let Some(tag) = self.fixed(TypeId(t.0)).tag else {
+            return Ok(());
+        };
+        if drop.finalizer.is_some() {
+            return Ok(());
+        }
+        let rows: Vec<Vec<hirsel_core_layout::FieldDrop>> = drop.fields.clone();
+        let flat: Vec<usize> = (0..rows.len())
+            .filter(|&r| rows[r].iter().all(|f| self.flat(&f.ty)))
+            .collect();
+        if flat.is_empty() {
+            return Ok(());
+        }
+        let deep = Label::new("deep", n);
+        let arms: Vec<_> = flat
+            .iter()
+            .map(|&r| {
+                (
+                    r as i128,
+                    Label {
+                        name: "flat",
+                        n: n as u32,
+                        edge: r as u32,
+                    },
+                )
+            })
+            .collect();
+        let which = self.case_value(&tag, node);
+        self.effect(Operation::Switch(&Type::I32, &which, deep, &arms));
+        let status = self.temp(Type::I8);
+        for &r in &flat {
+            self.block(Label {
+                name: "flat",
+                n: n as u32,
+                edge: r as u32,
+            });
+            for f in &rows[r] {
+                let at = self.offset(node, f.offset);
+                self.clean_field(&f.ty, &at, &status)?;
+            }
+            self.free_block(node, &int(charge));
+            self.br(Label::plain("resume"));
+        }
+        self.block(deep);
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn counted_glue(
     module: &Module,
@@ -742,7 +849,11 @@ fn counted_glue(
                 fields.extend(
                     [
                         memory_layout::fixed_point(k) as u64,
-                        p.cursor,
+                        if p.last {
+                            memory_layout::FIXED_POINT_DONE
+                        } else {
+                            p.cursor
+                        },
                         p.a,
                         p.b,
                         p.index.unwrap_or(memory_layout::FIXED_POINT_NO_INDEX),

@@ -52,6 +52,16 @@ pub const FIXED_POINT_B: usize = 24;
 pub const FIXED_POINT_INDEX: usize = 32;
 pub const FIXED_POINT_BYTES: usize = 40;
 pub const FIXED_POINT_NO_INDEX: u64 = u64::MAX;
+// A point's cursor word for a yield after which its glue has nothing left
+// (hirsel_core_layout::Point::last): the drain frees the block on resume.
+pub const FIXED_POINT_DONE: u64 = u64::MAX;
+// A drain's worklist (counted::Worklist), written inline by generated glue to
+// hand over one descendant: node, then descriptor (0 for a GRAPH buffer whose
+// frame stage_buffer wrote), then the running fixed block's point (0 under a buffer).
+pub const WORKLIST_HEAD: usize = 0;
+pub const WORKLIST_NODE: usize = 8;
+pub const WORKLIST_DESCRIPTOR: usize = 16;
+pub const WORKLIST_POINT: usize = 24;
 /// Byte offset of point `k` (1-based) from its descriptor.
 pub const fn fixed_point(k: u64) -> usize {
     FIXED_DESCRIPTOR_BYTES + FIXED_POINT_BYTES * (k as usize - 1)

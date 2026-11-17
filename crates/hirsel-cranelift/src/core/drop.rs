@@ -245,7 +245,14 @@ impl Glues {
                     for (k, p) in (1..).zip(&frames.points) {
                         let at = memory_layout::fixed_point(k);
                         put(at + memory_layout::FIXED_POINT_BACK, at as u64);
-                        put(at + memory_layout::FIXED_POINT_CURSOR, p.cursor);
+                        put(
+                            at + memory_layout::FIXED_POINT_CURSOR,
+                            if p.last {
+                                memory_layout::FIXED_POINT_DONE
+                            } else {
+                                p.cursor
+                            },
+                        );
                         put(at + memory_layout::FIXED_POINT_A, p.a);
                         put(at + memory_layout::FIXED_POINT_B, p.b);
                         put(

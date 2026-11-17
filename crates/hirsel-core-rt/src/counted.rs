@@ -2,7 +2,7 @@
 //! serializes Arc operations before calling these entry points (CONC-10).
 
 use crate::Context;
-use crate::abi_layout::{FIXED_POINT_NO_INDEX, fixed_point};
+use crate::abi_layout::{FIXED_POINT_DONE, FIXED_POINT_NO_INDEX, fixed_point};
 use crate::block::{self, Descriptor, Point};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering, fence};
@@ -18,24 +18,31 @@ pub type Recipe = unsafe extern "C" fn(*mut Context, *mut u8, *mut u64, *mut Wor
 /// A drain's suspended blocks, newest first, and the descendant the running
 /// glue has just handed over. A parent's frame is written only after its glue
 /// returns, so the parent is always linked under the descendant (postorder).
+/// Generated glue stages a descendant inline (abi_layout WORKLIST_*).
+#[repr(C)]
 pub struct Worklist {
     /// 0 when empty. With bit 0 set, the address of a suspended fixed block's
     /// A word; otherwise a dead GRAPH buffer's payload.
     head: usize,
-    pending: Pending,
-    /// The running fixed block's suspension point for `pending`, 1-based.
+    /// The staged descendant, null when none.
+    node: *mut u8,
+    /// The staged fixed block's descriptor; null for a staged GRAPH buffer.
+    descriptor: *const Descriptor,
+    /// The running fixed block's suspension point for the staged descendant, 1-based.
     point: u64,
 }
-
-enum Pending {
-    None,
-    Fixed(NonNull<u8>, *const Descriptor),
-    Graph(NonNull<u8>),
-}
+const _: () = assert!(std::mem::offset_of!(Worklist, head) == crate::abi_layout::WORKLIST_HEAD);
+const _: () = assert!(std::mem::offset_of!(Worklist, node) == crate::abi_layout::WORKLIST_NODE);
+const _: () =
+    assert!(std::mem::offset_of!(Worklist, descriptor) == crate::abi_layout::WORKLIST_DESCRIPTOR);
+const _: () = assert!(std::mem::offset_of!(Worklist, point) == crate::abi_layout::WORKLIST_POINT);
 
 type Fixed = (NonNull<u8>, *const Descriptor, u64);
 
 impl Worklist {
+    fn staged(&self) -> bool {
+        !self.node.is_null()
+    }
     /// Hand over an exclusively owned dead fixed block from point `point`.
     /// # Safety
     /// Glue calls this at most once per run, then returns false.
@@ -45,8 +52,9 @@ impl Worklist {
         descriptor: *const Descriptor,
         point: u64,
     ) {
-        debug_assert!(matches!(self.pending, Pending::None));
-        self.pending = Pending::Fixed(node, descriptor);
+        debug_assert!(!self.staged());
+        self.node = node.as_ptr();
+        self.descriptor = descriptor;
         self.point = point;
     }
     /// Hand over buffer storage from point `point`; see block::dead_buffer.
@@ -60,23 +68,24 @@ impl Worklist {
         payload: *mut u8,
         point: u64,
     ) {
-        debug_assert!(matches!(self.pending, Pending::None));
+        debug_assert!(!self.staged());
         // SAFETY: the caller transfers the exclusively owned buffer.
         unsafe { block::dead_buffer(buffer, charge, recipe, payload) };
-        self.pending = Pending::Graph(buffer);
+        self.node = buffer.as_ptr();
+        self.descriptor = std::ptr::null();
         self.point = point;
     }
     /// Link a staged buffer above the head; return a staged fixed block to run.
     unsafe fn take(&mut self) -> Option<Fixed> {
-        match std::mem::replace(&mut self.pending, Pending::None) {
-            Pending::None => None,
-            Pending::Fixed(node, descriptor) => Some((node, descriptor, 0)),
-            Pending::Graph(buffer) => {
-                // SAFETY: stage_buffer wrote this frame; the buffer is ours.
-                unsafe { (*block::dead(buffer)).next = self.head };
-                self.head = buffer.as_ptr() as usize;
-                None
-            }
+        let node = std::mem::replace(&mut self.node, std::ptr::null_mut());
+        let buffer = NonNull::new(node)?;
+        if self.descriptor.is_null() {
+            // SAFETY: stage_buffer wrote this frame; the buffer is ours.
+            unsafe { (*block::dead(buffer)).next = self.head };
+            self.head = node as usize;
+            None
+        } else {
+            Some((buffer, self.descriptor, 0))
         }
     }
 }
@@ -178,7 +187,8 @@ pub(crate) unsafe fn drain(
 ) {
     let mut list = Worklist {
         head: 0,
-        pending: Pending::None,
+        node: std::ptr::null_mut(),
+        descriptor: std::ptr::null(),
         point: 0,
     };
     let mut current = Some((node, descriptor, 0));
@@ -191,18 +201,22 @@ pub(crate) unsafe fn drain(
                 let d = &*descriptor;
                 let payload = node.as_ptr().add(d.payload_offset as usize);
                 if (d.recipe)(context, payload, &mut cursor, &mut list) {
-                    debug_assert!(matches!(list.pending, Pending::None));
+                    debug_assert!(!list.staged());
                     block::free_dead_in(&*context, node, d.charge);
                     continue;
                 }
-                if matches!(list.pending, Pending::None) {
+                if !list.staged() {
                     current = Some((node, descriptor, cursor));
                     continue;
                 }
                 let point = descriptor.cast::<u8>().add(fixed_point(list.point));
                 let p = &*point.cast::<Point>();
                 debug_assert_eq!(p.back as usize, fixed_point(list.point));
-                debug_assert!(p.index != FIXED_POINT_NO_INDEX || p.cursor == cursor);
+                debug_assert!(
+                    p.index != FIXED_POINT_NO_INDEX
+                        || p.cursor == cursor
+                        || p.cursor == FIXED_POINT_DONE
+                );
                 if p.index != FIXED_POINT_NO_INDEX {
                     payload.add(p.index as usize).cast::<u64>().write(cursor);
                 }
@@ -225,8 +239,14 @@ pub(crate) unsafe fn drain(
                 } else {
                     payload.add(p.index as usize).cast::<u64>().read()
                 };
-                let node = payload.sub((*descriptor).payload_offset as usize);
-                current = Some((NonNull::new_unchecked(node), descriptor, cursor));
+                let node =
+                    NonNull::new_unchecked(payload.sub((*descriptor).payload_offset as usize));
+                if cursor == FIXED_POINT_DONE {
+                    // Nothing follows this yield: the block is finished.
+                    block::free_dead_in(&*context, node, (*descriptor).charge);
+                } else {
+                    current = Some((node, descriptor, cursor));
+                }
             } else {
                 let buffer = NonNull::new_unchecked(list.head as *mut u8);
                 let frame = &mut *block::dead(buffer);

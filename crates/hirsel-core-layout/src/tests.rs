@@ -1051,7 +1051,9 @@ fn several_dataful_cases_share_one_niche_without_touching_it() {
 ///   tag@24 live), then l@8. Assignment yields v@0 while name@8..32 (with the
 ///   cap niche) is still to clean; a terminal String is freed from its pointer
 ///   and capacity, so its length word @16 is free. No spares: 32 native bytes,
-///   a 48-byte chunk with the 8-byte payer word.
+///   a 48-byte chunk with the 8-byte payer word. Only Binary's l is last: after
+///   it nothing is left to clean (op is a scalar), while Assignment's v still
+///   has name to free, so marking it last would leak the String.
 /// - Holder{xs: Inline[Pair, 2]}, Pair{pad, l, r} of stride 24: every word is in
 ///   the unfinished array, so A, B and the index are three spares after 48.
 #[test]
@@ -1105,23 +1107,34 @@ fn suspended_frames_avoid_live_words_and_unfinished_arrays() {
         ),
     ];
     let r = compute(&shapes).unwrap();
-    let at = |cursor, a, b, index| Point {
+    let at = |cursor, a, b, index, last| Point {
         cursor,
         a,
         b,
         index,
+        last,
     };
     let f = frames(&shapes, &r, TypeRef(0));
     // Assignment cleans v@0 while name@8 waits: a terminal String is freed from
     // its pointer and capacity, so its length word @16 takes the link.
     assert_eq!(
         f.points,
-        [at(1, 0, 16, None), at(2, 0, 8, None), at(1, 0, 16, None)]
+        [
+            at(1, 0, 16, None, false),
+            at(2, 0, 8, None, true),
+            at(1, 0, 16, None, false)
+        ]
     );
     assert_eq!((f.spares, f.native_bytes(32)), (0, 32));
     let f = frames(&shapes, &r, TypeRef(3));
     assert_eq!(fixed(&r[3]).size, 48);
-    assert_eq!(f.points, [at(1, 48, 56, Some(64)), at(2, 48, 56, Some(64))]);
+    assert_eq!(
+        f.points,
+        [
+            at(1, 48, 56, Some(64), false),
+            at(2, 48, 56, Some(64), false)
+        ]
+    );
     assert_eq!(f.native_bytes(48), 72);
 }
 

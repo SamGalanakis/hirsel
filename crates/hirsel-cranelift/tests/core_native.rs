@@ -401,6 +401,36 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
 /// A suspended fixed block is found again only through its record: an array
 /// element reuses one record, and two cases of one enum suspend at the same
 /// cursor with different offsets.
+/// LANG-19: ordinary release of a 10^6-deep `Box` chain completes under the
+/// default stack, and every box is refunded (hand-derived: n + 1 admissions).
+#[test]
+fn box_chain_releases_with_constant_stack() {
+    let source = include_str!("../../hirsel-core-ir/samples/box-chain.core");
+    let module = text::parse(source).unwrap();
+    let n = 1_000_000;
+    for optimize in [false, true] {
+        execute(&module, &sample_runs(&module, source), optimize);
+        execute_reports(
+            &module,
+            &[(FuncId(0), vec![n])],
+            optimize,
+            100_000_000,
+            None,
+            Some(&[eval::Report {
+                outcome: Outcome::Returned(vec![n]),
+                used: 0,
+                peak_reserved: 0,
+                trace: vec![],
+                admissions: n as usize + 1,
+                stdout: vec![],
+                stderr: vec![],
+                sites: vec![],
+                events: vec![],
+            }]),
+        );
+    }
+}
+
 #[test]
 fn counted_frames_recover_the_block_from_the_record() {
     let source = include_str!("../../hirsel-core-ir/samples/counted-frames.core");

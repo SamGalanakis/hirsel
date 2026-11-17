@@ -31,6 +31,10 @@ pub struct Point {
     pub b: u64,
     /// Payload-relative offset of the full cursor, for a point inside an array.
     pub index: Option<u64>,
+    /// No cleanup step follows the yield on this path, so once the descendant
+    /// is done the block is finished and the drain frees it without resuming
+    /// its glue. Never set inside an array.
+    pub last: bool,
 }
 
 /// The suspension points of one fixed type and the spare words its blocks need.
@@ -268,6 +272,34 @@ fn live(node: &Node, rank: u64, site: &Site, depth: &mut usize, on_path: bool, b
     }
 }
 
+/// Whether cleanup still has a step to take on `site`'s path after it yields.
+fn later(node: &Node, rank: u64, site: &Site, depth: &mut usize) -> bool {
+    match node {
+        Node::Empty | Node::Leaf { .. } => false,
+        Node::Fields(fields) => {
+            let mut r = rank;
+            for f in fields {
+                if r > site.rank && f.steps() > 0 {
+                    return true;
+                }
+                if r <= site.rank && site.rank < r + f.steps() && later(f, r, site, depth) {
+                    return true;
+                }
+                r += f.steps();
+            }
+            false
+        }
+        Node::Variant(_, rows) => {
+            let case = site.cases[*depth];
+            *depth += 1;
+            let more = later(&rows[case], rank, site, depth);
+            *depth -= 1;
+            more
+        }
+        Node::Array { .. } => true,
+    }
+}
+
 /// Every discriminant byte under a finished subtree, shifted by `shift`.
 fn tags(node: &Node, shift: u64, bytes: &mut [bool]) {
     match node {
@@ -319,13 +351,14 @@ pub fn frames(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Frames {
         chosen.push((
             site.rank + 1,
             site.array.is_some(),
+            site.array.is_none() && !later(&root, 0, site, &mut 0),
             std::mem::take(&mut free),
         ));
     }
     let spare = fixed.size.next_multiple_of(8);
     let points = chosen
         .into_iter()
-        .map(|(cursor, in_array, mut free)| {
+        .map(|(cursor, in_array, last, mut free)| {
             let mut j = 0;
             while free.len() < 2 + usize::from(in_array) {
                 free.push(spare + 8 * j);
@@ -336,6 +369,7 @@ pub fn frames(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Frames {
                 a: free[0],
                 b: free[1],
                 index: in_array.then(|| free[2]),
+                last,
             }
         })
         .collect();

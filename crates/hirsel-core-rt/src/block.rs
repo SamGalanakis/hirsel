@@ -233,7 +233,7 @@ pub(crate) unsafe fn free(payload: NonNull<u8>, charge: u64) {
     // SAFETY: caller supplies exclusive cleaned storage and its exact charge.
     unsafe { free_with(payload, charge, None) }
 }
-#[inline]
+#[inline(always)]
 unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>) {
     // SAFETY: native kind/alignment are encoded in the sole payer word.
     unsafe {
@@ -250,7 +250,14 @@ unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>
         } else {
             8usize << index
         };
-        let offset = (prefix(kind) + usize::from(index == 7) * 8).next_multiple_of(alignment);
+        // Alignment is a power of two (allocate), so round with a mask: the
+        // drain frees every fixed block through here and a division is its
+        // dearest step. Plain align-8 blocks, the common case, need no rounding.
+        let offset = if tag == 0 {
+            crate::abi_layout::PLAIN_PREFIX_BYTES
+        } else {
+            (prefix(kind) + usize::from(index == 7) * 8 + alignment - 1) & !(alignment - 1)
+        };
         if charge != 0 || kind != RESOURCE {
             if let Some(context) = context {
                 payer.with_tag(0).settle_in(context, charge);
@@ -263,7 +270,7 @@ unsafe fn free_with(payload: NonNull<u8>, charge: u64, context: Option<&Context>
 }
 /// # Safety
 /// The worklist owns a cleaned node, its exact charge and a live task context.
-#[inline]
+#[inline(always)]
 pub(crate) unsafe fn free_dead_in(context: &Context, payload: NonNull<u8>, charge: u64) {
     // SAFETY: caller transfers exclusive storage; the original payer stays pinned.
     unsafe { free_with(payload, charge, Some(context)) }

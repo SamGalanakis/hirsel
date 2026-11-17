@@ -122,7 +122,7 @@ fn buffer() -> Buffer {
     }
 }
 /// # Safety
-/// Live run, typed Net grant, borrowed Until carrier and source site.
+/// Live run, typed Net grant, optional Clock designation and source site.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_connect(
@@ -261,7 +261,7 @@ unsafe fn owned_op(
     }
 }
 /// # Safety
-/// Live listener and Until carrier, borrowed through delivery.
+/// Live listener and optional Clock designation, pinned through delivery.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_accept(
     context: *mut Context,
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn hirsel_core_host_accept(
     }
 }
 /// # Safety
-/// Live read half, mutable caller buffer and borrowed Until carrier.
+/// Live read half, mutable caller buffer and optional Clock designation.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_recv(
@@ -312,7 +312,7 @@ pub unsafe extern "C" fn hirsel_core_host_recv(
     }
 }
 /// # Safety
-/// Live write half, immutable caller buffer and borrowed Until carrier.
+/// Live write half, immutable caller buffer and optional Clock designation.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_send(

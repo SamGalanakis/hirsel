@@ -7,6 +7,7 @@
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
 #include "loop_version.h"
+#include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Transforms/Utils/PromoteMemToReg.h>
@@ -164,9 +165,9 @@ public:
   }
 };
 
-extern "C" void hirsel_llvm_guard_copy_loops(void *Raw, void *Machine) noexcept {
-  auto &M = *static_cast<Module *>(Raw);
-  PassBuilder PB(static_cast<TargetMachine *>(Machine));
+template <typename Run>
+static void runLoopPass(TargetMachine *Machine, Run RunPass) {
+  PassBuilder PB(Machine);
   LoopAnalysisManager LAM;
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;
@@ -176,9 +177,172 @@ extern "C" void hirsel_llvm_guard_copy_loops(void *Raw, void *Machine) noexcept 
   PB.registerFunctionAnalyses(FAM);
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-  FunctionPassManager PM;
-  PM.addPass(CheckedCopyPass(PB));
-  for (Function &F : M) if (!F.isDeclaration()) PM.run(F, FAM);
+  RunPass(PB, FAM);
+}
+
+extern "C" void hirsel_llvm_guard_copy_loops(void *Raw, void *Machine) noexcept {
+  auto &M = *static_cast<Module *>(Raw);
+  runLoopPass(static_cast<TargetMachine *>(Machine), [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
+    FunctionPassManager PM;
+    PM.addPass(CheckedCopyPass(PB));
+    for (Function &F : M) if (!F.isDeclaration()) PM.run(F, FAM);
+  });
+}
+
+namespace {
+struct ReadCheck {
+  CondBrInst *Branch;
+  Value *Bound;
+  bool OnTrue;
+  SetVector<Instruction *> Reads;
+};
+
+// Collect only address arithmetic and ordinary reads reached before this
+// check. Each staged check runs after all preceding checks in source order.
+static bool collectRead(Value *V, Loop &L, DominatorTree &DT,
+                        Instruction *Before, SetVector<Instruction *> &Reads) {
+  auto *I = dyn_cast<Instruction>(V);
+  if (!I || !L.contains(I)) return DT.dominates(V, L.getLoopPreheader()->getTerminator());
+  if (Reads.contains(I)) return true;
+  if (!DT.dominates(I, Before)) return false;
+  if (auto *Load = dyn_cast<LoadInst>(I)) {
+    if (!Load->isSimple()) return false;
+  } else if (!isa<GetElementPtrInst>(I)) {
+    return false;
+  }
+  for (Value *Operand : I->operand_values())
+    if (!collectRead(Operand, L, DT, Before, Reads)) return false;
+  Reads.insert(I);
+  return true;
+}
+
+static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
+                            ScalarEvolution &SE, DenseSet<BasicBlock *> &Done) {
+  BasicBlock *PH = L.getLoopPreheader(), *H = L.getHeader(), *Latch = L.getLoopLatch();
+  if (!PH || !Latch || !L.isInnermost() || L.getNumBlocks() < 3) return false;
+  auto *End = dyn_cast<CondBrInst>(Latch->getTerminator());
+  auto *Eq = End ? dyn_cast<ICmpInst>(End->getCondition()) : nullptr;
+  if (!Eq || Eq->getPredicate() != ICmpInst::ICMP_EQ ||
+      L.contains(End->getSuccessor(0)) || End->getSuccessor(1) != H) return false;
+  auto *Next = dyn_cast<BinaryOperator>(Eq->getOperand(0));
+  auto *Index = Next ? dyn_cast<PHINode>(Next->getOperand(0)) : nullptr;
+  auto *One = Next ? dyn_cast<ConstantInt>(Next->getOperand(1)) : nullptr;
+  Value *Limit = Eq->getOperand(1);
+  if (!Next || Next->getOpcode() != Instruction::Add || !Next->hasNoUnsignedWrap() ||
+      !One || !One->isOne() || !Index || Index->getParent() != H ||
+      Index->getNumIncomingValues() != 2 || Index->getIncomingValueForBlock(Latch) != Next ||
+      !L.isLoopInvariant(Limit) || !DT.dominates(Limit, PH->getTerminator())) return false;
+  Value *Initial = Index->getIncomingValueForBlock(PH);
+  if (!Initial) return false;
+
+  // No loop store, call into the runtime, volatile read, or other effect can
+  // invalidate a staged read or change which state the checked path observes.
+  for (BasicBlock *BB : L.blocks()) for (Instruction &I : *BB) {
+    if (auto *Load = dyn_cast<LoadInst>(&I)) {
+      if (!Load->isSimple()) return false;
+    } else if (!I.isTerminator() && (I.mayReadOrWriteMemory() || I.mayHaveSideEffects())) {
+      return false;
+    }
+  }
+
+  SmallVector<ReadCheck, 4> Checks;
+  unsigned Bounds = 0;
+  for (BasicBlock *BB = H; BB != Latch;) {
+    auto *Branch = dyn_cast<CondBrInst>(BB->getTerminator());
+    auto *Cmp = Branch ? dyn_cast<ICmpInst>(Branch->getCondition()) : nullptr;
+    if (!Cmp) return false;
+    bool OnTrue = L.contains(Branch->getSuccessor(0));
+    if (OnTrue == L.contains(Branch->getSuccessor(1))) return false;
+    Value *Bound = nullptr;
+    SetVector<Instruction *> Reads;
+    if (Cmp->getOperand(0) == Index) {
+      Bound = Cmp->getOperand(1);
+      if (!OnTrue && Cmp->getPredicate() == ICmpInst::ICMP_EQ) {
+        // IndVarSimplify can turn the first unsigned check into equality
+        // with max(start, length), since the induction only increases by one.
+        auto *Max = dyn_cast<IntrinsicInst>(Bound);
+        if (!Max || Max->getIntrinsicID() != Intrinsic::umax) return false;
+        if (Max->getArgOperand(0) == Initial) Bound = Max->getArgOperand(1);
+        else if (Max->getArgOperand(1) == Initial) Bound = Max->getArgOperand(0);
+        else return false;
+      } else if (!OnTrue || Cmp->getPredicate() != ICmpInst::ICMP_ULT) {
+        return false;
+      }
+      if (!collectRead(Bound, L, DT, Branch, Reads)) return false;
+      ++Bounds;
+    } else if (!collectRead(Cmp->getOperand(0), L, DT, Branch, Reads) ||
+               !collectRead(Cmp->getOperand(1), L, DT, Branch, Reads)) {
+      return false;
+    }
+    Checks.push_back({Branch, Bound, OnTrue, std::move(Reads)});
+    BB = Branch->getSuccessor(OnTrue ? 0 : 1);
+    if (Checks.size() >= L.getNumBlocks()) return false;
+  }
+  if (Bounds < 2 || Checks.size() + 1 != L.getNumBlocks()) return false;
+
+  IRBuilder<> B(PH->getTerminator());
+  Value *Nonempty = B.CreateFreeze(B.CreateICmpULT(Initial, Limit));
+  versionLoop(L, Nonempty, LI, DT, SE, "read.fast.ph", ".read.checked");
+  auto *Route = cast<CondBrInst>(PH->getTerminator());
+  BasicBlock *Fast = Route->getSuccessor(0), *Slow = Route->getSuccessor(1);
+  Done.insert(H);
+  Done.insert(Slow->getSingleSuccessor());
+  DenseMap<Value *, Value *> Staged;
+  auto substitute = [&](Value *V) { return Staged.lookup(V) ? Staged.lookup(V) : V; };
+  for (const ReadCheck &Check : Checks) {
+    auto *Guard = BasicBlock::Create(H->getContext(), "read.check", H->getParent(), Fast);
+    Route->setSuccessor(0, Guard);
+    B.SetInsertPoint(Guard);
+    auto *Cmp = cast<ICmpInst>(Check.Branch->getCondition());
+    for (Instruction *Read : Check.Reads) {
+      if (Staged.contains(Read)) continue;
+      auto *Copy = Read->clone();
+      for (Use &Operand : Copy->operands()) Operand.set(substitute(Operand.get()));
+      Copy->setMetadata(LLVMContext::MD_alias_scope, nullptr);
+      Copy->setMetadata(LLVMContext::MD_noalias, nullptr);
+      B.Insert(Copy);
+      Staged[Read] = Copy;
+    }
+    Value *Good;
+    if (Check.Bound) {
+      Good = B.CreateICmpULE(Limit, substitute(Check.Bound));
+    } else {
+      Good = B.CreateICmp(Cmp->getPredicate(), substitute(Cmp->getOperand(0)),
+                          substitute(Cmp->getOperand(1)));
+      if (!Check.OnTrue) Good = B.CreateNot(Good);
+    }
+    Route = B.CreateCondBr(B.CreateFreeze(Good), Fast, Slow);
+    Check.Branch->setCondition(B.getInt1(Check.OnTrue));
+  }
+  for (auto [Original, Copy] : Staged) Original->replaceAllUsesWith(Copy);
+  return true;
+}
+}
+
+extern "C" void hirsel_llvm_guard_read_loops(void *Raw, void *Machine) noexcept {
+  auto &M = *static_cast<Module *>(Raw);
+  runLoopPass(static_cast<TargetMachine *>(Machine), [&](PassBuilder &PB, FunctionAnalysisManager &FAM) {
+    FunctionPassManager Clean;
+    cantFail(PB.parsePassPipeline(Clean,
+        "simplifycfg,loop-mssa(licm),instcombine<no-verify-fixpoint>,simplifycfg"));
+    for (Function &F : M) if (!F.isDeclaration()) {
+      DenseSet<BasicBlock *> Done;
+      for (;;) {
+        auto &LI = FAM.getResult<LoopAnalysis>(F);
+        auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+        auto &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
+        bool Changed = false;
+        for (Loop *L : LI.getLoopsInPreorder())
+          if (!Done.contains(L->getHeader()) && versionReadLoop(*L, LI, DT, SE, Done)) {
+            Changed = true;
+            break;
+          }
+        if (!Changed) break;
+        FAM.invalidate(F, PreservedAnalyses::none());
+      }
+      if (!Done.empty()) Clean.run(F, FAM);
+    }
+  });
 }
 
 // The step word is private runtime storage. Once calls have been inlined,

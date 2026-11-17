@@ -18,6 +18,7 @@
 extern void hirsel_llvm_promote_step_window(void *module);
 extern void hirsel_llvm_mark_loop_callbacks(void *module);
 extern void hirsel_llvm_inline_loop_callbacks(void *module);
+extern void hirsel_llvm_guard_read_loops(void *module, void *machine);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
@@ -657,7 +658,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                 "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,gvn,simplifycfg,dse,loop-simplify,lcssa,instcombine<no-verify-fixpoint>,simplifycfg,dse)",
                 machine, options);
         }
-        if (!e) hirsel_cold_failure_edges(module, context);
+        if (!e) {
+            hirsel_llvm_guard_read_loops(module, machine);
+            hirsel_cold_failure_edges(module, context);
+        }
         LLVMDisposePassBuilderOptions(options);
         if (e) {
             char *text = LLVMGetErrorMessage(e); error(out, text);

@@ -279,11 +279,16 @@ impl<'context> Module<'context> {
             }
             if error.is_null() {
                 unsafe extern "C" {
+                    fn hirsel_llvm_guard_read_loops(
+                        module: LLVMModuleRef,
+                        machine: LLVMTargetMachineRef,
+                    );
                     fn hirsel_llvm_cold_failure_edges(
                         module: LLVMModuleRef,
                         context: LLVMContextRef,
                     );
                 }
+                hirsel_llvm_guard_read_loops(self.raw, machine.raw);
                 hirsel_llvm_cold_failure_edges(self.raw, self.context.raw);
             }
             LLVMDisposePassBuilderOptions(options);

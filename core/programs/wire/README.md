@@ -44,5 +44,7 @@ with the same compiler, runtime and linker, using `wire_build.py --session-only`
 and either native backend. It listens on loopback port 18094 under a 64 MiB
 logical root. Run `wire_wsock.py --session <output>/session-<backend>` for
 concurrent upgrades, strict Frame decoding, blocked output and bounded Close.
+Add --idle-session <output>/session-idle-<backend> to check idle Ping and Close;
+--session-codes-only selects just the text and idle Close-code cases.
 Its test service returns deterministic Batches and Resets and refuses Hello;
 production Hello and call admission belong to W3c.

@@ -40,7 +40,7 @@ def main():
     })
     inputs = output/'inputs.json'
     inputs.write_text(json.dumps({'core':core, 'packages':packages})+'\n')
-    entries = [('session','session/main')] if args.session_only else [('main','echo/main'), ('client_probe','echo/client_probe'), ('idle_probe','echo/idle_probe'), ('finish','finish/probe')]
+    entries = [('session','session/main'), ('session-idle','session/idle')] if args.session_only else [('main','echo/main'), ('client_probe','echo/client_probe'), ('idle_probe','echo/idle_probe'), ('finish','finish/probe')]
     for name, entry in entries:
         stem = f'{name}-{args.backend}'
         command = [str(args.compiler.resolve()), 'build', '--source-core',

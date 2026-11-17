@@ -2379,11 +2379,12 @@ fn wire_read(take x: WireRead) -> () waits {
                         Error(code) => { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(code), take r))); return },
                     }
                 },
+                Ok(Text(_)) => { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(1003u16), take r))); return },
                 Ok(Ping(control)) => { probing = false; break Control(10u8, control) },
                 Ok(Closed(control)) => { let _ = channel.send(to, wire_event(ReadClosed(control, take r))); return },
                 Ok(Reject(code)) => { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(code), take r))); return },
                 Error(Network(TimedOut)) => {
-                    if probing { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(1008u16), take r))); return }
+                    if probing { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(1001u16), take r))); return }
                     probing = true
                     break Control(9u8, std.websocket.Control(data: [0u8; 125], len: 0u64))
                 },

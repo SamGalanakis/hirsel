@@ -1966,7 +1966,7 @@ fn repath(b: Bytes, from: String, to: String) -> Bytes {
             result.unwrap(list.append(mut out, with))
             i += n
         } else {
-            result.unwrap(list.push_copy(mut out, b[i]))
+            result.unwrap(result.capacity_only(list.push(mut out, b[i])))
             i += 1
         }
     }

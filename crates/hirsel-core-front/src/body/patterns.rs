@@ -1691,7 +1691,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             if d != od || error != oe {
                 let (a, b) = (self.shown(subject.ty), self.shown(self.fd.result));
-                let message = "`?` propagates only the identical error type, or Option to Option";
+                let capacity_only = d == od
+                    && oe.is_some_and(|capacity| {
+                        matches!(self.t.kind(capacity), TyKind::Adt(d, _)
+                            if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"]))
+                            && error.is_some_and(|e| {
+                                matches!(self.t.kind(e), TyKind::Tuple(fields)
+                                    if fields.len() == 2 && fields[0] == capacity)
+                            })
+                    });
+                let message = if capacity_only {
+                    "`?` propagates only the identical error type, or Option to Option; use `result.capacity_only(...)?` to discard the returned value and propagate Capacity"
+                } else {
+                    "`?` propagates only the identical error type, or Option to Option"
+                };
                 self.refuse_compared("LANG-18", n, a, b, message);
                 return (success, None);
             }

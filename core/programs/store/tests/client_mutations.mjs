@@ -38,6 +38,15 @@ export const controls = {
   send_then_commit: ['commit_before_send', text => replace(text,
     'record.pending = pending;\n        await this.options.storage.write(state);',
     "record.pending = pending;\n        this.socket!.send(this.options.frame.encode({tag: 'Call', values: [this.stream, pending.p, pending.slot, 30000, pending.args]}));\n        await this.options.storage.write(state);")],
+  backoff_reset_at_welcome: ['backoff_requires_stable_session', text => replace(text,
+    'this.welcomed = true; this.welcomedAt = this.clock.now();',
+    'this.welcomed = true; this.welcomedAt = this.clock.now(); this.backoff = 100;')],
+  resend_on_mismatch: ['request_mismatch_fences', text => replace(text,
+    "if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { await this.fence('RequestMismatch'); continue; }",
+    "if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { this.sent = false; this.timer = this.clock.set(() => { this.timer = undefined; void this.enqueue(async () => this.sendPending()); }, 100); continue; }")],
+  advance_on_mismatch: ['request_mismatch_fences', text => replace(text,
+    "if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { await this.fence('RequestMismatch'); continue; }",
+    "if (outcome.tag === 'Refused' && outcome.value.tag === 'RequestMismatch') { await this.installation(async state => { const record = state.streams[this.stream]; record.next = pending.p + 1n; delete record.pending; await this.options.storage.write(state); this.record = structuredClone(record); this.finish({tag: 'RequestMismatch'}); }); continue; }")],
 };
 
 export async function mutations(codec,names) {

@@ -231,6 +231,7 @@ export async function laws(codec, only, mutant) {
     storage.raw.streams[0]={next:0n,retired:false};
     const b=await setup(storage,{prepare:configure});await ready(b);assert.equal(b.client.stream,0);
     const rejected=b.client.call(want,bytes(8),x=>x);await settle();
+    await b.time.advance(100);assert.equal(b.server.calls.length,1,'mismatched bytes must never be resent');
     assert.equal(b.client.state,'Fenced');
     assert.deepEqual(await rejected,{tag:'RequestMismatch'});assert.equal(store.effects,1);assert.equal(storage.raw.generation,2n);
     await b.time.advance(120000);assert.equal(b.server.calls.length,1);

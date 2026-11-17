@@ -364,7 +364,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         drop(image);
         meter.finish("package handle teardown");
         if let Some(path) = metrics {
-            std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
+            meter.write_metrics(path)?;
         }
         std::process::exit(0);
     }
@@ -597,7 +597,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         }
         meter.finish("test execution/output");
         if let Some(path) = metrics {
-            std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
+            meter.write_metrics(path)?;
         }
         std::process::exit(if tests.is_empty() {
             2
@@ -852,7 +852,7 @@ fn finish(
     };
     meter.finish("output/render");
     if let Some(path) = metrics {
-        std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
+        meter.write_metrics(path)?;
     }
     // Publication and output are complete. The OS reclaims these in-memory
     // graphs at exit; the reusable library Driver retains ordinary destruction.

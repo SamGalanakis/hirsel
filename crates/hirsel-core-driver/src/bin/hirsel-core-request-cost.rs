@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "library_bodies_after_check":library_bodies_after_check})
     );
     meter.finish("output/render");
-    std::fs::write(&args[5], serde_json::to_vec_pretty(&meter.result)?)?;
+    meter.write_metrics(&args[5])?;
     // Match hirsel's process boundary: outputs remain alive until process exit.
     std::process::exit(if accepted { 0 } else { 2 });
 }

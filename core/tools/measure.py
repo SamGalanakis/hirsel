@@ -2,6 +2,8 @@
 """One serial Rust sample per workload/layout/profile/operation/cache configuration."""
 import argparse
 import csv
+import contextlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -93,26 +95,50 @@ def sources(name, layout):
     return [base/name/(layout+'.rs'), base/name/'program.rs', base/'support.rs']
 
 
-def sample(command, directory):
+def sample(command, directory, compiler_only=False, env=None):
     directory.mkdir()
     perf = directory/'perf.csv'
     stats = directory/'time.txt'
-    # perf runs INSIDE capped. Wrapping a systemd launcher with perf loses its reparented children.
-    launch = [str(REPO/'tools/capped'), 'perf', 'stat', '-x', ';', '-e', 'instructions:u,duration_time', '-o', str(perf), '--', '/usr/bin/time', '-f', '%e\t%M', '-o', str(stats), *map(str, command)]
+    # Compiler-cost mode pins ASLR before perf starts the compiler. perf's FIFO
+    # acknowledgment stops counting before diagnostic time-metrics formatting.
+    env = os.environ | (env or {})
+    control = directory / 'perf-control'
+    if compiler_only:
+        os.mkfifo(control)
+        os.mkfifo(control.with_suffix('.ack'))
+        env['PERF_CTL_FIFO'] = str(control)
+        launch = [str(REPO/'tools/capped'), '--stats', str(stats),
+                  'taskset', '-c', '16', 'setarch', os.uname().machine, '-R', 'perf', 'stat', '-x', ';',
+                  '-e', 'instructions:u,duration_time', '-o', str(perf),
+                  '--control', f'fifo:{control},{control.with_suffix(".ack")}',
+                  '--', *map(str, command)]
+    else:
+        # Other benchmarks retain their existing measurement contract.
+        launch = [str(REPO/'tools/capped'), 'perf', 'stat', '-x', ';', '-e', 'instructions:u,duration_time', '-o', str(perf), '--', '/usr/bin/time', '-f', '%e\t%M', '-o', str(stats), *map(str, command)]
     started = time.monotonic()
-    with (directory/'stdout').open('wb') as out, (directory/'stderr').open('wb') as err:
-        result = subprocess.run(launch, stdout=out, stderr=err)
+    with contextlib.ExitStack() as stack:
+        if compiler_only:
+            lock = stack.enter_context(open('/tmp/hirsel-langarena-measure.lock', 'a'))
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        with (directory/'stdout').open('wb') as out, (directory/'stderr').open('wb') as err:
+            result = subprocess.run(launch, stdout=out, stderr=err, env=env)
+    if compiler_only:
+        control.unlink()
+        control.with_suffix('.ack').unlink()
     elapsed = time.monotonic()-started
     instructions, seconds, rss = '', '', ''
     status = 'ok' if result.returncode == 0 else f'exit:{result.returncode}'
-    if stats.exists():
+    if compiler_only and stats.exists():
+        usage = json.loads(stats.read_text())
+        seconds, rss = str(usage['seconds']), usage['max_rss_kib']
+    elif stats.exists():
         fields = stats.read_text().strip().splitlines()[-1].split('\t')
         if len(fields) == 2:
             seconds, rss = fields
     if perf.exists():
         for line in perf.read_text().splitlines():
             fields = line.split(';')
-            if len(fields) > 2 and fields[2] == 'duration_time' and fields[0].strip().isdigit():
+            if not compiler_only and len(fields) > 2 and fields[2] == 'duration_time' and fields[0].strip().isdigit():
                 seconds = f'{int(fields[0])/1e9:.9f}'
             if len(fields) > 2 and fields[2] == 'instructions:u':
                 if fields[0].strip().isdigit():
@@ -122,6 +148,8 @@ def sample(command, directory):
     if not instructions:
         status = 'missing-counter' if status == 'ok' else status
     stderr = (directory/'stderr').read_text()
+    if compiler_only and status == 'ok' and 'Events disabled' not in stderr:
+        status = 'missing-counter-stop'
     if 'kernel killed' in stderr or result.returncode in (137, -9):
         status = 'memory-censored'
     peak = re.search(r'capped: peak (\d+) MiB of', stderr)

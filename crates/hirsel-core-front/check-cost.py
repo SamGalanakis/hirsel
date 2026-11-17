@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Fail a release check/lower cost regression on the fixed M1 and core/std corpora."""
+"""Guard native compiler cost on M1, std and published-program requests.
+
+One native measurement path: setarch -R pins address layout, perf counts the
+compiler from exec through its answer, then an acknowledged disable excludes
+optional time-metrics formatting and writing. Startup and publication remain
+counted. No /usr/bin/time process is counted. Wall and child peak RSS come from
+the capped harness. Native residual is 12 instructions; proposed ceilings keep
+both the existing 2% allowance and at least that absolute residual. Land clamps
+lowerings to those measurement floors. The finished budget remains 60000.
+"""
 import argparse
 import copy
 import json
@@ -13,11 +22,12 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'core/tools'))
-from measure import source_lines
+from measure import source_lines, sample
 
 # Frozen, absolute allowances owned by core-check-index-912. They never scale
 # with source growth and never apply to the fixed finished-process budget.
 ANCHOR_RESIDUAL = {'m1': 3371157, 'std': 973518}
+PROCESS_RESIDUAL = 12
 COMPLETE = dict(complete_bodies=1, bodies=1,
                 missing_check_lower_per_line=0, additional_publication_per_line=0)
 
@@ -103,28 +113,28 @@ def sample_sources(compiler, output, profile_front=False):
         (directory / 'code-lines.txt').write_text(str(lines) + '\n')
         env = os.environ | {'HIRSEL_MEMORY_LIMIT': '2G', 'HIRSEL_JOBS': '1'}
         admit()
-        command = ['taskset', '-c', '16', str(ROOT / 'tools/capped'),
-                   'perf', 'stat', '--no-big-num', '-x', ';', '-e', 'instructions:u',
-                   '-o', str(directory / 'process-perf.txt'), '--', str(compiler), 'check',
+        command = [str(compiler), 'check',
                    '--inputs', str(directory / 'inputs.json'), '--store', str(directory / 'store'),
                    '--metrics', str(directory / 'metrics.json'), '--json',
                    *(['--profile-front'] if profile_front else [])]
-        with (directory / 'result.json').open('w') as stdout, (directory / 'stderr.log').open('w') as stderr:
-            result = subprocess.run(command, cwd=ROOT, env=env, stdout=stdout, stderr=stderr)
+        observed = sample(command, directory / 'process', compiler_only=True, env=env)
+        for source, target in [('stdout', 'result.json'), ('stderr', 'stderr.log'), ('perf.csv', 'process-perf.txt')]:
+            (directory / target).write_bytes((directory / 'process' / source).read_bytes())
+        accepted_statuses = ('ok', 'exit:1', 'exit:2')
         # Until the checker is complete, benchmark corpora legitimately contain GAPs.
         # A tool crash or missing counter never passes as a cheap check.
-        if result.returncode not in (0, 1, 2):
-            raise ValueError(f'{name}: driver exited {result.returncode}')
+        if observed['status'] not in accepted_statuses:
+            raise ValueError(f'{name}: driver exited {observed["status"]}')
         product = json.loads((directory / 'result.json').read_text())
         if 'incomplete' not in product or 'diagnostics' not in product:
             raise ValueError(f'{name}: driver did not return a check result')
         metrics = json.loads((directory / 'metrics.json').read_text())
-        process = process_instructions(directory / 'process-perf.txt')
+        process = observed['instructions']
         yield name, lines, product, metrics, process
 
 
 def run(compiler, output, ceilings, request_compiler=None, report_only=False):
-    failures, observations, proposed = [], {}, {}
+    failures, observations, proposed, floors = [], {}, {}, {}
     for name, lines, product, metrics, process in sample_sources(compiler, output):
         ceiling = ceilings['corpora'].get(name, {})
         residual = ANCHOR_RESIDUAL.get(name, 0)
@@ -148,12 +158,15 @@ def run(compiler, output, ceilings, request_compiler=None, report_only=False):
         observations[name] = dict(code_lines=lines, process=process, metrics=metrics,
                                   diagnostics=product['diagnostics'], incomplete=product['incomplete'])
         if not completion:
-            proposed[name] = {key: margin(max(0, value)) for key, value in values.items()}
+            floors[name] = {key: max(0, value) + PROCESS_RESIDUAL / lines for key, value in values.items()}
+            proposed[name] = {key: max(margin(max(0, value)), floors[name][key]) for key, value in values.items()}
     if request_compiler is not None:
         errors, observed, limits = run_product(request_compiler, output / 'product', ceilings)
         failures.extend(errors)
         observations['product'], proposed['product'] = observed, limits
-    print('COST_REPORT ' + json.dumps(dict(target='core-check-cost', findings=failures, observations=observations, ceilings=proposed)), flush=True)
+        floors['product'] = {'fixed_' + mode + '_instructions': value + PROCESS_RESIDUAL for mode, value in observed['fixed'].items()}
+        floors['product']['entries'] = {row['entry']: dict(marginal_per_line=row['marginal'] + 2 * PROCESS_RESIDUAL / row['own_lines']) for row in observed['entries']}
+    print('COST_REPORT ' + json.dumps(dict(target='core-check-cost', findings=failures, observations=observations, ceilings=proposed, floors=floors)), flush=True)
     if failures:
         message = '\n'.join(failures) + '\n' + ceilings['policy']
         if report_only:
@@ -186,9 +199,9 @@ def product_sample(compiler, inputs, entry, mode, directory, cache):
     manifest = directory.with_suffix('.inputs.json')
     manifest.write_text(json.dumps(inputs))
     admit()
-    observed = sample(['taskset', '-c', '16', str(compiler), str(manifest), entry,
+    observed = sample([str(compiler), str(manifest), entry,
                       str(directory / 'store'), str(cache), mode,
-                      str(directory / 'metrics.json')], directory)
+                      str(directory / 'metrics.json')], directory, compiler_only=True)
     if observed['status'] != 'ok':
         raise ValueError(f'{directory.name}: {observed["status"]}')
     result = json.loads((directory / 'stdout').read_text())
@@ -254,7 +267,7 @@ def run_product(compiler, directory, ceilings):
         print(f'product {name}: {lines} own lines; process {process}; fixed {fixed["std"]}; marginal {marginal:.2f}')
         failures.extend(f'product {name}: {e}' for e in errors)
     (directory / 'results.json').write_text(json.dumps(dict(fixed=fixed, entries=rows), indent=2) + '\n')
-    proposals = {'fixed_' + mode + '_instructions': math.ceil(value * 1.02) for mode, value in fixed.items()}
+    proposals = {'fixed_' + mode + '_instructions': max(math.ceil(value * 1.02), value + PROCESS_RESIDUAL) for mode, value in fixed.items()}
     proposals['entries'] = {row['entry']: dict(marginal_per_line=margin(row['marginal'])) for row in rows}
     return failures, dict(fixed=fixed, entries=rows), proposals
 

@@ -4,7 +4,7 @@ import json
 DIRECTORY = 'crates/hirsel-core-front/'
 FILES = {target: DIRECTORY + name for target, name in (
     ('core-check-cost', 'cost-ceilings.json'), ('core-front-cost', 'front-cost-ceilings.json'))}
-POLICY = ('Land lowers measured ceilings only, with the existing 2% margin. '
+POLICY = ('Land lowers measured ceilings only, with the existing 2% margin and measured residual floors. '
           'New cells start at their measured margin. Regressions are reported per ticket. '
           'Request an increase with a reviewed tools/cost-ceiling-requests/<lane>.json '
           'containing file, cell, previous, value and reason. The fixed budget stays 60000.')
@@ -26,14 +26,18 @@ def compact(target, document):
     return dict(policy=POLICY, finished_budget_per_line=document['finished_budget_per_line'], corpora=corpora)
 
 
-def lower(saved, measured, path=()):
-    """Existing cells take min; new cells use the measurement's margin."""
+def lower(saved, measured, path=(), floors=None):
+    """Clamp proposals to observation-plus-residual floors before decreasing cells."""
     changes = []
+    floors = floors or {}
     for key, value in measured.items():
         cell = (*path, key)
         if isinstance(value, dict):
-            changes.extend(lower(saved.setdefault(key, {}), value, cell))
-        elif key not in saved or value < saved[key]:
+            changes.extend(lower(saved.setdefault(key, {}), value, cell, floors.get(key)))
+        else:
+            value = max(value, floors.get(key, value))
+            if key in saved and value >= saved[key]:
+                continue
             previous = saved.get(key)
             saved[key] = value
             changes.append(dict(cell=list(cell), previous=previous, value=value))
@@ -62,7 +66,7 @@ def ratchet(root, reports):
                             reason=row['reason'], request=str(request.relative_to(root))))
     for report in reports:
         path = FILES[report['target']]
-        for change in lower(documents[path]['corpora'], report['ceilings'], ('corpora',)):
+        for change in lower(documents[path]['corpora'], report['ceilings'], ('corpora',), report.get('floors')):
             changes.append(dict(file=path, **change))
     written = []
     for path, document in documents.items():

@@ -464,6 +464,30 @@ impl Meter {
         self.first = image.read();
         self.last = self.first;
     }
+    /// Write optional diagnostics after the external cost counter has stopped.
+    /// PERF_CTL_FIFO is set only by the native cost harness; ordinary requests
+    /// have no external counter to control. perf acknowledges disable before
+    /// any timestamp or counter-value JSON is formatted.
+    pub fn write_metrics(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        if let Some(control) = std::env::var_os("PERF_CTL_FIFO") {
+            use std::io::{BufRead, Write};
+            let control = std::path::PathBuf::from(control);
+            let mut ack =
+                std::io::BufReader::new(std::fs::File::open(control.with_extension("ack"))?);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(control)?
+                .write_all(b"disable\n")?;
+            let mut line = String::new();
+            ack.read_line(&mut line)?;
+            if line != "ack\n" {
+                return Err(std::io::Error::other(
+                    "perf did not acknowledge counter stop",
+                ));
+            }
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&self.result)?)
+    }
     pub(crate) fn enabled(&self) -> bool {
         self.counter.is_some()
     }

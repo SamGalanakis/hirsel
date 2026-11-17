@@ -68,6 +68,14 @@ class Capped(unittest.TestCase):
                          ['MemoryMax=4G', 'MemorySwapMax=0', 'OOMPolicy=continue', 'CPUQuota=200%'])
         self.assertRegex(result.stderr, r'capped: peak .* of 4G \(systemd scope\), [0-9.]+ s, exit 3\n')
 
+    def test_stats_come_from_the_harness_without_a_time_child(self):
+        stats = self.root / 'usage.json'
+        result = self.capped('--stats', str(stats), 'true')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        usage = json.loads(stats.read_text())
+        self.assertGreater(usage['seconds'], 0)
+        self.assertGreater(usage['max_rss_kib'], 0)
+
     def test_the_environment_sets_the_cap_and_the_quota(self):
         result = self.capped('true', env={'HIRSEL_MEMORY_LIMIT': '512M', 'HIRSEL_JOBS': '3'})
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -295,7 +295,7 @@ fn served(take db: store.Db, c: Clock, tasks: Tasks, out: Stdout, sessions: u64,
     for _ in 0u64 .. sessions {
         let pair: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
         let (tx, rx) = result.unwrap(take pair)
-        let (s, t) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, runner.post(mail), take tx, c, 4u64, 2097152u64))
+        let (s, t) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, runner.post(mail), take tx, c, 4u64, 2097152u64, false))
         result.unwrap(list.push(mut mine, channel.sender(s)))
         result.unwrap(list.push(mut to, take s))
         result.unwrap(list.push(mut from, take rx))

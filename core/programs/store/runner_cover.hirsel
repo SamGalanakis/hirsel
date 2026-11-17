@@ -63,7 +63,7 @@ fn initial(rx: Receiver[runner.Down], sub: u32, rows: u64) -> () waits {
 fn drive(take d: D) -> () waits {
     let made: Result[(Sender[runner.Down], Receiver[runner.Down]), Capacity] = channel.new(64u64)
     let (tx, rx) = result.unwrap(take made)
-    let (to, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), 1048576u64, d.head, d.post, take tx, d.clock, 1u64, 2097152u64))
+    let (to, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), 1048576u64, d.head, d.post, take tx, d.clock, 1u64, 2097152u64, false))
     if let Error(_) = channel.send(to, runner.subscribe(1u32, k_span(), arg(d.covered))) {
         fail("runner_cover: session gone")
     }

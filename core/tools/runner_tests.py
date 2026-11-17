@@ -66,7 +66,7 @@ COUNTS = {'calls_runs_once': (7, 5), 'calls_deadline_hung': (7, 32668)}
 HUNG_TOLDS = 3
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
-SUBS = ('subs_main', 'rows_normalized', 'subscribe_order')
+SUBS = ('subs_main', 'rows_normalized', 'subscribe_order', 'retired_without_waiting')
 
 
 def counted(name, report):
@@ -308,12 +308,28 @@ MUTANTS = (
       ('fn retell(mut waiting: List[Answer], at: u64) {', 'fn retell(mut waiting: List[Answer], at: u64) -> () waits {'),
       ('take owes: List[Owe]) {\n', 'take owes: List[Owe]) -> () waits {\n')],
      'runner_calls', 'publisher_never_blocks'),
+    # L25 (retired_without_waiting, v2.14): a marked session's end sends its Drained and waits
+    # for a PubIn slot; the publisher sweeps only after a Released, so a quiet place keeps a
+    # dead session; the sweep reads Empty as an end, retiring a live session.
+    ('retire_waits_for_slot',
+     [('            let _ = channel.try_send(to_pub, PubIn(e: Drained))\n',
+       '            let _ = channel.send(to_pub, PubIn(e: Drained))\n')],
+     'runner', 'retired_without_waiting'),
+    ('sweep_skipped_when_quiet',
+     [('        sweep(mut b.subs, mut joined)\n        settle(', '        settle('),
+      ('                    deliver(mut b, mut joined, take owes)\n                }\n                retell(',
+       '                    deliver(mut b, mut joined, take owes)\n                }\n                sweep(mut b.subs, mut joined)\n                retell(')],
+     'runner', 'retired_without_waiting'),
+    ('sweep_retires_live',
+     [('                Error(Closed) => true,\n                _ => false,\n            },\n            None => false,',
+       '                Error(_) => true,\n                _ => false,\n            },\n            None => false,')],
+     'runner', 'retired_without_waiting'),
     # L17 on the wire (v2.12's one publisher inbox): an initial result split from the Batch
     # that names its sub, and an Unsubscribe the publisher ignores.
     ('initial_split',
-     [('        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: list.new())))\n',
+     [('        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: list.new())))\n',
        '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: list.new(), outcomes: list.new())))\n'
-       '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: list.new(), rows: take rows, outcomes: list.new())))\n')],
+       '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: list.new(), rows: take heard, outcomes: list.new())))\n')],
      'runner_calls', 'subs_wired'),
     ('unsubscribe_ignored',
      [('            Unsubscribed(who, sub) => if let Some(i) = find(b.subs, who, sub) {\n                let _ = list.remove(mut b.subs, i)\n            },',

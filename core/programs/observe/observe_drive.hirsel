@@ -61,7 +61,7 @@ fn connect(d: Drive, id: u64) -> Conn {
         Ok(take t) => take t,
         Error(_) => fail("observe drive watchdog"),
     }
-    let (send, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), N_PLACE, d.head, d.post, take to, d.clock, 8u64, 2097152u64))
+    let (send, session) = result.unwrap(runner.connect(d.tasks, code.describe(place), N_PLACE, d.head, d.post, take to, d.clock, 8u64, 2097152u64, false))
     Conn(id: id, clock: d.clock, out: d.out, to: take send, from: take from, task: take session, dog: take dog)
 }
 

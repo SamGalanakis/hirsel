@@ -779,7 +779,9 @@ type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes
 
 // A session's join, on its first Subscribe: where its content goes, and where the
 // publisher answers with the id it mints for the session.
-type Join: send { to: Sender[Event], told: Sender[u64] }
+// v2.14: a marked session (an HTTP group or one-shot read) sends the Receiver of its
+// retirement mark, a channel it keeps the only Sender of and never sends on.
+type Join: send { to: Sender[Event], told: Sender[u64], mark: Option[Receiver[()]] }
 
 // The publisher's inbox, both ends. `post` gives each session a sender; place_head then
 // takes the mailbox whole, its head sending Releases on the same channel.
@@ -1193,7 +1195,7 @@ fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
 // it; the publisher holds no subscription content. The ledger is retried after every message
 // and before a session's next content, so it reaches the owner ahead of that content. A
 // retried Told is told at the current base, which is still >= its commit (rule 9).
-type Joiner { who: u64, to: Sender[Event], ended: List[(u32, Outcome)], reset: bool }
+type Joiner { who: u64, to: Sender[Event], ended: List[(u32, Outcome)], reset: bool, mark: Option[Receiver[()]] }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Event) | Shut
@@ -1234,9 +1236,9 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 }
             },
             Joined(take j) => {
-                let Join(to: take to, told: take told) = take j
+                let Join(to: take to, told: take told, mark: take mark) = take j
                 minted += 1u64
-                result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, ended: list.new(), reset: false)))
+                result.unwrap(list.push(mut joined, Joiner(who: minted, to: take to, ended: list.new(), reset: false, mark: take mark)))
                 let _ = channel.try_send(told, minted)
             },
             Subscribed(who, sub, take key, take arg) => if let Some(i) = joiner(joined, who) {
@@ -1249,9 +1251,11 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 let _ = list.remove(mut b.subs, i)
             },
             Left(who) => forget(mut b.subs, mut joined, who),
-            // An owner made room (v2.13): the retry below is the whole of it.
+            // An owner made room (v2.13), or a marked session ended (v2.14): the sweep and the
+            // retry below are the whole of it.
             Drained => (),
         }
+        sweep(mut b.subs, mut joined)
         settle(mut b.subs, mut joined, mut waiting, at)
     }
 }
@@ -1406,6 +1410,28 @@ fn deliver[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], take 
     }
 }
 
+// v2.14: after every message but Halt, in join order, a marked session whose mark answers
+// Closed has ended, and is retired: its subscriptions, its ledger and mark (in its Joiner)
+// go. The retry pass that follows drops its waiting Told's, whose inbox is closed (Shut).
+fn sweep(mut subs: List[Sub], mut joined: List[Joiner]) {
+    let mut i = 0u64
+    while i < list.len(joined) {
+        let ended = match joined[i].mark {
+            Some(m) => match channel.try_receive(m) {
+                Error(Closed) => true,
+                _ => false,
+            },
+            None => false,
+        }
+        if ended {
+            let who = joined[i].who
+            forget(mut subs, mut joined, who)
+        } else {
+            i += 1u64
+        }
+    }
+}
+
 fn forget(mut subs: List[Sub], mut joined: List[Joiner], who: u64) {
     let mut i = 0u64
     while i < list.len(subs) {
@@ -1497,20 +1523,31 @@ type Session[G: send, H: send]: send {
     client: Sender[Down],
     clock: Clock,
     tasks: Tasks,
-    q: u64
+    q: u64,
+    marked: bool
 }
 
 // A session as a task under `bytes n_session`: it runs `place` itself under n_place
 // (rule 10), forwards calls to the head and Subscribes to the publisher, and answers its
 // client on `client`. The returned
-// sender is the client's way in; the task ends with Place's error if `place` fails.
-pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], to_publisher: Sender[PubIn], take client: Sender[Down], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity] {
+// sender is the client's way in; the task ends with Place's error if `place` fails. A
+// `marked` session (v2.14: an HTTP group or one-shot read) ends without waiting on the
+// publisher, and its joiner uses `join_marked`; an unmarked one (WebSocket) sends `Left`.
+pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], to_publisher: Sender[PubIn], take client: Sender[Down], clock: Clock, q: u64, n_session: u64, marked: bool) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity] {
     let (tx, rx): (Sender[Event], Receiver[Event]) = channel.new(INBOX)?
-    let s = Session(place: place, n_place: n_place, inbox: take rx, me: channel.sender(tx), head: channel.sender(head), publisher: channel.sender(to_publisher), client: take client, clock: clock, tasks: tasks, q: q)
+    let s = Session(place: place, n_place: n_place, inbox: take rx, me: channel.sender(tx), head: channel.sender(head), publisher: channel.sender(to_publisher), client: take client, clock: clock, tasks: tasks, q: q, marked: marked)
     match task.spawn(tasks, bytes n_session, take s, session) {
         Ok(take t) => Ok((take tx, take t)),
         Error((c, _)) => Error(c),
     }
+}
+
+// v2.14: a marked session's joiner. A failed or cancelled session skipped its own end, so
+// whatever the outcome, the joiner offers the publisher one Drained, never waiting.
+pub fn join_marked[R: send](take t: Task[R], to_publisher: Sender[PubIn]) -> Result[R, JoinError] waits {
+    let got = task.join(take t)
+    let _ = channel.try_send(to_publisher, PubIn(e: Drained))
+    got
 }
 
 fn slot_key(stream: Bytes, p: u64) -> Bytes {
@@ -1545,21 +1582,45 @@ fn tell(to: Sender[Down], version: u64, take stream: Bytes, p: u64, take o: Outc
 fn session[G: send, H: send](take s: Session[G, H]) -> Result[(), RegisterError] waits {
     let r = placed(s.place, s.n_place)?
     let mut id: Option[u64] = None
-    sessioned(s, r, mut id)
+    let mut mark: Option[Sender[()]] = None
+    sessioned(s, r, mut id, mut mark)
+    // v2.14: a marked session drops its inbox and its mark, then offers one Drained; nothing
+    // waits. The publisher's next sweep retires it.
+    if s.marked {
+        mark = None
+        let Session(place: _, n_place: _, inbox: _, me: _, head: _, publisher: take to_pub, client: _, clock: _, tasks: _, q: _, marked: _) = take s
+        if let Some(_) = id {
+            let _ = channel.try_send(to_pub, PubIn(e: Drained))
+        }
+        return Ok(())
+    }
     if let Some(n) = id {
         let _ = channel.send(s.publisher, PubIn(e: Left(n)))
     }
     Ok(())
 }
 
-// The session's first Subscribe joins it to the publisher, which mints its id.
-fn join_publisher[G: send, H: send](s: Session[G, H]) -> Option[u64] waits {
+// The session's first Subscribe joins it to the publisher, which mints its id. A marked
+// session makes its mark here and keeps the Sender in `mark` (v2.14).
+fn join_publisher[G: send, H: send](s: Session[G, H], mut mark: Option[Sender[()]]) -> Option[u64] waits {
     let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
     let (told, hear) = match take made {
         Ok(take pair) => take pair,
         Error(_) => return None,
     }
-    if let Error(_) = channel.send(s.publisher, PubIn(e: Joined(Join(to: channel.sender(s.me), told: take told)))) {
+    let mut held: Option[Receiver[()]] = None
+    if s.marked {
+        let made_mark: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
+        match take made_mark {
+            Ok(take pair) => {
+                let (keep, give) = take pair
+                mark = Some(take keep)
+                held = Some(take give)
+            },
+            Error(_) => return None,
+        }
+    }
+    if let Error(_) = channel.send(s.publisher, PubIn(e: Joined(Join(to: channel.sender(s.me), told: take told, mark: take held)))) {
         return None
     }
     match channel.receive(hear) {
@@ -1570,19 +1631,65 @@ fn join_publisher[G: send, H: send](s: Session[G, H]) -> Option[u64] waits {
 
 // The publisher's content for this session: one Batch with its complete subs and rows (G3:
 // a sub's whole initial result in the Batch that names it), then its Ended subs; or a Reset.
-fn hand(to: Sender[Down], take o: Owe) -> () waits {
+// `dropped` holds the subs whose Unsubscribe met a full PubIn (v2.12 item 3): the publisher
+// keeps them, and the owner drops their rows and Endeds until a Batch completes the sub's
+// resubscription, an Ended ends it, or a Reset ends them all.
+fn hand(to: Sender[Down], take o: Owe, mut dropped: List[u32]) -> () waits {
     let Owe(session: _, version: v, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
     if reset {
+        list.clear(mut dropped)
         let _ = channel.send(to, Reset)
         return
     }
-    if list.len(complete) > 0u64 || list.len(rows) > 0u64 {
-        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: list.new())))
+    for sub in complete {
+        forgive(mut dropped, sub)
+    }
+    let heard = unheard(take rows, dropped)
+    if list.len(complete) > 0u64 || list.len(heard) > 0u64 {
+        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: list.new())))
     }
     for take e in take ended {
         let (sub, take why) = take e
-        let _ = channel.send(to, Ended(sub, take why))
+        if has_sub(dropped, sub) {
+            forgive(mut dropped, sub)
+        } else {
+            let _ = channel.send(to, Ended(sub, take why))
+        }
     }
+}
+
+fn has_sub(subs: List[u32], sub: u32) -> bool {
+    for s in subs {
+        if s == sub {
+            return true
+        }
+    }
+    false
+}
+
+fn forgive(mut dropped: List[u32], sub: u32) {
+    let mut i = 0u64
+    while i < list.len(dropped) {
+        if dropped[i] == sub {
+            let _ = list.remove(mut dropped, i)
+        } else {
+            i += 1u64
+        }
+    }
+}
+
+// The rows of subs not in `dropped`.
+fn unheard(take rows: List[Row], dropped: List[u32]) -> List[Row] {
+    if list.len(dropped) == 0u64 {
+        return take rows
+    }
+    let mut kept: List[Row] = list.new()
+    for take w in take rows {
+        if !has_sub(dropped, w.sub) {
+            result.unwrap(list.push(mut kept, take w))
+        }
+    }
+    kept
 }
 
 // A session owner's inbox capacity: C, the run of takes after which a joined owner wakes the
@@ -1620,7 +1727,8 @@ fn take_event[G: send, H: send](s: Session[G, H], joined: bool, mut run: u64) ->
     Some(take got)
 }
 
-fn sessioned[G: send, H: send](s: Session[G, H], r: Registry[G, H], mut id: Option[u64]) -> () waits {
+fn sessioned[G: send, H: send](s: Session[G, H], r: Registry[G, H], mut id: Option[u64], mut mark: Option[Sender[()]]) -> () waits {
+    let mut dropped: List[u32] = list.new()
     let mut held: Map[Bytes, Held] = map.new()
     let mut used = 0u64
     let mut last = 0u64
@@ -1726,22 +1834,34 @@ fn sessioned[G: send, H: send](s: Session[G, H], r: Registry[G, H], mut id: Opti
                 }
                 let who = match id {
                     Some(n) => n,
-                    None => match join_publisher(s) {
+                    None => match join_publisher(s, mut mark) {
                         Some(n) => n,
                         None => return,
                     },
                 }
                 id = Some(who)
-                if let Error(_) = channel.send(s.publisher, PubIn(e: Subscribed(who, sub, take key, take arg))) {
-                    return
+                // v2.12 item 3: the owner waits only on its own inbox. A full PubIn refuses
+                // this Subscribe, and nothing is registered.
+                match channel.try_send(s.publisher, PubIn(e: Subscribed(who, sub, take key, take arg))) {
+                    Ok(_) => (),
+                    Error(Full(_)) => {
+                        let _ = channel.send(s.client, Ended(sub, Refused(Overloaded)))
+                    },
+                    Error(Closed(_)) => return,
                 }
             },
+            // An Unsubscribe that meets a full PubIn is applied here: the publisher keeps the
+            // sub, and this owner drops its rows (v2.12 item 3).
             Unsubscribing(sub) => if let Some(who) = id {
-                if let Error(_) = channel.send(s.publisher, PubIn(e: Unsubscribed(who, sub))) {
-                    return
+                match channel.try_send(s.publisher, PubIn(e: Unsubscribed(who, sub))) {
+                    Ok(_) => (),
+                    Error(Full(_)) => if !has_sub(dropped, sub) {
+                        result.unwrap(list.push(mut dropped, sub))
+                    },
+                    Error(Closed(_)) => return,
                 }
             },
-            Content(take o) => hand(s.client, take o),
+            Content(take o) => hand(s.client, take o, mut dropped),
             // One send's own deadline: that send alone is answered Abandoned; the slot stays.
             Expired(t) => {
                 let k = slot_key(t.stream, t.p)
@@ -2087,7 +2207,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let (ev_to, ev_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(8u64))
     let (told_to, told_from): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
     let mut queue: List[ToPub] = list.new()
-    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to))))
+    result.unwrap(list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None))))
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
     result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new()))))
@@ -2121,6 +2241,376 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
         n += 1u64
     }
     n == 2u64
+}
+
+// L25 (RUNNER-SPEC v2.14, retired_without_waiting): a marked session's end waits on nothing,
+// and after the next message the publisher takes, Released or not, that session's
+// subscriptions, Joiner (its ledger and mark) and waiting Told's are gone; a live session is
+// unchanged by every sweep. The oracle is the state itself, in place of §8's retained-bytes
+// figure (followups.md, 2026-11-17): a closed event channel for the publisher's Joiner, the
+// Board's subs and the waiting list for the sweep, and the Drained messages on PubIn for the
+// session's end.
+pub fn law_retired_without_waiting(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    retired_at_publisher(c, r, tasks, true) && retired_at_publisher(c, r, tasks, false) && retired_state(c, r) && retired_session(c, tasks, 0u64) && retired_session(c, tasks, 1u64) && retired_session(c, tasks, 2u64) && retired_session(c, tasks, 3u64)
+}
+
+// A session joins the publisher and is told its id (0 if it could not): a sync point that is
+// not a Released, since the publisher has taken every message sent before it.
+fn join_as(to: Sender[PubIn], take ev: Sender[Event], take mark: Option[Receiver[()]]) -> u64 waits {
+    let (told, hear): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take ev, told: take told, mark: take mark)))) {
+        return 0u64
+    }
+    match channel.receive(hear) {
+        Ok(n) => n,
+        Error(_) => 0u64,
+    }
+}
+
+// Takes every event `from` holds: each Content's version, and whether any names `sub`.
+// True if the channel is then closed, false if it is only empty.
+fn drain_content(from: Receiver[Event], mut versions: List[u64], sub: u32, mut named: bool) -> bool {
+    loop {
+        match channel.try_receive(from) {
+            Ok(take x) => {
+                let Event(e: take e) = take x
+                if let Content(take o) = take e {
+                    for s in o.complete {
+                        named = named || s == sub
+                    }
+                    for w in o.rows {
+                        named = named || w.sub == sub
+                    }
+                    result.unwrap(list.push(mut versions, o.version))
+                }
+            },
+            Error(Empty) => return false,
+            Error(Closed) => return true,
+        }
+    }
+}
+
+// The publisher, as a task. Marked sessions L and M and an unmarked filler F join; L and M
+// subscribe sub 1, and both take c1's round. M's mark then closes in a quiet place, and the
+// next message is M's wake (woken) or, with the wake dropped, F's Unsubscribe followed by M's
+// queued Subscribe of sub 2. After that and a Joined, with no Released between, M's event
+// channel holds its two contents and is closed (its Joiner is gone), and sub 2 registered
+// nothing. Then c2's round reaches L.
+fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let v0 = store.version(base)
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    set(mut db, t, 1u64, 1u64)
+    let c1 = store.snapshot(db)
+    set(mut db, t, 2u64, 7u64)
+    let c2 = store.snapshot(db)
+    let v1 = store.version(c1)
+    let v2 = store.version(c2)
+    let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(8u64))
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = result.unwrap(channel.new(1u64))
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: take h, base: take base, from: take from, ready: take ready_to)
+    let publishing = match task.spawn(tasks, bytes 8388608u64, take p, publish) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    match channel.receive(ready_from) {
+        Ok(None) => (),
+        _ => return false,
+    }
+    let (l_to, l_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(16u64))
+    let (l_send, l_mark): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let mut l_keep = Some(take l_send)
+    let l = join_as(to, take l_to, Some(take l_mark))
+    let (m_to, m_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(16u64))
+    let (m_send, m_mark): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let mut m_keep = Some(take m_send)
+    let m = join_as(to, take m_to, Some(take m_mark))
+    let (f_to, f_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(16u64))
+    let f = join_as(to, take f_to, None)
+    let k1 = query_key(code.describe(q1))
+    let mut queue: List[ToPub] = list.new()
+    result.unwrap(list.push(mut queue, Subscribed(l, 1u32, result.unwrap(clone(k1)), no_arg())))
+    result.unwrap(list.push(mut queue, Subscribed(m, 1u32, result.unwrap(clone(k1)), no_arg())))
+    result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
+    for take e in queue {
+        if let Error(_) = channel.send(to, PubIn(e: take e)) {
+            return false
+        }
+    }
+    let (g_to, g_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(1u64))
+    let g = join_as(to, take g_to, None)
+    // M ends: its mark's only Sender goes. Nothing is Released until M's channel is read.
+    m_keep = None
+    let mut quiet: List[ToPub] = list.new()
+    if woken {
+        result.unwrap(list.push(mut quiet, Drained))
+    } else {
+        result.unwrap(list.push(mut quiet, Unsubscribed(f, 9u32)))
+        result.unwrap(list.push(mut quiet, Subscribed(m, 2u32, result.unwrap(clone(k1)), no_arg())))
+    }
+    for take e in quiet {
+        if let Error(_) = channel.send(to, PubIn(e: take e)) {
+            return false
+        }
+    }
+    let (n_to, n_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(1u64))
+    let n = join_as(to, take n_to, None)
+    let mut mv: List[u64] = list.new()
+    let mut m2 = false
+    let m_closed = drain_content(m_from, mut mv, 2u32, mut m2)
+    if !m_closed || m2 || list.len(mv) != 2u64 || mv[0] != v0 || mv[1] != v1 {
+        return false
+    }
+    if let Error(_) = channel.send(to, PubIn(e: Released(Release(version: v2, snapshot: Some(take c2), answers: list.new())))) {
+        return false
+    }
+    let (k_to, k_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(1u64))
+    let k = join_as(to, take k_to, None)
+    let mut lv: List[u64] = list.new()
+    let mut l2 = false
+    let l_closed = drain_content(l_from, mut lv, 2u32, mut l2)
+    if l_closed || l2 || list.len(lv) != 3u64 || lv[0] != v0 || lv[1] != v1 || lv[2] != v2 {
+        return false
+    }
+    if let Error(_) = channel.send(to, PubIn(e: Halt)) {
+        return false
+    }
+    let stopped = match task.join(take publishing) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+    l_keep = None
+    let _ = (f_from, g_from, n_from, k_from)
+    stopped && l != 0u64 && m != 0u64 && f != 0u64 && g != 0u64 && n != 0u64 && k != 0u64 && none(l_keep) && none(m_keep)
+}
+
+// The sweep's own state: session 2's mark is closed, session 1's is open. One sweep and the
+// retry pass leave session 1's sub and Joiner, and remove session 2's two subs, its Joiner
+// (with its waiting Ended and its mark) and its waiting Told.
+fn retired_state(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    let base = store.snapshot(db)
+    let at = store.version(base)
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let reg = match placed(code.describe(subs_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: list.new())
+    let k1 = query_key(code.describe(q1))
+    let _ = at_base(mut b, 1u64, 1u32, result.unwrap(clone(k1)), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, result.unwrap(clone(k1)), no_arg())
+    let _ = at_base(mut b, 2u64, 2u32, result.unwrap(clone(k1)), no_arg())
+    let (l_send, l_mark): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (m_send, m_mark): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let mut m_keep = Some(take m_send)
+    m_keep = None
+    let (l_to, l_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(4u64))
+    let (m_to, m_from): (Sender[Event], Receiver[Event]) = result.unwrap(channel.new(4u64))
+    let m_told = channel.sender(m_to)
+    let mut m_inbox = Some(take m_from)
+    m_inbox = None
+    let mut ended: List[(u32, Outcome)] = list.new()
+    result.unwrap(list.push(mut ended, (1u32, Refused(Overloaded))))
+    let mut joined: List[Joiner] = list.new()
+    result.unwrap(list.push(mut joined, Joiner(who: 1u64, to: take l_to, ended: list.new(), reset: false, mark: Some(take l_mark))))
+    result.unwrap(list.push(mut joined, Joiner(who: 2u64, to: take m_to, ended: take ended, reset: false, mark: Some(take m_mark))))
+    let mut waiting: List[Answer] = list.new()
+    result.unwrap(list.push(mut waiting, Answer(to: take m_told, stream: no_arg(), p: 0u64, outcome: Refused(Overloaded))))
+    sweep(mut b.subs, mut joined)
+    settle(mut b.subs, mut joined, mut waiting, at)
+    let mut live = 0u64
+    for s in b.subs {
+        if s.session != 1u64 {
+            return false
+        }
+        live += 1u64
+    }
+    let _ = (l_send, l_from)
+    live == 1u64 && list.len(joined) == 1u64 && joined[0].who == 1u64 && list.len(waiting) == 0u64 && none(m_keep) && none(m_inbox)
+}
+
+fn none[T](x: Option[T]) -> bool {
+    match x {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+// The Drained messages `from` holds now; any other message counts as many.
+fn drained(from: Receiver[PubIn]) -> u64 {
+    let mut n = 0u64
+    while let Ok(take x) = channel.try_receive(from) {
+        let PubIn(e: take e) = take x
+        n += match take e {
+            Drained => 1u64,
+            _ => 1000u64,
+        }
+    }
+    n
+}
+
+fn is_ended(take d: Down, sub: u32) -> bool {
+    match take d {
+        Ended(s, take o) => s == sub && match o {
+            Refused(Overloaded) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// The session's end. A marked session on a mailbox of 2, with this law as its publisher,
+// joins and subscribes sub 1; its mark is Empty while it lives. It ends (0) normally on an
+// empty PubIn, (1) normally on a full one, (2) by a fault, or (3) by cancellation. Its end
+// waits on nothing: the session's own Drained is on PubIn before `join_marked` in (0), and in
+// (1) it was dropped, so `join_marked` adds only its own. In (2) and (3) only the joiner offers
+// one. The mark is closed after the join in each. (1) also holds v2.12 item 3: on the full
+// PubIn, a Subscribe of sub 2 is answered Ended(2, Refused(Overloaded)), and an Unsubscribe of
+// sub 1 is applied at the owner, which drops sub 1's rows from later content.
+fn retired_session(c: Clock, tasks: Tasks, end: u64) -> bool waits {
+    let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(2u64))
+    let (head, heads): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
+    let (down_to, down): (Sender[Down], Receiver[Down]) = result.unwrap(channel.new(16u64))
+    let pair = match connect(tasks, code.describe(subs_place), 1048576u64, head, to, take down_to, c, 1u64, 4194304u64, true) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let (inbox, started) = take pair
+    let mut running = take started
+    let k1 = query_key(code.describe(q1))
+    if let Error(_) = channel.send(inbox, subscribe(1u32, result.unwrap(clone(k1)), no_arg())) {
+        return false
+    }
+    let joining = match channel.receive(from) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let PubIn(e: take first) = take joining
+    let (ses, held) = match take first {
+        Joined(take j) => {
+            let Join(to: take ses_to, told: take told, mark: take given) = take j
+            let _ = channel.try_send(told, 7u64)
+            (take ses_to, take given)
+        },
+        _ => return false,
+    }
+    let m = match take held {
+        Some(take x) => take x,
+        None => return false,
+    }
+    let subscribing = match channel.receive(from) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let PubIn(e: take second) = take subscribing
+    let subscribed = match take second {
+        Subscribed(who, sub, _, _) => who == 7u64 && sub == 1u32,
+        _ => false,
+    }
+    let live = match channel.try_receive(m) {
+        Error(Empty) => true,
+        _ => false,
+    }
+    if !subscribed || !live {
+        return false
+    }
+    if end == 1u64 {
+        for _ in 0u64 .. 2u64 {
+            if let Error(_) = channel.send(to, PubIn(e: Drained)) {
+                return false
+            }
+        }
+        let mut rows: List[Row] = list.new()
+        result.unwrap(list.push(mut rows, Row(sub: 1u32, key: no_arg(), value: None)))
+        result.unwrap(list.push(mut rows, Row(sub: 3u32, key: no_arg(), value: None)))
+        let o = Owe(session: 7u64, version: 9u64, complete: list.new(), rows: take rows, ended: list.new(), reset: false)
+        if let Error(_) = channel.send(inbox, subscribe(2u32, result.unwrap(clone(k1)), no_arg())) {
+            return false
+        }
+        if let Error(_) = channel.send(inbox, unsubscribe(1u32)) {
+            return false
+        }
+        if let Error(_) = channel.send(ses, Event(e: Content(take o))) {
+            return false
+        }
+        let refused = match channel.receive(down) {
+            Ok(take d) => is_ended(take d, 2u32),
+            Error(_) => false,
+        }
+        let only_three = match channel.receive(down) {
+            Ok(Batched(take x)) => list.len(x.rows) == 1u64 && x.rows[0].sub == 3u32,
+            _ => false,
+        }
+        if !refused || !only_three {
+            return false
+        }
+    }
+    if end == 2u64 {
+        // A Told whose stream is over the session's bytes: slot_key's allocation faults.
+        let mut big: Bytes = list.new()
+        if let Error(_) = list.fill(mut big, 8388608u64, 0u8) {
+            return false
+        }
+        if let Error(_) = channel.send(ses, Event(e: Answered(Told(version: 0u64, stream: take big, p: 0u64, outcome: Refused(Overloaded))))) {
+            return false
+        }
+    } else if end == 3u64 {
+        task.cancel(mut running)
+    } else if let Error(_) = channel.send(inbox, hang_up()) {
+        return false
+    }
+    // The session's end drops its client; this waits for that, never for the task.
+    while let Ok(_) = channel.receive(down) {
+    }
+    let before = drained(from)
+    let outcome = match join_marked(take running, to) {
+        Ok(Ok(_)) => end <= 1u64,
+        Error(Failed(_)) => end == 2u64,
+        Error(Cancelled(_)) => end == 3u64,
+        _ => false,
+    }
+    let after = drained(from)
+    let closed = match channel.try_receive(m) {
+        Error(Closed) => true,
+        _ => false,
+    }
+    let want = if end == 0u64 {
+        1u64
+    } else if end == 1u64 {
+        2u64
+    } else {
+        0u64
+    }
+    let _ = heads
+    outcome && closed && before == want && after == 1u64
+}
+
+@test
+fn test_retired_without_waiting(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_retired_without_waiting(c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 @test

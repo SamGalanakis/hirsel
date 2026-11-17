@@ -101,7 +101,11 @@ with no other machinery. A session joins the publisher at its first Subscribe an
 leaves when it ends; the publisher drops a session whose client channel is gone. A
 client sends `subscribe(sub, key, arg)` and `unsubscribe(sub)` as session events. A
 Subscribe whose key is not a query entry ends at once with `Ended(sub,
-Refused(NoEntry))`. The publisher never blocks on a session (L23): every send to a
+Refused(NoEntry))`. An owner `try_send`s its Subscribes and Unsubscribes (v2.12): on a full
+publisher inbox a Subscribe is answered `Ended(sub, Refused(Overloaded))` and registers nothing,
+and an Unsubscribe is applied at the owner, which drops that sub's rows and Endeds until a Batch
+completes its resubscription; the publisher keeps the sub until then or until the session ends.
+The publisher never blocks on a session (L23): every send to a
 session is a `try_send`. A closed inbox drops that session's subscriptions. A full one ends
 each subscription whose content did not fit with `Ended(sub, Refused(Overloaded))`, and the
 client resubscribes. That Ended, and any answer that did not fit, waits in the publisher until
@@ -111,10 +115,19 @@ publisher keeps no subscription content for a full inbox. A subscribed session's
 wakes the publisher (v2.13, L24): it counts the events it takes since it last found its
 inbox empty, and at the inbox's capacity it offers the publisher a `Drained` by `try_send`
 (dropped if the publisher's inbox is full), so a waiting Ended reaches its client in a
-quiet place too. An owner that keeps up never offers one. Not built yet: the budget ledger
+quiet place too. An owner that keeps up never offers one. A marked session (v2.14: an HTTP
+group or a one-shot read) ends without waiting on the publisher (L25). At its join it sends the
+Receiver of a retirement mark, a channel whose only Sender it keeps and never sends on. To end,
+it drops its inbox and the mark, then offers one `Drained` by `try_send`; its joiner calls
+`join_marked(task, publisher)`, which joins the task and offers one more, since a failed or
+cancelled session skipped its own. After every message but `Halt`, before the retry pass, the
+publisher sweeps: in join order, a mark that answers `Closed` retires its session, with its
+subscriptions, its Joiner (ledger and mark) and, in the retry pass, its waiting answers. An
+unmarked (WebSocket) session sends `Left`. L25's law, `retired_without_waiting`, is in
+runner.hirsel with R2's other publisher laws. Not built yet: the budget ledger
 that bounds these bytes (R2-a).
 
-`connect(tasks, place, n_place, head, publisher, client, clock, q, n_session)` spawns a session
+`connect(tasks, place, n_place, head, publisher, client, clock, q, n_session, marked)` spawns a session
 task under `bytes n_session` and returns its inbox sender and its task. The session
 runs `place` itself under n_place, and its task ends with that `RegisterError` if it
 fails. The session answers by itself what V1 lets it: a passed deadline (`Deadline`),

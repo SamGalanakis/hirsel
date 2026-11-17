@@ -281,7 +281,7 @@ fn conn_in(tasks: Tasks, head: Sender[runner.Req], post: Sender[runner.PubIn], c
         Ok(take t) => take t,
         Error(_) => fail("calls: watchdog spawn"),
     }
-    let (to, session) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, post, take tx, clock, q, n_session))
+    let (to, session) = result.unwrap(runner.connect(tasks, code.describe(place), N_PLACE, head, post, take tx, clock, q, n_session, false))
     Conn(to: take to, from: take rx, dog: take dog, session: take session)
 }
 

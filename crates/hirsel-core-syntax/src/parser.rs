@@ -958,11 +958,12 @@ impl Parser<'_> {
     fn path(&mut self, kind: NodeKind) -> Parsed<NodeId> {
         self.path_inner(kind, false)
     }
+    #[inline(always)]
     fn path_inner(&mut self, kind: NodeKind, expression: bool) -> Parsed<NodeId> {
         let s = self.pos;
         let n = self.name()?;
-        while (self.continuing() || expression)
-            && self.at(sym::DOT)
+        while self.at(sym::DOT)
+            && (expression || self.continuing())
             && self.token(1).kind == TokenKind::Ident
         {
             self.resolution_size.path_extra += 1;
@@ -1091,13 +1092,28 @@ impl Parser<'_> {
         let mut left = self.primary()?;
         let mut nonassoc = None;
         let mut placed = false;
-        while self.continuing() || line_continuation(self.word(0)) {
-            if self.newline() && self.bare_exit(left) {
-                return self.fail("LANG-4", "a bare exit is complete at its newline");
-            }
-            let Some(next) = continuation(self.word(0)) else {
+        loop {
+            let word = self.word(0);
+            let Some(next) = continuation(word) else {
+                if self.whitespace > 0 && self.newline() && self.bare_exit(left) {
+                    return self.fail("LANG-4", "a bare exit is complete at its newline");
+                }
                 break;
             };
+            if self.newline() {
+                if self.whitespace == 0
+                    && (word == sym::MINUS
+                        || matches!(
+                            next,
+                            Continuation::Call | Continuation::Index | Continuation::Placement
+                        ))
+                {
+                    break;
+                }
+                if self.bare_exit(left) {
+                    return self.fail("LANG-4", "a bare exit is complete at its newline");
+                }
+            }
             match next {
                 Continuation::Call if minimum <= 12 && !placed => {
                     self.bump();

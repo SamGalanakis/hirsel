@@ -490,18 +490,17 @@ impl NameIndex {
         }
         heads.sort_unstable();
         heads.dedup();
-        for &(name, _) in &heads {
-            if self.core_module(name).is_none() {
+        for group in heads.chunk_by(|a, b| a.0 == b.0) {
+            if self.core_module(group[0].0).is_none() {
                 continue;
             }
             let start = self.extensions.len() as u32;
-            self.extensions
-                .extend(heads.iter().filter(|&&(n, _)| n == name).map(|&(_, m)| m));
+            self.extensions.extend(group.iter().map(|&(_, m)| m));
             let range = Rows {
                 start,
                 end: self.extensions.len() as u32,
             };
-            for &(_, m) in heads.iter().filter(|&&(n, _)| n == name) {
+            for &(_, m) in group {
                 self.modules[m.0 as usize].merge = range;
             }
         }
@@ -568,6 +567,12 @@ impl NameIndex {
                 .iter()
                 .map(|(_, &d)| d)
                 .find(|&d| self.get(d).site.module == module && self.get(d).name == name)
+        } else if module.0 as usize >= self.modules.base_len() {
+            // New modules cannot have members in the published prefix.
+            match self.members.entry((module, name)) {
+                std::collections::hash_map::Entry::Occupied(e) => Some(*e.get()),
+                std::collections::hash_map::Entry::Vacant(_) => None,
+            }
         } else {
             self.members.get(&(module, name)).copied()
         };

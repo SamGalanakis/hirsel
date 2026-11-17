@@ -55,14 +55,34 @@ pub enum Continuation {
 }
 /// LANG-4's closed set for a complete expression at a newline. Assignment
 /// operators are handled only by the statement grammar, never by expressions.
-pub fn line_continuation(word: Symbol) -> bool {
-    word != sym::MINUS
-        && matches!(
-            continuation(word),
-            Some(Continuation::Binary(..) | Continuation::Projection | Continuation::Try)
-        )
-}
 #[inline]
+pub fn line_continuation(word: Symbol) -> bool {
+    matches!(
+        word,
+        sym::DOTDOT
+            | sym::DOTDOTEQ
+            | sym::OROR
+            | sym::ANDAND
+            | sym::EQEQ
+            | sym::NE
+            | sym::LT
+            | sym::LE
+            | sym::GT
+            | sym::GE
+            | sym::PIPE
+            | sym::CARET
+            | sym::AMP
+            | sym::SHL
+            | sym::SHR
+            | sym::PLUS
+            | sym::STAR
+            | sym::SLASH
+            | sym::PERCENT
+            | sym::DOT
+            | sym::QUESTION
+    )
+}
+#[inline(always)]
 pub fn continuation(word: Symbol) -> Option<Continuation> {
     Some(match word {
         sym::LPAREN => Continuation::Call,

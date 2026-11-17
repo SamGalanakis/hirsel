@@ -199,6 +199,7 @@ impl NameIndex {
             self.set_dependencies(p, deps);
         }
         let mut modules = vec![];
+        let mut path = Vec::new();
         for m in manifests {
             let p = self
                 .package(
@@ -207,11 +208,8 @@ impl NameIndex {
                 )
                 .unwrap();
             for s in &m.sources {
-                let path = s
-                    .modules
-                    .iter()
-                    .map(|n| self.symbols.find(n).unwrap())
-                    .collect::<Vec<_>>();
+                path.clear();
+                path.extend(s.modules.iter().map(|n| self.symbols.find(n).unwrap()));
                 modules.push(self.add_module(p, &path));
             }
         }

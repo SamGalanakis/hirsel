@@ -120,33 +120,27 @@ No semicolons are inserted. These rules use syntax only:
    right-hand side or body is missing) a newline is whitespace: `let x =\n f()` and
    `a +\n b` continue.
 3. At a complete statement or item a newline ends it, unless the next token after it,
-   past comments and blank lines, is a continuation token that continues the expression
-   or assignment being parsed. The continuation tokens are a closed set: `&&` `||` `==`
+   past comments and blank lines, is a continuation token that continues the expression,
+   assignment or variant list being parsed. The continuation tokens are a closed set: `&&` `||` `==`
    `!=` `<` `<=` `>` `>=` `+` `*` `/` `%` `&` `|` `^` `<<` `>>` `..` `..=`, `.` and `?`,
    and, at an assignment position, `=` and every compound assignment operator. A token is
    classified whole, so `!=` and `-=` are continuation tokens though `!` and `-` are not.
    `-`, `!`, `~`, `(`, `[` and `{` never continue a line: each starts the next statement.
    A continued statement is exactly the statement its tokens make on one line, with the
-   same precedence and the same refusals, so `a < b
- < c` is refused as a chained
+   same precedence and the same refusals, so `a < b\n < c` is refused as a chained
    comparison. The rule is the parser's, not the lexer's:
-   - Only an expression or an assignment continues. A type, pattern or item header does
-     not, so `type T = A
- | B` is refused at `|`; a function item ends at its closing `}`,
-     while an expression block such as `{ a }
- + b` continues as `{ a } + b` does.
+   - Only an expression, an assignment or a type definition's variant list continues. A
+     line that starts with `|` after a variant continues the list, so `type T = A\n | B`
+     declares two variants; a `|` before the first variant, as in `type T =\n | A`, is
+     still refused. A type, pattern or item header does not continue; a function item
+     ends at its closing `}`, while an expression block such as `{ a }\n + b` continues as
+     `{ a } + b` does.
    - An assignment position follows a complete expression statement, or a `let` with no
-     `=` yet: `x
- += 1` and `let y: u64
- = 2` continue.
+     `=` yet: `x\n += 1` and `let y: u64\n = 2` continue.
    - A bare `return`, `break` or `continue` is complete at a newline and no token continues
-     it: `return
- + b` is refused. A valued exit continues its value: `return a
- + b`
+     it: `return\n + b` is refused. A valued exit continues its value: `return a\n + b`
      returns `a + b`.
-   - An `if`, `while` or `match` subject continues: `if a
- && b {` and `match x
- .kind {`
+   - An `if`, `while` or `match` subject continues: `if a\n && b {` and `match x\n .kind {`
      are one subject. An unparenthesized subject that ends in a block is still refused,
      however its lines break.
    - `;` always ends a statement, and a match arm's expression continues as a statement's
@@ -186,6 +180,11 @@ fn total(a: u64, b: u64, c: u64) -> u64 {
     a
   }
 }
+```
+```hirsel unbuilt
+type Shape = Dot
+  | Line(u64)
+  | Box(u64, u64)                                         // one definition with three variants
 ```
 ```hirsel
 fn total(a: i64, b: i64) -> i64 {

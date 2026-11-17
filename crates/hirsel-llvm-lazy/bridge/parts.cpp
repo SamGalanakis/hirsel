@@ -432,13 +432,9 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         if (ask("", code)) return 0;
         misses = 1;
     } else {
-        // Every local definition is a hidden global: a part's references to
-        // another part's definitions resolve at link time.
-        for (GlobalObject &g : m.global_objects())
-            if (!g.isDeclaration() && g.hasLocalLinkage()) {
-                g.setLinkage(GlobalValue::ExternalLinkage);
-                g.setVisibility(GlobalValue::HiddenVisibility);
-            }
+        // Keyed while local definitions are still local: a part's bitcode
+        // then carries each constant it reaches with its initializer, which
+        // the part's object holds a copy of.
         StringMap<std::string> sets = asm_lines(m);
         std::vector<Function *> held;
         for (Function &f : m) {
@@ -448,6 +444,13 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
             if (ask(f.getName(), code)) held.push_back(&f);
             else ++misses;
         }
+        // Every local definition is a hidden global: a part's references to
+        // another part's definitions resolve at link time.
+        for (GlobalObject &g : m.global_objects())
+            if (!g.isDeclaration() && g.hasLocalLinkage()) {
+                g.setLinkage(GlobalValue::ExternalLinkage);
+                g.setVisibility(GlobalValue::HiddenVisibility);
+            }
         for (Function *f : held) f->deleteBody();
     }
     if (!misses) return 0;

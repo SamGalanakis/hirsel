@@ -143,3 +143,13 @@ The hand-derived `frame_vectors` law and its `tag_order`, `complete_omitted` and
 `//:core-runner-wire`. The byte
 fixtures in `core/programs/store/frame-vectors.json` are frozen against
 RUNNER-SPEC v2.11.4's R2 contract and Outcome/Refusal tags, including F9-F12.
+
+WIRE W3b uses reader-funded decoded frames. With payload cap m and q queued
+calls, `reader_bytes` reserves `2(1+q)(4m+128) + round8(3m/2) + 8192 + 4096`.
+The first term counts both the owner's inbox and requests retained by a stalled
+head. The codec admits exact lists; `4m+128` bounds the inline Want list, rounded
+identity buffers and the other client variants. The assembly growth and receive
+scratch are separate. At m=262144 and q=4 the child allowance is 10,892,544 bytes.
+The shared runner harness's `reader_reservation_holds` holds ten maximum Calls
+and one assembly allowance under that reservation. It runs on the evaluator and
+native engines in `core-runner-r0` after a push, and in `core-runner-wire`.

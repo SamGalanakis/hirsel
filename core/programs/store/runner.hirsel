@@ -1851,3 +1851,33 @@ fn test_rows_normalized(c: Clock, r: Random) -> Result[(), ()] waits {
         Error(())
     }
 }
+
+pub type WireConfig: send { socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, n_place: u64 }
+
+pub fn wire_defaults(n_service: u64, n_place: u64) -> WireConfig {
+    WireConfig(socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, n_place: n_place)
+}
+
+fn wire_round(n: u64) -> u64 { (n + 7u64) & 0xfffffffffffffff8u64 }
+
+// Client decoding allocates exact lists. Want's 40 inline bytes represent at
+// least 20 encoded bytes, and rounding each identity adds at most seven bytes.
+// 4m + 128 bounds every client variant, including Hello's empty identities.
+// g(m) = round8(3m/2) + 8192 at the power-of-two configured maxima.
+pub fn reader_bytes(c: WireConfig) -> u64 {
+    let outstanding = 2u64 * (1u64 + c.q)
+    outstanding * (4u64 * c.socket.max_frame + 128u64) + wire_round(3u64 * c.socket.max_frame / 2u64) + 8192u64 + 4096u64
+}
+
+
+fn wire_decode(b: Bytes) -> Result[Frame, u16] {
+    if list.len(b) < 4u64 || b[0u64] >= 4u8 || b[1u64] != 0u8 || b[2u64] != 0u8 || b[3u64] != 0u8 {
+        return Error(1007u16)
+    }
+    let codec: std.codec.Codec[Frame] = std.codec.of()
+    match std.codec.decode(codec, b) {
+        Ok(Ok(take f)) => Ok(take f),
+        _ => Error(1007u16),
+    }
+}
+

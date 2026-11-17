@@ -1,0 +1,55 @@
+// WIRE-SPEC 2.3: ten reader-funded frames at q=4, assembly plus growth and
+// scratch 401408, and 4096 bytes of reader bookkeeping. Decode's safe bound
+// is four payload bytes per encoded byte plus 128 per frame, not a run's peak.
+fn pressure(take c: WireConfig) -> bool {
+    let units = 1u64 + c.q
+    let (head, stalled): (Sender[Frame], Receiver[Frame]) = result.unwrap(channel.new(units))
+    let (to, inbox): (Sender[Frame], Receiver[Frame]) = result.unwrap(channel.new(units))
+    let mut input: Bytes = result.unwrap(list.with_capacity(c.socket.max_frame))
+    result.unwrap(std.codec.put_u32(1u32, mut input))
+    result.unwrap(std.codec.put_u32(0u32, mut input))
+    result.unwrap(std.codec.put_u64(0u64, mut input))
+    result.unwrap(std.codec.put_u32(0u32, mut input))
+    result.unwrap(std.codec.put_u32(1000u32, mut input))
+    result.unwrap(std.codec.put_u32(262116u32, mut input))
+    while list.len(input) < c.socket.max_frame { result.unwrap(list.push(mut input, 97u8)) }
+    for _ in 0u64 .. units {
+        let f = result.unwrap(wire_decode(input))
+        if let Error(_) = channel.try_send(head, take f) { return false }
+    }
+    for _ in 0u64 .. units {
+        let f = result.unwrap(wire_decode(input))
+        if let Error(_) = channel.try_send(to, take f) { return false }
+    }
+    // A max frame still being assembled, with geometric-growth transient and
+    // receive scratch, while neither consumer drains its held requests.
+    let assembly: Bytes = result.unwrap(list.with_capacity(401408u64))
+    let full_head = match channel.try_send(head, Unsubscribe(0u32)) { Error(Full(_)) => true, _ => false }
+    let full_inbox = match channel.try_send(to, Unsubscribe(0u32)) { Error(Full(_)) => true, _ => false }
+    let mut count = 0u64
+    for _ in 0u64 .. units {
+        if let Ok(Call(_, _, _, _, arg)) = channel.try_receive(stalled) {
+            if list.len(arg) == c.socket.max_frame - 28u64 { count += 1u64 }
+        }
+        if let Ok(Call(_, _, _, _, arg)) = channel.try_receive(inbox) {
+            if list.len(arg) == c.socket.max_frame - 28u64 { count += 1u64 }
+        }
+    }
+    full_head && full_inbox && count == 10u64 && list.capacity(assembly) == 401408u64
+}
+
+pub fn law_reader_reservation_holds(tasks: Tasks) -> bool waits {
+    let c = wire_defaults(0u64, 0u64)
+    // Independent arithmetic from the WIRE formula, for m=262144 and q=4.
+    let expected = 10u64 * (4u64 * 262144u64 + 128u64) + 401408u64 + 4096u64
+    if reader_bytes(c) < expected { return false }
+    let h = match task.spawn(tasks, bytes reader_bytes(c), c, pressure) {
+        Ok(take h) => take h, Error(_) => return false,
+    }
+    match task.join(take h) { Ok(ok) => ok, Error(_) => false }
+}
+
+@test
+fn test_wire_session(tasks: Tasks) -> Result[(), ()] waits {
+    if law_reader_reservation_holds(tasks) { Ok(()) } else { Error(()) }
+}

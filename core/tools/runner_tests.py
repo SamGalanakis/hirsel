@@ -522,6 +522,44 @@ def frame_vectors(args, root, work, engines, row):
             and all(t.get('passed') for t in tests), result=report)
 
 
+
+def session_laws(args, root, work, engines, row):
+    text = (root / 'core/programs/store/runner.hirsel').read_text()
+    laws = (root / 'core/programs/store/session-laws.hirsel').read_text()
+    adapted = work / 'session' / 'runner.hirsel'
+    adapted.parent.mkdir()
+    adapted.write_text(text + '\n' + laws)
+    selected = manifest(root, work, 'session', adapted)
+    names = ('reader_reservation_holds',)
+    if 'evaluator' in engines:
+        for name in names:
+            value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/runner/law_' + name)
+            row(engine='evaluator', law=name, passed=value == 1, result=report)
+    for engine in (e for e in engines if e != 'evaluator'):
+        definition = 'store@1/runner/test_wire_session'
+        code, report = native_run(args, engine, selected, work / f'session-store-{engine}', definition)
+        tests = report.get('tests', [])
+        row(engine=engine, law='wire_session', passed=code == 0
+            and [t['definition'] for t in tests] == [definition]
+            and all(t.get('passed') for t in tests), result=report)
+    if args.no_mutants:
+        return
+    mutants = (
+        ('undersized_reader', ' + 8192u64 + 4096u64', ' + 0u64 + 0u64'),
+        ('head_frames_uncounted', 'let outstanding = 2u64 * (1u64 + c.q)', 'let outstanding = 1u64 * (1u64 + c.q)'),
+    )
+    for name, old, new in mutants:
+        if text.count(old) != 1:
+            row(engine='evaluator', mutant=name, passed=False, result='mutation site not found once')
+            continue
+        changed = work / name / 'runner.hirsel'
+        changed.parent.mkdir()
+        changed.write_text(text.replace(old, new) + '\n' + laws)
+        value, report = evaluate(args.evaluator.resolve(), manifest(root, work, name, changed),
+                                 'store@1/runner/law_reader_reservation_holds')
+        row(engine='evaluator', mutant=name, law='reader_reservation_holds',
+            passed=value == 0 or (report.get('outcome') or {}).get('causes') == ['Fail'], result=report)
+
 def l12_values(evaluator, root, work, tag, runner=None):
     """The fingerprint per variant (base twice), or None where a run did not return."""
     values = {}
@@ -615,7 +653,7 @@ def main():
     p.add_argument('--no-mutants', action='store_true')
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
-    p.add_argument('--part', choices=['r0', 'r1', 'wire'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1')
     root = args.root.resolve()
@@ -629,9 +667,11 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
+        if r0 or args.part in ('wire', 'session'):
+            session_laws(args, root, work, engines, row)
         if r0 or args.part == 'wire':
             frame_vectors(args, root, work, engines, row)
-        if args.part == 'wire':
+        if args.part in ('wire', 'session'):
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
             for r in rows:

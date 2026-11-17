@@ -401,3 +401,30 @@ fn print_capacity_prefixes() -> bool {
         zero && run && atomic_hex
     }
 }
+
+fn read_named_values(s: String, mut cursor: json.Cursor) -> Result[List[f64], json.Error] {
+    json.record_of(s, mut cursor, list.new(), fn(key: String, input: String, mut c: json.Cursor, mut values: List[f64]) -> Result[(), json.Error] {
+        if key == "xy" {
+            values = json.list_of(input, mut c, json.read_f64)?
+        } else {
+            json.skip_value(input, mut c)?
+        }
+        Ok(())
+    })
+}
+
+fn decode_refuses(s: String) -> bool {
+    match json.decode(s, read_named_values) {
+        Error(Syntax(_)) => true,
+        _ => false,
+    }
+}
+
+// RFC 8259 member names are decoded first. Skipped fields and trailing bytes
+// still obey JSON grammar. A raw-key lookup or unchecked skip fails this case.
+// expect: run typed_record_decode() = true
+fn typed_record_decode() -> bool {
+    let source = " {\"unused\":[false,{\"a\":null}],\"x\u{005c}u0079\":[-2.5,3e1]} "
+    let values = result.unwrap(json.decode(source, read_named_values))
+    list.len(values) == 2 && float.to_bits64(values[0]) == float.to_bits64(-2.5) && float.to_bits64(values[1]) == float.to_bits64(30.0) && decode_refuses("{\"xy\":[],\"unused\":[true,]}") && decode_refuses("{\"xy\":[false]}") && decode_refuses("{\"xy\":[]}{}")
+}

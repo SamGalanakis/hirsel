@@ -72,6 +72,128 @@ pub fn parse(r: Region, s: String) -> Result[Json in r, Error] {
     }
 }
 
+/// A byte cursor borrowed by the composable JSON readers. Start one with decode.
+pub opaque type Cursor {
+    at: u64
+}
+
+/// Decodes one whole JSON value, allowing leading and trailing JSON whitespace.
+/// The reader composes record_of, list_of and the scalar readers for its type.
+pub fn decode[T](s: String, read: scoped fn(String, mut Cursor) -> Result[T, Error]) -> Result[T, Error] {
+    let mut c = Cursor(at: 0)
+    let value = read(s, mut c)?
+    skip(s, mut c.at)
+    if c.at != string.byte_len(s) {
+        return Error(Syntax(c.at))
+    }
+    Ok(take value)
+}
+
+/// Reads an array directly into a list of decoded elements.
+pub fn list_of[T](s: String, mut c: Cursor, item: scoped fn(String, mut Cursor) -> Result[T, Error]) -> Result[List[T], Error] {
+    opening(s, mut c.at, b'[')?
+    let mut out: List[T] = list.new()
+    if !ends(s, mut c.at, b']') {
+        loop {
+            let v = item(s, mut c)?
+            match list.push(mut out, take v) {
+                Ok(()) => {},
+                Error((e, _)) => return Error(Build(Capacity(e))),
+            }
+            if after_item(s, mut c.at, b']')? {
+                break
+            }
+        }
+    }
+    Ok(take out)
+}
+
+/// Reads an object into a caller's record. The callback consumes each field
+/// value using the provided cursor, or uses skip_value for an unknown field.
+/// Keys are decoded JSON strings. Fields visit in wire order, including duplicates.
+pub fn record_of[T](s: String, mut c: Cursor, take seed: T, field: scoped fn(String, String, mut Cursor, mut T) -> Result[(), Error]) -> Result[T, Error] {
+    opening(s, mut c.at, b'{')?
+    let mut value = take seed
+    if !ends(s, mut c.at, b'}') {
+        loop {
+            skip(s, mut c.at)
+            let quote = c.at
+            if at(s, quote) != b'"' {
+                return Error(Syntax(quote))
+            }
+            let width = string_size(s, mut c.at)?
+            let end = c.at - 1
+            opening(s, mut c.at, b':')?
+            if end - quote - 1 == width {
+                field(string.slice(s, quote + 1, end), s, mut c, mut value)?
+            } else {
+                let key = escaped_key(s, quote + 1, end)?
+                field(key, s, mut c, mut value)?
+            }
+            if after_item(s, mut c.at, b'}')? {
+                break
+            }
+        }
+    }
+    Ok(take value)
+}
+
+/// Reads one finite JSON number, with the same grammar as parse.
+pub fn read_f64(s: String, mut c: Cursor) -> Result[f64, Error] {
+    skip(s, mut c.at)
+    let first = at(s, c.at)
+    if first != b'-' && !is_digit(first) {
+        return Error(Syntax(c.at))
+    }
+    read_number(s, mut c.at)
+}
+
+/// Checks and consumes one complete value without allocating a document.
+pub fn skip_value(s: String, mut c: Cursor) -> Result[(), Error] {
+    let _ = value_size(s, mut c.at)?
+    Ok(())
+}
+
+fn opening(s: String, mut i: u64, expected: u8) -> Result[(), Error] {
+    skip(s, mut i)
+    if at(s, i) != expected {
+        return Error(Syntax(i))
+    }
+    i += 1
+    Ok(())
+}
+
+fn escaped_key(s: String, start: u64, end: u64) -> Result[String, Error] {
+    let mut key = string.new()
+    let mut i = start
+    while i < end {
+        let begin = i
+        while i < end && at(s, i) != b'\\' {
+            i += 1
+        }
+        if begin < i {
+            match string.push(mut key, string.slice(s, begin, i)) {
+                Ok(()) => {},
+                Error(e) => return Error(Build(Capacity(e))),
+            }
+        }
+        if i < end {
+            let escape = at(s, i + 1)
+            let c = if escape == b'u' {
+                unicode(s, mut i)?
+            } else {
+                i += 2
+                unescape(escape)
+            }
+            match string.push_char(mut key, c) {
+                Ok(()) => {},
+                Error(e) => return Error(Build(Capacity(e))),
+            }
+        }
+    }
+    Ok(take key)
+}
+
 /// Appends compact JSON, with members and duplicates in document order. Numbers keep
 /// their original spelling; strings escape controls, quotes and backslashes (RFC 8259).
 /// Fails: Error(Capacity) at the first refused append. Prefix: all earlier appends stay
@@ -396,6 +518,12 @@ fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
 /// grammar, which is JSON's, and the range.
 fn number_size(s: String, mut i: u64) -> Result[u64, Error] {
     let start = i
+    let _ = read_number(s, mut i)?
+    Ok(i - start)
+}
+
+fn read_number(s: String, mut i: u64) -> Result[f64, Error] {
+    let start = i
     let b = string.as_bytes(s)
     let end = list.len(b)
     loop {
@@ -419,7 +547,7 @@ fn number_size(s: String, mut i: u64) -> Result[u64, Error] {
         i += 1
     }
     match float.parse64(string.slice(s, start, i)) {
-        Ok(_) => Ok(i - start),
+        Ok(v) => Ok(v),
         Error(OutOfRange) => Error(NotFinite(start)),
         Error(Invalid(p)) => Error(Syntax(start + p)),
         Error(Empty) => Error(Syntax(start)),

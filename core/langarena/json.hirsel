@@ -1,5 +1,5 @@
 // kostya/LangArena3c9f84d benchmarks/json_{generate,parse_dom,parse_mapping}.rs.
-// Current std.json document API; Mapping materializes typed Coordinate records.
+// The DOM and typed mapping use std.json.
 type Coordinate {
     x: f64,
     y: f64,
@@ -104,7 +104,64 @@ fn coordinate(j: std.json.Json) -> Result[Coordinate, helper.Error] {
     }
 }
 
-fn average(j: std.json.Json, mapping: bool) -> Result[Coordinate, helper.Error] {
+fn read_coordinate(s: String, mut cursor: std.json.Cursor) -> Result[Coordinate, std.json.Error] {
+    std.json.record_of(s, mut cursor, Coordinate(x: 0.0, y: 0.0, z: 0.0), fn(key: String, input: String, mut value: std.json.Cursor, mut c: Coordinate) -> Result[(), std.json.Error] {
+        if key == "x" {
+            c.x = std.json.read_f64(input, mut value)?
+        } else if key == "y" {
+            c.y = std.json.read_f64(input, mut value)?
+        } else if key == "z" {
+            c.z = std.json.read_f64(input, mut value)?
+        } else {
+            std.json.skip_value(input, mut value)?
+        }
+        Ok(())
+    })
+}
+
+type Coordinates {
+    items: List[Coordinate],
+    found: bool
+}
+
+fn read_coordinates(s: String, mut cursor: std.json.Cursor) -> Result[Coordinates, std.json.Error] {
+    std.json.record_of(s, mut cursor, Coordinates(items: list.new(), found: false), fn(key: String, input: String, mut value: std.json.Cursor, mut c: Coordinates) -> Result[(), std.json.Error] {
+        if key == "coordinates" && !c.found {
+            c.items = std.json.list_of(input, mut value, read_coordinate)?
+            c.found = true
+        } else {
+            std.json.skip_value(input, mut value)?
+        }
+        Ok(())
+    })
+}
+
+fn mean(x: f64, y: f64, z: f64, n: u64) -> Coordinate {
+    let divisor: f64 = float.from_int(n)
+    Coordinate(x: x / divisor, y: y / divisor, z: z / divisor)
+}
+
+fn average_mapping(s: String) -> Result[Coordinate, helper.Error] {
+    let data = match std.json.decode(s, read_coordinates) {
+        Ok(take data) => take data,
+        Error(Build(Capacity(e))) => return Error(Capacity(e)),
+        Error(_) => return Error(Config),
+    }
+    if !data.found {
+        return Error(Config)
+    }
+    let mut x: f64 = 0.0
+    let mut y: f64 = 0.0
+    let mut z: f64 = 0.0
+    for c in data.items {
+        x += c.x
+        y += c.y
+        z += c.z
+    }
+    Ok(mean(x, y, z, list.len(data.items)))
+}
+
+fn average_dom(j: std.json.Json) -> Result[Coordinate, helper.Error] {
     if let Obj(members) = j {
         for member in members {
             if text.as_string(member.key) == "coordinates" {
@@ -114,31 +171,13 @@ fn average(j: std.json.Json, mapping: bool) -> Result[Coordinate, helper.Error] 
                 let mut x: f64 = 0.0
                 let mut y: f64 = 0.0
                 let mut z: f64 = 0.0
-                let mut count: u64 = 0
-                let mut mapped: List[Coordinate] = list.new()
                 for item in items {
                     let c = coordinate(item)?
-                    if mapping {
-                        match list.push(mut mapped, c) {
-                            Ok(()) => {},
-                            Error((e, _)) => return Error(Capacity(e))
-                        }
-                    } else {
-                        x += c.x;
-                        y += c.y;
-                        z += c.z
-                    }
-                    count += 1
+                    x += c.x
+                    y += c.y
+                    z += c.z
                 }
-                if mapping {
-                    for c in mapped {
-                        x += c.x;
-                        y += c.y;
-                        z += c.z
-                    }
-                }
-                let divisor: f64 = float.from_int(count)
-                return Ok(Coordinate(x: x / divisor, y: y / divisor, z: z / divisor))
+                return Ok(mean(x, y, z, seq.len(items)))
             }
         }
     }
@@ -172,17 +211,21 @@ pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> R
         }
     } else {
         for _ in 0 .. warmup + iterations {
-            region r {
-                let j = match std.json.parse(r, source) {
-                    Ok(v) => v,
-                    Error(_) => return Error(Config)
+            let c = if name == "Json::ParseMapping" {
+                average_mapping(source)?
+            } else {
+                region r {
+                    let j = match std.json.parse(r, source) {
+                        Ok(v) => v,
+                        Error(_) => return Error(Config)
+                    }
+                    average_dom(j)?
                 }
-                let c = average(j, name == "Json::ParseMapping")?
-                let a = helper.checksum_f64(c.x)?
-                let b = helper.checksum_f64(c.y)?
-                let d = helper.checksum_f64(c.z)?
-                checksum = int.wrapping_add(checksum, int.wrapping_add(int.wrapping_add(a, b), d))
             }
+            let a = helper.checksum_f64(c.x)?
+            let b = helper.checksum_f64(c.y)?
+            let d = helper.checksum_f64(c.z)?
+            checksum = int.wrapping_add(checksum, int.wrapping_add(int.wrapping_add(a, b), d))
         }
     }
     Ok(checksum)

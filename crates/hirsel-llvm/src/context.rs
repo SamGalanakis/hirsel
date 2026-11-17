@@ -192,7 +192,10 @@ impl<'context> Module<'context> {
     /// after typed empty-drop elimination. Keep this in sync with the lazy component;
     /// object parity covers both entries. No retained count/ahead extensions.
     pub(crate) fn run_core_passes(&self, machine: &TargetMachine) -> Result<(), String> {
-        let pipeline = c_string("default<O3>");
+        // Metering fallbacks can dwarf the hot helper before the inliner
+        // prices it. Promote the emitted slots, then outline cold regions so
+        // ordinary O3 sees the helper's hot body.
+        let pipeline = c_string("function(sroa),hotcoldsplit,default<O3>");
         // SAFETY: handles are live; these are per-invocation options, disposed
         // after LLVM consumes them. The default pipeline does not verify IR.
         unsafe {

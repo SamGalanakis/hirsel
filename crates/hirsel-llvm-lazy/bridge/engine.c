@@ -636,7 +636,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         // Scalar cleanup also exposes checked end offsets to constraints again.
         // A typed empty-drop guard can disappear in that round. DSE then
         // removes carrier clears/restores that its cleanup used to observe.
-        LLVMErrorRef e = LLVMRunPasses(module, "default<O3>", machine, options);
+        LLVMErrorRef e = LLVMRunPasses(module, "function(sroa),hotcoldsplit,default<O3>", machine, options);
         if (!e) {
             hirsel_llvm_mark_loop_callbacks(module);
             e = LLVMRunPasses(module,

@@ -44,6 +44,10 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         crate::cli::Action::Invoke(invocation) => invocation,
     };
     let command = invocation.command.name;
+    if command == "sdk" {
+        crate::sdk_command::run(crate::sdk_command::Options::read(invocation)?)?;
+        std::process::exit(0);
+    }
     if command == "new" {
         let directory = invocation
             .positional

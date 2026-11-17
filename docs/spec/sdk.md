@@ -53,3 +53,6 @@ a subprotocol change; the client checks the negotiated subprotocol.
 the registration allowance, default 16 MiB. Ordinary native build options select
 the runtime, engine and target. A built executable can also be supplied as the
 program. Describe and generation errors leave the output destination untouched.
+The CLI uses the driver's shared bounded describe child. Capacity and duplicate
+registration errors retain their typed payloads; an expired child reports
+`PlaceTimedOut` after the launcher kills and reaps it.

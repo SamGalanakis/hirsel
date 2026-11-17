@@ -74,7 +74,21 @@ impl Options {
 
 /// The launcher owns timeout, kill/reap and response bounds. Generation has no
 /// output effects until the child and every schema/name have succeeded.
-pub fn run(
+pub fn run(options: Options) -> Result<(), Error> {
+    run_with(options, describe)
+}
+
+fn describe(executable: &Path, n_place: u64, timeout: Duration) -> Result<Vec<u8>, Error> {
+    match crate::describe::describe_child(executable, n_place, timeout) {
+        Ok(bytes) => Ok(bytes),
+        Err(crate::describe::DescribeError::PlaceError(bytes)) => {
+            Err(crate::sdk::place_error(&bytes)?.into())
+        }
+        Err(error) => Err(Box::new(error)),
+    }
+}
+
+fn run_with(
     options: Options,
     describe: impl FnOnce(&Path, u64, Duration) -> Result<Vec<u8>, Error>,
 ) -> Result<(), Error> {
@@ -273,12 +287,54 @@ mod tests {
             n_place: 7,
             build: vec![],
         };
-        let error = run(options, |_, n_place, _| {
+        let error = run_with(options, |_, n_place, _| {
             assert_eq!(n_place, 7);
             Err("PlaceTimedOut".into())
         })
         .unwrap_err();
         assert_eq!(error.to_string(), "PlaceTimedOut");
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn sdk_command_uses_bounded_child_and_preserves_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let server = dir.path().join("server");
+        let output = dir.path().join("out");
+        std::fs::create_dir(&output).unwrap();
+        let marker = output.join("keep");
+        std::fs::write(&marker, "unchanged").unwrap();
+        let check = |body: &str, n_place, expected: &str| {
+            std::fs::write(&server, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let options = Options {
+                program: server.clone(),
+                out: output.clone(),
+                timeout: Duration::from_millis(100),
+                n_place,
+                build: vec![],
+            };
+            assert_eq!(run(options).unwrap_err().to_string(), expected);
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "unchanged");
+            assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
+        };
+        for n_place in [0, 1] {
+            check(
+                "printf '\\000\\000\\000\\000\\010\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000'; exit 2",
+                n_place,
+                "PlaceCapacity(Room { requested: 8, available: 0 })",
+            );
+        }
+        check(
+            "printf '\\001\\000\\000\\000\\003\\000\\000\\000abc'; exit 2",
+            4096,
+            "AlreadyRegistered([97, 98, 99])",
+        );
+        check(
+            "exec python3 -c 'import time; time.sleep(2)'",
+            4096,
+            "PlaceTimedOut",
+        );
     }
 }

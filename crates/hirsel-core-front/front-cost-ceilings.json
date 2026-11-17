@@ -11,10 +11,10 @@
     "m1": {
       "instructions_per_token": {
         "parse": 427.8149250817512,
-        "index": 7.261213333984089,
+        "index": 7.475862068965517,
         "resolve": 159.08216879569866,
         "input counts": 8.621247528312061,
-        "declarations": 158.73517497193617,
+        "declarations": 163.67616191904048,
         "body keys/new": 63.85926095164801,
         "body keys/for_body": 192.52037678754454,
         "body keys": 258.7334332833583,
@@ -36,10 +36,10 @@
     "std": {
       "instructions_per_token": {
         "parse": 450.47890188103713,
-        "index": 9.026762974406079,
+        "index": 9.224935107073328,
         "resolve": 150.87679011314768,
         "input counts": 8.740458788038307,
-        "declarations": 204.50085591415808,
+        "declarations": 210.6829980532122,
         "body keys/new": 72.43162889201132,
         "body keys/for_body": 182.10983127839066,
         "body keys": 255.6639357560026,
@@ -79,7 +79,7 @@
         "digest_bytes": 11.52390029407646,
         "index_calls": 0.993260887830836,
         "key_probes": 0.09782943565326985,
-        "row_demands": 0.02362526256826775,
+        "row_demands": 0.024126450311081217,
         "nodes_decoded": 5.601456378658451e-05
       }
     }

@@ -179,3 +179,28 @@ fn client_wrong_accept() -> u16 {
 fn client_unrequested_protocol() -> u16 {
     client_status(result.unwrap(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.1\r\n\r\n"), false)
 }
+
+fn ingress_request(extra: String) -> Bytes {
+    request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", extra)
+}
+
+// WIRE 2.1 v2. Keys feed per-IP limits independently of Net authority.
+// Mutants: trust_any_xff, fallback_to_peer, take_rightmost_of_list.
+// expect: run ingress_sanitized() = true
+fn ingress_sanitized() -> bool {
+    let peer = V4(0x7f000001)
+    let mut trusted: List[wsock.Prefix] = list.new()
+    result.unwrap(list.push(mut trusted, wsock.Prefix(ip: peer, bits: 32)))
+    let a = ingress_request("X-Forwarded-For: 1.1.1.1\r\n")
+    let b = ingress_request("X-Forwarded-For: 2.2.2.2\r\n")
+    let outside = V4(0x03030303)
+    ingress_value(a, peer, trusted) == (4u16, 0u64, 0x01010101u64) && ingress_value(b, peer, trusted) == (4u16, 0u64, 0x02020202u64) && ingress_value(a, outside, trusted) == (4u16, 0u64, 0x03030303u64) && ingress_value(ingress_request(""), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: 1.1.1.1\r\nX-Forwarded-For: 2.2.2.2\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: 1.1.1.1, 2.2.2.2\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: 1.1.1.01\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: ::ffff:1.1.1.1\r\n"), peer, trusted) == (4u16, 0u64, 0x01010101u64) && ingress_value(ingress_request("X-Forwarded-For: 2001:db8::1\r\n"), peer, trusted) == (6u16, 0x20010db800000000u64, 1u64) && ingress_value(ingress_request("X-Forwarded-For: 2001:0db8::1\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: 2001:db8:0:0:1::1\r\n"), peer, trusted) == (400u16, 0u64, 0u64) && ingress_value(ingress_request("X-Forwarded-For: ::\r\n"), peer, trusted) == (6u16, 0u64, 0u64)
+}
+
+fn ingress_value(b: Bytes, peer: Ip, trusted: List[wsock.Prefix]) -> (u16, u64, u64) {
+    match wsock.source(b, peer, trusted) {
+        Ok(V4(v)) => (4, 0, int.widen(v)),
+        Ok(V6(hi, lo)) => (6, hi, lo),
+        Error(code) => (code, 0, 0)
+    }
+}

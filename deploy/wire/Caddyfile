@@ -1,0 +1,7 @@
+# Public ingress. Add trusted_proxies only for actual upstream proxies.
+# remote_host is the immediate client's address; never append its XFF.
+:8080 {
+    reverse_proxy 127.0.0.1:8081 {
+        header_up X-Forwarded-For {remote_host}
+    }
+}

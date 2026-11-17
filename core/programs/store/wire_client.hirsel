@@ -161,7 +161,9 @@ pub fn pair[G: send, H: send](tasks: Tasks, n: Net, c: Clock, random: Random,
     keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64)
     -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
     let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
-    let mut config = runner.wire_defaults(1048576u64, 65536u64)
+    // Reserve the fixture's service work within its existing 2 MiB seed,
+    // including q = 2, while leaving room in a frame for subscription rows.
+    let mut config = runner.wire_defaults(524288u64, 65536u64)
     config.q = q
     config.budget = 65536u64
     config.socket.max_frame = 32768u64

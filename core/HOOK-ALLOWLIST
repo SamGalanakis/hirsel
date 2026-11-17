@@ -365,3 +365,6 @@ core@1/core/NetError
 core@1/core/Socket
 core@1/core/Until
 core@1/host/accept
+# DECISIONS.md 2026-11-17: W3d's loopback wire client and fixture listeners.
+core@1/host/connect
+core@1/host/listen

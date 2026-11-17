@@ -431,6 +431,43 @@ fn box_chain_releases_with_constant_stack() {
     }
 }
 
+/// LANG-19 through receivers: a value whose depth runs through channel
+/// queues releases under the default stack. One chain of 10^6 receiver hops,
+/// and a capacity-2 queue holding two chains of 5 * 10^5 hops each, cleaned
+/// last published first (hand-derived: m (n + 1) + 1 admissions, Toks traced
+/// m..1, nothing used).
+#[test]
+fn receiver_chain_releases_with_constant_stack() {
+    let source = include_str!("../../hirsel-core-ir/samples/receiver-chain.core");
+    let module = text::parse(source).unwrap();
+    for optimize in [false, true] {
+        check_sample_with_refusals(source, optimize);
+        let runs = [(1_000_000u64, 1u64), (500_000, 2)];
+        let reports: Vec<_> = runs
+            .iter()
+            .map(|&(n, m)| eval::Report {
+                outcome: Outcome::Returned(vec![m]),
+                used: 0,
+                peak_reserved: 0,
+                trace: (1..=m).rev().collect(),
+                admissions: (m * (n + 1) + 1) as usize,
+                stdout: vec![],
+                stderr: vec![],
+                sites: vec![],
+                events: vec![],
+            })
+            .collect();
+        execute_reports(
+            &module,
+            &runs.map(|(n, m)| (FuncId(0), vec![n, m])),
+            optimize,
+            1_000_000_000,
+            None,
+            Some(&reports),
+        );
+    }
+}
+
 #[test]
 fn counted_frames_recover_the_block_from_the_record() {
     let source = include_str!("../../hirsel-core-ir/samples/counted-frames.core");

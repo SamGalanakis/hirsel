@@ -653,6 +653,7 @@ impl FunctionEmitter<'_> {
                     )
                 }
                 .remove(0);
+                let staged = self.cmp(Predicate::Ne, &Type::I8, &staged, &int(0));
                 let handed = Label::new("handed", n);
                 self.cond(&staged, handed, Label::plain("resume"));
                 self.block(handed);

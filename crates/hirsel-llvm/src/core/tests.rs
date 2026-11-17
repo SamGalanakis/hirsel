@@ -1263,6 +1263,48 @@ fn box_chain_releases_with_constant_stack() {
     }
 }
 
+/// LANG-19 through receivers: a value whose depth runs through channel
+/// queues releases under the default stack. One chain of 10^6 receiver hops,
+/// and a capacity-2 queue holding two chains of 5 * 10^5 hops each, cleaned
+/// last published first (hand-derived: m (n + 1) + 1 admissions, Toks traced
+/// m..1, nothing used). The small rows and every admission refusal agree
+/// with the evaluator.
+#[test]
+fn receiver_chain_releases_with_constant_stack() {
+    let source = include_str!("../../../hirsel-core-ir/samples/receiver-chain.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = Vec::new();
+    for case in sample_cases(&module, source) {
+        let baseline = eval::run(&module, case.function, &case.args, case.limit);
+        for nth in 1..=baseline.admissions {
+            for later in [false, true] {
+                cases.push(Case {
+                    function: case.function,
+                    args: case.args.clone(),
+                    limit: case.limit,
+                    injection: Some((nth, later)),
+                });
+            }
+        }
+        cases.push(case);
+    }
+    agree_cases(&module, &cases, true);
+    let cases = [(1_000_000u64, 1u64), (500_000, 2)].map(|(n, m)| Case {
+        function: FuncId(0),
+        args: vec![n, m],
+        limit: u64::MAX,
+        injection: None,
+    });
+    for (case, got) in cases.iter().zip(execute(&module, &cases)) {
+        let (n, m) = (case.args[0], case.args[1]);
+        assert_eq!(got.outcome, eval::Outcome::Returned(vec![m]));
+        assert_eq!(got.used, 0);
+        assert_eq!(got.trace, (1..=m).rev().collect::<Vec<_>>());
+        assert_eq!(got.admissions, (m * (n + 1) + 1) as usize);
+    }
+}
+
 /// A suspended fixed block is found again only through its record: an array
 /// element reuses one record, and two cases of one enum suspend at the same
 /// cursor with different offsets.

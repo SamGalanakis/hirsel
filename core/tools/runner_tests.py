@@ -727,6 +727,43 @@ def session_laws(args, root, work, engines, row):
             row(engine='evaluator', mutant=name, law=law, passed=red, result=report)
 
 
+def ingress_laws(args, root, work, engines, row):
+    names = ('limits', 'rates_and_expiry', 'reply_isolated')
+    selected = manifest(root, work, 'ingress')
+    if 'evaluator' in engines:
+        for name in names:
+            value, report = evaluate(args.evaluator.resolve(), selected, 'store@1/ingress/law_' + name)
+            row(engine='evaluator', law='ingress_' + name, passed=value == 1, result=report)
+    for engine in (e for e in engines if e != 'evaluator'):
+        definition = 'store@1/ingress/test_ingress'
+        code, report = native_run(args, engine, selected, work / f'ingress-store-{engine}', definition)
+        tests = report.get('tests', [])
+        row(engine=engine, law='ingress', passed=code == 0
+            and [t['definition'] for t in tests] == [definition]
+            and all(t.get('passed') for t in tests), result=report)
+    if args.no_mutants or args.part != 'ingress':
+        return
+    text = (root / 'core/programs/store/ingress.hirsel').read_text()
+    mutants = (
+        ('no_ip_session_limit', 'if s.free == 0u64 { RejectedPolicy }', 'if false { RejectedPolicy }', 'limits'),
+        ('no_call_rate', 'if b.credit < period { return false }', 'if b.credit < period { return true }', 'rates_and_expiry'),
+        ('expiry_resets_active', 'if refill(b, now, c.call_burst * c.call_period_ns).credit == c.call_burst * c.call_period_ns {', 'if true {', 'rates_and_expiry'),
+    )
+    for name, old, new, law in mutants:
+        assert text.count(old) == 1, name
+        changed = work / (name + '.hirsel')
+        changed.write_text(text.replace(old, new))
+        description = inputs(root)
+        for source in description['packages'][-1]['sources']:
+            if source['modules'] == ['ingress']:
+                source['file'] = str(changed)
+        altered = work / (name + '.json')
+        altered.write_text(json.dumps(description) + '\n')
+        value, report = evaluate(args.evaluator.resolve(), altered, 'store@1/ingress/law_' + law)
+        red = value == 0 or (report.get('outcome') or {}).get('causes') in (['Fail'], ['Overflow'])
+        row(engine='evaluator', mutant=name, law='ingress_' + law, passed=red, result=report)
+
+
 def l12_values(evaluator, root, work, tag, runner=None):
     """The fingerprint per variant (base twice), or None where a run did not return."""
     values = {}
@@ -822,7 +859,7 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=['reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
     p.add_argument('--session-mutant', action='append', choices=['undersized_reader', 'head_frames_uncounted', 'writer_queue', 'orphan_reader'])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1')
     root = args.root.resolve()
@@ -836,11 +873,13 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
+        if args.part == 'ingress' or r1:
+            ingress_laws(args, root, work, engines, row)
         if r0 or args.part in ('wire', 'session'):
             session_laws(args, root, work, engines, row)
         if r0 or args.part == 'wire':
             frame_vectors(args, root, work, engines, row)
-        if args.part in ('wire', 'session'):
+        if args.part in ('wire', 'session', 'ingress'):
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
             for r in rows:

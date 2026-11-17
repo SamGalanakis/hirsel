@@ -1,0 +1,245 @@
+// Shared admission for transports. Only this task owns cross-connection policy.
+pub type Config: send { buckets_max: u64, inbox: u64, sessions: u64, mint_burst: u64, mint_period_ns: u64, call_burst: u64, call_period_ns: u64 }
+
+pub fn defaults() -> Config {
+    Config(buckets_max: 8192u64, inbox: 256u64, sessions: 32u64, mint_burst: 10u64, mint_period_ns: 6000000000u64, call_burst: 40u64, call_period_ns: 50000000u64)
+}
+
+type Bucket: send { at: u64, credit: u64 }
+
+fn refill(b: Bucket, now: u64, cap: u64) -> Bucket {
+    let elapsed = if now > b.at { now - b.at } else { 0u64 }
+    let credit = if elapsed >= cap - b.credit { cap } else { b.credit + elapsed }
+    Bucket(at: if now > b.at { now } else { b.at }, credit: credit)
+}
+
+fn take_credit(mut b: Bucket, now: u64, burst: u64, period: u64) -> bool {
+    b = refill(b, now, burst * period)
+    if b.credit < period { return false }
+    b.credit -= period
+    true
+}
+
+pub opaque resource type Lease: send { returned: Sender[()] } drop(lease) {
+    let _ = channel.try_send(lease.returned, ())
+}
+
+pub opaque type Principal: send { token: Bytes }
+
+pub fn principal(p: Principal) -> View[Bytes] in p { view p.token }
+
+type Source: send { mint: Bucket, free: u64, returned: Receiver[()], to: Sender[()] }
+type Book: send { config: Config, sources: Map[Bytes, Source], calls: Map[Bytes, Bucket] }
+
+type Kind: send = Open(Bytes) | Hello(Bytes, Option[Bytes]) | Call(Bytes)
+type Answer: send = Opened(Lease) | Bound(Principal) | Allowed | RejectedPolicy
+
+type Ask: send { kind: Kind, reply: Sender[Answer] }
+pub opaque type Ingress: send { to: Sender[Ask] }
+type Policy: send { from: Receiver[Ask], book: Book, clock: Clock, random: Random }
+
+fn source_key(ip: Ip) -> Bytes {
+    let mut b: Bytes = list.new()
+    match ip {
+        V4(v) => { result.unwrap(std.codec.put_u32(4u32, mut b)); result.unwrap(std.codec.put_u32(v, mut b)) },
+        V6(a, z) => { result.unwrap(std.codec.put_u32(6u32, mut b)); result.unwrap(std.codec.put_u64(a, mut b)); result.unwrap(std.codec.put_u64(z, mut b)) },
+    }
+    b
+}
+
+fn collect(mut s: Source) {
+    while let Ok(()) = channel.try_receive(s.returned) { s.free += 1u64 }
+}
+
+// Only fully refilled, inactive keys may retire. Insertion pressure never resets
+// a live limit. The retirement pass is bounded by the configured fixed table.
+fn retire(mut book: Book, now: u64) {
+    let c = book.config
+    let mut gone: List[Bytes] = list.new()
+    for (key, b) in book.calls {
+        if refill(b, now, c.call_burst * c.call_period_ns).credit == c.call_burst * c.call_period_ns {
+            result.unwrap(list.push(mut gone, result.unwrap(clone(key))))
+        }
+    }
+    for take key in take gone { let _ = map.remove(mut book.calls, key) }
+    let mut expired: List[Bytes] = list.new()
+    for (key, _) in book.sources {
+        result.unwrap(list.push(mut expired, result.unwrap(clone(key))))
+    }
+    for take key in take expired {
+        let mut s = option.unwrap(map.remove(mut book.sources, key))
+        collect(mut s)
+        s.mint = refill(s.mint, now, c.mint_burst * c.mint_period_ns)
+        if s.free != c.sessions || s.mint.credit != c.mint_burst * c.mint_period_ns {
+            result.unwrap(map.insert(mut book.sources, take key, take s))
+        }
+    }
+}
+
+fn ensure_source(mut book: Book, key: Bytes, now: u64) -> bool {
+    if map.contains(book.sources, key) { return true }
+    let c = book.config
+    if map.len(book.sources) >= c.buckets_max { retire(mut book, now) }
+    if map.len(book.sources) >= c.buckets_max { return false }
+    let made: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(c.sessions)
+    let (to, returned) = match take made { Ok(take pair) => take pair, Error(_) => return false }
+    let source = Source(mint: Bucket(at: now, credit: c.mint_burst * c.mint_period_ns), free: c.sessions, returned: take returned, to: take to)
+    match map.insert(mut book.sources, result.unwrap(clone(key)), take source) { Ok(()) => true, Error(_) => false }
+}
+
+fn open_source(mut book: Book, key: Bytes, now: u64) -> Answer {
+    if !ensure_source(mut book, key, now) { return RejectedPolicy }
+    let mut s = option.unwrap(map.remove(mut book.sources, key))
+    collect(mut s)
+    let answer = if s.free == 0u64 { RejectedPolicy } else {
+        match Lease(returned: channel.sender(s.to)) {
+            Ok(take lease) => { s.free -= 1u64; Opened(take lease) },
+            Error(_) => RejectedPolicy,
+        }
+    }
+    result.unwrap(map.insert(mut book.sources, result.unwrap(clone(key)), take s))
+    answer
+}
+
+fn valid_token(b: Bytes) -> bool {
+    list.len(b) == 21u64 && b[0u64] == 97u8 && b[1u64] == 110u8 && b[2u64] == 111u8 && b[3u64] == 110u8 && b[4u64] == 58u8
+}
+
+fn bind(mut book: Book, key: Bytes, take token: Option[Bytes], now: u64, random: Random) -> Answer {
+    if let Some(take b) = take token {
+        return if valid_token(b) { Bound(Principal(token: take b)) } else { RejectedPolicy }
+    }
+    if !ensure_source(mut book, key, now) { return RejectedPolicy }
+    let c = book.config
+    let allowed = option.unwrap(map.update(mut book.sources, key, scoped fn(mut s: Source) -> bool {
+        take_credit(mut s.mint, now, c.mint_burst, c.mint_period_ns)
+    }))
+    if !allowed { return RejectedPolicy }
+    let mut nonce: Bytes = result.unwrap(list.with_capacity(16u64))
+    host.random(random, mut nonce)
+    let mut token_bytes: Bytes = result.unwrap(list.with_capacity(21u64))
+    result.unwrap(list.append(mut token_bytes, string.as_bytes("anon:")))
+    result.unwrap(list.append(mut token_bytes, nonce))
+    Bound(Principal(token: take token_bytes))
+}
+
+fn call_allowed(mut book: Book, key: Bytes, now: u64) -> bool {
+    let c = book.config
+    if !map.contains(book.calls, key) {
+        if map.len(book.calls) >= c.buckets_max { retire(mut book, now) }
+        if map.len(book.calls) >= c.buckets_max { return false }
+        if let Error(_) = map.insert(mut book.calls, result.unwrap(clone(key)), Bucket(at: now, credit: c.call_burst * c.call_period_ns)) { return false }
+    }
+    option.unwrap(map.update(mut book.calls, key, scoped fn(mut b: Bucket) -> bool { take_credit(mut b, now, c.call_burst, c.call_period_ns) }))
+}
+
+fn policy(take p: Policy) -> () waits {
+    let Policy(from: take from, book: take initial, clock: clock, random: random) = take p
+    let mut book = take initial
+    while let Ok(take ask) = channel.receive(from) {
+        let now = host.mono_ns(clock)
+        let Ask(kind: take kind, reply: take reply) = take ask
+        let answer = match take kind {
+            Open(key) => open_source(mut book, key, now),
+            Hello(key, take token) => bind(mut book, key, take token, now, random),
+            Call(key) => if call_allowed(mut book, key, now) { Allowed } else { RejectedPolicy },
+        }
+        let _ = channel.try_send(reply, take answer)
+    }
+}
+
+pub fn start(tasks: Tasks, clock: Clock, random: Random, config: Config, n_policy: u64) -> Result[(Ingress, Task[()]), Capacity] {
+    if config.buckets_max == 0u64 || config.buckets_max > 8192u64 || config.inbox == 0u64 || config.inbox > 256u64 || config.sessions == 0u64 || config.mint_burst == 0u64 || config.call_burst == 0u64 || config.mint_period_ns == 0u64 || config.call_period_ns == 0u64 || config.mint_burst > 0xffffffffffffffffu64 / config.mint_period_ns || config.call_burst > 0xffffffffffffffffu64 / config.call_period_ns {
+        return Error(Capacity(requested: 1u64, available: 0u64))
+    }
+    let (to, from): (Sender[Ask], Receiver[Ask]) = channel.new(config.inbox)?
+    let p = Policy(from: take from, book: Book(config: config, sources: map.new(), calls: map.new()), clock: clock, random: random)
+    match task.spawn(tasks, bytes n_policy, take p, policy) {
+        Ok(take h) => Ok((Ingress(to: take to), take h)),
+        Error((c, _)) => Error(c),
+    }
+}
+
+fn decide(i: Ingress, take kind: Kind) -> Answer waits {
+    let made: Result[(Sender[Answer], Receiver[Answer]), Capacity] = channel.new(1u64)
+    let (reply, from) = match take made { Ok(take pair) => take pair, Error(_) => return RejectedPolicy }
+    if let Error(_) = channel.try_send(i.to, Ask(kind: take kind, reply: take reply)) { return RejectedPolicy }
+    match channel.receive(from) { Ok(take a) => take a, Error(_) => RejectedPolicy }
+}
+
+pub fn open(i: Ingress, source: Ip) -> Option[Lease] waits {
+    match decide(i, Open(source_key(source))) { Opened(take lease) => Some(take lease), _ => None }
+}
+
+pub fn hello(i: Ingress, source: Ip, take token: Option[Bytes]) -> Option[Principal] waits {
+    if let Some(b) = token { if !valid_token(b) { return None } }
+    match decide(i, Hello(source_key(source), take token)) { Bound(take p) => Some(take p), _ => None }
+}
+
+pub fn call(i: Ingress, p: Principal) -> bool waits {
+    match decide(i, Call(result.unwrap(clone(p.token)))) { Allowed => true, _ => false }
+}
+
+pub fn law_limits(random: Random) -> bool {
+    let mut c = defaults()
+    c.buckets_max = 2u64
+    c.sessions = 2u64
+    let mut book = Book(config: c, sources: map.new(), calls: map.new())
+    let source = source_key(V4(0x7f000001u32))
+    let a = match open_source(mut book, source, 0u64) { Opened(take l) => take l, _ => return false }
+    let b = match open_source(mut book, source, 0u64) { Opened(take l) => take l, _ => return false }
+    if let RejectedPolicy = open_source(mut book, source, 600000000000u64) {} else { return false }
+    let _ = take a
+    let returned = match open_source(mut book, source, 600000000000u64) { Opened(take l) => take l, _ => return false }
+    for _ in 0u64 .. 10u64 {
+        if let Bound(_) = bind(mut book, source, None, 600000000000u64, random) {} else { return false }
+    }
+    if let RejectedPolicy = bind(mut book, source, None, 600000000000u64, random) {} else { return false }
+    if let RejectedPolicy = bind(mut book, source, Some(list.new()), 600000000000u64, random) {} else { return false }
+    if let Bound(_) = bind(mut book, source, None, 606000000000u64, random) {} else { return false }
+    true
+}
+
+pub fn law_rates_and_expiry() -> bool {
+    let mut c = defaults()
+    c.buckets_max = 2u64
+    let mut book = Book(config: c, sources: map.new(), calls: map.new())
+    let a = source_key(V4(1u32))
+    let b = source_key(V4(2u32))
+    let other = source_key(V4(3u32))
+    for _ in 0u64 .. 40u64 { if !call_allowed(mut book, a, 0u64) { return false } }
+    if call_allowed(mut book, a, 0u64) { return false }
+    if !call_allowed(mut book, b, 0u64) { return false }
+    if call_allowed(mut book, other, 0u64) { return false }
+    // Only b is full here. Inserting another key must not erase a's debt.
+    if !call_allowed(mut book, other, 50000000u64) { return false }
+    if !call_allowed(mut book, a, 50000000u64) { return false }
+    if call_allowed(mut book, a, 50000000u64) { return false }
+    if map.len(book.calls) != 2u64 { return false }
+    // Backwards arrivals cannot refund credit or move a bucket's clock back.
+    if call_allowed(mut book, a, 0u64) { return false }
+    for _ in 0u64 .. 40u64 { if !call_allowed(mut book, a, 2050000000u64) { return false } }
+    !call_allowed(mut book, a, 2050000000u64)
+}
+
+pub fn law_reply_isolated(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut c = defaults()
+    c.call_period_ns = 60000000000u64
+    let (i, take handle) = result.unwrap(start(tasks, clock, random, c, 1048576u64))
+    let mut h = take handle
+    let a = match hello(i, V4(1u32), None) { Some(take p) => take p, _ => return false }
+    let token: Bytes = result.unwrap(clone(principal(a)))
+    let b = match hello(i, V4(2u32), Some(take token)) { Some(take p) => take p, _ => return false }
+    let same = principal(a) == principal(b)
+    let mut allowed = true
+    for _ in 0u64 .. 20u64 { allowed = call(i, a) && call(i, b) && allowed }
+    let denied = !call(i, a)
+    task.cancel(mut h)
+    let _ = task.join(take h)
+    same && allowed && denied
+}
+
+@test
+fn test_ingress(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_limits(random) && law_rates_and_expiry() && law_reply_isolated(tasks, clock, random) { Ok(()) } else { Error(()) }
+}

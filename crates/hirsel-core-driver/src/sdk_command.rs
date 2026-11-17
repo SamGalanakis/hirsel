@@ -148,6 +148,10 @@ pub fn frame_schema(
                     "store",
                     include_str!("../../../core/programs/store/store.hirsel"),
                 ),
+                (
+                    "ingress",
+                    include_str!("../../../core/programs/store/ingress.hirsel"),
+                ),
             ][..],
             vec![core.clone(), std.clone()],
             false,

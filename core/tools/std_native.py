@@ -242,7 +242,7 @@ def manifest(root, case, adapted):
     if case.package == 'store':
         packages.append({'package': {'name': 'store', 'version': '1'}, 'dependencies': [core, std],
                          'sources': [{'file': str(root / 'core/programs/store' / (name + '.hirsel')),
-                                      'modules': [name], 'signatures': False} for name in ['runner', 'store']]})
+                                      'modules': [name], 'signatures': False} for name in ['runner', 'store', 'ingress']]})
     files = next(p['sources'] for p in packages if p['package']['name'] == case.package)
     if case.test_of:
         original = next(f for f in files if f['modules'] == [case.test_of])

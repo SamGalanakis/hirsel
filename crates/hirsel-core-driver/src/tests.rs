@@ -72,6 +72,7 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
         dependencies: vec![package("core"), package("std")],
         sources: [
             ("core/programs/store/store.hirsel", "store"),
+            ("core/programs/store/ingress.hirsel", "ingress"),
             ("core/programs/store/runner.hirsel", "runner"),
             (
                 "crates/hirsel-core-driver/src/testdata/runner_launch.hirsel",

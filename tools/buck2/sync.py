@@ -753,7 +753,7 @@ def first_party(meta: dict) -> str:
                                   "--compiler", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel",
                                   "--node", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/node"],
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "sdk/client/*.ts", "core/tools/std_native.py", "core/tools/std_native_owners.json"]) + ["crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "sdk/client/*.ts", "core/tools/std_native.py", "core/tools/std_native_owners.json"]) + ["crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel", "core/programs/store/ingress.hirsel"]')))
     # CONC-10 event order: the evaluator against native cranelift under the poll recorder's FIFO choice.
     out.append("\n" + call("hirsel_script_test", name="core-event-order", script="crates/hirsel-core-rt/test-event-order.py", full=False,
                             host=True,

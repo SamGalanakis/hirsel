@@ -255,3 +255,26 @@ once. At most sixteen refusal tasks each reserve 16384 working bytes and a
 320-byte record. The shared ingress task and its bounded tables have their own
 caller-supplied reservation. Logical reservations, live charge, virtual stacks and RSS are different
 quantities.
+
+**Operating a place (RUNNER-SPEC v2.15 §12; specified, not built).**
+`operate(config, stop, status, watch)` owns a place from store open to store close.
+It supervises a head task (store, activation, publisher), a serve supervisor
+with one acceptor child, and the sessions. It publishes
+`Starting(Recovering | Activating | Publishing | Listening)`, then `Ready`, then
+`Draining` to one `Latest[Status]` root, which any number of readers read
+without waiting. It publishes `Ready` only after the activation commit, the
+publisher's first base and the bound listener, and starts accepting only after
+`Ready`. A stop request starts the drain with one absolute deadline,
+D = stop + `grace_ms`. Readiness is withdrawn at once, and admission closes at
+min(stop + `lag_ms`, D): the acceptor is cancelled, so the listener refuses.
+After that, a new send is `Refused(Overloaded)`, and so is a head FIFO entry
+that was never admitted. Admitted work runs to its reply, and then the head
+closes the store. At D, every owed send is `Abandoned`, the head is cancelled,
+and the store is left at a crash cut for recovery. The result is `Stopped` or
+`Forced(n)`. The place serves `GET /hirsel/status`, a raw route that answers 200
+only when `Ready`, with the launch identity and `release_digest`.
+`runner.fixture` starts a place through `operate` on a memory or temporary
+store, with typed calls whose replies are durable, `seen_at` for the first
+batch at or after a version, relative bounds on the place's clock, and release
+of every resource on `end` or on drop. It runs natively until the evaluator's model
+network provider (W8a) lands.

@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.14: entries, calls, sessions and subscriptions of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.15: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,29 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.15 (operating a place: lifecycle, release manifest and preview, the place fixture; gap study 1117 items 1, 2 and 5)
+
+v2.15 adds §12 for gap study 1117's items 1, 2 and 5 (/workspace/code/hirsel-briefs/gap-study-1117/GAPS.md). Item 6, keyset pages, is a store read and is in STORE-SPEC v2.25. Each rule extends a v2.14 rule and reopens none. The slice plan is /workspace/code/hirsel-briefs/service-ops-1127/SLICES.md. Text only: no model was re-run. `calls25_model.py`'s `drain` scenario is planned with slice O1. v2.14 is this file at 8f15cd57.
+
+| # | Item | Decision | What v2.15 says | Basis |
+|---|---|---|---|---|
+| 1 | One lifecycle owner | **NEW** | `runner.operate` owns store open, activation, publisher, listener, drain and close, publishes `Starting(step)`, `Ready` and `Draining` to one `Latest[Status]` root, and supervises the head, the serve supervisor and its acceptor as separate tasks (§12.1). | GAPS #1 |
+| 2 | Readiness | **DECIDED: a status route on the place's listener** | `GET /hirsel/status`, a raw route that reads the `Latest[Status]`: 200 in `Ready`, 503 in `Draining`; no connection is accepted before `Ready`. The supervisor-channel option is NOT TAKEN as the outside read, because every outside reader speaks HTTP probes and a channel would need a second outside protocol. | §12.1; http.md §6 |
+| 3 | The drain | **EXTENDS V1 and V3** | One absolute deadline D = stop + `grace_ms`, shared with std.http's stop (http.md HTTP-1 "Stopping", added in v2.15). Admission closes at min(stop + `lag_ms`, D). After `Close`, a send the session does not hold and a FIFO entry never admitted are `Refused(Overloaded)`; admitted work runs to its reply; at D each owed send is `Abandoned` and the store is left for recovery. | §12.1; rule 5 |
+| 4 | The stop source | **PROPOSED, Sam's call** | `host.stopped(p: Process)`: the first SIGTERM or SIGINT, through the replay point. | §12.4 |
+| 5 | Manifest | **NEW; extends D1** | Written by `hirsel build --manifest`, from the preview launch with an empty old list, so there is no second entry list and no second hash. | §12.2; launch.md |
+| 6 | Preview | **NEW** | The new executable answers the old entry list with the session's own `Placed` function. Schema readiness is reported as unknown. It is advisory (ENDSTATE: no deploy gate). | §12.2 |
+| 7 | Confirmation | **NEW** | `hirsel confirm` reads the status route and compares the identity and `release_digest`. | §12.2 |
+| 8 | Fixture | **NEW** | `runner.fixture` runs `operate` over the wire path, with typed calls, durable replies, `seen_at`, relative bounds on the place's clock and full release. It is native-only until W8a. | §12.3; DECISIONS 2026-11-17 |
+| 9 | Laws | **NEW L26–L35** | §8. | — |
+
+**Decision log.**
+- **Readiness (item 2).** Candidates: (a) a raw HTTP status route that reads `operate`'s `Latest[Status]`; (b) a supervisor channel (a local socket or pipe that the supervisor reads); (c) both, as two equal sources. (c) is NOT TAKEN: two sources for one fact can disagree. (b) is NOT TAKEN: its readers (proxy, supervisor, `confirm`) are outside the process and already speak HTTP probes, and (b) needs a second listener and grant. Its strongest case is that it works before std.http serves the place. That is build order, so it decides the slice order and not the design. (a) is TAKEN.
+- **Drain answers (item 3).** Candidates: (a) `Refused(Overloaded)`; (b) a new `Refused(Draining)` with tag 8; (c) close the session at once, with no answers. (c) breaks rule 5: owed sends would get no Outcome. (b) asks the client for the same action as (a) and changes frozen tags. (a) is TAKEN.
+- **Forced exit (item 3).** Candidates: (a) cancel and leave the store to recovery; (b) wait without bound for `durable`; (c) call `store.close` after cancelling. (b) has no bound, and (c) waits on journal acks past D. (a) is TAKEN: recovery already covers every cut (L1, H4).
+
+**Prior art (v2.15).** See §11's new rows.
 
 ## CHANGES-v2.14 (teardown retires a session's subscriptions without waiting; the retirement mark; ATTACK R4 on HTTP Part A, DECISIONS 2026-11-17 "HTTP Part A closure check")
 
@@ -712,7 +735,8 @@ Each law sits in the runner's law suite, beside STORE-SPEC §5's. Each runs agai
 
 **Status values:**
 - **MODEL**: checked by a v2.2 model, with the mutant named;
-- **UNTESTED**: no model reaches it yet; the harness and slice that will test it are named.
+- **UNTESTED**: no model reaches it yet; the harness and slice that will test it are named;
+- **PLANNED** (v2.15): specified with its mutants for the named slice of service-ops-1127/SLICES.md; nothing is built or run.
 
 | Law | Wrong implementation it catches | Oracle | Model check and mutant | Status |
 |---|---|---|---|---|
@@ -740,6 +764,16 @@ Each law sits in the runner's law suite, beside STORE-SPEC §5's. Each runs agai
 | L25 (v2.14, `retired_without_waiting`): a marked session's end performs no wait on the publisher, and after the next message the publisher takes, that session's subscriptions, ledger, waiting `Told`s and mark are released. This holds for a normal end, a failure and a cancellation. A live session, marked or not, is unchanged by every sweep | `retire_waits_for_slot` (the end `send`s a notice on `PubIn` and waits for a slot); `sweep_skipped_when_quiet` (the publisher sweeps only after a `Released`); `sweep_retires_live` (the sweep reads `Empty` as an end); `no_joiner_wake` (only the session's own end code offers a `Drained`) | **Retained bytes:** the runner's retained bytes (L20's charge checkpoint). The baseline is read after one warm-up marked session has joined, subscribed, ended and been retired, so collection storage the publisher keeps after removal is in both figures. The figure after the measured end must equal the baseline. **The case:** a live marked session L subscribes and receives one round (commit c1). A marked test session M subscribes one sub to a table, takes its initial Batch, then ends normally, by a fault, or by cancellation. Each end runs in two cases. **(a)** `PubIn` is empty at the end, so the wake is taken. **(b)** `PubIn` is full at the end: an unmarked filler session has filled it with Subscribe and Unsubscribe traffic, and M's last Subscribe (sub 2) is queued behind that traffic. So M's wake is dropped. Then the filler stops, holding no sub, and the publisher takes what is queued. No `Released` is sent between M's end and the read. Then commit c2 is made, and L must receive it as a round. **Red signals,** with the order read from the event log, not a clock: in (b), no publisher take falls between M's first ending step and M's task end (`retire_waits_for_slot` puts one there); the figure equals the baseline in (a) (`sweep_skipped_when_quiet`, and `no_joiner_wake` on the fault and cancel ends); L gets c2 (`sweep_retires_live` retired it at its first sweep); and sub 2 is taken after the retiring sweep and registers nothing. | — (no model has a session end) | **RUN** (built in 4b9aea33: runner.hirsel `retired_without_waiting`, evaluator, Cranelift and LLVM; all four mutants CAUGHT). The oracle as built is state, not retained bytes: M's event channel Closed after one quiet message, the Board's subs, Joiners and waiting answers after one sweep, and `Drained` counts around `join_marked` (followups.md 2026-11-17). http.md L9p (H8) is the HTTP group's and the one-shot read's case of the same law |
 | L22 (v2.12, `subscribe_order`): a Subscribe's initial result is at the version of the last `Released` taken before its `Subscribed`, and every later Release reaches it as a G2 round | `subscribe_past_queue` (the Subscribe reads one queued Release past its place before it runs: the inbox form of subs_main's Board-level `subscribe_at_latest`, renamed because that name was taken); `second_receiver` (built as a publisher that reads one queued message ahead when it takes a Release, and handles a Subscribe found there before the Release: a text mutant cannot add a second `Sender` to every session) | a session sends one Subscribe while a commit's Release is queued ahead of it, and another while one is queued behind it. The first sees the commit in its initial Batch, and the second sees it as a round. As built, one case covers both clauses: the real publisher loop runs inline on a pre-filled mailbox (Joined, c1's Release, Subscribe sub 1, c2's Release, Halt). | — | **RUN** (built in 1aabda56, `subscribe_past_queue`; a96d5167, `second_receiver`) |
 | L15 (new in v2.5): every send gets exactly one Outcome (rule 5). At most one: no row reaches a client for a send it already has an Outcome for. At least one: a send whose session stays up is answered. Each send is answered at its own deadline, never later. | forward every head frame (R0 at 4a7fe8a9; `late_completion_resent`); one row for two joined sends (`one_for_joined`); a joined deadline moved to the latest send's (`latest_deadline`, bdf27482); joins outside the slot account (`join_outside_account`) | the client's count per `(stream, p)`: sends, rows, sends lost at a session end; the wall clock for deadline order | C9: `late_completion_resent` (`abandoned_no_resend`), `one_for_joined` (`same_session_double_send`, at least once) CAUGHT. C6b: `join_outside_account` (`join_overflow`) CAUGHT. subs25 K8: `outcome_repeated` CAUGHT. `latest_deadline`: no model has a clock. | MODEL, except deadline order. R1 cases: 1033's `drive_one_outcome_per_send`; send A (`deadline_ms` 2) then send B (50) of one position on a held head, A's `Abandoned` first and before B's deadline; q = 0, two sends of one held position, the second `Refused(Overloaded)`. |
+| L26 (v2.15, `ready_after_activation`): no connection is accepted and no `Ready` is sent before the activation commit, the publisher's first base and the bound listener; a failure in any step returns its `StartError` with every earlier resource released and no `Ready` ever sent; a stop during any step publishes `Draining`, never `Ready`, and `operate` returns by D with every resource released | `ready_before_activation` (Ready sent when `handles` returns, before step 3's commit: a confirmation passes against a place whose activation a crash then loses); `accept_before_ready` (the accept loop starts at bind); `leak_on_listen_error` (a `Listen` error returns with the publisher task still running); `serve_after_start_stop` (a stop during `Recovering` is taken only after `Ready`, so the place accepts and then drains) | the `watch` sequence, checked against the store version that holds the new `current` row (read back after a reopen); the runtime's live task count before and after (L4's counters); `host.listen` on the same port | — | **PLANNED** (slice O1) |
+| L27 (v2.15, `drain_answers_once`): from `Close` to the end of the drain, every send gets exactly one Outcome (rule 5): a send the session did not hold is `Refused(Overloaded)` with nothing recorded; a position that reached `admit` is answered by its run; a FIFO entry never admitted is `Refused(Overloaded)`; a join with an equal digest gets the worker's answer | `drop_fifo_silently` (FIFO entries are dropped at `Close`: their sends wait to their own deadlines and get `Abandoned`, so a request that never ran looks in doubt); `refuse_admitted` (an admitted position is answered `Overloaded` while its body still commits: a re-send at another place gets `Duplicate` of a reply the client was told was refused); `refuse_join` (a join of a held position is refused, so that send's reply goes to no one) | the store's streams rows and data, read after reopen: for each send answered `Overloaded`, there is no reply row and no effect at its p, unless another send of p was answered with that reply | `calls25_model.py` gains a `drain` scenario with these three mutants | **PLANNED** (slice O1; model run in O1) |
+| L28 (v2.15, `one_drain_deadline`): with a body that holds the head past D, every owed send is answered by D (`Abandoned` where nothing else came), `operate` returns `Forced(n)` with n equal to the number of those `Abandoned`, every task is joined, and the next open re-runs the position once (H4) | `own_deadline_only` (a send keeps its own later deadline, so the process waits past D); `second_deadline` (std.http's stop takes its own deadline instead of D); `close_on_force` (the forced path calls `store.close`, which waits for journal acks past D) | the clock: the last Outcome's time ≤ D; the reopened store's streams row and effect count | — | **PLANNED** (slice O1; the HTTP half with O3) |
+| L29 (v2.15, `stop_replayed`): a run that takes a stop while a call is in flight replays with the same Outcomes, the same D and the same `Ended` | `stop_unrecorded` (the stop source bypasses the replay point, so the replay never drains); `deadline_from_wall` (D taken from `host.wall_ms`) | `hirsel replay` of the recorded tape against the original run's frames | — | **PLANNED** (slice O2) |
+| L30 (v2.15, `status_route`): the route answers 200 only in `Ready`, 503 with the phase otherwise, its fields equal the launch identity and `release_digest` of the registry, and it records nothing and takes no ingress token | `ready_while_draining` (the route reads a phase cached at `Ready`); `route_through_ingress` (the probe spends a session token, so a busy place reports not-ready) | hand-derived JSON for a fixed place; the store version before and after 100 probes | — | **PLANNED** (slice O3) |
+| L31 (v2.15, `preview_is_placed`): for every entry of an old release, the preview's answer equals the `Placed` answer a live session of the new release gives to a Hello naming that entry; new entries are exactly the new keys absent from the old list | `preview_own_matcher` (the preview compares keys itself, so it says `Ready` for an entry whose E changed, where the session says `Gone`, which is L10's `key_without_e` case); `new_by_name` (new entries found by identity instead of key) | differential: the same old list sent as a Hello to a fixture of the new release | — | **PLANNED** (slice O4; needs O5's fixture) |
+| L32 (v2.15, `confirm_identity`): `confirm` says `Confirmed` only when the place is `Ready` and every available field equals the manifest's; an empty digest is `Unknown`, never `Different` | `confirm_on_200` (any 200 confirms, so an old release that is ready confirms the new manifest); `empty_is_mismatch` | fixtures of two releases, and a launch with the digest unavailable (launch.md `identity_unavailable`) | — | **PLANNED** (slice O6) |
+| L33 (v2.15, `fixture_releases`): after `end`, and after a drop without `end`, the port can be bound again, the `Temp` subdirectory no longer exists, the test's live task count and retained bytes equal their values before `start`; a `start` past its bound returns `Deadline` and releases the same way | `end_leaks_listener` (the accept loop is not joined, so the port stays bound); `drop_leaves_store` (a drop without `end` keeps the directory's LOCK); `start_deadline_leaks`; `call_waits_past_deadline` (`call` waits for a reply instead of the Outcome row that V1 sends by `deadline_ms`, for an entry that outlasts it) | `host.listen` on the same port; the clock's time of `call`'s return against `deadline_ms`; the directory listing; the runtime's retained-bytes counter (L4's) | — | **PLANNED** (slice O5) |
+| L34 (v2.15, `lag_window`): between the stop and t₀ + `lag_ms`, the phase is `Draining`, and a new connection and a new send are served as in `Ready`. From min(t₀ + `lag_ms`, D) on, the listener refuses and new sends are `Overloaded` | `close_at_stop` (admission closes at t₀, so a proxy that has not polled yet sends to a refusing place); `lag_after_deadline` (admission closes at t₀ + `lag_ms` even when that is after D); **HTTP half (slice O3):** `keepalive_survives_stop` (a keep-alive connection takes a new request after admission closes) | the clock's recorded times of each answer and accept, against t₀, `lag_ms` and D | — | **PLANNED** (slice O1; HTTP half O3) |
+| L35 (v2.15, `manifest_exact`): a manifest's `grants` and `root_limit` equal those of the build that wrote it, for a build with each grant kind, two `--dir`s and two Net rules, and its `release` equals the running place's status `release` | `grants_from_defaults` (the manifest lists the CLI's default grants instead of the build's); `net_rules_dropped` (Net appears without its rules); `release_recomputed` (the driver hashes its own re-encoding of the entry list, which differs from the registry's bytes once an entry's schema bytes are not canonical) | the build command line, canonicalized by hand; the status route of a fixture of the same executable | — | **PLANNED** (slice O4) |
 
 ### 8.1 `calls25_model.py` (RUN; `models/evidence/calls25.txt`)
 
@@ -888,6 +922,8 @@ Each slice is final when it lands, and later slices only add.
 - `calls25_model.py`'s scenarios as the runner's model case, except `upgrade_gone` (R4), with its mutants each still CAUGHT (`gone_refused_at_session` moves to R4).
 - `L7/deadline_held` on the real head: p+1 sent while p is unsent waits in the FIFO; `Abandoned` at its deadline with the slot kept; then p sent and p+1 re-sent runs once. `L7/deadline_hung` as in §8 (v2.7), once core's `bound steps` is built (exec-budget slices).
 
+**v2.15's slices** (O1–O7: lifecycle, stop source, status route, manifest and preview, fixture, confirmation, and STORE-SPEC v2.25's pages) are in /workspace/code/hirsel-briefs/service-ops-1127/SLICES.md, with each slice's laws, mutants, dependencies and land order.
+
 **What no slice may do:** give a send a second Outcome or none (C9, L15); answer a commitless outcome outside V1/V3 (mutant `direct_commitless`); release at a commit version (mutant `release_at_commit_version`); hold a request outside the session's slot table (mutant `queue_outside_account`).
 
 ## 10. Decisions
@@ -921,3 +957,240 @@ Unchanged from v2.1. v2.2 takes no new mechanism from outside. V1's session time
 | breaking schema policy | SpacetimeDB auto_migrate.rs:61-121 | ADAPTED as D2-K |
 | types-only contract | tRPC | NOT TAKEN |
 | per-handler adapter | Hirsel dispatch spool | REPLACED by one adapter per kind |
+| ordered shutdown: drain in-flight requests, then stop workers, with a forced exit after a timeout (v2.15) | Convex crates/local_backend/src/main.rs:217-240 (opened) | ADAPTED as §12.1's drain. The weakness: Convex's force-exit duration is separate from its HTTP drain and is measured from the signal. Here one absolute D serves both. Convex's "preempt" path (a fatal error exits at once) is NOT TAKEN: poison already exits |
+| health route (v2.15) | SpacetimeDB crates/client-api/src/routes/health.rs:9-42 (opened) | ADAPTED as `GET /hirsel/status`. The weakness: it reports node and control-database reachability, not whether this database has activated, so a 200 does not say which code runs. Here the body carries the launch identity and `release_digest`, and 200 means `Ready` only |
+| pre-publish plan (v2.15) | SpacetimeDB crates/cli/src/subcommands/publish.rs:885-970 (opened) | ADAPTED as `hirsel preview`. The weakness: the plan is computed by the server against the live database, so planning needs a write-capable endpoint. Here the new executable answers the old entry list with no store, and schema readiness is said to be unknown instead |
+| evaluate then finish push (v2.15) | Convex npm-packages/convex/src/cli/lib/deploy2.ts:90-100 (opened) | NOT TAKEN: a server-side evaluation step is a rollout service Hirsel does not run. `confirm` reads the outcome instead |
+| test server with explicit Close (v2.15) | Go src/net/http/httptest/server.go:266-290, Close :482 (opened) | ADAPTED as `runner.fixture`. The weakness: `Close` is a method the test must remember to call, and a forgotten one leaks the listener. Here dropping the fixture also cancels and joins its task group, and the durable version is part of each answer |
+| test fixtures (v2.15) | Goose docs/testing.md, "Fixture layout" (opened) | NOT TAKEN: Goose's fixtures are compiler fixtures, inputs and expected outputs for the compiler. It has no runtime fixture that starts a served program, so there is nothing to adapt for §12.3 |
+| release manifest and preview (v2.15) | Goose docs/packages.md §1 "Running and building" and §4 "Publishing" (opened) | NOT TAKEN: Goose pins package versions for a build and publishes a package by a repository tag. It has no record of a deployed program's entries or grants and no upgrade preview, so §12.2 follows SpacetimeDB's pre-publish plan instead |
+| orderly shutdown: send quit messages, then wait (v2.15) | Goose docs/goose_spec.md:4547-4550, `thread_wait` (opened) | ADAPTED as `Close` to every session and the head, then joins. The weakness: Goose's wait has no deadline, so one stuck worker holds the shutdown. Here D bounds it, and cancellation ends the rest |
+
+## 12. Operating a place (new in v2.15)
+
+This section adds what a place needs in order to be run by a supervisor:
+- a lifecycle with readiness and a bounded drain (§12.1);
+- a release manifest with a read-only preview (§12.2, with docs/spec/launch.md "Release manifest" and "Preview launch");
+- a fixture that application tests start a place with (§12.3).
+
+Keyset pages are a store read. They are specified in STORE-SPEC v2.25 §1.5 and in core/std/api/store.md. This section's rules extend §2.1 (V1, V3), §3 and §6, and each extension is marked **extends** where it occurs. No ruling is reopened.
+
+### 12.1 Lifecycle
+
+**One owner.** `runner.operate` owns a place from store open to store close. It replaces the sequence that place programs and the runner's harnesses wire by hand today (`store.open`, `place_head`, `mailbox`, `serve`), so the sequence exists once.
+
+```hirsel
+pub type Step: codec + send = Recovering | Activating | Publishing | Listening
+pub type Phase: codec + send = Starting(Step) | Ready | Draining
+pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, addr: Option[Addr] }
+pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
+pub type Backing: send = Memory | Disk(Dir, String, store.Options) | Temp(Dir)
+pub type PlaceConfig[G: send, H: send]: send {
+    backing: Backing, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
+    handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], granted: G,
+    session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
+    listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
+}
+pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place | HandlesChanged
+pub type Ended: codec + send = Stopped | Forced(u64)
+
+pub fn status_root() -> Result[Latest[Status], Capacity]
+pub fn operate[G: send, H: send](take p: PlaceConfig[G, H], stop: Receiver[()], status: Latest[Status], watch: Option[Sender[Phase]]) -> Result[Ended, StartError] waits
+pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity]
+```
+
+- `operate` refuses `grace_ms = 0` with `Missing("grace_ms")` before it opens anything. A zero bound is a bound that was not given, as in STORE-SPEC W1. Admission closes at min(t₀ + `lag_ms`, D), so a lag that reaches the grace needs no refusal.
+- `Temp(d)` opens a fresh, uniquely named subdirectory of `d`, named from `random`, and removes it after the store is closed or dropped. `Disk` opens the named directory and removes nothing.
+
+**Status.** `digest`, `target` and `n_place` are the launch identity (launch.md). `release` is `release_digest(exported)`, which is SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the value codec's bytes of this registry's `List[Exported]` in registration order. It is empty until activation has committed. The preview child computes `release` with the same function for the manifest (§12.2). `addr` is the bound address, present from `Listening` on.
+
+`status` is a `Latest[Status]` root (CONC-13). The caller makes it with `status_root()`, which holds `Starting(Recovering)` with the launch identity, an empty `release` and no `addr`, so a read before `operate` starts sees the first phase. `operate` is the only task that calls `latest.publish` on it: it publishes a new value at each phase change. Every other holder gets its own handle with `latest.handle`: S passes one to the route, and the fixture keeps one. Readers call `latest.read` and get the newest value. A read never waits and never consumes, so any number of readers see the same newest phase. In one reader's program order, phases never go backwards.
+
+**Waiting for a phase.** A reader that must wait for a phase, rather than sample it, passes `watch`. After each publish, `operate` sends the same `Phase` on it. `operate` publishes at most six phases in its life (four steps, `Ready`, `Draining`), so a `watch` channel of capacity 6 never fills and `operate` never waits on it. A smaller capacity is refused with `Missing("watch")` before anything is opened. A `Closed` watch is ignored. `runner.main` passes `None`; the fixture passes a channel and waits on it (§12.3).
+
+**Tasks.** `operate` runs in the caller's task as the place's supervisor. It waits only on its own inbox, as http.md's supervisor does (HTTP-1). It spawns these children:
+- **The head (H).** It opens the store, so it owns the `Db` (P2: own, not send). It runs `handles` and activation, spawns the publisher as its own child, and then serves its inbox, as `place_head` does today. It sends its progress to `operate`: each step, then `Published(Sender[PubIn])`.
+- **The serve supervisor (S).** It owns the sessions. It spawns one acceptor child (A) that holds the listener and sends `Accepted` to S. Sessions are S's children, not A's, so A can be cancelled without cancelling a session. This is HTTP-1's split of acceptor and supervisor, applied to `runner.serve`.
+- **A stop watcher (W).** It waits on `stop`, then sends `StopRequested` to `operate`.
+- **A drain timer (T).** Spawned at the stop, it sends `AdmissionClose` at min(t₀ + `lag_ms`, D) and `Expired` at D, each with `host.sleep_until`. So `operate`'s timers are events on its inbox like every other.
+
+Each child sends one last message to `operate` before it ends.
+
+**Starting.** The steps run in this order, and `operate` publishes each one before it starts. H runs the steps in lockstep with `operate`: after each of its steps, H sends the step's result and waits on its inbox for `Continue` or `Close`. So a stop during `Starting` is taken between steps (below). A failure in any step returns its `StartError` after the earlier steps' resources are released in reverse order. For the head, that means the head ends: it drops the publisher (cancel and join, CONC-8) and then calls `store.close`.
+
+| Step | Run by | What it waits on | Failure | What a crash in the step leaves |
+|---|---|---|---|---|
+| `Recovering` | H | `store.open` (recovery, STORE-SPEC §3.4) | `Open(Store(e))` | what §3.6 says for that cut; the next open recovers again |
+| `Activating` | H | `handles` twice (rule 12), the activation table's `create_table` on first open, the activation commit (§6 step 3), then the gone-key set | `Open(Place(e))`, `Open(HandlesChanged)` (L14), `Open(Store(e))` | L13's two outcomes, (old previous, old current) or (old current, new); the next open repeats step 3 or writes nothing |
+| `Publishing` | H | the publisher spawned, and its first base taken (the durable version at open) | `Full(c)` | nothing new on disk: activation is already committed, and the next open on the same code writes nothing (§6) |
+| `Listening` | `operate` | `host.listen` on `listen` | `Listen(e)` | as `Publishing` |
+
+**Ready.** After `Listening`, `operate` publishes `Ready` and only then spawns S, so that A's first `accept` follows `Ready`. So no session exists before `Ready`, and `Ready` means that activation has committed for this registry's `release`. A probe that connects between the bind and `Ready` waits in the kernel backlog and is answered after `Ready`.
+
+A failure after the activation commit and before `Ready` leaves the new activation rows on disk, because it happens in `Publishing` or `Listening`. The process never reported `Ready`, so a confirmation fails (§12.2). An operator who rolls back to the old code meets D2-K's rollback row (§6), which is unchanged.
+
+**A stop during `Starting`.** `operate` takes `StopRequested` in any phase. During `Starting`, it fixes D = t₀ + `grace_ms` as below, publishes `Draining`, spawns T, and answers H's next step result with `Close`. Nothing has been accepted yet, so there is nothing to refuse.
+- H ends as a failure in that step ends: it drops the publisher if it spawned one and calls `store.close` if it opened the store. `operate` releases the listener if it bound one, and returns `Ok(Stopped)`.
+- A step still running at D (a long recovery) is not waited for: at `Expired`, `operate` cancels H and joins it. H is cancelled at its next cancellation point inside the step, and the `Db`, if it exists, is dropped without `close` (§1.10, §3.7). `operate` returns `Ok(Forced(0))`.
+- `Ready` is never published after a stop, and S is never spawned.
+
+**The stop input.** `stop` is an ordinary channel. W takes the first `()` on it, or its `Closed`, as the stop request. Who sends it is the caller's choice: `runner.main` connects it to the host stop source (below), and the fixture sends it at its end (§12.3).
+
+**Draining.** `operate` takes `StopRequested` at t₀ (`host.mono_ns`). The drain deadline is D = t₀ + `grace_ms`, absolute, and it is the only deadline of the drain.
+1. **Withdraw readiness.** `operate` publishes `Draining` and spawns T. Until admission closes, sessions and connections are served as before, so a proxy that polls readiness stops routing before anything is refused.
+2. **Close admission** when `operate` receives T's `AdmissionClose`, at min(t₀ + `lag_ms`, D):
+   - `operate` sends `Close(D)` to S and to H's inbox. Both inboxes are bounded and always drained, so each `send` waits for at most one message's handling.
+   - S cancels A and joins it. That drops the listener, and the host then refuses new connections. S then sends `Close(D)` to each session.
+   - Under std.http, the same step is http.md HTTP-1's "Stopping" (v2.15) with deadline D. One D serves both transports.
+3. **Sessions after `Close(D)` (extends V1).**
+   - A send the session does not already hold is answered `Refused(Overloaded)` at once. Nothing is recorded and nothing is forwarded.
+   - A send of a position the session holds is a join (V2), as before, and waits for the head's answer.
+   - A `Subscribe` is answered `Ended(sub, Refused(Overloaded))`.
+   - A compute call in progress in the owner task finishes there under its step bound (P1), and is answered as usual.
+   - A granted call's task keeps running, and its send stays owed.
+   - Every owed send's deadline becomes min(its own, D).
+   - `Overloaded` already means "nothing recorded; re-send the same p", which is what a client of a draining place must do, at another instance or after a restart. So no Refusal tag is added, and frame-vectors.json is unchanged.
+4. **The head after `Close` (extends V3).**
+   - A running worker keeps running. Its group commits, waits on `durable` and is released as H2–H3 say.
+   - A request in a stream's FIFO that was never admitted is answered `Refused(Overloaded)` as V3, in a snapshot-less Release.
+   - A request taken after `Close` is answered the same way, unless it joins a running worker with an equal request digest (H1). Then it waits for that worker.
+   - Nothing that reached `admit` is answered by the drain.
+   - When the head holds no worker and no FIFO entry, it sends `Settled` to `operate` and keeps serving its inbox, which can only bring more `Overloaded` answers or joins.
+5. **Sessions end.** A session that owes no send ends. A WebSocket session closes with 1001 (going away). Its subscriptions end with it through its one end path (v2.14: `Left` or the mark), and no `Ended` is sent for them; the client re-subscribes elsewhere. S joins each session as it ends, and once it has none it sends `Done(0)` to `operate` and ends.
+6. **Finish.** When `operate` holds `Settled` and S's `Done`, it sends `Finish` to H. H sends `Halt` to the publisher, joins it, calls `store.close` and ends. Sessions are gone before `Halt`, so every Release the head made has reached its sessions. `operate` joins W, T, S and H, and returns `Ok(Stopped)`.
+
+**At D (extends V1).**
+- Each session answers every send it still owes `Abandoned`, by V1's timer rule, closes with 1001 and ends. S sends `Done(n)`, where n is the number of sends its sessions answered `Abandoned` at D, and ends.
+- `operate` then cancels H, if H has not ended, and joins it.
+  - H is cancelled at its next cancellation point (CONC-7). That is the `durable` wait, an inbox `receive`, or the end of a running body. A running body ends by its step bound `s` (D5), so the join waits at most one body's step bound plus the shielded joins of the store's tasks (STORE-SPEC §1.10).
+  - H's cleanup cancels and joins the publisher (CONC-8). It drops the `Db` without `close`: §1.10 "Drop without close" and §3.7 leave the store at the crash cut of that moment, and the next open recovers it (§3.6).
+  - An admitted, unreplied position comes back as `Abandoned` and runs again (H4).
+- `operate` returns `Ok(Forced(n))`. So a forced exit adds nothing that L1 and H4 do not already cover.
+
+**Poison** is unchanged: if `durable` returns an error, the head answers nothing and the process exits, in any phase.
+
+**What a crash leaves at each point.** A crash in `Ready`, or in `Draining` before or after `Close`, is the crash L1 already covers: every Outcome a client saw that reports a commit is durable, and every other position is re-sent and answered. The drain writes nothing of its own, so it adds no cut.
+
+**Replay.** The stop request is a channel receive. t₀ and every deadline come from `host.mono_ns`. Both are events at the replay point (CONC-10, CAP-8). The host stop source is a provider result (below). So a replay takes the stop at the same point, reaches the same D and records the same answers.
+
+**The host stop source** is a new host operation, and Sam's call (§12.4).
+- `host.stopped(p: Process) waits` returns once the process has received its first SIGTERM or SIGINT.
+- It is a cancellation point at its entry and while it waits. Its completion passes the replay point at issue and at delivery (CAP-8).
+- The runtime installs the handler only when the program holds `Process`. A program without it keeps the default action, which ends the process as a crash cut.
+- A second SIGTERM or SIGINT after the first ends the process at once, also as a crash cut.
+- `runner.main` spawns one task that calls `host.stopped` and then drops the stop `Sender`, so W reads `Closed`.
+- `main` returns `Ok(())` for `Stopped`. For `Forced(n)` and for a `StartError` it writes one stderr line and returns `Error(Exit(status: 1u8))`. The line is `place: forced at the drain deadline, n sends abandoned`, or the error.
+
+**Readiness is read through a status route on the place's own listener.** The place serves `GET /hirsel/status` as a raw route (HTTP-11), beside `GET /hirsel` (http.md §6).
+- The handler calls `latest.read(status)`. It answers 200 when the phase is `Ready` and 503 when it is `Draining`.
+- The body is one JSON object, with its keys in this order:
+  - `phase`: `"ready"` or `"draining"`;
+  - `digest`: lowercase hex, empty when unavailable;
+  - `target`;
+  - `n_place`;
+  - `release`: lowercase hex.
+- No connection is accepted before `Ready`, so the route never sees `Starting`. The route records nothing and admits nothing. It is answered before the place's ingress policy, which admits sessions only.
+
+**Why the route, and not a supervisor channel:**
+- The readers of readiness are outside the process: the proxy that routes to the place, the supervisor that restarts it, and the release confirmation in §12.2. Each of them already speaks an HTTP probe. A supervisor channel would need a second protocol that reaches outside the process for the same fact: a control socket, so a second listener and a second grant.
+- Every served place already has the raw route path, so the status route is a second route of a kind the place already serves.
+- A probe that crosses the listener also shows that the listener accepts, which a side channel cannot show.
+- The in-process source still exists: it is `status`, the one record of the phase. The route renders it, and the fixture reads it.
+
+**What a reader sees.** Before the bind, a probe sees a refused connection. Between the bind and `Ready`, it waits in the backlog and then gets 200. From `Draining` until admission closes, it gets 503 `"draining"`. After admission closes, it sees a refused connection again. So "not ready" is either a 503 or a refused connection, and only `Ready` is ever a 200.
+
+**Until std.http serves the place,** the place listens through `runner.serve`'s WebSocket accept path, which has no router. In that interval, the lifecycle and its `Latest` are built and tested in process (§12.3), and the route is built with http.md §6's cutover. That is build order, and SLICES.md records it.
+
+### 12.2 Release manifest and preview
+
+**The manifest** is the release's record. `hirsel build --manifest PATH` writes it after it links the executable. It runs the built executable once in the preview launch with an empty old list (launch.md), through the same `describe_child` helper, with the same deadline and bound. So:
+- the entry list and `release` come from running `place` inside the executable, and from nowhere else;
+- `release` has one implementation, `runner.release_digest`.
+
+That **extends D1** ("it runs `place`") to the manifest: there is no second entry list. The manifest's contents and encoding are in launch.md "Release manifest": the executable's digest and target, `n_place`, the exported entries, `release`, the exact grants and the root limit.
+
+**The preview** is read-only. `hirsel preview --exe NEW NEW.manifest OLD.manifest` compares the release to be run with the running one.
+- It refuses an executable whose launch digest differs from NEW's (launch.md).
+- It runs NEW in the preview launch mode, which opens no store and no listener.
+- The child runs `place` and answers each of OLD's exported entries with **the session's own answer to a Hello `Want`**. That code is extracted from the session's `Placed` path (runner.hirsel, the `Placed(take answer)` arm) as `answer_want`, and the session calls it after the change. So the two cannot differ. The answers are:
+  - `Ready`: unchanged;
+  - `Resolve`: resolvable. When R4 builds `Resolve`, the preview gains it with no change;
+  - `Gone`: gone, so a client that holds it gets `Gone` + `Upgrade`.
+- Entries of NEW whose key matches no entry of OLD are new.
+- The preview also reports changed grants (a set difference of the canonical grant strings), and a changed target, root limit or `n_place`.
+- It reports **schema readiness: unknown**. Entry compatibility is not schema readiness. Under D2-K, a changed row schema can make the new `handles` fail with `Schema` at open, and only the target store's catalog can say whether it will. That catalog belongs to the running place, which holds the store. A catalog-aware preview needs a read-only catalog view from another process, which does not exist, so the preview says unknown and never guesses.
+- The preview gates nothing (ENDSTATE: "trials and diffs are tools"). It exits 0 whatever it finds. It exits 2 only when it cannot answer: a child error, a timeout or an unreadable manifest.
+
+**"The running release"** is the manifest whose identity the running place confirms. The preview compares two manifest files, and the confirmation below ties OLD.manifest to what is running, so no second remote read is needed.
+
+**Confirmation through readiness.** `hirsel confirm MANIFEST ADDR` sends `GET /hirsel/status` to ADDR under an absolute deadline: 10 s by default, set by `--confirm-timeout`. The answer is one of these:
+- `Confirmed`: the phase is `Ready`, and `digest`, `target`, `n_place` and `release` all equal the manifest's;
+- `NotReady(phase)` for a 503, or not listening for a refused connection;
+- `Different(fields)`: `Ready`, with at least one available field that differs;
+- `Unknown`: `Ready`, with an empty digest on either side (launch.md, "identity unavailable") and the other fields equal. An unavailable identity is never reported as a mismatch.
+
+`confirm` exits 0 only for `Confirmed`. A supervisor publishes a release with its own tools, then runs `confirm` until it gets `Confirmed` or its own deadline passes. Hirsel runs no rollout.
+
+### 12.3 Place fixture for application tests
+
+`runner.fixture` starts a place in a test with the application's real `place` and `handles`, through `operate`. A test therefore runs the same lifecycle, sessions, head and publisher that production runs. It runs them over the wire path on the granted `Net`, never through the in-process seam (DECISIONS 2026-11-17, "W3e waits on W8a").
+
+```hirsel
+pub type FixtureError: send = Start(StartError) | Deadline(u64) | Full(Capacity)
+pub type CallError: send = Deadline(u64) | Closed | Protocol(String) | Decode(std.codec.DecodeError) | Full(Capacity)
+pub type Answer[R] = Returned(R) | Failed(Fault) | Refused(Refusal) | Abandoned
+pub type Replied[R] { answer: Answer[R], version: u64 }
+pub type Seen { version: u64, rows: List[Row] }
+
+pub opaque type Fixture: send
+pub opaque type Caller: send
+pub opaque type Callee[A, R]: shareable + send
+
+pub fn start[G: send, H: send](take p: PlaceConfig[G, H], within_ms: u64) -> Result[Fixture, FixtureError] waits
+pub fn compute_entry[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R]
+pub fn transact_entry[H, A, R, E](f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]]
+pub fn query_entry[H, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]]) -> Callee[A, Cover]
+pub fn caller(f: Fixture, within_ms: u64) -> Result[Caller, CallError] waits
+pub fn call[A: codec, R: codec](mut c: Caller, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits
+pub fn subscribe[A: codec](mut c: Caller, e: Callee[A, Cover], take a: A, within_ms: u64) -> Result[u32, CallError] waits
+pub fn seen_at(mut c: Caller, sub: u32, version: u64, within_ms: u64) -> Result[Seen, CallError] waits
+pub fn status(f: Fixture) -> Status
+pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
+```
+
+**Time.** Every bound is relative and measured on the `Clock` in the fixture's `PlaceConfig` (`host.mono_ns`), as the wire `Call`'s `deadline_ms` is. A wait that reaches its bound is `Deadline(bound)`.
+
+**Start.** `start` requires the backing to be `Memory` or `Temp` and `listen` to be 127.0.0.1 port 0. It refuses anything else with `Start(Missing("backing"))` or `Start(Missing("listen"))`.
+- It makes the root with `status_root()` and a `watch` channel of capacity 6, spawns `operate` in its own task group, and receives on `watch` until `Ready`. The fixture keeps a handle to the root for `status`.
+- A `StartError` is returned as `Start(e)`.
+- If `within_ms` passes first, the result is `Deadline(within_ms)`. It is returned after the fixture has stopped `operate` and released everything it made.
+
+**Typed calls.**
+- `compute_entry`, `transact_entry` and `query_entry` compute the entry's key with the function registration uses: identity and the two fingerprints. So a typed `Callee` cannot name another key.
+- Granted entries have no constructor. A wire client cannot call one: a Hello names entries for `Call` and `Subscribe` only.
+- `caller` connects one wire client to `status.addr`, with a `Hello` that lists the fixture's entries, and owns one stream.
+- `call` assigns the next position by WIRE's client rules (P1–P3). It encodes `a` and sends one `Call` with `deadline_ms`. It returns when that send's Outcome row arrives, and V1 makes the place answer by `deadline_ms` (`Abandoned` at the latest). A transact `Returned` is decoded as `Result[R, E]`. A broken connection is `Closed`.
+
+**A durable reply.** `Replied.version` is the version of the Batch that carried the Outcome. By V4, a reply that reports a commit is released only after `durable`, so a `Replied` that `call` returns is already durable at that version. Nothing extra waits.
+
+**The batch at or after a version.** `seen_at(c, sub, v, within_ms)` returns the subscription's full row set as of the first Batch at a version ≥ v. That is L6+L7's count form. It applies Batches in order, as the client cache does. A subscription that is `Ended` gives `Closed`.
+
+**End.** `end` sends the stop and waits for `operate`'s `Ended`. It closes every `Caller` it made, and `operate` removes the `Temp` subdirectory. It returns `Ended`. If `within_ms` passes, the result is `Deadline(within_ms)`, returned after the group is cancelled and joined. **Dropping a `Fixture` without `end`** cancels and joins its task group (CONC-8). That drops the listener and the `Db` (a crash cut, §1.10), and `operate`'s cleanup removes the `Temp` subdirectory. Every resource the fixture made is released on either path.
+
+**Grants.** A test that uses the fixture needs `Net` (listen and connect on 127.0.0.1), `Tasks`, `Clock` and `Random`, plus `Dir` for `Temp`. It receives them as ordinary capability parameters (PROG-4) and places them in `PlaceConfig`.
+
+**Engines.** The fixture runs on Cranelift and LLVM. The evaluator has no socket model (DECISIONS 2026-11-17, "W3e waits on W8a"). When W8a's model network provider becomes the evaluator's provider, the fixture runs there unchanged. That provider is also how a test gets a controlled network and clock.
+
+**The runner's own harness.** `runner_calls.hirsel`'s `served` and `served_on` drive the head through the in-process seam, so that the evaluator keeps runner-law coverage. They move onto the fixture when W3e deletes the seam, which waits on W8a. Until then the two exist for different reasons, and no third harness is added.
+
+### 12.4 Calls this section makes
+
+- **The host stop source (Sam's call).** It changes what `--grant Process` means at the command line.
+  - **Recommended:** `host.stopped(p: Process)`, under the existing `Process` capability. `Process` has no operations in v1, and the end of one's own process is process authority.
+  - **The /wholehog alternative:** a new grant kind, `Signal`, which keeps `Process` for starting children (gap 26). It is not recommended, because it adds a kind for one operation.
+  - **Reversible** until the slice lands: renaming the capability touches one host operation and the grant table.
+- **The status route's contract** (outward-facing: proxies and supervisors will read it). `GET /hirsel/status` with 200/503 and the JSON fields above. Reversible until the route ships in a release.
+- **The new CLI verbs** (outward-facing): `hirsel build --manifest`, `hirsel manifest show`, `hirsel preview` and `hirsel confirm`.
+- **Readiness through the route** is decided here, for the reasons above. Reversible: the route is one raw handler over `status`.
+- **`Overloaded` for drain refusals** is decided here. A `Draining` refusal would append tag 8 and change frame-vectors.json, and it would ask the client for the same action. Reversible until a client needs to tell the two apart.
+- **The manifest from the build** is decided here, and extends D1. Reversible: the manifest is one file that one command writes.

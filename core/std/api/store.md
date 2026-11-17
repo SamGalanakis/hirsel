@@ -56,6 +56,19 @@ returns a Latest root; publication follows the admitted head swap. A refused
 snapshot-record allocation leaves the follower behind until a later publication.
 Closing the writer leaves readers' last snapshots usable.
 
+**Keyset pages (STORE-SPEC v2.25 AI1; specified, not built).**
+`scan_page(s, shape, lo, hi, limits)` and `find_page(s, index, lo, hi, limits)`
+read one bounded page from the same byte cursor as `scan` and `find`.
+`Limits{rows, bytes}` refuses zero with `Missing("rows")` or `Missing("bytes")`.
+A row counts its data-tree key plus its stored value, and a page holds at least
+one row when one remains. `Page{rows, bytes, next}` has `next` = None exactly
+on the last page. `Resume` is `send`, not `codec`. It binds the Snapshot's
+identity, the table or index id, the upper bound and the last row's full
+physical key. `scan_next` and `find_next` resume strictly after that key, so
+index entries with equal keys are neither repeated nor skipped. A different
+Snapshot gives `Moved(version)`, and another incarnation gives `Stale(id)`. The
+law is L36.
+
 The resident account is `62 + r8(key length) + r8(value length)` per live entry,
 exact after each memory commit on main without pins or other branches. An
 overwrite replaces the previous entry's charge and an ordinary main-branch

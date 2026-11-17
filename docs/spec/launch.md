@@ -1,6 +1,6 @@
 # Runner launch modes and identity
 
-The runner has ordinary and describe launch modes. The launcher selects the mode
+The runner has ordinary, describe and preview launch modes (preview: below, v2.15). The launcher selects the mode
 before program code runs. Both modes enter through the program's `main`, which
 calls `runner.main`; describe is the first branch of `runner.main`, before store,
 listener or other capability use. Selecting describe grants no capabilities.
@@ -108,3 +108,73 @@ Laws: `place_run_bounded` kills a looping place at its deadline and observes no
 store or listener; `identity_stable` keeps the launch digest after executable
 replacement; `identity_unavailable` launches with an empty digest and produces
 no mismatch diagnostic when the image is unreadable or evaluation is source-only.
+
+## Release manifest
+
+`hirsel build --manifest PATH` writes the release manifest after it links the
+executable. It runs the built executable's preview launch (below) with an
+empty old list through `describe_child`, with the same absolute deadline and
+allowance. So the entries and `release` come from running `place` inside the
+executable, and from no second list or second hash (RUNNER-SPEC D1, extended in
+v2.15 §12.2). A preview error or timeout writes no manifest and fails the build
+with that error. The manifest is one value of this type, encoded with the
+ordinary value codec:
+
+```hirsel
+type Release: codec + send { describe: Describe, release: Bytes, grants: List[String], root_limit: u64 }
+```
+
+- `describe` is the preview child's `Describe`: digest, target, `n_place` and
+  the exported entries in registration order. `n_place` is the allowance the
+  child ran with. An ordinary launch that selects another `--hirsel-n-place`
+  is a different release identity, and Welcome and the status route report it.
+- `release` is the preview child's `release`, which it computes with
+  `runner.release_digest`: SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the
+  value codec's bytes of the registry's exported list. The driver never hashes
+  the list itself. The running place computes the same function from its
+  registry and reports it on the status route.
+- `grants` is every grant baked into the executable, one canonical string each,
+  sorted bytewise: a kind name as `--grant` takes it (`Clock`, `Random`, …),
+  `Net=` followed by the rule text `--grant` takes, and `Dir=` followed by the
+  path `--dir` took. A directory path stays as given. It is resolved against the
+  working directory at startup, which the manifest does not know.
+- `root_limit` is the executable's root limit.
+
+Grants and the root limit are part of the executable's build key, so a manifest
+describes exactly one executable. Limits the place sets in its own code (`q`,
+`n_session`, `budget` and the others) are covered by the digest.
+`hirsel manifest show PATH` prints a manifest as text.
+
+## Preview launch
+
+`hirsel preview --exe NEW NEW.manifest OLD.manifest` compares two releases
+without a store, a listener or a write grant. It refuses with exit 2 when NEW's
+launch digest differs from NEW.manifest's, or either is unavailable. It then
+runs NEW as a child in preview mode, with the same deadline, kill and reap as
+describe. The child's arguments are the private prefix `--hirsel-preview` and
+`--hirsel-n-place=<bytes>`. It reads OLD's `List[Exported]` on stdin, bounded
+by the allowance. It runs `place` under `n_place` and answers each old entry,
+in OLD's order, with the session's own answer to a Hello `Want`, `answer_want`
+(RUNNER-SPEC §12.2). It writes one `Preview{describe: Describe, release: Bytes,
+answers: List[Entry]}` and exits 0. Its errors are describe's, with the same
+exit 2. With an empty old list it is how `hirsel build --manifest` reads a
+release.
+
+The CLI prints, per old entry, `unchanged` (`Ready`), `resolvable` (`Resolve`)
+or `gone` (`Gone`); then each NEW entry whose key is in no old entry as `new`;
+then the grant strings added and removed, and any change of target, root limit
+or `n_place`; and last `schema: unknown`. The preview cannot read the target
+store's catalog, so it never reports schema readiness as known. It gates
+nothing: it exits 0 whatever the differences are.
+
+`hirsel confirm MANIFEST ADDR` reads `GET /hirsel/status` at ADDR under an
+absolute deadline, 10 seconds by default (`--confirm-timeout`), and prints
+`confirmed`, `not ready: <phase>` (a 503), `not listening`, `different:
+<fields>` or `unknown` (an empty digest on either side, with the other fields
+equal). It exits 0 only for `confirmed` (RUNNER-SPEC §12.2).
+
+Laws: `preview_is_placed` (RUNNER-SPEC L31) checks the preview's answers against
+a live session's `Placed` answers for the same list; `manifest_exact` (L35)
+checks the grants, the root limit and `release`; `confirm_identity` (L32);
+`place_run_bounded` also covers the preview child, which observes no store or
+listener.

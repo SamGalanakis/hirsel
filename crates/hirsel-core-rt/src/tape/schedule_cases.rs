@@ -72,15 +72,12 @@ impl Script {
         }
     }
 }
-unsafe extern "C" fn inert(_: *mut Context, _: *mut u8) -> u8 {
-    0
-}
 fn value<T>(logical: u64) -> ValueLayout {
     ValueLayout {
         bytes: size_of::<T>(),
         align: align_of::<T>(),
         logical,
-        drop: inert,
+        clean: None,
     }
 }
 fn layout<T>() -> TaskLayout {

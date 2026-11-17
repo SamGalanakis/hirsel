@@ -13,16 +13,16 @@ Trailing 4, Schema 5, Value 6; Raised is Overflow 1, Bounds 2, Division 3, Unwra
 Fail 5, Cancelled 6, Capacity 7. A kind added later takes the next unused number.
 
 An entry's key is its `code.identity`, followed by the u64 little-endian
-fingerprints of the argument schema and then the result schema. Registering a key that
+fingerprints of the argument schema and then the result schema. The result is the
+type the `Returned` bytes carry: `Result[R, E]` for a `transact` entry, R for `compute`
+and `granted`, so a change to a transact entry's E alone changes its key. Registering a key that
 is already present returns `AlreadyRegistered(key)` and leaves the registry
 unchanged. Allocation failure while registering returns `Full`. Each register
 function (`compute(mut r, f, n)`, `granted`, `transact`) takes the entry's byte bound n,
 which the slot keeps; n is in neither the key nor `Described`. Each kind has one erased
 adapter. `describe(r, mut out)` appends the codec of `List[Described]`, in
 registration order. Each element holds the kind, the identity, the argument schema
-bytes, the result schema bytes and the error schema bytes: E's schema for a
-`transact` entry, empty for `compute` and `granted`, whose only error is Capacity.
-The error schema is not in the key. Registration order, an
+bytes and the result schema bytes. Registration order, an
 added argument field and a changed result type each change these bytes, and two
 `place` runs in two tasks give equal bytes.
 

@@ -167,8 +167,7 @@ pub fn law_p09_describe() -> bool {
     }
     kinds && d0.identity == code.identity(code.describe(toggle)) && d1.identity == code.identity(code.describe(boom)) &&
         d2.identity == code.identity(code.describe(stamp)) && d0.args == u32s && d0.result == bools &&
-        d1.args == u32s && d1.result == u32s && d2.args == u32s && d2.result == u64s &&
-        list.len(d0.error) == 0u64 && list.len(d2.error) == 0u64
+        d1.args == u32s && d1.result == u32s && d2.args == u32s && d2.result == u64s
 }
 
 // p13: registering a key already present is refused with that key, and the registry
@@ -251,7 +250,7 @@ pub fn law_p15_types_roundtrip() -> bool {
     let mut id: Bytes = list.new()
     result.unwrap(list.push(mut id, 1u8))
     let mut out: Bytes = list.new()
-    let d = runner.Described(kind: Transact, identity: take id, args: u32_arg(1u32), result: list.new(), error: u32_arg(2u32))
+    let d = runner.Described(kind: Transact, identity: take id, args: u32_arg(1u32), result: u32_arg(2u32))
     result.unwrap(std.codec.encode(dc, d, mut out))
     let back = match std.codec.decode(dc, out) {
         Ok(Ok(take x)) => take x,
@@ -261,7 +260,7 @@ pub fn law_p15_types_roundtrip() -> bool {
         Transact => true,
         _ => false,
     }
-    ok && kind && back.identity == d.identity && back.args == d.args && list.len(back.result) == 0u64 && back.error == d.error
+    ok && kind && back.identity == d.identity && back.args == d.args && back.result == d.result
 }
 
 fn place_branching(mut r: Reg) -> Result[(), runner.RegisterError] {

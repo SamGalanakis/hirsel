@@ -113,7 +113,8 @@ fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
 
 const N_PLACE: u64 = 1048576u64
 
-// A key as a client builds it: identity ++ fingerprint(A) ++ fingerprint(R).
+// A key as a client builds it: identity ++ fingerprint(A) ++ fingerprint(reply), where the
+// reply is what Returned carries: Result[R, E] for transact, R for compute (v2.11.2).
 fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
     let mut key: Bytes = list.new()
     result.unwrap(list.append(mut key, id))
@@ -122,20 +123,25 @@ fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R])
     key
 }
 
+// The reply of every transact here: Result[u64, u32].
+fn reply() -> std.codec.Codec[Result[u64, u32]] {
+    std.codec.of()
+}
+
 fn k_write() -> Bytes {
-    key_of(code.identity(code.describe(write)), std.codec.of_u64(), std.codec.of_u64())
+    key_of(code.identity(code.describe(write)), std.codec.of_u64(), reply())
 }
 
 fn k_refuse() -> Bytes {
-    key_of(code.identity(code.describe(refuse)), std.codec.of_u64(), std.codec.of_u64())
+    key_of(code.identity(code.describe(refuse)), std.codec.of_u64(), reply())
 }
 
 fn k_flood() -> Bytes {
-    key_of(code.identity(code.describe(flood)), std.codec.of_u64(), std.codec.of_u64())
+    key_of(code.identity(code.describe(flood)), std.codec.of_u64(), reply())
 }
 
 fn k_named() -> Bytes {
-    key_of(code.identity(code.describe(named)), std.codec.of_string(), std.codec.of_u64())
+    key_of(code.identity(code.describe(named)), std.codec.of_string(), reply())
 }
 
 // A String of n bytes, encoded; with `trailing`, one byte more, so its decode reads the
@@ -154,11 +160,11 @@ fn string_arg(n: u64, trailing: bool) -> Bytes {
 }
 
 fn k_tally() -> Bytes {
-    key_of(code.identity(code.describe(tally)), std.codec.of_u64(), std.codec.of_u64())
+    key_of(code.identity(code.describe(tally)), std.codec.of_u64(), reply())
 }
 
 fn k_crash() -> Bytes {
-    key_of(code.identity(code.describe(crash)), std.codec.of_u64(), std.codec.of_u64())
+    key_of(code.identity(code.describe(crash)), std.codec.of_u64(), reply())
 }
 
 fn u64_arg(x: u64) -> Bytes {
@@ -495,7 +501,7 @@ fn drive_refusals(take d: Drive) -> () waits {
         let f = frame(s0)
         want(is(f.outcome, Refused(Malformed(runner.Bad(kind: 0u32, at: 0u64)))) && f.version == 0u64, "refusals: malformed")
     }
-    ask(s0, d.clock, 1u64, 0u64, key_of(code.identity(code.describe(write)), std.codec.of_u32(), std.codec.of_u64()), u64_arg(3u64), LATER)
+    ask(s0, d.clock, 1u64, 0u64, key_of(code.identity(code.describe(write)), std.codec.of_u32(), reply()), u64_arg(3u64), LATER)
     want(is(frame(s0).outcome, Refused(NoEntry)), "refusals: NoEntry")
     ask(s0, d.clock, 1u64, 0u64, k_write(), u64_arg(3u64), 0u64)
     want(is(frame(s0).outcome, Refused(Deadline)), "refusals: Deadline")
@@ -801,7 +807,7 @@ fn test_l14_handles(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
 fn drive_deadline_hung(take d: Drive) -> () waits {
     let s0 = conn(d.tasks, d.head, d.clock, 1u64)
     let s1 = conn(d.tasks, d.head, d.clock, 1u64)
-    let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), std.codec.of_u64())
+    let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply())
     let ka = key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64())
     ask(s0, d.clock, 0u64, 0u64, result.unwrap(clone(kh)), u64_arg(5u64), LATER)
     ask(s1, d.clock, 1u64, 0u64, take ka, u64_arg(19u64), LATER)

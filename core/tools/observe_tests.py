@@ -58,17 +58,17 @@ def traced_calls(root, work):
     text = replace(text, '    if let Error(_) = channel.send(cn.to, runner.ask(take c)) {',
                    '    record(cn, Sent(observe.Send(conn: cn.id, stream: observe.own(c.stream), p: c.p, digest: list.new(), deadline: c.deadline, at: host.mono_ns(clock))))\n'
                    '    if let Error(_) = channel.send(cn.to, runner.ask(take c)) {')
-    text = replace(text, '            want(f.version != NEVER,',
-                   '            if f.version != NEVER { record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(f.stream), p: f.p, version: f.version, outcome: observe.from_runner(f.outcome), at: host.mono_ns(cn.clock)))) }\n'
-                   '            want(f.version != NEVER,')
-    text = replace(text, '            Ok(f) => f.version == 0u64 && match f.outcome {',
-                   '            Ok(f) => {\n'
-                   '                if f.version != NEVER { record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(f.stream), p: f.p, version: f.version, outcome: observe.from_runner(f.outcome), at: host.mono_ns(cn.clock)))) }\n'
-                   '                let valid = f.version == 0u64 && match f.outcome {')
-    text = replace(text, '            Error(_) => false,\n        }\n        i += 1u64',
-                   '                valid\n            },\n            Error(_) => false,\n        }\n        i += 1u64')
-    text = replace(text, '                _ => false,\n            },\n                valid',
-                   '                _ => false,\n            }\n                valid')
+    text = replace(text, '                return Got(version: v, stream: take stream, p: p, outcome: take o)',
+                   '                record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(stream), p: p, version: v, outcome: observe.from_runner(o), at: host.mono_ns(cn.clock))))\n'
+                   '                return Got(version: v, stream: take stream, p: p, outcome: take o)')
+    text = replace(text, '            Ok(Batched(b)) => b.version == 0u64 && list.len(b.outcomes) == 1u64 && match b.outcomes[0].outcome {',
+                   '            Ok(Batched(b)) => {\n'
+                   '                for t in b.outcomes {\n'
+                   '                    if b.version != NEVER { record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(t.stream), p: t.p, version: b.version, outcome: observe.from_runner(t.outcome), at: host.mono_ns(cn.clock)))) }\n'
+                   '                }\n'
+                   '                let valid = b.version == 0u64 && list.len(b.outcomes) == 1u64 && match b.outcomes[0].outcome {')
+    text = replace(text, '            },\n            _ => false,\n        }\n        i += 1u64',
+                   '            }\n                valid\n            },\n            _ => false,\n        }\n        i += 1u64')
     text = replace(text, '    let Conn(to: _, from: _, dog: _, session: take s) = take cn\n    match task.join(take s) {\n        Ok(Ok(())) => all,',
                    '    let Conn(id: id, clock: clock, out: out, err: err, log: take entries, to: _, from: _, dog: _, session: take s) = take cn\n'
                    '    let joined = task.join(take s)\n'

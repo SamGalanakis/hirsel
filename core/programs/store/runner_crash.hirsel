@@ -75,7 +75,8 @@ fn key_of(id: View[Bytes]) -> Bytes {
     let mut key: Bytes = list.new()
     result.unwrap(list.append(mut key, id))
     result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
-    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key))
+    let carried: std.codec.Codec[Result[u64, u32]] = std.codec.of()
+    result.unwrap(std.codec.put_u64(result.unwrap(std.codec.fingerprint(carried)), mut key))
     key
 }
 

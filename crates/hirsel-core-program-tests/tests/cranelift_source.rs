@@ -38,3 +38,49 @@ fn waiting() -> u64 waits {
     );
     execute(&module, &[(names["waiting"], vec![])], false);
 }
+
+mod wire_socket {
+    include!("support/wire_socket.rs");
+}
+#[test]
+fn wire_socket_loopback_carries_addresses_deadlines_and_bytes() {
+    let (program, names) =
+        hirsel_core_program_tests::SourceProgram::lower(wire_socket::SOURCE, None);
+    let scratch = Scratch::new();
+    fs::write(
+        scratch.0.join("input.o"),
+        program.cranelift_object(NATIVE_TARGET, false, false, false),
+    )
+    .unwrap();
+    let symbol = program
+        .identity(program.functions[names["wire"].index()].instance)
+        .symbol();
+    let source = format!(
+        r#"
+#include <stdint.h>
+#include <assert.h>
+#include "hirsel_core_rt.h"
+{binding}
+{sites}
+typedef struct {{ uint64_t value; uint8_t status; }} WireResult;
+extern WireResult {symbol}(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
+static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg, HirselCoreMainResult *out) {{
+    (void)cfg; (void)out;
+    WireResult r={symbol}(ctx,1,2,0);
+    assert(r.status==0 && r.value==42);
+    return 0;
+}}
+int main(void) {{ assert(hirsel_core_run(wire_config(),entry)==0); return 0; }}
+"#,
+        binding = wire_socket::BINDINGS,
+        sites = program.site_bindings()
+    );
+    let executable = link_program(&scratch, &source);
+    let output = Command::new(executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

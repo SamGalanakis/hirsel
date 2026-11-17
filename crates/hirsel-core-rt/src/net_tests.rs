@@ -41,6 +41,8 @@ fn net_laws_child() {
     let rules = [
         hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
         hirsel_core_net::Rule::parse("Listen 127.0.0.0/8 0-65535").unwrap(),
+        hirsel_core_net::Rule::parse("Connect ::1/128 1-65535").unwrap(),
+        hirsel_core_net::Rule::parse("Listen ::1/128 0-65535").unwrap(),
     ];
     let config = OsConfig {
         root_limit: 1 << 20,
@@ -156,6 +158,8 @@ fn net_narrow_retains_charge_until_run_end_and_refuses_invalid_or_capacity() {
 fn net_socket_provider_laws() {
     for law in [
         "loopback_io",
+        "ipv6_loopback",
+        "partial_send",
         "deadline",
         "reset_after_queued",
         "fd_exhaustion_other24",
@@ -174,17 +178,18 @@ fn carrier(bytes: &mut [u8], len: usize) -> Buffer {
         capacity: bytes.len(),
     }
 }
-unsafe fn connected(context: *mut Context, n: u64) -> (u64, u64, u64) {
+unsafe fn connected(context: *mut Context, n: u64, family: u8) -> (u64, u64, u64) {
     unsafe {
-        let l = hirsel_core_host_listen(context, n, 0, 0, 0x7f000001, 0, 16, 1);
+        let ip = if family == 0 { 0x7f000001 } else { 1 };
+        let l = hirsel_core_host_listen(context, n, family, 0, ip, 0, 16, 1);
         assert_eq!(l.error, IoError::OK);
-        assert_eq!((l.family, l.hi, l.lo), (0, 0, 0x7f000001));
+        assert_eq!((l.family, l.hi, l.lo), (family, 0, ip));
         assert_ne!(l.port, 0);
-        let c = hirsel_core_host_connect(context, n, 0, 0, 0x7f000001, l.port, 0, 0, 0, 2);
+        let c = hirsel_core_host_connect(context, n, family, 0, ip, l.port, 0, 0, 0, 2);
         assert_eq!(c.error, IoError::OK);
         let a = hirsel_core_host_accept(context, l.value, 0, 0, 0, 3);
         assert_eq!(a.error, IoError::OK);
-        assert_eq!((a.family, a.hi, a.lo), (0, 0, 0x7f000001));
+        assert_eq!((a.family, a.hi, a.lo), (family, 0, ip));
         (l.value, c.value, a.value)
     }
 }
@@ -196,9 +201,10 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
     };
     unsafe {
         match law {
-            "loopback_io" | "deadline" => {
+            "loopback_io" | "ipv6_loopback" | "deadline" => {
                 let available = (*context).available();
-                let (listener, client, server) = connected(context, n);
+                let (listener, client, server) =
+                    connected(context, n, u8::from(law == "ipv6_loopback"));
                 assert_eq!(
                     (*context).available(),
                     available,
@@ -267,6 +273,44 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     hirsel_core_socket_drop(context, key);
                 }
                 assert!((*(*context).host_files).sockets.is_empty());
+            }
+            "partial_send" => {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                let (mut peer, _) = listener.accept().unwrap();
+                socket.set_nonblocking(true).unwrap();
+                // Fixture-only send capacity forces a prefix without changing product defaults.
+                let size = 4096i32;
+                assert_eq!(
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        (&size as *const i32).cast(),
+                        4
+                    ),
+                    0
+                );
+                let key = (*(*context).host_files)
+                    .sockets
+                    .insert(socket.into())
+                    .unwrap();
+                let split = hirsel_core_net_split(context, key, 1);
+                let mut payload = vec![0x5a; 256 * 1024];
+                let len = payload.len();
+                let mut b = carrier(&mut payload, len);
+                let first = hirsel_core_host_send(context, split.written, &mut b, 1, clock, 0, 2);
+                assert_eq!(first.error, IoError::OK);
+                assert!(
+                    first.value > 0 && first.value < len as u64,
+                    "send commits one prefix"
+                );
+                let mut received = vec![0; first.value as usize];
+                peer.read_exact(&mut received).unwrap();
+                assert_eq!(received, payload[..first.value as usize]);
+                assert_eq!((b.len, b.capacity), (len, len));
+                hirsel_core_socket_drop(context, split.value);
+                hirsel_core_socket_drop(context, split.written);
             }
             "reset_after_queued" => {
                 let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -378,9 +422,13 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 sockets.arm(key, false, 101).unwrap();
                 sockets.arm(key, true, 102).unwrap();
                 peer.write_all(b"x").unwrap();
-                while tokens.len() < 2 {
-                    sockets.poll(100, |t| tokens.push(t)).unwrap();
-                }
+                let mut readable = libc::pollfd {
+                    fd: sockets.fd(key),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                assert_eq!(libc::poll(&mut readable, 1, -1), 1);
+                sockets.poll(0, |t| tokens.push(t)).unwrap();
                 tokens.sort();
                 assert_eq!(
                     tokens,

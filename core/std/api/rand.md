@@ -32,9 +32,9 @@ There are two seeds, and the choice between them is the caller's.
   gets a different stream, and a replay of the call gets the same one. Any other `u64` the
   program derives (a test's constant, a hash of a job id) works the same way.
 - **Fresh:** 16 bytes from `host.random(r, mut b)`, then
-  `std.rand.new(list.word_le(b, 0), list.word_le(b, 8))`. This inherits `host.random`'s
-  failure edge (DECISIONS 2026-11-16, Tape cause). It still is not a secret source; it is only
-  unrepeatable.
+  `std.rand.new(list.word_le(b, 0), list.word_le(b, 8))`. A replay delivers the recorded
+  bytes ([core.md](../../../docs/spec/core.md), Host), so the stream still replays. It is
+  still not a secret source; it is only unpredictable at the start.
 
 ## Operations
 

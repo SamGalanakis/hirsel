@@ -6,9 +6,9 @@
 // the substitute Clock after `tape.end`; `force` replays Across, and a run that
 // replays another revision's tape prints "across:" first. Exit 2 open refused or failed,
 // 3 Refused(Revision), 4 a faulted end, 5 Diverged(Outcome).
-pub fn main(d: Dir, c: Clock, out: Stdout, a: Args) -> Result[(), Exit] {
+pub fn main(d: Dir, c: Clock, out: Stdout, a: Args, ts: Tasks) -> Result[(), Exit] {
     let first = match args.get(a, 0) {
-        Some(v) => if v == "x" { 1u8 } else if v == "after" { 2u8 } else if v == "force" { 3u8 } else { 0u8 },
+        Some(v) => if v == "x" { 1u8 } else if v == "after" { 2u8 } else if v == "force" { 3u8 } else if v == "aftertasks" { 4u8 } else { 0u8 },
         None => 0u8
     }
     let mode = match host.open(d, "run.tape", Read) {
@@ -27,6 +27,7 @@ pub fn main(d: Dir, c: Clock, out: Stdout, a: Args) -> Result[(), Exit] {
         Error(_) => return Error(Exit(status: 2))
     }
     let differs = tape.across(t)
+    let scheduler = tape.tasks(mut t, ts)
     let clock = tape.clock(mut t, c)
     let taped = tape.stdout(mut t, out)
     let recorded = tape.args(mut t, a)
@@ -47,6 +48,9 @@ pub fn main(d: Dir, c: Clock, out: Stdout, a: Args) -> Result[(), Exit] {
     }
     if first == 2u8 {
         let _ = host.mono_ns(clock)
+    }
+    if first == 4u8 {
+        let _ = task.spawn(scheduler, bytes 64, (), fn(take unit: ()) {})
     }
     if differs {
         result.unwrap(stdout.write(out, "across:"))

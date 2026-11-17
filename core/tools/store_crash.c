@@ -39,9 +39,9 @@ static void cancel_wait(HirselCoreContext *ctx) {
         hirsel_core_cancel(ctx,cancellation.owner);
     }
 }
-extern HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext*,uint64_t,void*,HirselCoreTaskBody,HirselCoreTaskLayout);
-HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout) {
-    HirselCoreSpawn result=__real_hirsel_core_spawn(ctx,bytes,input,body,layout);
+extern HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext*,uint64_t,uint64_t,void*,HirselCoreTaskBody,HirselCoreTaskLayout,uint64_t);
+HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t tasks,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout,uint64_t site) {
+    HirselCoreSpawn result=__real_hirsel_core_spawn(ctx,tasks,bytes,input,body,layout,site);
     if(cancellation.enabled && cancellation.phase==1 && ctx==cancellation.root && !cancellation.owner) cancellation.owner=result.task;
     return result;
 }

@@ -109,6 +109,7 @@ impl Default for SchedulerProvider {
         }
     }
 }
+thread_local! { static CALLBACK_TASK: Local<*mut Task> = const { Local::new(ptr::null_mut()) }; }
 thread_local! { static CURRENT: Local<*mut Task> = const { Local::new(ptr::null_mut()) }; }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -143,6 +144,7 @@ pub struct Task {
     all: *mut Task,
     state: State,
     id: u64,
+    group: Option<crate::tape::schedule::Group>,
     stack: Stack,
     sp: *mut u8,
     body: Body,
@@ -170,9 +172,11 @@ struct Scheduler {
     /// Cancellation requests for tasks parked in a provider operation, in
     /// request order, taken at the next scheduler turn.
     cancels: Vec<*mut Task>,
+    outside_cancels: Vec<*mut Task>,
     /// Tasks in State::Blocked. Only `checkpoint(true)` blocks a task and only
     /// `wake` unblocks, readying every one, so a wake with none is a no-op.
     blocked: usize,
+    taped: bool,
 }
 const HOST_STACK_BYTES: usize = 64 << 10;
 impl Task {
@@ -227,10 +231,28 @@ impl Scheduler {
             if count == 0 {
                 return ptr::null_mut();
             }
-            let choice = self
+            let mut choice = self
                 .provider
                 .choose
                 .map_or(0, |choose| choose(self.provider.state, count));
+            let mut selected = self.head;
+            for _ in 0..choice {
+                selected = (*selected).ready;
+            }
+            if let Some(group) = (*selected).group {
+                let mut members = Vec::new();
+                let mut at = self.head;
+                let mut index = 0;
+                while !at.is_null() {
+                    if (*at).group.is_some_and(|g| g.same(group)) {
+                        members.push(index);
+                    }
+                    index += 1;
+                    at = (*at).ready;
+                }
+                let proposed = members.iter().position(|&i| i == choice).unwrap();
+                choice = members[group.choose(members.len(), proposed)];
+            }
             let mut link = &raw mut self.head;
             let mut before = ptr::null_mut();
             for _ in 0..choice {
@@ -317,6 +339,26 @@ impl Scheduler {
     /// next cancellation point (CONC-7). Readiness before timers is the network
     /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
     unsafe fn take_wakes(&mut self) {
+        // SAFETY: idle owns every task and operation frame.
+        if self.taped {
+            // SAFETY: idle owns tasks; retirement removes queued requests.
+            unsafe {
+                for task in std::mem::take(&mut self.outside_cancels) {
+                    if let Some(group) = (*task).group
+                        && group.cancel(None)
+                    {
+                        (*(*task).context)
+                            .cancel_requested
+                            .store(true, Ordering::Release);
+                        if (*task).state == State::Provider {
+                            self.cancels.push(task);
+                        }
+                        self.wake();
+                    }
+                }
+                self.tape_inputs();
+            }
+        }
         // SAFETY: no task is running; every parked operation's frame is pinned.
         unsafe {
             if !self.cancels.is_empty() {
@@ -379,6 +421,85 @@ impl Scheduler {
         }
     }
 
+    unsafe fn tape_inputs(&mut self) {
+        // SAFETY: called only from idle; tasks and their pinned operations live.
+        unsafe {
+            let mut groups = Vec::new();
+            let mut task = self.all;
+            while !task.is_null() {
+                if let Some(group) = (*task).group
+                    && !groups
+                        .iter()
+                        .any(|g: &crate::tape::schedule::Group| g.same(group))
+                {
+                    groups.push(group);
+                }
+                task = (*task).all;
+            }
+            for group in groups {
+                while let Some(input) = group.input() {
+                    use crate::tape::schedule::Input;
+                    let id = match input {
+                        Input::Wake(t) | Input::Cancel(t) | Input::Done(t) => t,
+                    };
+                    let mut target = self.all;
+                    while !target.is_null()
+                        && !(*target)
+                            .group
+                            .is_some_and(|g| g.same(group) && g.task == id)
+                    {
+                        target = (*target).all;
+                    }
+                    if target.is_null() {
+                        group.fail();
+                        break;
+                    }
+                    match input {
+                        Input::Cancel(_) if (*target).state != State::Ended => {
+                            (*(*target).context)
+                                .cancel_requested
+                                .store(true, Ordering::Release);
+                            if (*target).state == State::Provider {
+                                self.wake_operation(target, Wake::Cancel);
+                            }
+                            self.wake();
+                        }
+                        Input::Wake(_)
+                            if (*target).state == State::Provider
+                                && (*(*target).operation).phase == Phase::Waiting =>
+                        {
+                            if let Some(group) = (*target).group {
+                                group.cancel_wait((*(*target).operation).request);
+                            }
+                            self.runnable(target, Next::Issue);
+                        }
+                        Input::Done(_)
+                            if (*target).state == State::Provider
+                                && (*(*target).operation).phase == Phase::Issued =>
+                        {
+                            self.wake_operation(target, Wake::Ready);
+                        }
+                        _ => {
+                            group.fail();
+                            break;
+                        }
+                    }
+                }
+                if group.failed() {
+                    let mut target = self.all;
+                    while !target.is_null() {
+                        if (*target).group.is_some_and(|g| g.same(group))
+                            && (*target).state == State::Provider
+                        {
+                            self.runnable(target, Next::Deliver(crate::tape::REFUSED));
+                        }
+                        target = (*target).all;
+                    }
+                }
+            }
+        }
+    }
+
     fn idle(&mut self) {
         if self.readies.pending.load(Ordering::Acquire) || !self.cancels.is_empty() {
             return;
@@ -392,6 +513,23 @@ impl Scheduler {
                 deadline.saturating_sub(crate::os::monotonic_ns()),
             )),
             None => {
+                // A closed replay cannot await host readiness. An input that
+                // cannot make progress at this coordinate is a schedule fault.
+                let mut task = self.all;
+                // SAFETY: the scheduler owns its task list while idle.
+                unsafe {
+                    while !task.is_null() {
+                        if let Some(group) = (*task).group
+                            && group.replaying()
+                            && (*task).state == State::Provider
+                        {
+                            group.fail();
+                            self.tape_inputs();
+                            return;
+                        }
+                        task = (*task).all;
+                    }
+                }
                 let mut task = self.all;
                 // SAFETY: idle owns the task list and no task is running.
                 let provider = unsafe {
@@ -433,6 +571,7 @@ impl Scheduler {
             if wake == Wake::Cancel && !cancels_operation(task) {
                 return false;
             }
+            let _callback = CallbackTask::new(task);
             let op = (*task).operation;
             let p = (*op).provider;
             let (request, token) = ((*op).request, (*op).token);
@@ -456,6 +595,9 @@ impl Scheduler {
                     if wake == Wake::Cancel {
                         // W -> C (CONC-7): the request fails the operation and
                         // issue is never called, whatever wait answered.
+                        if let Some(group) = (*task).group {
+                            group.cancel_wait(request);
+                        }
                         self.runnable(task, Next::Cancelled);
                         return false;
                     }
@@ -465,6 +607,9 @@ impl Scheduler {
                                 (*op).phase = Phase::Runnable;
                                 (*op).next = Next::Issue;
                                 return true;
+                            }
+                            if let Some(group) = (*task).group {
+                                group.wake(request);
                             }
                             self.runnable(task, Next::Issue);
                             return false;
@@ -774,9 +919,11 @@ unsafe fn operation<C: Calls>(
 ) -> crate::provider::Outcome {
     // SAFETY: provider contract; request pinned by the caller through delivery.
     unsafe {
+        CALLBACK_TASK.set(task);
         CURRENT.set(ptr::null_mut());
         let wait = C::wait(provider, request, token);
         CURRENT.set(task);
+        CALLBACK_TASK.set(ptr::null_mut());
         if wait.kind != WAIT_READY {
             let start = Start::Entry(Some(wait));
             return slow(context, task, provider, request, token, start, issued);
@@ -1085,7 +1232,8 @@ unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) 
         // Without a sink the gate is the refund flag, so a quiet event reads
         // one byte; with one the gate stays set and the flag is separate.
         if task.arc_gate.load(Ordering::Acquire)
-            && (run.provider.event.is_none() || task.recorded_refunds.load(Ordering::Acquire))
+            && ((run.provider.event.is_none() && task.group.is_none())
+                || task.recorded_refunds.load(Ordering::Acquire))
         {
             drain_refunds(task_pointer);
         }
@@ -1099,6 +1247,9 @@ unsafe fn event_for(task_pointer: *mut Task, kind: u8, object: u64, value: u64) 
                     value,
                 },
             );
+        }
+        if let Some(group) = task.group {
+            group.event();
         }
         poll_event(task_pointer, kind, value);
     }
@@ -1171,6 +1322,64 @@ pub(crate) fn capacity_refused(requested: u64, available: u64) -> Capacity {
         available,
     }
 }
+struct CallbackTask(*mut Task);
+impl CallbackTask {
+    fn new(task: *mut Task) -> Self {
+        Self(CALLBACK_TASK.replace(task))
+    }
+}
+impl Drop for CallbackTask {
+    fn drop(&mut self) {
+        CALLBACK_TASK.set(self.0);
+    }
+}
+pub(crate) fn recorded_chooser() -> u8 {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins the scheduler while the tape opens.
+    unsafe { u8::from(!task.is_null() && (*(*task).run).provider.choose.is_some()) }
+}
+pub(crate) fn has_provider_task() -> bool {
+    !CURRENT.get().is_null() || !CALLBACK_TASK.get().is_null()
+}
+pub(crate) fn provider_group() -> Option<crate::tape::schedule::Group> {
+    let task = if CURRENT.get().is_null() {
+        CALLBACK_TASK.get()
+    } else {
+        CURRENT.get()
+    };
+    // SAFETY: the callback's task is pinned for the synchronous callback.
+    unsafe { task.as_ref().and_then(|t| t.group) }
+}
+
+pub(crate) fn current_group() -> Option<crate::tape::schedule::Group> {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins its task, or is null outside a task.
+    unsafe { task.as_ref().and_then(|t| t.group) }
+}
+pub(crate) fn attach_tape(group: crate::tape::schedule::Group) {
+    let task = CURRENT.get();
+    if !task.is_null() {
+        // SAFETY: CURRENT pins this task while tape.open executes.
+        unsafe {
+            assign_tape(task, group);
+        }
+    }
+}
+unsafe fn assign_tape(task: *mut Task, group: crate::tape::schedule::Group) {
+    // SAFETY: caller exclusively owns this task before publication or execution.
+    unsafe {
+        (*(*task).run).taped = true;
+        (*task).refunds.take();
+        (*task).group = Some(group);
+        (*task).refunds = Some(
+            (*(*task).context)
+                .current
+                .subscribe_refunds(NonNull::from(&(*task).recorded_refunds)),
+        );
+        (*task).arc_gate.store(true, Ordering::Release);
+    }
+}
+
 pub(crate) fn current_id() -> u64 {
     let task = CURRENT.get();
     if task.is_null() {
@@ -1331,7 +1540,9 @@ pub unsafe fn run_root(
         provider,
         readies: Readies::new(),
         cancels: Vec::new(),
+        outside_cancels: Vec::new(),
         blocked: 0,
+        taped: false,
     };
     let registered = Registered(run.readies.clone());
     WAITERS
@@ -1359,6 +1570,7 @@ pub unsafe fn run_root(
         all: ptr::null_mut(),
         state: State::Ready,
         id: 0,
+        group: None,
         stack: Stack::new(),
         sp: ptr::null_mut(),
         body,
@@ -1428,28 +1640,28 @@ pub unsafe fn run_root(
 }
 
 #[repr(C)]
-pub struct Spawn {
-    pub task: *mut Task,
-    pub available: u64,
+struct Spawned {
+    task: *mut Task,
+    available: u64,
 }
 /// # Safety
 /// Layout is emitter-produced. Input is initialized X and moves only on success;
 /// body consumes it and initializes R only on success. Handle stays with parent.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_spawn(
+unsafe fn spawn_in(
     context: *mut Context,
     bytes: u64,
     input: *mut u8,
     body: Body,
     layout: TaskLayout,
-) -> Spawn {
+    group: Option<crate::tape::schedule::Group>,
+) -> Spawned {
     // SAFETY: spawn is invoked by the current parent in its exclusive context.
     unsafe {
         let mut record =
             match Block::new(&*context, charge::task(layout.result.logical, bytes), 1, 8) {
                 Ok(record) => record,
                 Err(Capacity { available, .. }) => {
-                    return Spawn {
+                    return Spawned {
                         task: ptr::null_mut(),
                         available,
                     };
@@ -1476,6 +1688,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
             all: (*run).all,
             state: State::Ready,
             id,
+            group: group.map(|group| group.child()),
             stack: Stack::new(),
             sp: ptr::null_mut(),
             body,
@@ -1488,9 +1701,12 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
         let task = Box::into_raw(task);
+        if (*task).group.is_some() {
+            (*task).arc_gate.store(true, Ordering::Release);
+        }
         (*task).context = (*task).owned_context.as_mut().unwrap();
         (*task).refunds = Some((*(*task).context).current.subscribe_refunds(NonNull::from(
-            (*task).refund_flag((*run).provider.event.is_some()),
+            (*task).refund_flag((*run).provider.event.is_some() || (*task).group.is_some()),
         )));
         (*(*task).context).events = if (*(*task).context).events != 0 {
             task.expose_provenance()
@@ -1502,15 +1718,73 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         (*run).all = task;
         (*run).ready(task);
         event(SPAWN, (*task).id, bytes);
-        Spawn { task, available: 0 }
+        Spawned { task, available: 0 }
     }
 }
+#[repr(C)]
+pub struct Spawn {
+    pub task: *mut Task,
+    pub available: u64,
+    pub status: u8,
+}
+/// Spawn through the supplied Tasks capability's provider. The reservation
+/// admitted by spawn is the child's fresh accounting boundary (CONC-3).
+/// # Safety
+/// Same operands as `hirsel_core_spawn`, plus a live Tasks grant of this run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_spawn(
+    context: *mut Context,
+    tasks: u64,
+    bytes: u64,
+    input: *mut u8,
+    body: Body,
+    layout: TaskLayout,
+    site: u64,
+) -> Spawn {
+    // SAFETY: generated operands belong to the active parent and run.
+    unsafe {
+        let group = if tasks & crate::host_file::DYNAMIC_GRANT != 0 {
+            (*(*context).host_files).grant_group(tasks)
+        } else if tasks == 0 && (*context).run.is_null() {
+            current_group()
+        } else {
+            None
+        };
+        if let Some(group) = group
+            && let Err(f) = group.check()
+        {
+            crate::tape::refuse(f);
+            causes::record(&mut *context, Cause::new(causes::TAPE, site));
+            return Spawn {
+                task: ptr::null_mut(),
+                available: 0,
+                status: 1,
+            };
+        }
+        let spawned = spawn_in(context, bytes, input, body, layout, group);
+        Spawn {
+            task: spawned.task,
+            available: spawned.available,
+            status: 0,
+        }
+    }
+}
+
 /// # Safety
 /// Live unjoined handle owned by this task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
     // SAFETY: parent owns the child's handle and requests without touching its stack.
     unsafe {
+        if let Some(group) = (*task).group
+            && !current_group().is_some_and(|source| source.same(group))
+        {
+            if (*task).state != State::Ended {
+                (*(*task).run).outside_cancels.push(task);
+            }
+            event(CANCEL, (*task).id, 0);
+            return;
+        }
         (*(*task).context)
             .cancel_requested
             .store(true, Ordering::Release);
@@ -1525,6 +1799,7 @@ unsafe fn retire(task: *mut Task) {
     // SAFETY: task ended, is not queued, and its sole handle is being consumed.
     unsafe {
         let run = (*task).run;
+        (*run).outside_cancels.retain(|&t| t != task);
         let mut link = &raw mut (*run).all;
         while *link != task {
             link = &raw mut (**link).all;

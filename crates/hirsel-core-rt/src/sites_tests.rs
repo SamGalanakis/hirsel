@@ -198,6 +198,7 @@ unsafe extern "C" fn joined(ctx: *mut Context, _: *const Config, _: *mut MainRes
     unsafe {
         let spawned = hirsel_core_spawn(
             ctx,
+            0,
             64,
             ptr::dangling_mut(),
             child,
@@ -205,6 +206,7 @@ unsafe extern "C" fn joined(ctx: *mut Context, _: *const Config, _: *mut MainRes
                 input: value,
                 result: value,
             },
+            0,
         );
         assert!(!spawned.task.is_null());
         let result = hirsel_core_join(ctx, spawned.task, ptr::dangling_mut(), 123);

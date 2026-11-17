@@ -10,11 +10,13 @@ typedef struct {
 typedef struct { HirselCoreValueLayout input, result; } HirselCoreTaskLayout;
 typedef uint8_t (*HirselCoreTaskBody)(HirselCoreContext *, void *destination, void *input);
 typedef struct HirselCoreTask HirselCoreTask;
-typedef struct { HirselCoreTask *task; uint64_t available; } HirselCoreSpawn;
-/* Emitters specialize FORM rows with closed layout/drop constants, then call
+typedef struct { HirselCoreTask *task; uint64_t available; uint8_t status; } HirselCoreSpawn;
+/* FORM #121: spawn carries the Tasks grant and site and returns a failure
+   status for a taped grant that has ended or faulted. Capacity remains a null
+   task plus available, with status zero. Emitters specialize FORM rows with closed layout/drop constants, then call
    these generic entries. Input remains caller-owned on null spawn. */
-HirselCoreSpawn hirsel_core_spawn(HirselCoreContext *, uint64_t bytes, void *input,
-    HirselCoreTaskBody, HirselCoreTaskLayout);
+HirselCoreSpawn hirsel_core_spawn(HirselCoreContext *, uint64_t tasks, uint64_t bytes, void *input,
+    HirselCoreTaskBody, HirselCoreTaskLayout, uint64_t site);
 void hirsel_core_cancel(HirselCoreContext *, HirselCoreTask *);
 typedef struct { uint8_t kind; HirselCoreCauseCell *causes; uint8_t status; } HirselCoreJoin;
 /* kind: 0 result, 1 Failed(chain), 2 Cancelled(chain).

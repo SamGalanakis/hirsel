@@ -110,7 +110,7 @@ unsafe extern "C" fn root(context: *mut Context, out: *mut u8, input: *mut u8) -
             0 => {
                 let mut unit = 0u8;
                 for _ in 0..p.n {
-                    let h = hirsel_core_spawn(context, 0, &mut unit, empty, layout::<(), ()>(0));
+                    let h = hirsel_core_spawn(context, 0, 0, &mut unit, empty, layout::<(), ()>(0), 0);
                     assert!(!h.task.is_null());
                     let j = hirsel_core_join(context, h.task, &mut unit, 1);
                     assert_eq!((j.kind, j.status), (0, 0));
@@ -127,12 +127,11 @@ unsafe extern "C" fn root(context: *mut Context, out: *mut u8, input: *mut u8) -
                     role: 1,
                 };
                 let h = hirsel_core_spawn(
-                    context,
+                    context, 0,
                     0,
                     (&mut w as *mut Worker).cast(),
                     worker,
-                    layout::<Worker, ()>(0),
-                );
+                    layout::<Worker, ()>(0), 0);
                 assert!(!h.task.is_null());
                 let mut sum = 0u64;
                 for mut x in 0..p.n {
@@ -173,26 +172,23 @@ unsafe extern "C" fn root(context: *mut Context, out: *mut u8, input: *mut u8) -
                     role: 2,
                 };
                 let h0 = hirsel_core_spawn(
-                    context,
+                    context, 0,
                     0,
                     (&mut p0 as *mut Worker).cast(),
                     worker,
-                    layout::<Worker, ()>(0),
-                );
+                    layout::<Worker, ()>(0), 0);
                 let h1 = hirsel_core_spawn(
-                    context,
+                    context, 0,
                     0,
                     (&mut p1 as *mut Worker).cast(),
                     worker,
-                    layout::<Worker, ()>(0),
-                );
+                    layout::<Worker, ()>(0), 0);
                 let h2 = hirsel_core_spawn(
-                    context,
+                    context, 0,
                     0,
                     (&mut p2 as *mut Worker).cast(),
                     worker,
-                    layout::<Worker, u64>(8),
-                );
+                    layout::<Worker, u64>(8), 0);
                 assert!(!h0.task.is_null() && !h1.task.is_null() && !h2.task.is_null());
                 let mut unit = 0u8;
                 let mut sum = 0u64;

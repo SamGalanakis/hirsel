@@ -35,7 +35,7 @@ pub type Divergence {
     kind: Mismatch
 }
 
-pub type Mismatch = Op | Object | Arg | Missing | Extra | Outcome
+pub type Mismatch = Op | Object | Arg | Missing | Extra | Outcome | Schedule
 
 // Opens the tape `name` in `d`. Replay compares the header with the stored one.
 pub fn open(d: Dir, name: String, mode: Mode, header: Header) -> Result[Tape, OpenError] waits {
@@ -70,6 +70,8 @@ pub fn dir(mut t: Tape, d: Dir) -> Dir
 pub fn stdout(mut t: Tape, s: Stdout) -> Stdout
 
 pub fn stderr(mut t: Tape, s: Stderr) -> Stderr
+
+pub fn tasks(mut t: Tape, ts: Tasks) -> Tasks
 
 // Args's substitute reads the recorded vector, also after the tape ends: reading
 // it is not an operation.
@@ -137,8 +139,10 @@ fn ending(code: u64) -> End {
             Missing
         } else if sub == 4 {
             Extra
-        } else {
+        } else if sub == 5 {
             Outcome
+        } else {
+            Schedule
         }))
     } else if tag == 2 {
         Truncated(value)

@@ -267,10 +267,12 @@ unsafe fn spawn(context: *mut Context, rec: *mut Rec, site: u64, operation: u8) 
     let task = unsafe {
         hirsel_core_spawn(
             context,
+            0,
             64,
             (&mut input as *mut Job).cast(),
             job,
             job_layout(),
+            0,
         )
         .task
     };
@@ -898,6 +900,7 @@ fn cancelled_file_op(operation: u8, issued: bool) -> Rec {
             let mut input = job;
             let task = hirsel_core_spawn(
                 context,
+                0,
                 64,
                 (&mut input as *mut FileJob).cast(),
                 file_job,
@@ -915,6 +918,7 @@ fn cancelled_file_op(operation: u8, issued: bool) -> Rec {
                         drop: inert,
                     },
                 },
+                0,
             )
             .task;
             yield_turn(context);
@@ -992,7 +996,8 @@ unsafe fn tick(context: *mut Context) {
                 drop: inert,
             },
         };
-        let task = hirsel_core_spawn(context, 64, (&mut unit as *mut u8), nothing, layout).task;
+        let task =
+            hirsel_core_spawn(context, 0, 64, (&mut unit as *mut u8), nothing, layout, 0).task;
         assert!(!task.is_null());
         assert!(!join(context, task));
     }
@@ -1328,10 +1333,12 @@ unsafe fn shield_parent(context: *mut Context, rec: *mut Rec) {
         };
         let task = hirsel_core_spawn(
             context,
+            0,
             64,
             (&mut job as *mut ShieldJob).cast(),
             shielded_job,
             layout,
+            0,
         )
         .task;
         assert!(!task.is_null());
@@ -1362,10 +1369,12 @@ unsafe fn shield_parent(context: *mut Context, rec: *mut Rec) {
                 };
                 let peer = hirsel_core_spawn(
                     context,
+                    0,
                     64,
                     (&mut peer as *mut Job).cast(),
                     canceller,
                     job_layout(),
+                    0,
                 )
                 .task;
                 while (*rec).count(50, Cb::Issue) == 0 {
@@ -1577,7 +1586,7 @@ unsafe fn spawn_os(context: *mut Context, site: u64, steps: &'static [OsStep]) -
     // SAFETY: the job is copied into the child.
     let task = unsafe {
         let input = (&mut input as *mut OsJob).cast();
-        hirsel_core_spawn(context, 64, input, os_job, layout).task
+        hirsel_core_spawn(context, 0, 64, input, os_job, layout, 0).task
     };
     assert!(!task.is_null());
     task

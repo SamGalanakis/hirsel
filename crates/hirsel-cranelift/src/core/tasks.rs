@@ -72,6 +72,7 @@ impl Function<'_, '_, '_> {
             | RtOp::ChannelNew { .. }
             | RtOp::Send { .. }
             | RtOp::Receive { .. }
+            | RtOp::Spawn { .. }
             | RtOp::TapeGrant => self.site()?,
             _ => self.b.ins().iconst(types::I64, 0),
         };
@@ -355,10 +356,19 @@ impl Function<'_, '_, '_> {
                 let descriptor = self.descriptor(&[x, r], true)?;
                 let values = self.c_call(
                     "hirsel_core_spawn",
-                    &[P, U, P, P, P],
-                    &[P, U],
-                    &[self.context, args[0], packed, bridge, descriptor],
+                    &[P, U, U, P, P, P, U],
+                    &[P, U, K],
+                    &[
+                        self.context,
+                        args[3],
+                        args[0],
+                        packed,
+                        bridge,
+                        descriptor,
+                        site,
+                    ],
                 )?;
+                self.call_failure(values[2], call.fail)?;
                 outputs[0] = values[0];
                 outputs[1] = values[1];
                 2

@@ -147,6 +147,7 @@ impl FunctionEmitter<'_> {
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
+                | RtOp::Spawn { .. }
                 | RtOp::TapeGrant
         ) {
             self.site_word()
@@ -263,13 +264,15 @@ impl FunctionEmitter<'_> {
                 let descriptor = self.value_descriptors(&[x, r], true);
                 self.native_call(
                     "hirsel_core_spawn",
-                    &[P, U],
+                    &[P, U, K],
                     &[
                         ptr(CONTEXT),
+                        u(&args[3]),
                         u(&args[0]),
                         p(&packed),
                         ptr(Value::global(format!("core_task_entry_{}_{}", x.0, r.0))),
                         (abi::composite_argument(self.abi.target, 64), descriptor),
+                        u(&at),
                     ],
                 )
             }

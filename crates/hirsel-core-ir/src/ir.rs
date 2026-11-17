@@ -921,7 +921,7 @@ impl RtOp {
     ///
     /// | op | params | results |
     /// |---|---|---|
-    /// | `spawn[X, R]` | `n: u64`, `&X`, `f: ptr` | task `ptr` (null on `Capacity`), `available: u64` |
+    /// | `spawn[X, R]` | `n: u64`, `&X`, `f: ptr`, `tasks: u64` | task `ptr` (null on `Capacity`), `available: u64` |
     /// | `join[R]` | task `ptr`, `&R` | status `u8`: 0 Ok (R written), 1 Failed, 2 Cancelled; `Causes` `ptr` (null when Ok) |
     /// | `cancel` | task `ptr` | |
     /// | `check_cancel` | | |
@@ -992,7 +992,7 @@ impl RtOp {
         );
         let p = Ty::Ptr;
         let (params, results) = match self {
-            RtOp::Spawn { x, .. } => (vec![V(u64_), take(x), V(p)], vec![p, u64_]),
+            RtOp::Spawn { x, .. } => (vec![V(u64_), take(x), V(p), V(u64_)], vec![p, u64_]),
             RtOp::Join { r } => (vec![V(p), out(r)], vec![u8_, p]),
             RtOp::Cancel => (vec![V(p)], vec![]),
             RtOp::CheckCancel => (vec![], vec![]),
@@ -1098,6 +1098,7 @@ impl RtOp {
         matches!(
             self,
             RtOp::Join { .. }
+                | RtOp::Spawn { .. }
                 | RtOp::CheckCancel
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }

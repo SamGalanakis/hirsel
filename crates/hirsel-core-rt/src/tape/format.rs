@@ -42,6 +42,7 @@ pub const F_GRANT: u8 = 7;
 pub const F_INCARNATION: u8 = 8;
 pub const F_DATA: u8 = 9;
 pub const F_END: u8 = 10;
+pub const F_WAIT: u8 = 11;
 /// The head bit saying a task varint follows.
 pub const T: u8 = 0x10;
 
@@ -505,6 +506,9 @@ impl Out {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Frame {
+    Wait {
+        task: u64,
+    },
     Issue {
         task: u64,
         op: u8,
@@ -571,6 +575,10 @@ impl Encoder {
         let mut out = Vec::new();
         let mut rest = Vec::new();
         match f {
+            Frame::Wait { task } => {
+                out.push(F_WAIT);
+                self.task(&mut out, 0, *task);
+            }
             Frame::Issue {
                 task,
                 op,
@@ -679,7 +687,7 @@ impl Decoder {
             if head & 0xe0 != 0 {
                 return Err(Corrupt);
             }
-            let has_task = matches!(kind, F_ISSUE | F_DONE | F_OP | F_WAKE | F_CANCEL);
+            let has_task = matches!(kind, F_ISSUE | F_DONE | F_OP | F_WAKE | F_CANCEL | F_WAIT);
             if head & T != 0 && !has_task {
                 return Err(Corrupt);
             }
@@ -687,6 +695,9 @@ impl Decoder {
                 return Err(Corrupt);
             }
             let frame = match kind {
+                F_WAIT => Frame::Wait {
+                    task: self.task(head, &mut c)?,
+                },
                 F_ISSUE => {
                     let task = self.task(head, &mut c)?;
                     let op = c.u8()?;

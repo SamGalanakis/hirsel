@@ -812,9 +812,11 @@ unsafe extern "C" fn cancel_timer_root(context: *mut Context, _: *mut u8, input:
         let spawned = hirsel_core_spawn(
             context,
             0,
+            0,
             (&mut child as *mut TimerChild).cast(),
             cancellable_timer_child,
             timer_layout::<TimerChild>(),
+            0,
         );
         assert!(!spawned.task.is_null());
         crate::tasks::checkpoint(false);
@@ -845,16 +847,20 @@ unsafe extern "C" fn timer_root(context: *mut Context, _: *mut u8, input: *mut u
         let a = hirsel_core_spawn(
             context,
             0,
+            0,
             (&mut first as *mut TimerChild).cast(),
             timer_child,
             timer_layout::<TimerChild>(),
+            0,
         );
         let b = hirsel_core_spawn(
             context,
             0,
+            0,
             (&mut second as *mut TimerChild).cast(),
             timer_child,
             timer_layout::<TimerChild>(),
+            0,
         );
         assert!(!a.task.is_null() && !b.task.is_null());
         let joined_a = hirsel_core_join(context, a.task, ptr::null_mut(), 123);

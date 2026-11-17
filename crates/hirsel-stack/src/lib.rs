@@ -17,7 +17,7 @@ pub fn initial_frame(entry: Entry, first: *mut u8, second: *mut u8) -> [u64; 8] 
         first as u64,
         0,
         0,
-        fiber_start as usize as u64,
+        fiber_start as *const () as usize as u64,
     ]
 }
 
@@ -71,7 +71,7 @@ pub fn initial_frame(entry: Entry, first: *mut u8, second: *mut u8) -> [u64; 20]
     words[0] = first as u64;
     words[1] = second as u64;
     words[2] = entry as usize as u64;
-    words[11] = fiber_start as usize as u64;
+    words[11] = fiber_start as *const () as usize as u64;
     words
 }
 

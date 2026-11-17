@@ -107,7 +107,7 @@ impl<'a> Calls<'a> {
     ) -> Result<NativeValues> {
         let arm = abi::aarch64(object);
         let structure = match name {
-            "hirsel_core_spawn" => Some((4, 64)),
+            "hirsel_core_spawn" => Some((5, 64)),
             "hirsel_core_channel_new" => Some((2, 32)),
             _ => None,
         };

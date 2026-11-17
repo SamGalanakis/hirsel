@@ -60,6 +60,7 @@ unsafe extern "C" fn entry(context: *mut Context, cfg: *const Config, _: *mut Ma
         let mut stop = (*cfg).state.cast::<Stop>().read();
         let child = hirsel_core_spawn(
             context,
+            0,
             64,
             (&mut stop as *mut Stop).cast(),
             child_body,
@@ -67,6 +68,7 @@ unsafe extern "C" fn entry(context: *mut Context, cfg: *const Config, _: *mut Ma
                 input: scalar::<Stop>(),
                 result: scalar::<()>(),
             },
+            0,
         );
         let mut unit = 0u8;
         hirsel_core_join(context, child.task, &mut unit, 5);

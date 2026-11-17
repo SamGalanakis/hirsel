@@ -8,7 +8,7 @@ use crate::os::OsProvider;
 use std::cell::Cell as Shared;
 
 /// The code revision the tests open tapes as.
-const REVISION: [u8; 32] = {
+pub(super) const REVISION: [u8; 32] = {
     let mut b = [0; 32];
     let mut i = 0;
     while i < 32 {
@@ -155,8 +155,8 @@ impl World {
 
 /// An in-memory Dir (handle 1) holding tape files, for the campaigns.
 #[derive(Default)]
-struct Store {
-    files: BTreeMap<Vec<u8>, Vec<u8>>,
+pub(super) struct Store {
+    pub(super) files: BTreeMap<Vec<u8>, Vec<u8>>,
     open: BTreeMap<u64, (Vec<u8>, usize)>,
     next: u64,
 }
@@ -166,10 +166,10 @@ impl Store {
         s.files.insert(b"t".to_vec(), bytes.to_vec());
         s
     }
-    fn file(&self) -> &[u8] {
+    pub(super) fn file(&self) -> &[u8] {
         &self.files[&b"t".to_vec()]
     }
-    fn dir(&mut self) -> (Provider, u64) {
+    pub(super) fn dir(&mut self) -> (Provider, u64) {
         unsafe extern "C" fn issue(s: *mut u8, r: *mut Request, _: u64) -> Step {
             let st = unsafe { &mut *s.cast::<Store>() };
             let r = unsafe { &mut *r };
@@ -384,7 +384,7 @@ fn handle_like(like: u64, ordinal: u64) -> u64 {
     (like & !0xffff_ffff) | ordinal
 }
 
-fn header(build: [u8; 32]) -> Header {
+pub(super) fn header(build: [u8; 32]) -> Header {
     Header {
         kind: KIND_CALL,
         mode: MODE_RECORD,
@@ -399,7 +399,7 @@ fn header(build: [u8; 32]) -> Header {
         grants: vec![],
     }
 }
-fn expect() -> Expect<'static> {
+pub(super) fn expect() -> Expect<'static> {
     Expect {
         identity: b"app@1/main/run",
         charge_policy: 0,
@@ -411,7 +411,7 @@ fn expect() -> Expect<'static> {
 
 /// The scripted run's outcome, as vectors.py writes it: Failed with
 /// Fail("no data") then Overflow.
-fn ending() -> Ending {
+pub(super) fn ending() -> Ending {
     Ending::causes(END_FAILED, [(4, Some(&b"no data"[..])), (0, None)])
 }
 
@@ -612,6 +612,7 @@ fn record_writes_the_hand_encoded_tape() {
 /// operation to a source, or answers one differently from the recording.
 #[test]
 fn replay_answers_every_operation_from_the_tape_and_none_reaches_the_host() {
+    super::schedule_cases::run();
     let (_, recorded) = record(70_000);
     let (obs, fault, verdict) = replay(HAND, 70_000, Variant::Same, &ending()).unwrap();
     assert_eq!(fault, None);

@@ -163,6 +163,7 @@ operations! {
     ("tape", "dir", Lane::Runtime(Kernel::TapeGrant(0)), "B", "tape-build-1037", false),
     ("tape", "stdout", Lane::Runtime(Kernel::TapeGrant(4)), "B", "tape-build-1037", false),
     ("tape", "stderr", Lane::Runtime(Kernel::TapeGrant(5)), "B", "tape-build-1037", false),
+    ("tape", "tasks", Lane::Runtime(Kernel::TapeGrant(9)), "B", "tape-s2-1074", false),
     ("tape", "args", Lane::Runtime(Kernel::TapeGrant(10)), "B", "tape-build-1037", false),
     ("tape", "across", Lane::Runtime(Kernel::TapeAcross), "B", "tape-build-1037", false),
     ("tape", "io_error", Lane::PendingCode, "C", "tape-build-1037", true),
@@ -677,9 +678,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
             Kernel::Net(op) => self.runtime_net(op, f, vals, result, n),
-            Kernel::Spawn => {
-                self.runtime_spawn(types[0], types[1], vals[1]?, vals[2], vals[3]?, result, n)
-            }
+            Kernel::Spawn => self.runtime_spawn(
+                types[0], types[1], vals[0]?, vals[1]?, vals[2], vals[3]?, result, n,
+            ),
             Kernel::CheckCancel => {
                 self.runtime_row(RtOp::CheckCancel, &[], n)?;
                 None
@@ -1567,6 +1568,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 | "core-collections-918"
                 | "tape-build-1037"
                 | "wire-w1a-1063"
+                | "tape-s2-1074"
         ));
         if entry.private {
             assert!(
@@ -1601,6 +1603,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         &mut self,
         x: TyId,
         r: TyId,
+        tasks: ValueId,
         bytes: ValueId,
         value: Option<ValueId>,
         function: ValueId,
@@ -1624,7 +1627,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let requested = self.runtime_charge(bytes, one, base, n)?;
         let [task, available, ..] = self.runtime_row(
             RtOp::Spawn { x: xid, r: rid },
-            &[Arg::Value(bytes), Arg::Address(input), Arg::Value(function)],
+            &[
+                Arg::Value(bytes),
+                Arg::Address(input),
+                Arg::Value(function),
+                Arg::Value(tasks),
+            ],
             n,
         )?;
         self.consume(value, n);

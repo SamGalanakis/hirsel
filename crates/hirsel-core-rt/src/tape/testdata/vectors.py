@@ -118,3 +118,14 @@ t.op(SYNC_DIR, 6, b'')
 FAILED = 1
 (HERE / 'hand-tape.bin').write_bytes(t.end(FAILED, vi(2) + bytes([4]) + lb(b'no data') + bytes([0])))
 print('xxh3.bin rows', len(rows) // 16, 'hand-tape.bin bytes', sum(map(len, t.blocks)), 'blocks', len(t.blocks))
+
+# R17, independently derived coordinates: open 0; event 1; GRANT at 1;
+# event 2; WAIT is structural; WAKE at 2 therefore has gap 2 - 1 = 1.
+# WAIT is the first task-carrying frame, so it sets T and names task 0.
+g = Tape()
+g.grant(CLOCK)
+g.put(bytes([0x1b, 0]))           # WAIT task 0, no coordinate
+g.task = 0
+g.put(bytes([4, 1]))              # WAKE gap 1, previous task 0
+g.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9000), value=17)
+(HERE / 'grant-gap-tape.bin').write_bytes(g.end(FAILED, vi(2) + bytes([4]) + lb(b'no data') + bytes([0])))

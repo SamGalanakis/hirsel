@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, ptr};
 
 #[derive(Clone, Copy)]
 struct File {
+    group: Option<crate::tape::schedule::Group>,
     provider: Provider,
     handle: u64,
 }
@@ -74,8 +75,28 @@ impl Files {
     }
     pub(crate) fn grant(&mut self, provider: Provider, handle: u64) -> u64 {
         let id = DYNAMIC_GRANT | self.id();
-        self.grants.insert(id, Box::new(File { provider, handle }));
+        self.grants.insert(
+            id,
+            Box::new(File {
+                provider,
+                handle,
+                group: None,
+            }),
+        );
         id
+    }
+    pub(crate) fn taped_grant(
+        &mut self,
+        provider: Provider,
+        handle: u64,
+        group: crate::tape::schedule::Group,
+    ) -> u64 {
+        let id = self.grant(provider, handle);
+        self.grants.get_mut(&id).unwrap().group = Some(group);
+        id
+    }
+    pub(crate) fn grant_group(&self, handle: u64) -> Option<crate::tape::schedule::Group> {
+        self.grants.get(&handle).and_then(|g| g.group)
     }
     pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
         &raw const self.grants[&handle].provider
@@ -144,6 +165,7 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
         let provider = *provider;
         if result.status == 0 && result.error == IoError::OK {
             result.value = (*(*context).host_files).insert(File {
+                group: None,
                 provider,
                 handle: result.value,
             });
@@ -152,6 +174,7 @@ pub unsafe extern "C" fn hirsel_core_host_file_open(
             close(
                 context,
                 File {
+                    group: None,
                     provider,
                     handle: issued.value,
                 },

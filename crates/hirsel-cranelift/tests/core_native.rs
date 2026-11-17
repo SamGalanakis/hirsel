@@ -896,8 +896,8 @@ b3:
 "#;
     source.replace_range(child_start..child_end, child);
     source = source.replace(
-        "  v4: ptr, v5: u64 = call rt.spawn[t1, t2] g2 (v1, &a1, v3)   ; spawn cannot fail",
-        "  v4: ptr, v5: u64 = call rt.spawn[t1, t2] g2 (v1, &a1, v3)   ; spawn cannot fail\n  call rt.cancel g16 (v4)",
+        "  v4: ptr, v5: u64 = call rt.spawn[t1, t2] g2 (v1, &a1, v3, v1)",
+        "  v4: ptr, v5: u64 = call rt.spawn[t1, t2] g2 (v1, &a1, v3, v1)\n  call rt.cancel g16 (v4)",
     );
     let module = text::parse(&source).unwrap();
     let scratch = Scratch::new();
@@ -920,9 +920,9 @@ b3:
 #include <stdint.h>
 #include <stdlib.h>
 #include "hirsel_core_rt.h"
-HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext *,uint64_t,void *,HirselCoreTaskBody,HirselCoreTaskLayout);
-HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout) {{
-  HirselCoreSpawn spawn=__real_hirsel_core_spawn(ctx,bytes,input,body,layout);
+HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext *,uint64_t,uint64_t,void *,HirselCoreTaskBody,HirselCoreTaskLayout,uint64_t);
+HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t tasks,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout,uint64_t site) {{
+  HirselCoreSpawn spawn=__real_hirsel_core_spawn(ctx,tasks,bytes,input,body,layout,site);
   if(spawn.task) hirsel_core_cancel(ctx,spawn.task);
   return spawn;
 }}

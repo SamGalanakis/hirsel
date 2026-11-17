@@ -72,9 +72,11 @@ unsafe extern "C" fn spawn_join(context: *mut Context, destination: *mut u8, _: 
         let h = hirsel_core_spawn(
             context,
             0,
+            0,
             (&mut input as *mut u64).cast(),
             add,
             layout::<u64, u64>(8),
+            0,
         );
         assert!(!h.task.is_null());
         assert_eq!((*context).available(), before - 296);
@@ -87,9 +89,11 @@ unsafe extern "C" fn spawn_join(context: *mut Context, destination: *mut u8, _: 
         let refused = hirsel_core_spawn(
             context,
             0,
+            0,
             (&mut input as *mut u64).cast(),
             add,
             layout::<u64, u64>(8),
+            0,
         );
         assert!(refused.task.is_null());
         assert_eq!(input, 41);
@@ -179,24 +183,30 @@ unsafe extern "C" fn pipeline(context: *mut Context, destination: *mut u8, input
         let mut c = b.receiver;
         let producer = hirsel_core_spawn(
             context,
+            0,
             1024,
             (&mut p as *mut Producer).cast(),
             producer,
             layout::<Producer, ()>(0),
+            0,
         );
         let relay = hirsel_core_spawn(
             context,
+            0,
             1024,
             (&mut r as *mut Relay).cast(),
             relay,
             layout::<Relay, ()>(0),
+            0,
         );
         let consumer = hirsel_core_spawn(
             context,
+            0,
             1024,
             (&mut c as *mut *mut Channel).cast(),
             consumer,
             layout::<*mut Channel, u64>(8),
+            0,
         );
         assert!(!producer.task.is_null() && !relay.task.is_null() && !consumer.task.is_null());
         let mut unit = 0u8;
@@ -254,10 +264,12 @@ unsafe extern "C" fn cancelled_join(context: *mut Context, destination: *mut u8,
         let mut rx = c.receiver;
         let child = hirsel_core_spawn(
             context,
+            0,
             64,
             (&mut rx as *mut *mut Channel).cast(),
             cancelled,
             layout::<*mut Channel, ()>(0),
+            0,
         );
         assert!(!child.task.is_null());
         for _ in 0..POLLS_PER_TURN {
@@ -293,10 +305,12 @@ unsafe extern "C" fn abandoned(context: *mut Context, destination: *mut u8, _: *
         let mut rx = c.receiver;
         let child = hirsel_core_spawn(
             context,
+            0,
             64,
             (&mut rx as *mut *mut Channel).cast(),
             cancelled,
             layout::<*mut Channel, ()>(0),
+            0,
         );
         assert_eq!(hirsel_core_check_cancel(context, 0), 0);
         hirsel_core_task_drop(context, child.task);
@@ -446,8 +460,15 @@ fn child_results_keep_their_origin_funding_until_joiner_drop() {
         // SAFETY: result pointer becomes exclusively owned by this parent at join.
         unsafe {
             let mut unit = 0u8;
-            let child =
-                hirsel_core_spawn(context, 16, &mut unit, allocate, layout::<(), *mut u8>(8));
+            let child = hirsel_core_spawn(
+                context,
+                0,
+                16,
+                &mut unit,
+                allocate,
+                layout::<(), *mut u8>(8),
+                0,
+            );
             let mut result = ptr::null_mut();
             assert_eq!(
                 hirsel_core_join(context, child.task, (&mut result as *mut *mut u8).cast(), 1).kind,
@@ -483,9 +504,11 @@ fn arc_unwrap_observes_release_order_and_foreign_last_refund() {
             let h = hirsel_core_spawn(
                 context,
                 0,
+                0,
                 (&mut pointer as *mut *mut u8).cast(),
                 child,
                 layout::<*mut u8, ()>(0),
+                0,
             );
             if release_first {
                 for _ in 0..POLLS_PER_TURN {
@@ -535,9 +558,11 @@ fn cancelled_joiner_retains_handle_for_shielded_abandonment() {
             let h = hirsel_core_spawn(
                 context,
                 0,
+                0,
                 (&mut input as *mut u64).cast(),
                 add,
                 layout::<u64, u64>(8),
+                0,
             );
             (*context)
                 .cancel_requested
@@ -608,7 +633,7 @@ fn abandoning_successful_resource_result_propagates_its_finalizer_failure() {
                     ..value::<Resource>(16)
                 },
             };
-            let child = hirsel_core_spawn(context, 32, &mut unit, create, descriptor);
+            let child = hirsel_core_spawn(context, 0, 32, &mut unit, create, descriptor, 0);
             assert!(!child.task.is_null());
             hirsel_core_task_drop(context, child.task)
         }
@@ -692,9 +717,11 @@ fn foreign_growth_defers_parent_refunds_until_parent_events_and_received_grant_r
             let task = hirsel_core_spawn(
                 context,
                 0,
+                0,
                 (&mut input as *mut Input).cast(),
                 child,
                 layout::<Input, u64>(8),
+                0,
             );
             let joined = hirsel_core_join(context, task.task, out, 1);
             assert_eq!((joined.kind, joined.status), (0, 0));
@@ -898,9 +925,11 @@ fn event_gate_enables_poll_hooks_without_a_sink_and_children_inherit_the_gate() 
             let task = hirsel_core_spawn(
                 context,
                 0,
+                0,
                 (&mut enabled as *mut bool).cast(),
                 child,
                 layout::<bool, u64>(8),
+                0,
             );
             assert!(!task.task.is_null());
             assert_eq!(hirsel_core_join(context, task.task, out, 1).status, 0);
@@ -967,7 +996,8 @@ fn unjoined_failed_child_frees_the_moved_string_backing() {
     unsafe extern "C" fn abandon(context: *mut Context, result: *mut u8, _: *mut u8) -> u8 {
         // SAFETY: root transfers its only child handle to drop and never joins it.
         unsafe {
-            let child = hirsel_core_spawn(context, 8, ptr::null_mut(), fail, layout::<(), ()>(0));
+            let child =
+                hirsel_core_spawn(context, 0, 8, ptr::null_mut(), fail, layout::<(), ()>(0), 0);
             assert!(!child.task.is_null());
             assert_eq!(hirsel_core_task_drop(context, child.task), 0);
             result.cast::<u64>().write(1);

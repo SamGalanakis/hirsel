@@ -34,9 +34,9 @@ void __wrap_hirsel_core_cancel(HirselCoreContext *ctx,HirselCoreTask *task) {
     }
     __real_hirsel_core_cancel(ctx,task);
 }
-extern HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext*,uint64_t,void*,HirselCoreTaskBody,HirselCoreTaskLayout);
-HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout) {
-    HirselCoreSpawn h=__real_hirsel_core_spawn(ctx,bytes,input,body,layout);
+extern HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext*,uint64_t,uint64_t,void*,HirselCoreTaskBody,HirselCoreTaskLayout,uint64_t);
+HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t tasks,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout,uint64_t site) {
+    HirselCoreSpawn h=__real_hirsel_core_spawn(ctx,tasks,bytes,input,body,layout,site);
     CHECK(h.task); s.child=h.task; return h;
 }
 extern HirselCoreTransfer __real_hirsel_core_receive(HirselCoreContext*,HirselCoreChannel*,void*,uint64_t);
@@ -205,7 +205,7 @@ static uint8_t s0_sleeper(HirselCoreContext *c,void *out,void *in) {
 static uint8_t s0_peer(HirselCoreContext *c,void *out,void *in) {(void)c;(void)out;(void)in;s0_order[s0_at++]='P';return 0;}
 static uint8_t s0_sleep_entry(HirselCoreContext *c,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {
     (void)cfg; char in=0,res=0; HirselCoreValueLayout v={0,1,0,s0_drop}; HirselCoreTaskLayout l={v,v};
-    HirselCoreSpawn a=hirsel_core_spawn(c,4096,&in,s0_sleeper,l), b=hirsel_core_spawn(c,4096,&in,s0_peer,l);
+    HirselCoreSpawn a=hirsel_core_spawn(c,0,4096,&in,s0_sleeper,l,0), b=hirsel_core_spawn(c,0,4096,&in,s0_peer,l,0);
     CHECK(hirsel_core_join(c,a.task,&res,2).status==0 && hirsel_core_join(c,b.task,&res,3).status==0);
     out->kind=0; out->exit=0; return 0;
 }

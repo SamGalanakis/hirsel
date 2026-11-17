@@ -41,6 +41,7 @@ fn fault_word(f: Fault) -> u64 {
                 Mismatch::Missing => 3,
                 Mismatch::Extra => 4,
                 Mismatch::Outcome => 5,
+                Mismatch::Schedule => 6,
             };
             word(1, sub, d.at)
         }
@@ -111,7 +112,7 @@ pub unsafe extern "C" fn hirsel_core_tape_open(
             charge_policy: 0,
             limit,
             bound: 0,
-            chooser: 0,
+            chooser: crate::tasks::recorded_chooser(),
             arg: arg.to_vec(),
             grants: vec![],
         };
@@ -234,7 +235,10 @@ pub unsafe extern "C" fn hirsel_core_tape_grant(
             (*files)
                 .tape_ref(tape)
                 .on_tape(kind, (provider, handle))
-                .map(|(p, h)| (*files).grant(p, h))
+                .map(|(p, h)| {
+                    let group = (*files).tape_ref(tape).group();
+                    (*files).taped_grant(p, h, group)
+                })
         };
         match result {
             Ok(value) => Granted { value, status: 0 },

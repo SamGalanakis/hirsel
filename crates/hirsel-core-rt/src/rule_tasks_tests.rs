@@ -91,6 +91,7 @@ unsafe extern "C" fn abandon(context: *mut Context, out: *mut u8, _: *mut u8) ->
         let mut pointer = &mut witness as *mut u64;
         let task = hirsel_core_spawn(
             context,
+            0,
             64,
             (&mut pointer as *mut *mut u64).cast(),
             child,
@@ -101,6 +102,7 @@ unsafe extern "C" fn abandon(context: *mut Context, out: *mut u8, _: *mut u8) ->
                     ..value::<ResultValue>(16)
                 },
             },
+            0,
         );
         (*context)
             .cancel_requested

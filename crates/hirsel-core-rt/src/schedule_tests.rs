@@ -278,10 +278,12 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
         };
         let h = hirsel_core_spawn(
             context,
+            0,
             128,
             (&mut p as *mut Producer).cast(),
             produce,
             descriptor::<Producer>(),
+            0,
         );
         if h.task.is_null() {
             return cleanup(context, &mut handles, &mut senders, &mut receivers);
@@ -294,10 +296,12 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
         };
         let h = hirsel_core_spawn(
             context,
+            0,
             128,
             (&mut r as *mut Relay).cast(),
             relay,
             descriptor::<Relay>(),
+            0,
         );
         if h.task.is_null() {
             return cleanup(context, &mut handles, &mut senders, &mut receivers);
@@ -308,10 +312,12 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
         let mut rx = receivers[1].unwrap();
         let h = hirsel_core_spawn(
             context,
+            0,
             128,
             (&mut rx as *mut *mut Channel).cast(),
             consume,
             descriptor::<*mut Channel>(),
+            0,
         );
         if h.task.is_null() {
             return cleanup(context, &mut handles, &mut senders, &mut receivers);
@@ -554,9 +560,11 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
             let h = hirsel_core_spawn(
                 context,
                 0,
+                0,
                 (&mut s as *mut *mut Script).cast(),
                 child,
                 descriptor::<*mut Script>(),
+                0,
             );
             loop {
                 if (*s).phase >= (*s).hold {

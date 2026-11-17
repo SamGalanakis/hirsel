@@ -137,6 +137,7 @@ fn tape_run_replays(backend: Backend, other: Backend) {
 #[ignore = "explicit native integration target"]
 fn tape_run_replays_cranelift() {
     tape_run_replays(Backend::Cranelift, Backend::Llvm);
+    tape_schedule_engines();
 }
 
 #[test]
@@ -154,10 +155,12 @@ fn tape_run_after_end(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("grant")).unwrap();
     let program = tape_run_build(backend, dir.path(), "a", ("", ""));
-    for run in ["record", "replay"] {
-        let (code, out, err) = tape_run(&program, &["after"]);
+    for argument in ["after", "aftertasks"] {
+      for run in ["record", "replay"] {
+        let (code, out, err) = tape_run(&program, &[argument]);
         assert_ne!(code, Some(0), "{run}: {out:?}");
         assert!(err.starts_with("Tape(ended) at "), "{run}: {err:?}");
+      }
     }
 }
 
@@ -171,4 +174,45 @@ fn tape_run_after_end_cranelift() {
 #[ignore = "explicit native integration target"]
 fn tape_run_after_end_llvm() {
     tape_run_after_end(Backend::Llvm);
+}
+
+/// Both emitters record identical scheduling coordinates and portable outcomes.
+/// The fixed inner provider drives W and I without host timing.
+fn tape_schedule_engines() {
+    use std::io::Write;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let grant = dir.path().join("grant");
+    std::fs::create_dir(&grant).unwrap();
+    let cc = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
+    let source = std::fs::read_to_string(root.join("core/front/tape/schedule.hirsel")).unwrap();
+    let c = dir.path().join("provider.c");
+    std::fs::write(&c, include_str!("tape_schedule_provider.c")).unwrap();
+    let linker = dir.path().join("cc");
+    let quote = |p: &Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
+    let mut script = Vec::new();
+    writeln!(script, "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_run", quote(&cc), quote(&c), quote(&root.join("crates/hirsel-core-rt/include"))).unwrap();
+    crate::executable::write(&linker, &script, 0o755).unwrap();
+    let mut recorded = None;
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut request = source_request(&source, dir.path());
+        request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        let mut options = native_options(backend, dir.path());
+        options.output = dir.path().join(format!("schedule-{backend:?}"));
+        options.store = dir.path().join(format!("store-{backend:?}"));
+        options.directories = vec![grant.to_str().unwrap().into()];
+        options.grant_mask = (1 << 2) | (1 << 9);
+        options.link = Link::Driver(linker.clone());
+        let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
+        let (code, out, err) = tape_run(&built.executable, &[]);
+        assert_eq!(code, Some(0), "{backend:?} record: {out} {err}");
+        let bytes = std::fs::read(grant.join("schedule.tape")).unwrap();
+        let (code, out, err) = tape_run(&built.executable, &[]);
+        assert_eq!(code, Some(0), "{backend:?} replay: {out} {err}");
+        if let Some(recorded) = &recorded { assert_eq!(&bytes, recorded, "engine recordings, including block 0"); }
+        recorded = Some(bytes);
+        std::fs::remove_file(grant.join("schedule.tape")).unwrap();
+    }
 }

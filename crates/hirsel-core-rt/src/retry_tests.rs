@@ -158,6 +158,7 @@ unsafe extern "C" fn root(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
         };
         let child = hirsel_core_spawn(
             ctx,
+            0,
             1024,
             (&mut child_input as *mut Input).cast(),
             child,
@@ -165,6 +166,7 @@ unsafe extern "C" fn root(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
                 input: value::<Input>(),
                 result: value::<()>(),
             },
+            0,
         );
         assert!(!child.task.is_null());
         if (*trace).kind == 3 {

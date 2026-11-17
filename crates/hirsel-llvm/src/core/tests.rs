@@ -1735,9 +1735,9 @@ b3:
 #include "hirsel_core_rt.h"
 static uint64_t traces;
 void hirsel_core_test_drop_trace(uint64_t n) {{ (void)n; traces++; }}
-HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext *,uint64_t,void *,HirselCoreTaskBody,HirselCoreTaskLayout);
-HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout) {{
-  HirselCoreSpawn spawn=__real_hirsel_core_spawn(ctx,bytes,input,body,layout);
+HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext *,uint64_t,uint64_t,void *,HirselCoreTaskBody,HirselCoreTaskLayout,uint64_t);
+HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t tasks,uint64_t bytes,void *input,HirselCoreTaskBody body,HirselCoreTaskLayout layout,uint64_t site) {{
+  HirselCoreSpawn spawn=__real_hirsel_core_spawn(ctx,tasks,bytes,input,body,layout,site);
   if(spawn.task) hirsel_core_cancel(ctx,spawn.task);
   return spawn;
 }}

@@ -1,4 +1,4 @@
-//! Tapes: Record and Replay of provider operations (REPLAY-SPEC v2 slice S1).
+//! Tapes: Record and Replay of provider operations (REPLAY-SPEC v2.4 S1/S2).
 //!
 //! A tape is a provider over the four-state ABI (section 3). `on_tape` turns a
 //! capability's (provider, handle) into a substitute: the tape's provider with
@@ -6,17 +6,19 @@
 //! dynamic grant like any other (host_file.rs). Every operation on it, and on
 //! every HostFile or Dir made through it, reaches the tape at issue.
 //!
-//! Record forwards each operation to the substitute's inner provider and
-//! writes one OP frame (section 4.1: nothing comes between an S1 operation's
-//! issue and its delivery). Replay holds no inner provider at all: it answers
-//! each issue from the next frame after comparing op, object and arguments,
-//! so no operation under Replay can reach the host.
+//! Record forwards operations and records their issue and production. S2 also
+//! records waiting, external cancellation and non-FIFO scheduling at semantic
+//! event coordinates. Replay has no inner provider and supplies those inputs
+//! at scheduler turns; malformed pairings and positions give Schedule.
 //!
 //! The tape's state lives in a process slot table (section 8). Ending or
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
 pub mod abi;
 pub mod format;
+pub(crate) mod schedule;
+#[cfg(test)]
+mod schedule_cases;
 #[cfg(test)]
 mod tests;
 
@@ -34,7 +36,7 @@ pub enum Mode {
     Replay,
 }
 
-/// Section 4.2's divergence kinds that S1 can produce.
+/// Section 4.2's divergence kinds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mismatch {
     Op,
@@ -44,6 +46,7 @@ pub enum Mismatch {
     Extra,
     /// The replaying domain's outcome differs from END's (v2.3 R9).
     Outcome,
+    Schedule,
 }
 
 /// Where a replay diverged: `at` is the 1-based position of the frame it was
@@ -189,6 +192,9 @@ struct Replayer {
 }
 
 struct Live {
+    schedule: schedule::Schedule,
+    waiting: BTreeMap<usize, u64>,
+    pending: BTreeMap<usize, Pending>,
     mode: Mode,
     fault: Option<Fault>,
     /// Index ordinal - 1 (section 4.3: one sequence per tape, from 1).
@@ -201,6 +207,12 @@ struct Live {
 
 /// A Record operation between issue and deliver: deliver runs the inner
 /// provider's own deliver on its own outcome, then maps a new handle.
+struct Pending {
+    inner: Inner,
+    task: u64,
+    before: usize,
+}
+
 struct Delivery {
     inner: Inner,
     outcome: Outcome,
@@ -372,6 +384,14 @@ impl Recorder {
 }
 
 impl Replayer {
+    fn peek(&mut self) -> Result<&Frame, Fault> {
+        if self.frames.is_empty() {
+            let frame = self.next()?;
+            self.taken -= 1;
+            self.frames.push_front(frame);
+        }
+        Ok(self.frames.front().unwrap())
+    }
     fn next(&mut self) -> Result<Frame, Fault> {
         loop {
             if let Some(f) = self.frames.pop_front() {
@@ -442,6 +462,9 @@ fn clock(op: u8) -> bool {
 }
 
 impl Tape {
+    pub(crate) fn group(&self) -> schedule::Group {
+        schedule::Group::root(self.cell, self.generation)
+    }
     /// Open a tape at `name` in the Dir `dir` (its provider and handle), as
     /// the code whose revision is `revision`: the generated `tape.open` passes
     /// the entry object's `hirsel_code_revision`, the entry's code revision,
@@ -491,6 +514,9 @@ impl Tape {
                 // SAFETY: forwarded.
                 unsafe { recorder.close(0) }.map_err(OpenError::Io)?;
                 let live = Live {
+                    waiting: BTreeMap::new(),
+                    pending: BTreeMap::new(),
+                    schedule: schedule::Schedule::new(header.chooser),
                     mode,
                     fault: None,
                     objects: vec![],
@@ -524,6 +550,9 @@ impl Tape {
                 }
                 differs = stored.revision != header.revision;
                 let live = Live {
+                    waiting: BTreeMap::new(),
+                    pending: BTreeMap::new(),
+                    schedule: schedule::Schedule::new(stored.chooser),
                     mode,
                     fault: None,
                     objects: vec![],
@@ -549,6 +578,7 @@ impl Tape {
         s.live = Some(live);
         let generation = s.generation;
         drop(s);
+        crate::tasks::attach_tape(schedule::Group::root(cell, generation));
         Ok((
             Tape {
                 cell,
@@ -601,6 +631,7 @@ impl Tape {
         if let Some(f) = live.fault {
             return Err(refuse(f));
         }
+        live.own_position();
         let stored = match live.mode {
             Mode::Record => {
                 let rec = live.recorder.as_mut().unwrap();
@@ -620,6 +651,13 @@ impl Tape {
                 let stored = match rep.next() {
                     Ok(Frame::Grant { kind: k, args }) if k == kind => Ok(args.unwrap_or_default()),
                     Ok(Frame::End(_)) => Err(rep.diverged(Mismatch::Missing)),
+                    Ok(
+                        Frame::Wake { .. }
+                        | Frame::Cancel { .. }
+                        | Frame::Done { .. }
+                        | Frame::Choose { .. }
+                        | Frame::Wait { .. },
+                    ) => Err(rep.diverged(Mismatch::Schedule)),
                     Ok(_) => Err(rep.diverged(Mismatch::Op)),
                     Err(f) => Err(f),
                 };
@@ -664,6 +702,13 @@ impl Tape {
         }
         drop(s);
         let mut result = live.fault.map_or(Ok(()), Err);
+        if end.is_some() && result.is_ok() && (!live.waiting.is_empty() || !live.pending.is_empty())
+        {
+            result = Err(Fault::Diverged(Divergence {
+                at: live.replayer.as_ref().map_or(1, |r| r.taken + 1),
+                kind: Mismatch::Schedule,
+            }));
+        }
         if let Some(rec) = live.recorder.as_mut() {
             // SAFETY: end and drop run in a task of the tape's run.
             let written = unsafe {
@@ -695,6 +740,13 @@ impl Tape {
                     },
                     |_| Err(Fault::Corrupt),
                 ),
+                Ok(
+                    Frame::Wake { .. }
+                    | Frame::Cancel { .. }
+                    | Frame::Done { .. }
+                    | Frame::Choose { .. }
+                    | Frame::Wait { .. },
+                ) => Err(rep.diverged(Mismatch::Schedule)),
                 Ok(_) => Err(rep.diverged(Mismatch::Extra)),
                 Err(f) => Err(f),
             };
@@ -752,7 +804,7 @@ unsafe fn read_file(dir: Inner, name: &[u8]) -> Result<Vec<u8>, IoError> {
     }
 }
 
-fn cell_of<'a>(state: *mut u8) -> &'a Cell {
+fn cell_of(state: *mut u8) -> &'static Cell {
     // SAFETY: a tape provider's state is its leaked cell.
     unsafe { &*state.cast::<Cell>() }
 }
@@ -763,54 +815,110 @@ fn ordinal_of(h: u64) -> usize {
     (h & 0xffff_ffff) as usize
 }
 
-/// Record forwards the wait to the inner provider (a sleep waits on the host
-/// clock); Replay, an ended tape and a stopped tape are Ready at once.
+/// A first non-ready answer opens W explicitly. Subsequent callbacks keep
+/// that WAIT open until the scheduler records WAKE, or cancellation closes W.
 unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
     let cell = cell_of(state);
-    // SAFETY: the driver's pinned request.
+    // SAFETY: the driver pins this request for the entire operation.
     let h = unsafe { (*r).handle };
-    let inner = {
-        let s = cell.state.lock().unwrap();
-        match &s.live {
-            Some(live)
-                if s.generation == generation_of(h)
-                    && live.fault.is_none()
-                    && live.mode == Mode::Record =>
-            {
-                live.objects[ordinal_of(h) - 1].inner
-            }
-            _ => None,
-        }
-    };
-    let Some(inner) = inner else {
+    let key = r as usize;
+    let mut s = cell.state.lock().unwrap();
+    if s.generation != generation_of(h) {
+        return Wait::default();
+    }
+    let generation = s.generation;
+    let Some(live) = s.live.as_mut() else {
         return Wait::default();
     };
-    // SAFETY: forwarded to the source with its own handle, restored after.
-    unsafe {
+    if live.fault.is_some() {
+        return Wait::default();
+    }
+    if !schedule::member(cell, generation) {
+        let live = s.live.as_mut().unwrap();
+        live.fault = Some(refuse(Fault::Diverged(Divergence {
+            at: live.replayer.as_ref().map_or(1, |r| r.taken + 1),
+            kind: Mismatch::Schedule,
+        })));
+        return Wait::default();
+    }
+    let live = s.live.as_mut().unwrap();
+    let task = schedule::task(cell);
+    if live.mode == Mode::Replay {
+        if live.waiting.contains_key(&key) {
+            return Wait {
+                kind: WAIT_PARK,
+                deadline_ns: 0,
+            };
+        }
+        let rep = live.replayer.as_mut().unwrap();
+        let result = match rep.peek() {
+            Ok(Frame::Wait { task: t }) if *t == task => {
+                rep.next().unwrap();
+                live.waiting.insert(key, task);
+                return Wait {
+                    kind: WAIT_PARK,
+                    deadline_ns: 0,
+                };
+            }
+            Ok(Frame::Op { task: t, .. } | Frame::Issue { task: t, .. }) if *t == task => {
+                return Wait::default();
+            }
+            Ok(_) => rep.diverged_next(Mismatch::Schedule),
+            Err(f) => f,
+        };
+        live.fault = Some(refuse(result));
+        return Wait::default();
+    }
+    let inner = live.objects[ordinal_of(h) - 1].inner.unwrap();
+    drop(s);
+    // SAFETY: forward with the source's handle and restore the pinned request.
+    let w = unsafe {
         (*r).handle = inner.handle;
         let w = (inner.provider.wait)(inner.provider.state, r, token);
         (*r).handle = h;
         w
+    };
+    if w.kind != WAIT_READY {
+        let mut s = cell.state.lock().unwrap();
+        let live = s.live.as_mut().unwrap();
+        if live.waiting.insert(key, task).is_none() {
+            // SAFETY: callback runs on the tape's owning thread.
+            if let Err(e) = unsafe { live.recorder.as_mut().unwrap().frame(&Frame::Wait { task }) }
+            {
+                live.fault = Some(refuse(Fault::Io(e)));
+                return Wait::default();
+            }
+        }
     }
+    w
 }
 
 unsafe extern "C" fn issue(state: *mut u8, r: *mut Request, token: u64) -> Step {
     let cell = cell_of(state);
     // SAFETY: the driver's pinned request, in the task.
-    let outcome = unsafe { issue_in(cell, &mut *r, token) };
+    unsafe { issue_in(cell, &mut *r, token) }
+}
+
+fn done(outcome: Outcome) -> Step {
     Step {
         kind: STEP_DONE,
         outcome,
         deadline_ns: 0,
     }
 }
+fn pending() -> Step {
+    Step {
+        kind: STEP_PENDING,
+        outcome: Outcome::default(),
+        deadline_ns: 0,
+    }
+}
 
-unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Outcome {
+unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let h = r.handle;
+    let key = r as *mut Request as usize;
     let mut s = cell.state.lock().unwrap();
     if s.generation != generation_of(h) || s.live.is_none() {
-        // Section 8: fails before issue. Cleaning a Record HostFile closes the
-        // inner live file, with no frame; Replay has none.
         let orphan = (r.operation == CLOSE)
             .then(|| s.orphans.remove(&h))
             .flatten();
@@ -820,106 +928,148 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Outcome {
             let _ = unsafe { sink(inner, request(CLOSE, 0, 0, &[], empty_buffer())) };
         }
         refuse(Fault::Ended);
-        return REFUSED;
+        return done(REFUSED);
     }
     let generation = s.generation;
     let live = s.live.as_mut().unwrap();
     if let Some(f) = live.fault {
         refuse(f);
-        return REFUSED;
+        return done(REFUSED);
     }
+    live.waiting.remove(&key);
     let ordinal = ordinal_of(h);
+    let task = schedule::task(cell);
     // SAFETY: forwarded.
     let args = unsafe { canonical(r) };
-    match live.mode {
-        Mode::Record => {
-            let inner = live.objects[ordinal - 1].inner.unwrap();
-            drop(s);
-            let before = r.buffer.len;
-            r.handle = inner.handle;
-            // SAFETY: the source's own issue, in the task, with its handle.
-            let step = unsafe { (inner.provider.issue)(inner.provider.state, r, token) };
-            r.handle = h;
-            if step.kind != STEP_DONE {
-                // An operation in I is recorded with positions, slice S2.
-                crate::process::stop(b"TapePending");
+    live.own_position();
+    live.schedule.events += 1;
+    if live.mode == Mode::Replay {
+        // SAFETY: output is written only into the request's spare carrier.
+        return match unsafe { replay(live, generation, ordinal, r, &args) } {
+            Ok(step) => step,
+            Err(f) => {
+                live.fault = Some(refuse(f));
+                done(REFUSED)
             }
-            let o = step.outcome;
-            let mut s = cell.state.lock().unwrap();
-            let live = s.live.as_mut().unwrap();
-            let ok = o.status == 0 && o.error == IoError::OK;
-            let mut out = Out {
-                status: if o.error == IoError::OK { OK } else { ERROR },
-                value: o.value,
-                error: (o.error.tag, u64::from(o.error.code)),
-                written: o.written,
-                payload: vec![],
-            };
-            let mut created = None;
-            let mut answer = o;
-            if ok && matches!(r.operation, OPEN | MKDTEMP) {
-                live.objects.push(Object {
-                    inner: Some(Inner {
-                        provider: inner.provider,
-                        handle: o.value,
-                    }),
-                    open_file: r.operation == OPEN,
-                });
-                let n = live.objects.len();
-                out.value = n as u64;
-                answer.value = handle(generation, n);
-                created = Some(answer.value);
-            }
-            if ok && r.operation == CLOSE {
-                live.objects[ordinal - 1].open_file = false;
-            }
-            if clock(r.operation) {
-                let prev = live
-                    .clocks
-                    .insert((r.operation, ordinal as u64), o.value)
-                    .unwrap_or(0);
-                out.value = zz(o.value.wrapping_sub(prev) as i64);
-            }
-            if ok && carries_payload(r.operation) && r.buffer.len > before {
-                // SAFETY: the source wrote these bytes into the pinned carrier.
-                out.payload = unsafe {
-                    std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before)
-                }
-                .to_vec();
-            }
-            let frame = Frame::Op {
-                task: 0,
-                op: r.operation,
-                object: ordinal as u64,
-                args: Args::of(&args),
-                out,
-            };
-            let rec = live.recorder.as_mut().unwrap();
-            // SAFETY: in the task.
-            if let Err(e) = unsafe { rec.frame(&frame) } {
-                live.fault = Some(Fault::Io(e));
-            }
-            s.delivering.insert(
-                r as *mut Request as usize,
-                Delivery {
-                    inner,
-                    outcome: o,
-                    created,
-                },
-            );
-            answer
-        }
-        Mode::Replay => {
-            // SAFETY: forwarded.
-            match unsafe { replay(live, generation, ordinal, r, &args) } {
-                Ok(o) => o,
-                Err(f) => {
-                    live.fault = Some(refuse(f));
-                    REFUSED
-                }
-            }
-        }
+        };
     }
+    let inner = live.objects[ordinal - 1].inner.unwrap();
+    let before = r.buffer.len;
+    drop(s);
+    r.handle = inner.handle;
+    // SAFETY: source callback, in the task, with its own handle.
+    let step = unsafe { (inner.provider.issue)(inner.provider.state, r, token) };
+    r.handle = h;
+    let mut s = cell.state.lock().unwrap();
+    let live = s.live.as_mut().unwrap();
+    let own = Frame::Issue {
+        task,
+        op: r.operation,
+        object: ordinal as u64,
+        args: Args::of(&args),
+    };
+    if step.kind == STEP_PENDING {
+        // SAFETY: the run's callback thread owns the sink.
+        if let Err(e) = unsafe { live.recorder.as_mut().unwrap().frame(&own) } {
+            live.fault = Some(refuse(Fault::Io(e)));
+            return done(REFUSED);
+        }
+        live.pending.insert(
+            key,
+            Pending {
+                inner,
+                task,
+                before,
+            },
+        );
+        return step;
+    }
+    // SAFETY: the source completed this pinned request.
+    let (out, answer, delivery) =
+        unsafe { record_out(live, generation, r, before, inner, step.outcome) };
+    let Frame::Issue {
+        task,
+        op,
+        object,
+        args,
+    } = own
+    else {
+        unreachable!()
+    };
+    let frame = Frame::Op {
+        task,
+        op,
+        object,
+        args,
+        out,
+    };
+    // SAFETY: the run owns the tape sink.
+    if let Err(e) = unsafe { live.recorder.as_mut().unwrap().frame(&frame) } {
+        live.fault = Some(refuse(Fault::Io(e)));
+    }
+    live.schedule.events += 1;
+    s.delivering.insert(key, delivery);
+    done(answer)
+}
+
+/// Normalize a provider outcome and assign newly created object ordinals at
+/// production, before another task can observe the completion.
+unsafe fn record_out(
+    live: &mut Live,
+    generation: u32,
+    r: &Request,
+    before: usize,
+    inner: Inner,
+    o: Outcome,
+) -> (Out, Outcome, Delivery) {
+    let ordinal = ordinal_of(r.handle);
+    let ok = o.status == 0 && o.error == IoError::OK;
+    let mut out = Out {
+        status: if o.error == IoError::OK { OK } else { ERROR },
+        value: o.value,
+        error: (o.error.tag, u64::from(o.error.code)),
+        written: o.written,
+        payload: vec![],
+    };
+    let mut answer = o;
+    let mut created = None;
+    if ok && matches!(r.operation, OPEN | MKDTEMP) {
+        live.objects.push(Object {
+            inner: Some(Inner {
+                provider: inner.provider,
+                handle: o.value,
+            }),
+            open_file: r.operation == OPEN,
+        });
+        out.value = live.objects.len() as u64;
+        answer.value = handle(generation, live.objects.len());
+        created = Some(answer.value);
+    }
+    if ok && r.operation == CLOSE {
+        live.objects[ordinal - 1].open_file = false;
+    }
+    if clock(r.operation) {
+        let prev = live
+            .clocks
+            .insert((r.operation, ordinal as u64), o.value)
+            .unwrap_or(0);
+        out.value = zz(o.value.wrapping_sub(prev) as i64);
+    }
+    if ok && carries_payload(r.operation) && r.buffer.len > before {
+        // SAFETY: source initialized these bytes in the request's spare carrier.
+        out.payload =
+            unsafe { std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before) }
+                .to_vec();
+    }
+    (
+        out,
+        answer,
+        Delivery {
+            inner,
+            outcome: o,
+            created,
+        },
+    )
 }
 
 /// Answer one issue from the next frame (section 4.2's issue check first).
@@ -929,28 +1079,29 @@ unsafe fn replay(
     ordinal: usize,
     r: &mut Request,
     args: &[u8],
-) -> Result<Outcome, Fault> {
+) -> Result<Step, Fault> {
+    let task = schedule::task_from_live();
     let rep = live.replayer.as_mut().unwrap();
-    let (op, object, stored, out) = match rep.next()? {
+    let (t, op, object, stored, out) = match rep.next()? {
         Frame::Op {
+            task,
             op,
             object,
             args,
             out,
-            ..
-        } => (op, object, args, out),
+        } => (task, op, object, args, Some(out)),
         Frame::Issue {
             task,
             op,
             object,
             args,
-        } => match rep.next()? {
-            Frame::Done { task: t, out, .. } if t == task => (op, object, args, out),
-            _ => return Err(rep.diverged(Mismatch::Op)),
-        },
+        } => (task, op, object, args, None),
         Frame::End(_) => return Err(rep.diverged(Mismatch::Missing)),
-        _ => return Err(rep.diverged(Mismatch::Op)),
+        _ => return Err(rep.diverged(Mismatch::Schedule)),
     };
+    if t != task {
+        return Err(rep.diverged(Mismatch::Schedule));
+    }
     if op != r.operation {
         return Err(rep.diverged(Mismatch::Op));
     }
@@ -960,6 +1111,22 @@ unsafe fn replay(
     if stored != Args::of(args) {
         return Err(rep.diverged(Mismatch::Arg));
     }
+    let Some(out) = out else {
+        return Ok(pending());
+    };
+    live.schedule.events += 1;
+    // SAFETY: replay's checked payload fits the caller's pinned carrier.
+    unsafe { replay_out(live, generation, op, object, r, out).map(done) }
+}
+
+unsafe fn replay_out(
+    live: &mut Live,
+    generation: u32,
+    op: u8,
+    object: u64,
+    r: &mut Request,
+    out: Out,
+) -> Result<Outcome, Fault> {
     let mut o = Outcome {
         value: out.value,
         error: IoError {
@@ -972,6 +1139,7 @@ unsafe fn replay(
     match out.status {
         OK => {}
         ERROR if out.error.0 != 0 => {}
+        ABORTED | TIMED_OUT => {}
         _ => return Err(Fault::Corrupt),
     }
     let ok = out.status == OK;
@@ -1009,11 +1177,108 @@ unsafe fn replay(
     Ok(o)
 }
 
-unsafe extern "C" fn resume(_: *mut u8, _: *mut Request, _: u64) -> Step {
-    unreachable!("a tape answers every S1 issue at once")
+unsafe extern "C" fn resume(state: *mut u8, r: *mut Request, token: u64) -> Step {
+    // SAFETY: scheduler pins the operation and calls outside any task.
+    unsafe { complete(state, r, token, None) }
 }
-unsafe extern "C" fn abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
-    unreachable!("a tape answers every S1 issue at once")
+unsafe extern "C" fn abort(state: *mut u8, r: *mut Request, token: u64, why: u8) -> Outcome {
+    // SAFETY: scheduler pins the operation and calls outside any task.
+    unsafe { complete(state, r, token, Some(why)).outcome }
+}
+unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>) -> Step {
+    let cell = cell_of(state);
+    let key = r as usize;
+    let mut s = cell.state.lock().unwrap();
+    // SAFETY: the scheduler pins the request throughout the callback.
+    if s.generation != generation_of(unsafe { (*r).handle }) {
+        refuse(Fault::Ended);
+        return done(REFUSED);
+    }
+    let generation = s.generation;
+    let Some(live) = s.live.as_mut() else {
+        return done(REFUSED);
+    };
+    if let Some(f) = live.fault {
+        refuse(f);
+        return done(REFUSED);
+    }
+    if live.mode == Mode::Replay {
+        let rep = live.replayer.as_mut().unwrap();
+        let frame = rep.next();
+        let result = match frame {
+            Ok(Frame::Done { gap, task, out })
+                if task == schedule::task(cell)
+                    && live.schedule.last.checked_add(gap) == Some(live.schedule.events) =>
+            {
+                live.schedule.last = live.schedule.events;
+                live.schedule.events += 1;
+                // SAFETY: external payload is checked before copying.
+                unsafe {
+                    replay_out(
+                        live,
+                        generation,
+                        (*r).operation,
+                        ordinal_of((*r).handle) as u64,
+                        &mut *r,
+                        out,
+                    )
+                }
+            }
+            _ => Err(rep.diverged(Mismatch::Schedule)),
+        };
+        return match result {
+            Ok(o) => done(o),
+            Err(f) => {
+                live.fault = Some(refuse(f));
+                done(REFUSED)
+            }
+        };
+    }
+    let p = live.pending.get(&key).unwrap().inner;
+    drop(s);
+    // SAFETY: forward with the pinned inner provider's own handle.
+    let step = unsafe {
+        let h = (*r).handle;
+        (*r).handle = p.handle;
+        let step = match why {
+            Some(why) => done((p.provider.abort)(p.provider.state, r, token, why)),
+            None => (p.provider.resume)(p.provider.state, r, token),
+        };
+        (*r).handle = h;
+        step
+    };
+    if step.kind == STEP_PENDING {
+        return step;
+    }
+    let mut s = cell.state.lock().unwrap();
+    let live = s.live.as_mut().unwrap();
+    let pending = live.pending.remove(&key).unwrap();
+    // SAFETY: completed request is still pinned by the scheduler.
+    let (mut out, answer, delivery) = unsafe {
+        record_out(
+            live,
+            generation,
+            &*r,
+            pending.before,
+            pending.inner,
+            step.outcome,
+        )
+    };
+    if let Some(why) = why {
+        out.status = if why == ABORT_CANCEL {
+            ABORTED
+        } else {
+            TIMED_OUT
+        };
+    }
+    live.write_input(Frame::Done {
+        gap: 0,
+        task: pending.task,
+        out,
+    });
+    live.schedule.events += 1;
+    s.delivering.insert(key, delivery);
+    done(answer)
 }
 /// Record runs the source's own deliver on the source's outcome, then maps a
 /// handle it created to the substitute's; Replay delivers what it answered.

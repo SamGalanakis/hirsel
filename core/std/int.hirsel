@@ -20,7 +20,7 @@ pub fn parse_uint(s: String, base: u32) -> Result[u64, ParseError] {
     if list.len(b) == 0 {
         return Error(Empty)
     }
-    digits(b, 0, base)
+    digits(b, 0, base, 18446744073709551615)
 }
 
 /// As parse_uint, with an optional leading '-'; "-" alone is Error(Invalid(1)), and the
@@ -43,27 +43,27 @@ pub fn parse_int(s: String, base: u32) -> Result[i64, ParseError] {
     if start == n {
         return Error(Invalid(start))
     }
-    let m = digits(b, start, base)?
-    if !negative {
-        let narrowed: Option[i64] = int.try_narrow(m)
-        return match narrowed {
-            Some(x) => Ok(x),
-            None => Error(OutOfRange),
-        }
+    let limit: u64 = if negative {
+        9223372036854775808
+    } else {
+        9223372036854775807
     }
-    if m == 9223372036854775808 {
+    let m = digits(b, start, base, limit)?
+    if !negative {
+        Ok(int.narrow(m))
+    } else if m == 9223372036854775808 {
         Ok(-9223372036854775808)
-    } else if m < 9223372036854775808 {
+    } else {
         let x: i64 = int.narrow(m)
         Ok(-x)
-    } else {
-        Error(OutOfRange)
     }
 }
 
-/// The digits b[start..] in base as a u64; b[start..] is not empty.
-fn digits(b: Bytes, start: u64, base: u32) -> Result[u64, ParseError] {
+/// The digits b[start..] in base, up to limit; b[start..] is not empty.
+fn digits(b: Bytes, start: u64, base: u32, limit: u64) -> Result[u64, ParseError] {
     let radix: u64 = int.widen(base)
+    let cutoff = limit / radix
+    let last_digit = limit % radix
     let mut v: u64 = 0
     for i in start .. list.len(b) {
         let x = b[i]
@@ -79,14 +79,10 @@ fn digits(b: Bytes, start: u64, base: u32) -> Result[u64, ParseError] {
         if d >= radix {
             return Error(Invalid(i))
         }
-        v = match int.checked_mul(v, radix) {
-            Some(r) => r,
-            None => return Error(OutOfRange),
+        if v > cutoff || (v == cutoff && d > last_digit) {
+            return Error(OutOfRange)
         }
-        v = match int.checked_add(v, d) {
-            Some(r) => r,
-            None => return Error(OutOfRange),
-        }
+        v = v * radix + d
     }
     Ok(v)
 }

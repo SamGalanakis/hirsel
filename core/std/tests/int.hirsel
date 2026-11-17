@@ -107,6 +107,13 @@ fn int_past_min() -> u64 {
     signed_error(int.parse_int("-9223372036854775809", 10))
 }
 
+// The 19th decimal digit exceeds the signed bound before the trailing x.
+// At the signed limit the x is instead the first error.
+// expect: run signed_overflow_before_bad_byte() = true
+fn signed_overflow_before_bad_byte() -> bool {
+    signed_error(int.parse_int("9223372036854775808x", 10)) == 3 && signed_error(int.parse_int("-9223372036854775809x", 10)) == 3 && signed_error(int.parse_int("9223372036854775807x", 10)) == 119 && signed_error(int.parse_int("-9223372036854775808x", 10)) == 120
+}
+
 // expect: run int_sign_alone() = 101
 fn int_sign_alone() -> u64 {
     signed_error(int.parse_int("-", 10))

@@ -3275,14 +3275,18 @@ fn wire_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] wait
 // The accept loop retains at most max_sessions owner handles and reaps completed
 // ones on the next acceptance. Upgrade runs in the owner, so a stalled HTTP
 // client cannot prevent the listener accepting another connection.
+resource type WireCompletion: send { done: Sender[u64], id: u64 } drop(completion) {
+    let _ = channel.try_send(completion.done, completion.id)
+}
+
 type WireAccept[C: send]: send {
     socket: Socket, peer: Ip, accepted: u64, slot: std.wsock.Pending, proxies: List[std.wsock.Prefix],
-    policy: Option[ingress.Ingress], service: Service[C], publisher: Sender[PubIn], c: WireConfig, clock: Clock, tasks: Tasks, done: Sender[u64], id: u64
+    policy: Option[ingress.Ingress], service: Service[C], publisher: Sender[PubIn], c: WireConfig, clock: Clock, tasks: Tasks, completion: WireCompletion
 }
 
 fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] waits {
-    let WireAccept(socket: take socket, peer: peer, accepted: accepted, slot: take slot, proxies: take proxies,
-        policy: take policy, service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks, done: take done, id: id) = take x
+    let WireAccept(completion: take completion, socket: take socket, peer: peer, accepted: accepted, slot: take slot, proxies: take proxies,
+        policy: take policy, service: take service, publisher: take pub_to, c: c, clock: clock, tasks: tasks) = take x
     let mut active: Option[ingress.Lease] = None
     let admission = scoped fn(ip: Ip) -> bool waits {
         if let Some(i) = policy {
@@ -3294,8 +3298,8 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
         Ok(take up) => wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks)),
         Error(e) => Error(e),
     }
-    let _ = channel.try_send(done, id)
     let _ = take active
+    let _ = take completion
     result
 }
 
@@ -3307,12 +3311,12 @@ pub fn serve_admitted[C: send](n: Net, mut listener: Listener, tasks: Tasks, clo
     serve_ingress(n, mut listener, tasks, clock, to_publisher, c, max_sessions, proxies, Some(ingress.share(policy)), make)
 }
 
-type WireRefusal: send { socket: Socket, clock: Clock, until: u64, done: Sender[u64], id: u64 }
+type WireRefusal: send { socket: Socket, clock: Clock, until: u64, completion: WireCompletion }
 
 fn wire_refuse(take r: WireRefusal) -> Result[(), std.wsock.Error] waits {
-    let WireRefusal(socket: take socket, clock: clock, until: until, done: take done, id: id) = take r
+    let WireRefusal(completion: take completion, socket: take socket, clock: clock, until: until) = take r
     let result = std.wsock.refuse_socket(take socket, 503u16, At(clock, until))
-    let _ = channel.try_send(done, id)
+    let _ = take completion
     result
 }
 
@@ -3325,41 +3329,47 @@ fn serve_ingress[C: send](n: Net, mut listener: Listener, tasks: Tasks, clock: C
     }
     let mut owners: Map[u64, Task[Result[(), std.wsock.Error]]] = map.new()
     let mut rejects: Map[u64, Task[Result[(), std.wsock.Error]]] = map.new()
-    let mut id = 0u64
+    let mut next_id = 0u64
     loop {
+        let (socket, peer) = match host.accept(mut listener, Never) { Ok(take p) => take p, Error(e) => return Error(Network(e)) }
+        // An owner can finish while accept waits. Reap before counting slots.
         while let Ok(finished) = channel.try_receive(ended) {
             if let Some(take h) = map.remove(mut owners, finished) { let _ = task.join(take h) }
             if let Some(take h) = map.remove(mut rejects, finished) { let _ = task.join(take h) }
         }
-        let (socket, peer) = match host.accept(mut listener, Never) { Ok(take p) => take p, Error(e) => return Error(Network(e)) }
+        let id = next_id
+        next_id += 1u64
         let slot: Option[std.wsock.Pending] = if map.len(owners) == max_sessions { None } else { std.wsock.acquire(pool)? }
         let accepted_ns = host.mono_ns(clock)
         let pending = match take slot {
             Some(take pending) => take pending,
             None => {
                 wire_start_refusal(tasks, take socket, clock, accepted_ns, c, done, id, mut rejects)
-                id += 1u64
                 continue
             },
         }
         let duplicate: Result[List[std.wsock.Prefix], Capacity] = clone(proxies)
-        let copied = match take duplicate { Ok(take ps) => take ps, Error(_) => { wire_start_refusal(tasks, take socket, clock, accepted_ns, c, done, id, mut rejects); id += 1u64; continue } }
+        let copied = match take duplicate { Ok(take ps) => take ps, Error(_) => { wire_start_refusal(tasks, take socket, clock, accepted_ns, c, done, id, mut rejects); continue } }
         let seed = bound bytes c.n_service { make() }
-        let made_service = match take seed { Ok(take instance) => take instance, Error(_) => { wire_start_refusal(tasks, take socket, clock, accepted_ns, c, done, id, mut rejects); id += 1u64; continue } }
+        let made_service = match take seed { Ok(take instance) => take instance, Error(_) => { wire_start_refusal(tasks, take socket, clock, accepted_ns, c, done, id, mut rejects); continue } }
+        let completion = match WireCompletion(done: channel.sender(done), id: id) {
+            Ok(take lease) => take lease,
+            Error(_) => { wire_start_refusal(tasks, take socket, clock, accepted_ns, c, done, id, mut rejects); continue },
+        }
         let accepted = WireAccept(socket: take socket, peer: peer.ip, accepted: accepted_ns, slot: take pending, proxies: take copied,
-            policy: match policy { Some(i) => Some(ingress.share(i)), None => None }, service: take made_service, publisher: channel.sender(to_publisher), c: c, clock: clock, tasks: tasks, done: channel.sender(done), id: id)
+            policy: match policy { Some(i) => Some(ingress.share(i)), None => None }, service: take made_service, publisher: channel.sender(to_publisher), c: c, clock: clock, tasks: tasks, completion: take completion)
         let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
         let owner = match task.spawn(tasks, bytes session_bytes(c), take accepted, run) {
             Ok(take h) => take h,
             Error((_, take back)) => {
-                let WireAccept(socket: take refused, peer: _, accepted: _, slot: _, proxies: _, policy: _, service: _, publisher: _, c: _, clock: _, tasks: _, done: _, id: _) = take back
-                wire_start_refusal(tasks, take refused, clock, accepted_ns, c, done, id, mut rejects)
-                id += 1u64
+                let WireAccept(socket: take refused, peer: _, accepted: _, slot: _, proxies: _, policy: _, service: _, publisher: _, c: _, clock: _, tasks: _, completion: _) = take back
+                let reject_id = next_id
+                next_id += 1u64
+                wire_start_refusal(tasks, take refused, clock, accepted_ns, c, done, reject_id, mut rejects)
                 continue
             },
         }
         if let Error(_) = map.insert(mut owners, id, take owner) { continue }
-        id += 1u64
     }
 }
 
@@ -3929,7 +3939,11 @@ pub fn wire_place_service[G: send, H: send](place: StaticFn[fn(mut Registry[G, H
 
 fn wire_start_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64, c: WireConfig, done: Sender[u64], id: u64, mut rejects: Map[u64, Task[Result[(), std.wsock.Error]]]) {
     if map.len(rejects) >= 16u64 { return }
-    let r = WireRefusal(socket: take socket, clock: clock, until: int.saturating_add(at, c.socket.upgrade_ms * 1000000u64), done: channel.sender(done), id: id)
+    let completion = match WireCompletion(done: channel.sender(done), id: id) {
+        Ok(take lease) => take lease,
+        Error(_) => return,
+    }
+    let r = WireRefusal(socket: take socket, clock: clock, until: int.saturating_add(at, c.socket.upgrade_ms * 1000000u64), completion: take completion)
     if let Ok(take h) = task.spawn(tasks, bytes 16384u64, take r, wire_refuse) { let _ = map.insert(mut rejects, id, take h) }
 }
 

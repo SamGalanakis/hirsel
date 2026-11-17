@@ -64,7 +64,38 @@ fn server(take seed: Server) -> () waits {
     let _ = task.join(take handle)
 }
 
+// A callback fault ends the owner task under FAIL-14.
+fn fault_step(mut context: (), mut work: store.runner.WireWork, take input: store.runner.ServiceInput) -> Result[Option[store.runner.Frame], u16] {
+    match take input {
+        WClient(Unsubscribe(1u32), _) => fail("wire listener law: owner fault"),
+        WClient(Unsubscribe(2u32), _) => Ok(Some(Reset(0u64, list.new()))),
+        _ => Ok(None),
+    }
+}
+
+fn fault_service() -> store.runner.Service[()] {
+    store.runner.Service(context: (), step: fault_step, ready: fn(context: ()) -> bool { true },
+        finish: fn(mut context: ()) -> Option[store.runner.PubIn] { None },
+        check: fn(context: (), f: store.runner.Frame) -> Option[u16] { None })
+}
+
+fn fault_listener(n: Net, c: Clock, tasks: Tasks) -> Result[(), Exit] waits {
+    let mut listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
+        Ok((take l, _)) => take l,
+        Error(_) => return Error(Exit(status: 1u8)),
+    }
+    let mail = result.unwrap(store.runner.mailbox(1u64))
+    let config = store.runner.wire_defaults(0u64, 0u64)
+    match store.runner.serve(n, mut listener, tasks, c, store.runner.post(mail), config, 1u64, list.new(), fault_service) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 1u8)),
+    }
+}
+
 pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
+    if let Some(mode) = args.get(a, 0u64) {
+        if mode == "faulted_owner_releases_slot" { return fault_listener(n, c, tasks) }
+    }
     let mut db = store.store.memory(c, random, store.store.defaults())
     let codec: std.codec.Codec[u32] = std.codec.of()
     let _ = result.unwrap(store.store.create_table(mut db, store.store.spec("data", std.codec.key_u64(), codec)))

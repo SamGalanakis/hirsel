@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import struct
 import subprocess
+import time
 import traceback
 
 from wire_process import stop_process
@@ -307,9 +308,37 @@ def reply_over_done_max():
         assert receive(s) == ('batch', 4, [1], [], [])
 
 
+def faulted_owner_releases_slot():
+    def next_owner():
+        for _ in range(100):
+            s = connect(18094)
+            try:
+                s.sendall(REQUEST)
+                response = head(s)
+                if response.startswith(b'HTTP/1.1 101 '):
+                    return s
+                assert response.startswith(b'HTTP/1.1 503 '), response
+            except BaseException:
+                s.close()
+                raise
+            s.close()
+            time.sleep(.02)
+        raise AssertionError('the listener never released its single owner slot')
+
+    with next_owner() as s:
+        s.sendall(frame(2, u32(3) + u32(2)))
+        assert receive(s) == ('reset', 0, [])
+        s.sendall(frame(2, u32(3) + u32(1)))
+        assert s.recv(1) == b''
+    with next_owner() as s:
+        s.sendall(frame(2, u32(3) + u32(2)))
+        assert receive(s) == ('reset', 0, [])
+
+
+
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
          session_limit_503, principal_limit_1013, call_rate_overloaded, request_mismatch_wire, held_request_mismatch, hello_deadline, resume_unknown,
-         history_below_latest, reply_over_done_max)}
+         history_below_latest, reply_over_done_max, faulted_owner_releases_slot)}
 
 
 def main():
@@ -320,7 +349,7 @@ def main():
     args = p.parse_args()
     rows = []
     for name in args.case or CASES:
-        process = subprocess.Popen([str(args.server.resolve())], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        process = subprocess.Popen([str(args.server.resolve()), name], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
             wait_ready(process, 18094)
             TRACE.clear()

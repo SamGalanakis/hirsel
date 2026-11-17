@@ -97,6 +97,65 @@ class ProductionFeatures(unittest.TestCase):
 
 
 class CargoUnits(unittest.TestCase):
+    def test_target_graphs_preserve_cross_only_edges_and_native_fixups(self):
+        from cargo_units import Resolution, calls, literal, configured
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'Cargo.toml').write_text('[workspace]\n')
+            (root / 'rust-toolchain.toml').write_text('[toolchain]\nchannel="stable"\n')
+            (root / 'third-party').mkdir()
+            (root / 'third-party/reindeer.toml').write_text(
+                '[platform.linux-x86_64]\ntarget="x86_64-unknown-linux-gnu"\nexecution-platform=true\n'
+                '[platform.linux-arm64]\ntarget="aarch64-unknown-linux-gnu"\nexecution-platform=false\n')
+            targets = []
+            def graph(command, **kwargs):
+                target = command[command.index('--target') + 1] if '--target' in command else None
+                targets.append(target)
+                arm = target == 'aarch64-unknown-linux-gnu'
+                def unit(name, deps=(), features=(), mode='build'):
+                    return dict(pkg_id=name, target=dict(name=name, kind=['lib']), mode=mode,
+                                platform=target, features=list(features),
+                                dependencies=[dict(index=i, extern_crate_name=n) for n, i in deps])
+                return json.dumps(dict(version=1, roots=[2], units=[
+                    unit('system'), unit('probe', [('system', 0)] if arm else []),
+                    unit('app', [('probe', 1)] + ([('system', 0)] if arm else []),
+                         ['arm'] if arm else [], 'test' if command[1] == 'test' else 'build'),
+                    dict(unit('system'), platform=None)]))
+            meta = dict(packages=[dict(id=n, name=n, version='1.0.0') for n in ('app', 'probe', 'system')],
+                        workspace_members=['app'])
+            with patch('cargo_units.rust_environment.environment', return_value={'CARGO': 'cargo'}), \
+                 patch('cargo_units.subprocess.check_output', side_effect=graph):
+                resolution = Resolution(root, meta)
+            systems = [u for u in resolution.units.values() if u['pkg_id'] == 'system']
+            self.assertEqual(len(systems), 2)
+            self.assertEqual(next(u['variants'].keys() for u in systems if 'variants' in u),
+                             {'linux-x86_64', 'linux-arm64'})
+            source = ''.join(sync.call('third_party_rust_library', name=n + '-1', features=[], deps=[],
+                                      platform={'linux-x86_64': {}, 'linux-arm64':
+                                                {'deps': [':system-1', ':native-hook']} if n == 'probe' else {}},
+                                      env={'CARGO_PKG_NAME': n, 'CARGO_PKG_VERSION': '1.0.0'})
+                             for n in ('probe', 'system'))
+            projected = {literal(call, 'name'): attrs for _, call, attrs in calls(resolution.third_party(source))}
+            probe = next(attrs for attrs in projected.values()
+                         if ast.literal_eval(attrs['env'])['CARGO_PKG_NAME'] == 'probe')
+            platforms = ast.literal_eval(probe['platform'])
+            for platform, expected in [('linux-x86_64', {}), ('linux-arm64', {'system'})]:
+                names = ast.literal_eval(probe.get('named_deps', ast.Dict(keys=[], values=[])))
+                names.update(platforms[platform].get('named_deps', {}))
+                self.assertEqual(set(names), set(expected))
+            self.assertIn(':native-hook', platforms['linux-arm64']['deps'])
+            self.assertNotIn(':system-1', platforms['linux-arm64']['deps'])
+            first = resolution.first_party(sync.call('hirsel_library', name='app', package_name='app', features=[], deps=[]), sync.starlark)
+            app = next(attrs for _, call, attrs in calls(first) if literal(call, 'name') == 'app')
+            self.assertEqual(configured(app['features'], 'linux-arm64'), ['arm'])
+            self.assertEqual(configured(app['features'], 'linux-x86_64'), [])
+            self.assertEqual(len(configured(app['deps'], 'linux-arm64')), 2)
+            self.assertEqual(len(configured(app['deps'], 'linux-x86_64')), 1)
+            policy = {'features': {'app/arm': 'test-only'}, 'roots': {'app': []}}
+            with self.assertRaisesRegex(SystemExit, 'app/arm'):
+                sync.check_production_features(first, policy, strict=True)
+            self.assertEqual(set(targets), {'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu'})
+
     def test_new_runtime_archives_keep_their_own_cargo_library_and_namespace(self):
         from cargo_units import Resolution, calls, literal
         r = Resolution.__new__(Resolution)

@@ -14,12 +14,29 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 
 import rust_environment
 
 
 FIRST_PARTY = {'hirsel_library', 'hirsel_binary', 'hirsel_test', 'hirsel_build_script'}
 EXTERNAL = {'third_party_rust_library', 'third_party_rust_binary', 'third_party_buildscript_run'}
+
+
+class PlatformValue:
+    def __init__(self, values):
+        self.values = values
+
+
+def platform_value(values):
+    first = next(iter(values.values()))
+    return first if all(value == first for value in values.values()) else PlatformValue(values)
+
+
+def configured(node, platform):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'cargo_platforms':
+        return ast.literal_eval(node.args[0])[platform]
+    return ast.literal_eval(node)
 
 
 def calls(source):
@@ -39,6 +56,8 @@ def replace(source, statement, fields, render):
     original_render = render
 
     def render(value):
+        if isinstance(value, PlatformValue):
+            return 'cargo_platforms(' + original_render(value.values) + ')'
         return 'None' if value is None else original_render(value)
     lines = source.splitlines(keepends=True)
     offsets = [0]
@@ -70,7 +89,10 @@ class Resolution:
         self.names = {}
         self.preferred = {}
         self.test_binaries = {}
-        fingerprint = hashlib.sha256(json.dumps([meta['packages'], meta['workspace_members'], (root / 'Cargo.toml').read_text(), (root / 'rust-toolchain.toml').read_text()], sort_keys=True).encode()).hexdigest()
+        platform_source = (root / 'third-party/reindeer.toml').read_text()
+        self.platforms = tomllib.loads(platform_source)['platform']
+        self.host_platform = next(name for name, config in self.platforms.items() if config.get('execution-platform'))
+        fingerprint = hashlib.sha256(json.dumps(['target-graphs-v1', platform_source, meta['packages'], meta['workspace_members'], (root / 'Cargo.toml').read_text(), (root / 'rust-toolchain.toml').read_text()], sort_keys=True).encode()).hexdigest()
         self.cache_path = root / '.buck2/cargo-units.json'
         try:
             cached = json.loads(self.cache_path.read_text())
@@ -83,15 +105,19 @@ class Resolution:
         for member in sorted(self.members, key=lambda i: self.packages[i]['name']):
             package = self.packages[member]
             for testing in (False, True):
-                command = [env['CARGO'], 'test' if testing else 'build', '-p', package['name'],
-                           '--manifest-path', str(root / 'Cargo.toml'), '--locked',
-                           '--unit-graph', '-Z', 'unstable-options']
-                if testing:
-                    command.append('--no-run')
-                graph = self.graph(command, env)
-                if graph['version'] != 1:
-                    raise ValueError('unsupported Cargo unit graph version')
-                keys = self.add(graph)
+                graphs = {}
+                for platform, config in self.platforms.items():
+                    command = [env['CARGO'], 'test' if testing else 'build', '-p', package['name'],
+                               '--manifest-path', str(root / 'Cargo.toml'), '--locked',
+                               '--target', config['target'], '--unit-graph', '-Z', 'unstable-options']
+                    if testing:
+                        command.append('--no-run')
+                    graphs[platform] = self.graph(command, env)
+                    if graphs[platform]['version'] != 1:
+                        raise ValueError('unsupported Cargo unit graph version')
+                target_keys = self.add_platforms(graphs)
+                graph = graphs[self.host_platform]
+                keys = target_keys[self.host_platform]
                 if testing:
                     binaries = {u['target']['name']: keys[i] for i, u in enumerate(graph['units'])
                                 if u['pkg_id'] == member and u['target']['kind'] == ['bin'] and u['mode'] == 'build'}
@@ -127,7 +153,7 @@ class Resolution:
         if key not in self.graphs:
             graph = json.loads(subprocess.check_output(command, cwd=self.root, env=env))
             self.graphs[key] = dict(version=graph['version'], roots=graph['roots'], units=[
-                {field: unit[field] for field in ('pkg_id', 'target', 'mode', 'features', 'dependencies')}
+                {field: unit[field] for field in ('pkg_id', 'target', 'mode', 'platform', 'features', 'dependencies')}
                 for unit in graph['units']])
         return self.graphs[key]
 
@@ -151,6 +177,58 @@ class Resolution:
             intern(i)
         return keys
 
+    def add_platforms(self, graphs):
+        """Pair target units across configurations; host units keep Cargo's exact identities."""
+        def target_unit(unit):
+            return unit.get('platform') is not None and unit['mode'] != 'run-custom-build'
+
+        def role(unit):
+            return (unit['pkg_id'], unit['target']['name'], tuple(unit['target']['kind']), unit['mode'])
+
+        projections, roles = {}, {}
+        for platform, graph in graphs.items():
+            projection = Resolution.__new__(Resolution)
+            projection.packages, projection.units = self.packages, {}
+            keys = projection.add(graph)
+            projections[platform] = keys, projection.units
+            for index, unit in enumerate(graph['units']):
+                if target_unit(unit):
+                    variants = roles.setdefault(role(unit), {})
+                    if platform in variants:
+                        raise ValueError(f'duplicate Cargo compilation context: {role(unit)} on {platform}')
+                    variants[platform] = keys[index]
+        families = {}
+        for context, variants in roles.items():
+            # Even identical Rust edges can have different native fixups on
+            # host and target. Do not let a host unit overwrite target variants.
+            families[context] = hashlib.sha256(
+                json.dumps(['target', sorted(variants.items())]).encode()).hexdigest()
+        result = {}
+        for platform, graph in graphs.items():
+            keys, units = projections[platform]
+            result[platform] = {index: families[role(unit)] if target_unit(unit) else keys[index]
+                                for index, unit in enumerate(graph['units'])}
+            for index, unit in enumerate(graph['units']):
+                key = result[platform][index]
+                projected = dict(units[keys[index]], edges=[
+                    (edge['extern_crate_name'], result[platform][edge['index']])
+                    for edge in unit['dependencies']])
+                if target_unit(unit):
+                    family = self.units.setdefault(key, dict(projected, variants={}))
+                    family.setdefault('variants', {})[platform] = projected
+                else:
+                    self.units[key] = projected
+        return result
+
+    def variant(self, key, platform=None):
+        unit = self.units[key]
+        return unit.get('variants', {}).get(platform, unit)
+
+    def values(self, key, value):
+        unit = self.units[key]
+        return (platform_value({platform: value(variant) for platform, variant in unit['variants'].items()})
+                if 'variants' in unit else value(unit))
+
     def base(self, unit):
         package = self.packages[unit['pkg_id']]
         name, target = package['name'], unit['target']
@@ -168,20 +246,21 @@ class Resolution:
             return name + '-' + kind + '-' + target['name']
         return None
 
-    def deps(self, key):
-        for _, dep in self.units[key]['edges']:
+    def deps(self, key, platform=None):
+        unit = self.variant(key, platform)
+        for _, dep in unit['edges']:
             if dep not in self.names and self.units[dep]['target']['kind'] != ['custom-build']:
                 package = self.packages[self.units[dep]['pkg_id']]
                 raise ValueError(f"Reindeer has no Rust dependency template for {package['name']} {package['version']}")
-        return [self.label(dep) for _, dep in self.units[key]['edges'] if dep in self.names
+        return [self.label(dep) for _, dep in unit['edges'] if dep in self.names
                 and self.units[dep]['target']['kind'] != ['custom-build']]
 
     def label(self, key):
         prefix = '//:' if self.units[key]['pkg_id'] in self.members else '//third-party:'
         return prefix + self.names[key]
 
-    def script(self, key):
-        return next((self.label(dep) for _, dep in self.units[key]['edges']
+    def script(self, key, platform=None):
+        return next((self.label(dep) for _, dep in self.variant(key, platform)['edges']
                      if dep in self.names and self.units[dep]['mode'] == 'run-custom-build'), None)
 
     def first_party(self, source, render):
@@ -207,11 +286,18 @@ class Resolution:
                         deps = [self.label(dep) for _, dep in compiled['edges'] if dep in self.names]
                     if self.packages[unit['pkg_id']]['name'] == 'hirsel-llvm':
                         deps.append('//crates/hirsel-llvm/bridge:bridge')
-                    fields = dict(name=name, features=unit['features'], deps=sorted(deps))
+                    fields = dict(name=name, features=self.values(key, lambda u: u['features']),
+                                  deps=self.values(key, lambda u: sorted(
+                                      [self.label(dep) for _, dep in u['edges'] if dep in self.names
+                                       and self.units[dep]['target']['kind'] != ['custom-build']]
+                                      + (['//crates/hirsel-llvm/bridge:bridge']
+                                         if self.packages[u['pkg_id']]['name'] == 'hirsel-llvm' else [])))
+                                  if 'variants' in unit else sorted(deps))
                     if call.func.id == 'hirsel_build_script':
                         fields['compile_features'] = compiled['features']
                     if call.func.id != 'hirsel_build_script':
-                        fields['build_script'] = self.script(key)
+                        fields['build_script'] = (platform_value({p: self.script(key, p) for p in unit['variants']})
+                                                  if 'variants' in unit else self.script(key))
                     if 'bin_exes' in attrs:
                         binaries = ast.literal_eval(attrs['bin_exes'])
                         fields['bin_exes'] = {binary: self.label(self.test_binaries[key][binary])
@@ -238,14 +324,15 @@ class Resolution:
         for key in emitted:
             unit = self.units[key]
             attrs = rules[self.names[key]]
-            if ast.literal_eval(attrs['features']) != unit['features']:
-                raise ValueError(f'{self.names[key]}: features differ from package-local Cargo unit')
-            if unit['mode'] != 'run-custom-build':
-                expected = sorted(self.deps(key))
-                actual = sorted(dep for dep in ast.literal_eval(attrs['deps'])
-                                if dep != '//crates/hirsel-llvm/bridge:bridge')
-                if actual != expected:
-                    raise ValueError(f'{self.names[key]}: dependencies differ from package-local Cargo unit')
+            for platform, variant in unit.get('variants', {None: unit}).items():
+                if configured(attrs['features'], platform) != variant['features']:
+                    raise ValueError(f'{self.names[key]}: features differ from package-local Cargo unit')
+                if unit['mode'] != 'run-custom-build':
+                    expected = sorted(self.deps(key, platform))
+                    actual = sorted(dep for dep in configured(attrs['deps'], platform)
+                                    if dep != '//crates/hirsel-llvm/bridge:bridge')
+                    if actual != expected:
+                        raise ValueError(f'{self.names[key]}: dependencies differ from package-local Cargo unit')
 
     def external_json(self):
         return json.dumps({key: name for key, name in self.names.items()
@@ -293,44 +380,69 @@ class Resolution:
             base = bases[(package['name'], package['version'])]
             if unit['target']['kind'] == ['custom-build']:
                 base += '-build-script-run' if unit['mode'] == 'run-custom-build' else '-build-script-build'
-            call = copy.deepcopy(templates[base])
-            # References to the owning package's build script are not Rust
-            # externs. Keep them, but point to this context's resolved script.
-            references = {}
-            for _, dep in unit['edges']:
-                if dep in self.names and self.units[dep]['target']['kind'] == ['custom-build']:
-                    suffix = '-build-script-run' if self.units[dep]['mode'] == 'run-custom-build' else '-build-script-build'
-                    references[':' + bases[(package['name'], package['version'])] + suffix] = ':' + self.names[dep]
-            class Rewrite(ast.NodeTransformer):
-                def visit_Constant(self, node):
-                    if isinstance(node.value, str):
-                        for old, new in references.items():
-                            node.value = node.value.replace(old + '[', new + '[') if old + '[' in node.value else (new if node.value == old else node.value)
-                    return node
-
-                def visit_keyword(self, node):
-                    if node.arg == 'features':
-                        node.value = ast.List(elts=[], ctx=ast.Load())
-                    if node.arg == 'named_deps':
-                        node.value = ast.Dict(keys=[], values=[])
-                    if node.arg == 'deps':
-                        # Retain native fixup dependencies. Cargo supplies Rust edges.
-                        node.value.elts = [d for d in node.value.elts if not isinstance(d, ast.Constant)
+            template = templates[base]
+            attrs = {k.arg: k.value for k in template.keywords}
+            def mapping(node):
+                if isinstance(node, ast.Call):
+                    return {k.arg: k.value for k in node.keywords}
+                return {ast.literal_eval(k): v for k, v in zip(node.keys, node.values)}
+            platforms = mapping(attrs['platform']) if 'platform' in attrs else {}
+            variants = unit.get('variants') or {
+                platform: unit for platform in (getattr(self, 'platforms', {}) or platforms or {None: {}})}
+            projected = {}
+            for platform, variant in variants.items():
+                fields = {field: copy.deepcopy(value) for field, value in attrs.items()
+                          if field not in ('name', 'platform')}
+                for field, value in mapping(platforms.get(platform, ast.Dict(keys=[], values=[]))).items():
+                    value = copy.deepcopy(value)
+                    if field in fields and isinstance(value, ast.List):
+                        fields[field].elts.extend(value.elts)
+                    elif field in fields and isinstance(value, ast.Dict):
+                        combined = mapping(fields[field]) | mapping(value)
+                        fields[field] = ast.Dict(keys=[ast.Constant(k) for k in combined], values=list(combined.values()))
+                    else:
+                        fields[field] = value
+                references = {}
+                for _, dep in variant['edges']:
+                    if dep in self.names and self.units[dep]['target']['kind'] == ['custom-build']:
+                        suffix = '-build-script-run' if self.units[dep]['mode'] == 'run-custom-build' else '-build-script-build'
+                        references[':' + bases[(package['name'], package['version'])] + suffix] = ':' + self.names[dep]
+                class Rewrite(ast.NodeTransformer):
+                    def visit_Constant(self, node):
+                        if isinstance(node.value, str):
+                            for old, new in references.items():
+                                node.value = node.value.replace(old + '[', new + '[') if old + '[' in node.value else (new if node.value == old else node.value)
+                        return node
+                fields = {field: Rewrite().visit(value) for field, value in fields.items()}
+                if 'deps' in fields:
+                    # Native fixups remain; Cargo supplies every Rust edge.
+                    fields['deps'].elts = [d for d in fields['deps'].elts if not isinstance(d, ast.Constant)
                                            or not isinstance(d.value, str) or d.value.removeprefix(':') not in rust_names]
-                    return self.generic_visit(node)
-            call = Rewrite().visit(call)
-            fields = {k.arg: k for k in call.keywords}
-            values = dict(name=name, features=unit['features'], visibility=['PUBLIC'])
-            self.deps(key)  # refuse missing active Rust dependency templates
-            if unit['mode'] != 'run-custom-build':
-                values['named_deps'] = {extern: self.label(dep) for extern, dep in unit['edges']
-                                       if dep in self.names and self.units[dep]['target']['kind'] != ['custom-build']}
-            for field, value in values.items():
-                expr = ast.parse(repr(value), mode='eval').body
-                if field in fields:
-                    fields[field].value = expr
+                fields['features'] = ast.parse(repr(variant['features']), mode='eval').body
+                fields['visibility'] = ast.parse(repr(['PUBLIC']), mode='eval').body
+                self.deps(key, platform)
+                if variant['mode'] != 'run-custom-build':
+                    named = {extern: self.label(dep) for extern, dep in variant['edges']
+                             if dep in self.names and self.units[dep]['target']['kind'] != ['custom-build']}
+                    fields['named_deps'] = ast.parse(repr(named), mode='eval').body
+                projected[platform] = fields
+            fields, conditional = {}, {platform: {} for platform in projected if platform is not None}
+            for field in sorted({field for attrs in projected.values() for field in attrs}):
+                values = [attrs.get(field) for attrs in projected.values()]
+                if all(value is not None and ast.dump(value) == ast.dump(values[0]) for value in values):
+                    fields[field] = values[0]
                 else:
-                    call.keywords.append(ast.keyword(arg=field, value=expr))
+                    for platform, attrs in projected.items():
+                        if field in attrs:
+                            conditional[platform][field] = attrs[field]
+            fields['name'] = ast.Constant(name)
+            if conditional:
+                fields['platform'] = ast.Dict(
+                    keys=[ast.Constant(platform) for platform in conditional],
+                    values=[ast.Dict(keys=[ast.Constant(k) for k in values], values=list(values.values()))
+                            for values in conditional.values()])
+            call = ast.Call(func=copy.deepcopy(template.func), args=[],
+                            keywords=[ast.keyword(arg=field, value=value) for field, value in fields.items()])
             output.append(ast.unparse(ast.fix_missing_locations(call)))
         # Stable aliases for hand-written tools; generated first-party edges
         # always name their exact Cargo unit instead.

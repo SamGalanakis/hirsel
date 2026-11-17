@@ -16,7 +16,14 @@ load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budg
 load(":test_requirements.bzl", "OPENAT2_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "runtime_profile_flags", "workspace_profile_flags")
+load("@prelude//rust:cargo_package.bzl", "get_reindeer_platforms")
+load("@prelude//utils:selects.bzl", "selects")
 load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "MergedLinkInfo")
+
+def cargo_platforms(values):
+    """Use the same target configuration names as Reindeer's external rules."""
+    default = [] if type(values.values()[0]) == "list" else None
+    return selects.apply(get_reindeer_platforms(), lambda platform: values.get(platform, default))
 
 # Cargo gives integration tests an existing, private scratch directory; this is
 # its repository-relative stand-in, created by the test launcher.
@@ -139,8 +146,8 @@ def _compile_env(package_name, crate, version, build_script):
     env = _cargo_env(package_name, crate, version)
     if package_name == "hirsel-llvm-lazy":
         env["OUT_DIR"] = "$(location //crates/hirsel-llvm-lazy/bridge:image)"
-    if build_script:
-        env["OUT_DIR"] = "$(location {})".format(build_script)
+    if build_script != None:
+        env = selects.apply(build_script, lambda script: env | ({"OUT_DIR": "$(location {})".format(script)} if script else {}))
     return env
 
 # `-c hirsel.clippy=true` (tools/buck2/clippy.py) declares every Rust target's
@@ -186,8 +193,10 @@ def hirsel_library(name, crate, crate_root, srcs, features, deps, manifest_dir, 
     )
 
 def hirsel_binary(name, bin_name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None):
-    env = _compile_env(package_name, crate, version, build_script)
-    env["CARGO_BIN_NAME"] = bin_name
+    env = selects.apply(
+        _compile_env(package_name, crate, version, build_script),
+        lambda env: env | {"CARGO_BIN_NAME": bin_name},
+    )
     _rust(
         native.rust_binary,
         name = name,

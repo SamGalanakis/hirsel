@@ -65,6 +65,7 @@ pub(super) fn glue_emitter<'a>(
         step_neutral: &[],
         step_counter: None,
         neutral_step_call: false,
+        view_invariants: Vec::new(),
         empty_bounds: empty::EmptyBounds::default(),
         sink,
         items,

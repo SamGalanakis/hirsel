@@ -543,6 +543,7 @@ fn emit_module(
             step_neutral: &step_neutral,
             step_counter: None,
             neutral_step_call: false,
+            view_invariants: Vec::new(),
             aliases,
             module,
             body,
@@ -708,8 +709,36 @@ fn emit_module(
         if let Some(scopes) = e.aliases.as_ref().map(|a| a.declared().to_vec()) {
             e.declare_scopes(&scopes);
         }
-        e.br(Label::block(0u32));
         let mut forwarding = forward::Forwarding::new(body);
+        // A view freezes the carrier header throughout the activation, even
+        // across calls through an opaque capture. End the invariant on every
+        // return; retain existing frame-safe tail-call functions unchanged.
+        if facts
+            && !(0..body.blocks.len()).any(|b| {
+                forwarding
+                    .ending(module, &recipes, sig, e.constants, b)
+                    .is_some_and(|ending| ending.frame_safe)
+            })
+        {
+            for (index, param) in sig.params.iter().enumerate() {
+                if let Param::Address {
+                    place: PlaceTy::Declared(t),
+                    loan: Loan::View,
+                } = *param
+                    && hirsel_core_ir::roles::carrier(module, t)
+                {
+                    let bytes = e.place_layout(PlaceTy::Declared(t)).0;
+                    let pointer = Value::Local(Local::Param(index));
+                    let token = e.intrinsic(
+                        "llvm.invariant.start.p0",
+                        Type::Ptr,
+                        &[word(int(bytes)), ptr(pointer.clone())],
+                    );
+                    e.view_invariants.push((token, pointer, bytes));
+                }
+            }
+        }
+        e.br(Label::block(0u32));
         for (i, b) in body.blocks.iter().enumerate() {
             e.block(Label::block(i));
             if let Some((number, plan)) = step_loops
@@ -1215,6 +1244,7 @@ struct FunctionEmitter<'a> {
     step_neutral: &'a [bool],
     step_counter: Option<Value>,
     neutral_step_call: bool,
+    view_invariants: Vec<(Value, Value, u64)>,
     sink: &'a mut dyn Sink,
     items: &'a mut Items,
     next: usize,
@@ -1326,12 +1356,23 @@ impl FunctionEmitter<'_> {
         self.effect(Operation::Conditional(c, yes, no, false));
     }
     fn ret(&mut self, t: &Type, v: &Value) {
+        self.end_view_invariants();
         self.flush_steps();
         self.effect(Operation::Return(Some((t, v))));
     }
     fn ret_void(&mut self) {
+        self.end_view_invariants();
         self.flush_steps();
         self.effect(Operation::Return(None));
+    }
+    fn end_view_invariants(&mut self) {
+        for (token, pointer, bytes) in self.view_invariants.clone() {
+            self.intrinsic(
+                "llvm.invariant.end.p0",
+                Type::Void,
+                &[ptr(token), word(int(bytes)), ptr(pointer)],
+            );
+        }
     }
     fn call(&mut self, sig: &FnSig, callee: &Value, args: &[Value], attrs: &CallAttrs) -> Value {
         let flush = !self.neutral_step_call

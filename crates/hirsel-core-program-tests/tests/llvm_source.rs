@@ -13,6 +13,74 @@ use std::{
 };
 hirsel_guard::install!();
 include!("../../hirsel-llvm/tests/support/native.rs");
+
+#[test]
+fn viewed_carrier_headers_thaw_after_success_error_and_failure() {
+    let source = r#"
+fn inspect(xs: List[u64], mode: u64) -> Result[u64, Capacity] {
+    let mut scratch: List[u64] = result.unwrap(list.with_capacity(2))
+    let _ = result.unwrap(list.push(mut scratch, 7u64))
+    let _ = result.unwrap(list.push(mut scratch, 8u64))
+    let before = list.len(xs)
+    if mode == 1 { return Error(Capacity(requested: 1, available: 0)) }
+    if mode == 2 { let _ = 1u64 / (mode - 2) }
+    Ok(before + list.len(xs) + list.len(scratch))
+}
+fn probe(mode: u64) -> u64 {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(2))
+    let _ = result.unwrap(list.push(mut xs, 1u64))
+    let _ = result.unwrap(list.push(mut xs, 2u64))
+    let first = result.unwrap(isolate(scoped fn() -> u64 {
+        match inspect(xs, mode) { Ok(n) => n, Error(_) => 900u64 }
+    }))
+    let before: u64 = match take first { Ok(n) => n, Error(take causes) => 901u64 }
+    let _ = result.unwrap(list.push(mut xs, 3u64))
+    let after = result.unwrap(inspect(xs, 0))
+    before * 100u64 + after
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let cases = [0, 1, 2].map(|mode| Case {
+        function: names["probe"],
+        args: vec![mode],
+        limit: 1_000_000,
+        injection: None,
+    });
+    for (case, want) in cases.iter().zip([608, 90008, 90108]) {
+        assert_eq!(
+            eval::run(&module, case.function, &case.args, case.limit).outcome,
+            eval::Outcome::Returned(vec![want])
+        );
+    }
+    for facts in [false, true] {
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                    .unwrap();
+            let reports = execute_object(&module, &cases, "", "", optimization, Some(object));
+            for (case, report) in cases.iter().zip(reports) {
+                assert_eq!(
+                    report.outcome,
+                    eval::run(&module, case.function, &case.args, case.limit).outcome,
+                    "facts={facts}, mode={:?}, optimization={optimization:?}",
+                    case.args
+                );
+            }
+        }
+    }
+    let object = module.llvm_program(Target::X86_64Linux, false, false, &[names["probe"]]);
+    let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
+    for (case, report) in cases.iter().zip(reports) {
+        assert_eq!(
+            report.outcome,
+            eval::run(&module, case.function, &case.args, case.limit).outcome
+        );
+    }
+}
+
 impl NativeInput for hirsel_core_program_tests::SourceProgram {
     fn module(&self) -> &Module {
         self

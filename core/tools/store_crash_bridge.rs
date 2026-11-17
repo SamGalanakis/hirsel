@@ -446,3 +446,23 @@ pub unsafe extern "C" fn store_crash_failed_syncs(p: *mut c_void) -> u64 {
     // SAFETY: called only between the wrapper's synchronous runs.
     unsafe { (*p.cast::<Bridge>()).failed_syncs }
 }
+
+/// # Safety
+/// `p` is a live bridge, exclusively owned by the serialized parent callbacks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_crashed(p: *mut c_void) -> u8 {
+    // SAFETY: the parent calls this between provider operations.
+    u8::from(unsafe { (*p.cast::<Bridge>()).crashed })
+}
+
+/// # Safety
+/// `p` is live and exclusive. Every process using its descriptors has exited,
+/// and all provider callbacks and RPCs have ended.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_process_exit(p: *mut c_void) {
+    // SAFETY: only the parent owns the bridge after both children are reaped.
+    let bridge = unsafe { &mut *p.cast::<Bridge>() };
+    assert!(bridge.crashed);
+    bridge.files.clear();
+    bridge.locks.clear();
+}

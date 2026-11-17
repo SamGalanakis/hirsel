@@ -40,7 +40,7 @@ def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
 
 
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
-                entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None):
+                entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c"):
     build = work / (engine + '-crash')
     build.mkdir()
     if cc is None:
@@ -50,13 +50,14 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
     # Name files directly: a -L/rpath directory becomes an unsupported directory
     # input to the native link recipe.
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc.resolve())) + ' "$@" '
-                       + shlex.quote(str(root / 'core/tools/store_crash.c')) + ' '
+                       + shlex.quote(str(root / 'core/tools' / adapter)) + ' '
                        + shlex.quote(str(bridge.resolve())) + ' -I'
                        + shlex.quote(str(root / 'crates/hirsel-core-rt/include'))
                        + ' -Wl,--wrap=hirsel_core_os_run_with_sources'
-                       + ' -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_host_op'
-                       + ' -Wl,--wrap=hirsel_core_host_rename -Wl,--wrap=hirsel_core_send'
-                       + ' -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_join\n')
+                       + ('\n' if adapter == 'runner_crash.c' else
+                          ' -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_host_op'
+                          ' -Wl,--wrap=hirsel_core_host_rename -Wl,--wrap=hirsel_core_send'
+                          ' -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_join\n'))
     wrapper.chmod(0o755)
     executable = build / 'store'
     command = [str(compiler.resolve()), 'build', '--inputs', str(manifest), '--source-core', '--source-std',
@@ -66,7 +67,9 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                '--dir', str(build), '-o', str(executable), '--json']
     for grant in ('Clock', 'Random', 'Tasks', 'Stderr', 'Stdout'):
         command += ['--grant', grant]
-    if engine == 'llvm-release':
+    if adapter == 'runner_crash.c':
+        command += ['--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
+    if engine == 'llvm-release' or (engine == 'llvm' and adapter == 'runner_crash.c'):
         command.append('--release')
     wait_load()
     result = checked(command, environment)

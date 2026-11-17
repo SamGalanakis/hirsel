@@ -1,0 +1,190 @@
+/* W2 owns the filesystem in this parent. Server and client run in separate
+ * processes; provider calls cross a local socketpair. A W2 cut exits only the
+ * server, without cleanup. The next server sees W2's restarted durable image. */
+#include "hirsel_core_rt_host.h"
+#include "hirsel_core_rt_sites.h"
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+extern void *store_crash_new(uint64_t);
+extern void store_crash_phase(void *,uint64_t);
+extern HirselCoreHostOutcome store_crash_op(void *,uint8_t,uint8_t,uint64_t,const uint8_t *,size_t,uint8_t *,size_t,size_t);
+extern uint64_t store_crash_events(void *);
+extern uint8_t store_crash_acked(void *);
+extern uint64_t store_crash_floor(void *);
+extern void store_crash_sync_failure(void *,uint8_t);
+extern uint64_t store_crash_failed_syncs(void *);
+extern uint8_t store_crash_crashed(void *);
+extern void store_crash_process_exit(void *);
+extern void store_crash_free(void *);
+
+typedef struct { uint64_t handle,path_len,len,capacity; uint8_t op,mode; } Request;
+typedef struct { HirselCoreHostOutcome out; uint64_t bytes; uint8_t crash; } Response;
+typedef struct { pid_t pid; int fd,finished,status; } Child;
+static int rpc;
+static unsigned port;
+static char saved_token[43]="-";
+static void transfer(int fd,void *data,size_t len,int writing) {
+    uint8_t *p=data;
+    while(len) {
+        ssize_t n=writing?write(fd,p,len):read(fd,p,len);
+        if(n<0 && errno==EINTR) continue;
+        if(n<=0) _exit(121);
+        p+=n;len-=(size_t)n;
+    }
+}
+static HirselCoreWait ready(void *s,HirselCoreHostRequest *r,uint64_t token) {
+    (void)s;(void)r;(void)token;return (HirselCoreWait){0};
+}
+static HirselCoreStep issue(void *s,HirselCoreHostRequest *r,uint64_t token) {
+    (void)s;(void)token;
+    Request q={r->handle,r->path_len,r->buffer.len,r->buffer.capacity,r->operation,r->mode};
+    transfer(rpc,&q,sizeof q,1);
+    transfer(rpc,(void *)r->path,r->path_len,1);
+    transfer(rpc,r->buffer.data,r->buffer.len,1);
+    Response response;
+    transfer(rpc,&response,sizeof response,0);
+    if(response.crash) _exit(99);
+    if(response.bytes) {
+        if(response.bytes>r->buffer.capacity-r->buffer.len) abort();
+        transfer(rpc,r->buffer.data+r->buffer.len,response.bytes,0);
+        r->buffer.len+=response.bytes;
+    }
+    return (HirselCoreStep){.outcome=response.out};
+}
+static HirselCoreStep resume(void *s,HirselCoreHostRequest *r,uint64_t token) {
+    (void)s;(void)r;(void)token;abort();
+}
+static HirselCoreHostOutcome cancel(void *s,HirselCoreHostRequest *r,uint64_t token,uint8_t why) {
+    (void)s;(void)r;(void)token;(void)why;abort();
+}
+static HirselCoreHostOutcome deliver(void *s,HirselCoreHostRequest *r,HirselCoreHostOutcome out) {
+    (void)s;(void)r;return out;
+}
+static Child launch(const HirselCoreOsConfig *input,const HirselCoreSourceTable *sources,HirselCoreEntry entry,const char **args,size_t argc,int inherited) {
+    int pair[2];if(socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair)) abort();
+    pid_t pid=fork();if(pid<0) abort();
+    if(!pid) {
+        close(pair[0]);if(inherited>=0) close(inherited);rpc=pair[1];
+        HirselCoreProvider provider={NULL,ready,issue,resume,cancel,deliver};
+        HirselCoreOpenProcess open=hirsel_core_os_process_new(input);
+        if(!open.process) _exit(103);
+        hirsel_core_os_process_set_sources(open.process,sources);
+        HirselCoreProcessConfig cfg=*hirsel_core_os_process_config(open.process);
+        HirselCoreEntryGrant caps[16];
+        if(cfg.capabilities_len>16) abort();
+        memcpy(caps,cfg.capabilities,cfg.capabilities_len*sizeof *caps);
+        for(size_t i=0;i<cfg.capabilities_len;i++) {
+            if(caps[i].kind==0 || caps[i].kind==3 || caps[i].kind==4) {
+                caps[i].provider=&provider;caps[i].handle=caps[i].kind==0?7:0;
+            }
+        }
+        HirselCoreBuffer argv[6];if(argc>6) abort();
+        for(size_t i=0;i<argc;i++) argv[i]=(HirselCoreBuffer){(uint8_t *)args[i],strlen(args[i]),0};
+        cfg.capabilities=caps;cfg.args=argv;cfg.args_len=argc;
+        uint8_t status=hirsel_core_run(&cfg,entry);
+        hirsel_core_os_process_free(open.process);
+        close(rpc);_exit(status);
+    }
+    close(pair[1]);return (Child){.pid=pid,.fd=pair[0]};
+}
+static void stop(Child *child) {
+    if(child->finished) return;
+    pid_t ended=waitpid(child->pid,&child->status,WNOHANG);
+    if(ended==0) {
+        /* Only this fork's PID is eligible. Check its comm immediately before
+         * signaling; it must still be this executable, never a parent/helper. */
+        char command[80],comm[80],own[80];
+        snprintf(command,sizeof command,"ps -o comm= -p %ld",(long)child->pid);
+        FILE *p=popen(command,"r"),*me=fopen("/proc/self/comm","r");
+        if(!p || !me || !fgets(comm,sizeof comm,p) || !fgets(own,sizeof own,me)) abort();
+        int status=pclose(p);fclose(me);
+        if(status || strcmp(comm,own)) abort();
+        if(kill(child->pid,SIGKILL) && errno!=ESRCH) abort();
+        if(waitpid(child->pid,&child->status,0)!=child->pid) abort();
+    } else if(ended!=child->pid) abort();
+    child->finished=1;if(child->fd>=0) close(child->fd);child->fd=-1;
+}
+static void service(void *state,Child *child,int server,int phase) {
+    Request q;ssize_t first=read(child->fd,&q,sizeof q);
+    if(first<0 && errno==EINTR) return;
+    if(first==0) { close(child->fd);child->fd=-1;return; }
+    if(first<0) abort();
+    if((size_t)first<sizeof q) transfer(child->fd,(uint8_t *)&q+first,sizeof q-(size_t)first,0);
+    size_t capacity=q.capacity>q.len?q.capacity:q.len;
+    uint8_t *path=malloc(q.path_len?q.path_len:1),*data=calloc(capacity?capacity:1,1);
+    if(!path || !data) abort();
+    transfer(child->fd,path,q.path_len,0);transfer(child->fd,data,q.len,0);
+    if(q.op==12) {
+        if(q.len>5 && !memcmp(data,"PORT ",5)) {
+            char text[32]={0};if(q.len-5>=sizeof text) abort();memcpy(text,data+5,q.len-5);port=(unsigned)strtoul(text,NULL,10);
+        } else if(q.len==48 && !memcmp(data,"TOKEN ",6)) {
+            memcpy(saved_token,data+6,42);saved_token[42]=0;
+        }
+    }
+    HirselCoreHostOutcome out=store_crash_op(state,q.op,q.mode,q.handle,path,q.path_len,data,q.len,q.capacity);
+    uint64_t bytes=!out.error.tag?(q.op==1?out.value:q.op==18?out.written:0):0;
+    Response response={out,bytes,(uint8_t)(server && phase==1 && store_crash_crashed(state))};
+    transfer(child->fd,&response,sizeof response,1);
+    if(bytes) transfer(child->fd,data+q.len,bytes,1);
+    free(path);free(data);
+}
+static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSourceTable *sources,HirselCoreEntry entry,const char *scenario,int number) {
+    static const char *modes[]={"init","write","read"};
+    port=0;
+    char floor[32];snprintf(floor,sizeof floor,"%llu",(unsigned long long)store_crash_floor(state));
+    const char *server_args[]={modes[number],scenario,store_crash_acked(state)?"new":"prefix",floor};
+    Child server=launch(input,sources,entry,server_args,4,-1),client={.fd=-1,.finished=1};
+    while(!server.finished || !client.finished) {
+        if(port && client.pid==0) {
+            char address[16];snprintf(address,sizeof address,"%u",port);
+            const char *client_args[]={"client",scenario,modes[number],address,saved_token};
+            client=launch(input,sources,entry,client_args,5,server.fd);
+        }
+        Child *children[]={&server,&client};
+        for(size_t i=0;i<2;i++) {
+            Child *c=children[i];if(c->finished) continue;
+            pid_t ended=waitpid(c->pid,&c->status,WNOHANG);
+            if(ended==c->pid) {c->finished=1;if(c->fd>=0) close(c->fd);c->fd=-1;}
+            else if(ended<0) abort();
+        }
+        if(client.pid && client.finished && client.status) {stop(&server);return 120;}
+        if(server.finished && client.pid==0) break;
+        struct pollfd fds[2]={{server.fd,POLLIN,0},{client.fd,POLLIN,0}};
+        if(server.finished && client.finished) break;
+        int count=poll(fds,2,100);if(count<0 && errno==EINTR) continue;if(count<0) abort();
+        if(fds[0].revents) service(state,&server,1,number);
+        if(fds[1].revents) service(state,&client,0,number);
+    }
+    if(store_crash_crashed(state)) store_crash_process_exit(state);
+    int expected=number==1 && WIFEXITED(server.status) && WEXITSTATUS(server.status)==99;
+    if(!WIFEXITED(server.status) || (!expected && WEXITSTATUS(server.status))) {
+        fprintf(stderr,"server phase %s: wait status %d\n",modes[number],server.status);return 120;
+    }
+    return 0;
+}
+uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry entry) {
+    (void)names;if(input->args_len!=2 || input->parameters_len>16) return 120;
+    char scenario[64]={0},cut_text[32]={0};
+    if(input->args[0].len>=sizeof scenario || input->args[1].len>=sizeof cut_text) return 120;
+    memcpy(scenario,input->args[0].data,input->args[0].len);memcpy(cut_text,input->args[1].data,input->args[1].len);
+    int uncut=!strcmp(cut_text,"count"),poison=!strcmp(scenario,"poison-segment");
+    uint64_t cut=uncut||poison?UINT64_MAX:strtoull(cut_text,NULL,10);
+    void *state=store_crash_new(cut);store_crash_sync_failure(state,poison?1:0);
+    uint8_t status=0;
+    for(int n=0;n<3;n++) {
+        store_crash_phase(state,(uint64_t)n);
+        if(phase(state,input,sources,entry,scenario,n)) {status=120;break;}
+        if(n==1 && poison && store_crash_failed_syncs(state)!=1) {fprintf(stderr,"named sync failure was not reached\n");status=120;break;}
+        if(n==1 && uncut && !store_crash_acked(state)) {fprintf(stderr,"uncut run did not acknowledge its checkpoint\n");status=120;break;}
+    }
+    if(!status) printf("cuts %llu\n",(unsigned long long)store_crash_events(state));
+    store_crash_free(state);return status;
+}

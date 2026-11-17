@@ -593,7 +593,8 @@ def crashes(args, root, work, engine, name, runner=None, scenarios=CRASHES):
     build = work / f'crash_{name}'
     build.mkdir()
     rows = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
-                       entry='store@1/runner_crash/main', scenarios=scenarios, environment=env)
+                       entry='store@1/runner_crash/main', scenarios=scenarios, environment=env,
+                       adapter='runner_crash.c')
     checked([str(build / (engine + '-crash') / 'store'), POISON, 'count'], env)
     return rows
 

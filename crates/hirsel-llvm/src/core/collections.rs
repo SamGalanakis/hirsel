@@ -205,6 +205,7 @@ pub(super) fn glue(
             &mut *sink,
             &mut *items,
         );
+        e.release_site();
         let per = entries
             .fields
             .iter()

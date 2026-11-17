@@ -118,6 +118,7 @@ impl Glues {
         fn descendants(
             t: usize,
             layouts: &[Recipe],
+            resources: &BTreeSet<usize>,
             roots: &mut BTreeSet<usize>,
             visited: &mut BTreeSet<usize>,
             whole: &mut BTreeSet<usize>,
@@ -136,37 +137,54 @@ impl Glues {
             fn field(
                 f: &FieldTy,
                 layouts: &[Recipe],
+                resources: &BTreeSet<usize>,
                 roots: &mut BTreeSet<usize>,
                 visited: &mut BTreeSet<usize>,
                 whole: &mut BTreeSet<usize>,
             ) {
                 match f {
-                    FieldTy::Inline(t) => descendants(t.index(), layouts, roots, visited, whole),
+                    // A resource is one step cleaned whole by its ordinary glue.
+                    FieldTy::Inline(t) if resources.contains(&t.index()) => {
+                        whole.insert(t.index());
+                    }
+                    FieldTy::Inline(t) => {
+                        descendants(t.index(), layouts, resources, roots, visited, whole)
+                    }
                     FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                         roots.insert(t.index());
-                        descendants(t.index(), layouts, roots, visited, whole);
+                        descendants(t.index(), layouts, resources, roots, visited, whole);
                     }
                     FieldTy::Array(e, _) | FieldTy::Seq(e) => {
-                        field(e, layouts, roots, visited, whole)
+                        field(e, layouts, resources, roots, visited, whole)
                     }
                     FieldTy::Map(k, v) => {
-                        field(k, layouts, roots, visited, whole);
-                        field(v, layouts, roots, visited, whole);
+                        field(k, layouts, resources, roots, visited, whole);
+                        field(v, layouts, resources, roots, visited, whole);
                     }
                     _ => {}
                 }
             }
             if let Some(d) = &layouts[t].drop {
                 for f in d.fields.iter().flatten() {
-                    field(&f.ty, layouts, roots, visited, whole);
+                    field(&f.ty, layouts, resources, roots, visited, whole);
                 }
             }
         }
+        let resources: BTreeSet<usize> = (0..input.types.len())
+            .filter(|&t| input.types[t].repr == Repr::Resource)
+            .collect();
         let mut visited = BTreeSet::new();
         let mut whole = BTreeSet::new();
         loop {
             for root in roots.clone() {
-                descendants(root, layouts, &mut roots, &mut visited, &mut whole);
+                descendants(
+                    root,
+                    layouts,
+                    &resources,
+                    &mut roots,
+                    &mut visited,
+                    &mut whole,
+                );
             }
             let fresh: Vec<usize> = whole.difference(&needed).copied().collect();
             if fresh.is_empty() {

@@ -142,9 +142,9 @@ pub(super) fn drop_glue(
             continue;
         }
         if let Some(drop) = &recipes[t].drop {
-            // FORM v1c: counted cleanup runs a row with a finalizer whole, by its
-            // ordinary glue.
-            if mechanical && drop.finalizer.is_some() {
+            // FORM v1c: counted cleanup runs a row with a finalizer, or a
+            // resource, whole, by its ordinary glue.
+            if mechanical && (drop.finalizer.is_some() || module.types[t].repr == Repr::Resource) {
                 pending.push((t, false));
                 continue;
             }
@@ -557,8 +557,9 @@ pub(super) fn mechanical_count(
             let Some(drop) = &recipes[t.index()].drop else {
                 return Ok(0);
             };
-            // FORM v1c: a row with a finalizer is one step, cleaned whole.
-            if drop.finalizer.is_some() {
+            // FORM v1c: a row with a finalizer, or a resource, is one step,
+            // cleaned whole.
+            if drop.finalizer.is_some() || module.types[t.index()].repr == Repr::Resource {
                 return Ok(1);
             }
             let mut max = 0;
@@ -572,12 +573,19 @@ pub(super) fn mechanical_count(
             max
         }
         FieldTy::Array(e, n) => mechanical_count(module, recipes, e)? * n,
-        FieldTy::Scalar(_) | FieldTy::Fn | FieldTy::Stable(_) => 0,
-        other => {
-            return Err(Error::Unsupported(format!(
-                "counted payload field {other:?}"
-            )));
-        }
+        FieldTy::Handle(hirsel_core_layout::Handle::Capability) => 0,
+        FieldTy::Handle(_) | FieldTy::OwnFn => 1,
+        FieldTy::Scalar(_)
+        | FieldTy::Fn
+        | FieldTy::Stable(_)
+        | FieldTy::Borrow
+        | FieldTy::View(_)
+        | FieldTy::Locator(_)
+        | FieldTy::Text
+        | FieldTy::FixedSpan(_)
+        | FieldTy::SeqSpan(_)
+        | FieldTy::IndexedSpan(_)
+        | FieldTy::Link(_) => 0,
     })
 }
 impl FunctionEmitter<'_> {
@@ -608,29 +616,20 @@ impl FunctionEmitter<'_> {
         self.cond(&here, clean, skip);
         self.block(clean);
         match field {
-            // Its ordinary glue: the finalizer, then the fields, under the
-            // release's site. A failure is recorded and cleaning goes on (FAIL-10).
+            // One step cleaned whole by ordinary glue, under the release's
+            // site: a row with a finalizer (the finalizer, then its fields), a
+            // resource, a handle or a callable. A failure goes into the
+            // worklist's byte and cleaning goes on (FAIL-10).
             FieldTy::Inline(t)
-                if self.recipes[t.index()]
-                    .drop
-                    .as_ref()
-                    .is_some_and(|d| d.finalizer.is_some()) =>
+                if self.module.types[t.index()].repr == Repr::Resource
+                    || self.recipes[t.index()]
+                        .drop
+                        .as_ref()
+                        .is_some_and(|d| d.finalizer.is_some()) =>
             {
-                let list = Value::Local(Local::WORKLIST);
-                let at = self.offset(&list, memory_layout::WORKLIST_SITE as u64);
-                let site = self.load(&i64, &at, 8);
-                let failed = self.call(
-                    &drop_signature(),
-                    &Value::global(format!("core_drop_{}", t.0)),
-                    &[CONTEXT, p.clone(), site],
-                    &CallAttrs::default(),
-                );
-                let at = self.offset(&list, memory_layout::WORKLIST_FAILED as u64);
-                let before = self.load(&Type::I8, &at, 1);
-                let after = self.bin(Binary::Or, &Type::I8, &before, &failed);
-                self.store(&Type::I8, &after, &at, 1);
-                self.br(Label::plain("resume"));
+                self.clean_whole(field, p)?;
             }
+            FieldTy::Handle(_) | FieldTy::OwnFn => self.clean_whole(field, p)?,
             FieldTy::Inline(t) => {
                 let drop = self.recipes[t.index()].drop.as_ref().unwrap();
                 let tag = self.fixed(TypeId(t.0)).tag;
@@ -740,6 +739,21 @@ impl FunctionEmitter<'_> {
     }
 }
 impl FunctionEmitter<'_> {
+    /// A drain step that runs `field`'s ordinary cleanup, recording a failure
+    /// in the worklist's failed byte.
+    fn clean_whole(&mut self, field: &FieldTy, p: &Value) -> Result<()> {
+        let list = Value::Local(Local::WORKLIST);
+        let failed = self.offset(&list, memory_layout::WORKLIST_FAILED as u64);
+        self.clean_field(field, p, &failed)?;
+        self.br(Label::plain("resume"));
+        Ok(())
+    }
+    /// Recipes clean under the site their release was called with.
+    pub(super) fn release_site(&mut self) {
+        let list = Value::Local(Local::WORKLIST);
+        let at = self.offset(&list, memory_layout::WORKLIST_SITE as u64);
+        self.caller_site = self.load(&Type::I64, &at, 8);
+    }
     /// Whether cleaning `field` frees at most terminal storage and yields nothing.
     fn flat(&self, field: &FieldTy) -> bool {
         match field {
@@ -904,6 +918,7 @@ fn counted_glue(
         );
         let field = FieldTy::Inline(TypeRef(t as u32));
         let cursor_at = Value::Local(Local::CURSOR);
+        e.release_site();
         e.br(Label::plain("resume"));
         e.block(Label::plain("resume"));
         let cursor = e.load(&Type::I64, &cursor_at, 0);

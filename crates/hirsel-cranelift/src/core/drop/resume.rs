@@ -27,8 +27,8 @@ pub(super) fn plan_type(tables: &Tables<'_>, t: TypeRef) -> Result<Plan> {
     let Layout::Fixed(f) = &tables.layouts[t.index()].layout else {
         return Ok(Plan::Empty);
     };
-    // FORM v1c: a row with a finalizer is one step, cleaned whole.
-    if d.finalizer.is_some() {
+    // FORM v1c: a row with a finalizer, or a resource, is one step, cleaned whole.
+    if d.finalizer.is_some() || tables.input.types[t.index()].repr == Repr::Resource {
         return Ok(Plan::Leaf(FieldTy::Inline(t)));
     }
     let rows = d
@@ -65,7 +65,14 @@ fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
             field_size(&tables.input.types, tables.layouts, e).0,
             Box::new(plan_field(tables, e)?),
         ),
-        other => return Err(unsupported(format!("resumable counted field {other:?}"))),
+        FieldTy::Handle(hirsel_core_layout::Handle::Capability) => Plan::Empty,
+        // Cleaned whole by ordinary glue in one step that never yields.
+        FieldTy::Handle(_) | FieldTy::OwnFn => Plan::Leaf(t.clone()),
+        FieldTy::Text
+        | FieldTy::FixedSpan(_)
+        | FieldTy::SeqSpan(_)
+        | FieldTy::IndexedSpan(_)
+        | FieldTy::Link(_) => Plan::Empty,
     })
 }
 impl Glue<'_, '_, '_> {
@@ -252,11 +259,16 @@ impl Glue<'_, '_, '_> {
                 let node = self.load(base, 0);
                 let mut yields = true;
                 match field {
-                    // Its ordinary glue: the finalizer, then the fields. A counted
-                    // payload holds no resource, so this cannot fail, and it hands
-                    // nothing over.
+                    // Its ordinary glue: the finalizer, then the fields, or the
+                    // resource's release. Its status joins the worklist's, and it
+                    // hands nothing over.
                     FieldTy::Inline(t) => {
                         self.drop_type(base, *t);
+                        yields = false;
+                    }
+                    // A handle or an owned closure is released whole in place.
+                    FieldTy::Handle(_) | FieldTy::OwnFn => {
+                        self.field(base, field)?;
                         yields = false;
                     }
                     FieldTy::Box(t) => {

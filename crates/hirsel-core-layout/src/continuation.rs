@@ -125,7 +125,15 @@ fn plan_type(shapes: &[Shape], recipes: &[Recipe], t: TypeRef, at: u64) -> Node 
 fn plan_field(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64) -> Node {
     let fixed =
         |edge: &FieldTy| cleanup_class(shapes, recipes, edge) != Some(crate::Cleanup::Terminal);
+    // Cleaned whole by its ordinary glue in one step that never yields: the
+    // pointer (or handle word, or callable pair) is all the drain reads.
+    let whole = |len: u64| Node::Leaf {
+        at,
+        live: vec![(at, len)],
+        yields: None,
+    };
     match ty {
+        FieldTy::Inline(t) if shapes[t.index()].repr == crate::Repr::Resource => whole(8),
         FieldTy::Inline(t) => plan_type(shapes, recipes, *t, at),
         FieldTy::Seq(_) if crate::storage_free(shapes, ty) => Node::Empty,
         FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) => Node::Leaf {
@@ -159,7 +167,21 @@ fn plan_field(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64) -> No
                 }
             }
         }
-        _ => Node::Empty,
+        FieldTy::Handle(crate::Handle::Capability) => Node::Empty,
+        FieldTy::Handle(_) => whole(8),
+        FieldTy::OwnFn => whole(field_size(shapes, recipes, ty).0),
+        FieldTy::Scalar(_)
+        | FieldTy::Stable(_)
+        | FieldTy::Fn
+        | FieldTy::Borrow
+        | FieldTy::View(_)
+        | FieldTy::Locator(_) => Node::Empty,
+        // Compact data is plain bytes inside its blob: nothing to clean (MEM-9).
+        FieldTy::Text
+        | FieldTy::FixedSpan(_)
+        | FieldTy::SeqSpan(_)
+        | FieldTy::IndexedSpan(_)
+        | FieldTy::Link(_) => Node::Empty,
     }
 }
 

@@ -3496,7 +3496,7 @@ pub fn law_published_value(c: Clock) -> bool waits {
     if !typed_put(mut db, other, 1, 5) {
         return false
     }
-    let first = run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+    let first = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, old, 1, OldAccount(balance: 10))
     })
     match take first {
@@ -3504,7 +3504,7 @@ pub fn law_published_value(c: Clock) -> bool waits {
         _ => return false
     }
     let current = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), new_codec()))
-    let second = run(mut db, fn(mut tx: Tx) -> Result[(), Error] {
+    let second = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, current, 2, NewAccount(balance: 20, bonus: 9))
     })
     match take second {
@@ -3550,7 +3550,7 @@ pub fn law_published_value(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    let gone = run(mut db, fn(mut tx: Tx) -> Result[bool, Error] {
+    let gone = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
         delete(mut tx, current, 1)
     })
     match take gone {
@@ -5962,7 +5962,7 @@ pub fn law_read_spans(c: Clock) -> bool waits {
     if !reads_key(mid, d[1].tree_key) || !reads_key(mid, d[2].tree_key) || reads_key(mid, d[0].tree_key) || reads_key(mid, d[3].tree_key) || !reads_key(point, d[0].tree_key) || reads_key(point, d[1].tree_key) {
         return false
     }
-    let observed = result.unwrap(look(after, fn(tx: Tx) -> Result[(), Error] {
+    let observed = result.unwrap(look(after, None, fn(tx: Tx) -> Result[(), Error] {
         let _ = range(tx, sh, Included(2), Excluded(4))?
         let _ = range(tx, sh, Excluded(2), Included(4))?
         Ok(())

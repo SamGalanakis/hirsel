@@ -101,23 +101,31 @@ has no revisions. It is written as a u32 length of 0 or 32, any other length is
 `Corrupt(Malformed)`, and a Some that is not 32 bytes is `Missing("revision")`
 before anything commits.
 
-Streams (§1.8, L13) live in the streams root, keyed by stream bytes; a value is
-the position as u64 LE, a state byte (1 Admitted, 2 Replied) and the reply.
-`admit(mut db, stream, p)` answers `Admission`: a new stream admits position 0
-only and is otherwise `Rejected(0)`; `latest + 1` commits `Admitted(p)` only
-once `latest` has its reply; `p == latest` replied is `Duplicate(reply)`;
-unreplied, it is `Abandoned` with the ticket this open committed it under, or,
-when another open admitted it, commits Admitted again and answers `Abandoned`
-with the new ticket. Anything else is `Rejected(latest)`. An admit over
-`resident_limit` is `Full`. `reply(mut tx, stream, p, r)` is `Missing("reply")`
-unless the stream is Admitted at `p`. `record(mut tx, call)` adds the CALL
+Streams (§1.8, L13, STORE-SPEC v2.24) live in the streams root, keyed by
+stream bytes; a value is the position as u64 LE, the 32-byte `RequestDigest`
+bound at it, a state byte (1 Admitted, 2 Replied) and the reply.
+`request_digest(key, args)` is SHA-256 of `u8 17 ‖ "hirsel.request.v1" ‖ u32
+LE len(key) ‖ key ‖ u32 LE len(args) ‖ args`, allocating nothing (L35).
+`admit(mut db, stream, p, d)` answers `Admission`: a new stream admits
+position 0 only and is otherwise `Rejected(0)`; `latest + 1` commits
+`Admitted(p)`, binding `d`, only once `latest` has its reply, and is otherwise
+`Rejected(latest)`. At `p == latest` the stored digest is compared first: a
+different `d` is `RequestMismatch` and commits nothing. With an equal digest,
+replied is `Duplicate(reply)`; unreplied is `Abandoned` with the ticket this
+open committed it under, or, when another open admitted it, commits Admitted
+again with the bound digest and answers `Abandoned` with the new ticket. Below
+latest is `HistoryUnavailable`, and above `latest + 1` is `Rejected(latest)`.
+An admit over `resident_limit` is `Full` and binds nothing. `reply(mut tx,
+stream, p, r)` is `Missing("reply")` unless the stream is Admitted at `p`,
+and keeps the bound digest. `record(mut tx, call)` adds the CALL
 section once (`Exists("call")` after that) and is `Missing("reply")` unless
 this Tx replied on the call's stream. Each stream op adds `9 + key + value`
-COMMIT bytes and a CALL `17 + key + args + stream + revision`; a frame with
-only stream ops has no data head. A body that returns Error after a reply
-commits its reply writes and CALL on the base data and catalog (F2) and
-answers `Undone { value, ticket: Some(t) }`; past the admission bound it is
-`Refused` and keeps nothing. The I4 settle re-encodes every section.
+COMMIT bytes, with a value of `41 + reply`, and a CALL `17 + key + args +
+stream + revision`; a frame with only stream ops has no data head. A body that
+returns Error after a reply commits its reply writes and CALL on the base data
+and catalog (F2) and answers `Undone { value, ticket: Some(t) }`; past the
+admission bound it is `Refused` and keeps nothing. The I4 settle re-encodes
+every section.
 
 Scopes (§1.4, L14): `KeyScope` names the keys a Tx may touch on one store.
 `scope(t, access)` covers a table, `scope_keys(t, lo, hi, access)` a key

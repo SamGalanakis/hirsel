@@ -1291,19 +1291,61 @@ fn tree_height(m: std.omap.OMap[Bytes, Arc[Bytes]]) -> u64 {
 
 // Stream value (section 1.8): position u64 LE, state u8 (1 Admitted,
 // 2 Replied), then the reply when Replied.
-fn stream_bytes(p: u64, state: u64, answer: Bytes) -> Result[Bytes, Error] {
-    let mut value: Bytes = capacity(list.with_capacity(9 + list.len(answer)))?
+// A request's identity at a stream position (STORE-SPEC v2.24 §1.8, AH1).
+// Made only by request_digest or read from a streams value.
+pub opaque type RequestDigest: key + shareable + send {
+    b: Inline[u8, 32]
+}
+
+/// SHA-256 of u8 17 ‖ "hirsel.request.v1" ‖ u32 LE len(key) ‖ key ‖ u32 LE
+/// len(args) ‖ args (§1.8): versioned, domain-separated, length-delimited.
+/// Alloc: none. Cost: O(key + args).
+pub fn request_digest(key: Bytes, args: Bytes) -> RequestDigest {
+    let mut h = std.sha256.start()
+    let tag = string.as_bytes("hirsel.request.v1")
+    std.sha256.add_byte(mut h, int.truncate(list.len(tag)))
+    std.sha256.add(mut h, tag, 0, list.len(tag))
+    digest_part(mut h, key)
+    digest_part(mut h, args)
+    RequestDigest(b: std.sha256.finish(h))
+}
+
+fn digest_part(mut h: std.sha256.Sha256, part: Bytes) {
+    let n = list.len(part)
+    for i in 0u64 .. 4 {
+        std.sha256.add_byte(mut h, int.truncate(n >> int.truncate(i * 8)))
+    }
+    std.sha256.add(mut h, part, 0, n)
+}
+
+// A streams value (§1.8, AH3): position u64 LE, the RequestDigest's 32
+// bytes, state u8 (1 Admitted, 2 Replied), then the reply when Replied.
+fn stream_bytes(p: u64, d: RequestDigest, state: u64, answer: Bytes) -> Result[Bytes, Error] {
+    let mut value: Bytes = capacity(list.with_capacity(41 + list.len(answer)))?
     capacity(le(mut value, p, 8))?
+    for x in d.b {
+        capacity(result.capacity_only(list.push(mut value, x)))?
+    }
     capacity(le(mut value, state, 1))?
     capacity(list.append(mut value, answer))?
     Ok(take value)
 }
 
-fn stream_state(raw: Bytes) -> Result[(u64, u8), Error] {
-    if list.len(raw) < 9 || (raw[8] != 1 && raw[8] != 2) || (raw[8] == 1 && list.len(raw) != 9) {
+type StreamState {
+    p: u64,
+    digest: RequestDigest,
+    state: u8
+}
+
+fn stream_state(raw: Bytes) -> Result[StreamState, Error] {
+    if list.len(raw) < 41 || (raw[40] != 1 && raw[40] != 2) || (raw[40] == 1 && list.len(raw) != 41) {
         return Error(malformed(0))
     }
-    Ok((read_le(raw, 0, 8), raw[8]))
+    let mut b: Inline[u8, 32] = [0u8; 32]
+    for i in 0u64 .. 32 {
+        b[i] = raw[8 + i]
+    }
+    Ok(StreamState(p: read_le(raw, 0, 8), digest: RequestDigest(b: b), state: raw[40]))
 }
 
 // One write to the streams tree, charged and sized like a data write.
@@ -1351,17 +1393,19 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes) -> Result[(), Er
 }
 
 pub fn reply(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes) -> Result[(), Error] {
-    let open_at = match std.omap.get(tx.roots.streams, stream) {
+    // The reply keeps the digest bound at p (AH1).
+    let held = match std.omap.get(tx.roots.streams, stream) {
         Some(raw) => {
-            let (at, state) = stream_state(raw)?
-            at == p && state == 1
+            let at = stream_state(raw)?
+            if at.p == p && at.state == 1 { Some(at.digest) } else { None }
         },
-        None => false
+        None => None
     }
-    if !open_at {
-        return Error(Missing("reply"))
+    let d = match held {
+        Some(d) => d,
+        None => return Error(Missing("reply"))
     }
-    let value = stream_bytes(p, 2, r)?
+    let value = stream_bytes(p, d, 2, r)?
     stream_write(mut tx, copied(stream)?, take value)
 }
 
@@ -1371,7 +1415,7 @@ pub fn record(mut tx: Tx, take c: CallRecord) -> Result[(), Error] {
     }
     let replied = match std.omap.get(tx.stream_ops, c.stream) {
         Some(op) => match op {
-            Some(raw) => list.len(raw) >= 9 && raw[8] == 2,
+            Some(raw) => list.len(raw) >= 41 && raw[40] == 2,
             None => false
         },
         None => false
@@ -1393,6 +1437,7 @@ pub fn record(mut tx: Tx, take c: CallRecord) -> Result[(), Error] {
 }
 
 pub type Admission = Admitted(Ticket) | Duplicate(Bytes) | Rejected(u64) | Abandoned(Ticket)
+    | RequestMismatch | HistoryUnavailable
 
 // An Admitted(p) this open committed on main: a later admit of p while it is
 // still unreplied answers Abandoned with this ticket and commits nothing.
@@ -1401,47 +1446,54 @@ type OpenAdmit: shareable + send {
     ticket: Ticket
 }
 
-pub fn admit(mut db: Db, stream: Bytes, p: u64) -> Result[Admission, Error] waits {
+pub fn admit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest) -> Result[Admission, Error] waits {
     journal_poll(mut db)?
     healthy(db)?
     let state = match std.omap.get(db.heads[0].roots.streams, stream) {
         Some(raw) => Some(stream_state(raw)?),
         None => None
     }
-    let (latest, s) = match state {
+    let at = match take state {
         Some(x) => x,
-        // Ruling 1: a new stream admits position 0 only.
-        None => return if p == 0 { admit_commit(mut db, stream, 0, false) } else { Ok(Rejected(0)) }
+        // AE1: a new stream admits position 0 only.
+        None => return if p == 0 { admit_commit(mut db, stream, 0, d, false) } else { Ok(Rejected(0)) }
     }
-    // S7: latest + 1 only after latest has its reply.
-    if p != 0 && p - 1 == latest && s == 2 {
-        return admit_commit(mut db, stream, p, false)
+    let latest = at.p
+    if p < latest {
+        // AH2: one state per stream keeps no digest below latest.
+        return Ok(HistoryUnavailable)
     }
-    if p == latest && s == 2 {
+    if p > latest {
+        // S7: latest + 1 only after latest has its reply.
+        return if p == latest + 1 && at.state == 2 { admit_commit(mut db, stream, p, d, false) } else { Ok(Rejected(latest)) }
+    }
+    // AH1: at latest the digest is compared before any other answer.
+    if at.digest != d {
+        return Ok(RequestMismatch)
+    }
+    if at.state == 2 {
         let r = match std.omap.get(db.heads[0].roots.streams, stream) {
-            Some(raw) => copied(list.slice(raw, 9, list.len(raw)))?,
+            Some(raw) => copied(list.slice(raw, 41, list.len(raw)))?,
             None => return Error(malformed(0))
         }
         return Ok(Duplicate(take r))
     }
-    if p == latest {
-        let mine = match std.omap.get(db.admits, stream) {
-            Some(a) => if a.p == p { Some(a.ticket) } else { None },
-            None => None
-        }
-        if let Some(t) = mine {
-            return Ok(Abandoned(t))
-        }
-        return admit_commit(mut db, stream, p, true)
+    let mine = match std.omap.get(db.admits, stream) {
+        Some(a) => if a.p == p { Some(a.ticket) } else { None },
+        None => None
     }
-    Ok(Rejected(latest))
+    if let Some(t) = mine {
+        return Ok(Abandoned(t))
+    }
+    // An earlier open's admit: re-commit, keeping the digest bound at p.
+    admit_commit(mut db, stream, p, at.digest, true)
 }
 
-fn admit_commit(mut db: Db, stream: Bytes, p: u64, abandoned: bool) -> Result[Admission, Error] waits {
+fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: bool) -> Result[Admission, Error] waits {
     let b = main_branch(db)
     let outcome = run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
         let empty: Bytes = list.new()
-        let value = stream_bytes(p, 1, empty)?
+        let value = stream_bytes(p, d, 1, empty)?
         stream_write(mut tx, copied(stream)?, take value)
     })?
     let ticket = match take outcome {
@@ -5271,14 +5323,14 @@ fn mark_is(t: Ticket, n: u64) -> bool {
 // (position, state) of a stream on main, or (0, 0) when it has none.
 fn stream_now(db: Db, name: Bytes) -> (u64, u64) {
     match std.omap.get(db.heads[0].roots.streams, name) {
-        Some(raw) => (read_le(raw, 0, 8), int.widen(raw[8])),
+        Some(raw) => (read_le(raw, 0, 8), int.widen(raw[40])),
         None => (0, 0)
     }
 }
 
 fn stream_reply_is(db: Db, name: Bytes, want: Bytes) -> bool {
     match std.omap.get(db.heads[0].roots.streams, name) {
-        Some(raw) => list.len(raw) >= 9 && list.slice(raw, 9, list.len(raw)) == want,
+        Some(raw) => list.len(raw) >= 41 && list.slice(raw, 41, list.len(raw)) == want,
         None => false
     }
 }
@@ -5291,6 +5343,13 @@ fn call_for(stream: Bytes, revision: u64) -> CallRecord {
     let mut r: Bytes = list.new()
     result.unwrap(list.fill(mut r, revision, 3u8))
     CallRecord(key: take key, args: take args, stream: result.unwrap(copied(stream)), revision: Some(take r))
+}
+
+// The digest of a request with call_for's entry key and these args.
+fn digest_for(args: String) -> RequestDigest {
+    let mut key: Bytes = list.new()
+    result.unwrap(list.fill(mut key, 32, 1u8))
+    request_digest(key, string.as_bytes(args))
 }
 
 fn missing_is(r: Result[(), Error], name: String) -> bool {
@@ -5312,13 +5371,18 @@ fn missing_is(r: Result[(), Error], name: String) -> bool {
 pub fn law_streams(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     let s = result.unwrap(copied(string.as_bytes("s")))
-    match result.unwrap(admit(mut db, s, 1)) { Rejected(0) => {}, _ => return false }
+    let d = digest_for("d")
+    let e = digest_for("e")
+    match result.unwrap(admit(mut db, s, 1, d)) { Rejected(0) => {}, _ => return false }
     if db.heads[0].head != 0 { return false }
-    match result.unwrap(admit(mut db, s, 0)) { Admitted(t) => if !mark_is(t, 1) { return false }, _ => return false }
+    match result.unwrap(admit(mut db, s, 0, d)) { Admitted(t) => if !mark_is(t, 1) { return false }, _ => return false }
     if db.heads[0].head != 1 || stream_now(db, s) != (0u64, 1u64) { return false }
     // S7: latest + 1 over an unreplied latest commits nothing.
-    match result.unwrap(admit(mut db, s, 1)) { Rejected(0) => {}, _ => return false }
-    match result.unwrap(admit(mut db, s, 0)) { Abandoned(t) => if !mark_is(t, 1) { return false }, _ => return false }
+    match result.unwrap(admit(mut db, s, 1, d)) { Rejected(0) => {}, _ => return false }
+    // AH1: another request at latest mismatches before Abandoned, binds
+    // nothing, and the bound request is still Abandoned after it.
+    match result.unwrap(admit(mut db, s, 0, e)) { RequestMismatch => {}, _ => return false }
+    match result.unwrap(admit(mut db, s, 0, d)) { Abandoned(t) => if !mark_is(t, 1) { return false }, _ => return false }
     if db.heads[0].head != 1 { return false }
     // The effect and its reply in one commit.
     let replied = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
@@ -5332,8 +5396,12 @@ pub fn law_streams(c: Clock) -> bool waits {
     match take replied { Committed(_) => {}, _ => return false }
     if db.heads[0].head != 2 || stream_now(db, s) != (0u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r0")) { return false }
     match std.omap.get(db.heads[0].roots.data, result.unwrap(physical(1, key_word(1)))) { Some(v) => if decode_word(v) != 11 { return false }, None => return false }
-    match result.unwrap(admit(mut db, s, 0)) { Duplicate(r) => if r != string.as_bytes("r0") { return false }, _ => return false }
-    match result.unwrap(admit(mut db, s, 1)) { Admitted(t) => if !mark_is(t, 3) { return false }, _ => return false }
+    // The reply keeps d: e still mismatches, before Duplicate, and d's
+    // Duplicate follows it.
+    match result.unwrap(admit(mut db, s, 0, e)) { RequestMismatch => {}, _ => return false }
+    match result.unwrap(admit(mut db, s, 0, d)) { Duplicate(r) => if r != string.as_bytes("r0") { return false }, _ => return false }
+    if db.heads[0].head != 2 { return false }
+    match result.unwrap(admit(mut db, s, 1, d)) { Admitted(t) => if !mark_is(t, 3) { return false }, _ => return false }
     // F2: a body that replies and returns Error keeps the reply alone.
     let kept = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) { return Error(1) }
@@ -5346,7 +5414,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     }
     if db.heads[0].head != 4 || stream_now(db, s) != (1u64, 2u64) || !stream_reply_is(db, s, string.as_bytes("r1")) { return false }
     if let Some(_) = std.omap.get(db.heads[0].roots.data, result.unwrap(physical(1, key_word(2)))) { return false }
-    match result.unwrap(admit(mut db, s, 2)) { Admitted(t) => if !mark_is(t, 5) { return false }, _ => return false }
+    match result.unwrap(admit(mut db, s, 2, d)) { Admitted(t) => if !mark_is(t, 5) { return false }, _ => return false }
     // Aborted without a reply, Failed and Refused keep nothing; each later
     // admit of 2 is Abandoned with the ticket of 5 and commits nothing.
     let dropped = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
@@ -5354,13 +5422,13 @@ pub fn law_streams(c: Clock) -> bool waits {
         Error(8)
     }))
     match take dropped { Aborted(Undone(value: 8, ticket: None)) => {}, _ => return false }
-    match result.unwrap(admit(mut db, s, 2)) { Abandoned(t) => if !mark_is(t, 5) { return false }, _ => return false }
+    match result.unwrap(admit(mut db, s, 2, d)) { Abandoned(t) => if !mark_is(t, 5) { return false }, _ => return false }
     let faulted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = reply(mut tx, s, 2, list.new()) { return Error(1) }
         fail("L13 injected fault")
     }))
     match take faulted { Failed(_) => {}, _ => return false }
-    match result.unwrap(admit(mut db, s, 2)) { Abandoned(t) => if !mark_is(t, 5) { return false }, _ => return false }
+    match result.unwrap(admit(mut db, s, 2, d)) { Abandoned(t) => if !mark_is(t, 5) { return false }, _ => return false }
     // A reply the size of Admitted(2) leaves the account unchanged, so a
     // ceiling one below it refuses every write.
     let ceiling = db.ceiling
@@ -5375,13 +5443,17 @@ pub fn law_streams(c: Clock) -> bool waits {
         Error(9)
     }))
     match take over_abort { Refused(_) => {}, _ => return false }
-    // Ruling 3: an admit over the bound is Full.
-    match admit(mut db, string.as_bytes("u"), 0) { Error(Full(_)) => {}, _ => return false }
+    // Ruling 3: an admit over the bound is Full and binds nothing.
+    match admit(mut db, string.as_bytes("u"), 0, e) { Error(Full(_)) => {}, _ => return false }
     db.ceiling = ceiling
-    match result.unwrap(admit(mut db, s, 2)) { Abandoned(t) => if !mark_is(t, 5) { return false }, _ => return false }
+    match result.unwrap(admit(mut db, s, 2, d)) { Abandoned(t) => if !mark_is(t, 5) { return false }, _ => return false }
     if db.heads[0].head != 5 || stream_now(db, s) != (2u64, 1u64) { return false }
-    for p in [1u64, 3u64, 5u64] {
-        match result.unwrap(admit(mut db, s, p)) { Rejected(2) => {}, _ => return false }
+    // AH2: below latest there is no digest to compare, whatever the bytes.
+    for (p, x) in [(1u64, d), (1u64, e), (0u64, d)] {
+        match result.unwrap(admit(mut db, s, p, x)) { HistoryUnavailable => {}, _ => return false }
+    }
+    for p in [3u64, 5u64] {
+        match result.unwrap(admit(mut db, s, p, d)) { Rejected(2) => {}, _ => return false }
     }
     if db.heads[0].head != 5 { return false }
     // A reply on a stream never admitted, then record's three refusals.
@@ -5396,25 +5468,66 @@ pub fn law_streams(c: Clock) -> bool waits {
     }))
     match take unadmitted { Committed(_) => {}, _ => return false }
     if db.heads[0].head != 6 { return false }
-    match result.unwrap(admit(mut db, s, 3)) { Admitted(t) => if !mark_is(t, 7) { return false }, _ => return false }
+    match result.unwrap(admit(mut db, s, 3, d)) { Admitted(t) => if !mark_is(t, 7) { return false }, _ => return false }
     // L29 by section 2.4: head 16, call info 21, streams section 5 + op
-    // (1 + 4 + 1 + 4 + 11) = 26, so 63 with no data head. A CALL of 1 +
-    // (4 + 32) + (4 + 16) + (4 + 1) + (4 + 32) = 98 gives 161. A put of a
-    // 12-byte key and 8-byte value adds the data head 5 and 29: 195.
+    // (1 + 4 + 1 + 4 + 43) = 58 with the value 8 + 32 + 1 + 2 (AH3, 92 + S
+    // + R for S = 1, R = 2), so 95 with no data head. A CALL of 1 + (4 +
+    // 32) + (4 + 16) + (4 + 1) + (4 + 32) = 98 gives 193. A put of a
+    // 12-byte key and 8-byte value adds the data head 5 and 29: 227.
     let sized = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = reply(mut tx, s, 3, result.unwrap(copied(string.as_bytes("ab")))) { return Error(1) }
         let ci = info(mut tx)
         let one = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, tx.call, 1, 72)))
-        if tx_frame(tx) != 63 || one != 63 { return Error(2) }
+        if tx_frame(tx) != 95 || one != 95 { return Error(2) }
         if let Error(_) = record(mut tx, call_for(s, 32)) { return Error(3) }
         let two = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, tx.call, 1, 72)))
-        if tx_frame(tx) != 161 || two != 161 { return Error(4) }
+        if tx_frame(tx) != 193 || two != 193 { return Error(4) }
         if let Error(_) = put_bytes(mut tx, 1, key_word(4), key_word(44)) { return Error(5) }
         let three = list.len(result.unwrap(encode_sections(ci, tx.ops, tx.stream_ops, tx.call, 1, 72)))
-        if tx_frame(tx) != 195 || three != 195 { return Error(6) }
+        if tx_frame(tx) != 227 || three != 227 { return Error(6) }
         Ok(())
     }))
-    match take sized { Committed(_) => true, _ => false }
+    match take sized { Committed(_) => {}, _ => return false }
+    // The Full admit of e at u bound nothing: d admits there.
+    match result.unwrap(admit(mut db, string.as_bytes("u"), 0, d)) { Admitted(_) => true, _ => false }
+}
+
+fn digest_hex(d: RequestDigest, hex: String) -> bool {
+    let alphabet = string.as_bytes("0123456789abcdef")
+    let want = string.as_bytes(hex)
+    for i in 0u64 .. 32 {
+        if alphabet[int.widen(d.b[i] >> 4)] != want[i * 2] || alphabet[int.widen(d.b[i] & 15)] != want[i * 2 + 1] {
+            return false
+        }
+    }
+    true
+}
+
+// L35: STORE-SPEC v2.24's vectors, RUN by Python hashlib (l35-digest-
+// vectors.py). Wrong implementations caught: no tag or lengths (no_framing:
+// both values differ, and a byte moved from key to args hashes the same);
+// big-endian lengths; xxh3 as the identity (xxh3_identity).
+pub fn law_request_digest() -> bool {
+    let mut key: Bytes = result.unwrap(list.with_capacity(32))
+    for i in 0u8 .. 32u8 {
+        result.unwrap(list.push(mut key, i))
+    }
+    let args: Bytes = result.unwrap(b"\x01\x02\x03")
+    let empty: Bytes = list.new()
+    if !digest_hex(request_digest(key, args), "172630b31e7cd5050e8c06447738d3002e79578c1bb18836380fa604eb1c2135") ||
+        !digest_hex(request_digest(key, empty), "2b8d69847b046143da891fdb319ab0fb26033ef1b8116ff0e61e544adceb307b") {
+        return false
+    }
+    let mut changed = result.unwrap(copied(key))
+    changed[5] = 0xff
+    let short = list.slice(key, 0, 31)
+    let moved: Bytes = result.unwrap(b"\x1f\x01\x02\x03")
+    request_digest(changed, args) != request_digest(key, args) && request_digest(short, moved) != request_digest(key, args)
+}
+
+@test
+fn test_request_digest() -> Result[(), ()] {
+    if law_request_digest() { Ok(()) } else { Error(()) }
 }
 
 @test
@@ -10866,16 +10979,24 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let mut options = journal_crash_options()
     options.resident_limit = 4194304
     let s = result.unwrap(copied(string.as_bytes("s")))
+    let ours = digest_for("d")
+    let theirs = digest_for("e")
     let mut before = result.unwrap(open(tasks, dir, c, r, options))
-    let first = match result.unwrap(admit(mut before, s, 0)) { Admitted(t) => t, _ => return false }
+    let first = match result.unwrap(admit(mut before, s, 0, ours)) { Admitted(t) => t, _ => return false }
     result.unwrap(durable(mut before, first))
     result.unwrap(close(take before))
     let mut db = result.unwrap(open(tasks, dir, c, r, options))
     let head = db.heads[0].head
-    let again = match result.unwrap(admit(mut db, s, 0)) { Abandoned(t) => t, _ => return false }
+    // AH1 across a reopen: the digest replayed from the frame still binds
+    // 0, so theirs mismatches with no frame and the re-commit keeps ours.
+    let quiet = db.frame_seq
+    match result.unwrap(admit(mut db, s, 0, theirs)) { RequestMismatch => {}, _ => return false }
+    if db.frame_seq != quiet || db.heads[0].head != head { return false }
+    let again = match result.unwrap(admit(mut db, s, 0, ours)) { Abandoned(t) => t, _ => return false }
     if again.open != open_number(db) || again.open == first.open || db.heads[0].head != head + 1 { return false }
-    match result.unwrap(admit(mut db, s, 0)) { Abandoned(t) => if t.open != again.open || journal_mark(t) != journal_mark(again) { return false }, _ => return false }
+    match result.unwrap(admit(mut db, s, 0, ours)) { Abandoned(t) => if t.open != again.open || journal_mark(t) != journal_mark(again) { return false }, _ => return false }
     if db.heads[0].head != head + 1 { return false }
+    match result.unwrap(admit(mut db, s, 0, theirs)) { RequestMismatch => {}, _ => return false }
     let frames = db.frame_seq
     let effect = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(11)) { return Error(1) }
@@ -10887,7 +11008,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if db.frame_seq != frames + 1 { return false }
     let b = main_branch(db)
     match result.unwrap(recorded(db, b, db.heads[0].head)) { Some(call) => if call.stream != s { return false }, None => return false }
-    match result.unwrap(admit(mut db, s, 1)) { Admitted(_) => {}, _ => return false }
+    match result.unwrap(admit(mut db, s, 1, ours)) { Admitted(_) => {}, _ => return false }
     let aborted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = put_bytes(mut tx, 1, key_word(2), key_word(22)) { return Error(1) }
         if let Error(_) = reply(mut tx, s, 1, result.unwrap(copied(string.as_bytes("r1")))) { return Error(2) }
@@ -10906,7 +11027,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let held = snapshot(db)
     let _ = result.unwrap(pin(mut db, "p", held))
     if !put_run(mut db, 9, 2) || !put_run(mut db, 9, 3) || !put_run(mut db, 9, 4) { return false }
-    let last = match result.unwrap(admit(mut db, s, 2)) { Admitted(t) => t, _ => return false }
+    let last = match result.unwrap(admit(mut db, s, 2, ours)) { Admitted(t) => t, _ => return false }
     result.unwrap(durable(mut db, kept))
     result.unwrap(durable(mut db, last))
     let wall = host.wall_ms(db.clock)
@@ -10922,11 +11043,18 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     db.ceiling = ceiling
     let committed_at = db.heads[0].head
     result.unwrap(close(take db))
-    let after = result.unwrap(open(tasks, dir, c, r, options))
+    let mut after = result.unwrap(open(tasks, dir, c, r, options))
     if stream_now(after, s) != (2u64, 2u64) || !stream_reply_is(after, s, string.as_bytes("r2")) { return false }
     match std.omap.get(after.heads[0].roots.data, result.unwrap(physical(1, key_word(9)))) { Some(v) => if decode_word(v) != 5 { return false }, None => return false }
     let main = main_branch(after)
     match result.unwrap(recorded(after, main, committed_at)) { Some(call) => if call.stream != s { return false }, None => return false }
+    // After the reopen, replied 2 keeps ours: Duplicate for ours, a mismatch
+    // for theirs, and below latest no answer from history; none writes a frame.
+    let still = after.frame_seq
+    match result.unwrap(admit(mut after, s, 2, theirs)) { RequestMismatch => {}, _ => return false }
+    match result.unwrap(admit(mut after, s, 2, ours)) { Duplicate(x) => if x != string.as_bytes("r2") { return false }, _ => return false }
+    match result.unwrap(admit(mut after, s, 1, ours)) { HistoryUnavailable => {}, _ => return false }
+    if after.frame_seq != still || after.heads[0].head != committed_at { return false }
     result.unwrap(close(take after))
     true
 }

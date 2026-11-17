@@ -16,6 +16,18 @@ fn nist_vectors() -> bool {
     matches(sha256.hash(string.as_bytes("")), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") && matches(sha256.hash(string.as_bytes("abc")), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") && matches(sha256.hash(string.as_bytes("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") && matches(sha256.hash(string.as_bytes("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")), "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1")
 }
 
+// The NIST 896-bit message fed by add_byte, through one full block and a
+// tail. Mutant: add_byte filling a block without compressing it.
+// expect: run nist_bytewise() = true
+fn nist_bytewise() -> bool {
+    let b = string.as_bytes("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu")
+    let mut s = sha256.start()
+    for x in b {
+        sha256.add_byte(mut s, x)
+    }
+    matches(sha256.finish(s), "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1")
+}
+
 // NIST million-a vector, streamed as 1,000 chunks with only one 1,000-byte input.
 // expect: run nist_million() = true
 fn nist_million() -> bool {

@@ -119,6 +119,19 @@ pub fn add(mut s: Sha256, input: Bytes, lo: u64, hi: u64) {
     }
 }
 
+/// Append one byte, as `add` of a one-byte input. Lets a caller frame its
+/// input with tags and lengths without building a buffer.
+/// Alloc: none. Cost: O(1), at most one compression block. Ex: `sha256.add_byte(mut s, 17)`.
+pub fn add_byte(mut s: Sha256, x: u8) {
+    s.total = int.wrapping_add(s.total, 1)
+    s.pending[s.used] = x
+    s.used += 1
+    if s.used == 64 {
+        buffered(mut s.h, s.pending)
+        s.used = 0
+    }
+}
+
 /// Thirty-two network-order digest bytes. Leaves s usable for further add calls.
 /// Alloc: none. Cost: O(1), at most two compression blocks.
 pub fn finish(s: Sha256) -> Inline[u8, 32] {

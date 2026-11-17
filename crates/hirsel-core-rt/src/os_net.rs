@@ -300,7 +300,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
             RECV | SEND => {
                 let b = &mut request.buffer;
                 let receiving = request.operation == RECV;
-                if (receiving && b.len == b.capacity) || (!receiving && b.len == 0) {
+                if (receiving && b.len >= b.capacity) || (!receiving && b.len == 0) {
                     return Some(Outcome::default());
                 }
                 if !receiving && sockets.reset(key) {

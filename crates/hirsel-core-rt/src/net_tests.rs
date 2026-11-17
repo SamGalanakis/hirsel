@@ -229,6 +229,16 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     "partial recv needs no fresh edge"
                 );
                 assert_eq!(&bytes, b"def");
+                // A borrowed static carrier has no spare storage even with a nonzero length.
+                let mut borrowed = [0xa5; 2];
+                let mut view = Buffer {
+                    data: borrowed.as_mut_ptr(),
+                    len: 2,
+                    capacity: 0,
+                };
+                let out = hirsel_core_host_recv(context, s.value, &mut view, 0, 0, 0, 7);
+                assert_eq!((out.error, out.value), (IoError::OK, 0));
+                assert_eq!((view.len, view.capacity, borrowed), (2, 0, [0xa5; 2]));
                 // Full buffer and empty send issue/deliver without touching the host.
                 assert_eq!(
                     hirsel_core_host_recv(context, s.value, &mut input, 0, 0, 0, 7).value,

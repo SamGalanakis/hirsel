@@ -1947,49 +1947,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(join);
         Some(self.pointer(to, n))
     }
-    /// IEEE totalOrder becomes unsigned comparison after complementing negative
-    /// bits and flipping positive sign bits. SEM-2 canonicalizes every NaN.
-    fn float_order_key(&mut self, operand: ValueId, n: NodeId) -> Option<ValueId> {
-        let width = if self.b.values[operand.index()] == Ty::Scalar(Scalar::F32) {
-            32
-        } else {
-            64
+    fn float_order_tie_key(&mut self, operand: ValueId, n: NodeId) -> Option<ValueId> {
+        let (unsigned, signed) = match self.b.values[operand.index()] {
+            Ty::Scalar(Scalar::F32) => (Scalar::U32, Scalar::I32),
+            Ty::Scalar(Scalar::F64) => (Scalar::U64, Scalar::I64),
+            _ => return None,
         };
-        let ty = Ty::Scalar(if width == 32 {
-            Scalar::U32
-        } else {
-            Scalar::U64
-        });
-        let bits = self.numeric_convert(ty, ConvertMode::Reinterpret, operand, n)?;
-        let sign = self.konst(ty, 1u64 << (width - 1), n)?;
-        let negative = self.numeric_compare(CompareOp::Ge, bits, sign, n);
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let join = self.new_block(&[ty]);
-        self.numeric_branch(negative, yes, no, n);
-        self.start(yes);
-        let result = self.value(ty);
-        self.inst(
-            Inst::Unary {
-                result,
-                op: UnaryOp::BitNot,
-                operand: bits,
-                fail: None,
-            },
-            n,
-        );
-        self.jump(join, &[result], n);
-        self.start(no);
-        let result = self.numeric_binary(ty, BinaryOp::BitXor, bits, sign, n)?;
-        self.jump(join, &[result], n);
-        self.start(join);
-        Some(
-            self.b.blocks[join.index()]
-                .params
-                .get(&self.b.pools.values)
-                .expect("the join block just built holds its parameter")[0],
-        )
+        let bits =
+            self.numeric_convert(Ty::Scalar(unsigned), ConvertMode::Reinterpret, operand, n)?;
+        self.numeric_convert(Ty::Scalar(signed), ConvertMode::Truncate, bits, n)
     }
+
     fn float_total_order(
         &mut self,
         ty: TyId,
@@ -1997,47 +1965,38 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         b: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let a = self.float_order_key(a, n)?;
-        let b = self.float_order_key(b, n)?;
         let place = self.place_ty(ty, n)?;
         let to = self.new_slot(place, n);
-        let less = self.numeric_compare(CompareOp::Lt, a, b, n);
         let lt = self.new_block(&[]);
-        let other = self.new_block(&[]);
-        let join = self.new_block(&[]);
-        self.numeric_branch(less, lt, other, n);
-        self.start(lt);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 0,
-            },
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(other);
-        let equal = self.numeric_compare(CompareOp::Eq, a, b, n);
         let eq = self.new_block(&[]);
         let gt = self.new_block(&[]);
+        let check_greater = self.new_block(&[]);
+        let tie = self.new_block(&[]);
+        let check_equal = self.new_block(&[]);
+        let join = self.new_block(&[]);
+
+        let less = self.numeric_compare(CompareOp::Lt, a, b, n);
+        self.numeric_branch(less, lt, check_greater, n);
+        self.start(check_greater);
+        let greater = self.numeric_compare(CompareOp::Gt, a, b, n);
+        self.numeric_branch(greater, gt, tie, n);
+
+        // Only numeric equality and unordered pairs reach this comparison.
+        // Signed canonical bits order -0 before +0 and every NaN after all numbers.
+        self.start(tie);
+        let a = self.float_order_tie_key(a, n)?;
+        let b = self.float_order_tie_key(b, n)?;
+        let less = self.numeric_compare(CompareOp::Lt, a, b, n);
+        self.numeric_branch(less, lt, check_equal, n);
+        self.start(check_equal);
+        let equal = self.numeric_compare(CompareOp::Eq, a, b, n);
         self.numeric_branch(equal, eq, gt, n);
-        self.start(eq);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 1,
-            },
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(gt);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 2,
-            },
-            n,
-        );
-        self.jump(join, &[], n);
+
+        for (block, case) in [(lt, 0), (eq, 1), (gt, 2)] {
+            self.start(block);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.jump(join, &[], n);
+        }
         self.start(join);
         Some(self.pointer(to, n))
     }

@@ -58,6 +58,11 @@ pub fn handles(mut db: store.Db) -> Result[Handles, store.Error] waits {
     Ok(Handles(ran: t))
 }
 
+pub fn query_handles(h: Handles) -> Handles {
+    Handles(ran: store.query_table(h.ran))
+}
+
+
 pub fn k_record(mut tx: store.Tx, h: Handles, take a: Request) -> Result[u64, store.Error] {
     let k = observe.key(0u64, a.stream, a.p)
     store.put(mut tx, h.ran, take k, observe.own(a))?

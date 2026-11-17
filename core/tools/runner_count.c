@@ -1,7 +1,7 @@
 /* L3's native count (RUNNER-SPEC v2.6): linked through
  * --wrap=hirsel_core_os_run_with_sources into the test executable of one case, it counts
  * CONC-10 TRY_SEND events (the case's body, once per run, and the publisher, once per
- * answer it tells) and fails the run (status 105) unless there are exactly TRY_SENDS. */
+ * answer it tells, and the owner retirement wake) and fails the run (status 105) unless there are exactly TRY_SENDS. */
 #include "hirsel_core_rt_host.h"
 #include "hirsel_core_rt_tasks.h"
 #include "hirsel_core_rt_sites.h"
@@ -12,11 +12,11 @@
 #endif
 // The socket owner and ingress add their own TRY_SENDs. Keep the original
 // body/publisher/compute-marker observation by attributing their tasks and the
-// marker's channel from the native source sites, rather than counting transport.
+// marker's channel from native source sites. Count the lease wake on the head inbox.
 static const HirselCoreSourceTable *source_table;
-static uint64_t head_task, publisher_task;
-static int publisher_spawn, observed, marker_send;
-static HirselCoreChannel *marker_channel;
+static uint64_t head_task, publisher_task, retiring_task;
+static int publisher_spawn, observed, marker_send, retirement_send;
+static HirselCoreChannel *marker_channel, *head_channel;
 #if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
 static int place_spawn, permit_create, places, publisher_live;
 static int first_permits, second_permits, place_permits, premature_accept;
@@ -59,6 +59,7 @@ HirselCoreChannelNew __wrap_hirsel_core_channel_new(HirselCoreContext *ctx, uint
 #endif
     HirselCoreChannelNew out = __real_hirsel_core_channel_new(ctx, capacity, layout, site);
     if (item_named(site, "answer")) marker_channel = out.sender;
+    if (!head_channel && item_named(site, "served_with_handles")) head_channel = out.sender;
 #if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
     permit_create = 0;
 #endif
@@ -68,13 +69,15 @@ extern uint8_t __real_hirsel_core_try_send(HirselCoreChannel *, void *);
 uint8_t __wrap_hirsel_core_try_send(HirselCoreChannel *channel, void *input) {
     marker_send = channel == marker_channel && marker_channel != NULL;
     if (marker_send) marker_channel = NULL;
+    retirement_send = channel == head_channel && head_channel != NULL;
     uint8_t result = __real_hirsel_core_try_send(channel, input);
     marker_send = 0;
+    retirement_send = 0;
     return result;
 }
 static uint64_t try_sends;
 #ifdef HUNG_BODY_SENDS
-static struct { uint64_t object, task, count; int before_slice; } senders[3];
+static struct { uint64_t object, task, count; int before_slice; } senders[4];
 static size_t sender_count;
 static uint64_t slice_task, slices;
 static int too_many_senders;
@@ -107,13 +110,19 @@ static void event(void *state, HirselCoreEvent e) {
         head_task = e.task;
         observed = 1;
     }
+    // The owner publishes its closed lease before offering a wake on the head inbox.
+    if (e.kind == HIRSEL_CORE_EVENT_LATEST_PUBLISH && observed
+        && e.task != head_task && e.task != publisher_task) {
+        retiring_task = e.task;
+    }
     if (e.kind == HIRSEL_CORE_EVENT_TRY_SEND && observed
-        && (e.task == head_task || e.task == publisher_task || marker_send)) {
+        && (e.task == head_task || e.task == publisher_task || marker_send
+            || (retirement_send && e.task == retiring_task))) {
         try_sends++;
 #ifdef HUNG_BODY_SENDS
         size_t i = 0;
         while (i < sender_count && senders[i].object != e.object) i++;
-        if (i == 3) { too_many_senders = 1; return; }
+        if (i == 4) { too_many_senders = 1; return; }
         if (i == sender_count) {
             sender_count++;
             senders[i].object = e.object;
@@ -170,20 +179,21 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
             (unsigned long long)TRY_SENDS);
     if (status) return status;
 #ifdef HUNG_BODY_SENDS
-    if (try_sends != TRY_SENDS || too_many_senders || sender_count != 3 || slices != 1) {
+    if (try_sends != TRY_SENDS || too_many_senders || sender_count != 4 || slices != 1) {
         for (size_t k = 0; k < sender_count; k++) fprintf(stderr, "runner_count: object %llu task %llu sends %llu\n", (unsigned long long)senders[k].object, (unsigned long long)senders[k].task, (unsigned long long)senders[k].count);
         return 105;
     }
-    size_t body = 3, marker = 3, told = 3;
-    for (size_t k = 0; k < 3; k++) {
+    size_t body = 4, marker = 4, told = 4, retirement = 4;
+    for (size_t k = 0; k < 4; k++) {
         if (senders[k].count == HUNG_BODY_SENDS) body = k;
-        else if (senders[k].count == 1) marker = k;
+        else if (senders[k].count == 1 && senders[k].before_slice) marker = k;
+        else if (senders[k].count == 1) retirement = k;
         else if (senders[k].count == HUNG_TOLDS) told = k;
     }
-    if (body == 3 || marker == 3 || told == 3 ||
+    if (body == 4 || marker == 4 || told == 4 || retirement == 4 ||
         senders[body].task != slice_task || senders[marker].task == slice_task ||
         senders[told].task == slice_task || !senders[marker].before_slice) {
-        fprintf(stderr, "runner_count: body=%zu marker=%zu told=%zu slice_task=%llu marker_before_slice=%d\n", body, marker, told, (unsigned long long)slice_task, marker < 3 ? senders[marker].before_slice : -1);
+        fprintf(stderr, "runner_count: body=%zu marker=%zu told=%zu slice_task=%llu marker_before_slice=%d\n", body, marker, told, (unsigned long long)slice_task, marker < 4 ? senders[marker].before_slice : -1);
         return 105;
     }
 #endif

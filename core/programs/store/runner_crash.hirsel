@@ -31,6 +31,10 @@ fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
     Ok(Hd(t: t))
 }
 
+fn query_handles(h: Hd) -> Hd {
+    Hd(t: store.query_table(h.t))
+}
+
 fn counted(tx: store.Tx, h: Hd) -> Result[u64, u32] {
     match store.fetch(tx, store.shape(h.t), 0u64) {
         Ok(Some(n)) => Ok(n),
@@ -286,6 +290,9 @@ fn accept(take seed: Accept) -> () waits {
     let Accept(listener: take listener, tasks: tasks, clock: c, policy: take policy, head: take head, post: take post, sessions: sessions) = take seed
     let mut l = take listener
     let mut config = runner.wire_defaults(65536u64, N_PLACE)
+    // The replay sends up to three calls per owner. Reserve those outcomes
+    // within the fixture's 32 KiB frame limit.
+    config.q = 2u64
     config.socket.max_frame = 32768u64
     let pool = result.unwrap(std.wsock.pending(config.socket))
     let mut owners: List[Task[Result[(), std.wsock.Error]]] = list.new()
@@ -311,7 +318,7 @@ fn served(take db: store.Db, c: Clock, r: Random, tasks: Tasks, n: Net, out: Std
     let mut policy_task = take policy_handle
     let seed = Accept(listener: take listener, tasks: tasks, clock: c, policy: ingress.share(policy), head: take head, post: runner.post(mail), sessions: sessions)
     let mut driving = result.unwrap(task.spawn(tasks, bytes 33554432u64, take seed, accept))
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }
     let _ = task.join(take driving)
     task.cancel(mut policy_task)
@@ -439,7 +446,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let (policy, policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
     let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
-    let settings = runner.PlaceConfig(backing: Disk(d, existing), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles),
+    let settings = runner.PlaceConfig(backing: Disk(d, existing), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles), query_handles: code.describe(query_handles),
         session: runner.wire_defaults(131072u64, N_PLACE), max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
@@ -469,7 +476,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let status = result.unwrap(runner.status_root())
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
     wire.socket.max_frame = 65536u64
-    let config = runner.PlaceConfig(backing: Disk(d, options()), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles),
+    let config = runner.PlaceConfig(backing: Disk(d, options()), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles), query_handles: code.describe(query_handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64))

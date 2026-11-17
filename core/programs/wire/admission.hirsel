@@ -7,6 +7,11 @@ fn handles(mut db: store.store.Db) -> Result[H, store.store.Error] waits {
     Ok(H(table: table))
 }
 
+fn query_handles(h: H) -> H {
+    H(table: store.store.query_table(h.table))
+}
+
+
 fn put(mut tx: store.store.Tx, h: H, take value: u32) -> Result[u64, u32] {
     if let Error(_) = store.store.put(mut tx, h.table, 0u64, value) { return Error(1u32) }
     Ok(store.store.info(mut tx).id.version)
@@ -115,7 +120,7 @@ pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(
     let mail = result.unwrap(store.runner.mailbox(64u64))
     let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: store.runner.post(mail))
     let h = result.unwrap(task.spawn(tasks, bytes 1073741824u64, take seed, server))
-    let _ = store.runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), take inbox, take mail, tasks, 8388608u64)
+    let _ = store.runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 8388608u64)
     let _ = task.join(take h)
     Ok(())
 }

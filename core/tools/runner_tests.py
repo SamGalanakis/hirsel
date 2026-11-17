@@ -51,24 +51,23 @@ CHUNK = 500
 N_PLACE = 16 * 1024 * 1024
 
 CALLS = ('release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
-         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'owed_ended_delivered')
+         'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'owed_ended_delivered')
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
-# L3's tally handler and the publisher, once per answer it tells (L23), are the only
-# callers of try_send (TRY_SEND is kind 7 in crates/hirsel-core-layout/src/event.rs).
-# calls_runs_once runs tally for one position exactly once, however often that position is
-# re-sent, and its four sends get four answers: 1 + 4. The evaluator's count comes from
+# TRY_SEND is kind 7 in crates/hirsel-core-layout/src/event.rs. calls_runs_once
+# reaches tally once and receives four answers. The session sends one retirement
+# wake to the head, so the total is 1 + 4 + 1. The evaluator's count comes from
 # its event log; natively, core/tools/runner_count.c is linked into the case's test
 # executable as its event sink and fails the run on any other count.
 # L7 adds32664 sends by the hung body and one marker by the other session's
 # compute body; the marker precedes the head's exhaustion slice (kind21). The head's three
-# answers to s0 (the stop, its duplicate, the write) are three Told sends to s0's inbox.
-COUNTS = {'calls_runs_once': (7, 5), 'calls_deadline_hung': (7, 32668)}
+# answers to s0 go to one inbox. Its head retirement wake follows the slice.
+COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, 32669)}
 PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}
 HUNG_TOLDS = 3
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
-SUBS = ('subs_main', 'subs_reset_keeps_diff', 'rows_normalized', 'subscribe_order', 'retired_without_waiting')
+SUBS = ('subs_main', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting')
 
 
 def counted(name, report):
@@ -83,13 +82,13 @@ def counted(name, report):
         for at, e in enumerate(events):
             if e[0] == 7:
                 sends.setdefault(e[2], []).append((at, e[1]))
-        if sorted(map(len, sends.values())) != [1, HUNG_TOLDS, 32664]:
+        if sorted(map(len, sends.values())) != [1, 1, HUNG_TOLDS, 32664]:
             return False
         told = next(v for v in sends.values() if len(v) == HUNG_TOLDS)
-        marker = next(v[0] for v in sends.values() if len(v) == 1)
+        marker, retirement = sorted(v[0] for v in sends.values() if len(v) == 1)
         body = next(v for v in sends.values() if len(v) == 32664)
         slices = [(at, e[1]) for at, e in enumerate(events) if e[0] == 21]
-        return (len(slices) == 1 and marker[0] < slices[0][0]
+        return (len(slices) == 1 and marker[0] < slices[0][0] < retirement[0]
                 and marker[1] != slices[0][1] == body[0][1]
                 and all(t != slices[0][1] for _, t in told))
     return True
@@ -240,7 +239,7 @@ MUTANTS = (
      [('if subs[i].session == who && subs[i].sub == sub {', 'if subs[i].sub == sub {')],
      'runner', 'subs_main'),
     ('rerun_without_retract',
-     [('            result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(before[i].tree_key)), value: None)))\n', '')],
+     [('            projection_row(out, sub, take removed, None)?\n', '')],
      'runner', 'subs_main'),
     # R5 (RUNNER-SPEC §7): an aborted run's reply kept without its call record (STORE G1),
     # and records that name no revision.
@@ -288,8 +287,7 @@ MUTANTS = (
        '                                    Some(take s) => {\n'
        '                                        at = v\n'
        '                                        b.newest = Some(take s)\n'
-       '                                        let owes = round(mut b)\n'
-       '                                        deliver(mut b, mut joined, take owes)\n'
+       '                                        owes = round(mut b)\n'
        '                                    },\n'
        '                                    None => (),\n'
        '                                }\n'
@@ -344,11 +342,7 @@ MUTANTS = (
     }
 }
 '''),
-      ('take a: Answer, at: u64) {\n', 'take a: Answer, at: u64) -> () waits {\n'),
-      ('mut waiting: List[Answer], at: u64) {\n    let mut i', 'mut waiting: List[Answer], at: u64) -> () waits {\n    let mut i'),
-      ('fn catch_up(mut j: Joiner, at: u64) -> Ledger {', 'fn catch_up(mut j: Joiner, at: u64) -> Ledger waits {'),
-      ('fn retell(mut waiting: List[Answer], at: u64) {', 'fn retell(mut waiting: List[Answer], at: u64) -> () waits {'),
-      ('take owes: List[Owe]) {\n', 'take owes: List[Owe]) -> () waits {\n')],
+      ('take owes: List[Owe], at: u64) {', 'take owes: List[Owe], at: u64) -> () waits {')],
      'runner_calls', 'publisher_never_blocks'),
     # L25 (retired_without_waiting, v2.14): a marked session's end sends its Drained and waits
     # for a PubIn slot; the publisher sweeps only after a Released, so a quiet place keeps a
@@ -359,8 +353,8 @@ MUTANTS = (
      'runner', 'retired_without_waiting'),
     ('sweep_skipped_when_quiet',
      [('        sweep(mut b.subs, mut joined)\n        settle(', '        settle('),
-      ('                    deliver(mut b, mut joined, take owes)\n                }\n                retell(',
-       '                    deliver(mut b, mut joined, take owes)\n                }\n                sweep(mut b.subs, mut joined)\n                retell(')],
+      ('                keep_answers(mut waiting, take answers)\n',
+       '                keep_answers(mut waiting, take answers)\n                sweep(mut b.subs, mut joined)\n')],
      'runner', 'retired_without_waiting'),
     ('sweep_retires_live',
      [('                Error(Closed) => true,\n                _ => false,\n            },\n            None => false,',
@@ -374,8 +368,8 @@ MUTANTS = (
     # L17 on the wire (v2.12's one publisher inbox): an initial result split from the Batch
     # that names its sub, and an Unsubscribe the publisher ignores.
     ('initial_split',
-     [('        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: list.new())))\n',
-       '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: list.new(), outcomes: list.new())))\n'
+     [('        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: take outcomes)))\n',
+       '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: list.new(), outcomes: take outcomes)))\n'
        '        let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: list.new(), rows: take heard, outcomes: list.new())))\n')],
      'runner_calls', 'subs_wired'),
     ('unsubscribe_ignored',
@@ -431,17 +425,21 @@ MUTANTS = (
      'l12', 'l12'),
     ('direct_commitless',
      [('    let mut answers: List[Answer] = list.new()\n'
-       '    result.unwrap(list.push(mut answers, Answer(to: take to, stream: take stream, p: p, outcome: take o)))\n'
+       '    result.unwrap(list.push(mut answers, Answer(recipient: Recipient(owner: owner, to: take to), row: KeyedDone(stream: take stream, p: p, outcome: take o))))\n'
        '    let _ = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))',
-       '    let e = Event(e: Answered(Told(version: 0u64, stream: take stream, p: p, outcome: take o)))\n'
+       '    let mut rows: List[KeyedDone] = list.new()\n'
+       '    result.unwrap(list.push(mut rows, KeyedDone(stream: take stream, p: p, outcome: take o)))\n'
+       '    let e = update(0u64, None, take rows)\n'
        '    match to {\n'
        '        Seam(sender) => { let _ = channel.send(sender, take e) },\n'
        '        Wire(sender) => { let _ = channel.send(sender, wire_event(FromRunner(take e))) },\n'
        '    }')],
      'runner_calls', 'calls_duplicate'),
     ('release_at_commit_version',
-     [('let Worker(p: p, digest: _, version: _, outcome', 'let Worker(p: p, digest: _, version: wv, outcome'),
-      ('Release(version: d, snapshot', 'Release(version: wv, snapshot')],
+     [('    let d = store.version(store.snapshot(hd.db))', '    let mut d = store.version(store.snapshot(hd.db))'),
+      ('let Worker(p: p, digest: _, version: _, outcome: take o, waiters: take waiters) = take w',
+       'let Worker(p: p, digest: _, version: wv, outcome: take o, waiters: take waiters) = take w\n'
+       '        if stream == group[0u64] { d = wv }')],
      'runner_calls', 'calls_group_version'),
     ('queue_outside_account',
      [('                    result.unwrap(map.insert(mut held, take k, take h))\n                    if hit {',
@@ -469,11 +467,11 @@ MUTANTS = (
        '                }\n')],
      'runner_calls', 'calls_session_mismatch'),
     ('late_completion_resent',
-     [('                if owed > 0u64 {\n                    last = f.version',
-       '                if true {\n                    last = f.version')],
+     [('                    for _ in 0u64 .. owed {',
+       '                    for _ in 0u64 .. (if owed == 0u64 { 1u64 } else { owed }) {')],
      'runner_calls', 'calls_one_outcome_per_send'),
     ('one_for_joined',
-     [('                    for _ in 1u64 .. owed {', '                    for _ in 1u64 .. 1u64 {')],
+     [('                    for _ in 0u64 .. owed {', '                    for _ in 0u64 .. (if owed > 0u64 { 1u64 } else { 0u64 }) {')],
      'runner_calls', 'calls_one_outcome_per_send'),
     ('latest_deadline',
      [('                        if h.owed[i].generation == t.generation {',
@@ -1149,7 +1147,7 @@ def main():
         if 'evaluator' in engines and r1:
             # Socket laws wait for W8a's model network provider. W3d qualifies
             # their unchanged assertions on both native engines.
-            for name in (n for n in selected_calls if n in ('l14_handles', 'release_digest', 'drain_answers_once')):
+            for name in (n for n in selected_calls if n in ('release_digest', 'drain_answers_once')):
                 value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
             for name in (() if args.part == 'calls' else SUBS):

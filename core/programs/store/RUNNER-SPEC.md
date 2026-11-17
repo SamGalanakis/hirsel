@@ -110,7 +110,7 @@ v2.12.1 replaces v2.12's §1.1 wiring with the built wiring, as the orchestrator
 |---|---|---|---|---|
 | 1 | The signatures | **AS BUILT** | The publisher's inbox is a `Mailbox`: `mailbox(n) -> Result[Mailbox, Capacity]`, and `post(mail) -> Sender[PubIn]` makes a sender to it. `place_head` takes `take mail: Mailbox` in place of a receiver and a sender. `connect` takes `to_publisher: Sender[PubIn]` and no session number. | 1033's built signatures |
 | 2 | Two internal kinds | **RULED** | Inside the opaque `PubIn` there are two more kinds. `Left`: a session ended, so the publisher drops its subs. `Halt`: the head stopped serving, so the publisher stops and never outlives its head. Neither kind can be named outside the runner. | orchestrator |
-| 3 | When a session joins | **RULED: at its first Subscribe** | A session sends `Joined` and gets its publisher id at its first Subscribe, not at connect. A session that never subscribes costs the publisher nothing. | orchestrator |
+| 3 | When a session joins | **RULED: at its first Subscribe** | A session sends `Joined` and gets its publisher id at its first Subscribe, not at connect. A session that never subscribes holds no publisher subscription state. | orchestrator |
 | 4 | The publisher never blocks on a session | **RULED; law `publisher_never_blocks`** | Every publisher send to a session is a `try_send`. If the owner's inbox is closed, the publisher drops that session's subs. If it is full, the sub whose content did not fit is ended with `Ended(sub, Refused(Overloaded))`, and the client resubscribes (WIRE-SPEC D3). That Ended and any `Told` stay on the session's ledger until the inbox takes them. The publisher holds no subscription content for a full inbox. Not built yet: the built publisher still waits on a full session (1033's known R2-a gap). | orchestrator; W-D3 |
 
 ## CHANGES-v2.12 (as built at origin/main e2534995; the orchestrator's PubIn ruling, followups.md 2026-11-17)
@@ -323,7 +323,7 @@ STORE-SPEC is at v2.8: nothing in v2.8 changes the runner. The pending v2.9 item
 | Item | Runner change | Where |
 |---|---|---|
 | v2.6 I1: `Read = Point(Bytes) \| Span(Bytes, Bytes)` of data-tree keys, compared as bytes | The interval index is keyed on those bytes, the same as `Change.tree_key`. A Change hits a subscription when its key equals a Point or lies in a Span. Cover ranges are encoded the same way. | §4 G2 |
-| v2.6 I3: ids are incarnations; a read through a pre-drop handle is `Stale` | **Within an open**, H is built only at open, and only `handles` may make schema operations. The head runs `handles` twice and checks that the second run commits nothing (rule 12), so no H the place holds can predate a drop. **Across opens**, every H is rebuilt from the current catalog, so `handles` after a drop and recreate names the new incarnation (p17 4b). A query that still reads through an H older than a drop gets `Stale` from the read. The query type has no store error, so the body faults or maps it, and that subscription gets `Ended`. Re-execution builds a fresh H on the fork (§7). | rule 12, §4, §7 |
+| v2.6 I3: ids are incarnations; a read through a pre-drop handle is `Stale` | **Within an open**, H is built only at open, and only `handles` may make schema operations. The head runs `handles` once and derives the publisher handles from that selection (rule 12), so all handles name the same catalog incarnations. **Across opens**, every H is rebuilt from the current catalog, so `handles` after a drop and recreate names the new incarnation (p17 4b). A query that still reads through an H older than a drop gets `Stale` from the read. The query type has no store error, so the body faults or maps it, and that subscription gets `Ended`. Re-execution builds a fresh H on the fork (§7). | rule 12, §4, §7 |
 | v2.7 J1: `lookup` returns a scoped `IndexRows` and records a Point per row it yields, besides its Span | A query's read set grows with the rows it looks up: 100 B plus 48 B per row, so 148 B, 4.9 KB and 480 KB for 1, 100 and 10,000 rows. The Points are charged to the session `budget` with the rest of the read set (§3), counted in L9, and limited by the per-session read-set bytes (§3). §4 gives what a 10,000-row subscription costs the publisher per commit. | §3, §4, §8 L9 |
 | v2.7 J1: a body must finish iterating a lookup before it writes (OWN-10) | A transact body that updates rows it looked up collects them first, then writes. The checker enforces this (RUN by the store: `ixrows_write` REFUSED). The runner adds nothing. | §1.4 |
 | v2.4 G2: `info(mut tx)` | Finding 7. | §1.1 |
@@ -360,9 +360,8 @@ STORE-SPEC is at v2.8: nothing in v2.8 changes the runner. The pending v2.9 item
     - Welcome carries `(principal, q, budget, executable, target, n_place)`, and the generated bindings record the digest, target and `n_place` they were made from. A mismatch is a developer diagnostic, never a wire error. An unavailable identity is reported as "identity unknown", not as a mismatch.
 11. **No guard against our own implementation.** Checks exist only at trust boundaries: client bytes, frames and rates, old writers' schemas, and app code (entries, `place`, `handles`), which may loop, fault or allocate.
 12. **Handles are built only at open.** `pub fn handles(mut db: Db) -> Result[H, store.Error] waits` is the only app code that may make schema operations.
-    - The head calls it twice: it keeps the first H and moves the second to the publisher.
-    - It checks that the second call committed nothing (the version did not move; N12). Otherwise open fails with `HandlesChanged`.
-    - So the two H name the same incarnations. An H never outlives its open, and no H the place holds predates a drop.
+    - The head calls `handles` once and keeps its result. The application supplies `query_handles(H) -> H` to derive the publisher's read handles from that result without access to the database.
+    - Both handle sets name the same selected incarnations. An H never outlives its open, and no H the place holds predates a drop.
 
 ## 1. The surface
 
@@ -380,7 +379,7 @@ pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) |
 pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt   // v2.11.4: Superseded deleted (STORE AH2)
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }   // v2.11.2: `result` is the schema of what `Returned` carries (Result[R, E] for transact)
 pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes)
-pub type OpenError = Store(store.Error) | Place(RegisterError) | HandlesChanged
+pub type OpenError = Store(store.Error) | Place(RegisterError)
 pub opaque type Registry[G: send, H: send]: send   // Map[Bytes, Slot] + List[Described]
 pub opaque type Cover: send                 // data-tree key ranges (I1 bytes), built by `cover`
 pub opaque type Req: send                   // stream, p, key, arg, the session's reply sender
@@ -403,19 +402,19 @@ pub fn start[G: send, H: send](r: Registry[G, H], tasks: Tasks, take g: G, key: 
 pub fn finish(take t: Task[Outcome]) -> Outcome waits
 pub fn mailbox(n: u64) -> Result[Mailbox, Capacity]
 pub fn post(mail: Mailbox) -> Sender[PubIn]
-pub fn place_head[G: send, H: send](take db: Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, handles: StaticFn[fn(mut Db) -> Result[H, store.Error] waits], take inbox: Receiver[Req], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits
+pub fn place_head[G: send, H: send](take db: Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, handles: StaticFn[fn(mut Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H], take inbox: Receiver[Req], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits
 pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], to_publisher: Sender[PubIn], take client: Sender[Down], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity]
 ```
 
-- `place_head` runs on the task that opened the `Db` (a `Db` is not send). It runs `place` under `n_place` (rule 10) and `handles` twice (rule 12), writes activation (§6), then spawns the publisher with `bytes n_publisher`. The publisher runs `place` itself, receives the second H and owns the `PubIn` receiver. There is no public `publisher` (v2.4). `connect` takes the same `place` and `n_place` for each session.
+- `place_head` runs on the task that opened the `Db` (a `Db` is not send). It runs `place` under `n_place` (rule 10) and `handles` once (rule 12), writes activation (§6), then spawns the publisher with `bytes n_publisher`. The publisher runs `place` itself, receives the derived query H and owns the `PubIn` receiver. There is no public `publisher` (v2.4). `connect` takes the same `place` and `n_place` for each session.
 - **One publisher inbox (v2.12, the orchestrator's ruling; wiring as built, v2.12.1).** The caller makes the inbox with `mailbox(n)` and gives each `connect` a sender from `post(mail)`. Then it moves the `Mailbox` into `place_head`, which hands its receiver to the publisher and keeps a sender for `Released`. A session has no other route to the publisher. The publisher waits on this inbox and nothing else.
   - A session joins at its **first Subscribe**: it sends `Joined` then `Subscribed` and gets its publisher id. A session that never subscribes costs the publisher nothing. `Subscribed` and `Unsubscribed` always follow that session's `Joined`.
   - **A session's end (v2.14).** Each session has one end path, fixed when it joins.
     - An **unmarked** session (`mark: None`; every WebSocket session) that has joined sends `Left` when it ends, and the publisher drops its subs. A session that never joined sends nothing.
     - A **marked** session (an HTTP group or one-shot read, docs/spec/http.md §2) puts the `Receiver` of its retirement mark, a `ch(1, ())` it keeps the only `Sender` of and never sends on, in its `Joined`. To end, it drops its inbox `Receiver` and the mark's `Sender`, then `try_send`s one `Drained`. A failure or a cancellation skips that `Drained`. So the joiner of a task that held a mark offers one after its `join` returns, whatever the outcome. A marked session never waits and never sends `Left` or `Unsubscribed`.
-    - **The sweep.** After every message it takes except `Halt`, the publisher first `try_receive`s each held mark, in join order, and **retires** each session whose mark answers `Closed`: its subscriptions (Cover, read set, `budget` charge), its ledger, its waiting `Told`s and its `Joiner` go. Then it runs v2.13's retry pass. A dropped `Drained` is safe: a full `PubIn` holds a message that a sweep follows. A `Subscribed` or `Unsubscribed` naming a session the publisher no longer holds changes nothing, and ids are never reused (law `retired_without_waiting`, CHANGES-v2.14).
+    - **The sweep.** After every message it takes except `Halt`, the publisher first `try_receive`s each held mark, in join order, and **retires** each session whose mark answers `Closed`: its subscriptions (Cover, read set, `budget` charge), its ledger, its waiting outcomes and its `Joiner` go. Then it runs v2.13's retry pass. A dropped `Drained` is safe: a full `PubIn` holds a message that a sweep follows. A `Subscribed` or `Unsubscribed` naming a session the publisher no longer holds changes nothing, and ids are never reused (law `retired_without_waiting`, CHANGES-v2.14).
     - `Unsubscribed` comes only from a live session, for one sub. When the head stops serving it sends `Halt`, and the publisher stops without a sweep. These kinds are internal to the opaque `PubIn`.
-  - **The owner's wake (v2.13, law `owed_ended_delivered`).** A joined owner takes each event with `try_receive` first and counts a run of takes. An empty inbox sets the run to 0, and then the owner waits in `receive`. When the run reaches C, its inbox's capacity (1+q, §3), the owner `try_send`s an internal `Drained`, which carries nothing, and sets the run to 0. A full `PubIn` drops it, and the owner never waits. An owner that keeps up never offers one. After every message it takes, `Drained` included, the publisher retries every waiting ledger and every waiting `Told`, oldest first. So a bounced session's Ended is retried within C of that owner's takes, with no other traffic (CHANGES-v2.13 item 2).
+  - **The owner's wake (v2.13, law `owed_ended_delivered`).** An owner with a head lease takes each event with `try_receive` first and counts a run of takes. An empty inbox sets the run to 0, and then the owner waits in `receive`. When the run reaches C, its inbox's capacity (1+q, §3), the owner `try_send`s an internal `Drained`, which carries nothing, and sets the run to 0. A full `PubIn` drops it, and the owner never waits. An owner that keeps up never offers one. After every message it takes, `Drained` included, the publisher retries each owner's pending answers in order together with its pending ledger. So a bounced session's Ended is retried within C of that owner's takes, with no other traffic (CHANGES-v2.13 item 2).
   - The head `send`s. **The publisher never blocks on a session** (law `publisher_never_blocks`): every send to an owner is a `try_send`, so the head's wait is at most one drain. A closed owner inbox drops that session's subs. A full one ends the sub whose content did not fit with `Ended(sub, Refused(Overloaded))`, and the client resubscribes (WIRE-SPEC D3). The owner `try_send`s, because it waits only on its own inbox (§3).
 - Each register function takes the entry's byte bound `n` (v2.4) and step bound `s` (v2.7; `DEFAULT_STEPS` unless the place chooses). The Slot keeps both; they are in neither the key nor `Described`.
 - `OutOfTime(s)` is the fault of a body its step bound `s` stopped (D5, v2.7). `Gone` is the reply of an admitted position whose entry is gone (§6).
@@ -492,10 +491,10 @@ The budget `n` is set per entry by the place at registration, never by the clien
     - `Refused(c)`: the store refused the commit (resident limit). The answer is `Refused(Overloaded)`, nothing is recorded, and the stream stays `Admitted(p)`. A refused reply-only commit is answered the same way.
     - The head does not wait for the admit ticket: the journal is prefix-ordered, so a durable reply implies a durable admit.
   - `Duplicate(r)`: answer `r`. Under H1 and H3, any reply the head can see at the stream's latest position is durable.
-  - `Rejected(l)`, p > l: the request waits in the FIFO and is retried when a request arrives or a worker ends.
+  - `Rejected(l)`, p > l: the request waits in the FIFO and is retried when a request arrives or a worker ends. The request holds its live session slot until answered. The head retires it when the session departs, before admitting replacement work.
   - `HistoryUnavailable` (p < latest) or `RequestMismatch` (p = latest, another digest): `Refused(HistoryUnavailable)` or `Refused(RequestMismatch)`, as V3; nothing is committed and nothing runs (STORE AH1, AH2; v2.11.4).
   - A gone key (§6): `Admitted`/`Abandoned` gives a reply-only commit of `Failed(Gone)`; `Duplicate(r)` answers `r`.
-- **H3. Gate.** After each group, the head calls `durable` on the group's newest ticket. Then, for each worker in the group, it pushes `Release{version: d, snapshot, outcomes}` and ends the worker. Here d is the durable version the group reached.
+- **H3. Gate.** After each group, the head calls `durable` on the group's newest ticket. It collects every worker answer in commit order and pushes one `Release{version: d, snapshot, outcomes}` for the group. Here d is the durable version the group reached.
 - **H4. Across opens.** An admitted-unreplied position from a crashed open returns `Abandoned` and re-runs. `p+1` arriving first gets `Rejected(p)` from S7 and waits until p is re-sent.
 - **Throughput.** H1 serialises only within a stream. Different streams interleave inside one group commit.
 
@@ -563,14 +562,14 @@ The budget `n` is set per entry by the place at registration, never by the clien
   | server → client | `Ended` | `sub: u32`, `Outcome`, for a subscription whose query faulted or ran out of bytes; the others continue |
   | server → client | `Reset` / `Close` | §4 / the threat table |
 
-  The head's internal `Told{version, done: Done}` (formerly the seam's Frame) is one Batch outcome row before batching.
+  The publisher gives the owner one update for a durable group, with its content and all answers still pending at that version.
 
 - **Rows (v2.11, F10).** `Row.key` is the data-tree key, exactly `Change.tree_key`: the table id as u32 **big-endian**, then the key-codec bytes. `Row.value` is the **published value codec**: the table's current value type's codec bytes at the Batch version, without the store's u16 schema prefix. A value stored under an older schema number is decoded with that schema's reader and re-encoded with the current codec, so stripping two bytes is wrong. "Current" is the value type of the H built at open, fixed for the open (rule 12). `None` means the key left the Cover or was deleted. This **publication adapter** is STORE-SPEC v2.23's `published_value(t, c)` (AG3). It serves both `changes` and the initial rows from `span_changes`. `cover(t, lo, hi)` erases it once per Cover: the Cover keeps `t` and `published_value` at t's K and V (v2.11.1).
 - **Where an outcome row lives (v2.11, R2-a).** Rows are made in three places, and each is reported to the owner:
-  - The head's answers (V2, V4, V5) and the publisher's commitless answers (V3) reach the owner as `Told` events. The publisher holds a `Told` only while the owner's inbox is full, on its `budget` ledger. The owner's `Drained` wakes it to retry (v2.13).
+  - The publisher delivers head answers (V2, V4, V5) and commitless answers (V3). If the owner's inbox is full, its answers remain pending until the next delivery attempt at the publisher's current base. The owner's `Drained` wakes it to retry (v2.13).
   - The owner makes V1 rows, `Abandoned` rows, and compute replies itself. A granted entry's task reports its reply to the inbox.
   - The owner keeps every row it holds in its outgoing queue until it hands a frame to the writer.
-  - The owner builds every `Batch`, `Ended` and `Reset`. A `Reset` carries every row the owner holds. Rows held by the publisher reach the owner first: the publisher drains its pending `Told`s for that session before it signals a reset.
+  - The owner builds every `Batch`, `Ended` and `Reset`. A `Reset` carries every outcome the owner holds, including those in the publisher update that caused the reset.
   - So a frame never carries rows beyond the reserve: (1+q) unit rows of at most `DONE_MAX` B each, plus (1+q) V1 refusals of at most 36 B each (`Refused(Budget(Room))`: stream 4, p 8, Outcome tag 4, Refusal tag 4, Room 16).
 - **Frame bounds (v2.11, F12).** At the defaults (`max_frame` 256 KiB, `budget` 1 MiB, q = 4) the reserve is 5·8,192 + 5·36 = 41,140 B. A Batch's envelope is 24 + 4·|complete| B. Rows get `max_frame − reserve − envelope`; with one completing sub that is 262,144 − 41,140 − 28 = 220,976 B, which holds the full checkbox board (179,768 B).
   - A Subscribe whose initial rows exceed that is `Ended(sub, Refused(Budget(Room{requested: row bytes, available: the rows allowance})))`.
@@ -617,7 +616,7 @@ The budget `n` is set per entry by the place at registration, never by the clien
        - `Failed` or `Refused`: send `Ended(sub, ..)` and drop that subscription.
        - A `look` Error (`Foreign`): Reset.
      - **otherwise:** send the changed keys inside its Cover, with their values at `b`.
-  3. Each session with rows, or with outcomes from the drained Releases, gets its content `{version: b, complete, rows}` and its `Told`s in its owner's inbox. The owner builds the Batch (§3).
+  3. The publisher combines the current diff or Reset with all pending answers for each session. The owner builds one Batch or Reset at the group version with one outcome row for every send still owed, including local joins and sessions that have no subscriptions (§3).
 - **G3. Subscribe** runs the query with `look` at the publisher's base and sends its full result at that version, **whole in one Batch whose `complete` names the sub, an empty result included** (v2.11, F11). No row for that sub is sent before that Batch. When several initial results each fit but do not fit together, they go in separate Batches at the same version. `Failed` or `Refused` answers `Ended`.
   - **The base is defined by inbox order (v2.12).** It is the version of the last `Released` the publisher took from `PubIn` before this `Subscribed`. Releases taken after it reach this subscription as G2 rounds.
   - A Subscribe of a (session, sub) that is still live replaces the old subscription, with no `Ended` for the old one.
@@ -636,7 +635,7 @@ The budget `n` is set per entry by the place at registration, never by the clien
   - So one subscription whose rows change on every commit costs about 10 ms of publisher time per commit, and the publisher coalesces.
 - **Worst case:** every commit writes a key that every query reads. The cost is then design A's: a re-run per subscriber.
 
-**Query code runs in the publisher**, inside `look`'s `isolate`, so a fault or exhaustion ends only its subscription. A query that never returns is stopped at its step bound with `Failed(OutOfTime(s))`, which ends only its subscription; the publisher's other work runs at its slice ends meanwhile (D5, v2.7).
+**Query code runs in the publisher**, inside `look`'s `isolate`. Row conversion shares the query's remaining step and byte budgets. A round that reuses a Cover applies those budgets to conversion alone. A fault or exhaustion ends only its subscription. A query that never returns is stopped at its step bound with `Failed(OutOfTime(s))`, which ends only its subscription; the publisher's other work runs at its slice ends meanwhile (D5, v2.7).
 
 **Reset** is sent when the base is gone, when coalesced rows cannot fit `budget`, when `look` returns an Error, or when a resume token is unknown. A token from an earlier open is always unknown.
 
@@ -677,7 +676,7 @@ The budget `n` is set per entry by the place at registration, never by the clien
 An upgrade is a process restart on new code.
 
 - **Activation (rewritten in v2.2).** The runner owns one ordinary table, `hirsel.runner.activation: Table[u8, Bytes]`. Key 0 holds `current` and key 1 `previous`, each a `describe` byte list. No reserved key space and no store change are involved.
-  1. `operate`'s head registers the place and runs `handles` twice (rule 12). The head also calls `create_table` for its activation table if the catalog lacks it (a schema commit, first open only), then `table`.
+  1. `operate`'s head runs `handles` once and derives the query handles (rule 12). The head also calls `create_table` for its table if the catalog lacks it (a schema commit, first open only), then `table`.
   2. Open reads both rows through the Shape.
   3. One `run` writes activation. If `current` equals this registry's `describe` bytes, it writes nothing (a restart on the same code). Otherwise one commit writes `previous := current` and `current := new`.
   4. Then the head serves.
@@ -753,7 +752,7 @@ Each law sits in the runner's law suite, beside STORE-SPEC §5's. Each runs agai
 | L11: a re-send of an admitted, unreplied p whose key is gone leaves the `Failed(Gone)` reply row at p; p+1 is then admitted; a further re-send returns that reply. **Wire case (v2.11, `gone_slot_v5`):** the same over a Hello slot whose `Placed` is `Gone` | v1's session refusal; dropping p and advancing; a slot keeping only its `Placed` answer (`gone_refused_at_session` over the wire) | streams row read through the store | C8: `gone_refused_at_session` CAUGHT | MODEL; the wire case is W3c's |
 | L12: the generator's bytes equal the server binary's `describe`, across permuted registrations, a field added to an A, a changed R, and two runs in two tasks | a source parser matching one fixture; a generator on another build or bound | `describe` run in the server binary | — | Server half **RUN** (p19 mode 0: equal across two runs and tasks; mode 1: the bound changes the list). Generator half **UNTESTED** until R3. |
 | L13 (new): at every crash cut of open's activation, the next open sees (old previous, old current) or (old current, new), and a gone key is answered `Failed(Gone)` either way | activation written in two commits; a crash leaving `previous` overwritten and `current` old | the two rows read through the store | — | Activation pair **RUN** (O1, W2 on both native engines); split-commit control CAUGHT on Cranelift: the cut exposed a mixed pair before restart; Gone remains R4 |
-| L14 (new): a `handles` that commits on its second call makes open fail with `HandlesChanged`; one that only resolves opens | two H naming different incarnations | the store version (N12) | — | **UNTESTED** until R1; positive case RUN (p17 step 1) |
+| L14: schema initialization and selection run once | run selection again when the first call creates a table | the transaction writes the selected table and the query must see that row at the same version | — | **RUN** (`runner_calls` `l14_handles`) |
 | L16 (v2.11, `rows_normalized`): a Row's key is the table id big-endian ‖ key codec, and its value is the current codec without the schema prefix | `strip_two_bytes` (a fixed strip passes on current-schema rows only); `le_table_id`; `raw_value` | hand-derived bytes. The fixture uses a table whose id has bytes that differ under the two byte orders (e.g. 0x00000102), and a row stored under schema 0 of a table now at schema 1, which adds a defaulted field (v2.11.1). The expected value is written out by hand from the codec, not read from `row_value`. | — | **UNTESTED** until R2 |
 | L17 (v2.11, `complete_marks_empty`): every Subscribe that is not `Ended` is answered by exactly one Batch naming it in `complete`, an empty result included, and no row for it precedes that Batch | `no_complete_on_empty`; `initial_split` (an initial result spread over two Batches) | the client's log per sub id | — | **UNTESTED** until R2 |
 | L18 (v2.11, `reply_over_done_max`): a transact reply over `DONE_MAX − 20` B leaves the store's data unchanged, and p's reply is `Failed(OutOfBytes(Room{requested: \|b\|, available: 8,172}))`; a compute reply is answered the same, with nothing recorded | `commit_then_check` (the effect commits) | the store version and data rows; \|b\| hand-chosen | — | **UNTESTED** until W3c |
@@ -988,11 +987,11 @@ pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
 pub type PlaceConfig[G: send, H: send]: send {
     backing: Backing, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
-    handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits],
+    handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], policy: ingress.Ingress, n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
 }
-pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place | HandlesChanged
+pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place
 pub type Ended: codec + send = Stopped | Forced(u64)
 
 pub fn status_root() -> Result[Latest[Status], Capacity]
@@ -1023,7 +1022,7 @@ Each child sends one last message to `operate` before it ends.
 | Step | Run by | What it waits on | Failure | What a crash in the step leaves |
 |---|---|---|---|---|
 | `Recovering` | H | `store.open` (recovery, STORE-SPEC §3.4) | `Open(Store(e))` | what §3.6 says for that cut; the next open recovers again |
-| `Activating` | H | `handles` twice (rule 12), the activation table's `create_table` on first open, the activation commit (§6 step 3), then the gone-key set | `Open(Place(e))`, `Open(HandlesChanged)` (L14), `Open(Store(e))` | L13's two outcomes, (old previous, old current) or (old current, new); the next open repeats step 3 or writes nothing |
+| `Activating` | H | `handles` once and derives query handles (rule 12), then the activation table's `create_table` on first open, the activation commit (§6 step 3), then the gone-key set | `Open(Place(e))`, `Open(Store(e))` | L13's two outcomes, (old previous, old current) or (old current, new); the next open repeats step 3 or writes nothing |
 | `Publishing` | H | the publisher spawned, and its first base taken (the durable version at open) | `Full(c)` | nothing new on disk: activation is already committed, and the next open on the same code writes nothing (§6) |
 | `Listening` | `operate` | `host.listen` on `listen` | `Listen(e)` | as `Publishing` |
 

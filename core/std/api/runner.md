@@ -56,13 +56,14 @@ is `Failed(Gone)`, whose entry no longer exists: its reply has no record.
 `store.recorded(db, branch, v)` reads a record back from a disk store; a memory store
 keeps none.
 
-`place_head(db, place, n_place, handles, inbox, mail, tasks, n_publisher)` runs on
-the caller's task, because `store.Db` is not send. It runs `place` under `bytes
-n_place` (rule 10) and `handles` twice (rule 12). The head keeps the first H. The
-publisher, which it spawns under `bytes n_publisher`, runs `place` itself and gets the
-second H; open waits until it has, and a `place` that fails there fails the open with
-`Place`. A second `handles` call that moves the store's version fails the open with
-`HandlesChanged`. The session computes each request's digest at ingress
+Call `place_head(db, place, n_place, handles, query_handles, inbox, mail, tasks, n_publisher)`
+on the task that opened the `store.Db`. The head runs `place` under `bytes n_place`
+and calls `handles` once. It passes the result through `query_handles` to derive
+the publisher's handles from the selected descriptors. For a table field,
+`store.query_table` derives a read-only handle for the same incarnation. The
+publisher runs `place` itself under its task allowance, `bytes n_publisher`.
+Open waits for it and returns `Place` if registration fails. The session
+computes each request's digest at ingress
 (`store.request_digest` over the key and the exact argument bytes). The head admits
 each request with `store.admit` (one position per stream, H1–H4), answers another
 digest at a position `Refused(RequestMismatch)` without running it, whether the
@@ -70,14 +71,15 @@ position is still running (H1) or the store refuses it (AH1), runs at most one b
 groups commits and releases a group only after it is durable (V4). Answers that need
 no commit (a duplicate's stored reply, a refusal, `Refused(HistoryUnavailable)` below latest) go in a Release
 without a snapshot and the publisher sends them at its base (V3). The publisher
-tells each answer to its session as a `Told` at the version of the last Release that
-carried a snapshot (G1). The session hands its client a `Down`: `Batched(KeyedBatch)`, where a
+gives each session its diff or Reset and all pending answers in one update per durable
+group (G1). The session hands its client a `Down`: `Batched(KeyedBatch)`, where a
 `KeyedBatch` is `{version, complete, rows, outcomes}` with wire `Row`s and each outcome a
 `KeyedDone{stream, p, outcome}` (the wire `Done` with the store's stream key in place of a
-stream slot, until R3), or `Ended(sub, outcome)`, or `Reset`.
+stream slot, until R3), or `Ended(sub, outcome)`, or `KeyedReset(version, outcomes)`.
 
 R2 adds `query(mut r, f, n, s)`, which registers a subscription entry. Its body reads at a
-snapshot inside `look`, under `bound bytes n` and `s` steps, and returns a `Cover`: one
+snapshot inside `look`, under `bound bytes n` and `s` steps. Row conversion shares
+those limits when the query runs. A query returns a `Cover` that describes one
 data-tree key range of one table, made with `cover(shape, lo, hi)`, which keeps that
 table's published value. A query key's result fingerprint is the unit schema's, because
 its rows travel under their tables' codecs. The publisher keeps each subscription's
@@ -109,10 +111,9 @@ The publisher never blocks on a session (L23): every send to a
 session is a `try_send`. A closed inbox drops that session's subscriptions. A full one ends
 each subscription whose content did not fit with `Ended(sub, Refused(Overloaded))`, and the
 client resubscribes. That Ended, and any answer that did not fit, waits in the publisher until
-the inbox takes it, retried after every message the publisher handles and before that
-session's next content; a retried answer is told at the publisher's current base. The
-publisher keeps no subscription content for a full inbox. A subscribed session's owner
-wakes the publisher (v2.13, L24): it counts the events it takes since it last found its
+the inbox takes it. After each message the publisher retries pending outcomes and the
+ledger together at its current base. The publisher keeps no subscription content for a
+full inbox. An owner with a head lease wakes the publisher (v2.13, L24): it counts the events it takes since it last found its
 inbox empty, and at the inbox's capacity it offers the publisher a `Drained` by `try_send`
 (dropped if the publisher's inbox is full), so a waiting Ended reaches its client in a
 quiet place too. An owner that keeps up never offers one. A marked session (v2.14: an HTTP

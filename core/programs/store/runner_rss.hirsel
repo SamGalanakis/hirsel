@@ -14,6 +14,11 @@ fn handles(mut db: store.Db) -> Result[Hd, store.Error] waits {
     Ok(Hd(t: t))
 }
 
+fn query_handles(h: Hd) -> Hd {
+    Hd(t: store.query_table(h.t))
+}
+
+
 fn named(mut tx: store.Tx, h: Hd, take s: String) -> Result[u64, u32] {
     match store.put(mut tx, h.t, 0u64, string.byte_len(s)) {
         Ok(()) => Ok(string.byte_len(s)),
@@ -105,7 +110,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) ->
         Ok(take t) => take t,
         Error(_) => return Error(Exit(status: 3)),
     }
-    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
+    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }

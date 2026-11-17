@@ -19,6 +19,11 @@ fn handles(mut db: store.Db) -> Result[Hc, store.Error] waits {
     Ok(Hc(t: t))
 }
 
+fn query_handles(h: Hc) -> Hc {
+    Hc(t: store.query_table(h.t))
+}
+
+
 // Keys 0 to n - 1 of "data".
 fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Cover, Capacity] {
     runner.cover(store.shape(h.t), Included(0u64), Excluded(n))
@@ -114,7 +119,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args) -> Result[()
         Ok(take t) => take t,
         Error(_) => return Error(Exit(status: 3)),
     }
-    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), take inbox, take mail, tasks, 1048576u64) {
+    match runner.place_head(take db, code.describe(place), 1048576u64, code.describe(handles), code.describe(query_handles), take inbox, take mail, tasks, 1048576u64) {
         Ok(()) => (),
         Error(_) => return Error(Exit(status: 4)),
     }

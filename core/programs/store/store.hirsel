@@ -560,7 +560,7 @@ pub opaque type Snapshot: shareable + send {
     roots: Roots
 }
 
-type ByteRows: send {
+pub opaque type ByteRows: send {
     cursor: std.omap.Cursor[Bytes, Arc[Bytes]]
 }
 
@@ -2333,6 +2333,13 @@ pub opaque type Rows[K, V]: send {
     skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.Stop]]
 }
 
+// A query only needs the selected incarnation and readers. The copy cannot
+// write, since it does not carry the table's registered index extractors.
+pub fn query_table[K, V](t: Table[K, V]) -> Table[K, V] {
+    Table(store: t.store, id: t.id, epoch: t.epoch, complete: false,
+        catalog_key: arc.share(t.catalog_key), key: t.key, readers: arc.share(t.readers), indexes: list.new())
+}
+
 pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
     Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), key: t.key, readers: arc.share(t.readers))
 }
@@ -2510,16 +2517,26 @@ pub fn key_span[K, V](t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Read
     Ok(Span(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?, lower_bytes(t.id, typed_bound(t.key, hi)?, true)?))
 }
 
-// AG3: every data-tree row in [lo, hi) of s, as changes(empty, s) gives it, so a Cover's
-// initial rows and its changed rows reach `published_value` alike.
+// AG3: iterate the data-tree rows in [lo, hi) without keeping a second copy of the span.
+pub fn open_span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[ByteRows, Error] {
+    byte_cursor(s.roots.data, Included(copied(lo)?), hi)
+}
+
+pub fn next_span_change(mut rows: ByteRows) -> Result[Option[Change], Error] {
+    match next_bytes(mut rows)? {
+        Some((take k, take v)) => Ok(Some(Change(tree_key: take k, value: Some(copied(v)?)))),
+        None => Ok(None),
+    }
+}
+
 pub fn span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] {
     let mut out: List[Change] = list.new()
     if hi <= lo {
         return Ok(take out)
     }
-    let mut rows = byte_cursor(s.roots.data, Included(copied(lo)?), hi)?
-    while let Some((k, v)) = next_bytes(mut rows)? {
-        capacity(result.capacity_only(list.push(mut out, Change(tree_key: take k, value: Some(copied(v)?)))))?
+    let mut rows = open_span_changes(s, lo, hi)?
+    while let Some(take row) = next_span_change(mut rows)? {
+        capacity(result.capacity_only(list.push(mut out, take row)))?
     }
     Ok(take out)
 }

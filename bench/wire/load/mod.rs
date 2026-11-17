@@ -203,7 +203,7 @@ async fn observe(
 
 async fn collect(mut events: mpsc::Receiver<Event>) -> Result<Value> {
     let mut pending: HashMap<(usize, u64), Sample> = HashMap::new();
-    let mut observed: BTreeMap<u64, (HashSet<u32>, Instant)> = BTreeMap::new();
+    let mut observed: BTreeMap<u64, Instant> = BTreeMap::new();
     let mut scheduled = Vec::new();
     let mut socket = Vec::new();
     let mut lag = Vec::new();
@@ -250,13 +250,13 @@ async fn collect(mut events: mpsc::Receiver<Event>) -> Result<Value> {
             } => {
                 batches += 1;
                 rows += chunks.len();
-                observed.entry(version).or_insert((chunks, at));
+                observed.entry(version).or_insert(at);
             }
         }
         if pending.values().any(|s| {
             s.version
                 .and_then(|v| observed.range(v..).next())
-                .is_some_and(|(_, (_, at))| *at < s.socket)
+                .is_some_and(|(_, at)| *at < s.socket)
         }) {
             return Err("observer arrival precedes its correlated send".into());
         }
@@ -265,7 +265,7 @@ async fn collect(mut events: mpsc::Receiver<Event>) -> Result<Value> {
                 return true;
             };
             let hit = observed.range(version..).next();
-            if let Some((observed_version, (_, at))) = hit {
+            if let Some((observed_version, at)) = hit {
                 sampled_batches.insert(*observed_version);
                 scheduled.push(ns(at.saturating_duration_since(sample.scheduled)));
                 socket.push(ns(at.duration_since(sample.socket)));
@@ -274,13 +274,8 @@ async fn collect(mut events: mpsc::Receiver<Event>) -> Result<Value> {
                 true
             }
         });
-        // Retain observations that can still be matched to an outcome delivered later.
-        let low = pending.values().filter_map(|s| s.version).min();
-        if pending.values().all(|s| s.version.is_some())
-            && let Some(low) = low
-        {
-            observed = observed.split_off(&low);
-        }
+        // Keep first arrivals for this finite run. Another caller's Sent event
+        // can reach this queue after the observer and after a later outcome.
     }
     Ok(
         json!({ "admitted": admitted, "returned": returned_count, "observed": scheduled.len(), "unobserved": pending.len(),
@@ -342,6 +337,55 @@ pub async fn echo(samples: usize) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn observer_timestamp_survives_a_late_sent_notification() -> Result<()> {
+        let (tx, rx) = mpsc::channel(8);
+        let start = Instant::now();
+        tx.send(Event::Sent {
+            owner: 0,
+            p: 0,
+            scheduled: start,
+            socket: start,
+        })
+        .await?;
+        tx.send(Event::Observed {
+            version: 1,
+            chunks: HashSet::new(),
+            at: start + Duration::from_micros(1000),
+        })
+        .await?;
+        tx.send(Event::Returned {
+            owner: 0,
+            p: 0,
+            version: 2,
+        })
+        .await?;
+        tx.send(Event::Sent {
+            owner: 1,
+            p: 0,
+            scheduled: start,
+            socket: start + Duration::from_micros(500),
+        })
+        .await?;
+        tx.send(Event::Returned {
+            owner: 1,
+            p: 0,
+            version: 1,
+        })
+        .await?;
+        tx.send(Event::Observed {
+            version: 2,
+            chunks: HashSet::new(),
+            at: start + Duration::from_micros(2000),
+        })
+        .await?;
+        drop(tx);
+        let result = collect(rx).await?;
+        assert_eq!(result["socket_to_observe"]["p50_us"], 500.0);
+        assert_eq!(result["scheduled_to_observe"]["p50_us"], 1000.0);
+        assert_eq!(result["observed"], 2);
+        Ok(())
+    }
     #[tokio::test]
     async fn latency_counts_queue_delay_and_waits_for_a_different_observer() -> Result<()> {
         let (tx, rx) = mpsc::channel(8);

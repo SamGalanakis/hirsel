@@ -165,6 +165,12 @@ MUTANTS = (
     ('rerun_without_retract',
      [('            result.unwrap(list.push(mut out, Row(sub: sub, key: result.unwrap(clone(before[i].tree_key)), value: None)))\n', '')],
      'runner', 'subs_main'),
+    # L17 (RUNNER-SPEC §8.2, complete_marks_empty): an empty initial result names its sub in
+    # no Batch's complete, so the client never learns that sub is current.
+    ('no_complete_on_empty',
+     [('            result.unwrap(list.push(mut o.complete, sub))\n',
+       '            if list.len(o.rows) > 0u64 {\n                result.unwrap(list.push(mut o.complete, sub))\n            }\n')],
+     'runner', 'subs_main'),
     # L16 (RUNNER-SPEC §8.2): a row's value is the published value (F10), never the raw
     # stored bytes, nor stored bytes with a fixed two-byte header stripped.
     ('raw_value',

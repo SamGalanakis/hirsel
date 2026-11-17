@@ -1,0 +1,75 @@
+// test-of: std.http
+// test-reason: The fixed wire head builder belongs to the connection, so it has no public entry.
+// HTTP-4(11): a field with framing authority or invalid wire syntax is a typed error.
+// expect: run http_response_fields() = true
+fn http_response_fields() -> bool {
+    if let Ok(_) = response(101, list.new(), false) {
+        return false
+    }
+    let mut r = result.unwrap(response(200, list.new(), false))
+    if let Error(HeaderReserved) = header(mut r, result.unwrap(b"TrAnSfEr-EnCoDiNg"), result.unwrap(b"chunked")) {
+        if let Error(HeaderInvalid) = header(mut r, result.unwrap(b"X-Value"), result.unwrap(b"ok\r\nInjected: value")) {
+            return list.len(r.fields) == 0
+        }
+    }
+    false
+}
+
+// RFC 9110 5.6.7 IMF-fixdate. 951782400 seconds is 2000-02-29 00:00 UTC.
+// HTTP-4(11): 204 omits the length even when the response owns a body.
+// expect: run http_response_wire_head() = true
+fn http_response_wire_head() -> bool {
+    let mut out: Bytes = result.unwrap(list.with_capacity(128))
+    let r = result.unwrap(response(204, result.unwrap(b"unexpected"), false))
+    result.unwrap(response_head(mut out, r, 0, false, 951782400000))
+    out == string.as_bytes("HTTP/1.0 204 No Content\r\nConnection: keep-alive\r\nDate: Tue, 29 Feb 2000 00:00:00 GMT\r\n\r\n")
+}
+
+// HTTP-4(8): validate both authorities and use the one in an absolute-form target.
+// expect: run http_absolute_authority() = true
+fn http_absolute_authority() -> bool {
+    let raw = result.unwrap(b"GET http://[2001:0DB8::7]:65535/a?raw=%ff HTTP/1.1\r\nHost: origin.example\r\n\r\n")
+    let mut h = http1.head()
+    if http1.request(raw, mut h) != Complete {
+        return false
+    }
+    let meta = result.unwrap(request_policy(raw, h))
+    let auth = match meta.authority {
+        Some(s) => s,
+        None => return false,
+    }
+    part(raw, auth) == string.as_bytes("[2001:0DB8::7]:65535") && part(raw, meta.path) == string.as_bytes("/a") && part(raw, meta.query) == string.as_bytes("raw=%ff")
+}
+
+fn request_refused(raw: Bytes, status: u16) -> bool {
+    let mut h = http1.head()
+    if http1.request(raw, mut h) != Complete {
+        return false
+    }
+    match request_policy(raw, h) {
+        Error(s) => s == status,
+        Ok(_) => false,
+    }
+}
+
+// HTTP-4(8,10): missing or duplicate Host and bad authorities are 400.
+// CONNECT and authority-form are 501. Unsupported expectations are 417.
+// expect: run http_request_policy_refusals() = true
+fn http_request_policy_refusals() -> bool {
+    request_refused(result.unwrap(b"GET / HTTP/1.1\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET / HTTP/1.1\r\nHost: a\r\nhost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET http://other/ HTTP/1.1\r\nHost: a:65536\r\n\r\n"), 400) && request_refused(result.unwrap(b"GET http://[1::2::3]/ HTTP/1.1\r\nHost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"CONNECT a:80 HTTP/1.1\r\nHost: a\r\n\r\n"), 501) && request_refused(result.unwrap(b"GET a:80 HTTP/1.1\r\nHost: a\r\n\r\n"), 501) && request_refused(result.unwrap(b"GET * HTTP/1.1\r\nHost: a\r\n\r\n"), 400) && request_refused(result.unwrap(b"POST / HTTP/1.1\r\nHost: a\r\nExpect: later\r\n\r\n"), 417)
+}
+
+fn bad_path(s: String) -> bool {
+    match segments_of(string.as_bytes(s)) {
+        Error(BadTarget) => true,
+        _ => false,
+    }
+}
+
+// HTTP-4(9): a trailing empty segment is legal, embedded empty/dot segments
+// and invalid UTF-8 are not. A decoded slash does not create another segment.
+// expect: run http_segment_boundaries() = true
+fn http_segment_boundaries() -> bool {
+    let segments = result.unwrap(segments_of(string.as_bytes("/a%2fb/%C3%A9/")))
+    list.len(segments) == 3 && segments[0] == "a/b" && segments[1] == "é" && segments[2] == "" && bad_path("//") && bad_path("/./") && bad_path("/.%2e/") && bad_path("/%c0%80") && bad_path("/%2")
+}

@@ -32,3 +32,5 @@ control from revision 64d4d617. The Go ebe2feefc400 heads retain their raw
 inputs and parsed fields; expectations for the old adapter's URL and body
 policies are intentionally excluded. Response coverage includes the upstream
 101 with a tab in its reason. References are in each test.
+
+`token(c)` reports whether a byte is permitted in an HTTP field name.

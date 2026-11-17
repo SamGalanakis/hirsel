@@ -30,6 +30,12 @@ Runner bindings (one transport-neutral ingress, `HttpBinding` values, JSON
 forms, statuses, the HTTP relay and SSE subscriptions) are rules B-1 to B-12.
 Keyed operations (K-1 to K-10) are a separate, unbuilt part.
 
+`response(status, take body, close)` builds a final response for status 200
+through 599. `header(mut response, take name, take value)` appends a field
+after checking HTTP field syntax. It refuses Content-Length, Transfer-Encoding
+and Connection case-insensitively with `HeaderReserved`. Invalid status and
+field syntax return `StatusInvalid` and `HeaderInvalid` respectively.
+
 `framing(bytes, head, body_max)` reads the parsed field offsets once and returns
 `Empty`, `ContentLength(n)` or `Chunked`. It rejects TE+CL, repeated or listed
 lengths, invalid decimal lengths, HTTP/1.0 TE and unsupported codings with a

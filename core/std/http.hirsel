@@ -12,6 +12,522 @@ fn failure(status: u16) -> BodyError {
     BodyError(status: status, close: true)
 }
 
+type ResponseField: send {
+    name: Bytes,
+    value: Bytes
+}
+
+pub opaque type Response: send {
+    status: u16,
+    fields: List[ResponseField],
+    body: Bytes,
+    close: bool
+}
+
+pub type ResponseError: send = StatusInvalid | HeaderReserved | HeaderInvalid | HeadTooLarge | Allocation(Capacity)
+
+/// Builds a final response. Only the connection may send informational statuses.
+pub fn response(status: u16, take body: Bytes, close: bool) -> Result[Response, ResponseError] {
+    if status < 200 || status > 599 {
+        return Error(StatusInvalid)
+    }
+    Ok(Response(status: status, fields: list.new(), body: take body, close: close))
+}
+
+fn reserved_field(name: Bytes) -> bool {
+    http1.equal_ascii(name, string.as_bytes("content-length")) || http1.equal_ascii(name, string.as_bytes("transfer-encoding")) || http1.equal_ascii(name, string.as_bytes("connection"))
+}
+
+fn valid_field(name: Bytes, value: Bytes) -> bool {
+    if list.len(name) == 0 {
+        return false
+    }
+    for c in name {
+        if !http1.token(c) {
+            return false
+        }
+    }
+    for c in value {
+        if c != 9 && c < 32 || c == 127 {
+            return false
+        }
+    }
+    let n = list.len(value)
+    n == 0 || value[0] > 32 && value[n - 1] > 32
+}
+
+/// Appends a handler-owned field. Framing fields belong to the connection.
+pub fn header(mut r: Response, take name: Bytes, take value: Bytes) -> Result[(), ResponseError] {
+    if reserved_field(name) {
+        return Error(HeaderReserved)
+    }
+    if !valid_field(name, value) {
+        return Error(HeaderInvalid)
+    }
+    match list.push(mut r.fields, ResponseField(name: take name, value: take value)) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Allocation(c)),
+    }
+}
+
+fn append_head(mut out: Bytes, b: Bytes) -> Result[(), ResponseError] {
+    if list.len(b) > list.capacity(out) - list.len(out) {
+        return Error(HeadTooLarge)
+    }
+    match list.append(mut out, b) {
+        Ok(()) => Ok(()),
+        Error(c) => Error(Allocation(c)),
+    }
+}
+
+fn head_text(mut out: Bytes, s: String) -> Result[(), ResponseError] {
+    append_head(mut out, string.as_bytes(s))
+}
+
+fn decimal(mut out: Bytes, n: u64, width: u64) -> Result[(), ResponseError] {
+    let mut digits: Inline[u8, 20] =[0; 20]
+    let mut start: u64 = 20
+    let mut rest = n
+    loop {
+        start -= 1
+        digits[start] = b'0' + int.narrow(rest % 10)
+        rest /= 10
+        if rest == 0 && 20 - start >= width {
+            break
+        }
+    }
+    if 20 - start > list.capacity(out) - list.len(out) {
+        return Error(HeadTooLarge)
+    }
+    for i in start .. 20 {
+        if let Error((c, _)) = list.push(mut out, digits[i]) {
+            return Error(Allocation(c))
+        }
+    }
+    Ok(())
+}
+
+// Days since the Unix epoch to a Gregorian civil date, using a March-based
+// 400-year era (Howard Hinnant, civil_from_days). IMF-fixdate uses UTC.
+fn date_field(mut out: Bytes, wall_ms: u64) -> Result[(), ResponseError] {
+    let seconds = wall_ms / 1000
+    let days = seconds / 86400
+    let weekdays =["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"]
+    let months =["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    let z = days + 719468
+    let doe = z % 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let day = doy - (153 * mp + 2) / 5 + 1
+    let month = if mp < 10 {
+        mp + 3
+    } else {
+        mp - 9
+    }
+    let year = z / 146097 * 400 + yoe + if month <= 2 {
+        1
+    } else {
+        0
+    }
+    head_text(mut out, "Date: ")?
+    head_text(mut out, weekdays[days % 7])?
+    head_text(mut out, ", ")?
+    decimal(mut out, day, 2)?
+    head_text(mut out, " ")?
+    head_text(mut out, months[month - 1])?
+    head_text(mut out, " ")?
+    decimal(mut out, year, 4)?
+    head_text(mut out, " ")?
+    decimal(mut out, seconds / 3600 % 24, 2)?
+    head_text(mut out, ":")?
+    decimal(mut out, seconds / 60 % 60, 2)?
+    head_text(mut out, ":")?
+    decimal(mut out, seconds % 60, 2)?
+    head_text(mut out, " GMT\r\n")
+}
+
+fn reason(status: u16) -> String {
+    if status == 200 {
+        return "OK"
+    }
+    if status == 204 {
+        return "No Content"
+    }
+    if status == 304 {
+        return "Not Modified"
+    }
+    ""
+}
+
+fn has_body(status: u16) -> bool {
+    status != 204 && status != 304
+}
+
+// Construct the whole head before the first send. A full head leaves the
+// connection free to send a bounded error, with no partial header to undo.
+fn response_head(mut out: Bytes, r: Response, version: u8, close: bool, wall_ms: u64) -> Result[(), ResponseError] {
+    list.clear(mut out)
+    head_text(mut out, if version == 0 {
+        "HTTP/1.0 "
+    } else {
+        "HTTP/1.1 "
+    })?
+    decimal(mut out, int.widen(r.status), 3)?
+    head_text(mut out, " ")?
+    head_text(mut out, reason(r.status))?
+    head_text(mut out, "\r\n")?
+    for f in r.fields {
+        if !http1.equal_ascii(f.name, string.as_bytes("date")) {
+            append_head(mut out, f.name)?
+            head_text(mut out, ": ")?
+            append_head(mut out, f.value)?
+            head_text(mut out, "\r\n")?
+        }
+    }
+    if has_body(r.status) {
+        head_text(mut out, "Content-Length: ")?
+        decimal(mut out, list.len(r.body), 1)?
+        head_text(mut out, "\r\n")?
+    }
+    if close {
+        head_text(mut out, "Connection: close\r\n")?
+    } else if version == 0 {
+        head_text(mut out, "Connection: keep-alive\r\n")?
+    }
+    date_field(mut out, wall_ms)?
+    head_text(mut out, "\r\n")
+}
+
+fn part(b: Bytes, span: http1.Span) -> View[Bytes] in b {
+    list.slice(b, span.start, span.end)
+}
+
+fn hex_digit(x: u8) -> Option[u8] {
+    let c = int.to_ascii_lower(x)
+    if int.is_ascii_digit(c) {
+        Some(c - b'0')
+    } else if c >= b'a' && c <= b'f' {
+        Some(c - b'a' + 10)
+    } else {
+        None
+    }
+}
+
+fn unreserved(x: u8) -> bool {
+    int.is_ascii_alpha(x) || int.is_ascii_digit(x) || x == b'-' || x == b'.' || x == b'_' || x == b'~'
+}
+
+fn sub_delim(x: u8) -> bool {
+    x == b'!' || x == b'$' || x == b'&' || x == 39 || x == b'(' || x == b')' || x == b'*' || x == b'+' || x == b',' || x == b';' || x == b'='
+}
+
+fn ipv4(b: Bytes) -> bool {
+    let n = list.len(b)
+    let mut at: u64 = 0
+    for word in 0u64 .. 4 {
+        let start = at
+        let mut value: u16 = 0
+        while at < n && int.is_ascii_digit(b[at]) {
+            if at - start == 3 {
+                return false
+            }
+            value = value * 10 + int.widen(b[at] - b'0')
+            at += 1
+        }
+        if at == start || at - start > 1 && b[start] == b'0' || value > 255 {
+            return false
+        }
+        if word != 3 {
+            if at == n || b[at] != b'.' {
+                return false
+            }
+            at += 1
+        }
+    }
+    at == n
+}
+
+// RFC 3986 IP-literal accepts every IPv6 spelling (including an embedded
+// IPv4 tail) and the IPvFuture grammar. It has no scope ID or DNS step.
+fn ip_literal(b: Bytes) -> bool {
+    let n = list.len(b)
+    if n == 0 {
+        return false
+    }
+    if int.to_ascii_lower(b[0]) == b'v' {
+        let mut at: u64 = 1
+        while at < n && hex_digit(b[at]) != None {
+            at += 1
+        }
+        if at == 1 || at + 1 >= n || b[at] != b'.' {
+            return false
+        }
+        for i in at + 1 .. n {
+            if !(unreserved(b[i]) || sub_delim(b[i]) || b[i] == b':') {
+                return false
+            }
+        }
+        return true
+    }
+    let mut at: u64 = 0
+    let mut words: u64 = 0
+    let mut compressed = false
+    if b[0] == b':' {
+        if n < 2 || b[1] != b':' {
+            return false
+        }
+        at = 2
+        compressed = true
+    }
+    while at < n {
+        let start = at
+        while at < n && hex_digit(b[at]) != None {
+            at += 1
+        }
+        if at < n && b[at] == b'.' {
+            if !ipv4(list.slice(b, start, n)) {
+                return false
+            }
+            words += 2
+            break
+        }
+        if at == start || at - start > 4 {
+            return false
+        }
+        words += 1
+        if at == n {
+            break
+        }
+        if b[at] != b':' {
+            return false
+        }
+        at += 1
+        if at < n && b[at] == b':' {
+            if compressed {
+                return false
+            }
+            compressed = true
+            at += 1
+        } else if at == n {
+            return false
+        }
+    }
+    if compressed {
+        words < 8
+    } else {
+        words == 8
+    }
+}
+
+fn authority(b: Bytes) -> bool {
+    let n = list.len(b)
+    if n == 0 {
+        return false
+    }
+    let mut at: u64 = 0
+    if b[0] == b'[' {
+        at = 1
+        while at < n && b[at] != b']' {
+            at += 1
+        }
+        if at == n || !ip_literal(list.slice(b, 1, at)) {
+            return false
+        }
+        at += 1
+    } else {
+        while at < n && b[at] != b':' {
+            let c = b[at]
+            if c == b'%' {
+                if n - at < 3 || hex_digit(b[at + 1]) == None || hex_digit(b[at + 2]) == None {
+                    return false
+                }
+                at += 3
+            } else {
+                if !(unreserved(c) || sub_delim(c)) {
+                    return false
+                }
+                at += 1
+            }
+        }
+        if at == 0 {
+            return false
+        }
+    }
+    if at == n {
+        return true
+    }
+    if b[at] != b':' || n - at < 2 || n - at > 6 {
+        return false
+    }
+    let mut port: u32 = 0
+    for i in at + 1 .. n {
+        if !int.is_ascii_digit(b[i]) {
+            return false
+        }
+        port = port * 10 + int.widen(b[i] - b'0')
+    }
+    port <= 65535
+}
+
+type RequestHead {
+    authority: Option[http1.Span],
+    path: http1.Span,
+    query: http1.Span,
+    expect_continue: bool,
+    close: bool
+}
+
+fn request_policy(b: Bytes, h: http1.Head) -> Result[RequestHead, u16] {
+    let method = part(b, h.method)
+    let mut host: Option[http1.Span] = None
+    let mut expect = false
+    let mut close = false
+    let mut keep_alive = false
+    for i in 0u64 .. h.count {
+        let f = h.fields[i]
+        let name = part(b, f.name)
+        let value = part(b, f.value)
+        if http1.equal_ascii(name, string.as_bytes("host")) {
+            if host != None || !authority(value) {
+                return Error(400)
+            }
+            host = Some(f.value)
+        } else if http1.equal_ascii(name, string.as_bytes("expect")) {
+            if expect || h.version == 0 || !http1.equal_ascii(value, string.as_bytes("100-continue")) {
+                return Error(417)
+            }
+            expect = true
+        } else if http1.equal_ascii(name, string.as_bytes("connection")) {
+            close = close || http1.contains(value, string.as_bytes("close"))
+            keep_alive = keep_alive || http1.contains(value, string.as_bytes("keep-alive"))
+        }
+    }
+    if h.version == 1 && host == None {
+        return Error(400)
+    }
+    if method == string.as_bytes("CONNECT") {
+        return Error(501)
+    }
+    let mut start = h.target.start
+    let end = h.target.end
+    if part(b, h.target) == string.as_bytes("*") {
+        if method != string.as_bytes("OPTIONS") {
+            return Error(400)
+        }
+    } else if b[start] != b'/' {
+        let mut colon = start
+        while colon < end && b[colon] != b':' && b[colon] != b'/' && b[colon] != b'?' {
+            colon += 1
+        }
+        if end - colon < 3 || b[colon + 1] != b'/' || b[colon + 2] != b'/' {
+            return Error(501)
+        }
+        if !int.is_ascii_alpha(b[start]) {
+            return Error(400)
+        }
+        for i in start + 1 .. colon {
+            let x = b[i]
+            if !(int.is_ascii_alpha(x) || int.is_ascii_digit(x) || x == b'+' || x == b'-' || x == b'.') {
+                return Error(400)
+            }
+        }
+        let host_start = colon + 3
+        start = host_start
+        while start < end && b[start] != b'/' && b[start] != b'?' {
+            start += 1
+        }
+        let absolute = http1.Span(start: host_start, end: start)
+        if !authority(part(b, absolute)) {
+            return Error(400)
+        }
+        host = Some(absolute)
+    }
+    let mut path_end = start
+    while path_end < end && b[path_end] != b'?' {
+        if b[path_end] == b'#' {
+            return Error(400)
+        }
+        path_end += 1
+    }
+    let query = if path_end == end {
+        end
+    } else {
+        path_end + 1
+    }
+    Ok(RequestHead(authority: host, path: http1.Span(start: start, end: path_end), query: http1.Span(start: query, end: end), expect_continue: expect, close: close || h.version == 0 && !keep_alive))
+}
+
+type TargetError: key = BadTarget | TargetCapacity
+
+fn segment(b: Bytes) -> Result[String, TargetError] {
+    let end = list.len(b)
+    let allocated: Result[Bytes, Capacity] = list.with_capacity(end)
+    let mut decoded = match take allocated {
+        Ok(take x) => take x,
+        Error(_) => return Error(TargetCapacity),
+    }
+    let mut at: u64 = 0
+    while at < end {
+        let c = b[at]
+        if c == b'%' {
+            if end - at < 3 {
+                return Error(BadTarget)
+            }
+            let hi = match hex_digit(b[at + 1]) {
+                Some(x) => x,
+                None => return Error(BadTarget),
+            }
+            let lo = match hex_digit(b[at + 2]) {
+                Some(x) => x,
+                None => return Error(BadTarget),
+            }
+            let byte: u8 = hi * 16 + lo
+            let _ = list.push(mut decoded, byte)
+            at += 3
+        } else {
+            let _ = list.push(mut decoded, c)
+            at += 1
+        }
+    }
+    if decoded == string.as_bytes(".") || decoded == string.as_bytes("..") {
+        return Error(BadTarget)
+    }
+    match string.from_utf8(take decoded) {
+        Ok(take s) => Ok(take s),
+        Error(_) => Error(BadTarget),
+    }
+}
+
+// Split before decoding; a decoded slash is data in a single segment.
+// Root and an empty absolute-form path both have zero segments.
+fn segments_of(path: Bytes) -> Result[List[String], TargetError] {
+    let mut segments: List[String] = list.new()
+    let n = list.len(path)
+    if n <= 1 {
+        return Ok(take segments)
+    }
+    let mut start: u64 = 1
+    while start <= n {
+        let mut end = start
+        while end < n && path[end] != b'/' {
+            end += 1
+        }
+        if end == start && end < n {
+            return Error(BadTarget)
+        }
+        let s = segment(list.slice(path, start, end))?
+        if let Error(_) = list.push(mut segments, take s) {
+            return Error(TargetCapacity)
+        }
+        if end == n {
+            return Ok(take segments)
+        }
+        start = end + 1
+    }
+    Ok(take segments)
+}
+
 /// Selects a request body boundary from the already parsed Head. No allocation.
 /// HTTP-4 refuses ambiguous framing before interpreting any body bytes.
 /// Ex: `http.framing(bytes, h, 1048576)`.

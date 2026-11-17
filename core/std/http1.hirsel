@@ -291,7 +291,8 @@ fn newline(b: Bytes, mut at: u64) -> Result[(), Stop] {
     Ok(())
 }
 
-fn token(c: u8) -> bool {
+/// Whether c is an RFC 9110 field-name token byte.
+pub fn token(c: u8) -> bool {
     int.is_ascii_alpha(c) || int.is_ascii_digit(c) || c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126
 }
 

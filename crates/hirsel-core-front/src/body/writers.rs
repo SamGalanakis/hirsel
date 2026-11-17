@@ -9,6 +9,9 @@
 //! accepted only from the completed frame handed to it. The first failed write marks
 //! the build failed; every later write then fails, and so does the build, so a result
 //! that is ignored never publishes a partly written value.
+//! Failure sets `used = u64::MAX`, beyond every admitted blob's end.
+//! The same reservation comparison then rejects every later write, even empty
+//! ones, without polling the final build-error flag on the successful path.
 //!
 //! `build_in` (MEM-4) keeps the same state with a sixth word, the destination's identity
 //! `id @40` (`rt.dest_id`), and `end` is `16 + min(n, cap of W)`, so one fit test also
@@ -189,17 +192,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
         let over = self.over(sinks);
-        let failed = self.state_word(state, 32, u64t, n)?;
-        let zero = self.u64k(0, n)?;
-        let bad = self.test(CompareOp::Ne, failed, zero, n);
-        let go = self.new_block(&[]);
-        self.branch(bad, over, go, n);
-        self.start(go);
         let used = self.state_word(state, 8, u64t, n)?;
         let end = self.state_word(state, 16, u64t, n)?;
-        // `used <= end` is maintained by every reservation. Test the new
-        // cursor directly, sharing the sum with the store on the success edge.
-        // The flag is observed here as BuildError.Overflow, never raised.
+        // Live builds maintain used <= end; a poisoned build has end < used.
+        // Overflow and the new-cursor comparison reject both excess capacity
+        // and every post-failure reservation, including a zero-byte one.
         let (next, overflow) = self.list_arith(ArithOp::Add, ArithMode::Checked, used, k, n);
         let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
         let within = self.test(CompareOp::Le, next, end, n);
@@ -366,6 +363,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.put_word(AddressBase::Address(to), &ok, 0, blob, n)?;
         self.put_word(AddressBase::Address(to), &ok, 8, start, n)
     }
+    fn poison_writer(&mut self, state: ValueId, n: NodeId) -> Option<()> {
+        let one = self.u64k(1, n)?;
+        self.store_state_word(state, 32, one, n)?;
+        // Admission bounds bytes by MAX-HEAD-7, so end is at most MAX-7.
+        // MAX is therefore above end; adding any positive size overflows,
+        // while a zero-size reservation fails the unchanged capacity test.
+        // Completed views use recorded frame offsets, never this cursor, and
+        // publication reads it only after checking the sticky error flag.
+        let stopped = self.u64k(u64::MAX, n)?;
+        self.store_state_word(state, 8, stopped, n)
+    }
     /// End an operation: its sinks write their errors into `to` and mark the build
     /// failed; everything continues at `join`.
     fn close_sinks(
@@ -379,8 +387,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<()> {
         if let Some(over) = sinks.over {
             self.start(over);
-            let k = self.u64k(1, n)?;
-            self.store_state_word(state, 32, k, n)?;
+            self.poison_writer(state, n)?;
             let e = self.error_place(to, eid, n);
             self.inst(
                 Inst::SetCase {
@@ -394,8 +401,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(failed) = sinks.failed {
             self.start(failed);
             let from = self.block_params(failed)[0];
-            let k = self.u64k(1, n)?;
-            self.store_state_word(state, 32, k, n)?;
+            self.poison_writer(state, n)?;
             let e = self.error_place(to, eid, n);
             self.copy_to(e, from, eid, n);
             self.jump(join, &[], n);

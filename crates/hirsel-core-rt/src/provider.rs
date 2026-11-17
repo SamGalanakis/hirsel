@@ -1,30 +1,7 @@
 //! CAP-8 issue/delivery seam. Host adapters and scripted adapters use the same ABI.
 use crate::{Context, causes};
 
-pub const OPEN: u8 = 0;
-pub const READ: u8 = 1;
-pub const WRITE: u8 = 2;
-pub const CLOSE: u8 = 3;
-pub const TRY_LOCK: u8 = 4;
-pub const UNLOCK: u8 = 5;
-pub const MKDIR: u8 = 6;
-pub const MKDTEMP: u8 = 7;
-pub const REMOVE: u8 = 8;
-pub const REMOVE_TREE: u8 = 9;
-pub const WALL_MS: u8 = 10;
-pub const MONO_NS: u8 = 11;
-pub const STDOUT: u8 = 12;
-pub const STDERR: u8 = 13;
-pub const RENAME: u8 = 14;
-pub const SLEEP_UNTIL: u8 = 15;
-pub const SYNC: u8 = 16;
-pub const SYNC_DIR: u8 = 17;
-pub const RANDOM: u8 = 18;
-pub const CONNECT: u8 = 19;
-pub const LISTEN: u8 = 20;
-pub const ACCEPT: u8 = 21;
-pub const RECV: u8 = 22;
-pub const SEND: u8 = 23;
+pub use hirsel_tape_format::op::*;
 
 /// IoError tags. Other carries the host error number.
 #[repr(C)]

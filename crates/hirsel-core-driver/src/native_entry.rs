@@ -37,6 +37,7 @@ struct Requirement<'a> {
 #[derive(Serialize)]
 pub(crate) struct Plan<'a> {
     symbol: String,
+    identity: String,
     layout: &'a Fixed,
     exit_offset: Option<u64>,
     parameters: Vec<Requirement<'a>>,
@@ -46,17 +47,26 @@ pub(crate) struct Plan<'a> {
     net_rules: &'a [hirsel_core_net::Rule],
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
+    tape: Option<&'a crate::native::RunTape>,
 }
 /// Every link-plan input the environment does not cover, canonically: the
-/// root limit, the grant mask, the explicit Net rules, ordered directories and charge-report
-/// path. The plan's other fields are the entry's: `symbol` is the entry's
+/// root limit, grant mask, explicit Net rules, ordered directories, charge-report
+/// path and optional Run tape mode/path. The plan's other fields are the entry's:
+/// `symbol` is the entry's
 /// identity, `layout`, `exit_offset` and `parameters` are read from the entry
 /// body (its record's address and the declaration part), `cleanup` is the
 /// cleanup instance's identity. The request's source map is the link's, and
 /// the executable key takes its digest.
 pub(crate) fn policy(
     options: &NativeOptions,
-) -> (u64, u64, &[hirsel_core_net::Rule], &[String], Option<&[u8]>) {
+) -> (
+    u64,
+    u64,
+    &[hirsel_core_net::Rule],
+    &[String],
+    Option<&[u8]>,
+    Option<&crate::native::RunTape>,
+) {
     (
         options.root_limit,
         options.grant_mask,
@@ -66,11 +76,13 @@ pub(crate) fn policy(
             .logical_charge_report
             .as_ref()
             .map(|p| p.as_os_str().as_bytes()),
+        options.tape.as_ref(),
     )
 }
 impl<'a> Plan<'a> {
     pub(crate) fn new(
         symbol: String,
+        identity: String,
         binding: &'a EntryAbi,
         cleanup: Option<String>,
         options: &'a NativeOptions,
@@ -89,6 +101,11 @@ impl<'a> Plan<'a> {
                         .ok_or_else(|| {
                             NativeStop::Entry(format!("unsupported provider parameter {}", p.ty))
                         })?;
+                if options.tape.is_some() && kind == 8 {
+                    return Err(NativeStop::Entry(
+                        "Process cannot be recorded or replayed".into(),
+                    ));
+                }
                 let index = ordinals[kind as usize];
                 ordinals[kind as usize] += 1;
                 Ok(Requirement {
@@ -100,6 +117,7 @@ impl<'a> Plan<'a> {
             .collect::<std::result::Result<_, NativeStop>>()?;
         Ok(Self {
             symbol,
+            identity,
             layout,
             exit_offset: binding.exit_offset,
             parameters,
@@ -108,6 +126,7 @@ impl<'a> Plan<'a> {
             grant_mask: options.grant_mask,
             net_rules: &options.net_rules,
             directories: &options.directories,
+            tape: options.tape.as_ref(),
             charge_report: options
                 .logical_charge_report
                 .as_ref()

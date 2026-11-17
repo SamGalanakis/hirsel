@@ -421,12 +421,12 @@ impl Args {
 
 /// What an operation of a given op tag carries in its outcome.
 pub fn writes(op: u8) -> bool {
-    use crate::provider::*;
-    matches!(op, WRITE | STDOUT | STDERR)
+    use crate::op::*;
+    matches!(op, WRITE | STDOUT | STDERR | RANDOM)
 }
 pub fn carries_payload(op: u8) -> bool {
-    use crate::provider::*;
-    matches!(op, READ | MKDTEMP)
+    use crate::op::*;
+    matches!(op, READ | MKDTEMP | RANDOM)
 }
 
 /// An outcome as the tape stores it. `value` is stored as given: the recorder
@@ -496,8 +496,10 @@ impl Out {
     /// How many payload bytes this outcome needs in all: a successful read
     /// carries `value` bytes, everything else only its first chunk.
     fn needs(&self, op: u8) -> usize {
-        if op == crate::provider::READ && self.status == OK {
+        if op == crate::op::READ && self.status == OK {
             self.value as usize
+        } else if op == crate::op::RANDOM {
+            self.written as usize
         } else {
             self.payload.len()
         }
@@ -633,7 +635,7 @@ impl Encoder {
             Frame::Grant { kind, args } => {
                 out.push(F_GRANT);
                 out.push(*kind);
-                if *kind == crate::entry::ARGS {
+                if *kind == ARGS_KIND {
                     put_bytes(
                         &mut out,
                         args.as_deref().expect("an Args grant carries its vector"),
@@ -764,10 +766,10 @@ impl Decoder {
                 },
                 F_GRANT => {
                     let kind = c.u8()?;
-                    if kind > crate::entry::ARGS {
+                    if kind > ARGS_KIND {
                         return Err(Corrupt);
                     }
-                    let args = (kind == crate::entry::ARGS).then(|| c.bytes().map(<[u8]>::to_vec));
+                    let args = (kind == ARGS_KIND).then(|| c.bytes().map(<[u8]>::to_vec));
                     Frame::Grant {
                         kind,
                         args: args.transpose()?,
@@ -831,4 +833,35 @@ impl Decoder {
     pub fn unfinished(&self) -> bool {
         self.open.is_some()
     }
+}
+
+/// The Args grant kind in the entry ABI.
+pub const ARGS_KIND: u8 = 10;
+
+/// Provider operation codes shared by the runtime ABI and tape codec.
+pub mod op {
+    pub const OPEN: u8 = 0;
+    pub const READ: u8 = 1;
+    pub const WRITE: u8 = 2;
+    pub const CLOSE: u8 = 3;
+    pub const TRY_LOCK: u8 = 4;
+    pub const UNLOCK: u8 = 5;
+    pub const MKDIR: u8 = 6;
+    pub const MKDTEMP: u8 = 7;
+    pub const REMOVE: u8 = 8;
+    pub const REMOVE_TREE: u8 = 9;
+    pub const WALL_MS: u8 = 10;
+    pub const MONO_NS: u8 = 11;
+    pub const STDOUT: u8 = 12;
+    pub const STDERR: u8 = 13;
+    pub const RENAME: u8 = 14;
+    pub const SLEEP_UNTIL: u8 = 15;
+    pub const SYNC: u8 = 16;
+    pub const SYNC_DIR: u8 = 17;
+    pub const RANDOM: u8 = 18;
+    pub const CONNECT: u8 = 19;
+    pub const LISTEN: u8 = 20;
+    pub const ACCEPT: u8 = 21;
+    pub const RECV: u8 = 22;
+    pub const SEND: u8 = 23;
 }

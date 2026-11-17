@@ -23,4 +23,10 @@ void hirsel_core_os_process_set_sources(HirselCoreOsProcess *, const HirselCoreS
    Existing entry points and Config/OsConfig layouts are unchanged. */
 uint8_t hirsel_core_os_run_with_sources(const HirselCoreOsConfig *, const HirselCoreView *parameter_names,
                                       const HirselCoreSourceTable *, HirselCoreEntry);
+/* FORM #122: a link plan can select a run tape without changing ordinary
+   startup. Paths and code identity are NUL-terminated generated strings;
+   mode is 0 Record, 1 Replay or 2 diagnose (Across, never live). */
+uint8_t hirsel_core_os_run_taped(const HirselCoreOsConfig *, const HirselCoreView *,
+    const HirselCoreSourceTable *, HirselCoreEntry, const char *path, uint64_t mode,
+    const char *identity, const uint8_t revision[32]);
 #endif

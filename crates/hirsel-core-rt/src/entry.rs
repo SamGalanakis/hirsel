@@ -30,6 +30,7 @@ pub const ARGS: u8 = 10;
 /// Host metadata. Its index + 1 is the numeric provider handle. Source code
 /// cannot construct or inspect this metadata; copying a handle copies designation.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Grant {
     pub kind: u8,
     pub provider: *const Provider,
@@ -153,7 +154,7 @@ pub struct OpenProcess {
     pub process: *mut OsProcess,
     pub error: IoError,
 }
-fn duplicate(fd: i32) -> io::Result<OwnedFd> {
+pub(crate) fn duplicate(fd: i32) -> io::Result<OwnedFd> {
     // SAFETY: fcntl checks the external descriptor and transfers a fresh duplicate.
     let raw = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
     if raw < 0 {

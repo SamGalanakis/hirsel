@@ -1,0 +1,86 @@
+//! Standalone tape inspection uses the same format decoder as replay. Sites
+//! are diagnostic source bindings, not stored fields, so show has no site column.
+use hirsel_tape_format::{self as format, Blocks, Decoder, Frame, Header};
+use std::{io, path::Path};
+fn damaged(error: impl std::fmt::Debug) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("tape: {error:?}"))
+}
+pub(crate) fn header(path: &Path) -> io::Result<Header> {
+    let bytes = std::fs::read(path)?;
+    Blocks::open(&bytes).map(|(_, h)| h).map_err(damaged)
+}
+pub(crate) fn show(path: &Path) -> io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    let (mut blocks, h) = Blocks::open(&bytes).map_err(damaged)?;
+    println!(
+        "format {}  kind {}  mode {}",
+        format::FORMAT,
+        h.kind,
+        h.mode
+    );
+    println!("identity {}", String::from_utf8_lossy(&h.identity));
+    println!(
+        "revision {}",
+        h.revision
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    println!(
+        "tape_id {}",
+        h.tape_id
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    println!(
+        "limit {}  charge_policy {}  bound {}  chooser {}  arg_bytes {}",
+        h.limit,
+        h.charge_policy,
+        h.bound,
+        h.chooser,
+        h.arg.len()
+    );
+    println!("arg {:?}  grants {:?}", h.arg, h.grants);
+    let mut decoder = Decoder::default();
+    let mut at = 0;
+    while let Some((flags, payload)) = blocks.next(&bytes).map_err(damaged)? {
+        for frame in decoder
+            .block(payload, flags & format::END != 0)
+            .map_err(damaged)?
+        {
+            at += 1;
+            print!("{at} ");
+            match frame {
+                Frame::Wait { task } => println!("WAIT task={task}"),
+                Frame::Wake { gap, task } => println!("WAKE gap={gap} task={task}"),
+                Frame::Cancel { gap, task } => println!("CANCEL gap={gap} task={task}"),
+                Frame::Choose { gap, index } => println!("CHOOSE gap={gap} index={index}"),
+                Frame::Grant { kind, args } => println!("GRANT kind={kind} args={args:?}"),
+                Frame::Issue {
+                    task,
+                    op,
+                    object,
+                    args,
+                } => println!("ISSUE task={task} op={op} object={object} args={args:?}"),
+                Frame::Done { gap, task, out } => println!(
+                    "DONE gap={gap} task={task} status={} value={} error={:?} written={} payload={:?}",
+                    out.status, out.value, out.error, out.written, out.payload
+                ),
+                Frame::Op {
+                    task,
+                    op,
+                    object,
+                    args,
+                    out,
+                } => println!(
+                    "OP task={task} op={op} object={object} args={args:?} status={} value={} error={:?} written={} payload={:?}",
+                    out.status, out.value, out.error, out.written, out.payload
+                ),
+                Frame::Incarnation(n) => println!("INCARNATION n={n}"),
+                Frame::End(out) => println!("END kind={} outcome={:?}", out.kind, out.outcome),
+            }
+        }
+    }
+    Ok(())
+}

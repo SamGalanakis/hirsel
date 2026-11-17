@@ -41,7 +41,11 @@ fn tape_code_revision_is_the_entry_revision() {
         let mut options = native_options(backend, dir.path());
         options.output = dir.path().join(format!("{backend:?}"));
         let built = product.build(&entry, &options).unwrap();
-        assert_eq!(code_revision_of(&built.executable), built.revision.0, "{backend:?}");
+        assert_eq!(
+            code_revision_of(&built.executable),
+            built.revision.0,
+            "{backend:?}"
+        );
     }
 }
 
@@ -110,27 +114,56 @@ fn tape_run_replays(backend: Backend, other: Backend) {
     let tape = std::fs::read(grant.join("run.tape")).unwrap();
     let (code, replayed, err) = tape_run(&program, &["two"]);
     assert_eq!(code, Some(0), "replay: {err}");
-    assert_eq!(replayed, format!("{reading}|one"), "replay answers from the tape");
+    assert_eq!(
+        replayed,
+        format!("{reading}|one"),
+        "replay answers from the tape"
+    );
     assert_eq!(std::fs::read(grant.join("run.tape")).unwrap(), tape);
     let (code, _, err) = tape_run(&program, &["x"]);
-    assert_eq!(code, Some(5), "a changed outcome is Diverged(Outcome): {err}");
+    assert_eq!(
+        code,
+        Some(5),
+        "a changed outcome is Diverged(Outcome): {err}"
+    );
     let (code, forced, err) = tape_run(&program, &["force"]);
-    assert_eq!((code, forced), (Some(0), replayed.clone()), "Across of its own revision: {err}");
+    assert_eq!(
+        (code, forced),
+        (Some(0), replayed.clone()),
+        "Across of its own revision: {err}"
+    );
     let switched = tape_run_build(other, dir.path(), "e", ("", ""));
     let (code, again, err) = tape_run(&switched, &["three"]);
-    assert_eq!((code, again), (Some(0), replayed), "the other engine: {err}");
+    assert_eq!(
+        (code, again),
+        (Some(0), replayed),
+        "the other engine: {err}"
+    );
     let changed = tape_run_build(backend, dir.path(), "c", ("\"|\"", "\"/\""));
     let (code, printed, err) = tape_run(&changed, &["one"]);
-    assert_eq!((code, printed), (Some(3), String::new()), "Refused(Revision): {err}");
+    assert_eq!(
+        (code, printed),
+        (Some(3), String::new()),
+        "Refused(Revision): {err}"
+    );
     let (code, printed, err) = tape_run(&changed, &["force"]);
     assert_eq!(
         (code, printed),
         (Some(0), format!("across:{reading}/one")),
         "Across opens it, labelled: {err}"
     );
-    let behaves = tape_run_build(backend, dir.path(), "d", ("{ 1u8 } else { 0u8 }", "{ 1u8 } else { 6u8 }"));
+    let behaves = tape_run_build(
+        backend,
+        dir.path(),
+        "d",
+        ("{ 1u8 } else { 0u8 }", "{ 1u8 } else { 6u8 }"),
+    );
     let (code, _, err) = tape_run(&behaves, &["force"]);
-    assert_eq!(code, Some(5), "a changed outcome under Across is Diverged(Outcome): {err}");
+    assert_eq!(
+        code,
+        Some(5),
+        "a changed outcome under Across is Diverged(Outcome): {err}"
+    );
 }
 
 #[test]
@@ -138,6 +171,7 @@ fn tape_run_replays(backend: Backend, other: Backend) {
 fn tape_run_replays_cranelift() {
     tape_run_replays(Backend::Cranelift, Backend::Llvm);
     tape_schedule_engines();
+    tape_cli_replays();
 }
 
 #[test]
@@ -156,11 +190,11 @@ fn tape_run_after_end(backend: Backend) {
     std::fs::create_dir(dir.path().join("grant")).unwrap();
     let program = tape_run_build(backend, dir.path(), "a", ("", ""));
     for argument in ["after", "aftertasks"] {
-      for run in ["record", "replay"] {
-        let (code, out, err) = tape_run(&program, &[argument]);
-        assert_ne!(code, Some(0), "{run}: {out:?}");
-        assert!(err.starts_with("Tape(ended) at "), "{run}: {err:?}");
-      }
+        for run in ["record", "replay"] {
+            let (code, out, err) = tape_run(&program, &[argument]);
+            assert_ne!(code, Some(0), "{run}: {out:?}");
+            assert!(err.starts_with("Tape(ended) at "), "{run}: {err:?}");
+        }
     }
 }
 
@@ -191,28 +225,183 @@ fn tape_schedule_engines() {
     let linker = dir.path().join("cc");
     let quote = |p: &Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
     let mut script = Vec::new();
-    writeln!(script, "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_run", quote(&cc), quote(&c), quote(&root.join("crates/hirsel-core-rt/include"))).unwrap();
+    writeln!(
+        script,
+        "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_run",
+        quote(&cc),
+        quote(&c),
+        quote(&root.join("crates/hirsel-core-rt/include"))
+    )
+    .unwrap();
     crate::executable::write(&linker, &script, 0o755).unwrap();
     let mut recorded = None;
     for backend in [Backend::Cranelift, Backend::Llvm] {
         let mut request = source_request(&source, dir.path());
-        request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
-        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
-        assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            product.accepted(),
+            "{:?} {:?}",
+            product.diagnostics,
+            product.incomplete
+        );
         let mut options = native_options(backend, dir.path());
         options.output = dir.path().join(format!("schedule-{backend:?}"));
         options.store = dir.path().join(format!("store-{backend:?}"));
         options.directories = vec![grant.to_str().unwrap().into()];
         options.grant_mask = (1 << 2) | (1 << 9);
         options.link = Link::Driver(linker.clone());
-        let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
+        let built = product
+            .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
+            .unwrap();
         let (code, out, err) = tape_run(&built.executable, &[]);
         assert_eq!(code, Some(0), "{backend:?} record: {out} {err}");
         let bytes = std::fs::read(grant.join("schedule.tape")).unwrap();
         let (code, out, err) = tape_run(&built.executable, &[]);
         assert_eq!(code, Some(0), "{backend:?} replay: {out} {err}");
-        if let Some(recorded) = &recorded { assert_eq!(&bytes, recorded, "engine recordings, including block 0"); }
+        if let Some(recorded) = &recorded {
+            assert_eq!(&bytes, recorded, "engine recordings, including block 0");
+        }
         recorded = Some(bytes);
         std::fs::remove_file(grant.join("schedule.tape")).unwrap();
     }
+}
+
+/// S6's JSON/Args/Tasks run replays after its input grant is removed; diagnose
+/// names the first divergent request's rebound source, and show is standalone.
+fn tape_cli_replays() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let data = dir.path().join("data");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::create_dir(&data).unwrap();
+    let source = std::fs::read_to_string(root.join("core/front/tape/cli.hirsel")).unwrap();
+    std::fs::write(app.join("main.hirsel"), &source).unwrap();
+    std::fs::write(data.join("input.json"), b"{\"answer\":42}\n").unwrap();
+    let tape = dir.path().join("run.tape");
+    let options = native_options(Backend::Cranelift, dir.path());
+    let runtime = options.runtime.canonicalize().unwrap();
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let common = vec![
+        "--runtime".to_owned(),
+        runtime.display().to_string(),
+        "--cc".into(),
+        llvm.join("bin/clang").display().to_string(),
+        "--libraries".into(),
+        root.join("core").display().to_string(),
+        "--source-core".into(),
+        "--source-std".into(),
+        "--store".into(),
+        dir.path().join("cache").display().to_string(),
+    ];
+    let invoke = |command: &str, extra: Vec<String>| {
+        let mut args = vec![command.to_owned(), app.display().to_string()];
+        args.extend(common.clone());
+        args.extend(extra);
+        process::tape_request(&args, dir.path())
+    };
+    let record = vec![
+        "--dir".into(),
+        data.display().to_string(),
+        "--grant".into(),
+        "Clock".into(),
+        "--grant".into(),
+        "Tasks".into(),
+        "--grant".into(),
+        "Stdout".into(),
+        "--record".into(),
+        tape.display().to_string(),
+        "--".into(),
+        "recorded".into(),
+    ];
+    let (code, out, err) = invoke("run", record.clone());
+    assert_eq!(
+        (code, out),
+        (Some(0), "{\"answer\":42}\n".to_owned()),
+        "record: {err}"
+    );
+    let bytes = std::fs::read(&tape).unwrap();
+    let (code, _, _) = invoke("run", record);
+    assert_ne!(code, Some(0), "record never overwrites an existing tape");
+    assert_eq!(std::fs::read(&tape).unwrap(), bytes);
+    std::fs::remove_dir_all(&data).unwrap();
+    let replay = vec!["--tape".into(), tape.display().to_string()];
+    let (code, out, err) = invoke("replay", replay.clone());
+    assert_eq!(
+        (code, out),
+        (Some(0), String::new()),
+        "replay with no grants: {err}"
+    );
+    assert_eq!(std::fs::read(&tape).unwrap(), bytes);
+    let shown = vec!["tape".to_owned(), "show".into(), tape.display().to_string()];
+    let (code, out, err) = process::tape_request(&shown, dir.path());
+    assert_eq!(code, Some(0), "show: {err}");
+    assert!(out.contains("format 2") && out.contains("GRANT") && out.contains("END"));
+    assert!(!out.contains("site"));
+    // Random already exists in the provider ABI. Its payload must also replay,
+    // including DATA continuation, rather than leave the carrier empty.
+    let random = "pub fn main(r: Random, out: Stdout) -> Result[(), Exit] { let mut b: Bytes = result.unwrap(list.with_capacity(70000)); host.random(r, mut b); if list.len(b) != 70000u64 { return Error(Exit(status: 6)) }; result.unwrap(stdout.write_bytes(out, b)); Ok(()) }";
+    std::fs::write(app.join("main.hirsel"), random).unwrap();
+    let random_tape = dir.path().join("random.tape");
+    let (code, _, err) = invoke(
+        "run",
+        vec![
+            "--grant".into(),
+            "Random".into(),
+            "--grant".into(),
+            "Stdout".into(),
+            "--record".into(),
+            random_tape.display().to_string(),
+        ],
+    );
+    assert_eq!(code, Some(0), "random record: {err}");
+    let (code, out, err) = invoke(
+        "replay",
+        vec!["--tape".into(), random_tape.display().to_string()],
+    );
+    assert_eq!(
+        (code, out),
+        (Some(0), String::new()),
+        "random replay: {err}"
+    );
+    std::fs::write(
+        app.join("main.hirsel"),
+        source.replace("\"input.json\"", "\"other.json\""),
+    )
+    .unwrap();
+    let (code, _, err) = invoke("replay", replay.clone());
+    assert_eq!(code, Some(103), "{err}");
+    assert!(err.contains("Refused(Revision)"), "{err}");
+    let mut across = replay;
+    across.push("--diagnose".into());
+    let (code, _, err) = invoke("replay", across);
+    assert_eq!(code, Some(101), "{err}");
+    assert!(
+        err.contains("revision differs") && err.contains("Arg") && err.contains("file.hirsel:"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&tape).unwrap(), bytes);
+    std::fs::write(
+        app.join("main.hirsel"),
+        "pub fn main(p: Process) -> Result[(), Exit] { Ok(()) }",
+    )
+    .unwrap();
+    let (code, _, err) = invoke(
+        "run",
+        vec![
+            "--grant".into(),
+            "Process".into(),
+            "--record".into(),
+            dir.path().join("process.tape").display().to_string(),
+        ],
+    );
+    assert_ne!(code, Some(0));
+    assert!(err.contains("Process cannot be recorded"), "{err}");
 }

@@ -59,8 +59,24 @@ impl Link {
         }
     }
 }
+/// The startup behavior of a Run tape, fixed by the link plan.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[repr(u8)]
+pub enum RunTapeMode {
+    Record = 0,
+    Replay = 1,
+    Diagnose = 2,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RunTape {
+    pub path: String,
+    pub mode: RunTapeMode,
+}
+
 /// Runtime and linker inputs are explicit, independently produced artifacts.
 pub struct NativeOptions {
+    pub tape: Option<RunTape>,
     pub backend: Backend,
     pub optimize: bool,
     /// Source-neutral native line rows; failure positions are always enabled.
@@ -115,6 +131,7 @@ impl NativeOptions {
             output,
             root_limit: 64 * 1024 * 1024,
             instance_limit: 65_536,
+            tape: None,
             directories: vec![],
             grant_mask: 0,
             net_rules: vec![],
@@ -883,6 +900,7 @@ impl CheckProduct {
         };
         let entry_plan = crate::native_entry::Plan::new(
             Identity::plain(entry.clone()).symbol(),
+            entry.to_string(),
             &link.abi,
             link.cleanup.as_ref().map(|c| c.identity.symbol()),
             options,
@@ -1723,6 +1741,7 @@ mod tests {
     fn native_options(backend: Backend, dir: &Path) -> NativeOptions {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         NativeOptions {
+            tape: None,
             backend,
             optimize: false,
             debug_lines: false,

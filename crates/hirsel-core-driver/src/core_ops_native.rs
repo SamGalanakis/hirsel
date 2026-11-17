@@ -78,6 +78,7 @@ fn core_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
+            tape: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -162,6 +163,7 @@ fn counted_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
+            tape: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -234,6 +236,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
+            tape: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -314,6 +317,7 @@ fn stream_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
+            tape: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -385,6 +389,7 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         .unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
+        tape: None,
         backend,
         optimize,
         debug_lines: false,
@@ -402,7 +407,9 @@ fn finalizer_cancel(backend: Backend, optimize: bool) {
         directories: vec![],
         grant_mask: ["Clock", "Stdout", "Tasks"]
             .into_iter()
-            .fold(0, |mask, kind| mask | 1 << crate::native::grant_kind(kind).unwrap()),
+            .fold(0, |mask, kind| {
+                mask | 1 << crate::native::grant_kind(kind).unwrap()
+            }),
         logical_charge_report: None,
         net_rules: vec![],
         observed: None,
@@ -476,6 +483,7 @@ fn host_operations(backend: Backend) {
             .unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
+            tape: None,
             backend,
             optimize: false,
             debug_lines: false,
@@ -582,6 +590,7 @@ pub fn proof_clone_run() -> u64 {
         .unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let options = NativeOptions {
+        tape: None,
         backend,
         optimize: false,
         debug_lines: false,
@@ -1422,7 +1431,10 @@ fn straight_line_calls_llvm() {
 /// closure environment whose address outlives its statement is never shared (the
 /// corpus case's values).
 fn statement_slot_extents(backend: Backend) {
-    ordered_case(backend, include_str!("../../../core/front/cases/body/statement-slot-extents.hirsel"));
+    ordered_case(
+        backend,
+        include_str!("../../../core/front/cases/body/statement-slot-extents.hirsel"),
+    );
 }
 #[test]
 #[ignore = "explicit native integration target"]

@@ -35,6 +35,7 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-core-ir", Class::Data),
     ("hirsel-core-layout", Class::Data),
     ("hirsel-core-net", Class::Data),
+    ("hirsel-tape-format", Class::Data),
     ("hirsel-core-resolve", Class::Implementation),
     ("hirsel-core-front", Class::Implementation),
     // One instance's module from its identity and its arguments' closures.
@@ -90,6 +91,7 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-core-ir"
                 | "hirsel-core-layout"
                 | "hirsel-core-net"
+                | "hirsel-tape-format"
                 | "hirsel-intern"
                 | "hirsel-guard"
                 | "hirsel-cranelift"

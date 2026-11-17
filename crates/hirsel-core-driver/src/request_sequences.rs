@@ -2053,6 +2053,20 @@ fn request_child() {
     std::io::stderr().write_all(CHILD_MARK.as_bytes()).unwrap();
     crate::request::main(args)
 }
+/// Exercise the real CLI request in the existing process child harness.
+pub(super) fn tape_request(args: &[String], directory: &Path) -> (Option<i32>, String, String) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "native::tests::process::request_child", "--ignored", "--nocapture", "--test-threads=1"])
+        .env("REQUEST_CHILD_ARGS", serde_json::to_string(args).unwrap())
+        .current_dir(directory)
+        .output().unwrap();
+    let after = |bytes: &[u8]| {
+        let text=String::from_utf8_lossy(bytes);
+        let at=text.find(CHILD_MARK).expect("request child started")+CHILD_MARK.len();
+        text[at..].to_owned()
+    };
+    (output.status.code(),after(&output.stdout),after(&output.stderr))
+}
 fn step(command: &'static str, files: &[(&'static str, &'static str, &str)]) -> Step {
     Step {
         command,

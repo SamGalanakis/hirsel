@@ -4,6 +4,9 @@ use std::path::Path;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OptionId {
     Json,
+    Record,
+    Tape,
+    Diagnose,
     SourceCore,
     SourceStd,
     Name,
@@ -63,6 +66,8 @@ commands! {
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
     "build", "build [package-dir] [options]", "Build a native executable from its reachable definitions.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
+    "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
+    "tape", "tape show TAPE", "Print the header and frames stored in a tape.";
     "test", "test [package-dir] --limit BYTES --runtime ARCHIVE [options]", "Run each discovered @test in an independent process.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
@@ -99,6 +104,27 @@ static OPTIONS: &[OptionSpec] = &[
         Some("BYTES"),
         ["sdk"],
         "Place registration allowance; default 16777216 bytes."
+    ),
+    option!(
+        Record,
+        ["--record"],
+        Some("TAPE"),
+        ["run"],
+        "Record all program grants and scheduling to a new tape."
+    ),
+    option!(
+        Tape,
+        ["--tape"],
+        Some("TAPE"),
+        ["replay"],
+        "Replay this tape without host grants."
+    ),
+    option!(
+        Diagnose,
+        ["--diagnose"],
+        None,
+        ["replay"],
+        "Allow a changed revision and report its first divergence; never resume live."
     ),
     option!(
         FmtCheck,
@@ -138,6 +164,7 @@ static OPTIONS: &[OptionSpec] = &[
             "image",
             "build",
             "run",
+            "replay",
             "test",
             "core-product",
             "std-product",
@@ -150,14 +177,14 @@ static OPTIONS: &[OptionSpec] = &[
         SourceCore,
         ["--source-core"],
         None,
-        ["check", "build", "run", "test", "sdk"],
+        ["check", "build", "run", "replay", "test", "sdk"],
         "Check supplied core and std sources."
     ),
     option!(
         SourceStd,
         ["--source-std"],
         None,
-        ["check", "build", "run", "test", "sdk"],
+        ["check", "build", "run", "replay", "test", "sdk"],
         "Check std from source instead of its product."
     ),
     option!(
@@ -171,21 +198,21 @@ static OPTIONS: &[OptionSpec] = &[
         CoreProduct,
         ["--core-product"],
         Some("CACHE"),
-        ["check", "build", "run", "test", "env", "sdk"],
+        ["check", "build", "run", "replay", "test", "env", "sdk"],
         "Select the published package cache; enables products for check."
     ),
     option!(
         Dir,
         ["--dir"],
         Some("PATH"),
-        ["build", "run", "test"],
+        ["build", "run", "replay", "test"],
         "Grant a confined directory. Repeat for more directories."
     ),
     option!(
         Grant,
         ["--grant"],
         Some("KIND"),
-        ["build", "run", "test"],
+        ["build", "run", "replay", "test"],
         "Grant a capability kind; Net requires Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>]. Repeat for more kinds."
     ),
     option!(
@@ -206,21 +233,21 @@ static OPTIONS: &[OptionSpec] = &[
         Release,
         ["--release"],
         None,
-        ["build", "run", "test", "sdk"],
+        ["build", "run", "replay", "test", "sdk"],
         "Optimize native code; defaults to LLVM."
     ),
     option!(
         DebugLines,
         ["--debug-lines"],
         Some("on|off"),
-        ["build", "run", "test", "sdk"],
+        ["build", "run", "replay", "test", "sdk"],
         "Emit native line tables; default off on every profile. Failure positions stay enabled."
     ),
     option!(
         Backend,
         ["--backend"],
         Some("cranelift|llvm"),
-        ["build", "run", "test", "sdk"],
+        ["build", "run", "replay", "test", "sdk"],
         "Select the native engine; dev defaults to Cranelift."
     ),
     option!(
@@ -230,6 +257,7 @@ static OPTIONS: &[OptionSpec] = &[
         [
             "build",
             "run",
+            "replay",
             "test",
             "env",
             "core-product",
@@ -242,14 +270,22 @@ static OPTIONS: &[OptionSpec] = &[
         LogicalChargeReport,
         ["--logical-charge-report"],
         Some("FILE"),
-        ["build", "run", "test"],
+        ["build", "run", "replay", "test"],
         "Instrument root logical reservation; unsuitable for timings."
     ),
     option!(
         Cc,
         ["--cc"],
         Some("PROGRAM"),
-        ["build", "run", "test", "core-product", "std-product", "sdk"],
+        [
+            "build",
+            "run",
+            "replay",
+            "test",
+            "core-product",
+            "std-product",
+            "sdk"
+        ],
         "Select the C linker driver; an install records it for its requests."
     ),
     option!(
@@ -259,6 +295,7 @@ static OPTIONS: &[OptionSpec] = &[
         [
             "build",
             "run",
+            "replay",
             "test",
             "env",
             "core-product",
@@ -271,28 +308,28 @@ static OPTIONS: &[OptionSpec] = &[
         Emulator,
         ["--emulator"],
         Some("FILE"),
-        ["run", "test"],
+        ["run", "replay", "test"],
         "Run through this explicit QEMU user executable."
     ),
     option!(
         Sysroot,
         ["--sysroot"],
         Some("DIR"),
-        ["run", "test"],
+        ["run", "replay", "test"],
         "Use this QEMU runtime sysroot with --emulator."
     ),
     option!(
         Limit,
         ["--limit"],
         Some("BYTES"),
-        ["build", "run", "test", "sdk"],
+        ["build", "run", "replay", "test", "sdk"],
         "Set the root limit; mandatory for test."
     ),
     option!(
         Output,
         ["-o", "--output"],
         Some("PATH"),
-        ["build", "run", "test"],
+        ["build", "run", "replay", "test"],
         "Write the executable, or test executables, here."
     ),
     option!(
@@ -306,7 +343,7 @@ static OPTIONS: &[OptionSpec] = &[
         Libraries,
         ["--libraries"],
         Some("ROOT"),
-        ["check", "image", "build", "run", "test", "sdk"],
+        ["check", "image", "build", "run", "replay", "test", "sdk"],
         "Select a root containing core/ and std/."
     ),
     option!(
@@ -318,6 +355,7 @@ static OPTIONS: &[OptionSpec] = &[
             "image",
             "build",
             "run",
+            "replay",
             "test",
             "core-product",
             "std-product",
@@ -329,7 +367,7 @@ static OPTIONS: &[OptionSpec] = &[
         Inputs,
         ["--inputs"],
         Some("MANIFEST"),
-        ["check", "image", "build", "run", "test", "sdk"],
+        ["check", "image", "build", "run", "replay", "test", "sdk"],
         "Read an explicit CorpusManifest JSON file."
     ),
     option!(
@@ -341,6 +379,7 @@ static OPTIONS: &[OptionSpec] = &[
             "image",
             "build",
             "run",
+            "replay",
             "test",
             "core-product",
             "std-product"
@@ -362,6 +401,7 @@ static OPTIONS: &[OptionSpec] = &[
             "check",
             "build",
             "run",
+            "replay",
             "test",
             "core-product",
             "std-product"
@@ -456,6 +496,13 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             return Err("help takes at most one command".into());
         }
         return Ok(Action::Help(help(target)));
+    }
+    if name == "tape" {
+        match arguments.next().as_deref() {
+            Some("show") => {}
+            Some("--help" | "-h") => return Ok(Action::Help(help(Some(command)))),
+            _ => return Err("expected: tape show TAPE".into()),
+        }
     }
     let mut invocation = Invocation {
         command,

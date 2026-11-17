@@ -23,6 +23,7 @@ pub type Entry = unsafe extern "C" fn(*mut Context, *const Config, *mut MainResu
 /// Host configuration and grant operands, all pinned for the run. Missing
 /// required grants are refused by the named OS entry before calling run (CAP-4).
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Config {
     pub root_limit: u64,
     pub args: *const crate::provider::Buffer,

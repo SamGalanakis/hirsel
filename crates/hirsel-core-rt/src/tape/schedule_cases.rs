@@ -253,6 +253,7 @@ fn encode(header: &Header, frames: &[Frame]) -> Vec<u8> {
 pub(super) fn run() {
     grant_gap_vector();
     outside_cases();
+    overlapping_open();
     for chooser in [0, 1] {
         for pending in [false, true] {
             let recorded = run_case(None, chooser, pending, false);
@@ -317,6 +318,98 @@ pub(super) fn run() {
                 );
             }
         }
+    }
+}
+
+fn overlapping_open() {
+    struct Case {
+        store: Store,
+        mode: Mode,
+        result: Option<(u8, usize, Result<(), Fault>, Result<(), Fault>)>,
+    }
+    unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the caller pins the store and mode until this root returns.
+        unsafe {
+            let case = &mut **input.cast::<*mut Case>();
+            let mut script = Script {
+                waited: BTreeSet::new(),
+                calls: 0,
+                pending: false,
+                gap_case: false,
+            };
+            let (first, _) = Tape::open(
+                REVISION,
+                case.store.dir(),
+                b"first",
+                case.mode,
+                &header(REVISION),
+                &expect(),
+            )
+            .unwrap();
+            let (provider, handle) = first
+                .on_tape(crate::entry::CLOCK, (script.provider(), 0))
+                .unwrap();
+            let (second, _) = Tape::open(
+                REVISION,
+                case.store.dir(),
+                b"second",
+                case.mode,
+                &header(REVISION),
+                &expect(),
+            )
+            .unwrap();
+            let mut r = request(WALL_MS, 0, handle, &[], empty_buffer());
+            let outcome = hirsel_core_host(context, &provider, &mut r);
+            case.result = Some((
+                outcome.status,
+                script.calls,
+                first.end(&ending()),
+                second.end(&ending()),
+            ));
+        }
+        0
+    }
+    let mut case = Case {
+        store: Store::default(),
+        mode: Mode::Record,
+        result: None,
+    };
+    for mode in [Mode::Record, Mode::Replay] {
+        case.mode = mode;
+        let mut context = Context::new(1 << 20);
+        let mut files = crate::host_file::Files::default();
+        context.host_files = &mut files;
+        causes::task_start(&mut context).unwrap();
+        let mut input = &mut case as *mut Case;
+        // SAFETY: the case and its file registry outlive this cooperative run.
+        unsafe {
+            assert_eq!(
+                run_root(
+                    &mut context,
+                    root,
+                    (&mut input as *mut *mut Case).cast(),
+                    ptr::null_mut(),
+                    size_of::<*mut Case>(),
+                    0,
+                    SchedulerProvider::default(),
+                ),
+                0
+            );
+        }
+        let (status, calls, first, second) = case.result.take().unwrap();
+        assert_eq!(status, 1);
+        assert_eq!(calls, 0, "overlap reached the inner provider");
+        assert!(
+            matches!(
+                first,
+                Err(Fault::Diverged(Divergence {
+                    kind: Mismatch::Schedule,
+                    ..
+                }))
+            ),
+            "{first:?}"
+        );
+        assert_eq!(second, Ok(()));
     }
 }
 

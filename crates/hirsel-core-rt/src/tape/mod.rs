@@ -15,7 +15,8 @@
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
 pub mod abi;
-pub mod format;
+pub mod run;
+pub use hirsel_tape_format as format;
 pub(crate) mod schedule;
 #[cfg(test)]
 mod schedule_cases;

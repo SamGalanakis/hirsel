@@ -18,8 +18,8 @@
 /// args_len/get take (context, Args handle [, index]); views remain run-owned.
 /// Stdin/Env/Process have no v1 operations. Net has explicit rule lists and
 /// try-first socket operations over a per-run epoll driver. Tasks authorizes the
-/// source spawn; its FORM row omits the designation. No handle contains an
-/// address or reveals a descriptor to source code.
+/// source spawn; FORM #121 carries that designation through its provider. No
+/// handle contains an address or reveals a descriptor to source code.
 ///
 /// Config.close_grants is the run-owned teardown callback; os_process_free
 /// follows run and all borrowed views, freeing host argv/metadata. MainResult

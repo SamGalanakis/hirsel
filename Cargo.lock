@@ -403,6 +403,7 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-llvm-lazy",
+ "hirsel-tape-format",
  "libc",
  "mimalloc",
  "object",
@@ -529,10 +530,10 @@ dependencies = [
  "hirsel-core-net",
  "hirsel-guard",
  "hirsel-stack",
+ "hirsel-tape-format",
  "libc",
  "libmimalloc-sys",
  "mimalloc",
- "twox-hash",
 ]
 
 [[package]]
@@ -620,6 +621,13 @@ name = "hirsel-stack"
 version = "0.1.0"
 dependencies = [
  "hirsel-guard",
+]
+
+[[package]]
+name = "hirsel-tape-format"
+version = "0.1.0"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]

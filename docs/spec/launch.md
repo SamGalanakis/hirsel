@@ -47,6 +47,9 @@ through every task, describe response and session in that process. An embedded
 or evaluator launch owns its own value for the entire run. Views of it cannot
 outlive that owner. No filesystem lookup occurs when a view is read.
 
+A Run tape captures these metadata fields in its argument snapshot. Replay pins
+the recorded value before main instead of hashing the replay executable.
+
 `Welcome.executable` carries this digest, including an empty digest for
 unavailable identity. Generated bindings record digest, target and `n_place`.
 `Welcome` carries `(principal, q, budget, executable, target, n_place)`, retaining

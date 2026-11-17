@@ -11,6 +11,7 @@ pub mod installation;
 mod product;
 pub mod sdk;
 pub mod sdk_command;
+mod tape_cli;
 pub use product::PackageProduct;
 mod callable_variants;
 #[cfg(test)]
@@ -38,7 +39,8 @@ mod test_run;
 mod tool_inputs;
 pub use core_inventory::{allowlist, core_declarations, core_inventory};
 pub use native::{
-    Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, grant_kind,
+    Backend, BuildProduct, Link, NativeOptions, NativeStop, ObjectProduct, RunTape, RunTapeMode,
+    grant_kind,
 };
 pub use reach::ReachCounters;
 pub use reachability::{GapStop, Reachable};

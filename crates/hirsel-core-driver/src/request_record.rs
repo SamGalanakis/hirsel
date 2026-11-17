@@ -89,6 +89,7 @@ impl Request {
 /// key, and those that do not say why.
 fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
     let NativeOptions {
+        tape,
         backend,
         optimize,
         debug_lines,
@@ -128,6 +129,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
             directories,
             grant_mask,
             net_rules,
+            tape,
             toolchain.image,
             toolchain.environment,
         ))?,

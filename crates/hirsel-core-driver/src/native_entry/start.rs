@@ -77,11 +77,29 @@ pub(super) fn emit(
     let sources = f.address(data.sources);
     let entry = f.object.declare_func_in_func(entry, f.b.func);
     let entry = f.b.ins().func_addr(I64, entry);
-    let status = f.value_call(
-        "hirsel_core_os_run_with_sources",
-        I8,
-        &[config, names, sources, entry],
-    )?;
+    let status = if let Some(tape) = plan.tape {
+        let path = f.string(tape.path.as_bytes())?;
+        let identity = f.string(plan.identity.as_bytes())?;
+        let mode = f.constant(tape.mode as u64);
+        let revision = f
+            .object
+            .declare_data("hirsel_code_revision", Linkage::Import, false, false)
+            .map_err(error)?;
+        let revision = f.address(revision);
+        f.value_call(
+            "hirsel_core_os_run_taped",
+            I8,
+            &[
+                config, names, sources, entry, path, mode, identity, revision,
+            ],
+        )?
+    } else {
+        f.value_call(
+            "hirsel_core_os_run_with_sources",
+            I8,
+            &[config, names, sources, entry],
+        )?
+    };
     f.void_call("free", &[args])?;
     if let Some(path) = &plan.charge_report {
         report::emit(&mut f, path)?;

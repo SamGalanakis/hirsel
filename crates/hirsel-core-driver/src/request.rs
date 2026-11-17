@@ -48,6 +48,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         crate::sdk_command::run(crate::sdk_command::Options::read(invocation)?)?;
         std::process::exit(0);
     }
+    if command == "tape" {
+        let path = invocation
+            .positional
+            .as_deref()
+            .ok_or("tape show requires a tape file")?;
+        crate::tape_cli::show(Path::new(path))?;
+        std::process::exit(0);
+    }
+    let replay_command = command == "replay";
     if command == "new" {
         let directory = invocation
             .positional
@@ -105,7 +114,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut product_name = None;
     let mut entry = None;
     let test_command = command == "test";
-    let native_command = command == "build" || command == "run" || test_command;
+    let native_command = command == "build" || command == "run" || replay_command || test_command;
     let mut test_filter = None;
     let mut test_timeout = None;
     let mut explicit_limit = false;
@@ -128,6 +137,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let pinned =
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
     let run_args = invocation.arguments;
+    let mut run_tape = None;
+    let mut diagnose = false;
     let mut directories = Vec::new();
     let mut grant_mask = 0;
     let mut net_rules = Vec::new();
@@ -137,6 +148,19 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         let value = value.unwrap_or_default();
         match option {
             Opt::Json => json = true,
+            Opt::Record => {
+                run_tape = Some(crate::RunTape {
+                    path: value,
+                    mode: crate::RunTapeMode::Record,
+                })
+            }
+            Opt::Tape => {
+                run_tape = Some(crate::RunTape {
+                    path: value,
+                    mode: crate::RunTapeMode::Replay,
+                })
+            }
+            Opt::Diagnose => diagnose = true,
             Opt::Install => install_root = Some(PathBuf::from(value)),
             Opt::SourceCore => source_core = true,
             Opt::SourceStd => source_std = true,
@@ -224,6 +248,31 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::NPlace => {
                 unreachable!("CLI early command option")
             }
+        }
+    }
+    if replay_command {
+        if !directories.is_empty() || grant_mask != 0 {
+            return Err("replay takes no host grants".into());
+        }
+        let tape = run_tape.as_mut().ok_or("replay requires --tape TAPE")?;
+        if diagnose {
+            tape.mode = crate::RunTapeMode::Diagnose;
+        }
+        let header = crate::tape_cli::header(Path::new(&tape.path))?;
+        if !explicit_limit {
+            root_limit = header.limit;
+        }
+        if !run_args.is_empty() {
+            return Err("replay takes its arguments from the tape".into());
+        }
+    }
+    if let Some(tape) = &mut run_tape {
+        if !Path::new(&tape.path).is_absolute() {
+            tape.path = std::env::current_dir()?
+                .join(&tape.path)
+                .to_str()
+                .ok_or("tape path is not UTF-8")?
+                .to_owned();
         }
     }
     let runner = match (emulator, sysroot) {
@@ -456,6 +505,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             options.grant_mask = grant_mask;
             options.net_rules = net_rules;
             options.logical_charge_report = logical_charge_report;
+            options.tape = run_tape;
             Ok(options)
         };
         Some(prepare())
@@ -821,7 +871,7 @@ fn finish(
         if let Some(stop) = &output.stopped {
             eprintln!("{stop}");
         }
-        if command != "run" {
+        if command != "run" && command != "replay" {
             println!(
                 "{}: {} files, {} checked definitions",
                 if output.accepted {
@@ -834,7 +884,7 @@ fn finish(
             );
         }
     }
-    let run_exit = if command == "run" {
+    let run_exit = if command == "run" || command == "replay" {
         if let Some(native) = &output.native {
             let path = std::fs::canonicalize(&native.executable)?;
             Some(

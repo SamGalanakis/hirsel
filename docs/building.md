@@ -72,6 +72,29 @@ install; `--cc PROGRAM` selects another. `--target aarch64-unknown-linux-gnu` bu
 for AArch64; `run` and `test` then need `--emulator QEMU` and `--sysroot DIR` for the
 AArch64 runtime libraries.
 
+## Record and replay
+
+`hirsel run app --record session.tape [grants] [-- arguments...]` records
+provider operations and task scheduling in a new tape. The tape path must not
+already exist. A main that takes Process cannot be recorded.
+
+```sh
+hirsel run app --record session.tape --dir inputs --grant Stdout -- input.json
+hirsel replay app --tape session.tape
+hirsel tape show session.tape
+hirsel replay app --tape session.tape --diagnose
+```
+
+Replay takes its arguments and default root limit from the tape and accepts no
+host grants. It reproduces reads, writes and scheduling without repeating the
+recorded host effects. Normal replay refuses a changed code revision before
+running the program. `--diagnose` allows a different revision, labels it, and
+reports the first divergent request at its source position. It always replays
+and never continues with live effects.
+
+`tape show` reads the header and stored frames without building a program. Tape
+frames contain no source sites; source positions appear in diagnose replay.
+
 ## Run tests
 
 ```sh

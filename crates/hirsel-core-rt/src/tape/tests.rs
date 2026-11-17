@@ -1077,6 +1077,7 @@ fn a_dropped_tape_keeps_its_frames_and_has_no_end() {
 /// recorded answer (value, error, written, carrier bytes) is lost.
 #[test]
 fn every_s1_kind_recorded_on_the_os_replays_with_no_host() {
+    super::run::check_launch_replay();
     let root = std::env::temp_dir().join(format!("hirsel-tape-{}", std::process::id()));
     let (world_dir, store_dir) = (root.join("world"), root.join("store"));
     std::fs::create_dir_all(&world_dir).unwrap();

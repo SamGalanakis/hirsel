@@ -182,9 +182,9 @@ operations it names; nothing else about them may be inferred from an implementat
   unspecified order. A heap compares with `<` on an `ordered` type, which never fails, so
   only `sort_stable` calls a caller's comparator. Both are core Hirsel code over private
   bodiless functions, as `Map` is; no library module provides a deque or a heap.
-- **Maps.** `map.insert` returns its key and value with `Capacity`, as `(Capacity, (K, V))`. `map.set(mut m, k, take
-  v)` returns `Ok(old)` when `k` is present, after installing `v` in place, and `Error(v)`
-  when it is absent; it copies no key and admits nothing. `map.update(mut m, k, f)`, where
+- **Maps.** `map.insert` inserts an absent key or replaces a present key's value, and is the
+  only operation that writes a whole value; it returns its key and value with `Capacity`, as
+  `(Capacity, (K, V))`, and a present key admits nothing. `map.update(mut m, k, f)`, where
   `f: scoped fn(mut V) -> R`, runs `f` once on the value of `k` in place and returns
   `Some(r)`, or returns `None` without calling `f` when `k` is absent; it makes one lookup,
   never inserts and admits nothing. `m` is lent to `update` for the call, so `f` cannot
@@ -192,7 +192,7 @@ operations it names; nothing else about them may be inferred from an implementat
   one call: a tally is `update`, then `insert` when it returns `None`, so a present key
   costs one lookup and no owned key. `map.remove` drops the stored key
   and returns the value. `map.reserve(mut m, n)` makes room for `n` absent keys: after it
-  returns `Ok`, the next `n` insertions admit nothing, whatever removals, sets and updates
+  returns `Ok`, the next `n` insertions admit nothing, whatever removals, replacements and updates
   come between. It grows by [MEM-24](budgets.md#mem-24-logical-charges) from a need of
   `len + n`, admits nothing when the capacity already holds `len + n` (it drops removed
   entries in place), and on `Capacity` leaves `m` unchanged. A `Map` is cleaned entry by entry in insertion order, each key

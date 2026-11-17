@@ -68,13 +68,6 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
     Ok(())
 }
 
-pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V] {
-    match find(m, k, hash(k)) {
-        Some(i) => Ok(swap_value(mut m, i, take v)),
-        None => Error(take v)
-    }
-}
-
 pub fn update[K: key, V, R](mut m: Map[K, V], k: K, f: scoped fn(mut V) -> R) -> Option[R] {
     match find(m, k, hash(k)) {
         Some(i) => Some(with_value(mut m, i, f)),
@@ -90,7 +83,7 @@ pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V] {
 }
 
 // Room for n more absent keys: afterwards the next n insertions admit nothing, whatever
-// removals, sets and updates come between. Growth follows MEM-24 from needed = len + n;
+// removals, replacements and updates come between. Growth follows MEM-24 from needed = len + n;
 // when the capacity already holds len + n but removed entries fill the slots, it compacts
 // in place and admits nothing. On Capacity the map is unchanged.
 pub fn reserve[K: key, V](mut m: Map[K, V], n: u64) -> Result[(), Capacity] {

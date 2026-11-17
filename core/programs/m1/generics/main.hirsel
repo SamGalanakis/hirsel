@@ -50,7 +50,9 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
         if n == 0 {
             m1.support.insert(mut counts, m1.support.mem(string.from(w))?, 1)?
         } else {
-            let _ = map.set(mut counts, w, n + 1)
+            let _ = map.update(mut counts, w, fn(mut v: u64) {
+                v += 1
+            })
         }
     }
     let mut rendered = string.new()

@@ -269,7 +269,6 @@ core@1/map/regrow
 core@1/map/reindex
 core@1/map/remove
 core@1/map/reserve
-core@1/map/set
 core@1/map/slot_hash
 core@1/map/slot_key
 core@1/map/slot_live

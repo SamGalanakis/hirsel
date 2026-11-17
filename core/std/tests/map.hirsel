@@ -57,6 +57,42 @@ fn reinsert_order() -> u64 {
     n
 }
 
+// insert's law: an absent key appends and a present key replaces its value in place,
+// admitting nothing. The map is made inside a limit of exactly 4 entries of Map[u64, u64]
+// storage (4 x 32 = 128 bytes, MEM-24), and keys 1..4 fill that capacity. Replacing key 3
+// then succeeds, while absent key 5 needs growth and is refused, handing back (5, 55) with
+// the map unchanged. Order 1234, values 1 + 2 + 33 + 4 = 40.
+// expect: run insert_upsert() = 1234040
+fn insert_upsert() -> u64 {
+    let r = bound bytes 128 {
+        let mut m: Map[u64, u64] = map.new()
+        for i in 1u64 .. 5 {
+            match map.insert(mut m, i, i) {
+                Ok(()) => {}
+                Error(_) => return 1
+            }
+        }
+        match map.insert(mut m, 3, 33) {
+            Ok(()) => {}
+            Error(_) => return 2
+        }
+        match map.insert(mut m, 5, 55) {
+            Error((_, (k, v))) => if k != 5 || v != 55 || map.len(m) != 4 {
+                return 3
+            },
+            Ok(()) => return 4
+        }
+        let mut order: u64 = 0
+        let mut sum: u64 = 0
+        for (k, v) in m {
+            order = order * 10 + k
+            sum += v
+        }
+        order * 1000 + sum
+    }
+    result.unwrap(r)
+}
+
 // Remove a prefix, then iterate exactly the live suffix in original order.
 // expect: run remove_churn() = 3
 fn remove_churn() -> u64 {

@@ -1,2 +1,2 @@
-fn bad(mut x: Map[u64, u64]) { let _ = isolate(fn() -> u64 { let _ = map.set(mut x, 1u64, 3u64); fail("x") }); }
+fn bad(mut x: Map[u64, u64]) { let _ = isolate(fn() -> u64 { let _ = map.insert(mut x, 1u64, 3u64); fail("x") }); }
 // expect: refuse FAIL-16 at 1:48

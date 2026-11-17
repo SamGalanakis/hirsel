@@ -1,10 +1,10 @@
 // Map contracts: insertion-order storage, linear probing, replacement, removal,
 // regrow/index rebuild, String keys, and unchanged Capacity handback.
 // expect: run get_after_insert() = 70
-// expect: run replace() = 70088
+// expect: run replace() = 1088
 // expect: run remove_reinsert() = 7131711
 // expect: run growth() = 93680
-// expect: run strings() = 7911
+// expect: run strings() = 911
 // expect: run handback() = 711
 // expect: run refused_growth() = 4040
 // expect: run unit_entries() = 17
@@ -21,10 +21,10 @@ fn get_after_insert() -> u64 {
 fn replace() -> u64 {
     let mut m: Map[u64, u64] = map.new()
     result.unwrap(map.insert(mut m, 7, 70))
-    let old = result.unwrap(map.set(mut m, 7, 99))
+    result.unwrap(map.insert(mut m, 7, 99))
     result.unwrap(map.insert(mut m, 7, 88))
     match map.get(m, 7) {
-        Some(v) => old * 1000 + v,
+        Some(v) => map.len(m) * 1000 + v,
         None => 0
     }
 }
@@ -77,14 +77,14 @@ fn strings() -> u64 {
     result.unwrap(string.push(mut key, "route"))
     result.unwrap(map.insert(mut m, take key, 7))
     result.unwrap(map.insert(mut m, "other", 11))
-    let old = result.unwrap(map.set(mut m, "route", 9))
+    result.unwrap(map.insert(mut m, "route", 9))
     let removed = option.unwrap(map.remove(mut m, "route"))
     let other: u64 = match map.get(m, "other") {
         Some(v) => v,
         None => 0
     }
     if map.len(m) == 1 {
-        old * 1000 + removed * 100 + other
+        removed * 100 + other
     } else {
         0
     }

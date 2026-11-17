@@ -572,7 +572,7 @@ Indexing reads and assigns as [SEM-4](semantics.md#sem-4-lists),
 say. No other type is indexable: an index or index assignment on `String`, `Text`, `Map`,
 `SeqSpan`, `IndexedSpan` or any user type is refused here, at the index expression. A
 string is read through `string.as_bytes` or `string.next_scalar`, and a map through
-`map.get`, `map.set` and `map.insert`, whose results say what a missing key does.
+`map.get` and `map.insert`, whose results say what a missing key does.
 
 A **literal operand** is an unsuffixed number, or a unary `-` or `~`, a binary operator or
 parentheses applied only to literal operands; it synthesises no type. It is evaluated when
@@ -599,5 +599,5 @@ fn f(x: u8, y: u16) -> u16 { x + y }                      // refused: LANG-21, m
 ```hirsel
 fn first(s: String) -> u8 { s[0] }          // refused: LANG-21, use string.as_bytes or string.next_scalar
 fn find(m: Map[u64, u64]) -> u64 { m[0] }   // refused: LANG-21, use map.get(m, 0)
-fn put(mut m: Map[u64, u64]) { m[0] = 1 }   // refused: LANG-21, use map.set or map.insert
+fn put(mut m: Map[u64, u64]) { m[0] = 1 }   // refused: LANG-21, use map.insert
 ```

@@ -34,10 +34,9 @@ remains awkward, most useful first:
    A function that returns plain `Result[_, Capacity]` keeps bare `?` with
    `result.capacity_only`, so the useful shape is small helpers returning `Capacity` and one
    conversion at their caller.
-2. **generics tally.** `map.get_or` then `map.set` costs two hash probes per repeated word,
+2. **generics tally.** `map.get_or` then `map.update` costs two hash probes per repeated word,
    where the side list it replaces cost one probe and an O(1) `list.set`. Either allocates
-   nothing on a repeat. The tally uses `map.set`, as asked; the side list stays the faster
-   shape if the measurement cares.
+   nothing on a repeat; the side list stays the faster shape if the measurement cares.
 
 ## Shared by all nine (the driver protocol)
 
@@ -112,8 +111,8 @@ list are released in reverse order.
 - `list.with_capacity`, `list.push`, `list.len`, `list.get`
 - `string.from` (was `string.copy`), `string.push`, `string.byte_len`
 - Tally: a `Map[String, u64]`. A new word is `map.insert(mut m, string.from(w)?, 1)`; a repeat is
-  `let n = map.get_or(m, w, 0)` then `map.set(mut m, w, n + 1)`, which takes no key and admits
-  nothing. Insertion order is the map's own, so the output walks `for (k, n) in m` (SEM-6). This
+  `let n = map.get_or(m, w, 0)` then `map.update(mut m, w, fn(mut v: u64) { v += 1 })`, which
+  takes no key and admits nothing. Insertion order is the map's own, so the output walks `for (k, n) in m` (SEM-6). This
   replaces the side `List[u64]` of counts revision 2 needed; cost in item 3 above.
 
 ## json

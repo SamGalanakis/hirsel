@@ -65,7 +65,7 @@ fn seed() -> Map[String, String] {
 fn strings() -> bool {
     let m = seed()
     let mut duplicated: Map[String, String] = result.unwrap(clone(m))
-    let _ = result.unwrap(map.set(mut duplicated, "a", result.unwrap(string.from("new"))))
+    result.unwrap(map.insert(mut duplicated, "a", result.unwrap(string.from("new"))))
     let _ = map.remove(mut duplicated, "b")
     option.unwrap(map.get(m, "a")) == "one" && option.unwrap(map.get(m, "b")) == "two" && option.unwrap(map.get(duplicated, "a")) == "new" && map.len(duplicated) == 1
 }

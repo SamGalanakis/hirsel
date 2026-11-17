@@ -281,7 +281,6 @@ operations! {
     ("map", "len", Lane::Value, "A", "core-check-callables-913", false),
     ("map", "get", Lane::Value, "C", "core-check-callables-913", false),
     ("map", "insert", Lane::Value, "C", "core-check-callables-913", false),
-    ("map", "set", Lane::Value, "C", "core-check-callables-913", false),
     ("map", "remove", Lane::Value, "C", "core-check-callables-913", false),
     ("map", "update", Lane::Value, "C", "core-collections-918", false),
     ("map", "reserve", Lane::Value, "C", "std-seed-api-889", false),

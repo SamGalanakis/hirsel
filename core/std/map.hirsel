@@ -1,5 +1,5 @@
 // Module `map`, extended (LANG-7): library members of the core module `map` (SEM-5). The
-// core members (new, len, get, insert, set, remove) are declared in core/core/map.hirsel.
+// core members (new, len, get, insert, update, remove, reserve) are declared in core/core/map.hirsel.
 // Field legend: API.md, "Reading a contract"; layout, tombstones and compaction: api/map.md and api/set.md.
 //
 // Representation: 24-byte header inline; one storage block of capacity x (size(K) +
@@ -10,8 +10,9 @@
 // binds `(View[K], View[V])` for each live entry in insertion order (SEM-6) and FREEZES m.
 //
 // Core map.update lends a present value to a scoped callback after one lookup;
-// a tally uses update, then inserts only on None. map.set replaces a whole value
-// without allocating. Neither operation moves a present key or changes its order.
+// a tally uses update, then inserts only on None. map.insert inserts an absent key, or
+// replaces a present key's value without allocating. Neither moves a present key or
+// changes its order.
 /// Whether k is present: `map.get(m, k) != None`. Cost: as get. Ex: `map.contains(seen, k)`
 pub fn contains[K: key, V](m: Map[K, V], k: K) -> bool {
     match map.get(m, k) {
@@ -21,7 +22,7 @@ pub fn contains[K: key, V](m: Map[K, V], k: K) -> bool {
 }
 
 /// k's value copied out, or x when absent. Cost: as get.
-/// Ex: `let n = map.get_or(counts, w, 0); let _ = map.set(mut counts, w, n + 1)`
+/// Ex: `let n = map.get_or(counts, w, 0)`
 pub fn get_or[K: key, V: plain](m: Map[K, V], k: K, x: V) -> V {
     match map.get(m, k) {
         Some(v) => v,

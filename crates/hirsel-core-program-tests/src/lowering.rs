@@ -480,14 +480,9 @@ fn list_index_iteration_and_failure_cleanup() {
             eval::Outcome::Returned(vec![11]),
         ),
         (
-            "fn f(mut xs:Map[u64,u64])->u64 { let old=result.unwrap(map.set(mut xs,7,99)); match map.get(xs,7) {Some(v)=>old*1000+v,None=>0} }",
+            "fn f(mut xs:Map[u64,u64])->u64 { result.unwrap(map.insert(mut xs,7,99)); match map.get(xs,7) {Some(v)=>map.len(xs)*1000+v,None=>0} }",
             false,
-            eval::Outcome::Returned(vec![70099]),
-        ),
-        (
-            "fn f(mut xs:Map[u64,u64])->u64 { let returned:u64=match map.set(mut xs,2,99) {Ok(_)=>0,Error(v)=>v};returned*10+map.len(xs) }",
-            false,
-            eval::Outcome::Returned(vec![992]),
+            eval::Outcome::Returned(vec![2099]),
         ),
         (
             "fn f(mut xs:Map[u64,u64])->u64 { let old=option.unwrap(map.remove(mut xs,7)); old*100+map.len(xs) }",

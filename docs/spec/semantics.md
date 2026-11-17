@@ -96,7 +96,7 @@ a key's size, and from cleaning what they drop; removal keeps the order of the r
 Inserting an existing key installs the new value in place, keeps the stored key, cleans
 the old value and then drops the incoming key; it admits nothing, so it never returns
 `Capacity`. `map.get(m, k)` returns `Option[View[V]] in m`
-([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). `map.set` replaces the value of a present key and never inserts ([core](core.md)). Each `key`
+([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). Each `key`
 type has exactly one equality, the structural one of SEM-7, and one hash, fixed by the type;
 no program supplies or replaces them in v1 ([reserved](reserved.md), R11). The hash is keyed
 by a per-run seed that enters at the replay point

@@ -1662,6 +1662,10 @@ impl FunctionEmitter<'_> {
                     align: 1,
                     range: self.seq_word_range(address),
                     scopes: self.access_facts(&[address]),
+                    tbaa: self
+                        .facts
+                        .then(|| alias::writer_state_memory(self.module, self.body, address))
+                        .flatten(),
                     ..Memory::default()
                 };
                 let x = self.load_with(&ty(self.vty(result)), &p, &memory);
@@ -1673,6 +1677,10 @@ impl FunctionEmitter<'_> {
                 let memory = Memory {
                     align: 1,
                     scopes: self.access_facts(&[address]),
+                    tbaa: self
+                        .facts
+                        .then(|| alias::writer_state_memory(self.module, self.body, address))
+                        .flatten(),
                     ..Memory::default()
                 };
                 self.store_with(&ty(self.vty(value)), &x, &p, &memory);

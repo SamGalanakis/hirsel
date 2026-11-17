@@ -62,6 +62,69 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => Shape::Other,
         }
     }
+    fn writer_state_type(&mut self, words: u64) -> TypeId {
+        let which = usize::from(words == 6);
+        let names = [
+            hirsel_core_ir::WRITER_STATE_SHAPE,
+            hirsel_core_ir::WRITER_DEST_STATE_SHAPE,
+        ];
+        let (row, _) = crate::layout::intern_shape(
+            &mut self.e.module.types,
+            &mut self.e.types,
+            hirsel_core_layout::Shape {
+                name: names[which].into(),
+                repr: hirsel_core_layout::Repr::Scoped,
+                carried: hirsel_core_layout::Carried::Address,
+                body: hirsel_core_layout::Body::Record(
+                    (0..words)
+                        .map(|i| hirsel_core_layout::Field {
+                            name: format!("w{i}"),
+                            ty: hirsel_core_layout::FieldTy::Scalar(Scalar::U64),
+                        })
+                        .collect(),
+                ),
+                finalizer: None,
+                clone: None,
+                codec: None,
+                grant: 0,
+                held: None,
+            },
+        );
+        TypeId(row.0)
+    }
+    fn writer_state_slot(&mut self, words: u64, n: NodeId) -> AddressId {
+        let row = self.writer_state_type(words);
+        self.new_slot(PlaceTy::Declared(row), n)
+    }
+    fn writer_state_address(
+        &mut self,
+        pointer: ValueId,
+        offset: u64,
+        t: Ty,
+        n: NodeId,
+    ) -> Option<AddressId> {
+        let row = self.writer_state_type(if offset >= 40 { 6 } else { 5 });
+        let root = self.address(AddressBase::Value(pointer), &[], PlaceTy::Declared(row), n);
+        let offset = self.u64k(offset, n)?;
+        Some(self.address(
+            AddressBase::Address(root),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(t),
+            n,
+        ))
+    }
+    fn store_state_word(
+        &mut self,
+        state: ValueId,
+        offset: u64,
+        value: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let at = self.writer_state_address(state, offset, self.b.values[value.index()], n)?;
+        self.inst(Inst::Store { address: at, value }, n);
+        Some(())
+    }
+
     fn words(&mut self, k: u64, n: NodeId) -> Option<AddressId> {
         let ty = self.t.mk(TyKind::Array(scalar(Scalar::U64), k));
         let id = self.place_row(ty, "a built-in operand without a place is not built", n)?;
@@ -110,7 +173,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.konst(Ty::Scalar(Scalar::U64), k, n)
     }
     fn state_word(&mut self, state: ValueId, offset: u64, t: Ty, n: NodeId) -> Option<ValueId> {
-        self.get_word(AddressBase::Value(state), offset, t, n)
+        let at = self.writer_state_address(state, offset, t, n)?;
+        Some(self.read_bits(at, t, n))
     }
 
     /// Reserve `k` bytes at the build's next byte: their offset, or a jump to `over`
@@ -153,7 +217,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let fits = self.new_block(&[]);
         self.branch(valid, fits, over, n);
         self.start(fits);
-        self.put_word(AddressBase::Value(state), &[], 8, next, n)?;
+        self.store_state_word(state, 8, next, n)?;
         Some(used)
     }
 
@@ -316,7 +380,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(over) = sinks.over {
             self.start(over);
             let k = self.u64k(1, n)?;
-            self.put_word(AddressBase::Value(state), &[], 32, k, n)?;
+            self.store_state_word(state, 32, k, n)?;
             let e = self.error_place(to, eid, n);
             self.inst(
                 Inst::SetCase {
@@ -331,7 +395,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.start(failed);
             let from = self.block_params(failed)[0];
             let k = self.u64k(1, n)?;
-            self.put_word(AddressBase::Value(state), &[], 32, k, n)?;
+            self.store_state_word(state, 32, k, n)?;
             let e = self.error_place(to, eid, n);
             self.copy_to(e, from, eid, n);
             self.jump(join, &[], n);
@@ -1116,7 +1180,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let head = self.u64k(HEAD, n)?;
         self.put_word(AddressBase::Value(blob), &[], 0, bytes, n)?;
         self.put_word(AddressBase::Value(blob), &[], 8, wv, n)?;
-        let s = self.words(5, n)?;
+        let s = self.writer_state_slot(5, n);
         let end = self.add(bytes, head, n);
         let zero = self.u64k(0, n)?;
         self.put_word(AddressBase::Address(s), &[], 0, blob, n)?;
@@ -1685,7 +1749,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let wv = self.u64k(w, n)?;
         let head = self.u64k(HEAD, n)?;
         let zero = self.u64k(0, n)?;
-        let s = self.words(6, n)?;
+        let s = self.writer_state_slot(6, n);
         for (i, v) in [blob, head, end, wv, zero, id].into_iter().enumerate() {
             self.put_word(AddressBase::Address(s), &[], 8 * i as u64, v, n)?;
         }

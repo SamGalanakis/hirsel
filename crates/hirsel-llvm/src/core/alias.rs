@@ -168,6 +168,30 @@ impl FunctionEmitter<'_> {
 // memory effects; no claim is made about a runtime call's access to Context.
 const STEP_ACCESS: usize = 5;
 const PROGRAM_ACCESS: usize = 6;
+const WRITER_STATE_ACCESS: usize = 8;
+pub(super) fn writer_state_memory(
+    module: &Module,
+    body: &hirsel_core_ir::Body,
+    mut address: AddressId,
+) -> Option<usize> {
+    let private = |place| {
+        matches!(place, PlaceTy::Declared(t) if matches!(module.types[t.index()].name.as_str(),
+        hirsel_core_ir::WRITER_STATE_SHAPE | hirsel_core_ir::WRITER_DEST_STATE_SHAPE))
+    };
+    loop {
+        let at = &body.addresses[address.index()];
+        if private(at.ty) {
+            return Some(WRITER_STATE_ACCESS);
+        }
+        match at.base {
+            AddressBase::Address(parent) => address = parent,
+            AddressBase::Slot(slot) => {
+                return private(body.slots[slot.index()]).then_some(WRITER_STATE_ACCESS);
+            }
+            AddressBase::Value(_) => return None,
+        }
+    }
+}
 pub(super) fn private_steps(sink: &mut dyn Sink) -> usize {
     for (id, items) in [
         (
@@ -191,6 +215,18 @@ pub(super) fn private_steps(sink: &mut dyn Sink) -> usize {
             ],
         ),
         (
+            7,
+            vec![
+                MdItem::String("writer state".into()),
+                MdItem::Node(2),
+                MdItem::I64(0),
+            ],
+        ),
+        (
+            WRITER_STATE_ACCESS,
+            vec![MdItem::Node(7), MdItem::Node(7), MdItem::I64(0)],
+        ),
+        (
             STEP_ACCESS,
             vec![MdItem::Node(3), MdItem::Node(3), MdItem::I64(0)],
         ),
@@ -207,7 +243,7 @@ pub(super) fn private_steps(sink: &mut dyn Sink) -> usize {
             },
         );
     }
-    7
+    9
 }
 pub(super) fn program_memory(memory: &Memory, facts: bool) -> Memory {
     let mut memory = memory.clone();

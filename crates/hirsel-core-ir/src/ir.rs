@@ -1563,6 +1563,11 @@ pub struct Static {
     pub bytes: Vec<u8>,
 }
 
+/// Compiler-owned writer bookkeeping, never reachable as source payload storage.
+pub const WRITER_STATE_SHAPE: &str = "$hirsel.writer.state";
+/// The same bookkeeping with the destination identity in its sixth word.
+pub const WRITER_DEST_STATE_SHAPE: &str = "$hirsel.writer.destination-state";
+
 /// One unit of emission.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Module {

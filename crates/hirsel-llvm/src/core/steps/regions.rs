@@ -103,8 +103,16 @@ pub(crate) fn plans(
             || nodes.len() > 64
             || nodes
                 .iter()
-                .map(|&b| body.blocks[b].insts.len as usize)
-                .sum::<usize>()
+                .flat_map(|&b| body.blocks[b].insts.get(&body.insts).unwrap())
+                // A typed identity root emits no pointer arithmetic. Carrying
+                // its memory domain must not price out an effect region.
+                .filter(|inst| {
+                    !matches!(inst, Inst::Address { address, .. }
+                    if body.addresses[address.index()].steps.len == 0
+                        && matches!(body.addresses[address.index()].base, AddressBase::Value(_))
+                        && alias::writer_state_memory(module, body, *address).is_some())
+                })
+                .count()
                 > 512
         {
             continue;

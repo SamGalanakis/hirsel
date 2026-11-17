@@ -273,7 +273,7 @@ impl<'context> Module<'context> {
                 hirsel_llvm_promote_step_window(self.raw);
                 hirsel_llvm_scalarize_aggregate_phis(self.raw, self.context.raw);
                 let cleanup = c_string(
-                    "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,simplifycfg,dse)",
+                    "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,gvn,simplifycfg,dse)",
                 );
                 error = LLVMRunPasses(self.raw, cleanup.as_ptr(), machine.raw, options);
             }

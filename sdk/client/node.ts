@@ -8,38 +8,30 @@ export class NodeStorage implements Storage {
   constructor(private directory: string) {}
   async lock(name: string, wait: boolean): Promise<Lease | null> {
     await mkdir(this.directory, {recursive: true, mode: 0o700});
-    // Node has no flock syscall API. util-linux flock owns the descriptor;
-    // its child exits on stdin EOF, including when this Node process dies.
-    const child = spawn('flock', [...(wait ? [] : ['-n']), '-E', '75', join(this.directory, name === 'install' ? 'lock' : name + '.lock'),
-      process.execPath, '--input-type=module', '-e', 'process.stdout.write("locked\\n");process.stdin.resume();'], {stdio: ['pipe', 'pipe', 'pipe']});
-    let released = false;
-    let ended!: () => void;
-    const lost = new Promise<void>(resolve => { ended = resolve; });
-    const exit = new Promise<void>(resolve => child.once('close', () => { ended(); resolve(); }));
-    return new Promise<Lease | null>((resolve, reject) => {
-      let acquired = false, diagnostic = '', output = '';
-      child.stderr.setEncoding('utf8');
-      child.stderr.on('data', chunk => { diagnostic = (diagnostic + chunk).slice(-4096); });
-      child.stdout.setEncoding('utf8');
-      child.stdout.on('data', chunk => {
-        output += chunk;
-        if (!acquired && output.includes('locked\n')) {
-          acquired = true;
-          resolve({lost, release: async () => {
-            if (!released) { released = true; child.stdin.end(); }
-            await exit;
-          }});
-        }
+    // flock(2) locks an open file description. The helper inherits a dup of
+    // Node's descriptor, acquires the lock, and exits. Node keeps the same
+    // description open for the entire lease, including after helper exit.
+    const file = await open(join(this.directory, name === 'install' ? 'lock' : name + '.lock'), 'a', 0o600);
+    let diagnostic = '';
+    try {
+      const code = await new Promise<number | null>((resolve, reject) => {
+        const child = spawn('flock', [...(wait ? [] : ['-n']), '-E', '75', '3'], {stdio: ['ignore', 'ignore', 'pipe', file.fd]});
+        child.stderr!.setEncoding('utf8');
+        child.stderr!.on('data', chunk => { diagnostic = (diagnostic + chunk).slice(-4096); });
+        child.once('error', reject); child.once('close', resolve);
       });
-      child.stdin.on('error', () => {});
-      child.once('error', reject);
-      child.once('close', code => {
-        if (!acquired) {
-          if (!wait && code === 75) resolve(null);
-          else reject(new Error(`flock failed (${code}): ${diagnostic}`));
-        }
-      });
-    });
+      if (code !== 0) {
+        await file.close();
+        if (!wait && code === 75) return null;
+        throw new Error(`flock failed (${code}): ${diagnostic}`);
+      }
+    } catch (error) { await file.close(); throw error; }
+    let released = false, end!: () => void;
+    const lost = new Promise<void>(resolve => { end = resolve; });
+    return {lost, release: async () => {
+      if (released) return;
+      released = true; await file.close(); end();
+    }};
   }
   async read(): Promise<Installation | null> {
     try { return decodeState(await readFile(join(this.directory, 'state.json'), 'utf8')); }

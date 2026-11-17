@@ -595,7 +595,11 @@ fn cover_rows(s: store.Snapshot, c: Cover, sub: u32, mut out: List[Row]) -> Resu
 }
 
 // G3: the query runs at the base, and its whole result goes in one owe naming it complete.
-fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) -> Owe {
+fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, take key: Bytes, take arg: Bytes) -> Owe {
+    at_base_generation(mut b, who, sub, 0u64, take key, take arg)
+}
+
+fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) -> Owe {
     if let Some(i) = find(b.subs, who, sub) {
         let _ = list.remove(mut b.subs, i)
     }
@@ -1302,7 +1306,7 @@ fn publish_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[J
     if let Some(i) = joiner(joined, who) {
         unend(mut joined[i].ended, sub)
         let mut owes: List[Owe] = list.new()
-        result.unwrap(list.push(mut owes, at_base(mut b, who, sub, generation, take key, take arg)))
+        result.unwrap(list.push(mut owes, at_base_generation(mut b, who, sub, generation, take key, take arg)))
         deliver(mut b, mut joined, take owes)
     }
 }
@@ -2175,7 +2179,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     // round. Its result is the base's (row0 = 0), labelled with the base.
     set(mut db, t, 1u64, 1u64)
     b.newest = Some(store.snapshot(db))
-    let first = at_base(mut b, 0u64, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())
+    let first = at_base(mut b, 0u64, 1u32, result.unwrap(clone(k1)), no_arg())
     if first.version != 4u64 || list.len(first.complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
         return false
     }
@@ -2184,10 +2188,10 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     }
     // shared_cache: session 1 subscribes Q1 with the same sub id; session 0 subscribes Qf.
     // Then row1 = 5 is a cover change for both Q1s and a re-run for Qf.
-    if !apply(mut cl, at_base(mut b, 1u64, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8)) {
+    if !apply(mut cl, at_base(mut b, 1u64, 1u32, result.unwrap(clone(k1)), no_arg())) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8)) {
         return false
     }
-    if !apply(mut cl, at_base(mut b, 0u64, 2u32, 0u64, result.unwrap(clone(kf)), no_arg())) || !holds(cl, keys, 0u64, 2u32, None, Some(0u8)) {
+    if !apply(mut cl, at_base(mut b, 0u64, 2u32, result.unwrap(clone(kf)), no_arg())) || !holds(cl, keys, 0u64, 2u32, None, Some(0u8)) {
         return false
     }
     set(mut db, t, 2u64, 5u64)
@@ -2200,7 +2204,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, None, None) || !holds(cl, keys, 1u64, 1u32, None, None) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) {
         return false
     }
-    let empty_result = at_base(mut b, 1u64, 3u32, 0u64, result.unwrap(clone(k1)), no_arg())
+    let empty_result = at_base(mut b, 1u64, 3u32, result.unwrap(clone(k1)), no_arg())
     if list.len(empty_result.complete) != 1u64 || empty_result.complete[0] != 3u32 || list.len(empty_result.rows) != 0u64 || !apply(mut cl, take empty_result) {
         return false
     }
@@ -2499,9 +2503,9 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     }
     let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: list.new())
     let k1 = query_key(code.describe(q1))
-    let _ = at_base(mut b, 1u64, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())
-    let _ = at_base(mut b, 2u64, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())
-    let _ = at_base(mut b, 2u64, 2u32, 0u64, result.unwrap(clone(k1)), no_arg())
+    let _ = at_base(mut b, 1u64, 1u32, result.unwrap(clone(k1)), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, result.unwrap(clone(k1)), no_arg())
+    let _ = at_base(mut b, 2u64, 2u32, result.unwrap(clone(k1)), no_arg())
     let (l_send, l_mark): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let (m_send, m_mark): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let mut m_keep = Some(take m_send)
@@ -2841,7 +2845,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
     let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), Query, ca, cr))
     let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
-    let initial = at_base(mut b, 0u64, 7u32, 0u64, take key, no_arg())
+    let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
     if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
         return false
     }

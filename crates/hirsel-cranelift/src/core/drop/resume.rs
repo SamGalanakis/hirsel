@@ -123,6 +123,83 @@ impl Glue<'_, '_, '_> {
         });
         self.icon(k)
     }
+    /// Whether cleaning `field` frees at most terminal storage and yields nothing.
+    fn flat(&self, field: &FieldTy) -> bool {
+        match field {
+            FieldTy::Box(_)
+            | FieldTy::Rc(_)
+            | FieldTy::Arc(_)
+            | FieldTy::Seq(_)
+            | FieldTy::Map(..) => {
+                hirsel_core_layout::terminal(&self.tables.input.types, self.tables.layouts, field)
+            }
+            FieldTy::Inline(t) => self.tables.layouts[t.index()].drop.is_none(),
+            FieldTy::Array(e, _) => self.flat(e),
+            FieldTy::Scalar(_)
+            | FieldTy::Stable(_)
+            | FieldTy::Fn
+            | FieldTy::Borrow
+            | FieldTy::View(_)
+            | FieldTy::Locator(_) => true,
+            _ => false,
+        }
+    }
+    /// A boxed child in a case that owns only terminal storage is that case's
+    /// whole recipe: its fields are freed and the block refunded here, with no
+    /// hand-over, and the step continues at `done`. Other cases fall through to
+    /// the hand-over.
+    fn flat_cases(
+        &mut self,
+        node: Value,
+        t: TypeRef,
+        charge: Value,
+        done: cranelift_codegen::ir::Block,
+    ) -> Result<()> {
+        let tables = self.tables;
+        let recipe = &tables.layouts[t.index()];
+        let Some(drop) = &recipe.drop else {
+            return Ok(());
+        };
+        let Layout::Fixed(fixed) = &recipe.layout else {
+            return Ok(());
+        };
+        let Some(tag) = fixed.tag else {
+            return Ok(());
+        };
+        if drop.finalizer.is_some() || tables.input.types[t.index()].repr == Repr::Resource {
+            return Ok(());
+        }
+        let flat: Vec<usize> = (0..drop.fields.len())
+            .filter(|&r| drop.fields[r].iter().all(|f| self.flat(&f.ty)))
+            .collect();
+        if flat.is_empty() {
+            return Ok(());
+        }
+        let value =
+            super::super::case::case_value(&mut self.b, &tag, node, MemFlagsData::trusted());
+        for r in flat {
+            let yes = self.b.create_block();
+            let no = self.b.create_block();
+            let is = self.b.ins().icmp_imm_s(IntCC::Equal, value, r as i64);
+            self.b.ins().brif(is, yes, &[], no, &[]);
+            self.b.switch_to_block(yes);
+            for f in &drop.fields[r] {
+                let at = self.at(node, f.offset);
+                self.field(at, &f.ty)?;
+            }
+            fast::free(
+                &mut self.b,
+                &mut self.calls,
+                self.object,
+                self.ctx,
+                node,
+                charge,
+            )?;
+            self.b.ins().jump(done, &[]);
+            self.b.switch_to_block(no);
+        }
+        Ok(())
+    }
     /// Hand one descendant to the drain: written inline into the worklist
     /// (abi_layout WORKLIST_*), read by the drain when the recipe returns.
     fn stage(&mut self, list: Value, node: Value, descriptor: Value, point: Value) {
@@ -380,6 +457,7 @@ impl Glue<'_, '_, '_> {
                             )?;
                             yields = false;
                         } else {
+                            self.flat_cases(node, *t, charge, skip)?;
                             let descriptor = self.descriptor(*t, false);
                             let point = self.next_point();
                             self.stage(list, node, descriptor, point);

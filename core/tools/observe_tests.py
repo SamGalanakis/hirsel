@@ -134,7 +134,7 @@ class Codec:
 
     def outcome(self):
         tag = self.uint(4)
-        name = ('Returned', 'Failed', 'Refused', 'Superseded', 'Abandoned', 'InDoubt')[tag]
+        name = ('Returned', 'Failed', 'Refused', 'Abandoned', 'InDoubt')[tag]
         payload = []
         if tag == 0:
             payload = self.blob()

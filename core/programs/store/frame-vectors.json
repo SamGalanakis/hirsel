@@ -179,24 +179,31 @@
       "derivation": "Ended tag 4 + sub 4 + Outcome tag 4 + nested payload in declaration order"
     },
     {
-      "name": "ended_superseded",
+      "name": "ended_refused_request_mismatch",
       "type": "Frame",
-      "value": "Ended(0x01020304u32, Superseded)",
-      "hex": "070000000403020103000000",
+      "value": "Ended(0x01020304u32, Refused(RequestMismatch))",
+      "hex": "07000000040302010200000006000000",
+      "derivation": "Ended tag 4 + sub 4 + Outcome tag 4 + nested payload in declaration order"
+    },
+    {
+      "name": "ended_refused_history_unavailable",
+      "type": "Frame",
+      "value": "Ended(0x01020304u32, Refused(HistoryUnavailable))",
+      "hex": "07000000040302010200000007000000",
       "derivation": "Ended tag 4 + sub 4 + Outcome tag 4 + nested payload in declaration order"
     },
     {
       "name": "ended_abandoned",
       "type": "Frame",
       "value": "Ended(0x01020304u32, Abandoned)",
-      "hex": "070000000403020104000000",
+      "hex": "070000000403020103000000",
       "derivation": "Ended tag 4 + sub 4 + Outcome tag 4 + nested payload in declaration order"
     },
     {
       "name": "ended_in_doubt",
       "type": "Frame",
       "value": "Ended(0x01020304u32, InDoubt)",
-      "hex": "070000000403020105000000",
+      "hex": "070000000403020104000000",
       "derivation": "Ended tag 4 + sub 4 + Outcome tag 4 + nested payload in declaration order"
     },
     {

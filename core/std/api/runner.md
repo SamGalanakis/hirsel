@@ -56,7 +56,7 @@ second H; open waits until it has, and a `place` that fails there fails the open
 `HandlesChanged`. The head admits each request against its
 stream's row (one position per stream, H1–H4), runs at most one body per stream,
 groups commits and releases a group only after it is durable (V4). Answers that need
-no commit (a duplicate's stored reply, Superseded, a refusal) go in a Release
+no commit (a duplicate's stored reply, a refusal, `Refused(HistoryUnavailable)` below latest) go in a Release
 without a snapshot and the publisher sends them at its base (V3). The publisher
 tells each answer to its session as a `Told` at the version of the last Release that
 carried a snapshot (G1). The session hands its client a `Down`: `Batched(KeyedBatch)`, where a

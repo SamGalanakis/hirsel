@@ -110,7 +110,7 @@ fn hand_derived_frame_vectors_and_strict_decode() -> Result<()> {
         ),
         (
             Frame::Ended(2, Outcome::Abandoned),
-            "07 00 00 00 02 00 00 00 04 00 00 00",
+            "07 00 00 00 02 00 00 00 03 00 00 00",
         ),
         (
             Frame::Reset(3, vec![]),

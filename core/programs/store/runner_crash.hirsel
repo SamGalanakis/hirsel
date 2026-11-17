@@ -192,8 +192,8 @@ fn ack(out: Stdout, v: u64) waits {
 }
 
 // The client: each session's answers, each checked against its expected Outcome by
-// (stream, p). A frame that reports a commit raises the floor it reports. Superseded is
-// a valid answer only to a position with a later one on its stream: the later one is
+// (stream, p). A frame that reports a commit raises the floor it reports. Refused(HistoryUnavailable)
+// is a valid answer only to a position with a later one on its stream: the later one is
 // admitted only once this one is replied. The client never fails: a failed task would
 // leave its sessions open and the head waiting, so it hangs up every session, drains
 // each channel to its close, and returns its verdict (empty when every call was answered
@@ -237,11 +237,11 @@ fn client(take c: Client) -> String waits {
                 let mut matched = false
                 for x in calls {
                     if x.from == i && u64_bytes(x.stream) == f.stream && x.p == f.p {
-                        let superseded = match f.outcome {
-                            Superseded => later(calls, x),
+                        let below = match f.outcome {
+                            Refused(r) => match r { HistoryUnavailable => later(calls, x), _ => false },
                             _ => false,
                         }
-                        if superseded || same(f.outcome, expected(x)) {
+                        if below || same(f.outcome, expected(x)) {
                             matched = true
                         }
                     }

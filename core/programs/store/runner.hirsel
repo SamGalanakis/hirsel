@@ -6,11 +6,11 @@ pub type Bad: codec + send { kind: u32, at: u64 }
 
 pub type Kind: codec + send = Compute | Transact | Query | Granted
 
-pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed
+pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed | RequestMismatch | HistoryUnavailable
 
 pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone
 
-pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Superseded | Abandoned | InDoubt
+pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt
 
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }
 
@@ -658,7 +658,8 @@ fn next_waiting[G: send, H: send](mut hd: Head[G, H]) -> Result[bool, store.Erro
     Ok(false)
 }
 
-// H2.
+// H2. Below latest the store cannot say whether p ran these bytes (STORE AH2), so the
+// answer is Refused(HistoryUnavailable), commitless (V3), and the stream is not marked.
 fn begin[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.Error] waits {
     let a = match admit(mut hd.db, hd.streams, q.stream, q.p) {
         Ok(take x) => take x,
@@ -676,7 +677,7 @@ fn begin[G: send, H: send](mut hd: Head[G, H], take q: Req) -> Result[(), store.
             }
         },
         Rejected(l) => if q.p < l {
-            commitless(mut hd, take q, Superseded)
+            commitless(mut hd, take q, Refused(HistoryUnavailable))
         } else {
             result.unwrap(list.push(mut hd.waiting, Waiting(req: take q, parked: true)))
             Ok(())

@@ -3,7 +3,7 @@ pub type Header: codec { has_clock: bool, has_digest: bool, has_ran: bool, compl
 
 pub type Send: codec + send { conn: u64, stream: Bytes, p: u64, digest: Bytes, deadline: u64, at: u64 }
 pub type Refusal: codec + send = ObsNoEntry | ObsMalformed(runner.Bad) | ObsOverloaded | ObsDeadline | ObsBudget(runner.Room) | ObsNotAllowed | ObsRequestMismatch | ObsHistoryUnavailable
-pub type Outcome: codec + send = ObsReturned(Bytes) | ObsFailed(runner.Fault) | ObsRefused(Refusal) | ObsSuperseded | ObsAbandoned | ObsInDoubt
+pub type Outcome: codec + send = ObsReturned(Bytes) | ObsFailed(runner.Fault) | ObsRefused(Refusal) | ObsAbandoned | ObsInDoubt
 pub type Reply: codec + send { conn: u64, stream: Bytes, p: u64, version: u64, outcome: Outcome, at: u64 }
 pub type Close: codec + send { conn: u64, code: u64, at: u64 }
 pub type Run: codec + send { stream: Bytes, p: u64, digest: Bytes, version: u64 }
@@ -180,7 +180,7 @@ pub fn step(mut s: State, e: Obs) {
             match remove_send(mut q, immediate, abandoned) {
                 Some(p) => {
                     s.sends[p.row].done = true
-                    let accepted = match a.outcome { ObsReturned(_) => true, ObsSuperseded => true, _ => false }
+                    let accepted = match a.outcome { ObsReturned(_) => true, _ => false }
                     if accepted {
                         s.identity.hits += 1u64
                         result.unwrap(list.push(mut s.answers, Identity(slot: own(s.sends[p.row].slot), key: own(s.sends[p.row].key), digest: own(s.sends[p.row].digest), version: a.version, from: p.at, to: s.index)))

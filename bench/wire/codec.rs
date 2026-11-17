@@ -32,6 +32,8 @@ pub enum Refusal {
     Deadline,
     Budget(Room),
     NotAllowed,
+    RequestMismatch,
+    HistoryUnavailable,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fault {
@@ -45,7 +47,6 @@ pub enum Outcome {
     Returned(Vec<u8>),
     Failed(Fault),
     Refused(Refusal),
-    Superseded,
     Abandoned,
     InDoubt,
 }
@@ -179,9 +180,9 @@ macro_rules! sum {
     }};
 }
 sum!(Entry { 0 => Ready(slot), 1 => Resolve(slot, args), 2 => Gone });
-sum!(Refusal { 0 => NoEntry, 1 => Malformed(bad), 2 => Overloaded, 3 => Deadline, 4 => Budget(room), 5 => NotAllowed });
+sum!(Refusal { 0 => NoEntry, 1 => Malformed(bad), 2 => Overloaded, 3 => Deadline, 4 => Budget(room), 5 => NotAllowed, 6 => RequestMismatch, 7 => HistoryUnavailable });
 sum!(Fault { 0 => Raised(kind), 1 => OutOfBytes(room), 2 => OutOfTime(ticks), 3 => Gone });
-sum!(Outcome { 0 => Returned(bytes), 1 => Failed(fault), 2 => Refused(refusal), 3 => Superseded, 4 => Abandoned, 5 => InDoubt });
+sum!(Outcome { 0 => Returned(bytes), 1 => Failed(fault), 2 => Refused(refusal), 3 => Abandoned, 4 => InDoubt });
 sum!(Frame {
     0 => Hello(token, wants), 1 => Call(stream, p, slot, deadline, arg),
     2 => Subscribe(sub, slot, arg, resume), 3 => Unsubscribe(sub),

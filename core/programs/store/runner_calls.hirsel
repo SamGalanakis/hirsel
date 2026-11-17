@@ -7,7 +7,7 @@
 //   included, advances the branch version by one. Each case's store creates the table
 //   "data" (version 1) and place_head creates the streams table (2). A call's admit is one
 //   commit and its run, or its reply-only commit, is the next; a refusal, a Duplicate and
-//   a Superseded commit nothing.
+//   a Refused(HistoryUnavailable) commit nothing.
 type Hd: send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
@@ -462,7 +462,7 @@ pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 }
 
 // V3 and C3/C5 (direct_commitless): a re-send from another session gets the stored reply,
-// byte-equal, in a frame at or above its commit; an older position gets Superseded.
+// byte-equal, in a frame at or above its commit; an older position gets Refused(HistoryUnavailable).
 fn drive_duplicate(take d: Drive) -> () waits {
     let s0 = conn(d.tasks, d.head, d.clock, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
@@ -479,7 +479,7 @@ fn drive_duplicate(take d: Drive) -> () waits {
     want(ok_value(next.outcome) == Some(6u64) && next.version == 6u64, "duplicate: p1 at 6")
     ask(s1, d.clock, 0u64, 0u64, k_write(), u64_arg(5u64), LATER)
     let old = frame(s1)
-    want(is(old.outcome, Superseded) && old.version == 6u64, "duplicate: Superseded at 6")
+    want(is(old.outcome, Refused(HistoryUnavailable)) && old.version == 6u64, "duplicate: HistoryUnavailable at 6")
     hang(take s1)
 }
 
@@ -550,7 +550,7 @@ pub fn law_calls_runs_once(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 // (resident_limit), so the session gets Refused(Overloaded) in a frame at the publisher's
 // base (V3), the open's version 2, and p0 stays admitted with no reply. p1 is not admitted while p0 is unreplied (STORE-SPEC §1.8, S7):
 // it waits in the FIFO and is Abandoned at its deadline. A re-send of p0 runs it again
-// and is refused again; it is not Superseded, which C3 allows only for a replied position.
+// and is refused again; it is not HistoryUnavailable, which C3 allows only for a replied position.
 fn drive_store_refusal(take d: Drive) -> () waits {
     let s0 = conn(d.tasks, d.head, d.clock, 1u64)
     ask(s0, d.clock, 0u64, 0u64, k_flood(), u64_arg(FLOOD), LATER)
@@ -561,7 +561,7 @@ fn drive_store_refusal(take d: Drive) -> () waits {
     want(b.p == 1u64 && is(b.outcome, Abandoned), "store_refusal: p1 not admitted while p0 is unreplied")
     ask(s0, d.clock, 0u64, 0u64, k_flood(), u64_arg(FLOOD), LATER)
     let c = frame(s0)
-    want(c.p == 0u64 && is(c.outcome, Refused(Overloaded)), "store_refusal: re-sent p0 runs again, not Superseded")
+    want(c.p == 0u64 && is(c.outcome, Refused(Overloaded)), "store_refusal: re-sent p0 runs again, not HistoryUnavailable")
     hang(take s0)
 }
 

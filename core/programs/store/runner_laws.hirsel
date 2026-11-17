@@ -212,6 +212,8 @@ fn same_refusal(a: runner.Refusal, b: runner.Refusal) -> bool {
         Deadline => match b { Deadline => true, _ => false },
         Budget(x) => match b { Budget(y) => same_room(x, y), _ => false },
         NotAllowed => match b { NotAllowed => true, _ => false },
+        RequestMismatch => match b { RequestMismatch => true, _ => false },
+        HistoryUnavailable => match b { HistoryUnavailable => true, _ => false },
     }
 }
 
@@ -220,7 +222,6 @@ fn same(a: runner.Outcome, b: runner.Outcome) -> bool {
         Returned(x) => match b { Returned(y) => x == y, _ => false },
         Failed(x) => match b { Failed(y) => same_fault(x, y), _ => false },
         Refused(x) => match b { Refused(y) => same_refusal(x, y), _ => false },
-        Superseded => match b { Superseded => true, _ => false },
         Abandoned => match b { Abandoned => true, _ => false },
         InDoubt => match b { InDoubt => true, _ => false },
     }
@@ -245,7 +246,7 @@ pub fn law_p15_types_roundtrip() -> bool {
     ok = ok && trip(c, Failed(OutOfBytes(runner.Room(requested: 2u64, available: 1u64)))) && trip(c, Failed(OutOfTime(77u64)))
     ok = ok && trip(c, Failed(Gone)) && trip(c, Refused(NoEntry)) && trip(c, Refused(Malformed(runner.Bad(kind: 3u32, at: 11u64))))
     ok = ok && trip(c, Refused(Overloaded)) && trip(c, Refused(Deadline)) && trip(c, Refused(Budget(runner.Room(requested: 5u64, available: 4u64))))
-    ok = ok && trip(c, Refused(NotAllowed)) && trip(c, Superseded) && trip(c, Abandoned) && trip(c, InDoubt)
+    ok = ok && trip(c, Refused(NotAllowed)) && trip(c, Refused(RequestMismatch)) && trip(c, Refused(HistoryUnavailable)) && trip(c, Abandoned) && trip(c, InDoubt)
     let dc: std.codec.Codec[runner.Described] = std.codec.of()
     let mut id: Bytes = list.new()
     result.unwrap(list.push(mut id, 1u8))

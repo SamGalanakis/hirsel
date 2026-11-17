@@ -43,7 +43,6 @@ pub fn step(mut s: State, e: observe.Obs) {
             let slot = observe.key(0u64, a.stream, a.p)
             match a.outcome {
                 ObsReturned(_) => accept(mut s, a),
-                ObsSuperseded => accept(mut s, a),
                 ObsRefused(ObsRequestMismatch) => {
                     s.mismatch.hits += 1u64
                     match map.get(s.requests, k) {

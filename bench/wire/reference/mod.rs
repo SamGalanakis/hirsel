@@ -179,7 +179,7 @@ impl Wal {
     ) -> Result<(Outcome, bool)> {
         if let Some(saved) = self.streams.get(&(principal, stream)) {
             if p < saved.p {
-                return Ok((Outcome::Superseded, false));
+                return Ok((Outcome::Refused(Refusal::HistoryUnavailable), false));
             }
             if p == saved.p {
                 return Ok((

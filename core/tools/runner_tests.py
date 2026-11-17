@@ -168,8 +168,8 @@ def l20_retained(args, root, work, engine, runner=None, name='runner_cover'):
 # copy_rows_per_sub (L20): a subscription that keeps a copy of its initial rows beside its Cover.
 COVER_MUTANTS = (
     ('copy_rows_per_sub',
-     [('type Sub { session: u64, sub: u32, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read] }',
-       'type Sub { session: u64, sub: u32, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read], kept: List[Row] }'),
+     [('type Sub { session: u64, sub: u32, generation: u64, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read] }',
+       'type Sub { session: u64, sub: u32, generation: u64, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read], kept: List[Row] }'),
       ('cover: take c, reads: take reads)))',
        'cover: take c, reads: take reads, kept: result.unwrap(clone(o.rows)))))')]),
 )
@@ -250,10 +250,10 @@ MUTANTS = (
        '                        Ok(take ahead) => {\n'
        '                            let PubIn(e: take next) = take ahead\n'
        '                            match take next {\n'
-       '                                Subscribed(who, sub, take key, take arg) => if let Some(i) = joiner(joined, who) {\n'
+       '                                Subscribed(who, sub, generation, take key, take arg) => if let Some(i) = joiner(joined, who) {\n'
        '                                    unend(mut joined[i].ended, sub)\n'
        '                                    let mut early: List[Owe] = list.new()\n'
-       '                                    result.unwrap(list.push(mut early, at_base(mut b, who, sub, take key, take arg)))\n'
+       '                                    result.unwrap(list.push(mut early, at_base(mut b, who, sub, generation, take key, take arg)))\n'
        '                                    deliver(mut b, mut joined, take early)\n'
        '                                },\n'
        '                                _ => (),\n'
@@ -795,7 +795,7 @@ def admission_laws(args, root, work, engines, row):
     selected = manifest(root, work, 'admission-laws', adapted)
     durable = ('gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max')
     state = ('unread_client', 'hello_and_slots', 'join_cleanup', 'refused_send_releases_timer')
-    names = args.admission_law or (*state, *durable)
+    names = args.admission_law or (*state, *durable, 'wire_replacement_generation')
     qualified = set()
     if 'evaluator' in engines:
         for name in names:
@@ -804,7 +804,8 @@ def admission_laws(args, root, work, engines, row):
             if value == 1:
                 qualified.add(name)
     for engine in (e for e in engines if e != 'evaluator'):
-        groups = [('wire_admission', state), ('durable_wire_admission', durable)]
+        groups = [('wire_admission', state), ('durable_wire_admission', durable),
+                  ('wire_replacement_generation', ('wire_replacement_generation',))]
         for group, members in groups:
             if not any(name in names for name in members):
                 continue
@@ -819,7 +820,7 @@ def admission_laws(args, root, work, engines, row):
     mutants = (
         ('slot_freed_at_answer', 'h.queued += count', 'h.queued = 0u64', 'unread_client'),
         ('refusal_rows_uncapped', 'if s.refusals >= 1u64 + s.config.q { return Error(1008u16) }', 'if false { return Error(1008u16) }', 'unread_client'),
-        ('reset_drops_held', 'wire_queue(mut s, Reset(version, take done), take marks)', 'wire_queue(mut s, Reset(version, list.new()), take marks)', 'unread_client'),
+        ('reset_drops_held', 'wire_queue(mut s, Reset(version, take done), take marks, list.new())', 'wire_queue(mut s, Reset(version, list.new()), take marks, list.new())', 'unread_client'),
     )
     for name, old, new, law in mutants:
         if args.admission_mutant and name not in args.admission_mutant:
@@ -962,7 +963,7 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     p.add_argument('--session-law', action='append', choices=['reader_reservation_holds', 'writer_one_frame', 'children_joined_on_close', 'session_records'])
     p.add_argument('--session-mutant', action='append', choices=['undersized_reader', 'head_frames_uncounted', 'writer_queue', 'orphan_reader'])
-    p.add_argument('--admission-law', action='append', choices=['unread_client', 'hello_and_slots', 'join_cleanup',
+    p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
     p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls'])

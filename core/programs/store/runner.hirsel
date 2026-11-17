@@ -537,11 +537,11 @@ pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(s
 
 // ---- The publisher's subscriptions (G2, G3). A subscription keeps its Cover and read set at
 // the base, never its rows (F4): rows are enumerated from the snapshots the publisher holds.
-type Sub { session: u64, sub: u32, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read] }
+type Sub { session: u64, sub: u32, generation: u64, key: Bytes, arg: Bytes, cover: Cover, reads: List[store.Read] }
 
 // What one step owes one session: at `version`, the subs whose whole initial result it
 // carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
-type Owe: send { session: u64, version: u64, complete: List[u32], rows: List[Row], ended: List[(u32, Outcome)], reset: bool }
+type Owe: send { session: u64, version: u64, generations: List[(u32, u64)], complete: List[u32], rows: List[Row], ended: List[(u32, u64, Outcome)], reset: bool }
 
 type Board[G: send, H: send] { r: Registry[G, H], h: H, base: store.Snapshot, newest: Option[store.Snapshot], subs: List[Sub] }
 
@@ -557,6 +557,15 @@ fn find(subs: List[Sub], who: u64, sub: u32) -> Option[u64] {
     None
 }
 
+fn sub_generation(generations: List[(u32, u64)], sub: u32) -> Option[u64] {
+    for (id, generation) in generations { if id == sub { return Some(generation) } }
+    None
+}
+
+fn stamp_rows(mut generations: List[(u32, u64)], sub: u32, generation: u64) {
+    if generation != 0u64 { result.unwrap(list.push(mut generations, (sub, generation))) }
+}
+
 fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
     let mut i = 0u64
     while i < list.len(owes) {
@@ -565,7 +574,7 @@ fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
         }
         i += 1u64
     }
-    result.unwrap(list.push(mut owes, Owe(session: who, version: version, complete: list.new(), rows: list.new(), ended: list.new(), reset: false)))
+    result.unwrap(list.push(mut owes, Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false)))
     i
 }
 
@@ -586,12 +595,12 @@ fn cover_rows(s: store.Snapshot, c: Cover, sub: u32, mut out: List[Row]) -> Resu
 }
 
 // G3: the query runs at the base, and its whole result goes in one owe naming it complete.
-fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, take key: Bytes, take arg: Bytes) -> Owe {
+fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) -> Owe {
     if let Some(i) = find(b.subs, who, sub) {
         let _ = list.remove(mut b.subs, i)
     }
     let version = store.version(b.base)
-    let mut o = Owe(session: who, version: version, complete: list.new(), rows: list.new(), ended: list.new(), reset: false)
+    let mut o = Owe(session: who, version: version, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false)
     match run_query(b.r, b.h, b.base, key, arg) {
         Covered(take v) => {
             let Viewed(cover: take c, reads: take reads) = take v
@@ -600,10 +609,11 @@ fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, take key: B
                 o.reset = true
                 return take o
             }
+            stamp_rows(mut o.generations, sub, generation)
             result.unwrap(list.push(mut o.complete, sub))
-            result.unwrap(list.push(mut b.subs, Sub(session: who, sub: sub, key: take key, arg: take arg, cover: take c, reads: take reads)))
+            result.unwrap(list.push(mut b.subs, Sub(session: who, sub: sub, generation: generation, key: take key, arg: take arg, cover: take c, reads: take reads)))
         },
-        Stopped(take why) => result.unwrap(list.push(mut o.ended, (sub, take why))),
+        Stopped(take why) => result.unwrap(list.push(mut o.ended, (sub, generation, take why))),
         Lost(_) => {
             o.reset = true
         },
@@ -678,6 +688,7 @@ fn reset_session(mut b: List[Sub], mut owes: List[Owe], who: u64, version: u64, 
         }
     }
     let k = owe(mut owes, who, version)
+    owes[k].generations = list.new()
     owes[k].complete = list.new()
     owes[k].rows = list.new()
     owes[k].ended = list.new()
@@ -708,16 +719,19 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
     while i < list.len(b.subs) {
         let who = b.subs[i].session
         let sub = b.subs[i].sub
+        let generation = b.subs[i].generation
         let k = owe(mut owes, who, version)
         if owes[k].reset {
             i += 1u64
             continue
         }
+        let before = list.len(owes[k].rows)
         if !read_hit(b.subs[i].reads, d) {
             if let Error(_) = covered_rows(d, b.subs[i].cover, sub, mut owes[k].rows) {
                 i = reset_session(mut b.subs, mut owes, who, version, i)
                 continue
             }
+            if list.len(owes[k].rows) != before { stamp_rows(mut owes[k].generations, sub, generation) }
             i += 1u64
             continue
         }
@@ -728,12 +742,13 @@ fn round[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
                     i = reset_session(mut b.subs, mut owes, who, version, i)
                     continue
                 }
+                if list.len(owes[k].rows) != before { stamp_rows(mut owes[k].generations, sub, generation) }
                 b.subs[i].cover = take c
                 b.subs[i].reads = take reads
                 i += 1u64
             },
             Stopped(take why) => {
-                result.unwrap(list.push(mut owes[k].ended, (sub, take why)))
+                result.unwrap(list.push(mut owes[k].ended, (sub, generation, take why)))
                 let _ = list.remove(mut b.subs, i)
             },
             Lost(_) => {
@@ -786,7 +801,7 @@ pub opaque type Release: send {
 // without selection, which v1 lacks.
 pub opaque type PubIn: send { e: ToPub }
 
-type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes, Bytes) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
+type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, u64, Bytes, Bytes) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
 
 // A session's join, on its first Subscribe: where its content goes, and where the
 // publisher answers with the id it mints for the session.
@@ -1206,7 +1221,7 @@ fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
 // it; the publisher holds no subscription content. The ledger is retried after every message
 // and before a session's next content, so it reaches the owner ahead of that content. A
 // retried Told is told at the current base, which is still >= its commit (rule 9).
-type Joiner { who: u64, to: Delivery, closed: Option[Receiver[()]], ended: List[(u32, Outcome)], reset: bool, mark: Option[Receiver[()]] }
+type Joiner { who: u64, to: Delivery, closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], reset: bool, mark: Option[Receiver[()]] }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Event) | Shut
@@ -1264,10 +1279,10 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 let _ = channel.try_send(told, minted)
                 if let Some(sender) = wake { let _ = channel.try_send(sender, wire_event(JoinReady)) }
             },
-            Subscribed(who, sub, take key, take arg) => if let Some(i) = joiner(joined, who) {
+            Subscribed(who, sub, generation, take key, take arg) => if let Some(i) = joiner(joined, who) {
                 unend(mut joined[i].ended, sub)
                 let mut owes: List[Owe] = list.new()
-                result.unwrap(list.push(mut owes, at_base(mut b, who, sub, take key, take arg)))
+                result.unwrap(list.push(mut owes, at_base(mut b, who, sub, generation, take key, take arg)))
                 deliver(mut b, mut joined, take owes)
             },
             Unsubscribed(who, sub) => if let Some(i) = find(b.subs, who, sub) {
@@ -1302,7 +1317,7 @@ fn tell_owner(mut waiting: List[Answer], take a: Answer, at: u64) {
 }
 
 // A resubscribed sub's waiting Ended is moot: the new Subscribe's Batch replaces it.
-fn unend(mut ended: List[(u32, Outcome)], sub: u32) {
+fn unend(mut ended: List[(u32, u64, Outcome)], sub: u32) {
     let mut i = 0u64
     while i < list.len(ended) {
         if ended[i].0 == sub {
@@ -1351,7 +1366,7 @@ fn catch_up(mut j: Joiner, at: u64) -> Ledger {
     if !j.reset && list.len(j.ended) == 0u64 {
         return Clear
     }
-    let owed = Owe(session: j.who, version: at, complete: list.new(), rows: list.new(), ended: replace(mut j.ended, list.new()), reset: j.reset)
+    let owed = Owe(session: j.who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), ended: replace(mut j.ended, list.new()), reset: j.reset)
     match offer(j.to, Event(e: Content(take owed))) {
         Took => {
             j.reset = false
@@ -1361,7 +1376,7 @@ fn catch_up(mut j: Joiner, at: u64) -> Ledger {
             let Event(e: take e) = take back
             match take e {
                 Content(take x) => {
-                    let Owe(session: _, version: _, complete: _, rows: _, ended: take ended, reset: _) = take x
+                    let Owe(session: _, version: _, generations: _, complete: _, rows: _, ended: take ended, reset: _) = take x
                     j.ended = take ended
                 },
                 _ => (),
@@ -1380,7 +1395,7 @@ fn overloaded(mut subs: List[Sub], mut j: Joiner, take back: Event) {
         Content(take o) => take o,
         _ => return,
     }
-    let Owe(session: who, version: _, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
+    let Owe(session: who, version: _, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
     let mut cut: List[u32] = take complete
     for r in rows {
         if !list.contains(cut, r.sub) {
@@ -1401,7 +1416,8 @@ fn overloaded(mut subs: List[Sub], mut j: Joiner, take back: Event) {
         result.unwrap(list.push(mut j.ended, take x))
     }
     for sub in cut {
-        result.unwrap(list.push(mut j.ended, (sub, Refused(Overloaded))))
+        let generation = match sub_generation(generations, sub) { Some(g) => g, None => 0u64 }
+        result.unwrap(list.push(mut j.ended, (sub, generation, Refused(Overloaded))))
     }
 }
 
@@ -1664,7 +1680,7 @@ fn join_publisher[G: send, H: send](s: Session[G, H], mut mark: Option[Sender[()
 // keeps them, and the owner drops their rows and Endeds until a Batch completes the sub's
 // resubscription, an Ended ends it, or a Reset ends them all.
 fn hand(to: Sender[Down], take o: Owe, mut dropped: List[u32]) -> () waits {
-    let Owe(session: _, version: v, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
+    let Owe(session: _, version: v, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
     if reset {
         list.clear(mut dropped)
         let _ = channel.send(to, Reset)
@@ -1678,7 +1694,7 @@ fn hand(to: Sender[Down], take o: Owe, mut dropped: List[u32]) -> () waits {
         let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: list.new())))
     }
     for take e in take ended {
-        let (sub, take why) = take e
+        let (sub, _, take why) = take e
         if has_sub(dropped, sub) {
             forgive(mut dropped, sub)
         } else {
@@ -1871,7 +1887,7 @@ fn sessioned[G: send, H: send](s: Session[G, H], r: Registry[G, H], mut id: Opti
                 id = Some(who)
                 // v2.12 item 3: the owner waits only on its own inbox. A full PubIn refuses
                 // this Subscribe, and nothing is registered.
-                match channel.try_send(s.publisher, PubIn(e: Subscribed(who, sub, take key, take arg))) {
+                match channel.try_send(s.publisher, PubIn(e: Subscribed(who, sub, 0u64, take key, take arg))) {
                     Ok(_) => (),
                     Error(Full(_)) => {
                         let _ = channel.send(s.client, Ended(sub, Refused(Overloaded)))
@@ -2047,7 +2063,7 @@ fn apply(mut c: Client, take o: Owe) -> bool {
         drop_cache(mut c, o.session, sub)
         result.unwrap(list.push(mut c.caches, Cached(who: o.session, sub: sub, rows: map.new())))
     }
-    let Owe(session: who, version: _, complete: _, rows: take rows, ended: take ended, reset: _) = take o
+    let Owe(session: who, version: _, generations: _, complete: _, rows: take rows, ended: take ended, reset: _) = take o
     for take row in rows {
         let Row(sub: sub, key: take key, value: take value) = take row
         let k = match cached(c, who, sub) {
@@ -2150,7 +2166,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     // round. Its result is the base's (row0 = 0), labelled with the base.
     set(mut db, t, 1u64, 1u64)
     b.newest = Some(store.snapshot(db))
-    let first = at_base(mut b, 0u64, 1u32, result.unwrap(clone(k1)), no_arg())
+    let first = at_base(mut b, 0u64, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())
     if first.version != 4u64 || list.len(first.complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
         return false
     }
@@ -2159,10 +2175,10 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     }
     // shared_cache: session 1 subscribes Q1 with the same sub id; session 0 subscribes Qf.
     // Then row1 = 5 is a cover change for both Q1s and a re-run for Qf.
-    if !apply(mut cl, at_base(mut b, 1u64, 1u32, result.unwrap(clone(k1)), no_arg())) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8)) {
+    if !apply(mut cl, at_base(mut b, 1u64, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8)) {
         return false
     }
-    if !apply(mut cl, at_base(mut b, 0u64, 2u32, result.unwrap(clone(kf)), no_arg())) || !holds(cl, keys, 0u64, 2u32, None, Some(0u8)) {
+    if !apply(mut cl, at_base(mut b, 0u64, 2u32, 0u64, result.unwrap(clone(kf)), no_arg())) || !holds(cl, keys, 0u64, 2u32, None, Some(0u8)) {
         return false
     }
     set(mut db, t, 2u64, 5u64)
@@ -2175,7 +2191,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, None, None) || !holds(cl, keys, 1u64, 1u32, None, None) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) {
         return false
     }
-    let empty_result = at_base(mut b, 1u64, 3u32, result.unwrap(clone(k1)), no_arg())
+    let empty_result = at_base(mut b, 1u64, 3u32, 0u64, result.unwrap(clone(k1)), no_arg())
     if list.len(empty_result.complete) != 1u64 || empty_result.complete[0] != 3u32 || list.len(empty_result.rows) != 0u64 || !apply(mut cl, take empty_result) {
         return false
     }
@@ -2190,7 +2206,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     let mut faulted = false
     for o in owes {
         for e in o.ended {
-            faulted = o.session == 0u64 && e.0 == 2u32 && match e.1 {
+            faulted = o.session == 0u64 && e.0 == 2u32 && match e.2 {
                 Failed(Raised(n)) => n == 5u32,
                 _ => false,
             }
@@ -2267,7 +2283,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let mut queue: List[ToPub] = list.new()
     result.unwrap(list.push(mut queue, Joined(Join(to: Seam(take ev_to), told: take told_to, mark: None, closed: None))))
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
-    result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg())))
+    result.unwrap(list.push(mut queue, Subscribed(1u64, 1u32, 0u64, query_key(code.describe(q1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new()))))
     result.unwrap(list.push(mut queue, Halt))
     for take e in queue {
@@ -2397,8 +2413,8 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     let f = join_as(to, take f_to, None)
     let k1 = query_key(code.describe(q1))
     let mut queue: List[ToPub] = list.new()
-    result.unwrap(list.push(mut queue, Subscribed(l, 1u32, result.unwrap(clone(k1)), no_arg())))
-    result.unwrap(list.push(mut queue, Subscribed(m, 1u32, result.unwrap(clone(k1)), no_arg())))
+    result.unwrap(list.push(mut queue, Subscribed(l, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())))
+    result.unwrap(list.push(mut queue, Subscribed(m, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())))
     result.unwrap(list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new()))))
     for take e in queue {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -2414,7 +2430,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
         result.unwrap(list.push(mut quiet, Drained))
     } else {
         result.unwrap(list.push(mut quiet, Unsubscribed(f, 9u32)))
-        result.unwrap(list.push(mut quiet, Subscribed(m, 2u32, result.unwrap(clone(k1)), no_arg())))
+        result.unwrap(list.push(mut quiet, Subscribed(m, 2u32, 0u64, result.unwrap(clone(k1)), no_arg())))
     }
     for take e in quiet {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -2474,9 +2490,9 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     }
     let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: list.new())
     let k1 = query_key(code.describe(q1))
-    let _ = at_base(mut b, 1u64, 1u32, result.unwrap(clone(k1)), no_arg())
-    let _ = at_base(mut b, 2u64, 1u32, result.unwrap(clone(k1)), no_arg())
-    let _ = at_base(mut b, 2u64, 2u32, result.unwrap(clone(k1)), no_arg())
+    let _ = at_base(mut b, 1u64, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, 0u64, result.unwrap(clone(k1)), no_arg())
+    let _ = at_base(mut b, 2u64, 2u32, 0u64, result.unwrap(clone(k1)), no_arg())
     let (l_send, l_mark): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let (m_send, m_mark): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
     let mut m_keep = Some(take m_send)
@@ -2486,8 +2502,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     let m_told = channel.sender(m_to)
     let mut m_inbox = Some(take m_from)
     m_inbox = None
-    let mut ended: List[(u32, Outcome)] = list.new()
-    result.unwrap(list.push(mut ended, (1u32, Refused(Overloaded))))
+    let mut ended: List[(u32, u64, Outcome)] = list.new()
+    result.unwrap(list.push(mut ended, (1u32, 0u64, Refused(Overloaded))))
     let mut joined: List[Joiner] = list.new()
     result.unwrap(list.push(mut joined, Joiner(who: 1u64, to: Seam(take l_to), closed: None, ended: list.new(), reset: false, mark: Some(take l_mark))))
     result.unwrap(list.push(mut joined, Joiner(who: 2u64, to: Seam(take m_to), closed: None, ended: take ended, reset: false, mark: Some(take m_mark))))
@@ -2582,7 +2598,7 @@ fn retired_session(c: Clock, tasks: Tasks, end: u64) -> bool waits {
     }
     let PubIn(e: take second) = take subscribing
     let subscribed = match take second {
-        Subscribed(who, sub, _, _) => who == 7u64 && sub == 1u32,
+        Subscribed(who, sub, _, _, _) => who == 7u64 && sub == 1u32,
         _ => false,
     }
     let live = match channel.try_receive(m) {
@@ -2601,7 +2617,7 @@ fn retired_session(c: Clock, tasks: Tasks, end: u64) -> bool waits {
         let mut rows: List[Row] = list.new()
         result.unwrap(list.push(mut rows, Row(sub: 1u32, key: no_arg(), value: None)))
         result.unwrap(list.push(mut rows, Row(sub: 3u32, key: no_arg(), value: None)))
-        let o = Owe(session: 7u64, version: 9u64, complete: list.new(), rows: take rows, ended: list.new(), reset: false)
+        let o = Owe(session: 7u64, version: 9u64, generations: list.new(), complete: list.new(), rows: take rows, ended: list.new(), reset: false)
         if let Error(_) = channel.send(inbox, subscribe(2u32, result.unwrap(clone(k1)), no_arg())) {
             return false
         }
@@ -2816,7 +2832,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
     let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), Query, ca, cr))
     let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: list.new())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
-    let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
+    let initial = at_base(mut b, 0u64, 7u32, 0u64, take key, no_arg())
     if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
         return false
     }
@@ -3211,7 +3227,7 @@ fn wire_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] wait
         }
         let mut outgoing = take frame
         if !closing {
-            match (service.step)(mut service.context, mut work, WPoll(!busy && list.len(queue) == 0u64)) {
+            match (service.step)(mut service.context, mut work, WPoll(!busy && list.len(queue) == 0u64 && none(control) && none(outgoing))) {
                 Ok(Some(take f)) => { outgoing = Some(take f) },
                 Ok(None) => {},
                 Error(code) => { control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code)))); closing = true },
@@ -3459,7 +3475,7 @@ fn wire_work() -> WireWork { WireWork(asking: None, timers: map.new()) }
 type WireHeld: send { stream: u32, p: u64, digest: store.RequestDigest, forwarded: bool, queued: u64, owed: List[WireOwed] }
 type WireMark: send = Unit(Bytes) | V1
 
-type WireOutput: send { frame: Frame, marks: List[WireMark] }
+type WireOutput: send { frame: Frame, marks: List[WireMark], generations: List[(u32, u64)] }
 type WirePending: send { stream: u32, p: u64, slot: u32, deadline: u32, arg: Bytes, at: u64, grows: bool }
 type WirePolicy: send { policy: ingress.Ingress, source: Ip, token: Option[Bytes], principal: Option[ingress.Principal], to: Sender[WireEvent] }
 
@@ -3486,7 +3502,7 @@ pub opaque type WireSession[G: send, H: send]: send {
     phase: u8, wants: List[Want], entries: List[Bytes], placing: u64,
     asking: bool, pending: Option[WirePending],
     held: Map[Bytes, WireHeld], output: List[WireOutput], refusals: u64, last: u64, generation: u64,
-    joined: Option[u64], joining: Option[Receiver[u64]], join_lease: Option[WireJoinLease], subscription: Option[(u32, Bytes, Bytes)], subs: List[u32], pub_subs: List[u32], reset_seen: bool
+    joined: Option[u64], joining: Option[Receiver[u64]], join_lease: Option[WireJoinLease], subscription: Option[(u32, Bytes, Bytes)], sub_generation: u64, subs: List[(u32, u64)], pub_subs: List[u32], reset_seen: bool
 }
 
 pub fn wire_service[G: send, H: send](take reg: Registry[G, H], policy: ingress.Ingress, head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H]] {
@@ -3497,7 +3513,7 @@ fn wire_service_seed[G: send, H: send](take reg: Registry[G, H], policy: ingress
     let context = WireSession(registry: take reg, place: None, policy: ingress.share(policy), head: channel.sender(head), clock: clock, tasks: tasks, config: config, target: take target,
         source: V4(0u32), me: None, publisher: None, principal: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
         asking: false, pending: None, held: map.new(), output: list.new(), refusals: 0u64, last: 0u64, generation: 0u64,
-        joined: None, joining: None, join_lease: None, subscription: None, subs: list.new(), pub_subs: list.new(), reset_seen: false)
+        joined: None, joining: None, join_lease: None, subscription: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false)
     Service(context: take context, step: wire_step, ready: wire_can_read, finish: wire_finish, check: wire_check_live)
 }
 
@@ -3572,8 +3588,8 @@ fn wire_queued_bytes[G: send, H: send](s: WireSession[G, H]) -> u64 {
     size
 }
 
-fn wire_queue[G: send, H: send](mut s: WireSession[G, H], take frame: Frame, take marks: List[WireMark]) {
-    result.unwrap(list.push(mut s.output, WireOutput(frame: take frame, marks: take marks)))
+fn wire_queue[G: send, H: send](mut s: WireSession[G, H], take frame: Frame, take marks: List[WireMark], take generations: List[(u32, u64)]) {
+    result.unwrap(list.push(mut s.output, WireOutput(frame: take frame, marks: take marks, generations: take generations)))
 }
 
 fn wire_refused[G: send, H: send](mut s: WireSession[G, H], stream: u32, p: u64, take why: Refusal) -> Result[(), u16] {
@@ -3584,7 +3600,7 @@ fn wire_refused[G: send, H: send](mut s: WireSession[G, H], stream: u32, p: u64,
     let mut marks: List[WireMark] = list.new()
     result.unwrap(list.push(mut marks, V1))
     let version = s.last
-    wire_queue(mut s, Batch(version, list.new(), list.new(), take done), take marks)
+    wire_queue(mut s, Batch(version, list.new(), list.new(), take done), take marks, list.new())
     Ok(())
 }
 
@@ -3593,7 +3609,7 @@ fn wire_row[G: send, H: send](mut s: WireSession[G, H], key: Bytes, stream: u32,
     result.unwrap(list.push(mut done, Done(stream: stream, p: p, outcome: take outcome)))
     let mut marks: List[WireMark] = list.new()
     result.unwrap(list.push(mut marks, Unit(result.unwrap(clone(key)))))
-    wire_queue(mut s, Batch(version, list.new(), list.new(), take done), take marks)
+    wire_queue(mut s, Batch(version, list.new(), list.new(), take done), take marks, list.new())
 }
 
 fn wire_reset[G: send, H: send](mut s: WireSession[G, H], version: u64) -> Result[(), u16] {
@@ -3607,7 +3623,7 @@ fn wire_reset_rows[G: send, H: send](mut s: WireSession[G, H], version: u64) -> 
     let mut marks: List[WireMark] = list.new()
     let all = replace(mut s.output, list.new())
     for take o in take all {
-        let WireOutput(frame: take f, marks: take held) = take o
+        let WireOutput(frame: take f, marks: take held, generations: _) = take o
         for take m in take held { result.unwrap(list.push(mut marks, take m)) }
         match take f {
             Batch(_, _, _, take ds) => for take d in take ds { result.unwrap(list.push(mut done, take d)) },
@@ -3620,13 +3636,69 @@ fn wire_reset_rows[G: send, H: send](mut s: WireSession[G, H], version: u64) -> 
     let _ = replace(mut s.join_lease, None)
     s.joined = None
     let _ = replace(mut s.joining, None)
-    wire_queue(mut s, Reset(version, take done), take marks)
+    wire_queue(mut s, Reset(version, take done), take marks, list.new())
     Ok(())
 }
 
+fn wire_drop_stale(mut generations: List[(u32, u64)], active: List[(u32, u64)]) -> bool {
+    let mut index = list.len(generations)
+    let mut changed = false
+    while index != 0u64 {
+        index -= 1u64
+        let (sub, generation) = generations[index]
+        if sub_generation(active, sub) != Some(generation) {
+            let _ = list.remove(mut generations, index)
+            changed = true
+        }
+    }
+    changed
+}
+
+fn wire_current_output(active: List[(u32, u64)], take output: WireOutput) -> Option[WireOutput] {
+    let WireOutput(frame: take f, marks: take marks, generations: take stamps) = take output
+    let mut generations = take stamps
+    if let Ended(sub, _) = f {
+        // A terminal frame has no active subscription unless the id was reused.
+        if let Some(generation) = sub_generation(active, sub) {
+            if sub_generation(generations, sub) != Some(generation) { return None }
+        }
+    } else {
+        if wire_drop_stale(mut generations, active) {
+            if let Batch(version, take complete, take rows, take done) = take f {
+                let mut live_complete: List[u32] = list.new()
+                let mut live_rows: List[Row] = list.new()
+                for sub in complete {
+                    if let Some(_) = sub_generation(generations, sub) { result.unwrap(list.push(mut live_complete, sub)) }
+                }
+                for take row in take rows {
+                    if let Some(_) = sub_generation(generations, row.sub) { result.unwrap(list.push(mut live_rows, take row)) }
+                }
+                if list.len(live_complete) == 0u64 && list.len(live_rows) == 0u64 && list.len(done) == 0u64 { return None }
+                return Some(WireOutput(frame: Batch(version, take live_complete, take live_rows, take done), marks: take marks, generations: take generations))
+            }
+            return None
+        }
+    }
+    Some(WireOutput(frame: take f, marks: take marks, generations: take generations))
+}
+
+fn wire_prune_output[G: send, H: send](mut s: WireSession[G, H], retired: Option[u32]) {
+    let all = replace(mut s.output, list.new())
+    for take output in take all {
+        if let Ended(sub, _) = output.frame { if retired == Some(sub) { continue } }
+        if let Some(take current) = wire_current_output(s.subs, take output) {
+            result.unwrap(list.push(mut s.output, take current))
+        }
+    }
+}
+
 fn wire_take_output[G: send, H: send](mut s: WireSession[G, H]) -> Option[Frame] {
-    if list.len(s.output) == 0u64 { return None }
-    let WireOutput(frame: take f, marks: take marks) = list.remove(mut s.output, 0u64)
+    let selected = loop {
+        if list.len(s.output) == 0u64 { return None }
+        let next = list.remove(mut s.output, 0u64)
+        if let Some(take current) = wire_current_output(s.subs, take next) { break take current }
+    }
+    let WireOutput(frame: take f, marks: take marks, generations: _) = take selected
     for take mark in take marks {
         match take mark {
             V1 => { s.refusals -= 1u64 },
@@ -3696,18 +3768,26 @@ fn wire_call_ready[G: send, H: send](mut s: WireSession[G, H], mut work: WireWor
 }
 
 fn wire_end[G: send, H: send](mut s: WireSession[G, H], sub: u32, take outcome: Outcome) {
+    let mut generations: List[(u32, u64)] = list.new()
+    if let Some(generation) = sub_generation(s.subs, sub) { stamp_rows(mut generations, sub, generation) }
     wire_stop_sub(mut s, sub)
-    wire_queue(mut s, Ended(sub, take outcome), list.new())
+    wire_queue(mut s, Ended(sub, take outcome), list.new(), take generations)
 }
 
 fn wire_subscribed[G: send, H: send](mut s: WireSession[G, H], sub: u32, take key: Bytes, take arg: Bytes) {
     let who = option.unwrap(s.joined)
     let to_pub = wire_publisher(s)
-    let sent = channel.try_send(to_pub, PubIn(e: Subscribed(who, sub, take key, take arg)))
+    s.sub_generation += 1u64
+    let generation = s.sub_generation
+    let sent = channel.try_send(to_pub, PubIn(e: Subscribed(who, sub, generation, take key, take arg)))
     if let Error(_) = take sent { wire_end(mut s, sub, Refused(Overloaded)); return }
-    let mut present = false
-    for id in s.subs { if id == sub { present = true } }
-    if !present { result.unwrap(list.push(mut s.subs, sub)) }
+    let mut index = 0u64
+    while index < list.len(s.subs) && s.subs[index].0 != sub { index += 1u64 }
+    if index == list.len(s.subs) {
+        result.unwrap(list.push(mut s.subs, (sub, generation)))
+    } else {
+        s.subs[index] = (sub, generation)
+    }
     let mut registered = false
     for id in s.pub_subs { if id == sub { registered = true } }
     if !registered { result.unwrap(list.push(mut s.pub_subs, sub)) }
@@ -3739,6 +3819,8 @@ fn wire_subscribe[G: send, H: send](mut s: WireSession[G, H], sub: u32, slot: u3
     let lease = match WireJoinLease(closing: take closing, publisher: wire_publisher(s)) { Ok(take l) => take l, Error(_) => { wire_end(mut s, sub, Refused(Overloaded)); return Ok(()) } }
     let join = Join(to: Wire(wire_me(s)), told: take told, mark: None, closed: Some(take closed))
     if let Error(_) = channel.try_send(wire_publisher(s), PubIn(e: Joined(take join))) { wire_end(mut s, sub, Refused(Overloaded)); return Ok(()) }
+    // A fresh join can wait for its id while an old terminal frame is queued.
+    wire_prune_output(mut s, Some(sub))
     s.join_lease = Some(take lease)
     s.joining = Some(take hear)
     s.subscription = Some((sub, take key, take arg))
@@ -3748,20 +3830,18 @@ fn wire_subscribe[G: send, H: send](mut s: WireSession[G, H], sub: u32, slot: u3
 fn wire_content[G: send, H: send](mut s: WireSession[G, H], take o: Owe) -> Result[(), u16] {
     let current = match s.joined { Some(who) => who == o.session, _ => false }
     if !current { return Ok(()) }
-    let Owe(session: _, version: version, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
+    let Owe(session: _, version: version, generations: take stamps, complete: take complete, rows: take rows, ended: take ended, reset: reset) = take o
     s.last = if version > s.last { version } else { s.last }
     if reset { return wire_reset(mut s, version) }
+    let mut generations = take stamps
+    let _ = wire_drop_stale(mut generations, s.subs)
     let mut live_rows: List[Row] = list.new()
     let mut live_complete: List[u32] = list.new()
     for take row in take rows {
-        let mut live = false
-        for sub in s.subs { if sub == row.sub { live = true } }
-        if live { result.unwrap(list.push(mut live_rows, take row)) }
+        if let Some(_) = sub_generation(generations, row.sub) { result.unwrap(list.push(mut live_rows, take row)) }
     }
     for sub in complete {
-        let mut live = false
-        for id in s.subs { if id == sub { live = true } }
-        if live { result.unwrap(list.push(mut live_complete, sub)) }
+        if let Some(_) = sub_generation(generations, sub) { result.unwrap(list.push(mut live_complete, sub)) }
     }
     let reserve = (1u64 + s.config.q) * (DONE_MAX + 36u64)
     let envelope = 24u64 + 4u64 * list.len(live_complete)
@@ -3773,10 +3853,19 @@ fn wire_content[G: send, H: send](mut s: WireSession[G, H], take o: Owe) -> Resu
         } else { return wire_reset(mut s, version) }
     } else if list.len(live_rows) != 0u64 || list.len(live_complete) != 0u64 {
         let frame = Batch(s.last, take live_complete, take live_rows, list.new())
-        if wire_queued_bytes(s) + wire_output_size(frame) > s.config.budget { return wire_reset(mut s, version) }
-        wire_queue(mut s, take frame, list.new())
+        if wire_queued_bytes(s) + wire_output_size(frame) > s.config.budget {
+            wire_prune_output(mut s, None)
+            if wire_queued_bytes(s) + wire_output_size(frame) > s.config.budget { return wire_reset(mut s, version) }
+        }
+        wire_queue(mut s, take frame, list.new(), take generations)
     }
-    for take e in take ended { let (sub, take why) = take e; wire_forget_sub(mut s, sub); wire_end(mut s, sub, take why) }
+    for take e in take ended {
+        let (sub, generation, take why) = take e
+        if sub_generation(s.subs, sub) == Some(generation) {
+            wire_forget_sub(mut s, sub)
+            wire_end(mut s, sub, take why)
+        }
+    }
     Ok(())
 }
 
@@ -3906,7 +3995,10 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
         },
     }
     let version = s.last
-    if wire_queued_bytes(s) > s.config.budget { wire_reset(mut s, version)? }
+    if wire_queued_bytes(s) > s.config.budget {
+        wire_prune_output(mut s, None)
+        if wire_queued_bytes(s) > s.config.budget { wire_reset(mut s, version)? }
+    }
     Ok(None)
 }
 
@@ -3961,22 +4053,8 @@ resource type WireJoinLease: send { closing: Sender[()], publisher: Sender[PubIn
 
 fn wire_remove_sub[G: send, H: send](mut s: WireSession[G, H], sub: u32) {
     let mut i = 0u64
-    while i < list.len(s.subs) { if s.subs[i] == sub { let _ = list.remove(mut s.subs, i) } else { i += 1u64 } }
-    let pending = replace(mut s.output, list.new())
-    for take output in take pending {
-        let WireOutput(frame: take frame, marks: take marks) = take output
-        match take frame {
-            Batch(v, take complete, take rows, take done) => {
-                let mut live: List[u32] = list.new()
-                let mut kept: List[Row] = list.new()
-                for id in complete { if id != sub { result.unwrap(list.push(mut live, id)) } }
-                for take row in take rows { if row.sub != sub { result.unwrap(list.push(mut kept, take row)) } }
-                if list.len(live) != 0u64 || list.len(kept) != 0u64 || list.len(done) != 0u64 { wire_queue(mut s, Batch(v, take live, take kept, take done), take marks) }
-            },
-            Ended(id, take outcome) => if id != sub { wire_queue(mut s, Ended(id, take outcome), take marks) },
-            take other => wire_queue(mut s, take other, take marks),
-        }
-    }
+    while i < list.len(s.subs) { if s.subs[i].0 == sub { let _ = list.remove(mut s.subs, i) } else { i += 1u64 } }
+    wire_prune_output(mut s, Some(sub))
 }
 
 

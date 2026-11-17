@@ -364,3 +364,105 @@ pub fn law_reply_over_done_max(tasks: Tasks, clock: Clock, random: Random) -> bo
 fn test_durable_wire_admission(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
     if law_gone_slot_v5(tasks, clock, random) && law_request_mismatch_wire(tasks, clock, random) && law_history_below_latest(tasks, clock, random) && law_reply_over_done_max(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
+
+fn wire_deliver_content(mut owner: WireSession[(), Qh], mut work: WireWork, inbox: Receiver[WireEvent]) -> () waits {
+    let WireEvent(e: take event) = result.unwrap(channel.receive(inbox))
+    match take event {
+        FromRunner(take incoming) => { result.unwrap(wire_step(mut owner, mut work, WRunner(take incoming))); },
+        _ => fail("expected publisher content"),
+    }
+}
+
+fn wire_initial_count(frame: Option[Frame], sub: u32, count: u64) -> bool {
+    match frame {
+        Some(Batch(_, complete, rows, done)) => list.len(complete) == 1u64 && complete[0] == sub && list.len(rows) == count && list.len(done) == 0u64,
+        _ => false,
+    }
+}
+
+// G3 permits replacing a live id. Both the publisher's deliveries and the
+// frames waiting for the writer can outlive the query that produced them.
+pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let codec = std.codec.of_u64()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), codec)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), codec))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let Mailbox(to: take to, from: take from) = result.unwrap(mailbox(8u64))
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = result.unwrap(channel.new(1u64))
+    let pub_job = Publish(place: code.describe(subs_place), n_place: 1048576u64,
+        h: result.unwrap(subs_handles(mut db)), base: take base, from: take from, ready: take ready_to)
+    let publishing = result.unwrap(task.spawn(tasks, bytes 8388608u64, take pub_job, publish))
+    if let Ok(None) = channel.receive(ready_from) {} else { return false }
+    let (policy, take policy_task) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (head, requests): (Sender[Req], Receiver[Req]) = result.unwrap(channel.new(1u64))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let config = wire_defaults(1048576u64, 1048576u64)
+    let service = wire_service_seed(take reg, policy, head, c, tasks, config, string.new())
+    let Service(context: take initial, step: _, ready: _, finish: _, check: _) = take service
+    let mut owner = take initial
+    let mut work = wire_work()
+    let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
+    let (told, who): (Sender[u64], Receiver[u64]) = result.unwrap(channel.new(1u64))
+    result.unwrap(channel.send(to, PubIn(e: Joined(Join(to: Wire(take events), told: take told, mark: None, closed: None)))))
+    owner.joined = Some(result.unwrap(channel.receive(who)))
+    owner.publisher = Some(channel.sender(to))
+    if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else { return false }
+
+    wire_subscribed(mut owner, 10u32, query_key(code.describe(q1)), no_arg())
+    wire_deliver_content(mut owner, mut work, inbox)
+    let _ = wire_take_output(mut owner)
+
+    let sub = 8u32
+    wire_subscribed(mut owner, sub, query_key(code.describe(q1)), no_arg())
+    wire_deliver_content(mut owner, mut work, inbox)
+    wire_subscribed(mut owner, sub, query_key(code.describe(qf)), no_arg())
+    let old_initial_discarded = match wire_take_output(mut owner) { None => true, _ => false }
+    wire_deliver_content(mut owner, mut work, inbox)
+    let new_initial = wire_take_output(mut owner)
+    let replacement_published = wire_initial_count(new_initial, sub, 1u64)
+
+    set(mut db, t, 2u64, 2u64)
+    let snapshot = store.snapshot(db)
+    let version = store.version(snapshot)
+    result.unwrap(channel.send(to, PubIn(e: Released(Release(version: version, snapshot: Some(take snapshot), answers: list.new())))))
+    let stale = result.unwrap(channel.receive(inbox))
+    wire_subscribed(mut owner, sub, query_key(code.describe(q1)), no_arg())
+    if let WireEvent(e: FromRunner(take old_end)) = take stale {
+        result.unwrap(wire_step(mut owner, mut work, WRunner(take old_end)))
+    } else { return false }
+    wire_deliver_content(mut owner, mut work, inbox)
+    let after_end = wire_take_output(mut owner)
+    let other_sub_kept = match take after_end {
+        Some(Batch(_, complete, rows, _)) => list.len(complete) == 0u64 && list.len(rows) == 1u64 && rows[0].sub == 10u32,
+        _ => false,
+    }
+    let renewed = wire_take_output(mut owner)
+    let stale_end_discarded = other_sub_kept && wire_initial_count(renewed, sub, 2u64)
+
+    // The old complete can still be in the owner inbox when a replacement arrives.
+    wire_subscribed(mut owner, 3u32, query_key(code.describe(q1)), no_arg())
+    wire_subscribed(mut owner, 3u32, list.new(), no_arg())
+    wire_deliver_content(mut owner, mut work, inbox)
+    wire_deliver_content(mut owner, mut work, inbox)
+    let stale_complete_discarded = match wire_take_output(mut owner) {
+        Some(Ended(3u32, Refused(NoEntry))) => true,
+        _ => false,
+    }
+    result.unwrap(channel.send(to, PubIn(e: Halt)))
+    let _ = task.join(take publishing)
+    let mut policy_handle = take policy_task
+    task.cancel(mut policy_handle)
+    let _ = task.join(take policy_handle)
+    let _ = take requests
+    result.unwrap(store.close(take db))
+    old_initial_discarded && replacement_published && stale_end_discarded && stale_complete_discarded
+}
+
+@test
+fn test_wire_replacement_generation(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_wire_replacement_generation(tasks, clock, random) { Ok(()) } else { Error(()) }
+}

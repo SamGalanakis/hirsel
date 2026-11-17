@@ -10,6 +10,12 @@ A bodiless function that is not `pub` is visible only in its module
 ([PROG-2](programs.md#prog-2-visibility)) and is not part of the contract. A type declared
 there with no body is built in, so its summary is the one the table below gives it.
 
+A core function's body still resolves ordinary names:
+
+```hirsel core
+fn unknown() -> u64 { missing() }                       // refused: LANG-7, missing is not declared
+```
+
 | module | file | rules |
 |---|---|---|
 | `core` (the prelude: every core type, `fail`, `isolate`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2, FAIL-16 |

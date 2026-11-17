@@ -62,9 +62,9 @@ schema fingerprints; a mismatch never rejects a compatible call.
 `bound bytes n_place`, using the launch's fixed allowance, without opening a
 store or listener. It encodes this record with the ordinary value codec:
 
-```hirsel
-Describe { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
-Exported { described: Described, args_fp: u64, result_fp: u64 }
+```text
+type Describe { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
+type Exported { described: Described, args_fp: u64, result_fp: u64 }
 ```
 
 Entries are in registration order. `Described` retains its existing field order

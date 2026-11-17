@@ -20,26 +20,34 @@ fn every_live_spec_fence_parses_and_resolves_or_names_its_refusal() {
         .collect::<Vec<_>>();
     files.sort();
     let mut origins = HashMap::new();
-    let (mut examples, mut rules) = (0, 0);
+    let (mut examples, mut rules, mut core_rules) = (0, 0, 0);
     for path in files {
         let text = std::fs::read_to_string(&path).unwrap();
         let mut active = false;
+        let mut signatures = false;
         let mut code = String::new();
         let mut first_line = 0;
         for (line_no, line) in text.split_inclusive('\n').enumerate() {
             if !active {
-                if line.trim() == "```hirsel" {
+                if matches!(line.trim(), "```hirsel" | "```hirsel core") {
                     active = true;
+                    signatures = line.trim() == "```hirsel core";
                     first_line = line_no + 2;
                 }
             } else if line.trim() == "```" {
                 active = false;
-                let name = package(&format!("spec_{}", origins.len()));
+                let sample = format!("spec_{}", origins.len());
+                let name = if signatures {
+                    core.clone()
+                } else {
+                    package(&sample)
+                };
+                let modules = vec![sample];
                 let file = path.with_extension(format!("md#{first_line}"));
                 let source = ModuleSource {
                     file: file.clone(),
-                    modules: vec!["sample".into()],
-                    signatures: false,
+                    modules: modules.clone(),
+                    signatures,
                 };
                 let expected = code.lines().find_map(|l| {
                     l.split_once("refused:")
@@ -50,19 +58,28 @@ fn every_live_spec_fence_parses_and_resolves_or_names_its_refusal() {
                         })
                 });
                 origins.insert(file.clone(), (path.clone(), first_line, expected));
-                corpus.manifest.packages.push(PackageManifest {
-                    package: name.clone(),
-                    sources: vec![source],
-                    dependencies: vec![core.clone()],
-                });
+                if signatures {
+                    corpus.manifest.packages[0].sources.push(source);
+                    core_rules += 1;
+                } else {
+                    corpus.manifest.packages.push(PackageManifest {
+                        package: name.clone(),
+                        sources: vec![source],
+                        dependencies: vec![core.clone()],
+                    });
+                }
                 corpus.sources.push(CorpusSource {
                     module: ModulePath {
                         package: name,
-                        modules: vec!["sample".into()],
+                        modules,
                     },
                     file,
                     text: std::mem::take(&mut code),
-                    mode: ParseMode::Source,
+                    mode: if signatures {
+                        ParseMode::Signatures
+                    } else {
+                        ParseMode::Source
+                    },
                 });
                 if path.file_name().unwrap() == "examples.md" {
                     examples += 1;
@@ -76,8 +93,8 @@ fn every_live_spec_fence_parses_and_resolves_or_names_its_refusal() {
         assert!(!active, "unclosed Hirsel fence in {}", path.display());
     }
     assert!(
-        examples > 0 && rules > 0,
-        "spec corpus must execute examples and rule snippets"
+        examples > 0 && rules > 0 && core_rules > 0,
+        "spec corpus must execute examples, rule snippets and core declarations"
     );
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);
@@ -89,6 +106,17 @@ fn every_live_spec_fence_parses_and_resolves_or_names_its_refusal() {
             "{}",
             file.file.display()
         );
+        if file.module.package == core
+            && let Some((path, start, Some(expected))) = origins.get(&file.file)
+        {
+            assert!(
+                file.diagnostics.iter().any(|d| d.refusal.rule == *expected),
+                "{}:{} expected refusal {}",
+                path.display(),
+                start,
+                expected
+            );
+        }
         for d in &file.diagnostics {
             let Some((path, start, expected)) = origins.get(&file.file) else {
                 unexpected.push(format!(
@@ -131,7 +159,7 @@ fn every_live_spec_fence_parses_and_resolves_or_names_its_refusal() {
         }
     }
     println!(
-        "live spec: {examples} examples, {rules} rule snippets, {} core files; {} intentional refusals",
+        "live spec: {examples} examples, {rules} rule snippets ({core_rules} core declarations), {} core files; {} intentional refusals",
         report.files.len() - origins.len(),
         report
             .files

@@ -10,12 +10,12 @@ logical size 8. They are `send`, move-only and never `shareable`.
 
 Core declares these provider operations, each `waits`:
 
-```hirsel
-host.connect(n: Net, a: Addr, until: Until) -> Result[Socket, NetError]
-host.listen(n: Net, a: Addr, backlog: u16) -> Result[(Listener, Addr), NetError]
-host.accept(mut l: Listener, until: Until) -> Result[(Socket, Addr), NetError]
-host.recv(mut r: ReadHalf, mut buf: Bytes, until: Until) -> Result[u64, NetError]
-host.send(mut w: WriteHalf, b: Bytes, until: Until) -> Result[u64, NetError]
+```hirsel core
+pub fn connect(n: Net, a: Addr, until: Until) -> Result[Socket, NetError] waits
+pub fn listen(n: Net, a: Addr, backlog: u16) -> Result[(Listener, Addr), NetError] waits
+pub fn accept(mut l: Listener, until: Until) -> Result[(Socket, Addr), NetError] waits
+pub fn recv(mut r: ReadHalf, mut buf: Bytes, until: Until) -> Result[u64, NetError] waits
+pub fn send(mut w: WriteHalf, b: Bytes, until: Until) -> Result[u64, NetError] waits
 ```
 
 W1a declares these entries. A denied address returns `Denied` before issue or

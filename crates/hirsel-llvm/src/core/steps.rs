@@ -20,6 +20,7 @@ pub(super) struct Loop {
     constant: Option<(u64, u64)>,
     stride: Stride,
     inclusive: bool,
+    offset: u64,
 }
 fn next(body: &Body, block: usize) -> Option<Vec<usize>> {
     let edge = |e: EdgeId| body.edges[e.index()].target.index();
@@ -691,30 +692,84 @@ pub(super) fn loops(
             if known.contains_key(&header) {
                 continue;
             }
-            let Some(
-                [
-                    Inst::Read {
-                        result: index,
-                        address: index_slot,
-                        ..
-                    },
-                    Inst::Compare {
-                        result: condition,
-                        op: comparison @ (CompareOp::Lt | CompareOp::Le),
-                        left,
-                        right: limit,
-                    },
-                ],
-            ) = row.insts.get(&body.insts)
-            else {
-                continue;
-            };
-            if left != index
-                || !matches!(
-                    body.values[index.index()],
-                    Ty::Scalar(Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64)
-                )
-                || !local(body, *index_slot)
+            let (index, index_slot, condition, comparison, limit, offset) =
+                match row.insts.get(&body.insts).unwrap() {
+                    [
+                        Inst::Read {
+                            result: index,
+                            address,
+                            ..
+                        },
+                        Inst::Compare {
+                            result,
+                            op: comparison @ (CompareOp::Lt | CompareOp::Le),
+                            left,
+                            right,
+                        },
+                    ] if left == index => (index, address, result, comparison, right, 0),
+                    [
+                        Inst::Read {
+                            result: index,
+                            address,
+                            ..
+                        },
+                        Inst::Const { result: amount, .. },
+                        Inst::Binary {
+                            result: sum,
+                            op: BinaryOp::Add,
+                            left,
+                            right,
+                            ..
+                        },
+                        Inst::Compare {
+                            result,
+                            op: comparison @ (CompareOp::Lt | CompareOp::Le),
+                            left: tested,
+                            right: limit,
+                        },
+                    ] if left == index && right == amount && tested == sum => {
+                        let Some(offset) = constants[amount.index()] else {
+                            continue;
+                        };
+                        (index, address, result, comparison, limit, offset)
+                    }
+                    [
+                        Inst::Read {
+                            result: index,
+                            address,
+                            ..
+                        },
+                        Inst::Binary {
+                            result: gap,
+                            op: BinaryOp::Sub,
+                            left: limit,
+                            right,
+                            ..
+                        },
+                        Inst::Const { result: amount, .. },
+                        Inst::Compare {
+                            result,
+                            op: comparison @ (CompareOp::Gt | CompareOp::Ge),
+                            left: tested,
+                            right: threshold,
+                        },
+                    ] if right == index && tested == gap && threshold == amount => {
+                        let Some(offset) = constants[amount.index()] else {
+                            continue;
+                        };
+                        let comparison = if *comparison == CompareOp::Ge {
+                            &CompareOp::Le
+                        } else {
+                            &CompareOp::Lt
+                        };
+                        (index, address, result, comparison, limit, offset)
+                    }
+                    _ => continue,
+                };
+            if !matches!(
+                body.values[index.index()],
+                Ty::Scalar(Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64)
+            ) || !local(body, *index_slot)
             {
                 continue;
             }
@@ -905,7 +960,7 @@ pub(super) fn loops(
                         let Stride::Constant(step) = stride else {
                             return None;
                         };
-                        let gap = end.checked_sub(start)?;
+                        let gap = end.checked_sub(start)?.checked_sub(offset)?;
                         let count = if inclusive {
                             (gap / step).checked_add(1)?
                         } else {
@@ -942,6 +997,7 @@ pub(super) fn loops(
                 constant,
                 stride,
                 inclusive,
+                offset,
             };
             if !plan.cuts.is_empty() && iteration_prefixes(body, &plan).is_none() {
                 continue;
@@ -1061,6 +1117,14 @@ impl FunctionEmitter<'_> {
         self.store(&Type::I64, &index, &Value::Local(window.start), 8);
         let limit = self.step_word(plan.limit);
         let gap = self.bin(Binary::Sub, &Type::I64, &limit, &index);
+        // The original checked header has already proved index+offset meets
+        // its bound. Keep that addition in every clone; only the trip formula
+        // uses the equivalent nonnegative remaining distance.
+        let gap = if plan.offset == 0 {
+            gap
+        } else {
+            self.bin(Binary::Sub, &Type::I64, &gap, &int(plan.offset))
+        };
         let stride = match plan.stride {
             Stride::Constant(n) => int(n),
             Stride::Value(v) => self.step_word(v),

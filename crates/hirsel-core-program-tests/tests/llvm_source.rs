@@ -1937,3 +1937,144 @@ fn probe(s: u64, n: u64, at: u64, mode: u64) -> u64 {
         );
     }
 }
+
+#[test]
+fn shifted_loop_headers_keep_exact_tails_and_checked_header_overflow() {
+    let run = r#"
+fn probe(s: u64, n: u64, at: u64, base: u64) -> u64 {
+    let ran = bound steps s {
+        let mut xs: Inline[u64, 8] = [0; 8]
+        let mut k = base
+        while k + 8u64 <= n {
+            xs[((k - base) / 8u64) % 8u64] += int.widen(1u8)
+            if k == at { break }
+            k += 8u64
+        }
+        for _ in 0u64 .. 3u64 {}
+        xs[0] + xs[1] * 10 + xs[2] * 100 + xs[3] * 1000 + xs[4] * 10000 + xs[5] * 100000 + xs[6] * 1000000 + xs[7] * 10000000
+    }
+    match ran { Ok(v) => 1000000000u64 + v, Error(e) => 2000000000u64 + e.steps }
+}
+"#;
+    let source = format!(
+        "{run}\n{}",
+        run.replace("fn probe(", "fn distance(")
+            .replace("k + 8u64 <= n", "n - k >= 8u64")
+    );
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(&source, None);
+    let mut cases = Vec::new();
+    for name in ["probe", "distance"] {
+        for n in [0u64, 7, 8, 9, 16, 25, 262151, (1u64 << 63) + 7, u64::MAX] {
+            let trips = n / 8;
+            let positions = if n > 1u64 << 62 {
+                vec![0, 8]
+            } else {
+                vec![0, 8, trips * 8]
+            };
+            for at in positions {
+                let early = at / 8 < trips;
+                let completed = if early { at / 8 } else { trips };
+                // A full trip widens once and latches once. A break widens
+                // once, skips its latch, then pays the three tail latches.
+                let need = 2 * completed + u64::from(early) + 3;
+                let mut words = [0u64; 8];
+                for i in 0..completed + u64::from(early) {
+                    words[(i % 8) as usize] += 1;
+                }
+                let checksum = words
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| v * 10u64.pow(i as u32))
+                    .sum::<u64>();
+                for s in [0, 1, 2, 3, need - 1, need, need + 1, 65535, 65536, 65537] {
+                    let want = if s < need {
+                        2000000000u64 + s
+                    } else {
+                        1000000000u64 + checksum
+                    };
+                    let args = vec![s, n, at, 0];
+                    assert_eq!(
+                        eval::run(&module, names[name], &args, 1_000_000).outcome,
+                        eval::Outcome::Returned(vec![want]),
+                        "hand count {name} args={args:?}"
+                    );
+                    cases.push(Case {
+                        function: names[name],
+                        args,
+                        limit: 1_000_000,
+                        injection: None,
+                    });
+                }
+            }
+        }
+        // Two full trips end at MAX. The addition header then overflows
+        // before another Step; the distance header exits and pays its tail.
+        for s in 0..=9 {
+            let args = vec![s, u64::MAX, u64::MAX, u64::MAX - 16];
+            let want = if name == "probe" && s >= 4 {
+                eval::Outcome::Failed(vec!["Overflow".into()])
+            } else if s < if name == "probe" { 4 } else { 7 } {
+                eval::Outcome::Returned(vec![2000000000u64 + s])
+            } else {
+                eval::Outcome::Returned(vec![1000000011])
+            };
+            assert_eq!(
+                eval::run(&module, names[name], &args, 1_000_000).outcome,
+                want,
+                "checked terminal header {name} args={args:?}"
+            );
+            cases.push(Case {
+                function: names[name],
+                args,
+                limit: 1_000_000,
+                injection: None,
+            });
+        }
+    }
+    for facts in [false, true] {
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                    .unwrap();
+            for (case, report) in cases.iter().zip(execute_object(
+                &module,
+                &cases,
+                "",
+                "",
+                optimization,
+                Some(object),
+            )) {
+                assert_eq!(
+                    report.outcome,
+                    eval::run(&module, case.function, &case.args, case.limit).outcome,
+                    "facts={facts}, args={:?}",
+                    case.args
+                );
+            }
+        }
+    }
+    let object = module.llvm_program(
+        Target::X86_64Linux,
+        false,
+        false,
+        &[names["probe"], names["distance"]],
+    );
+    for (case, report) in cases.iter().zip(execute_object(
+        &module,
+        &cases,
+        "",
+        "",
+        Optimization::Speed,
+        Some(object),
+    )) {
+        assert_eq!(
+            report.outcome,
+            eval::run(&module, case.function, &case.args, case.limit).outcome,
+            "split units, args={:?}",
+            case.args
+        );
+    }
+}

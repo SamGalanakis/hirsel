@@ -991,6 +991,7 @@ fn carrier_ir(
         false,
         facts_enabled(),
         SourceEmission {
+            batch_steps: true,
             test_hooks: true,
             relocatable_sites: relocatable,
             debug_lines: false,
@@ -2402,6 +2403,7 @@ fn aarch64_memory_custody_and_calls_match_the_evaluator() {
                     false,
                     facts,
                     SourceEmission {
+                        batch_steps: true,
                         test_hooks: true,
                         relocatable_sites: false,
                         debug_lines: true,
@@ -2588,6 +2590,7 @@ fn check_consuming_growth(target: Target) {
             std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some(),
             true,
             SourceEmission {
+                batch_steps: true,
                 test_hooks: true,
                 relocatable_sites: false,
                 debug_lines: false,
@@ -2652,6 +2655,7 @@ fn aarch64_consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
                 false,
                 true,
                 SourceEmission {
+                    batch_steps: true,
                     test_hooks: true,
                     relocatable_sites: false,
                     debug_lines: false,

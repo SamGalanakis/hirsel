@@ -504,6 +504,7 @@ dependencies = [
  "hirsel-llvm-lazy",
  "llvm-sys",
  "object",
+ "serde_json",
  "tempfile",
 ]
 

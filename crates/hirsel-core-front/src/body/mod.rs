@@ -1228,7 +1228,7 @@ struct Cx<'c, 'a, 'e> {
     pending: Option<(AddressBase, TypeId)>,
     out: CoreCheck,
     capture_frame: Option<closures::CaptureFrame>,
-    /// Resolution or an enclosing closure has already refused this item.
+    /// Resolution, an enclosing closure or a callee's header already has a refusal.
     inherited_refusal: bool,
     has_callback_parameters: bool,
     frame_level: u32,

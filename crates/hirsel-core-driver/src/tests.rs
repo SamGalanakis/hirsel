@@ -2644,6 +2644,41 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
 }
 
 #[test]
+fn refused_callee_results_stop_emission_on_cold_cached_and_edited_requests() {
+    for body in [
+        "match broken() { Yes(n) => n, No => 0u64 }",
+        "let f = broken; match f() { Yes(n) => n, No => 0u64 }",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = format!(
+            "type Choice = Yes(u64) | No\nfn broken() -> Choice {{ let mut bytes: u64 = 0; Yes(0u64) }}\nfn answer() -> u64 {{ {body} }}\n"
+        );
+        let good = bad.replace("bytes", "enc");
+        for source in [&bad, &bad, &good, &good, &bad, &good] {
+            let product = Driver::default()
+                .check(request(source, dir.path()), &mut Meter::new(false))
+                .unwrap();
+            let refused = source == &bad;
+            assert_eq!(product.accepted(), !refused, "{:?}", product.diagnostics);
+            assert_eq!(
+                product
+                    .definitions
+                    .values()
+                    .find(|d| d.definition.0.name == "answer")
+                    .unwrap()
+                    .check
+                    .function
+                    .is_none(),
+                refused
+            );
+            if refused {
+                assert!(product.diagnostics.iter().any(|r| r.rule == "LANG-2"));
+            }
+        }
+    }
+}
+
+#[test]
 fn unresolved_closure_patterns_do_not_emit_or_use_undeclared_binders() {
     let dir = tempfile::tempdir().unwrap();
     let source = "fn nested() { let f = scoped fn(o: Option[(u64, u64)]) -> u64 { match o { Some((x, _)) => x } } }\nfn captured(x: Missing) -> u64 { match x { Some(y) => { let f = scoped fn() -> u64 { y }; f() } } }\nfn flags(a: bool) -> u64 { 0u64 }\nfn missing_args(a: List[u64], b: List[u64]) -> u64 { flags(a == b) }\nfn peek(h: Missing) -> u64 { flags(h) }\n";

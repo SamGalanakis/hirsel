@@ -91,6 +91,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.put_form(n, f, args, want);
         }
         let g = &p.fns[f];
+        if g.result == ERROR {
+            // The callee's refused header owns the diagnostic. Its error result
+            // cannot supply pattern payloads or a value for live emission.
+            self.inherited_refusal = true;
+            self.halt();
+        }
         // PROG-9 is decided at the argument even when a generic function item
         // cannot otherwise be materialized without an expected callable type.
         // Keep this refusal ahead of function-value inference so the diagnostic

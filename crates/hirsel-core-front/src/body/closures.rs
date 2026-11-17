@@ -261,6 +261,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         let g = &self.p.fns[f];
+        if g.result == ERROR {
+            self.inherited_refusal = true;
+            self.halt();
+        }
         if g.anchors
             .iter()
             .any(|&i| !self.region_handle(g.params[i as usize].ty))

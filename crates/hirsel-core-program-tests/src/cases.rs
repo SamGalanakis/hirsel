@@ -3,7 +3,9 @@ use crate::{Checked, repo};
 use hirsel_core_front::*;
 use hirsel_core_ids::{DefPath, PackageId};
 use hirsel_core_ir::{FuncId, Identity, Module, Param, Ty, eval, wf};
-use hirsel_core_resolve::{ModulePath, NameIndex, Site};
+use hirsel_core_resolve::{
+    CorpusManifest, ModulePath, ModuleSource, NameIndex, PackageManifest, Site,
+};
 use hirsel_core_syntax::Span;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1169,6 +1171,89 @@ fn codec_bounds_and_field_defaults() {
     assert!(report.is_empty(), "{}", report.join("\n"));
 }
 
+fn recovered_header_cases() -> Vec<String> {
+    let mut failures = vec![];
+    for (name, repaired) in [("plain", false), ("plain", true), ("store", false)] {
+        let files = tempfile::tempdir().unwrap();
+        let path = files.path().join("main.hirsel");
+        let mut source =
+            std::fs::read_to_string(root().join(format!("fixtures/ice-places-358-{name}.hirsel")))
+                .unwrap();
+        if repaired {
+            source = source
+                .replace("let mut bytes:", "let mut enc:")
+                .replace("mut bytes)", "mut enc)")
+                .replace("decode(c, bytes)", "decode(c, enc)");
+        }
+        std::fs::write(&path, source).unwrap();
+        let mut packages = vec![
+            PackageManifest::directory(&core_dir(), package("core"), true).unwrap(),
+            PackageManifest::directory(&repo().join("core/std"), package("std"), false).unwrap(),
+        ];
+        let (owner, module, entry) = if name == "store" {
+            let manifest: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(repo().join("core/programs/store/manifest.json")).unwrap(),
+            )
+            .unwrap();
+            let mut store: PackageManifest =
+                serde_json::from_value(manifest["packages"][0].clone()).unwrap();
+            for source in &mut store.sources {
+                source.file = repo().join(&source.file);
+            }
+            store.sources.push(ModuleSource {
+                file: path,
+                modules: vec!["ice_places_358_store".into()],
+                signatures: false,
+            });
+            packages.push(store);
+            ("store", "ice_places_358_store", None)
+        } else {
+            packages.push(PackageManifest {
+                package: package("app"),
+                dependencies: vec![package("core"), package("std")],
+                sources: vec![ModuleSource {
+                    file: path,
+                    modules: vec!["main".into()],
+                    signatures: false,
+                }],
+            });
+            ("app", "main", DefPath::from_full("app@1/main/main"))
+        };
+        let checked = Checked::check(
+            CorpusManifest {
+                core: package("core"),
+                packages,
+            },
+            files,
+            entry,
+        );
+        let product = &checked.product;
+        let label = if repaired { "plain/enc" } else { name };
+        eprintln!(
+            "recovery corpus {label}: accepted={}, diagnostics={}",
+            product.accepted(),
+            product.diagnostics.len()
+        );
+        if product.accepted() != repaired {
+            failures.push(format!(
+                "{label}: expected accepted={repaired}; {:?}; {:?}",
+                product.diagnostics, product.incomplete
+            ));
+        }
+        if !repaired
+            && !product.diagnostics.iter().any(|r| {
+                let at = product.index.module_path(r.primary.module);
+                at.package.name == owner && at.modules.iter().map(String::as_str).eq([module])
+            })
+        {
+            failures.push(format!(
+                "{label}: missing diagnostic in the refused source module"
+            ));
+        }
+    }
+    failures
+}
+
 #[test]
 fn corpus() {
     let mut paths = vec![];
@@ -1192,6 +1277,7 @@ fn corpus() {
             ));
         }
     }
+    report.extend(recovered_header_cases());
     assert!(report.is_empty(), "\n{}", report.join("\n"));
 }
 

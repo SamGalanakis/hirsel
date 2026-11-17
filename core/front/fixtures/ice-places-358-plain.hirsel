@@ -1,0 +1,118 @@
+// parcels: read parcel records, pass them through their binary codec, and print what decodes.
+type Fail = Usage | Unreadable | Bad(u64) | Mem(Capacity) | Corrupt | Write(WriteError)
+
+type Location: codec { x: i64, y: i64 }
+
+type Parcel: codec { name: String, at: Option[Location] }
+
+fn signed(s: View[String]) -> Option[i64] {
+    let n = string.byte_len(s)
+    if n == 0 {
+        return None
+    }
+    let b = string.as_bytes(s)
+    let mut i: u64 = 0
+    if b[0] == 0x2D {
+        i = 1
+    }
+    if i == n {
+        return None
+    }
+    while i < n {
+        if b[i] < 0x30 || b[i] > 0x39 {
+            return None
+        }
+        i += 1
+    }
+    match std.int.parse_int(s, 10) { Ok(v) => Some(v), Error(_) => None }
+}
+
+// `NAME` or `NAME X Y`, words separated by single spaces.
+fn parcel(line: View[String]) -> Result[Option[Parcel], Capacity] {
+    let Some((w, at)) = std.string.next_split(line, 0, " ") else { return Ok(None) }
+    if string.byte_len(w) == 0 {
+        return Ok(None)
+    }
+    let name = string.from(w)?
+    let Some((xs, at2)) = std.string.next_split(line, at, " ") else {
+        return Ok(Some(Parcel(name: take name, at: None)))
+    }
+    let Some((ys, end)) = std.string.next_split(line, at2, " ") else { return Ok(None) }
+    if std.string.next_split(line, end, " ") != None {
+        return Ok(None)
+    }
+    let Some(x) = signed(xs) else { return Ok(None) }
+    let Some(y) = signed(ys) else { return Ok(None) }
+    Ok(Some(Parcel(name: take name, at: Some(Location(x: x, y: y)))))
+}
+
+fn show(mut buf: String, p: Parcel) -> Result[(), Capacity] {
+    string.push(mut buf, p.name)?
+    match p.at {
+        Some(l) => {
+            string.push(mut buf, " at ")?
+            std.string.push_i64(mut buf, l.x)?
+            string.push(mut buf, ",")?
+            std.string.push_i64(mut buf, l.y)?
+        },
+        None => string.push(mut buf, " nowhere")?
+    }
+    string.push(mut buf, "\n")
+}
+
+fn run(out: Stdout, d: Dir, argv: Args) -> Result[(), Fail] waits {
+    if args.len(argv) != 1 {
+        return Error(Usage)
+    }
+    let Some(path) = args.get(argv, 0) else { return Error(Usage) }
+    let text = match std.file.read_string(d, path) { Ok(take s) => s, Error(_) => return Error(Unreadable) }
+    let mut ps: List[Parcel] = list.new()
+    let mut at: u64 = 0
+    let mut n: u64 = 0
+    while let Some((line, next)) = std.string.next_line(text, at) {
+        n += 1
+        let got = match parcel(line) { Ok(take g) => g, Error(c) => return Error(Mem(c)) }
+        let Some(take p) = got else { return Error(Bad(n)) }
+        match list.push(mut ps, take p) { Ok(()) => {}, Error((c, _)) => return Error(Mem(c)) }
+        at = next
+    }
+    let c: std.codec.Codec[List[Parcel]] = std.codec.of_list()
+    let mut bytes: Bytes = list.new()
+    match std.codec.encode(c, ps, mut bytes) { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+    let back = match std.codec.decode(c, bytes) {
+        Ok(Ok(take xs)) => xs,
+        Ok(Error(_)) => return Error(Corrupt),
+        Error(cap) => return Error(Mem(cap))
+    }
+    let mut buf = string.new()
+    for p in back {
+        match show(mut buf, p) { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+    }
+    match string.push(mut buf, "count ") { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+    match string.push_u64(mut buf, list.len(back)) { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+    match string.push(mut buf, "\n") { Ok(()) => {}, Error(cap) => return Error(Mem(cap)) }
+    match stdout.write(out, buf) { Ok(()) => Ok(()), Error(e) => Error(Write(e)) }
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    match run(out, d, argv) {
+        Ok(()) => Ok(()),
+        Error(Usage) => {
+            match stdout.write(out, "usage: parcels FILE\n") { _ => {} }
+            Error(Exit(status: 2))
+        },
+        Error(Unreadable) => {
+            match stdout.write(out, "error: cannot read file\n") { _ => {} }
+            Error(Exit(status: 3))
+        },
+        Error(Bad(n)) => {
+            let mut s = string.new()
+            match string.push(mut s, "error: line ") { _ => {} }
+            match string.push_u64(mut s, n) { _ => {} }
+            match string.push(mut s, "\n") { _ => {} }
+            match stdout.write(out, s) { _ => {} }
+            Error(Exit(status: 2))
+        },
+        Error(_) => Error(Exit(status: 4)),
+    }
+}

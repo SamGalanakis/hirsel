@@ -21,6 +21,10 @@
   caught failure keeps its cause cell (FAIL-16), so a run whose `isolate` caught
   one states `used 32`.
 
+The corpus also checks `fixtures/ice-places-358-*.hirsel` with std. The store case
+uses its package's manifest. Both malformed programs require diagnostics; the
+plain program with its reserved local renamed to `enc` must check.
+
 A run line may end in `evaluator-only:ENGINE,..` (engines `cranelift`, `llvm`): the case
 harness holds it under the evaluator, and each named native walker requires it to
 disagree. An engine's land that makes it agree removes that engine from the marker and

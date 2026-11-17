@@ -2699,21 +2699,26 @@ fn unresolved_closure_patterns_do_not_emit_or_use_undeclared_binders() {
 }
 
 #[test]
-fn unresolved_bodies_keep_secondary_diagnostics_on_cold_and_cached_requests() {
+fn unresolved_bodies_suppress_cascades_without_hiding_independent_body_errors() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "type Choice = Yes | No(u64)\nfn pattern(x: Choice) -> u64 { match x { Yes => 1u64, Missing(_) => 0u64 } }\n";
+    let source = "type Choice = Yes | No(u64)\nfn pattern(x: Choice) -> u64 { match x { Yes => 1u64, Missing(_) => 0u64 } }\nfn independent() -> u64 { true }\n";
     for attempt in 0..2 {
         let product = Driver::default()
             .check(request(source, dir.path()), &mut Meter::new(false))
             .unwrap();
         assert!(!product.accepted());
-        for rule in ["LANG-7", "LANG-17"] {
-            assert!(
-                product.diagnostics.iter().any(|r| r.rule == rule),
-                "attempt {attempt}: missing {rule}: {:?}",
-                product.diagnostics
-            );
-        }
+        let rules: Vec<_> = product
+            .diagnostics
+            .iter()
+            .map(|r| r.rule.as_str())
+            .collect();
+        assert_eq!(
+            rules,
+            ["LANG-7", "LANG-11"],
+            "attempt {attempt}: {:?}",
+            product.diagnostics
+        );
+        assert!(product.incomplete.is_empty());
     }
 }
 

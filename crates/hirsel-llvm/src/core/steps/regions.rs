@@ -12,6 +12,7 @@ fn visit(
     body: &Body,
     block: usize,
     allowed: &[bool],
+    header: usize,
     active: &mut BTreeSet<usize>,
     costs: &mut BTreeMap<usize, u64>,
 ) -> Option<u64> {
@@ -27,7 +28,9 @@ fn visit(
     }
     let mut tail = 0;
     for next in super::next(body, block).unwrap_or_default() {
-        tail = tail.max(visit(body, next, allowed, active, costs)?);
+        if next != header {
+            tail = tail.max(visit(body, next, allowed, header, active, costs)?);
+        }
     }
     active.remove(&block);
     let own = body.blocks[block]
@@ -41,9 +44,15 @@ fn visit(
     Some(cost)
 }
 
-pub(crate) fn plans(module: &Module, body: &Body, neutral: &[bool]) -> Vec<Region> {
+pub(crate) fn plans(
+    module: &Module,
+    body: &Body,
+    neutral: &[bool],
+    counted: &[super::Loop],
+) -> Vec<Region> {
     let flow = flow::Flow::new(body);
-    // A loop header is a region boundary. No copied path crosses a back edge.
+    // Other loop headers are boundaries. A region starting at an uncounted
+    // header covers one trip and refunds before its back edge.
     let mut headers = BTreeSet::new();
     for b in 0..body.blocks.len() {
         for next in super::next(body, b).unwrap_or_default() {
@@ -57,8 +66,7 @@ pub(crate) fn plans(module: &Module, body: &Body, neutral: &[bool]) -> Vec<Regio
         .iter()
         .enumerate()
         .map(|(b, row)| {
-            !headers.contains(&b)
-                && !matches!(body.terminators[b], Terminator::Switch { .. })
+            !matches!(body.terminators[b], Terminator::Switch { .. })
                 && row
                     .insts
                     .get(&body.insts)
@@ -69,11 +77,24 @@ pub(crate) fn plans(module: &Module, body: &Body, neutral: &[bool]) -> Vec<Regio
         .collect::<Vec<_>>();
     let mut regions = Vec::new();
     for header in 0..body.blocks.len() {
-        if !allowed[header] {
+        if !allowed[header] || counted.iter().any(|p| p.header == header) {
             continue;
         }
+        let mut region_allowed = allowed.clone();
+        for &h in &headers {
+            if h != header {
+                region_allowed[h] = false;
+            }
+        }
         let mut costs = BTreeMap::new();
-        let Some(cost) = visit(body, header, &allowed, &mut BTreeSet::new(), &mut costs) else {
+        let Some(cost) = visit(
+            body,
+            header,
+            &region_allowed,
+            header,
+            &mut BTreeSet::new(),
+            &mut costs,
+        ) else {
             continue;
         };
         let nodes = costs.keys().copied().collect::<BTreeSet<_>>();
@@ -91,7 +112,7 @@ pub(crate) fn plans(module: &Module, body: &Body, neutral: &[bool]) -> Vec<Regio
         let exits = nodes
             .iter()
             .flat_map(|&b| super::next(body, b).unwrap_or_default())
-            .filter(|b| !nodes.contains(b))
+            .filter(|b| *b == header || !nodes.contains(b))
             .collect();
         for &b in &nodes {
             allowed[b] = false;
@@ -155,7 +176,7 @@ impl FunctionEmitter<'_> {
             charged: Value::Local(window.charged),
         });
         for &b in &plan.nodes {
-            self.block(self.step_label(b));
+            self.block(label(number, self.body.blocks.len(), b));
             let row = &self.body.blocks[b];
             for (offset, inst) in row.insts.get(&self.body.insts).unwrap().iter().enumerate() {
                 if !matches!(inst, Inst::Const { .. }) {

@@ -1573,3 +1573,138 @@ fn probe(s: u64, mode: u64, repeats: u64) -> u64 {
         );
     }
 }
+
+#[test]
+fn data_dependent_cycles_refund_exact_step_prefixes() {
+    let source = r#"
+fn scan(mut xs: Inline[u64, 8], n: u64, at: u64) -> Result[(), Capacity] {
+    let mut i = 0u64
+    loop {
+        let one: u64 = int.widen(1u8)
+        if i == n { break }
+        xs[i % 8] += one
+        if i == at { return Error(Capacity(requested: 1, available: 0)) }
+        i += 1
+    }
+    Ok(())
+}
+fn probe(s: u64, n: u64, at: u64) -> u64 {
+    let ran = bound steps s {
+        let mut xs: Inline[u64, 8] = [0; 8]
+        let scanned = scan(mut xs, n, at)
+        for _ in 0u64 .. 3u64 {}
+        let checksum = xs[0] + xs[1] * 10 + xs[2] * 100 + xs[3] * 1000 + xs[4] * 10000 + xs[5] * 100000 + xs[6] * 1000000 + xs[7] * 10000000
+        match scanned { Ok(()) => 1000000000u64 + checksum, Error(_) => 3000000000u64 + checksum }
+    }
+    match ran { Ok(answer) => answer, Error(e) => 2000000000u64 + e.steps }
+}
+fn failing(s: u64, n: u64) -> u64 {
+    match (bound steps s {
+        let ran = result.unwrap(isolate(scoped fn() -> u64 {
+            let mut i = 0u64
+            loop {
+                let one: u64 = int.widen(1u8)
+                if i == n { let _ = 1u64 / (i - n) }
+                i += one
+            }
+        }))
+        for _ in 0u64 .. 3u64 {}
+        match take ran { Ok(v) => v, Error(take cs) => 77u64 }
+    }) { Ok(v) => 1000u64 + v, Error(e) => e.steps }
+}
+"#;
+    let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let mut cases = Vec::new();
+    for n in [0u64, 1, 8, 32768] {
+        for at in [0, n.saturating_sub(1), n] {
+            let early = at < n;
+            // One source call, two Steps per completed trip, one final
+            // conversion before exit, then three tail latches.
+            let need = 2 * if early { at } else { n } + 5;
+            let mut words = [0u64; 8];
+            for i in 0..if early { at + 1 } else { n } {
+                words[(i % 8) as usize] += 1;
+            }
+            let checksum = words
+                .iter()
+                .enumerate()
+                .map(|(i, v)| v * 10u64.pow(i as u32))
+                .sum::<u64>();
+            for s in [0, need - 1, need, need + 1, 65535, 65536, 65537] {
+                let want = if s < need {
+                    2000000000u64 + s
+                } else {
+                    (if early { 3000000000u64 } else { 1000000000u64 }) + checksum
+                };
+                assert_eq!(
+                    eval::run(&module, names["probe"], &[s, n, at], 1_000_000).outcome,
+                    eval::Outcome::Returned(vec![want]),
+                    "hand count s={s}, n={n}, at={at}"
+                );
+                cases.push(Case {
+                    function: names["probe"],
+                    args: vec![s, n, at],
+                    limit: 1_000_000,
+                    injection: None,
+                });
+            }
+        }
+    }
+    for n in [0, 7, 300] {
+        for s in [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 17, 600, 601, 602, 603, 604, 605, 606, 607, 608,
+            609, 610, 611, 612,
+        ] {
+            cases.push(Case {
+                function: names["failing"],
+                args: vec![s, n],
+                limit: 1_000_000,
+                injection: None,
+            });
+        }
+    }
+    for facts in [false, true] {
+        let ir =
+            emit_ir_for_test_with_facts(&module, Target::X86_64Linux, false, false, facts).unwrap();
+        verify_ir(&ir);
+        for optimization in [Optimization::None, Optimization::Speed] {
+            let object =
+                hirsel_llvm_lazy::compile_ir(&ir, matches!(optimization, Optimization::Speed))
+                    .unwrap();
+            let reports = execute_object(&module, &cases, "", "", optimization, Some(object));
+            for (case, report) in cases.iter().zip(reports) {
+                let expected = eval::run(&module, case.function, &case.args, case.limit);
+                assert_eq!(
+                    report.outcome, expected.outcome,
+                    "facts={facts}, f={:?}, args={:?}",
+                    case.function, case.args
+                );
+                let sites = expected
+                    .sites
+                    .iter()
+                    .map(|a| {
+                        a.map_or(0, |a| {
+                            ((u64::from(a.item.0) + 1) << 32) | u64::from(a.start)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(report.sites, sites, "failure site, args={:?}", case.args);
+            }
+        }
+    }
+    let object = module.llvm_program(
+        Target::X86_64Linux,
+        false,
+        false,
+        &[names["probe"], names["failing"]],
+    );
+    let reports = execute_object(&module, &cases, "", "", Optimization::Speed, Some(object));
+    for (case, report) in cases.iter().zip(reports) {
+        assert_eq!(
+            report.outcome,
+            eval::run(&module, case.function, &case.args, case.limit).outcome,
+            "split units, args={:?}",
+            case.args
+        );
+    }
+}

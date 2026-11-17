@@ -627,7 +627,7 @@ fn emit_module(
             Vec::new()
         };
         let step_regions = if source.batch_steps {
-            steps::regions(module, body, &step_neutral)
+            steps::regions(module, body, &step_neutral, &step_loops)
         } else {
             Vec::new()
         };

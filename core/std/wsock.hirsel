@@ -74,6 +74,7 @@ fn literal(b: Bytes) -> Option[Ip] {
     let mut count: u64 = 0
     let mut at: u64 = 0
     let mut gap: Option[u64] = None
+    let mut mixed = false
     if b[0] == b':' {
         if size < 2 || b[1] != b':' {
             return None
@@ -95,6 +96,7 @@ fn literal(b: Bytes) -> Option[Ip] {
             dotted = dotted || b[i] == b'.'
         }
         if dotted {
+            mixed = true
             if end != size || count > 6 {
                 return None
             }
@@ -167,7 +169,10 @@ fn literal(b: Bytes) -> Option[Ip] {
     let mapped = hi == 0 && lo >> 32 == 65535
     // RFC 5952 4.2: compress the longest zero run, ties to the left, never
     // compress a single zero. Mapped forms have the same normalized key.
-    if !mapped {
+    if mixed && !mapped {
+        return None
+    }
+    {
         let mut best: u64 = 8
         let mut length: u64 = 1
         let mut i: u64 = 0
@@ -227,5 +232,543 @@ pub fn source(b: Bytes, peer: Ip, ingress: List[Prefix]) -> Result[Ip, u16] {
     match literal(list.slice(b, span.start, span.end)) {
         Some(ip) => Ok(ip),
         None => Error(400)
+    }
+}
+
+pub type Config: send {
+    max_frame: u64,
+    upgrade_ms: u64,
+    hello_ms: u64,
+    pending_max: u64,
+    close_ms: u64,
+    idle_ms: u64
+}
+
+/// WIRE 2.3 defaults. Limits are validated before any connection allocation.
+pub fn defaults() -> Config {
+    Config(max_frame: 262144, upgrade_ms: 5000, hello_ms: 10000, pending_max: 1024, close_ms: 5000, idle_ms: 30000)
+}
+
+pub type Error: send = Allocation(Capacity) | Network(NetError) | Http(u16) | Protocol(u16) | Eof | Configuration | Busy
+
+fn valid(config: Config) -> bool {
+    config.max_frame != 0 && config.max_frame & (config.max_frame - 1) == 0 && config.max_frame <= 0xfffffffffffffff1 && config.pending_max != 0 && config.upgrade_ms <= 18446744073709 && config.hello_ms <= 18446744073709 && config.close_ms <= 18446744073709 && config.idle_ms != 0 && config.idle_ms <= 18446744073709
+}
+
+fn after(now: u64, ms: u64) -> u64 {
+    now + ms * 1000000
+}
+
+pub opaque type PendingPool {
+    free: Receiver[()],
+    returned: Sender[()]
+}
+
+pub opaque resource type Pending: send {
+    returned: Sender[()]
+} drop(slot) {
+    let _ = channel.try_send(slot.returned, ())
+}
+
+/// Bounded pending allowance. Tokens return on every exit, including cancellation
+/// and deadline, through Pending's finalizer. O(pending_max) initial channel storage.
+pub fn pending(config: Config) -> Result[PendingPool, Error] {
+    if !valid(config) {
+        return Error(Configuration)
+    }
+    let allocation: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(config.pending_max)
+    let (tx, rx) = match allocation {
+        Ok(take pair) => take pair,
+        Error(c) => return Error(Allocation(c))
+    }
+    for i in 0u64 .. config.pending_max {
+        let _ = channel.try_send(tx, ())
+    }
+    Ok(PendingPool(free: take rx, returned: take tx))
+}
+
+/// None means HTTP 503 before creating session state. Allocation refusal also
+/// returns the token. A successful Hello consumes the returned Pending lease.
+pub fn acquire(pool: PendingPool) -> Result[Option[Pending], Error] {
+    match channel.try_receive(pool.free) {
+        Ok(_) => {},
+        Error(_) => return Ok(None)
+    }
+    match Pending(returned: channel.sender(pool.returned)) {
+        Ok(take slot) => Ok(Some(take slot)),
+        Error((c, take tx)) => {
+            let _ = channel.try_send(tx, ())
+            Error(Allocation(c))
+        }
+    }
+}
+
+/// Releases the pending slot after the application has decoded and accepted Hello.
+pub fn hello_accepted(take slot: Pending) {}
+
+pub opaque type Timers: send {
+    config: Config,
+    hello: Option[u64],
+    idle: u64,
+    probing: bool,
+    close: Option[u64],
+    peer_closed: bool,
+    close_sent: bool
+}
+
+pub type Due: key + send = Wait | SendPing | SendClose | Expired
+
+/// Absolute Hello and idle deadlines begin at completion of the 101 response.
+pub fn timers(config: Config, now: u64) -> Timers {
+    Timers(config: config, hello: Some(after(now, config.hello_ms)), idle: after(now, config.idle_ms), probing: false, close: None, peer_closed: false, close_sent: false)
+}
+
+/// Called only after Hello is accepted; unrelated frames never extend Hello.
+pub fn welcomed(mut t: Timers) {
+    t.hello = None
+}
+
+/// Every received frame, including Pong, restarts idle observation.
+pub fn activity(mut t: Timers, now: u64) {
+    t.idle = after(now, t.config.idle_ms)
+    t.probing = false
+}
+
+/// Starts one absolute deadline for either direction. Repeated close events
+/// never extend it. The owner passes this same state to both child operations.
+pub fn closing(mut t: Timers, now: u64, peer: bool) {
+    if t.close == None {
+        t.close = Some(after(now, t.config.close_ms))
+    }
+    t.peer_closed = t.peer_closed || peer
+}
+
+/// Marks the Close flushed by the sole writer, independently of peer receipt.
+pub fn close_sent(mut t: Timers) {
+    t.close_sent = true
+}
+
+/// A complete handshake may release immediately; otherwise expiry cancels and
+/// joins both children. Pure time decision, also exercised under virtual time.
+pub fn due(mut t: Timers, now: u64) -> Due {
+    if let Some(end) = t.close {
+        if now >= end || t.peer_closed && t.close_sent {
+            return Expired
+        }
+        return Wait
+    }
+    if let Some(end) = t.hello {
+        if now >= end {
+            closing(mut t, now, false)
+            return SendClose
+        }
+    }
+    if now >= t.idle {
+        if t.probing {
+            closing(mut t, now, false)
+            return SendClose
+        }
+        t.probing = true
+        t.idle = after(now, t.config.idle_ms)
+        return SendPing
+    }
+    Wait
+}
+
+/// Minimum of the caller's operation deadline and every applicable protocol
+/// deadline. Try-first host I/O may still commit immediately at this instant.
+pub fn until(t: Timers, c: Clock, outer: Until) -> Until {
+    let mut end = match t.close {
+        Some(deadline) => deadline,
+        None => {
+            let mut deadline = t.idle
+            if let Some(hello) = t.hello {
+                if hello < deadline {
+                    deadline = hello
+                }
+            }
+            deadline
+        }
+    }
+    match outer {
+        At(_, deadline) => if deadline < end {
+            end = deadline
+        },
+        Never => {}
+    }
+    At(c, end)
+}
+
+fn expired(deadline: Until) -> bool {
+    match deadline {
+        At(c, end) => host.mono_ns(c) >= end,
+        Never => false
+    }
+}
+
+pub opaque type Reader: send {
+    half: ReadHalf,
+    input: Bytes,
+    cursor: u64,
+    decoder: websocket.Decoder
+}
+
+pub opaque type Writer: send {
+    half: WriteHalf,
+    buffer: WriteBuffer
+}
+
+pub opaque type WriteBuffer: send {
+    pending: Bytes,
+    cursor: u64,
+    pong: Option[websocket.Control]
+}
+
+pub opaque type Outbound: send {
+    encoder: websocket.Encoder,
+    role: websocket.Role,
+    max: u64,
+    random: Option[Random]
+}
+
+/// Owner-side encoder. Client role needs a granted Random, consumed fresh on
+/// every frame, including control frames. Encoded buffers stay owner-funded.
+pub fn outbound(role: websocket.Role, config: Config, random: Option[Random]) -> Result[Outbound, Error] {
+    if !valid(config) {
+        return Error(Configuration)
+    }
+    if role == Client {
+        match random {
+            None => return Error(Configuration),
+            Some(_) => {}
+        }
+    }
+    Ok(Outbound(encoder: websocket.encoder(role, config.max_frame), role: role, max: config.max_frame, random: random))
+}
+
+/// Encodes exactly one frame into capacity payload+14, avoiding geometric
+/// growth beyond WIRE's round8(max_frame+14) writer-buffer bound.
+pub fn encode(mut out: Outbound, fin: bool, opcode: u8, payload: Bytes) -> Result[Bytes, Error] {
+    if list.len(payload) > out.max {
+        return Error(Protocol(1009))
+    }
+    let mut mask: Inline[u8, 4] =[0; 4]
+    if let Some(random) = out.random {
+        if out.role == Client {
+            let mut entropy = buffer(4)?
+            host.random(random, mut entropy)
+            for i in 0u64 .. 4u64 {
+                mask[i] = entropy[i]
+            }
+        }
+    }
+    let mut b = buffer(list.len(payload) + 14)?
+    match websocket.encode(mut out.encoder, fin, opcode, payload, mask, mut b) {
+        Ok(Ok(_)) => Ok(take b),
+        Ok(Error(code)) => Error(Protocol(code)),
+        Error(c) => Error(Allocation(c))
+    }
+}
+
+/// One pending frame, moved from its allocating owner. A busy writer returns
+/// the offered buffer unchanged; controls wait behind a part-written frame.
+pub fn offer(mut w: WriteBuffer, take frame: Bytes) -> Result[(), Bytes] {
+    if !idle(w) {
+        return Error(take frame)
+    }
+    let old = replace(mut w.pending, take frame)
+    w.cursor = 0
+    Ok(())
+}
+
+/// One send attempt with an operation-local composite deadline. Prefix sends
+/// advance the retained cursor. TimedOut preserves it for the owner's timer
+/// transition; terminal release drops the buffer and the socket half together.
+pub fn flush(mut w: Writer, mut out: Outbound, deadline: Until) -> Result[bool, Error] waits {
+    if prepare(mut w.buffer, mut out)? {
+        return Ok(true)
+    }
+    let sent = host.send(mut w.half, remaining(w.buffer), deadline)
+    match sent {
+        Ok(n) => {
+            wrote(mut w.buffer, n)
+        },
+        Error(e) => return Error(Network(e))
+    }
+    Ok(idle(w.buffer))
+}
+
+/// Empty one-frame buffer and inline control debt, independent of its socket.
+pub fn write_buffer() -> WriteBuffer {
+    WriteBuffer(pending: list.new(), cursor: 0, pong: None)
+}
+
+/// Queue a frame for the sole socket writer; busy returns it unchanged.
+pub fn stage(mut w: Writer, take frame: Bytes) -> Result[(), Bytes] {
+    offer(mut w.buffer, take frame)
+}
+
+/// Record control debt at the writer while preserving the part-written frame.
+pub fn pong(mut w: Writer, control: websocket.Control) {
+    owe_pong(mut w.buffer, control)
+}
+
+/// Current unsent prefix, borrowed until host.send completes.
+pub fn remaining(b: WriteBuffer) -> View[Bytes] in b {
+    list.slice(b.pending, b.cursor, list.len(b.pending))
+}
+
+/// Commit the prefix count returned by host.send, without copying the frame.
+pub fn wrote(mut b: WriteBuffer, count: u64) {
+    b.cursor += count
+    if b.cursor == list.len(b.pending) {
+        {
+            let old = replace(mut b.pending, list.new())
+        }
+        b.cursor = 0
+    }
+}
+
+/// Whether both the pending frame and control debt have drained.
+pub fn idle(b: WriteBuffer) -> bool {
+    b.cursor == list.len(b.pending) && match b.pong {
+        None => true,
+        Some(_) => false
+    }
+}
+
+/// Retire a completed frame, then encode the owed Pong. Never interrupt a
+/// partial frame. True means there is no output remaining.
+pub fn prepare(mut w: WriteBuffer, mut out: Outbound) -> Result[bool, Error] {
+    if w.cursor != list.len(w.pending) {
+        return Ok(false)
+    }
+    {
+        let old = replace(mut w.pending, list.new())
+    }
+    w.cursor = 0
+    match replace(mut w.pong, None) {
+        Some(control) => {
+            let mut payload = buffer(control.len)?
+            match websocket.control(control, mut payload) {
+                Ok(_) => {},
+                Error(c) => return Error(Allocation(c))
+            }
+            w.pending = encode(mut out, true, 10, payload)?
+            Ok(false)
+        },
+        None => Ok(true)
+    }
+}
+
+/// Records a Pong even while a data frame is part-written. As RFC 6455 5.5.2
+/// permits, repeated pending Pings coalesce to the most recently received one.
+pub fn owe_pong(mut w: WriteBuffer, control: websocket.Control) {
+    w.pong = Some(control)
+}
+
+/// Reads one protocol event with bounded 8192-byte scratch. Every decoded
+/// message is allocated here, in the reader task's account, before handoff.
+pub fn read(mut r: Reader, deadline: Until) -> Result[websocket.Event, Error] waits {
+    let before = websocket.frame_count(r.decoder)
+    let mut attempted = false
+    loop {
+        if attempted && expired(deadline) {
+            return Error(Network(TimedOut))
+        }
+        match websocket.next(mut r.decoder, r.input, mut r.cursor) {
+            Ok(Need) => if websocket.frame_count(r.decoder) != before {
+                return Ok(Need)
+            },
+            Ok(take event) => return Ok(take event),
+            Error(c) => return Error(Allocation(c))
+        }
+        list.clear(mut r.input)
+        r.cursor = 0
+        match host.recv(mut r.half, mut r.input, deadline) {
+            Ok(0) => return Error(Eof),
+            Ok(_) => {},
+            Error(e) => return Error(Network(e))
+        }
+        attempted = true
+    }
+}
+
+pub type Upgraded: send {
+    reader: Reader,
+    writer: Writer,
+    source: Ip,
+    timers: Timers,
+    pending: Pending
+}
+
+fn buffer(n: u64) -> Result[Bytes, Error] {
+    let allocation: Result[Bytes, Capacity] = list.with_capacity(n)
+    match allocation {
+        Ok(take b) => Ok(take b),
+        Error(c) => Error(Allocation(c))
+    }
+}
+
+fn send_head(mut w: WriteHalf, b: Bytes, deadline: Until) -> Result[(), Error] waits {
+    let mut at: u64 = 0
+    while at != list.len(b) {
+        if at != 0 && expired(deadline) {
+            return Error(Network(TimedOut))
+        }
+        match host.send(mut w, list.slice(b, at, list.len(b)), deadline) {
+            Ok(n) => {
+                at += n
+            },
+            Error(e) => return Error(Network(e))
+        }
+    }
+    Ok(())
+}
+
+/// Bounded HTTP refusal. It is sent before releasing the socket halves.
+pub fn refuse(mut w: WriteHalf, code: u16, deadline: Until) -> Result[(), Error] waits {
+    let b = if code == 503 {
+        string.as_bytes("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    } else if code == 431 {
+        string.as_bytes("HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    } else if code == 426 {
+        string.as_bytes("HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: 13\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    } else if code == 404 {
+        string.as_bytes("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    } else {
+        string.as_bytes("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    }
+    send_head(mut w, b, deadline)
+}
+
+/// Accept-to-head absolute deadline, sanitized ingress and preserved read-ahead.
+/// The lease is consumed on every error path and returned with success until
+/// Hello acceptance. The accept loop acquires it before spawning session state.
+pub fn server(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64) -> Result[Upgraded, Error] waits {
+    if !valid(config) {
+        return Error(Configuration)
+    }
+    let (r, w) = net.split(take socket)
+    let mut input_half = r
+    let mut output_half = w
+    let deadline = At(clock, after(accepted_ns, config.upgrade_ms))
+    let mut input = buffer(8192)?
+    let mut attempted = false
+    loop {
+        if attempted && expired(deadline) {
+            return Error(Network(TimedOut))
+        }
+        let upgraded = match websocket.server(input) {
+            Ok(value) => value,
+            Error(c) => return Error(Allocation(c))
+        }
+        match upgraded {
+            Upgraded(end, response) => {
+                let ip = match source(input, peer, ingress) {
+                    Ok(ip) => ip,
+                    Error(code) => {
+                        let _ = refuse(mut output_half, code, deadline)
+                        return Error(Http(code))
+                    }
+                }
+                send_head(mut output_half, response, deadline)?
+                return Ok(Upgraded(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame)), writer: Writer(half: take output_half, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
+            },
+            Refused(code) => {
+                let _ = refuse(mut output_half, code, deadline)
+                return Error(Http(code))
+            },
+            Waiting => {}
+        }
+        match host.recv(mut input_half, mut input, deadline) {
+            Ok(0) => return Error(Eof),
+            Ok(_) => {},
+            Error(e) => return Error(Network(e))
+        }
+        attempted = true
+    }
+}
+
+pub type Connected: send {
+    reader: Reader,
+    writer: Writer,
+    outgoing: Outbound,
+    timers: Timers
+}
+
+/// Client handshake with a host.random challenge and the exact hirsel.1
+/// selection. A bounded response's tail becomes the first frame input.
+pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Clock, random: Random) -> Result[Connected, Error] waits {
+    if !valid(config) {
+        return Error(Configuration)
+    }
+    let (r, w) = net.split(take socket)
+    let mut input_half = r
+    let mut output_half = w
+    let deadline = At(clock, after(host.mono_ns(clock), config.upgrade_ms))
+    let mut nonce = buffer(16)?
+    host.random(random, mut nonce)
+    let request = match websocket.request(host_name, nonce, true) {
+        Ok(Ok(take b)) => take b,
+        Ok(Error(code)) => return Error(Http(code)),
+        Error(c) => return Error(Allocation(c))
+    }
+    let mut key: Bytes = list.new()
+    match base64.encode(nonce, mut key) {
+        Ok(_) => {},
+        Error(c) => return Error(Allocation(c))
+    }
+    send_head(mut output_half, request, deadline)?
+    let mut input = buffer(8192)?
+    let mut attempted = false
+    loop {
+        if attempted && expired(deadline) {
+            return Error(Network(TimedOut))
+        }
+        let checked = match websocket.client(input, key, true) {
+            Ok(value) => value,
+            Error(c) => return Error(Allocation(c))
+        }
+        match checked {
+            Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame)), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
+            Ready(_, false) => return Error(Http(400)),
+            Failed(code) => return Error(Http(code)),
+            Pending => {}
+        }
+        match host.recv(mut input_half, mut input, deadline) {
+            Ok(0) => return Error(Eof),
+            Ok(_) => {},
+            Error(e) => return Error(Network(e))
+        }
+        attempted = true
+    }
+}
+
+/// Whether the socket writer has no pending frame or Pong debt.
+pub fn drained(w: Writer) -> bool {
+    idle(w.buffer)
+}
+
+fn read_half(take reader: Reader) -> ReadHalf {
+    let Reader(half: input, ..) = take reader
+    take input
+}
+
+fn write_half(take writer: Writer) -> WriteHalf {
+    let Writer(half: output, ..) = take writer
+    take output
+}
+
+/// After Close is flushed and the reader has returned ownership, drain raw TCP
+/// under the same absolute close deadline. Reader assembly and scratch are
+/// released before net.finish allocates its bounded scratch.
+pub fn finish(take writer: Writer, take reader: Reader, clock: Clock, deadline_ns: u64) -> Result[(), Error] waits {
+    let input = read_half(take reader)
+    let output = write_half(take writer)
+    match net.finish(take output, take input, clock, deadline_ns) {
+        Ok(_) => Ok(()),
+        Error(Allocation(c)) => Error(Allocation(c)),
+        Error(Network(e)) => Error(Network(e))
     }
 }

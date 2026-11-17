@@ -424,3 +424,140 @@ fn mask_word_tail() -> bool {
     }
     true
 }
+
+// WIRE 2.2: one absolute close deadline for both initiators. Repeated events
+// do not restart it. Same oracle under the model clock and real native clock.
+// Mutant: close_waits_forever.
+// expect: run close_deadline(clock) = true
+fn close_deadline(c: Clock) -> bool waits {
+    let mut config = wsock.defaults()
+    config.close_ms = 2
+    let now = host.mono_ns(c)
+    let mut local = wsock.timers(config, now)
+    wsock.welcomed(mut local)
+    wsock.closing(mut local, now, false)
+    wsock.closing(mut local, now + 1000000, false)
+    let unchanged = match wsock.until(local, c, Never) {
+        At(_, end) => end == now + 2000000,
+        Never => false
+    }
+    let mut peer = wsock.timers(config, now)
+    wsock.closing(mut peer, now, true)
+    wsock.closing(mut peer, now + 1000000, true)
+    let before = wsock.due(mut local, now + 1999999) == Wait && wsock.due(mut peer, now + 1999999) == Wait
+    host.sleep_until(c, now + 2000000)
+    unchanged && before && wsock.due(mut local, host.mono_ns(c)) == Expired && wsock.due(mut peer, host.mono_ns(c)) == Expired
+}
+
+// WIRE 2.1: a timed-out upgrade's lease returns to the bounded allowance.
+// Mutant: leak_pending_on_timeout.
+// expect: run pending_released(clock) = true
+fn pending_released(c: Clock) -> bool waits {
+    let mut config = wsock.defaults()
+    config.pending_max = 1
+    let pool = result.unwrap(wsock.pending(config))
+    let slot = match result.unwrap(wsock.acquire(pool)) {
+        Some(take lease) => take lease,
+        None => return false
+    }
+    let full = match result.unwrap(wsock.acquire(pool)) {
+        None => true,
+        Some(_) => false
+    }
+    timed_pending(take slot, c)
+    let returned = match result.unwrap(wsock.acquire(pool)) {
+        Some(_) => true,
+        None => false
+    }
+    let returned_again = match result.unwrap(wsock.acquire(pool)) {
+        Some(_) => true,
+        None => false
+    }
+    full && returned && returned_again
+}
+
+fn timed_pending(take slot: wsock.Pending, c: Clock) waits {
+    host.sleep_until(c, host.mono_ns(c) + 1000000)
+}
+
+// Composite deadlines include Hello, idle Ping, idle Close and an outer wait.
+// Pong reception renews idle through a fresh activity timestamp.
+// expect: run connection_timers(clock) = true
+fn connection_timers(c: Clock) -> bool {
+    let config = wsock.defaults()
+    let mut t = wsock.timers(config, 0)
+    let hello = match wsock.until(t, c, Never) {
+        At(_, end) => end == 10000000000,
+        _ => false
+    }
+    wsock.welcomed(mut t)
+    let outer = match wsock.until(t, c, At(c, 7)) {
+        At(_, end) => end == 7,
+        _ => false
+    }
+    let ping_due = wsock.due(mut t, 30000000000) == SendPing
+    let next = match wsock.until(t, c, Never) {
+        At(_, end) => end == 60000000000,
+        _ => false
+    }
+    let second = wsock.due(mut t, 60000000000) == SendClose
+    let closing = match wsock.until(t, c, Never) {
+        At(_, end) => end == 65000000000,
+        _ => false
+    }
+    hello && outer && ping_due && next && second && closing && wsock.due(mut t, 65000000000) == Expired
+}
+
+// WIRE 2.2. A committed prefix may never be overwritten by a control frame.
+// Hand-derived RFC 6455 bytes, also exercised against a full kernel buffer.
+// Mutant: drop_pong_when_busy.
+// expect: run blocked_pong_drains() = true
+fn blocked_pong_drains() -> bool {
+    let config = wsock.defaults()
+    let mut encoder = result.unwrap(wsock.outbound(Server, config, None))
+    let frame = result.unwrap(wsock.encode(mut encoder, true, 2, result.unwrap(b"abc")))
+    let mut pending = wsock.write_buffer()
+    result.unwrap(wsock.offer(mut pending, take frame))
+    wsock.wrote(mut pending, 2)
+    let mut ping_payload = websocket.Control(data:[0; 125], len: 1)
+    ping_payload.data[0] = b'p'
+    wsock.owe_pong(mut pending, ping_payload)
+    let blocked = !result.unwrap(wsock.prepare(mut pending, mut encoder)) && wsock.remaining(pending) == result.unwrap(b"abc")
+    wsock.wrote(mut pending, 3)
+    let other = result.unwrap(wsock.encode(mut encoder, true, 2, result.unwrap(b"later")))
+    let priority = match wsock.offer(mut pending, take other) {
+        Error(_) => true,
+        Ok(_) => false
+    }
+    let drained = !result.unwrap(wsock.prepare(mut pending, mut encoder)) && wsock.remaining(pending) == result.unwrap(b"\x8a\x01p")
+    wsock.wrote(mut pending, 3)
+    blocked && priority && drained && result.unwrap(wsock.prepare(mut pending, mut encoder)) && wsock.idle(pending)
+}
+
+// Match std clock's checked deadline arithmetic, never shorten a requested
+// duration by silently saturating its unrepresentable absolute timestamp.
+// expect: run connection_time_overflow() = fail Overflow
+fn connection_time_overflow() -> bool {
+    let _ = wsock.timers(wsock.defaults(), 0xffffffffffffffff)
+    true
+}
+
+// Non-final data frames are activity even though no message is delivered yet.
+// Their observable count lets the socket driver renew idle without treating
+// a trickled partial frame as a completed one.
+// expect: run fragment_frame_progress() = true
+fn fragment_frame_progress() -> bool {
+    let mut d = websocket.decoder(Client, 256)
+    let mut at: u64 = 0
+    let a = unhex("01 01 61")
+    let start = websocket.frame_count(d) == 0 && event(result.unwrap(websocket.next(mut d, a, mut at))) == 0 && websocket.frame_count(d) == 1
+    at = 0
+    let b = unhex("00 01 62")
+    let middle = event(result.unwrap(websocket.next(mut d, b, mut at))) == 0 && websocket.frame_count(d) == 2
+    at = 0
+    let last = result.unwrap(websocket.next(mut d, unhex("80 01 63"), mut at))
+    start && middle && websocket.frame_count(d) == 3 && match last {
+        Text(text) => text == result.unwrap(b"abc"),
+        _ => false
+    }
+}

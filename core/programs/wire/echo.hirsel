@@ -1,0 +1,372 @@
+// Protocol-only echo endpoint. The runner's binary-only policy and Hello
+// admission are layered above wsock by its session owner.
+type Notice: send = Frame(std.websocket.Event, u64) | Timer(std.wsock.Due, u64) | Failed(std.wsock.Error)
+
+type Reading: send {
+    reader: std.wsock.Reader,
+    tx: Sender[Notice],
+    clock: Clock,
+    config: std.wsock.Config
+}
+
+type Closing: send {
+    tx: Sender[Notice],
+    clock: Clock,
+    deadline: u64
+}
+
+fn reader(take job: Reading) -> std.wsock.Reader waits {
+    let Reading(reader: initial, tx: output_tx, clock: c, config: limits) = take job
+    let mut input = take initial
+    let mut time = std.wsock.timers(limits, host.mono_ns(c))
+    std.wsock.welcomed(mut time)
+    loop {
+        let event = std.wsock.read(mut input, std.wsock.until(time, c, Never))
+        let now = host.mono_ns(c)
+        match event {
+            Ok(take frame) => {
+                let terminal = match frame {
+                    Closed(_) => true,
+                    Reject(_) => true,
+                    Ended => true,
+                    _ => false
+                }
+                std.wsock.activity(mut time, now)
+                if let Error(_) = channel.send(output_tx, Frame(take frame, now)) {
+                    return take input
+                }
+                if terminal {
+                    return take input
+                }
+            },
+            Error(Network(TimedOut)) => {
+                let due = std.wsock.due(mut time, now)
+                if let Error(_) = channel.send(output_tx, Timer(due, now)) {
+                    return take input
+                }
+                if due == Expired {
+                    return take input
+                }
+            },
+            Error(take error) => {
+                let _ = channel.send(output_tx, Failed(take error))
+                return take input
+            }
+        }
+    }
+}
+
+fn close_timer(take job: Closing) waits {
+    host.sleep_until(job.clock, job.deadline)
+    let _ = channel.send(job.tx, Timer(Expired, job.deadline))
+}
+
+fn close_code(code: u16) -> std.websocket.Control {
+    let mut payload = std.websocket.Control(data:[0; 125], len: 2)
+    payload.data[0] = int.truncate(code >> 8)
+    payload.data[1] = int.truncate(code)
+    payload
+}
+
+fn echo(take upgraded: std.wsock.Upgraded, clock: Clock, tasks: Tasks, config: std.wsock.Config) -> Result[(), std.wsock.Error] waits {
+    let std.wsock.Upgraded(reader: input, writer: initial_writer, source: _, timers: initial_time, pending: slot) = take upgraded
+    let mut time = take initial_time
+    std.wsock.welcomed(mut time)
+    std.wsock.hello_accepted(take slot)
+    let mut writer = take initial_writer
+    let mut output = std.wsock.outbound(Server, config, None)?
+    let channel_pair: Result[(Sender[Notice], Receiver[Notice]), Capacity] = channel.new(1)
+    let (tx, rx) = match channel_pair {
+        Ok(take pair) => take pair,
+        Error(c) => return Error(Allocation(c))
+    }
+    let reading = Reading(reader: take input, tx: channel.sender(tx), clock: clock, config: config)
+    let mut child = match task.spawn(tasks, bytes 100663296, take reading, reader) {
+        Ok(take handle) => take handle,
+        Error((c, _)) => return Error(Allocation(c))
+    }
+    let mut alarm: Option[Task[()]] = None
+    let mut closing = false
+    let mut closed = false
+    let mut reader_done = false
+    let mut closing_frame = false
+    let mut ping = false
+    let mut close: Option[std.websocket.Control] = None
+    let mut held: Option[(u8, Bytes)] = None
+    loop {
+        match std.wsock.due(mut time, host.mono_ns(clock)) {
+            Expired => break,
+            SendPing => {
+                ping = true
+            },
+            SendClose => {
+                close = Some(close_code(1001));
+                closing = true
+            },
+            Wait => {}
+        }
+        let notice: Option[Notice] = if std.wsock.drained(writer) && !ping && (match close {
+            None => true,
+            Some(_) => false
+        }) && (match held {
+            None => true,
+            Some(_) => false
+        }) {
+            match channel.receive(rx) {
+                Ok(take n) => Some(take n),
+                Error(_) => break
+            }
+        } else if (match held {
+            None => true,
+            Some(_) => false
+        }) {
+            match channel.try_receive(rx) {
+                Ok(take n) => Some(take n),
+                Error(_) => None
+            }
+        } else {
+            None
+        }
+        match notice {
+            Some(Frame(take frame, received)) => {
+                std.wsock.activity(mut time, received)
+                match frame {
+                    Text(take b) => if !closing {
+                        held = Some((1, take b))
+                    },
+                    Message(take b) => if !closing {
+                        held = Some((2, take b))
+                    },
+                    Ping(payload) => if !closing {
+                        std.wsock.pong(mut writer, payload)
+                    },
+                    Pong(_) => {},
+                    Closed(payload) => {
+                        reader_done = true
+                        std.wsock.closing(mut time, received, true)
+                        if !closing {
+                            close = Some(payload)
+                        }
+                        closing = true
+                    },
+                    Reject(code) => {
+                        reader_done = true
+                        std.wsock.closing(mut time, received, false)
+                        if !closing {
+                            close = Some(close_code(code))
+                        }
+                        closing = true
+                    },
+                    Ended => {
+                        reader_done = true;
+                        break
+                    },
+                    Need => {}
+                }
+            },
+            Some(Timer(due, when)) => {
+                if due == Expired {
+                    break
+                }
+                if due == SendPing && !closing {
+                    ping = true
+                }
+                if due == SendClose && !closing {
+                    std.wsock.closing(mut time, when, false)
+                    close = Some(close_code(1001))
+                    closing = true
+                }
+            },
+            Some(Failed(_)) => {
+                reader_done = true;
+                break
+            },
+            None => {}
+        }
+        if closing && (match alarm {
+            None => true,
+            Some(_) => false
+        }) {
+            let end = match std.wsock.until(time, clock, Never) {
+                At(_, deadline) => deadline,
+                Never => host.mono_ns(clock)
+            }
+            let job = Closing(tx: channel.sender(tx), clock: clock, deadline: end)
+            match task.spawn(tasks, bytes 4096, take job, close_timer) {
+                Ok(take handle) => {
+                    alarm = Some(take handle)
+                },
+                Error(_) => break
+            }
+        }
+        if std.wsock.due(mut time, host.mono_ns(clock)) == Expired {
+            break
+        }
+        if std.wsock.drained(writer) && !closed {
+            let frame: Option[Bytes] = match replace(mut close, None) {
+                Some(payload) => {
+                    let mut payload_bytes: Bytes = list.new()
+                    result.unwrap(std.websocket.control(payload, mut payload_bytes))
+                    closing_frame = true
+                    Some(std.wsock.encode(mut output, true, 8, payload_bytes)?)
+                },
+                None => if ping && !closing {
+                    ping = false
+                    let payload_bytes: Bytes = list.new()
+                    Some(std.wsock.encode(mut output, true, 9, payload_bytes)?)
+                } else if !closing {
+                    match replace(mut held, None) {
+                        Some((opcode, take payload_bytes)) => Some(std.wsock.encode(mut output, true, opcode, payload_bytes)?),
+                        None => None
+                    }
+                } else {
+                    None
+                }
+            }
+            if let Some(take payload_bytes) = take frame {
+                let _ = std.wsock.stage(mut writer, take payload_bytes)
+            }
+        }
+        if !std.wsock.drained(writer) {
+            match std.wsock.flush(mut writer, mut output, std.wsock.until(time, clock, Never)) {
+                Ok(done) => if done && closing_frame {
+                    std.wsock.close_sent(mut time)
+                    closed = true
+                    closing_frame = false
+                    if reader_done {
+                        break
+                    }
+                },
+                Error(Network(TimedOut)) => {
+                    match std.wsock.due(mut time, host.mono_ns(clock)) {
+                        Expired => break,
+                        SendPing => {
+                            ping = true
+                        },
+                        SendClose => {
+                            close = Some(close_code(1001))
+                            closing = true
+                        },
+                        Wait => {}
+                    }
+                },
+                Error(_) => break
+            }
+        }
+        if closed && reader_done {
+            break
+        }
+    }
+    if !reader_done {
+        task.cancel(mut child)
+    }
+    let joined = task.join(take child)
+    if let Ok(take returned) = take joined {
+        if closed {
+            let end = match std.wsock.until(time, clock, Never) {
+                At(_, deadline) => deadline,
+                Never => host.mono_ns(clock)
+            }
+            let _ = std.wsock.finish(take writer, take returned, clock, end)
+        }
+    }
+    if let Some(take handle) = take alarm {
+        let mut timer = take handle
+        task.cancel(mut timer)
+        let _ = task.join(take timer)
+    }
+    Ok(())
+}
+
+fn serve(n: Net, clock: Clock, tasks: Tasks, config: std.wsock.Config) -> Result[(), std.wsock.Error] waits {
+    let pool = std.wsock.pending(config)?
+    let listened = host.listen(n, Addr(ip: V4(0x7f000001), port: 18089), 128)
+    let (listener, _) = match listened {
+        Ok(take pair) => take pair,
+        Error(e) => return Error(Network(e))
+    }
+    let mut accepting = take listener
+    loop {
+        let accepted = host.accept(mut accepting, Never)
+        let (socket, peer) = match accepted {
+            Ok(take pair) => take pair,
+            Error(e) => return Error(Network(e))
+        }
+        let now = host.mono_ns(clock)
+        let slot = match std.wsock.acquire(pool)? {
+            Some(take lease) => take lease,
+            None => {
+                let (r, w) = net.split(take socket)
+                let mut rejected = take w
+                let _ = std.wsock.refuse(mut rejected, 503, At(clock, now))
+                continue
+            }
+        }
+        let ingress: List[std.wsock.Prefix] = list.new()
+        match std.wsock.server(take socket, take slot, peer.ip, ingress, config, clock, now) {
+            Ok(take upgraded) => {
+                let _ = echo(take upgraded, clock, tasks, config)
+            },
+            Error(_) => {}
+        }
+    }
+}
+
+pub fn main(n: Net, clock: Clock, tasks: Tasks) -> Result[(), std.wsock.Error] waits {
+    let mut config = std.wsock.defaults()
+    config.max_frame = 16777216
+    serve(n, clock, tasks, config)
+}
+
+pub fn idle_probe(n: Net, clock: Clock, tasks: Tasks) -> Result[(), std.wsock.Error] waits {
+    let mut config = std.wsock.defaults()
+    config.max_frame = 16777216
+    config.idle_ms = 250
+    serve(n, clock, tasks, config)
+}
+
+// Used by the same wire harness against an independent RFC 6455 peer.
+pub fn client_probe(n: Net, clock: Clock, random: Random) -> Result[(), std.wsock.Error] waits {
+    let socket = match host.connect(n, Addr(ip: V4(0x7f000001), port: 18090), At(clock, host.mono_ns(clock) + 5000000000)) {
+        Ok(take s) => take s,
+        Error(e) => return Error(Network(e))
+    }
+    let connected = std.wsock.client(take socket, string.as_bytes("localhost:18090"), std.wsock.defaults(), clock, random)?
+    let std.wsock.Connected(reader: input, writer: output, outgoing: encoding, timers: time) = take connected
+    let mut receiving = take input
+    let mut writing = take output
+    let mut encoder = take encoding
+    let mut timer = take time
+    std.wsock.welcomed(mut timer)
+    for opcode in 2u8 .. 11u8 {
+        if opcode != 2 && opcode != 9 && opcode != 10 {
+            continue
+        }
+        let payload = string.as_bytes("abc")
+        let frame = std.wsock.encode(mut encoder, true, opcode, payload)?
+        let _ = std.wsock.stage(mut writing, take frame)
+        while !std.wsock.flush(mut writing, mut encoder, std.wsock.until(timer, clock, Never))? {}
+        if opcode != 10 {
+            match std.wsock.read(mut receiving, std.wsock.until(timer, clock, Never))? {
+                Message(b) => if b != payload {
+                    return Error(Protocol(1002))
+                },
+                Pong(c) => if c.len != 3 || c.data[0] != b'a' || c.data[2] != b'c' {
+                    return Error(Protocol(1002))
+                },
+                _ => return Error(Protocol(1002))
+            }
+        }
+    }
+    let payload = close_code(1000)
+    let mut b: Bytes = list.new()
+    result.unwrap(std.websocket.control(payload, mut b))
+    let frame = std.wsock.encode(mut encoder, true, 8, b)?
+    let _ = std.wsock.stage(mut writing, take frame)
+    std.wsock.closing(mut timer, host.mono_ns(clock), false)
+    while !std.wsock.flush(mut writing, mut encoder, std.wsock.until(timer, clock, Never))? {}
+    match std.wsock.read(mut receiving, std.wsock.until(timer, clock, Never))? {
+        Closed(_) => Ok(()),
+        _ => Error(Protocol(1002))
+    }
+}

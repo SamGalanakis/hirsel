@@ -45,3 +45,9 @@ The shape adapts tungstenite 89576c6's handshake and frame machines and
 Goose's hypothetical sans-I/O server sketch in `docs/design/coroutines.md`.
 The change from tungstenite is growth from received bytes rather than its
 declared-length reservation. RFC and upstream hand vectors are the oracles.
+
+`frame_count` reports completed physical frames, including non-final data
+fragments when next returns Need. It allocates nothing and keeps the machine
+pure. The socket driver uses this progress to renew idle on frames rather than
+on trickled bytes or only on a completed message. The count uses checked u64
+arithmetic, like other source counters.

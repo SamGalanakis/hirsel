@@ -258,20 +258,18 @@ fn release_part_constant_names_its_own_function() {
 /// A release part is a function of its own key: its object is the same
 /// bytes whether it was generated alone or beside the program's other
 /// misses. The second build of `P` (same parts, a different `main`) reuses
-/// every part but `main`'s and generates `main` alone; a fresh store's build
-/// of the same source generates `main` beside every other program part. Each
-/// object both stores hold under one key's name is the same bytes, with and
-/// without debug lines. Bug caught: code generation that uses another
-/// definition in the same module (interprocedural register allocation, the
-/// machine outliner) or numbers shared constants per module makes `main`'s
-/// object depend on what else missed; `main` holds `a` across the second
-/// call to `sum`, so knowing `sum`'s registers changes `main`'s. Exits
-/// hand-derived: a = 1 + 2 + 3 + 4 = 10 then 15, b = 1 + 2 = 3, so 13 and
-/// 18.
+/// every part but `main`'s and generates `main` alone; a build of the same
+/// source into empty parts and store generates `main` beside every other
+/// part. Each object both parts caches hold under one name is the same
+/// bytes, with and without debug lines. Bug caught: code generation that
+/// uses another definition in the same module (interprocedural register
+/// allocation) or numbers shared constants per module makes `main`'s object
+/// depend on what else missed; core's `int.parse` part makes no call, and
+/// `main` holds `acc` across it, so knowing its registers changes `main`'s.
 #[test]
 #[ignore = "explicit native integration target"]
 fn release_part_alone_is_the_part_beside_other_misses() {
-    const P: &str = "type N: shareable + send {\n    value: u64,\n    tail: Option[Arc[N]]\n}\nfn sum(node: Arc[N]) -> u64 {\n    node.value + match node.tail {\n        Some(t) => sum(t),\n        None => 0u64\n    }\n}\nfn build(last: u64) -> Option[Arc[N]] {\n    let mut root: Option[Arc[N]] = None\n    for i in 1u64 .. last {\n        let old = replace(mut root, None)\n        root = match arc.new(N(value: i, tail: take old)) {\n            Ok(a) => Some(a),\n            Error(_) => None\n        }\n    }\n    root\n}\npub fn main() -> Result[(), Exit] {\n    let a = match build(LAST) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let b = match build(3u64) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    Error(Exit(status: int.truncate(a + b)))\n}\n";
+    const P: &str = "type N: shareable + send {\n    value: u64,\n    tail: Option[Arc[N]]\n}\nfn sum(node: Arc[N]) -> u64 {\n    node.value + match node.tail {\n        Some(t) => sum(t),\n        None => 0u64\n    }\n}\nfn build(last: u64) -> Option[Arc[N]] {\n    let mut root: Option[Arc[N]] = None\n    for i in 1u64 .. last {\n        let old = replace(mut root, None)\n        root = match arc.new(N(value: i, tail: take old)) {\n            Ok(a) => Some(a),\n            Error(_) => None\n        }\n    }\n    root\n}\npub fn main() -> Result[(), Exit] {\n    let a = match build(LAST) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let b = match build(3u64) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let mut s = string.new()\n    let _ = string.push_u64(mut s, a)\n    let _ = string.push_char(mut s, ' ')\n    let _ = string.push_u64(mut s, b)\n    let n = string.byte_len(s)\n    let mut acc = a + b\n    for i in 0u64 .. n {\n        let parsed: Result[i64, ParseError] = int.parse(string.slice(s, i, n))\n        acc = acc + match parsed {\n            Ok(v) => int.truncate(v),\n            Error(_) => 1u64\n        }\n    }\n    Error(Exit(status: int.truncate(acc)))\n}\n";
     let objects = |root: &Path| -> std::collections::BTreeMap<std::ffi::OsString, Vec<u8>> {
         std::fs::read_dir(root)
             .unwrap()
@@ -284,32 +282,37 @@ fn release_part_alone_is_the_part_beside_other_misses() {
     };
     for debug_lines in [false, true] {
         let dir = tempfile::tempdir().unwrap();
-        let [first, second] = ["5u64", "6u64"].map(|last| P.replace("LAST", last));
+        let [first, second] = ["6u64", "7u64"].map(|last| P.replace("LAST", last));
         let mut options = native_options(Backend::Llvm, dir.path());
         options.optimize = true;
         options.debug_lines = debug_lines;
+        // Exits: a = 1 + .. + (LAST - 1), b = 1 + 2, then the suffixes of "{a} {b}" parsed as i64:
+        // "15 3", "5 3" and " 3" do not parse (1 each), "3" is 3; so 15 + 3 + 6 = 24, and
+        // 21 + 3 + 6 = 30.
         let (cold, _, status) = reach_build(&record_check(&first, &core_sources(), dir.path(), "store"), &options);
-        assert_eq!(status, Some(13), "debug lines {debug_lines}");
+        assert_eq!(status, Some(24), "debug lines {debug_lines}");
         let (mixed, bytes, status) = reach_build(&record_check(&second, &core_sources(), dir.path(), "store"), &options);
-        assert_eq!(status, Some(18), "debug lines {debug_lines}");
+        assert_eq!(status, Some(30), "debug lines {debug_lines}");
         assert!(
             mixed.compiled >= 1 && mixed.compiled < cold.compiled,
             "debug lines {debug_lines}: a mixed build ({} of {} parts)",
             mixed.compiled,
             cold.compiled
         );
-        let fresh_store = dir.path().join("fresh-native");
-        let (_, fresh_bytes, _) = reach_build(
+        let fresh_parts = dir.path().join("fresh-parts");
+        let (fresh_build, fresh_bytes, _) = reach_build(
             &record_check(&second, &core_sources(), dir.path(), "fresh"),
             &NativeOptions {
-                store: fresh_store.clone(),
+                store: dir.path().join("fresh-native"),
+                parts: fresh_parts.clone(),
                 output: dir.path().join("fresh-program"),
                 optimize: true,
                 debug_lines,
                 ..native_options(Backend::Llvm, dir.path())
             },
         );
-        let (primed, fresh) = (objects(&options.store), objects(&fresh_store));
+        assert_eq!(fresh_build.compiled, cold.compiled, "debug lines {debug_lines}: a fresh build generates every part");
+        let (primed, fresh) = (objects(&options.parts), objects(&fresh_parts));
         let shared = fresh.keys().filter(|name| primed.contains_key(*name)).count();
         assert!(shared >= 2, "debug lines {debug_lines}: parts in both stores");
         for (name, object) in &fresh {

@@ -100,6 +100,9 @@ fn native_tuple(options: &NativeOptions) -> io::Result<(PathBuf, Vec<u8>)> {
         // The store holds the record; the output is rendered per request.
         store,
         output: _,
+        // A part's object is a function of its key alone, so where the
+        // parts are kept does not change the executable.
+        parts: _,
         root_limit,
         instance_limit,
         directories,

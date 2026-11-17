@@ -15,7 +15,7 @@ fn unit_key(
     consumed: &[&[hirsel_core_ir::roles::BodyFacts]],
 ) -> io::Result<ContentHash> {
     crate::native::key(
-        "hirsel.core-release-unit.v4",
+        "hirsel.core-release-unit.v5",
         &(hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs),
     )
 }
@@ -35,34 +35,18 @@ fn part_key(
     )
 }
 
-/// The release unit's record: its parts in link order, each by its key and
-/// whether it is in the shared tier. A program whose module cannot be cut is
-/// one part.
+/// The release unit's record: its parts' keys in link order. A program whose
+/// module cannot be cut is one part.
 #[derive(Serialize, Deserialize)]
 struct Parts {
     schema: u32,
-    parts: Vec<(bool, ContentHash)>,
+    parts: Vec<ContentHash>,
 }
-const PARTS_SCHEMA: u32 = 1;
+const PARTS_SCHEMA: u32 = 2;
 /// Whether a stored payload is a release unit's record.
 #[cfg(test)]
 pub(crate) fn is_unit_record(payload: &[u8]) -> bool {
     decode::<Parts>(payload).is_some_and(|r| r.schema == PARTS_SCHEMA)
-}
-
-/// A part of a monomorphic core or std instance carries no program type, so
-/// its object goes to the user's shared cache; every other part (generic and
-/// closure-bound instances, glue, the program's own code) to the store.
-fn shared_symbols(reached: &[Identity]) -> std::collections::HashSet<String> {
-    reached
-        .iter()
-        .filter(|i| {
-            i.dictionaries.is_empty()
-                && i.closures.is_empty()
-                && (i.definition.0.package.name_is("core") || i.definition.0.package.name_is("std"))
-        })
-        .map(Identity::symbol)
-        .collect()
 }
 
 impl CheckProduct {
@@ -157,8 +141,8 @@ impl CheckProduct {
             ),
             &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
         )?;
-        let shared = Store::new(&crate::PackageProduct::default_cache().join("release-parts"))?;
-        let tier = |in_shared: bool| if in_shared { &shared } else { store };
+        // Every part, whichever program reached it, is in the shared parts cache.
+        let shared = Store::new(&options.parts)?;
         let emit = |message: String| NativeStop::Emit {
             definition: entry.clone(),
             message,
@@ -168,11 +152,9 @@ impl CheckProduct {
         if let Some(record) = store.get(unit)?.and_then(|b| decode::<Parts>(&b))
             && record.schema == PARTS_SCHEMA
         {
-            for &(in_shared, key) in &record.parts {
-                match crate::native_object::load(tier(in_shared), key)? {
-                    Some((bare, object, file)) => {
-                        held.push((tier(in_shared), bare, object, file, false))
-                    }
+            for &key in &record.parts {
+                match crate::native_object::load(&shared, key)? {
+                    Some((bare, object, file)) => held.push((bare, object, file, false)),
                     None => break,
                 }
             }
@@ -191,23 +173,20 @@ impl CheckProduct {
                     debug_lines: options.debug_lines,
                 })
                 .collect::<Vec<_>>();
-            let symbols = shared_symbols(reached);
             let mut parts = Vec::new();
             let mut failure = None;
             let program = hirsel_llvm_lazy::emit_program_parts(
                 &units,
                 &[instance.symbol()],
                 target,
-                &mut |name, machine, bitcode| {
-                    let in_shared =
-                        !name.is_empty() && symbols.contains(name.get(..65).unwrap_or(name));
+                &mut |_, machine, bitcode| {
                     let loaded = part_key(&generator, machine, bitcode).and_then(|key| {
-                        parts.push((in_shared, key));
-                        crate::native_object::load(tier(in_shared), key)
+                        parts.push(key);
+                        crate::native_object::load(&shared, key)
                     });
                     match loaded {
-                        Ok(Some(hit)) => {
-                            held.push((tier(in_shared), hit.0, hit.1, hit.2, false));
+                        Ok(Some((bare, object, file))) => {
+                            held.push((bare, object, file, false));
                             true
                         }
                         Ok(None) => false,
@@ -229,7 +208,7 @@ impl CheckProduct {
                 .iter()
                 .zip(&parts)
                 .filter(|(part, _)| !part.reused)
-                .map(|(part, &(_, key))| (part.name.as_str(), key))
+                .map(|(part, &key)| (part.name.as_str(), key))
                 .collect::<Vec<_>>();
             let mut made = match &program.object {
                 Some(object) => hirsel_llvm_lazy::core::split_native_object(
@@ -242,14 +221,13 @@ impl CheckProduct {
             }
             .into_iter();
             let mut hits = std::mem::take(&mut held).into_iter();
-            for (part, &(in_shared, key)) in program.parts.iter().zip(&parts) {
+            for (part, &key) in program.parts.iter().zip(&parts) {
                 held.push(match part.reused {
                     true => hits.next().expect("a reused part was loaded"),
                     false => {
                         let object = made.next().expect("a missed part was generated");
-                        let (bare, file) =
-                            crate::native_object::publish(tier(in_shared), key, &object)?;
-                        (tier(in_shared), bare, object, file, true)
+                        let (bare, file) = crate::native_object::publish(&shared, key, &object)?;
+                        (bare, object, file, true)
                     }
                 });
             }
@@ -272,10 +250,10 @@ impl CheckProduct {
             .sum();
         Ok(held
             .into_iter()
-            .map(|(store, bare, object, file, compiled)| ObjectProduct {
+            .map(|(bare, object, file, compiled)| ObjectProduct {
                 private_variants: std::mem::take(&mut private_variants),
                 instance: instance.clone(),
-                path: crate::native_object::path(store, bare.address),
+                path: crate::native_object::path(&shared, bare.address),
                 identity: bare.address,
                 check: bare.check,
                 held: Some(file),

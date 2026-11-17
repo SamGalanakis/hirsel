@@ -69,6 +69,9 @@ pub struct NativeOptions {
     pub runtime: PathBuf,
     pub link: Link,
     pub store: PathBuf,
+    /// The release parts every program shares: each optimised definition's
+    /// object under its exact key (the user's cache by default).
+    pub parts: PathBuf,
     pub output: PathBuf,
     pub root_limit: u64,
     pub instance_limit: usize,
@@ -108,6 +111,7 @@ impl NativeOptions {
             runtime,
             link,
             store,
+            parts: crate::PackageProduct::default_cache().join("release-parts"),
             output,
             root_limit: 64 * 1024 * 1024,
             instance_limit: 65_536,
@@ -1729,6 +1733,7 @@ mod tests {
                 PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             ),
             store: dir.join("native"),
+            parts: dir.join("parts"),
             output: dir.join("program"),
             root_limit: 1_048_576,
             // Glue operations are instances of their own: a program's walk counts each.

@@ -66,6 +66,28 @@ class FrontStageCeiling(unittest.TestCase):
         self.assertAlmostEqual(ceiling['image_per_token']['records_opened'], 70.38 / 100)
 
 
+class SuiteFailure(unittest.TestCase):
+    def test_failed_request_includes_panic_before_temporary_logs_are_deleted(self):
+        import subprocess
+        from unittest.mock import patch
+        suite_edit = FRONT['suite_edit']
+        panic = "thread 'main' panicked at compiler.rs:42: bound value missing"
+        with tempfile.TemporaryDirectory() as temporary:
+            out = Path(temporary)
+            def fail(command, **kwargs):
+                kwargs['stderr'].write('request output\n' + panic + '\n')
+                return subprocess.CompletedProcess(command, 101)
+            with patch.object(FRONT['request_cost'], 'manifests'), \
+                    patch.dict(FRONT['GUARD'], admit=lambda: None), \
+                    patch('subprocess.run', side_effect=fail):
+                with self.assertRaises(ValueError) as failure:
+                    suite_edit(Path('hirsel'), Path('runtime.a'), out,
+                               dict(llvm='/llvm', kit='/kit', clang='/llvm/bin/clang'))
+            message = str(failure.exception)
+        self.assertIn('suite base: exit 101', message)
+        self.assertIn(panic, message)
+
+
 class PinnedRequestToolchain(unittest.TestCase):
     def fixture(self, root):
         import hashlib

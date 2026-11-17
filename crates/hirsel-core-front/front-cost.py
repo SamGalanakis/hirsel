@@ -113,7 +113,9 @@ def suite_edit(compiler, runtime, out, tools, profile_front=False, prepare=True)
             result = subprocess.run(['taskset', '-c', '16', str(ROOT / 'tools/capped'), *command],
                                     cwd=ROOT, env=env, stdout=log, stderr=log)
         if result.returncode:
-            raise ValueError(f'suite {tag}: exit {result.returncode}; {out / (tag + ".log")}')
+            path = out / (tag + '.log')
+            tail = '\n'.join(path.read_text(errors='replace').splitlines()[-40:])
+            raise ValueError(f'suite {tag}: exit {result.returncode}; {path}\n{tail}')
         request_cost.stamp_metrics(out / (tag + '.metrics.json'), tools)
     result = json.loads((out / 'edit.log').read_text().splitlines()[0])
     # Capped summaries use stderr and the compiler emits one JSON line.

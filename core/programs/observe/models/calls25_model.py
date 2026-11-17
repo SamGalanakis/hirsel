@@ -34,7 +34,8 @@ v2.2 rules (RUNNER-SPEC v2.2 sections 2 and 3):
      Abandoned at the deadline) at once, in a Batch at its last sent version;
   V2 the session forwards a position at most once while the head holds it (local join), and a
      forwarded position keeps its slot until the head's answer for it arrives, even after Abandoned;
-  V3 the head answers a commitless outcome (Duplicate, Superseded, Refused(Overloaded)) by pushing
+  V3 the head answers a commitless outcome (Duplicate, Refused(HistoryUnavailable) below latest,
+     Refused(Overloaded)) by pushing
      it at once in a snapshot-less Release, behind every earlier Release on the same FIFO;
   V4 a committed outcome is pushed in a Release only after durable (H3); on a durable error
      (poison) the head answers nothing and the process exits;
@@ -42,7 +43,7 @@ v2.2 rules (RUNNER-SPEC v2.2 sections 2 and 3):
 Checks:
   C1 durable effects per position <= 1;
   C3 a delivered reply-bearing outcome equals the position's durable reply (so it is durable);
-     Superseded only for a durably replied position;
+     HistoryUnavailable only below a durably replied position (RUNNER-SPEC v2.11.4);
   C5 an outcome reporting the commit at version c arrives in a frame at version >= c, and the frame
      versions a session sends never decrease;
   C6 the head holds at most 1+q requests from one session (the queue is inside the session account);
@@ -62,7 +63,7 @@ def key(s, p): return s * 2 + p
 MUTANTS = {
     "none": "v2.5 rules",
     "deadline_rides_release": "v2.1 H3: the deadline answer waits for the next commit's Release (review finding 1)",
-    "direct_commitless": "the head answers Duplicate/Superseded straight to the session, not behind the Release FIFO",
+    "direct_commitless": "the head answers Duplicate/HistoryUnavailable straight to the session, not behind the Release FIFO",
     "answer_before_durable": "H3 dropped: a committed outcome is pushed at commit",
     "queue_outside_account": "the session frees the slot when it sends Abandoned, not when the head answers",
     "poison_answers": "on a durable error the head pushes the outcome anyway",
@@ -341,8 +342,8 @@ def explore(name, mutant, machine=False):
                         st2 = commitless(st, tuple((se, s, p, a[1], a[2]) for se in waiters))
                         out.append((f"dup{s}{p}", end_worker(st2, s)))
                     elif p < a[1]:
-                        st2 = commitless(st, tuple((se, s, p, "Superseded", durrep[k][1]) for se in waiters))
-                        out.append((f"superseded{s}{p}", end_worker(st2, s)))
+                        st2 = commitless(st, tuple((se, s, p, "HistoryUnavailable", durrep[k][1]) for se in waiters))
+                        out.append((f"history_unavailable{s}{p}", end_worker(st2, s)))
                     else:  # park behind the stream's FIFO
                         nq = queues[s] + tuple((se, p, g, True) for se in waiters)
                         out.append((f"park{s}{p}", sset(st, workers=tup_set(workers, s, None), queues=tup_set(queues, s, nq))))
@@ -424,8 +425,8 @@ def explore(name, mutant, machine=False):
             c = client[i]; k = key(s, p)
             if c in REPLY_BEARING and durrep[k][0] != c:
                 raise Fail(("C3 answer", c, "for", (s, p), "but durable reply", durrep[k][0]))
-            if c == "Superseded" and durrep[k][0] is None:
-                raise Fail(("C3 Superseded for a position never replied", (s, p)))
+            if c == "HistoryUnavailable" and durrep[k][0] is None:
+                raise Fail(("C3 HistoryUnavailable for a position never replied", (s, p)))
             if kind == "bad" and k in admitted:
                 raise Fail(("C7 a malformed request's position was admitted", (s, p)))
         held = [0] * nsess

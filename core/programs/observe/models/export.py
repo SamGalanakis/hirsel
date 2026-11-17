@@ -214,8 +214,13 @@ def store_trace(history):
         events.append(sent(final['i'], 0, final['p'], (final['i'],)))
     elif law == 'I':
         for p, r, ans in final['resp']:
-            if (p, r) == (final['p'], final['i']) and ans[0] in ('Returned', 'Superseded'):
-                events.append(got(r, 0, p, version, answer(ans[0], ans[1] if ans[0] == 'Returned' else r)))
+            if (p, r) == (final['p'], final['i']) and ans[0] == 'Returned':
+                events.append(got(r, 0, p, version, answer('Returned', ans[1])))
+                break
+            if (p, r) == (final['p'], final['i']) and ans[0] == 'Superseded':
+                # v2.11.4 has no Superseded on the wire: the same head bug sends the
+                # position's stored reply, the reply of the request that ran there.
+                events.append(got(r, 0, p, version, answer('Returned', final['hist'][str(p)])))
                 break
     elif law == 'M' and not (path and path[-1][1].startswith('stale ')):
         match = re.search(r'r(\d+) at p(\d+)', str(why))

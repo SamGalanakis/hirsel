@@ -39,7 +39,8 @@ Store mutants (each must be caught under some client configuration):
   digest_dropped_on_reply  the reply writes the stream value without the digest (B), and an absent digest matches
   mismatch_mutates         a mismatch answers RequestMismatch but re-binds the stream to the new digest (B)
   readmit_rebinds          the Abandoned re-commit of an earlier open binds the sender's digest without comparing (B)
-  superseded_below_latest  below latest answers Rejected(latest) as v2.23 did, read by the client as Superseded (I)
+  superseded_below_latest  below latest answers Rejected(latest) as v2.23 did, read by the client as Superseded (I);
+                           exported as the stored reply of the request that ran at p
 """
 import sys
 

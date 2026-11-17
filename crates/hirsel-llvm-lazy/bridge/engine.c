@@ -654,7 +654,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             hirsel_llvm_promote_step_window(module);
             hirsel_scalarize_aggregate_phis(module, context);
             e = LLVMRunPasses(module,
-                "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,gvn,simplifycfg,dse)",
+                "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,gvn,simplifycfg,dse,loop-simplify,lcssa,instcombine<no-verify-fixpoint>,simplifycfg,dse)",
                 machine, options);
         }
         if (!e) hirsel_cold_failure_edges(module, context);

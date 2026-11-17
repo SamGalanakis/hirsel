@@ -338,6 +338,8 @@ fn forms(index: &NameIndex) -> (Vec<(DefinitionId, Form)>, Vec<Siblings>) {
 pub(crate) struct Shape {
     environment: ContentHash,
     items: ContentHash,
+    modules: Demand<ContentHash>,
+    headers: Vec<Vec<ContentHash>>,
 }
 impl Shape {
     pub(crate) fn new(
@@ -356,20 +358,33 @@ impl Shape {
             "hirsel.core-environment.v1",
             [&encode(&(compiler, &inputs.core, namespaces))?[..]],
         );
+        let identities = Demand::new(index.modules.base_len(), index.modules.len());
+        let mut headers = Vec::with_capacity(modules.len());
         let items = ContentHash::of_parts_stream("hirsel.key-items.v1", |parts| {
             for m in modules {
-                let module = ContentHash::of_parts(
-                    "hirsel.key-identity.module.v1",
-                    [&encode(&index.module_path(m.id))?[..]],
-                );
+                let module = identities.get_or_try_init(m.id.0 as u64, || {
+                    Ok(ContentHash::of_parts(
+                        "hirsel.key-identity.module.v1",
+                        [&encode(&index.module_path(m.id))?[..]],
+                    ))
+                })?;
                 parts.part_byte_slice(0, &module.0);
+                let mut row = Vec::with_capacity(m.syntax.items.len());
                 for item in m.syntax.items() {
-                    parts.part_byte_slice(1, &header_identity(item).0);
+                    let digest = header_identity(item);
+                    parts.part_byte_slice(1, &digest.0);
+                    row.push(digest);
                 }
+                headers.push(row);
             }
             Ok(())
         })?;
-        Ok(Self { environment, items })
+        Ok(Self {
+            environment,
+            items,
+            modules: identities,
+            headers,
+        })
     }
     /// The key shape: the environment, every module's item headers in order,
     /// and `request` (entry, image identity, library mode and parse modes).
@@ -390,20 +405,21 @@ impl Keys {
         index: &NameIndex,
         modules: &[ModuleInput],
         resolutions: &[Vec<Arc<Resolution>>],
-        shape: &Shape,
+        shape: Shape,
         image: Option<ContentHash>,
         image_headers: Option<&Headers>,
         image_anchors: Option<&hirsel_core_ids::published::Map<crate::ItemAt, DefPath>>,
     ) -> io::Result<Self> {
         let mut headers = image_headers.cloned().unwrap_or_default();
         headers.rows.resize(index.definitions.len(), None);
-        let mut keys = Self::bare(index, Headers::default());
+        let mut keys = Self::with_modules(index, Headers::default(), shape.modules);
         let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut hooks = vec![];
         let mut twins = vec![];
-        for (m, rows) in modules.iter().zip(resolutions) {
-            for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
-                let digest = header_identity(item);
+        for ((m, rows), digests) in modules.iter().zip(resolutions).zip(shape.headers) {
+            for (ordinal, ((item, resolution), digest)) in
+                m.syntax.items().zip(rows).zip(digests).enumerate()
+            {
                 let end = header_end(item);
                 let Some(definition) = index.item_definition(m.id, m.source, ordinal as u32, item)
                 else {
@@ -514,12 +530,19 @@ impl Keys {
         Ok(keys)
     }
     fn bare(index: &NameIndex, headers: Headers) -> Self {
+        Self::with_modules(
+            index,
+            headers,
+            Demand::new(index.modules.base_len(), index.modules.len()),
+        )
+    }
+    fn with_modules(index: &NameIndex, headers: Headers, modules: Demand<ContentHash>) -> Self {
         Self {
             headers,
             environment: ContentHash::default(),
             anchors: Default::default(),
             definitions: Demand::new(index.definitions.base_len(), index.definitions.len()),
-            modules: Demand::new(index.modules.base_len(), index.modules.len()),
+            modules,
             packages: Demand::new(index.packages.base_len(), index.packages.len()),
             closures: Default::default(),
             constructors: Default::default(),

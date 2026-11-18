@@ -5,7 +5,6 @@ use hirsel_core_resolve::{
 };
 use hirsel_core_syntax::Symbol;
 use hirsel_core_syntax::{Item, NodeKind, TokenKind};
-use std::collections::BTreeSet;
 
 /// A body record is reused exactly when its key is equal, so the key holds every
 /// program input the body's checking and lowering read. The rule: lowering reads
@@ -244,8 +243,6 @@ pub(crate) struct Keys {
     closures: std::cell::RefCell<rustc_hash::FxHashMap<u32, ContentHash>>,
     // Contextual constructor candidates in index order, per (module, name).
     constructors: std::cell::RefCell<rustc_hash::FxHashMap<(u32, Symbol), Arc<[DefinitionId]>>>,
-    // Symbol texts the lookup rows name.
-    texts: std::cell::RefCell<rustc_hash::FxHashMap<u32, Box<str>>>,
     // The core prelude types every body's signatures read
     // (`hirsel_core_front::PRELUDE`), and their closures' hash once per request.
     prelude: Vec<usize>,
@@ -380,6 +377,8 @@ impl Keys {
         let mut keys = Self::with_modules(index, Headers::default(), shape.modules);
         let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut hooks = vec![];
+        let mut reads = Vec::new();
+        let mut body_reads = Vec::new();
         for ((m, rows), digests) in modules.iter().zip(resolutions).zip(shape.headers) {
             for (ordinal, ((item, resolution), digest)) in
                 m.syntax.items().zip(rows).zip(digests).enumerate()
@@ -412,8 +411,8 @@ impl Keys {
                     )));
                 };
                 let path = index.definition_path(definition);
-                let mut reads = BTreeSet::new();
-                let mut body_reads = BTreeSet::new();
+                reads.clear();
+                body_reads.clear();
                 for name in &resolution.names {
                     let into = if (item.tree.node(name.node).origin.span.start as usize) < end {
                         &mut reads
@@ -422,7 +421,7 @@ impl Keys {
                     };
                     match name.target {
                         Target::Definition(id) => {
-                            into.insert(id);
+                            into.push(id);
                         }
                         Target::ContextualConstructor { name } => {
                             into.extend(keys.constructors(index, m.id, name).iter().copied());
@@ -430,6 +429,10 @@ impl Keys {
                         _ => {}
                     }
                 }
+                reads.sort_unstable();
+                reads.dedup();
+                body_reads.sort_unstable();
+                body_reads.dedup();
                 if index.get(definition).kind == DefinitionKind::Clone {
                     hooks.push((definition, reads.clone()));
                 }
@@ -441,8 +444,8 @@ impl Keys {
                     has_body: end < item.source_text().len(),
                     header_end: end as u32,
                     site: index.get(definition).site,
-                    body_reads: body_reads.into_iter().collect(),
-                    reads: reads.into_iter().collect(),
+                    body_reads: body_reads.clone(),
+                    reads: reads.clone(),
                     anchor: (m.id, m.source, ordinal as u32),
                 });
             }
@@ -498,7 +501,6 @@ impl Keys {
             packages: Demand::new(index.packages.base_len(), index.packages.len()),
             closures: Default::default(),
             constructors: Default::default(),
-            texts: Default::default(),
             prelude: vec![],
             prelude_closure: Default::default(),
             prelude_reads: Default::default(),
@@ -883,12 +885,12 @@ impl Keys {
         // closures, each keyed only for the bodies that name the form that
         // reads it.
         let mut siblings = vec![];
-        for &(_, sibling) in self
-            .forms
-            .iter()
-            .filter(|f| named.contains(&(f.0.0 as usize)))
-        {
-            siblings.push(self.sibling_reads(index, sibling)?);
+        if !named.is_empty() {
+            for &(id, sibling) in &self.forms {
+                if named.contains(&(id.0 as usize)) {
+                    siblings.push(self.sibling_reads(index, sibling)?);
+                }
+            }
         }
         siblings.sort_unstable();
         siblings.dedup();
@@ -976,7 +978,7 @@ impl Keys {
                 row.push(kind);
                 row.extend_from_slice(&scope.0);
                 row.push(r.constructor as u8);
-                self.text(index, r.symbol, &mut row);
+                Self::text(index, r.symbol, &mut row);
                 match r.result {
                     LookupResult::Found(t) => {
                         row.push(0);
@@ -1003,12 +1005,9 @@ impl Keys {
             Ok(())
         })
     }
-    /// A symbol's text with its length, read from the index once per request.
-    fn text(&self, index: &NameIndex, symbol: Symbol, row: &mut Vec<u8>) {
-        let mut texts = self.texts.borrow_mut();
-        let text = texts
-            .entry(symbol.0)
-            .or_insert_with(|| index.symbols.text(symbol).into());
+    /// A symbol's interned text with its length.
+    fn text(index: &NameIndex, symbol: Symbol, row: &mut Vec<u8>) {
+        let text = index.symbols.text(symbol);
         row.extend_from_slice(&(text.len() as u32).to_le_bytes());
         row.extend_from_slice(text.as_bytes());
     }
@@ -1036,11 +1035,11 @@ impl Keys {
             }
             Target::Builtin(s) => {
                 row.push(3);
-                self.text(index, s, row);
+                Self::text(index, s, row);
             }
             Target::ContextualConstructor { name } => {
                 row.push(4);
-                self.text(index, name, row);
+                Self::text(index, name, row);
                 let candidates = self.constructors(index, module, name);
                 row.extend_from_slice(&(candidates.len() as u32).to_le_bytes());
                 for &d in candidates.iter() {

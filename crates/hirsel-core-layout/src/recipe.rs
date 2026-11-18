@@ -1082,18 +1082,19 @@ fn measure<'r>(
             }
             _ => measure(shapes, Repr::Own, t, get)?,
         },
+        FieldTy::Handle(Handle::Capability) => (POINTER, POINTER, 8),
         _ if stable => return Err("a region block holds only plain or region data"),
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
         | FieldTy::Handle(
             Handle::Task
-            | Handle::Capability
             | Handle::Causes
             | Handle::Socket
             | Handle::HostFile
             | Handle::Tape
-            | Handle::Latest,
+            | Handle::Latest
+            | Handle::Flow,
         ) => (POINTER, POINTER, 8),
         FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
         FieldTy::Seq(_) | FieldTy::Map(..) => (SEQ_CARRIER, POINTER, 24),
@@ -1120,7 +1121,8 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
             | Handle::Latest
             | Handle::Socket
             | Handle::HostFile
-            | Handle::Tape,
+            | Handle::Tape
+            | Handle::Flow,
         ) => false,
         _ => true,
     }
@@ -1267,7 +1269,8 @@ fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool
             | Handle::Causes
             | Handle::Socket
             | Handle::HostFile
-            | Handle::Tape,
+            | Handle::Tape
+            | Handle::Flow,
         ) => true,
         FieldTy::Array(e, n) => *n > 0 && drops(shapes, e, drop),
         _ => false,

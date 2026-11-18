@@ -56,6 +56,15 @@ impl Cx<'_, '_, '_> {
         );
     }
 
+    pub(super) fn flow_waits(&mut self, n: NodeId) {
+        let name = &self.fd.path;
+        self.add_flow_violation(
+            n,
+            0,
+            format!("a closure written in `{name}` is declared `waits`"),
+        );
+    }
+
     pub(super) fn flow_stage(&mut self, argument: NodeId, value: Option<ValueId>) {
         let function = value
             .and_then(|v| self.static_fns.get(&v))

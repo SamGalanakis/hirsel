@@ -1,6 +1,81 @@
 use super::*;
 use crate::{Context, block::Block};
 
+#[test]
+fn flow_charges_follow_their_record_through_bound_exit() {
+    use crate::flow::{Reference, StageCharge, WireError};
+
+    for finish in [false, true] {
+        let mut context = Context::new(16_000_064);
+        let start = context.available();
+        let mut flow = Reference::<u64>::default();
+        let sink = flow.sink().unwrap();
+        context.limit_enter(2_000).unwrap();
+        let stage = flow
+            .stage(
+                &context,
+                sink,
+                2,
+                StageCharge {
+                    output: 8,
+                    working: 300,
+                    state: 8,
+                    item_steps: 1000,
+                },
+                |_, _, value| Ok(Some(*value)),
+            )
+            .unwrap();
+        flow.port(&context, stage, 4, 8).unwrap();
+        context.limit_exit();
+        assert_eq!(context.available(), start - 900);
+        if finish {
+            assert_eq!(flow.finish(), Ok(()));
+        } else {
+            drop(flow);
+        }
+        assert_eq!(context.available(), start);
+    }
+
+    let context = Context::new(16_000_063);
+    let mut flow = Reference::<()>::default();
+    let sink = flow.sink().unwrap();
+    assert!(matches!(
+        flow.port(&context, sink, 1_000_000, 0),
+        Err(WireError::Refused(crate::Capacity {
+            requested: 16_000_064,
+            available: 16_000_063
+        }))
+    ));
+    let large = StageCharge {
+        output: 0,
+        working: 0,
+        state: 1024,
+        item_steps: 1000,
+    };
+    let too_small = Context::new(1423);
+    assert!(matches!(
+        flow.stage(&too_small, sink, 1, large, |_, _, _| Ok(None)),
+        Err(WireError::Refused(crate::Capacity {
+            requested: 1424,
+            available: 1423
+        }))
+    ));
+    let overflow = StageCharge {
+        output: 0,
+        working: u64::MAX - 100,
+        state: 0,
+        item_steps: 1000,
+    };
+    assert!(matches!(
+        flow.stage(&context, sink, 1, overflow, |_, _, _| Ok(None)),
+        Err(WireError::Refused(crate::Capacity {
+            requested: u64::MAX,
+            available: 16_000_063
+        }))
+    ));
+    assert_eq!(context.available(), 16_000_063);
+}
+
 struct Foreign(Vec<Block>);
 // SAFETY: sole affine custody moves to the worker; its only operation is drop,
 // which publishes refunds under the domain mutex without touching live records.

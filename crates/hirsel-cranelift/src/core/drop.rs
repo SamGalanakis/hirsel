@@ -893,6 +893,10 @@ impl Glue<'_, '_, '_> {
                 };
                 self.call(name, &[P, U], &[], &[self.ctx, handle])?;
             }
+            FieldTy::Handle(hirsel_core_layout::Handle::Flow) => {
+                let handle = self.load(at, 0);
+                self.call("hirsel_core_flow_drop", &[P], &[], &[handle])?;
+            }
             FieldTy::Handle(hirsel_core_layout::Handle::Causes) => {
                 let p = self.load(at, 0);
                 self.call("hirsel_core_causes_drop", &[P], &[], &[p])?;

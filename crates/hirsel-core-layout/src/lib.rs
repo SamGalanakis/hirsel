@@ -18,6 +18,7 @@ hirsel_guard::install!();
 pub mod charge;
 mod continuation;
 pub mod event;
+pub mod flow;
 mod recipe;
 mod shape;
 mod target;

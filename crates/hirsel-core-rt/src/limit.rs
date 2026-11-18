@@ -275,6 +275,17 @@ struct Domain {
     reap_inboxes: Cell<Option<NonNull<Inbox>>>,
 }
 thread_local! { static THREAD:u8=const{0}; static CURRENT_DOMAIN: Cell<usize> = const { Cell::new(0) }; }
+
+pub(crate) fn preserve_binding<R>(run: impl FnOnce() -> R) -> R {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT_DOMAIN.set(self.0);
+        }
+    }
+    let _restore = Restore(CURRENT_DOMAIN.get());
+    run()
+}
 #[inline(always)]
 fn thread() -> usize {
     THREAD.with(|v| v as *const u8 as usize)

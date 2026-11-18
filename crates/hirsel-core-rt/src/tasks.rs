@@ -114,6 +114,17 @@ impl Default for SchedulerProvider {
 }
 thread_local! { static CALLBACK_TASK: Local<*mut Task> = const { Local::new(ptr::null_mut()) }; }
 thread_local! { static CURRENT: Local<*mut Task> = const { Local::new(ptr::null_mut()) }; }
+
+pub(crate) fn private_flow_step<R>(run: impl FnOnce() -> R) -> R {
+    struct Restore(*mut Task);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CURRENT.set(self.0);
+        }
+    }
+    let _restore = Restore(CURRENT.replace(ptr::null_mut()));
+    crate::limit::preserve_binding(run)
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Ready,
@@ -1964,6 +1975,31 @@ pub(crate) fn current_id() -> u64 {
     }
     // SAFETY: TLS pins the live currently running task.
     unsafe { (*task).id }
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn flow_script() -> Option<(Arc<crate::schedule_script::ScheduleScript>, u64)> {
+    use crate::schedule_script::{UNTAPED, installed};
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins the running owner. The test control is read at an
+    // owner's operation boundary, outside the dispatcher.
+    let Some(task) = (unsafe { task.as_ref() }) else {
+        return installed().map(|script| (script, UNTAPED));
+    };
+    let run = unsafe { &mut *task.run };
+    let script = run.script.clone()?;
+    let Some(group) = task.group else {
+        return Some((script, UNTAPED));
+    };
+    let domain = run
+        .script_groups
+        .iter()
+        .position(|g| g.same(group))
+        .unwrap_or_else(|| {
+            run.script_groups.push(group);
+            run.script_groups.len() - 1
+        });
+    Some((script, domain as u64))
 }
 /// Whether a task is running on this thread (tests assert where callbacks run).
 #[cfg(test)]

@@ -2473,6 +2473,7 @@ impl Machine<'_> {
             // The evaluator has no tape provider (REPLAY-SPEC S2), so no Tape
             // reaches a drop.
             FieldTy::Handle(Handle::Tape) => panic!("{NO_TAPE}"),
+            FieldTy::Handle(Handle::Flow) => panic!("flow execution uses the native reference"),
             FieldTy::Handle(Handle::Socket) => {
                 let h = self.load(at, 8);
                 self.world.network.sockets.release(h);
@@ -3120,6 +3121,7 @@ impl Machine<'_> {
                 vec![]
             }
             RtOp::Host(op) => self.host(t, op, a)?,
+            RtOp::Flow(_) => panic!("flow execution uses the native reference"),
             RtOp::CompareBytes => {
                 let range = |p: u64, n: u64| match n {
                     0 => Vec::new(),

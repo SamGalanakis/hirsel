@@ -16,6 +16,7 @@ pub mod counted;
 mod destination;
 pub mod entry;
 mod fiber;
+pub mod flow;
 mod growth;
 pub mod host_file;
 pub mod host_ops;

@@ -588,6 +588,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
         failure: CallFailure,
     ) -> Option<ValueId> {
+        if !self.generated && !self.flow_literals.contains(&value) {
+            self.flow_callable(n);
+        }
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
         let TyKind::Fn(params, result, _, callable) = self.t.kind(ty).clone() else {
             self.call_scratch.push(scratch);
@@ -1121,6 +1124,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.descriptors = std::mem::take(&mut frame.outer_descriptors);
         let out = child.finish();
         let function = out.function;
+        self.out.flow.violations.extend(out.flow.violations);
+        self.out.flow.stages.extend(out.flow.stages);
+        if out.flow.waits {
+            self.flow_waits(n);
+        }
         if let (Some(function), Some(template)) = (function, out.template) {
             self.nested.insert(function, template);
         }

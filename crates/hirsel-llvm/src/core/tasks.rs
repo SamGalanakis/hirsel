@@ -153,6 +153,7 @@ impl FunctionEmitter<'_> {
                 | RtOp::Receive { .. }
                 | RtOp::Spawn { .. }
                 | RtOp::TapeGrant
+                | RtOp::Flow(_)
         ) {
             self.site_word()
         } else {
@@ -161,6 +162,18 @@ impl FunctionEmitter<'_> {
         let p = |v: &Value| ptr(v.clone());
         let u = |v: &Value| word(v.clone());
         let values = match op {
+            RtOp::Flow(op) => self.native_call(
+                "hirsel_core_flow",
+                &[K],
+                &[
+                    ptr(CONTEXT),
+                    p(&args[0]),
+                    zeroext(Type::I8, int(op as u64)),
+                    p(&args[1]),
+                    p(&args[2]),
+                    u(&at),
+                ],
+            ),
             RtOp::StepEnter => {
                 self.native_call("hirsel_core_step_enter", &[B], &[ptr(CONTEXT), u(&args[0])])
             }

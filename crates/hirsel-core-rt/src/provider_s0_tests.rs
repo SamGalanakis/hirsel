@@ -18,6 +18,71 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[test]
+fn flow_step_bounds_a_private_cancel_loop_and_preserves_the_owner_request() {
+    use crate::flow::{Failure, Halt, Pull, Reference, StageCharge};
+
+    for finish in [false, true] {
+        let mut owner = Context::new(4096);
+        causes::task_start(&mut owner).unwrap();
+        let start = owner.available();
+        let counted = Arc::new(AtomicU64::new(0));
+        let calls = Arc::clone(&counted);
+        let mut flow = Reference::<u64>::default();
+        let sink = flow.sink().unwrap();
+        let stage = flow
+            .stage(
+                &owner,
+                sink,
+                1,
+                StageCharge {
+                    output: 8,
+                    working: 0,
+                    state: 0,
+                    item_steps: 1000,
+                },
+                move |stage, _, _| {
+                    loop {
+                        stage.steps -= 1;
+                        // SAFETY: the stage context is private to this item invocation.
+                        if stage.steps <= 0
+                            && unsafe { crate::steps::hirsel_core_step_out(stage, 0) } != 0
+                        {
+                            return Err(Halt::OutOfTime);
+                        }
+                        assert_eq!(unsafe { hirsel_core_check_cancel(stage, 0) }, 0);
+                        calls.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+            )
+            .unwrap();
+        let port = flow.port(&owner, stage, 1, 8).unwrap();
+        flow.push(port, 1, 1).unwrap();
+        owner.cancel_requested.store(true, Ordering::Release);
+        assert_eq!(flow.next(sink), Ok(Pull::Dropped(0, 1)));
+        assert_eq!(counted.load(Ordering::Relaxed), 1000);
+        if finish {
+            assert_eq!(
+                flow.finish(),
+                Err(Failure {
+                    stage: 0,
+                    key: 1,
+                    halt: Halt::OutOfTime
+                })
+            );
+        } else {
+            drop(flow);
+        }
+        assert_eq!(owner.available(), start);
+        // SAFETY: the fixture owns the owner's context and its prepaid primary.
+        assert_eq!(unsafe { hirsel_core_check_cancel(&mut owner, 1) }, 1);
+        assert_eq!(
+            owner.causes.iter().next().unwrap().kind(),
+            causes::CANCELLED
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cb {
     Wait,

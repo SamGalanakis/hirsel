@@ -77,10 +77,22 @@ impl Function<'_, '_, '_> {
             | RtOp::Send { .. }
             | RtOp::Receive { .. }
             | RtOp::Spawn { .. }
-            | RtOp::TapeGrant => self.site()?,
+            | RtOp::TapeGrant
+            | RtOp::Flow(_) => self.site()?,
             _ => self.b.ins().iconst(types::I64, 0),
         };
         let n = match op {
+            RtOp::Flow(op) => {
+                let opcode = self.b.ins().iconst(types::I8, op as i64);
+                let values = self.c_call(
+                    "hirsel_core_flow",
+                    &[P, P, K, P, P, U],
+                    &[K],
+                    &[self.context, args[0], opcode, args[1], args[2], site],
+                )?;
+                self.call_failure(values[0], call.fail)?;
+                0
+            }
             RtOp::StepEnter => {
                 outputs[0] = self.c_call(
                     "hirsel_core_step_enter",

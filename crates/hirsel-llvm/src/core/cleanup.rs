@@ -398,6 +398,11 @@ impl FunctionEmitter<'_> {
                 self.runtime_void(name, &[ptr(CONTEXT), word(handle)]);
                 None
             }
+            FieldTy::Handle(hirsel_core_layout::Handle::Flow) => {
+                let handle = self.load(&Type::Ptr, p, 1);
+                self.runtime_void("hirsel_core_flow_drop", &[ptr(handle)]);
+                None
+            }
             FieldTy::Handle(hirsel_core_layout::Handle::Causes) => {
                 let chain = self.load(&Type::Ptr, p, 1);
                 self.runtime_void("hirsel_core_causes_drop", &[ptr(chain)]);

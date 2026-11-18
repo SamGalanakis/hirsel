@@ -789,6 +789,8 @@ pub enum RtOp {
     },
     /// Write a Bytes carrier through the private describe transport.
     DescribeEmit,
+    /// Owner flow operation with pointers to its fixed operand and result words.
+    Flow(hirsel_core_layout::flow::Op),
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1026,6 +1028,7 @@ impl RtOp {
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
             RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
+            RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
             RtOp::TapeOpen => (
                 vec![V(u64_), V(p), V(u8_), V(p), V(p), V(u64_), V(u64_), V(u64_)],
                 vec![u64_, u64_],
@@ -1140,6 +1143,7 @@ impl RtOp {
                 | RtOp::Receive { .. }
                 | RtOp::IsolateCatch
                 | RtOp::TapeGrant
+                | RtOp::Flow(_)
         ) || matches!(self, RtOp::Host(_))
     }
 
@@ -1169,6 +1173,7 @@ impl RtOp {
             | RtOp::ArgsGet
             | RtOp::LaunchWord
             | RtOp::DescribeEmit
+            | RtOp::Flow(_)
             | RtOp::Host(_)
             | RtOp::TapeOpen
             | RtOp::TapeEnd

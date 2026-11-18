@@ -1,0 +1,440 @@
+// expect: accept
+fn u64_sink(mut f: Flow) -> (Sink[u64], Into[u64]) {
+    result.unwrap(flow.sink(mut f))
+}
+
+fn pushed(mut f: Flow, p: Port[u64], key: u64, value: u64) -> bool waits {
+    match flow.push(mut f, p, key, value) {
+        Ok => true,
+        _ => false
+    }
+}
+
+fn saw_item(mut f: Flow, s: Sink[u64], k: u64, p: u32, v: u64) -> bool waits {
+    match flow.next(mut f, s) {
+        Item(key: key, from: from, x: x) => key == k && from == p && x == v,
+        _ => false
+    }
+}
+
+fn dropped(mut f: Flow, s: Sink[u64], p: u32, k: u64) -> bool waits {
+    match flow.next(mut f, s) {
+        Dropped(from: from, at: at) => from == p && at == k,
+        _ => false
+    }
+}
+
+fn ended(mut f: Flow, s: Sink[u64]) -> bool waits {
+    match flow.next(mut f, s) {
+        End => true,
+        _ => false
+    }
+}
+
+fn stalled(mut f: Flow, s: Sink[u64]) -> bool waits {
+    match flow.next(mut f, s) {
+        Stalled => true,
+        _ => false
+    }
+}
+
+fn failed(take f: Flow, stage: u32, k: u64) -> bool waits {
+    match flow.finish(take f) {
+        Error(e) => e.stage == stage && e.key == k && match e.halt {
+            Failed => true,
+            _ => false
+        },
+        Ok(()) => false
+    }
+}
+
+fn identity_stage(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    ((), Some(value))
+}
+
+fn increment_stage(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    ((), Some(value + 1))
+}
+
+fn none_stage(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    ((), None)
+}
+
+fn divide_stage(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    ((), Some(100 / value))
+}
+
+fn fail_first(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    ((), Some(1 / (value - value)))
+}
+
+fn fail_at_2(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    if key == 2 {
+        ((), Some(1 / (value - value)))
+    } else {
+        ((), Some(value))
+    }
+}
+
+fn fail_at_3(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    if key == 3 {
+        ((), Some(1 / (value - value)))
+    } else {
+        ((), Some(value))
+    }
+}
+
+fn fail_at_7(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    if key == 7 {
+        ((), Some(1 / (value - value)))
+    } else {
+        ((), Some(value))
+    }
+}
+
+fn hide_and_fail(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    if key == 3 {
+        ((), None)
+    } else if key == 25 {
+        ((), Some(1 / (value - value)))
+    } else {
+        ((), Some(value))
+    }
+}
+
+fn equal_keys() -> u64 waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let a = result.unwrap(flow.port(mut f, out, 2))
+    let b = result.unwrap(flow.port(mut f, out, 2))
+    if !(pushed(mut f, b, 5, 1) && pushed(mut f, a, 5, 2) && pushed(mut f, b, 6, 3) && pushed(mut f, a, 6, 4)) {
+        return 1
+    }
+    flow.end(mut f, a)
+    flow.end(mut f, b)
+    if saw_item(mut f, s, 5, 0, 2) && saw_item(mut f, s, 5, 1, 1) && saw_item(mut f, s, 6, 0, 4) && saw_item(mut f, s, 6, 1, 3) && ended(mut f, s) {
+        42
+    } else {
+        2
+    }
+}
+
+fn frontier() -> u64 waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let a = result.unwrap(flow.port(mut f, out, 3))
+    let b = result.unwrap(flow.port(mut f, out, 1))
+    flow.advance(mut f, b, 10)
+    if !(pushed(mut f, a, 3, 3) && pushed(mut f, a, 7, 7) && pushed(mut f, a, 12, 12)) {
+        return 1
+    }
+    if !(saw_item(mut f, s, 3, 0, 3) && saw_item(mut f, s, 7, 0, 7) && stalled(mut f, s)) {
+        return 2
+    }
+    flow.advance(mut f, b, 12)
+    if saw_item(mut f, s, 12, 0, 12) {
+        42
+    } else {
+        3
+    }
+}
+
+fn failure_frontier(mark: bool) -> bool waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 4, bytes 0, steps 1000, (), code.describe(hide_and_fail)))
+    let a = result.unwrap(flow.port(mut f, into, 4))
+    let b = result.unwrap(flow.port(mut f, out, 1))
+    if !pushed(mut f, b, 10, 10) {
+        return false
+    }
+    flow.end(mut f, b)
+    if !mark && !pushed(mut f, a, 3, 3) {
+        return false
+    }
+    if !pushed(mut f, a, 20, 20) {
+        return false
+    }
+    if mark {
+        flow.advance(mut f, a, 24)
+    }
+    if !pushed(mut f, a, 25, 25) {
+        return false
+    }
+    flow.end(mut f, a)
+    saw_item(mut f, s, 10, 1, 10) && saw_item(mut f, s, 20, 0, 20) && dropped(mut f, s, 0, 25) && ended(mut f, s) && failed(take f, 0, 25)
+}
+
+fn failure_frontiers() -> u64 waits {
+    if failure_frontier(false) && failure_frontier(true) {
+        42
+    } else {
+        1
+    }
+}
+
+fn closed_timing() -> u64 waits {
+    let mut f = flow.new()
+    let (_, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 4, bytes 0, steps 1000, (), code.describe(fail_at_3)))
+    let p = result.unwrap(flow.port(mut f, into, 2))
+    let mut key: u64 = 1
+    while key <= 5 {
+        if !pushed(mut f, p, key, key) {
+            return key
+        }
+        key += 1
+    }
+    match flow.push(mut f, p, 6, 6) {
+        Closed(6) => 42,
+        _ => 6
+    }
+}
+
+fn dead_credit() -> u64 waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let a = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(fail_first)))
+    let b = result.unwrap(flow.stage(mut f, a, 1, bytes 0, steps 1000, (), code.describe(identity_stage)))
+    let p = result.unwrap(flow.port(mut f, b, 2))
+    let mut key: u64 = 1
+    while key <= 5 {
+        if !pushed(mut f, p, key, key) {
+            return key
+        }
+        key += 1
+    }
+    match flow.push(mut f, p, 6, 6) {
+        Closed(6) => (),
+        _ => return 6
+    }
+    if dropped(mut f, s, 0, 1) && ended(mut f, s) && failed(take f, 0, 1) {
+        42
+    } else {
+        7
+    }
+}
+
+fn per_port_credit() -> u64 waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 4, bytes 0, steps 1000, (), code.describe(fail_at_2)))
+    let a = result.unwrap(flow.port(mut f, into, 1))
+    let b = result.unwrap(flow.port(mut f, into, 1))
+    if !(pushed(mut f, b, 3, 3) && pushed(mut f, a, 1, 1) && pushed(mut f, a, 2, 2)) {
+        return 1
+    }
+    match flow.push(mut f, b, 4, 4) {
+        Closed(4) => (),
+        _ => return 2
+    }
+    if !pushed(mut f, a, 5, 5) {
+        return 3
+    }
+    match flow.push(mut f, a, 6, 6) {
+        Closed(6) => (),
+        _ => return 4
+    }
+    if saw_item(mut f, s, 1, 0, 1) && dropped(mut f, s, 0, 2) && ended(mut f, s) && failed(take f, 0, 2) {
+        42
+    } else {
+        5
+    }
+}
+
+fn error_priority() -> u64 waits {
+    let mut f = flow.new()
+    let (_, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(fail_first)))
+    let p = result.unwrap(flow.port(mut f, into, 1))
+    if !pushed(mut f, p, 5, 5) {
+        return 1
+    }
+    match flow.push(mut f, p, 4, 4) {
+        Order(4) => (),
+        _ => return 2
+    }
+    if !pushed(mut f, p, 6, 6) {
+        return 3
+    }
+    match flow.push(mut f, p, 6, 6) {
+        Closed(6) => 42,
+        _ => 4
+    }
+}
+
+fn seal() -> u64 waits {
+    let mut f = flow.new()
+    let (_, out) = u64_sink(mut f)
+    match flow.port(mut f, out, 0) {
+        Error(Zero) => (),
+        _ => return 1
+    }
+    let p = result.unwrap(flow.port(mut f, out, 1))
+    if !pushed(mut f, p, 1, 1) {
+        return 2
+    }
+    match flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(identity_stage)) {
+        Error(Started) => (),
+        _ => return 3
+    }
+    match flow.port(mut f, out, 1) {
+        Error(Started) => (),
+        _ => return 4
+    }
+    let after: Result[(Sink[u64], Into[u64]), Wire] = flow.sink(mut f)
+    match after {
+        Error(Started) => 42,
+        _ => 5
+    }
+}
+
+fn finish_failure() -> u64 waits {
+    let mut f = flow.new()
+    let (_, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(divide_stage)))
+    let p = result.unwrap(flow.port(mut f, into, 1))
+    if !pushed(mut f, p, 7, 0) {
+        return 1
+    }
+    flow.advance(mut f, p, 8)
+    if failed(take f, 0, 7) {
+        42
+    } else {
+        2
+    }
+}
+
+fn last_mark() -> u64 waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(none_stage)))
+    let p = result.unwrap(flow.port(mut f, into, 1))
+    if pushed(mut f, p, 1, 1) && stalled(mut f, s) {
+        42
+    } else {
+        1
+    }
+}
+
+fn empty_stage_case(end: bool) -> bool waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(identity_stage)))
+    let a = result.unwrap(flow.port(mut f, into, 1))
+    let b = result.unwrap(flow.port(mut f, out, 1))
+    if !pushed(mut f, b, 3, 17) {
+        return false
+    }
+    if end {
+        flow.end(mut f, a)
+    } else {
+        flow.advance(mut f, a, 10)
+    }
+    if !saw_item(mut f, s, 3, 1, 17) {
+        return false
+    }
+    if end {
+        flow.end(mut f, b);
+        ended(mut f, s)
+    } else {
+        true
+    }
+}
+
+fn empty_stage() -> u64 waits {
+    if empty_stage_case(false) && empty_stage_case(true) {
+        42
+    } else {
+        1
+    }
+}
+
+fn forwarded_failure() -> u64 waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let a = result.unwrap(flow.stage(mut f, out, 4, bytes 0, steps 1000, (), code.describe(increment_stage)))
+    let b = result.unwrap(flow.stage(mut f, a, 4, bytes 0, steps 1000, (), code.describe(fail_at_7)))
+    let p = result.unwrap(flow.port(mut f, b, 4))
+    if !(pushed(mut f, p, 5, 5) && pushed(mut f, p, 7, 7) && pushed(mut f, p, 9, 9)) {
+        return 1
+    }
+    flow.end(mut f, p)
+    if saw_item(mut f, s, 5, 0, 6) && dropped(mut f, s, 0, 7) && ended(mut f, s) && failed(take f, 1, 7) {
+        42
+    } else {
+        2
+    }
+}
+
+fn advance_through_stage() -> u64 waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(identity_stage)))
+    let a = result.unwrap(flow.port(mut f, into, 1))
+    let b = result.unwrap(flow.port(mut f, out, 2))
+    flow.advance(mut f, a, 10)
+    if !(pushed(mut f, b, 3, 3) && pushed(mut f, b, 12, 12)) {
+        return 1
+    }
+    flow.end(mut f, b)
+    if !(saw_item(mut f, s, 3, 1, 3) && stalled(mut f, s)) {
+        return 2
+    }
+    flow.advance(mut f, a, 13)
+    if saw_item(mut f, s, 12, 1, 12) {
+        42
+    } else {
+        3
+    }
+}
+
+fn copied_end() -> u64 waits {
+    let mut f = flow.new()
+    let (s, out) = u64_sink(mut f)
+    let p = result.unwrap(flow.port(mut f, out, 1))
+    let q = p
+    flow.end(mut f, p)
+    match flow.push(mut f, q, 5, 17) {
+        Ended(17) => (),
+        _ => return 1
+    }
+    flow.end(mut f, q)
+    flow.advance(mut f, q, 9)
+    if ended(mut f, s) && ended(mut f, s) {
+        42
+    } else {
+        2
+    }
+}
+
+fn finish_drains_full_sink() -> u64 waits {
+    let mut f = flow.new()
+    let (_, out) = u64_sink(mut f)
+    let into = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(identity_stage)))
+    let p = result.unwrap(flow.port(mut f, into, 5))
+    let mut key: u64 = 1
+    while key <= 5 {
+        if !pushed(mut f, p, key, key) {
+            return key
+        }
+        key += 1
+    }
+    match flow.finish(take f) {
+        Ok(()) => 42,
+        Error(_) => 6
+    }
+}
+
+fn foreign_push() -> u64 waits {
+    let mut f = flow.new()
+    let mut g = flow.new()
+    let (_, to_f) = u64_sink(mut f)
+    let (_, to_g) = u64_sink(mut g)
+    let p = result.unwrap(flow.port(mut f, to_f, 1))
+    let q = result.unwrap(flow.port(mut g, to_g, 1))
+    flow.end(mut f, p)
+    flow.end(mut g, q)
+    let _ = flow.push(mut f, q, 1, 0u64)
+    1u64
+}

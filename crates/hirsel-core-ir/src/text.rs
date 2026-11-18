@@ -172,6 +172,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::Handle(Handle::HostFile) => "hostfile".into(),
         FieldTy::Handle(Handle::Socket) => "socket".into(),
         FieldTy::Handle(Handle::Tape) => "tape".into(),
+        FieldTy::Handle(Handle::Flow) => "flow".into(),
         FieldTy::Map(k, v) => format!("map {} {}", field_ty(k), field_ty(v)),
         FieldTy::Text => "text".into(),
         FieldTy::FixedSpan(e) => format!("fixed {}", field_ty(e)),
@@ -269,6 +270,7 @@ fn rt(op: RtOp) -> String {
         RtOp::ArgsGet => "rt.args_get".into(),
         RtOp::LaunchWord => "rt.launch_word".into(),
         RtOp::DescribeEmit => "rt.describe_emit".into(),
+        RtOp::Flow(op) => format!("rt.{}", op.name()),
         RtOp::LaunchTarget { view } => format!("rt.launch_target[t{}]", view.0),
         RtOp::Host(op) => format!("rt.{}", op.name()),
         RtOp::IsolateEnter => "rt.isolate_enter".into(),
@@ -1007,6 +1009,7 @@ impl<'a> Line<'a> {
                     "hostfile" => FieldTy::Handle(Handle::HostFile),
                     "socket" => FieldTy::Handle(Handle::Socket),
                     "tape" => FieldTy::Handle(Handle::Tape),
+                    "flow" => FieldTy::Handle(Handle::Flow),
                     "text" => FieldTy::Text,
                     w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
                         (Some(s), _) => FieldTy::Scalar(s),
@@ -1693,6 +1696,13 @@ impl BodyParser {
                 "step_enter" => RtOp::StepEnter,
                 "step_leave" => RtOp::StepLeave,
                 "step_catch" => RtOp::StepCatch,
+                name if let Some(op) = hirsel_core_layout::flow::Op::ALL
+                    .iter()
+                    .copied()
+                    .find(|op| op.name() == name) =>
+                {
+                    RtOp::Flow(op)
+                }
                 _ => match HostOp::ALL.iter().copied().find(|op| op.name() == name) {
                     Some(op) => RtOp::Host(op),
                     None => return Err(format!("unknown engine operation `{t}`")),

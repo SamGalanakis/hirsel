@@ -80,6 +80,10 @@ int8_t hirsel_core_compare_bytes(const uint8_t *a, uint64_t a_len, const uint8_t
                                  uint64_t b_len);
 HirselCoreContext *hirsel_core_context_new(uint64_t bytes);
 void hirsel_core_context_free(HirselCoreContext *);
+/* A compiler-generated flow call. The four result words are command-specific. */
+uint8_t hirsel_core_flow(HirselCoreContext *, void *, uint8_t,
+    const uint64_t *, uint64_t (*)[4], uint64_t site);
+void hirsel_core_flow_drop(void *);
 HirselCoreAllocation hirsel_core_alloc(const HirselCoreContext *, void *reserved,
     size_t bytes, size_t alignment, uint64_t charge, bool charge_overflow, uint8_t native_kind);
 void hirsel_core_free(void *, uint64_t remaining_charge);

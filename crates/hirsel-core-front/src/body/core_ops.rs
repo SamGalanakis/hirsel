@@ -2,6 +2,8 @@
 //! Identity is resolved once when the program's declarations are published.
 use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
+use hirsel_core_layout::flow::Op as FlowOp;
+mod flow;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
@@ -47,6 +49,7 @@ pub(crate) enum Kernel {
     /// The substitute of a capability of this `entry` kind.
     TapeGrant(u8),
     TapeAcross,
+    Flow(FlowOp),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,15 +79,15 @@ macro_rules! operations {
 
 operations! {
 
-    ("flow", "new", Lane::PendingCode, "B", "mc-f1-1180", false),
-    ("flow", "sink", Lane::PendingCode, "B", "mc-f1-1180", false),
-    ("flow", "stage", Lane::PendingCode, "B", "mc-f1-1180", false),
-    ("flow", "port", Lane::PendingCode, "B", "mc-f1-1180", false),
-    ("flow", "push", Lane::PendingCode, "B", "mc-f1-1180", false),
-    ("flow", "advance", Lane::PendingCode, "B", "mc-f1-1180", false),
-    ("flow", "end", Lane::PendingCode, "B", "mc-f1-1180", false),
-    ("flow", "next", Lane::PendingCode, "B", "mc-f1-1180", false),
-    ("flow", "finish", Lane::PendingCode, "B", "mc-f1-1180", false),
+    ("flow", "new", Lane::Runtime(Kernel::Flow(FlowOp::New)), "B", "mc-f1-1180", false),
+    ("flow", "sink", Lane::Runtime(Kernel::Flow(FlowOp::Sink)), "B", "mc-f1-1180", false),
+    ("flow", "stage", Lane::Runtime(Kernel::Flow(FlowOp::Stage)), "B", "mc-f1-1180", false),
+    ("flow", "port", Lane::Runtime(Kernel::Flow(FlowOp::Port)), "B", "mc-f1-1180", false),
+    ("flow", "push", Lane::Runtime(Kernel::Flow(FlowOp::Push)), "B", "mc-f1-1180", false),
+    ("flow", "advance", Lane::Runtime(Kernel::Flow(FlowOp::Advance)), "B", "mc-f1-1180", false),
+    ("flow", "end", Lane::Runtime(Kernel::Flow(FlowOp::End)), "B", "mc-f1-1180", false),
+    ("flow", "next", Lane::Runtime(Kernel::Flow(FlowOp::Next)), "B", "mc-f1-1180", false),
+    ("flow", "finish", Lane::Runtime(Kernel::Flow(FlowOp::Finish)), "B", "mc-f1-1180", false),
     ("int", "parse", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("core", "isolate", Lane::PendingCode, "A", "core-check-callables-913", false),
     ("latest", "new", Lane::Runtime(Kernel::LatestNew), "A", "core-ops-914", false),
@@ -764,6 +767,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::CodeRevision => self.runtime_code_revision(vals[0]?, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
             Kernel::CodeDescribe => self.runtime_code_describe(result, n),
+            Kernel::Flow(op) => self.runtime_flow(op, types, vals, result, n),
             Kernel::TapeOpen => self.runtime_tape_open(f, vals, result, n),
             Kernel::TapeEnd(returned) => {
                 let tape = self.runtime_key(vals[0]?, n);
@@ -1534,7 +1538,8 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::CodeIdentity
             | Kernel::CodeRevision
             | Kernel::CodeCallable
-            | Kernel::CodeDescribe => false,
+            | Kernel::CodeDescribe
+            | Kernel::Flow(_) => false,
         }
     }
     for (f, fd) in p.fns.iter().enumerate() {

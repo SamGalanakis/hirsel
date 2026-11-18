@@ -1,0 +1,195 @@
+// expect: accept
+fn double(take count: u64, key: u64, value: u64) -> (u64, Option[u64]) {
+    (count + 1, Some(value * 2))
+}
+
+fn pipe() -> u64 waits {
+    let mut f = flow.new()
+    let (sink, out): (Sink[u64], Into[u64]) = result.unwrap(flow.sink(mut f))
+    let input = result.unwrap(flow.stage(mut f, out, 2, bytes 0, steps 1000, 0, code.describe(double)))
+    let port = result.unwrap(flow.port(mut f, input, 2))
+    match flow.push(mut f, port, 5, 20) {
+        Ok => (),
+        _ => return 1
+    }
+    match flow.push(mut f, port, 6, 1) {
+        Ok => (),
+        _ => return 2
+    }
+    flow.end(mut f, port)
+    let first = match flow.next(mut f, sink) {
+        Item(key: 5, from: 0, x: x) => x,
+        _ => return 3
+    }
+    let second = match flow.next(mut f, sink) {
+        Item(key: 6, from: 0, x: x) => x,
+        _ => return 4
+    }
+    match flow.next(mut f, sink) {
+        End => (),
+        _ => return 5
+    }
+    match flow.finish(take f) {
+        Ok(()) => first + second,
+        Error(_) => 6
+    }
+}
+
+type Sample: codec {
+    valid: bool,
+    tenths: u64
+}
+
+fn clean(take state: (), key: u64, reading: Sample) -> ((), Option[u64]) {
+    ((), if reading.valid {
+        Some(reading.tenths - 2)
+    } else {
+        None
+    })
+}
+
+fn max(take state: (bool, u64), key: u64, reading: u64) -> ((bool, u64), Option[u64]) {
+    let (seen, high) = state
+    if !seen || reading > high {
+        ((true, reading), Some(reading))
+    } else {
+        (state, None)
+    }
+}
+
+fn thermometer() -> u64 waits {
+    let mut f = flow.new()
+    let (sink, out): (Sink[u64], Into[u64]) = result.unwrap(flow.sink(mut f))
+    let highs = result.unwrap(flow.stage(mut f, out, 4, bytes 0, steps 1000, (false, 0u64), code.describe(max)))
+    let samples = result.unwrap(flow.stage(mut f, highs, 4, bytes 0, steps 1000, (), code.describe(clean)))
+    let port = result.unwrap(flow.port(mut f, samples, 4))
+    match flow.push(mut f, port, 10, Sample(valid: true, tenths: 85)) {
+        Ok => (),
+        _ => return 1
+    }
+    match flow.push(mut f, port, 11, Sample(valid: false, tenths: 999)) {
+        Ok => (),
+        _ => return 2
+    }
+    match flow.push(mut f, port, 12, Sample(valid: true, tenths: 80)) {
+        Ok => (),
+        _ => return 3
+    }
+    match flow.push(mut f, port, 13, Sample(valid: true, tenths: 90)) {
+        Ok => (),
+        _ => return 4
+    }
+    flow.end(mut f, port)
+    match flow.next(mut f, sink) {
+        Item(key: 10, from: 0, x: 83) => (),
+        _ => return 5
+    }
+    match flow.next(mut f, sink) {
+        Item(key: 13, from: 0, x: 88) => (),
+        _ => return 6
+    }
+    match flow.next(mut f, sink) {
+        End => (),
+        _ => return 7
+    }
+    match flow.finish(take f) {
+        Ok(()) => 42,
+        Error(_) => 8
+    }
+}
+
+fn small(take state: (), key: u64, item: u8) -> ((), Option[()]) {
+    ((), if item == 1u8 {
+        Some(())
+    } else {
+        None
+    })
+}
+
+fn zero_sized() -> u64 waits {
+    let mut f = flow.new()
+    let (sink, out): (Sink[()], Into[()]) = result.unwrap(flow.sink(mut f))
+    let into = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(small)))
+    let port = result.unwrap(flow.port(mut f, into, 2))
+    match flow.push(mut f, port, 1, 0u8) {
+        Ok => (),
+        _ => return 1
+    }
+    match flow.push(mut f, port, 2, 1u8) {
+        Ok => (),
+        _ => return 2
+    }
+    flow.end(mut f, port)
+    match flow.next(mut f, sink) {
+        Item(key: 2, from: 0, x: ()) => (),
+        _ => return 3
+    }
+    match flow.next(mut f, sink) {
+        End => (),
+        _ => return 4
+    }
+    match flow.finish(take f) {
+        Ok(()) => 42,
+        Error(_) => 5
+    }
+}
+
+fn handled(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    let attempt: Result[List[u64], Capacity] = list.with_capacity(1)
+    match attempt {
+        Error(_) => ((), Some(17u64)),
+        Ok(_) => ((), Some(99u64))
+    }
+}
+
+fn unhandled(take state: (), key: u64, value: u64) -> ((), Option[u64]) {
+    let work: List[u64] = result.unwrap(list.with_capacity(1))
+    ((), Some(list.len(work)))
+}
+
+fn handled_capacity() -> u64 waits {
+    let mut f = flow.new()
+    let (sink, out): (Sink[u64], Into[u64]) = result.unwrap(flow.sink(mut f))
+    let stage = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(handled)))
+    let p = result.unwrap(flow.port(mut f, stage, 1))
+    match flow.push(mut f, p, 7, 1u64) {
+        Ok => (),
+        _ => return 1
+    }
+    flow.end(mut f, p)
+    match flow.next(mut f, sink) {
+        Item(key: 7, from: 0, x: 17) => (),
+        _ => return 2
+    }
+    match flow.finish(take f) {
+        Ok(()) => 42,
+        Error(_) => 3
+    }
+}
+
+fn unhandled_capacity() -> u64 waits {
+    let mut f = flow.new()
+    let (sink, out): (Sink[u64], Into[u64]) = result.unwrap(flow.sink(mut f))
+    let stage = result.unwrap(flow.stage(mut f, out, 1, bytes 0, steps 1000, (), code.describe(unhandled)))
+    let p = result.unwrap(flow.port(mut f, stage, 1))
+    match flow.push(mut f, p, 7, 1u64) {
+        Ok => (),
+        _ => return 1
+    }
+    flow.end(mut f, p)
+    match flow.next(mut f, sink) {
+        Dropped(from: 0, at: 7) => (),
+        _ => return 2
+    }
+    match flow.finish(take f) {
+        Error(error) => if error.stage == 0 && error.key == 7 {
+            match error.halt {
+                Failed => 42,
+                _ => 3
+            }
+        } else {
+            4
+        },
+        Ok(()) => 5
+    }
+}

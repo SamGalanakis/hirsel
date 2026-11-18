@@ -344,3 +344,48 @@ fn a_join_result_grows_from_the_joiners_bound_while_its_funder_is_live() {
         assert_eq!(refunds.count(), usize::from(bytes == 64));
     }
 }
+#[test]
+fn flow_stage_refuses_an_item_that_cannot_enter_the_copied_bound() {
+    use crate::flow::{Failure, Halt, Pull, Reference, StageCharge};
+
+    let mut context = crate::Context::new(10_000);
+    let mut flow = Reference::<u64>::default();
+    let sink = flow.sink().unwrap();
+    // SAFETY: the fixture owns the context and closes the bound after wiring.
+    assert!(unsafe { crate::steps::hirsel_core_step_enter(&mut context, 2500) });
+    let stage = flow
+        .stage(
+            &context,
+            sink,
+            4,
+            StageCharge {
+                output: 8,
+                working: 0,
+                state: 8,
+                item_steps: 1000,
+            },
+            |private, _, value| {
+                private.steps -= 900;
+                Ok(Some(*value))
+            },
+        )
+        .unwrap();
+    // SAFETY: no parent steps elapsed inside the fixture's wiring bound.
+    unsafe { crate::steps::hirsel_core_step_leave(&mut context) };
+    let input = flow.port(&context, stage, 4, 8).unwrap();
+    for x in 1..=3 {
+        flow.push(input, x, x).unwrap();
+    }
+    flow.end(input).unwrap();
+    assert_eq!(flow.next(sink), Ok(Pull::Item(1, 0, 1)));
+    assert_eq!(flow.next(sink), Ok(Pull::Item(2, 0, 2)));
+    assert_eq!(flow.next(sink), Ok(Pull::Dropped(0, 3)));
+    assert_eq!(
+        flow.finish(),
+        Err(Failure {
+            stage: 0,
+            key: 3,
+            halt: Halt::OutOfTime
+        })
+    );
+}

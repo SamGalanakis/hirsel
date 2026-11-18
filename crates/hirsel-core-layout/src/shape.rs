@@ -176,6 +176,8 @@ pub enum Handle {
     Tape,
     /// Socket, directional half or listener. The key retains its direction.
     Socket,
+    /// Owner-only graph, mechanically discarding buffers on cleanup.
+    Flow,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

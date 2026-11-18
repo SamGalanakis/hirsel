@@ -282,6 +282,104 @@ fn frames(mut bytes: &[u8]) -> (Header, Vec<Frame>) {
     }
     (header, frames)
 }
+
+#[test]
+fn flow_items_leave_only_owner_events_in_the_tape() {
+    use crate::flow::{Pull, Reference, StageCharge};
+
+    struct FlowRun {
+        store: Store,
+        mode: Mode,
+        end: Option<Result<(), Fault>>,
+    }
+    unsafe extern "C" fn owner(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the fixture supplies the root's pinned store and context.
+        unsafe {
+            let run = &mut **input.cast::<*mut FlowRun>();
+            let mut h = header(REVISION);
+            h.kind = KIND_RUN;
+            let (tape, _) =
+                Tape::open(REVISION, run.store.dir(), b"t", run.mode, &h, &expect()).unwrap();
+            assert_eq!(hirsel_core_check_cancel(context, 1), 0);
+            let mut flow = Reference::<u64>::default();
+            let sink = flow.sink().unwrap();
+            let mut to = sink;
+            for _ in 0..3 {
+                to = flow
+                    .stage(
+                        &*context,
+                        to,
+                        4,
+                        StageCharge {
+                            output: 8,
+                            working: 0,
+                            state: 0,
+                            item_steps: 1000,
+                        },
+                        |stage, _, value| {
+                            assert_eq!(hirsel_core_check_cancel(stage, 9), 0);
+                            Ok(Some(*value + 1))
+                        },
+                    )
+                    .unwrap();
+            }
+            let port = flow.port(&*context, to, 4, 8).unwrap();
+            for key in 1..=1000 {
+                flow.push(port, key, key).unwrap();
+                assert_eq!(flow.next(sink), Ok(Pull::Item(key, 0, key + 3)));
+            }
+            flow.end(port).unwrap();
+            assert_eq!(flow.next(sink), Ok(Pull::End));
+            assert_eq!(flow.finish(), Ok(()));
+            assert_eq!(hirsel_core_check_cancel(context, 2), 0);
+            run.end = Some(tape.end(&ending()));
+        }
+        0
+    }
+    let run = |bytes: Option<&[u8]>| {
+        let mut run = FlowRun {
+            store: Store::default(),
+            mode: if bytes.is_some() {
+                Mode::Replay
+            } else {
+                Mode::Record
+            },
+            end: None,
+        };
+        if let Some(bytes) = bytes {
+            run.store.files.insert(b"t".to_vec(), bytes.to_vec());
+        }
+        let mut context = Context::new(1 << 20);
+        let mut files = crate::host_file::Files::default();
+        context.host_files = &mut files;
+        causes::task_start(&mut context).unwrap();
+        let mut input = &mut run as *mut FlowRun;
+        // SAFETY: the owner receives the same pinned fixture state until it returns.
+        let status = unsafe {
+            run_root(
+                &mut context,
+                owner,
+                (&mut input as *mut *mut FlowRun).cast(),
+                ptr::null_mut(),
+                size_of::<*mut FlowRun>(),
+                0,
+                SchedulerProvider::default(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert_eq!(run.end, Some(Ok(())));
+        run
+    };
+    let record = run(None);
+    assert_eq!(
+        frames(record.store.file()).1,
+        [Frame::End {
+            gap: 2,
+            ending: ending()
+        }]
+    );
+    run(Some(record.store.file()));
+}
 fn encode(header: &Header, frames: &[Frame]) -> Vec<u8> {
     let mut out = block(
         &header.tape_id,

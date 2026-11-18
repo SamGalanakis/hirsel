@@ -1006,7 +1006,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     || path.is_core("flow.stage")
                     || path.is_core("flow.port"))
             {
-                let (holds, _) = crate::decls::holds_components(&p.decls, &self.t, t);
+                let (holds, parameters) = crate::decls::holds_components(&p.decls, &self.t, t);
+                if holds == 0 && parameters != 0 {
+                    let shown = self.shown(t);
+                    self.refuse(
+                        "CONC-14",
+                        n,
+                        format!(
+                            "the holds set of `{shown}` must be known empty when wiring a flow"
+                        ),
+                    );
+                    return;
+                }
                 if holds != 0 {
                     let shown = self.shown(t);
                     let mut message = format!(

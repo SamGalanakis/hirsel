@@ -115,6 +115,15 @@ fn wire_parking(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
     flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(parking_body))
 }
 
+fn closure_flow(take state: u64, key: u64, value: u64) -> (u64, Option[u64]) {
+    let x = (fn() -> u64 { let _ = flow.new(); 1u64 })()
+    (state, Some(x))
+}
+
+fn wire_closure_flow(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
+    flow.stage(mut f, output, 1, bytes 0, steps 100, 0, code.describe(closure_flow))
+}
+
 // expect: refuse CONC-14 at 30:57
 // expect: refuse CONC-14 at 34:57
 // expect: refuse CONC-14 at 38:57
@@ -123,5 +132,5 @@ fn wire_parking(mut f: Flow, output: Into[u64]) -> Result[Into[u64], Wire] {
 // expect: refuse CONC-14 at 63:54
 // expect: refuse CONC-14 at 97:57
 // expect: refuse CONC-14 at 115:57
+// expect: refuse CONC-14 at 124:57
 // expect: compared LANG-11 at 42:57 | core@1/core/StaticFn[fn(take u64, u64, u64) -> (u64, core@1/core/Option[i64])] | core@1/core/StaticFn[fn(take u64, u64, u64) -> (u64, core@1/core/Option[u64])]
-// expect: gap this generic core operation is not built

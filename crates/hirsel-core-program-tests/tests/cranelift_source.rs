@@ -24,6 +24,104 @@ fn growth_shadow_copies_back_data_and_capacity() {
 }
 
 #[test]
+fn native_flow_pipeline_returns_42_and_refunds_the_owner() {
+    let source = concat!(
+        include_str!("../../../core/front/cases/body/flow-native-pipeline.hirsel"),
+        include_str!("../../../core/front/cases/body/flow-owner-laws.hirsel"),
+    );
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let scratch = Scratch::new();
+    fs::write(
+        scratch.0.join("input.o"),
+        program.cranelift_object(NATIVE_TARGET, false, false, false),
+    )
+    .unwrap();
+    let mut declarations = String::new();
+    let mut cases = String::new();
+    for name in [
+        "pipe",
+        "thermometer",
+        "zero_sized",
+        "handled_capacity",
+        "unhandled_capacity",
+        "equal_keys",
+        "frontier",
+        "failure_frontiers",
+        "closed_timing",
+        "dead_credit",
+        "per_port_credit",
+        "error_priority",
+        "seal",
+        "finish_failure",
+        "last_mark",
+        "empty_stage",
+        "forwarded_failure",
+        "advance_through_stage",
+        "copied_end",
+        "finish_drains_full_sink",
+    ] {
+        let symbol = program
+            .identity(program.functions[names[name].index()].instance)
+            .symbol();
+        declarations.push_str(&format!(
+            "extern FlowResult {symbol}(HirselCoreContext *, uint64_t);\n"
+        ));
+        cases.push_str(&format!("    check(ctx, \"{name}\", {symbol});\n"));
+    }
+    let foreign = program
+        .identity(program.functions[names["foreign_push"].index()].instance)
+        .symbol();
+    let caller = format!(
+        r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <assert.h>
+#include "hirsel_core_rt.h"
+{sites}
+extern HirselCoreContext *hirsel_core_test_context_new(uint64_t);
+extern uint64_t hirsel_core_test_available(const HirselCoreContext *);
+extern void hirsel_core_test_flow_run(bool, uint8_t *, void (*)(uint8_t *));
+typedef struct {{ uint64_t value; uint8_t status; }} FlowResult;
+typedef FlowResult (*Case)(HirselCoreContext *, uint64_t);
+{declarations}
+extern FlowResult {foreign}(HirselCoreContext *, uint64_t);
+static void check(HirselCoreContext *ctx, const char *name, Case run) {{
+    uint64_t start=hirsel_core_test_available(ctx);
+    FlowResult r=run(ctx,0);
+    if (r.status || r.value!=42) fprintf(stderr,"%s: status %d, value %llu\n",name,r.status,(unsigned long long)r.value);
+    assert(r.status==0 && r.value==42);
+    assert(hirsel_core_test_available(ctx)==start);
+}}
+static void cases(uint8_t *state) {{
+    HirselCoreContext *ctx=hirsel_core_test_context_new(4000);
+{cases}
+    FlowResult rejected = {foreign}(ctx,0);
+    assert(rejected.status==1);
+    HirselCoreCauseCell *cause = hirsel_core_causes_take(ctx);
+    assert(cause && hirsel_core_cause_kind(hirsel_core_cause_value(cause))==1);
+    assert(!hirsel_core_cause_next(cause));
+    hirsel_core_causes_drop(cause);
+    hirsel_core_context_free(ctx);
+}}
+int main(void) {{
+    hirsel_core_test_flow_run(false,0,cases);
+    hirsel_core_test_flow_run(true,0,cases);
+    return 0;
+}}
+"#,
+        sites = program.site_bindings()
+    );
+    let executable = link_program(&scratch, &caller);
+    let output = Command::new(executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn blocked_channel_is_a_named_run_stop() {
     let source = r#"
 fn waiting() -> u64 waits {

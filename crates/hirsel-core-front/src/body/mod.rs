@@ -925,7 +925,6 @@ impl Program<'_> {
         let mut cx = Cx::new(self, f, e);
         cx.run(f, body);
         let mut out = cx.finish();
-        out.flow.waits = fd.waits;
         if self.entry.as_ref() == Some(&fd.path) {
             self.check_entry(fd, &mut out.refusals);
         }
@@ -2294,6 +2293,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     fn finish(mut self) -> CoreCheck {
         crate::cost_scope!("phase", "body finish");
+        self.out.flow.waits = self.fd.waits;
         if let Some(n) = self.halted
             && !self.inherited_refusal
             && self.out.refusals.is_empty()

@@ -299,7 +299,8 @@ impl<T: TyRead> Shapes<'_, T> {
                         | Role::HostFile
                         | Role::Tape
                         | Role::Latest
-                        | Role::Causes),
+                        | Role::Causes
+                        | Role::Flow),
                     ) => {
                         let handle = match role {
                             Role::Sender => Handle::Sender,
@@ -309,21 +310,12 @@ impl<T: TyRead> Shapes<'_, T> {
                             Role::HostFile => Handle::HostFile,
                             Role::Socket => Handle::Socket,
                             Role::Tape => Handle::Tape,
+                            Role::Flow => Handle::Flow,
                             _ => Handle::Causes,
                         };
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
                         let held = Some(FieldTy::Handle(handle));
                         return self.fill(r, ty, LRepr::Own, body, None, held);
-                    }
-                    Some(Role::Flow) => {
-                        return self.fill(
-                            r,
-                            ty,
-                            LRepr::Resource,
-                            record(vec![("handle", FieldTy::Scalar(Scalar::U64))]),
-                            None,
-                            None,
-                        );
                     }
                     // A capability, Args, Unique, Site or StaticFn: one plain word,
                     // never cleaned by the holder. StaticFn is carried in CoreIR as a
@@ -590,6 +582,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
                 Some(Role::Socket) => FieldTy::Handle(Handle::Socket),
                 Some(Role::Tape) => FieldTy::Handle(Handle::Tape),
+                Some(Role::Flow) => FieldTy::Handle(Handle::Flow),
                 Some(Role::Causes) => FieldTy::Handle(Handle::Causes),
                 Some(Role::Text) => {
                     if compact {

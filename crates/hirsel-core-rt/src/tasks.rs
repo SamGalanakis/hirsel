@@ -138,7 +138,9 @@ enum State {
     Provider,
     Ended,
 }
-/// The first byte makes taped replay use the runtime Arc commit path.
+/// The first byte sends Arc count operations through the runtime commit path:
+/// taped replay, and a pool task whose events something records. Another
+/// pool task counts inline, and its event hooks skip what nothing observes.
 #[repr(C)]
 pub struct Task {
     pub(crate) arc_runtime: bool,
@@ -1022,6 +1024,16 @@ pub(crate) unsafe fn task_waits_for_join(task: *const Task) -> bool {
 }
 
 impl Scheduler {
+    /// Whether something beyond a task's own tape observes Arc count events:
+    /// the provider's event sink or a test schedule.
+    fn arc_observed(&self) -> bool {
+        #[cfg(any(test, feature = "testing"))]
+        if self.script.is_some() {
+            return true;
+        }
+        self.provider.event.is_some()
+    }
+
     fn id(&mut self) -> u64 {
         let next = self.next;
         self.next = self
@@ -2515,6 +2527,26 @@ pub(crate) fn poll_after_refund() {
 /// # Safety
 /// Context's immutable event word is nonzero and pins its current Task/run.
 #[inline(always)]
+/// Whether an inline Arc count event has nothing to fold or record: no tape,
+/// sink, test schedule, open LATEST pair or pending credit, and no network
+/// poll owed (a pool polls only at poll kinds, which Arc counts are not).
+/// Such an event needs no token; any other goes through `event_in`.
+/// # Safety
+/// `context` is the running task's, with a nonzero event word.
+pub(crate) unsafe fn arc_unobserved(context: *const Context) -> bool {
+    // SAFETY: the event word pins the running task and its scheduler. The
+    // task alone writes its tape and pair state while it runs.
+    unsafe {
+        let task = &*((*context).events as *const Task);
+        let run = &*task.run;
+        !task.arc_runtime
+            && task.group.is_none()
+            && !task.latest_pair
+            && !run.arc_observed()
+            && (run.pool.is_some() || run.net.is_null())
+            && !(*(*context).current.pending_word()).load(Ordering::Acquire)
+    }
+}
 pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, value: u64) {
     // SAFETY: the emitted gate proves the word is this running task.
     unsafe { event_for((*context).events as *mut Task, kind, object, value) }
@@ -2710,7 +2742,7 @@ pub(crate) fn attach_tape(group: Group) {
             *tapes.membership(group).unwrap() += 1;
             (*task).group = Some(group);
             (*task).replay = group.replaying();
-            (*task).arc_runtime |= (*task).replay;
+            (*task).arc_runtime |= (*task).replay || (*(*task).run).pool.is_some();
         }
     }
 }
@@ -3197,7 +3229,7 @@ pub unsafe fn run_root(
             .prepare(start, root_pointer.cast(), ptr::null_mut());
         run.all = root_pointer;
         if let Some(pool) = pool.as_deref().filter(|pool| !pool.serial_replay) {
-            root.arc_runtime = true;
+            root.arc_runtime = run.arc_observed();
             root.worker = Some(0);
             root.state = State::Ready;
             let domain = &pool.domains[&root.domain];
@@ -3680,7 +3712,8 @@ unsafe fn spawn_in(
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
         let task = Box::into_raw(task);
-        (*task).arc_runtime = (*run).pool.is_some();
+        (*task).arc_runtime =
+            (*run).pool.is_some() && ((*task).group.is_some() || (*run).arc_observed());
         if let Some(group) = (*task).group {
             (*task).replay = group.replaying();
             (*task).arc_runtime |= (*task).replay;

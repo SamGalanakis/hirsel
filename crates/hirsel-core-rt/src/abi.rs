@@ -396,6 +396,9 @@ pub unsafe extern "C" fn hirsel_core_arc_initialized(context: *const Context) {
     count_arc_hook();
     // SAFETY: caller's event word pins this task and sink through the callback.
     unsafe {
+        if crate::tasks::arc_unobserved(context) {
+            return;
+        }
         crate::tasks::event_in(context, crate::tasks::ARC_NEW, 0, 1);
     }
 }
@@ -407,6 +410,9 @@ pub unsafe extern "C" fn hirsel_core_arc_shared(context: *const Context, node: *
     count_arc_hook();
     // SAFETY: caller holds the node and the recorded event turn.
     unsafe {
+        if crate::tasks::arc_unobserved(context) {
+            return;
+        }
         let count = (&*node.cast::<std::sync::atomic::AtomicU64>())
             .load(std::sync::atomic::Ordering::Relaxed);
         crate::tasks::event_in(context, crate::tasks::ARC_SHARE, 0, count);
@@ -424,6 +430,9 @@ pub unsafe extern "C" fn hirsel_core_arc_released(context: *const Context, last:
     count_arc_hook();
     // SAFETY: the event word pins this immutable task/sink until completion.
     unsafe {
+        if crate::tasks::arc_unobserved(context) {
+            return;
+        }
         crate::tasks::event_in(context, crate::tasks::ARC_RELEASE, 0, u64::from(last));
     }
 }

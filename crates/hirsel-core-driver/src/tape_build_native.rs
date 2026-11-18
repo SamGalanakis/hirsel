@@ -343,7 +343,12 @@ fn tape_cli_replays() {
         "replay with no grants: {err}"
     );
     assert_eq!(std::fs::read(&tape).unwrap(), bytes);
-    let shown = vec!["tape".to_owned(), "show".into(), tape.display().to_string()];
+    let shown = vec![
+        "tape".to_owned(),
+        "show".into(),
+        tape.display().to_string(),
+        "--include-credentials".into(),
+    ];
     let (code, out, err) = process::tape_request(&shown, dir.path());
     assert_eq!(code, Some(0), "show: {err}");
     assert!(out.contains("format 2") && out.contains("GRANT") && out.contains("END"));

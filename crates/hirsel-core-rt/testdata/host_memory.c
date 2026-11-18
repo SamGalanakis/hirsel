@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
         /* Fund the growth from a different current limit before testing host refusal. */
         assert(hirsel_core_limit_enter(ctx, bytes).pointer);
     } else if (mode == 2 || mode == 3) {
-        HirselCoreRegion *region = hirsel_core_region_open(4096);
+        HirselCoreRegion *region = hirsel_core_region_open(ctx);
         if (mode == 3) assert(hirsel_core_region_alloc(ctx, region, 8, 8, 8, false).pointer);
         argument = region;
         body = 2;

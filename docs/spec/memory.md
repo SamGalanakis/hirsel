@@ -805,9 +805,9 @@ every engine. Each obligation is checked by counting the engine's work, never by
   allocation, rounded up to the allocator's granule, never a fixed size; later chunks grow
   geometrically. Count: a region whose allocations total `n` bytes reserves at most `2n` bytes
   plus one granule.
-- **Pools by type inside a region.** A region keeps allocations of one fixed-size type
+- **Pools inside a region.** A region keeps allocations of one fixed size and alignment
   together, so `k` such allocations occupy `k` × their size with no header per allocation,
-  apart from the slack at a chunk's end. Count: reserved bytes minus charged bytes in a
+  apart from the slack at a chunk's end. Count: reserved bytes minus occupied bytes in a
   region is at most its chunks' end slack.
 - **Regions reuse their storage.** A closing region returns its chunks to its task's
   allocator, and the next region the task opens takes them first, so a region opened and

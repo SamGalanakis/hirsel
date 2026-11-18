@@ -67,11 +67,13 @@ without recursion or an external stack; resources reserve a state pointer. The
 allocator takes a native kind; kind and alignment tag the payer word so generic
 free needs only pointer and charge. These tags never affect logical charges. No legacy ABI is retained.
 
-Regions bump within nonmoving chunks and aggregate charges per payer run, with
-four inline prior entries. A compact builder remembers its region entry and
-retained charge. Trim takes those explicit operands and never needs an object
-header. Writer/copy/index code and Child/Bounds/Overflow checks belong to the
-emitter. Region close refunds the aggregate entries and frees chunks.
+Regions bump within nonmoving pools keyed by native size and alignment. The
+first chunk rounds the request to a granule. Each pool grows geometrically
+within the region-wide backing ceiling. Closing refunds the aggregate payer
+runs and returns the complete chunk set to the task for reuse. A compact builder
+remembers its region entry and retained charge. Trim takes those explicit
+operands and needs no allocation header. Writer/copy/index code and
+Child/Bounds/Overflow checks belong to the emitter.
 
 Rc/Arc share and nonlast release inline; last release uses allocation-free,
 constant-stack resumable glue. Recipes decrement retained children inline and

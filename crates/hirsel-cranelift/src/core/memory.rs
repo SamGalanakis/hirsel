@@ -510,10 +510,7 @@ impl Function<'_, '_, '_> {
                 self.c_call("hirsel_core_limit_exit", &[p], &[], &[self.context])?;
             }
             Inst::RegionOpen { result } => {
-                // Physical chunk size is allocator policy and does not change
-                // logical admission or the stable addresses it publishes.
-                let chunk = self.b.ins().iconst(types::I64, 65536);
-                let values = self.c_call("hirsel_core_region_open", &[u], &[p], &[chunk])?;
+                let values = self.c_call("hirsel_core_region_open", &[p], &[p], &[self.context])?;
                 self.set(result, values[0]);
             }
             Inst::RegionClose { region } => {

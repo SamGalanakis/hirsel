@@ -340,13 +340,18 @@ fn grant_growth_overrides_original_payer_and_hands_survivors_back() {
 fn bound_handover_keeps_cells_own_counted_and_region_bytes_within_parent() {
     use crate::{counted, region::Region};
     let mut runs = 0;
-    for chunk in [128, 65536] {
+    for warm in [false, true] {
         for later in [false, true] {
             for k in 1..=9 {
                 let mut ctx = Context::new(2048);
                 let root = ctx.current.clone();
+                if warm {
+                    let mut previous = Region::open(&ctx);
+                    previous.allocate(&ctx, 8, 8, Some(0)).unwrap();
+                    previous.close();
+                }
                 root.inject(k, later);
-                let mut region = Region::new(chunk);
+                let mut region = Region::open(&ctx);
                 if causes::task_start(&mut ctx).is_ok() && ctx.limit_enter(1024).is_ok() {
                     let own = Block::new(&ctx, Some(24), 24, 8).ok();
                     let node = Block::graph(&ctx, Some(16), 16, 8)

@@ -329,24 +329,26 @@ impl FunctionEmitter<'_> {
         self.admit_balance(&payer, charge, &available);
         let total = self.bin(Binary::Add, &i64, &accumulated, charge);
         self.store_native(region, REGION_CHARGE, Type::I64, &total);
+        let stored_size = self.load_native(region, REGION_SIZE, Type::I64);
+        let stored_alignment = self.load_native(region, REGION_ALIGNMENT, Type::I64);
+        let same_size = self.cmp(Predicate::Eq, &i64, &stored_size, bytes);
+        let same_align = self.cmp(Predicate::Eq, &i64, &stored_alignment, &int(align));
+        let same_pool = self.bin(Binary::And, &i1, &same_size, &same_align);
         let cursor = self.load_native(region, REGION_CURSOR, Type::Ptr);
         let end = self.load_native(region, REGION_END, Type::Ptr);
-        let address = self.cast(Cast::PtrToInt, &Type::Ptr, &cursor, &i64);
-        let rounded = self.bin(Binary::Add, &i64, &address, &int(align - 1));
-        let start = self.bin(Binary::And, &i64, &rounded, &int(-i128::from(align)));
-        let offset = self.bin(Binary::Sub, &i64, &start, &address);
-        let result = self.offset_by(&cursor, &offset);
-        let zero = self.cmp(Predicate::Eq, &i64, bytes, &int(0));
-        let size = self.select(&i64, &zero, &int(1), bytes);
-        let next = self.bin(Binary::Add, &i64, &start, &size);
-        let wrapped = self.cmp(Predicate::Uge, &i64, &next, &start);
+        let stride = self.load_native(region, REGION_STRIDE, Type::I64);
+        let start = self.cast(Cast::PtrToInt, &Type::Ptr, &cursor, &i64);
         let limit = self.cast(Cast::PtrToInt, &Type::Ptr, &end, &i64);
-        let room = self.cmp(Predicate::Ule, &i64, &next, &limit);
-        let fits = self.bin(Binary::And, &i1, &room, &wrapped);
+        let remaining = self.bin(Binary::Sub, &i64, &limit, &start);
+        let room = self.cmp(Predicate::Ule, &i64, &stride, &remaining);
+        let fits = self.bin(Binary::And, &i1, &same_pool, &room);
         self.likely(&fits, store, refill_label);
         self.block(store);
-        let next_pointer = self.offset_by(&result, &size);
-        self.store_native(region, REGION_CURSOR, Type::Ptr, &next_pointer);
+        let next = self.offset_by(&cursor, &stride);
+        self.store_native(region, REGION_CURSOR, Type::Ptr, &next);
+        let occupied = self.load_native(region, REGION_OCCUPIED, Type::I64);
+        let occupied = self.bin(Binary::Add, &i64, &occupied, &stride);
+        self.store_native(region, REGION_OCCUPIED, Type::I64, &occupied);
         self.br(done);
         self.block(refill_label);
         let refill = self.call_declared(
@@ -379,7 +381,7 @@ impl FunctionEmitter<'_> {
         let pointer = self.emit(Operation::Phi(
             &Type::Ptr,
             &[
-                (result, store),
+                (cursor, store),
                 (refill, refill_label),
                 (Value::Null, refused),
                 (slow, slow_label),

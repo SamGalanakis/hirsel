@@ -273,7 +273,7 @@ fn frozen_prefixes_match_the_emitter_contract() {
             assert_eq!(ctx.available(), 256);
         }
     }
-    let mut region = Region::new(64);
+    let mut region = Region::open(&ctx);
     region.allocate(&ctx, 8, 8, Some(8)).unwrap();
     assert_eq!(ctx.available(), 248);
     drop(region);

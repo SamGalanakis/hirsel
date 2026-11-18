@@ -70,9 +70,9 @@
 //! and current is canonical, including after scope handover or grant completion.
 //!
 //! Region fast allocation compares its payer with current_limit, admits once,
-//! adds charge, aligns/bumps cursor and checks end. On payer change call the full
-//! region_alloc before admitting; on chunk exhaustion after admission call
-//! region_refill. Builder captures region.entry plus its original charge; trim
+//! adds charge and bumps a matching size/alignment pool if its chunk has room.
+//! On payer change call region_alloc before admitting. On pool change or chunk
+//! exhaustion after admission call region_refill. Builder captures region.entry plus its original charge; trim
 //! takes (region, entry, previous_charge, retained_charge). No object headers.
 //!
 //! Rc uses checked u64 increment and decrement/test at count offset zero; only
@@ -128,9 +128,14 @@ use crate::{
 };
 
 /// Open an empty explicit region. Opening admits nothing.
+/// # Safety
+/// Context is live and task-local through the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_region_open(chunk_bytes: usize) -> *mut crate::region::Region {
-    let region = Box::into_raw(Box::new(crate::region::Region::new(chunk_bytes)));
+pub unsafe extern "C" fn hirsel_core_region_open(
+    context: *const Context,
+) -> *mut crate::region::Region {
+    // SAFETY: the emitter passes the current live context.
+    let region = Box::into_raw(crate::region::Region::open(unsafe { &*context }));
     #[cfg(any(test, feature = "charge-observation"))]
     {
         crate::peak::allocated(region.cast(), size_of::<crate::region::Region>());
@@ -194,7 +199,11 @@ pub unsafe extern "C" fn hirsel_core_region_lower_charge(
 pub unsafe extern "C" fn hirsel_core_region_close(region: *mut crate::region::Region) {
     // SAFETY: every stable locator into this region has ended.
     unsafe {
-        drop(Box::from_raw(region));
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::region_close(region);
+        Box::from_raw(region).close();
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::deallocated(region.cast());
     }
 }
 use crate::causes::{self, Cause, Cell};

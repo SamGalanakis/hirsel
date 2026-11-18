@@ -7,8 +7,9 @@ use std::ptr::NonNull;
 
 struct OpenRegion(*mut crate::region::Region);
 impl OpenRegion {
-    fn new(chunk: usize) -> Self {
-        Self(hirsel_core_region_open(chunk))
+    fn new(context: &Context) -> Self {
+        // SAFETY: the current context is live through open.
+        Self(unsafe { hirsel_core_region_open(context) })
     }
     fn allocate(
         &mut self,
@@ -69,7 +70,7 @@ fn destination_identity_is_unique_across_workers_and_released_storage() {
     assert_eq!(ids.len(), 4000);
     for _ in 0..16 {
         let ctx = Context::new(8);
-        let mut region = OpenRegion::new(128);
+        let mut region = OpenRegion::new(&ctx);
         let _allocation = region.allocate(&ctx, 24, Some(8)).unwrap();
         assert!(ids.insert(hirsel_core_dest_id()));
         drop(region);
@@ -79,10 +80,14 @@ fn destination_identity_is_unique_across_workers_and_released_storage() {
 
 #[test]
 fn blob_header_is_uncharged_trim_keeps_payer_and_closed_copy_keeps_actual_width() {
-    for chunk in [128, 65536] {
+    for warm in [false, true] {
         let mut ctx = Context::new(128);
-        let mut source = OpenRegion::new(chunk);
-        let mut target = OpenRegion::new(chunk);
+        if warm {
+            let mut previous = OpenRegion::new(&ctx);
+            previous.allocate(&ctx, 80, Some(0)).unwrap();
+        }
+        let mut source = OpenRegion::new(&ctx);
+        let mut target = OpenRegion::new(&ctx);
         ctx.limit_enter(64).unwrap();
         let blob = source.allocate(&ctx, 16 + 64, charge::region(64)).unwrap();
         assert_eq!(
@@ -152,9 +157,13 @@ fn blob_header_is_uncharged_trim_keeps_payer_and_closed_copy_keeps_actual_width(
 
 #[test]
 fn failed_stream_keeps_its_full_reservation_and_completed_bytes_do_not_move() {
-    for chunk in [128, 65536] {
+    for warm in [false, true] {
         let ctx = Context::new(128);
-        let mut region = OpenRegion::new(chunk);
+        if warm {
+            let mut previous = OpenRegion::new(&ctx);
+            previous.allocate(&ctx, 26, Some(0)).unwrap();
+        }
+        let mut region = OpenRegion::new(&ctx);
         // FORM f0(3,10): tag, reserved sequence header, one complete Null;
         // the next Null cannot fit. No finish or trim occurs on this path.
         let blob = region.allocate(&ctx, 16 + 10, charge::region(10)).unwrap();
@@ -191,12 +200,16 @@ fn failed_stream_keeps_its_full_reservation_and_completed_bytes_do_not_move() {
 #[test]
 fn compact_reservations_closed_copies_and_indexes_fail_at_each_and_all_later_admissions() {
     let mut runs = 0;
-    for chunk in [128, 65536] {
+    for warm in [false, true] {
         for later in [false, true] {
             for k in 1..=4 {
                 let ctx = Context::new(128);
+                if warm {
+                    let mut previous = OpenRegion::new(&ctx);
+                    previous.allocate(&ctx, 80, Some(0)).unwrap();
+                }
                 ctx.current.inject(k, later);
-                let mut region = OpenRegion::new(chunk);
+                let mut region = OpenRegion::new(&ctx);
                 let mut retained = 0;
                 if let Ok(_blob) = region.allocate(&ctx, 16 + 64, charge::region(64)) {
                     // SAFETY: this fixture's completed source uses twelve bytes.
@@ -231,7 +244,7 @@ fn compact_reservations_closed_copies_and_indexes_fail_at_each_and_all_later_adm
 #[test]
 fn index_charge_overflow_is_a_capacity_value_before_any_storage_is_written() {
     let ctx = Context::new(128);
-    let mut region = OpenRegion::new(128);
+    let mut region = OpenRegion::new(&ctx);
     assert_eq!(charge::seq_index(3), Some(48));
     assert_eq!(
         region.allocate(&ctx, 48, charge::seq_index(u64::MAX)).err(),

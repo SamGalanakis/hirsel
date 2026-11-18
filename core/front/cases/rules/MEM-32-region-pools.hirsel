@@ -1,0 +1,16 @@
+fn fill(r: Region) -> Result[u64, Capacity] {
+    let first = text.copy_in(r, "abcdefghijk")?;
+    let middle = text.copy_in(r, "abcdefghijklmnopqrstuvwxyz")?;
+    let last = text.copy_in(r, "lmnopqrstuv")?;
+    Ok(text.len(first) * 100 + text.len(middle) + text.len(last))
+}
+
+fn pools() -> u64 {
+    region r {
+        match fill(r) {
+            Ok(n) => n,
+            Error(_) => 0
+        }
+    }
+}
+// expect: run pools() = 1137

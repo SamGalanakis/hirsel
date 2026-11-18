@@ -25,6 +25,10 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #define HIRSEL_CORE_REGION_ENTRY 16
 #define HIRSEL_CORE_REGION_PAYER 24
 #define HIRSEL_CORE_REGION_CHARGE 32
+#define HIRSEL_CORE_REGION_SIZE 40
+#define HIRSEL_CORE_REGION_ALIGNMENT 48
+#define HIRSEL_CORE_REGION_OCCUPIED 56
+#define HIRSEL_CORE_REGION_STRIDE 64
 #define HIRSEL_CORE_NODE_COUNT 0
 #define HIRSEL_CORE_NODE_PAYLOAD 8
 #define HIRSEL_CORE_OWN_PAYER_BACK 8
@@ -91,7 +95,7 @@ void hirsel_core_free(void *, uint64_t remaining_charge);
 HirselCoreAllocation hirsel_core_limit_enter(HirselCoreContext *, uint64_t bytes);
 void hirsel_core_limit_exit(HirselCoreContext *);
 typedef struct HirselCoreRegion HirselCoreRegion;
-HirselCoreRegion *hirsel_core_region_open(size_t physical_chunk_bytes);
+HirselCoreRegion *hirsel_core_region_open(const HirselCoreContext *);
 HirselCoreAllocation hirsel_core_region_alloc(const HirselCoreContext *,
     HirselCoreRegion *, size_t bytes, size_t alignment, uint64_t charge, bool charge_overflow);
 void hirsel_core_region_lower_charge(HirselCoreRegion *, size_t entry,

@@ -111,7 +111,7 @@ unsafe fn field<T>(base: *mut u8, offset: usize) -> *mut T {
 fn emitted_region() -> u64 {
     use hirsel_core_rt::abi_layout::*;
     let ctx = Context::new(u64::MAX);
-    let mut region = Region::new(65536);
+    let mut region = Region::open(&ctx);
     let mut sum = 0;
     for i in 0..COUNT {
         // SAFETY: this is the emitter's constant-size/stride u64 bump sequence.
@@ -122,13 +122,13 @@ fn emitted_region() -> u64 {
                 CONTEXT_CURRENT_LIMIT,
             )
             .read();
-            let raw = (&mut region as *mut Region).cast::<u8>();
+            let raw = (&mut *region as *mut Region).cast::<u8>();
             let p = if field::<*mut u8>(raw, REGION_PAYER).read() != limit
                 || field::<u64>(raw, REGION_CHARGE).read() == 0
             {
                 let result = hirsel_core_rt::abi::hirsel_core_region_alloc(
                     &ctx,
-                    &mut region,
+                    &mut *region,
                     8,
                     8,
                     8,
@@ -149,9 +149,11 @@ fn emitted_region() -> u64 {
                 if next.addr() <= field::<*mut u8>(raw, REGION_END).read().addr() {
                     let p = cursor.read();
                     cursor.write(next);
+                    let occupied = field::<usize>(raw, REGION_OCCUPIED);
+                    occupied.write(occupied.read() + 8);
                     p
                 } else {
-                    hirsel_core_rt::abi::hirsel_core_region_refill(&mut region, 8, 8)
+                    hirsel_core_rt::abi::hirsel_core_region_refill(&mut *region, 8, 8)
                 }
             };
             p.cast::<u64>().write(i);
@@ -325,7 +327,7 @@ fn region(runtime: bool) -> u64 {
     let mut sum = 0;
     if runtime {
         let ctx = Context::new(u64::MAX);
-        let mut region = Region::new(65536);
+        let mut region = Region::open(&ctx);
         for i in 0..COUNT {
             let p = region.allocate(&ctx, 8, 8, Some(8)).unwrap();
             // SAFETY: the newly allocated u64 is aligned and live until region close.

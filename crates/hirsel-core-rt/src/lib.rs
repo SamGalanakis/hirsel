@@ -79,6 +79,7 @@ pub struct Context {
     pub(crate) isolates: Vec<crate::isolate::Reservation>,
     pub(crate) step_bounds: Vec<steps::Bound>,
     pub(crate) step_slice_tail: u64,
+    pub(crate) regions: region::RegionCache,
 }
 
 impl Context {
@@ -96,6 +97,7 @@ impl Context {
             steps: steps::UNBOUNDED,
             step_bounds: Vec::new(),
             step_slice_tail: steps::SLICE,
+            regions: region::RegionCache::default(),
             run: std::ptr::null(),
             cancel_requested: AtomicBool::new(false),
             cancel_shield: 0,

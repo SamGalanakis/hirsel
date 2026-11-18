@@ -3,9 +3,9 @@ use hirsel_core_layout::charge;
 
 #[test]
 fn physical_chunk_sizes_do_not_change_capacity_or_move_stable_bytes() {
-    let run = |chunk| {
-        let mut ctx = Context::new(128);
-        let mut region = Region::new(chunk);
+    let mut ctx = Context::new(128);
+    let mut run = || {
+        let mut region = Region::open(&ctx);
         ctx.limit_enter(64).unwrap();
         let first = region.allocate(&ctx, 13, 64, charge::region(13)).unwrap();
         // SAFETY: first owns at least thirteen writable bytes until region close.
@@ -27,21 +27,17 @@ fn physical_chunk_sizes_do_not_change_capacity_or_move_stable_bytes() {
         unsafe {
             assert_eq!(std::slice::from_raw_parts(first.as_ptr(), 13), &[0x5a; 13]);
         }
-        let physical = region.physical_bytes();
-        drop(region);
+        region.close();
         assert_eq!(ctx.available(), 128);
-        (result, physical)
+        result
     };
-    let a = run(128);
-    let b = run(65536);
-    assert_eq!(a.0, b.0);
-    assert_ne!(a.1, b.1);
+    assert_eq!(run(), run());
 }
 
 #[test]
 fn partial_refund_follows_allocation_payer_and_close_refunds_only_the_tail_balance() {
     let mut ctx = Context::new(8192);
-    let mut region = Region::new(8192);
+    let mut region = Region::open(&ctx);
     ctx.limit_enter(4096).unwrap();
     let _p = region.allocate(&ctx, 4096, 8, Some(4096)).unwrap();
     let entry = region.entry;
@@ -61,12 +57,17 @@ fn partial_refund_follows_allocation_payer_and_close_refunds_only_the_tail_balan
 #[test]
 fn failed_region_prefixes_remain_charged_until_close_at_every_admission() {
     let mut runs = 0;
-    for chunk in [128, 65536] {
+    for warm in [false, true] {
         for later in [false, true] {
             for k in 1..=7 {
                 let ctx = Context::new(128);
+                if warm {
+                    let mut previous = Region::open(&ctx);
+                    previous.allocate(&ctx, 8, 8, Some(0)).unwrap();
+                    previous.close();
+                }
                 ctx.current.inject(k, later);
-                let mut region = Region::new(chunk);
+                let mut region = Region::open(&ctx);
                 let mut retained = 0;
                 for _ in 0..6 {
                     if region.allocate(&ctx, 8, 8, Some(8)).is_err() {
@@ -91,7 +92,7 @@ fn failed_region_prefixes_remain_charged_until_close_at_every_admission() {
 #[test]
 fn explicitly_reserved_empty_spans_pay_the_header_and_finish_refunds_nothing() {
     let ctx = Context::new(64);
-    let mut region = Region::new(256);
+    let mut region = Region::open(&ctx);
     let _span = region.allocate(&ctx, 8, 8, charge::region(8)).unwrap();
     let _text = region.allocate(&ctx, 8, 8, charge::region(8)).unwrap();
     assert_eq!(ctx.available(), 48);
@@ -105,7 +106,7 @@ fn region_c_abi_preserves_prefix_and_refunds_lowered_charge() {
     // SAFETY: follows the C allocation ownership and sole-writer trim contract.
     unsafe {
         let ctx = hirsel_core_context_new(128);
-        let region = hirsel_core_region_open(256);
+        let region = hirsel_core_region_open(ctx);
         let allocation = hirsel_core_region_alloc(ctx, region, 64, 16, 64, false);
         allocation.pointer.write(73);
         hirsel_core_region_lower_charge(region, (*region).entry, 64, 8);
@@ -120,7 +121,7 @@ fn region_c_abi_preserves_prefix_and_refunds_lowered_charge() {
 #[test]
 fn shared_payer_entries_trim_each_builder_independently_across_spills_and_slot_pages() {
     let mut ctx = Context::new(8192);
-    let mut region = Region::new(128);
+    let mut region = Region::open(&ctx);
     let mut reservations = Vec::new();
     for depth in 0..80 {
         ctx.limit_enter(8192 - depth * 80).unwrap();
@@ -147,8 +148,8 @@ fn shared_payer_entries_trim_each_builder_independently_across_spills_and_slot_p
 
 #[test]
 fn zero_charge_and_fully_trimmed_regions_outlive_their_payer_tables() {
-    let mut region = Region::new(64);
     let ctx = Context::new(8);
+    let mut region = Region::open(&ctx);
     let zero = region.allocate(&ctx, 1, 8, Some(0)).unwrap();
     let empty_entry = region.entry;
     let charged = region.allocate(&ctx, 8, 8, Some(8)).unwrap();
@@ -172,4 +173,82 @@ fn zero_charge_and_fully_trimmed_regions_outlive_their_payer_tables() {
     region.allocate(&next, 8, 8, Some(8)).unwrap();
     drop(next);
     drop(region);
+}
+
+#[test]
+fn demand_sized_chunks_bound_reserved_bytes_at_each_allocation() {
+    use crate::region::GRANULE;
+
+    let context = Context::new(u64::MAX);
+    let mut region = Region::open(&context);
+    let mut occupied = 0;
+    for (i, bytes) in std::iter::once(73)
+        .chain(std::iter::repeat_n(24, 2_000))
+        .chain((1..64).map(|n| n * 73))
+        .enumerate()
+    {
+        region.allocate(&context, bytes, 1, Some(0)).unwrap();
+        occupied += bytes;
+        if i == 0 {
+            assert_eq!(region.physical_bytes(), GRANULE);
+        }
+        assert!(region.physical_bytes() <= 2 * occupied + GRANULE);
+    }
+    region.close();
+}
+
+#[test]
+fn mixed_region_pools_pack_slots_at_their_own_size_and_alignment() {
+    use crate::region::GRANULE;
+
+    let context = Context::new(4096);
+    let mut region = Region::open(&context);
+    let mut positions = Vec::new();
+    for _ in 0..3 {
+        let small = region.allocate(&context, 24, 8, Some(24)).unwrap();
+        let aligned = region.allocate(&context, 32, 32, Some(16)).unwrap();
+        positions.push((small.as_ptr().addr(), aligned.as_ptr().addr()));
+    }
+    for (i, (small, aligned)) in positions.iter().enumerate() {
+        assert_eq!(*small, positions[0].0 + i * 24);
+        assert_eq!(*aligned % 32, 0);
+    }
+    assert_eq!(positions[2].1, positions[1].1 + 32);
+    let occupied = 3 * (24 + 32);
+    // The 24-byte pool uses the initial granule. The new 32-byte pool
+    // needs one slot, then grows to 64 bytes for its next two slots.
+    let end_slack = GRANULE - 3 * 24;
+    assert_eq!(region.physical_bytes() - occupied, end_slack);
+    assert_eq!(context.available(), 4096 - 3 * (24 + 16));
+    region.close();
+    assert_eq!(context.available(), 4096);
+}
+
+#[test]
+fn closing_and_reopening_a_region_reuses_chunks_without_visiting_values() {
+    use crate::region::{CHUNK_RELEASES, CHUNK_REQUESTS};
+    let context = Context::new(u64::MAX);
+    for length in [1, 1_000_000] {
+        let before = CHUNK_REQUESTS.with(std::cell::Cell::get);
+        let mut requests_after_first = 0;
+        for iteration in 0..2 {
+            let mut region = Region::open(&context);
+            for value in 0..length {
+                let pointer = region.allocate(&context, 8, 8, Some(8)).unwrap();
+                // SAFETY: this aligned slot has at least eight writable bytes.
+                unsafe { pointer.cast::<u64>().write(value) };
+            }
+            let releases = CHUNK_RELEASES.with(std::cell::Cell::get);
+            region.close();
+            assert_eq!(CHUNK_RELEASES.with(std::cell::Cell::get), releases);
+            assert_eq!(context.available(), u64::MAX);
+            let requests = CHUNK_REQUESTS.with(std::cell::Cell::get);
+            if iteration == 0 {
+                assert!(requests > before);
+                requests_after_first = requests;
+            } else {
+                assert_eq!(requests, requests_after_first);
+            }
+        }
+    }
 }

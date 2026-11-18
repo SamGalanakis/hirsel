@@ -36,8 +36,8 @@ struct Phase {
 }
 struct Region {
     pointer: *const crate::region::Region,
-    tails: u64,
-    tail: u64,
+    reserved: u64,
+    slack: u64,
 }
 struct Observation {
     root: Funding,
@@ -65,10 +65,10 @@ impl Observation {
                 // Emitted checkpoints have no Rust region borrow in progress;
                 // a runtime region method supplies its own tail instead of aliasing it.
                 let region = unsafe { &*r.pointer };
-                r.tail = (region.end.addr() - region.cursor.addr()) as u64;
+                r.slack = (region.physical_bytes() - region.occupied) as u64;
             }
         }
-        self.current.slack = self.regions.values().map(|r| r.tails + r.tail).sum();
+        self.current.slack = self.regions.values().map(|r| r.slack).sum();
     }
     fn checkpoint(&mut self, name: &str) {
         self.refresh_regions(None);
@@ -212,21 +212,23 @@ pub(crate) unsafe fn region_open(pointer: *const crate::region::Region) {
                 pointer.addr(),
                 Region {
                     pointer,
-                    tails: 0,
-                    tail: 0,
+                    reserved: 0,
+                    slack: 0,
                 },
             );
             o.sample();
         }
     });
 }
-pub(crate) fn region_refill(pointer: *const crate::region::Region, old_tail: usize, tail: usize) {
+pub(crate) fn region_refill(region: &crate::region::Region, chunk: usize) {
+    let key = std::ptr::from_ref(region).addr();
     ACTIVE.with(|active| {
         for o in active.borrow_mut().iter_mut().rev() {
-            if let Some(r) = o.regions.get_mut(&pointer.addr()) {
-                r.tails += old_tail as u64;
-                r.tail = tail as u64;
-                o.refresh_regions(Some(pointer.addr()));
+            if let Some(r) = o.regions.get_mut(&key) {
+                r.reserved += chunk as u64;
+                r.slack = (region.physical_bytes() - region.occupied) as u64;
+                o.current.retained += chunk as u64;
+                o.refresh_regions(Some(key));
                 o.sample();
                 break;
             }
@@ -236,7 +238,8 @@ pub(crate) fn region_refill(pointer: *const crate::region::Region, old_tail: usi
 pub(crate) fn region_close(pointer: *const crate::region::Region) {
     ACTIVE.with(|active| {
         for o in active.borrow_mut().iter_mut().rev() {
-            if o.regions.remove(&pointer.addr()).is_some() {
+            if let Some(r) = o.regions.remove(&pointer.addr()) {
+                o.current.retained -= r.reserved;
                 o.refresh_regions(None);
                 o.sample();
                 break;
@@ -489,11 +492,13 @@ mod tests {
         assert_eq!(LAST.get(), 248);
     }
     #[test]
-    fn region_slack_is_chunk_tails_and_close_releases_all_backing() {
+    fn region_slack_is_chunk_tails_and_only_live_backing_is_reported() {
         let context = Context::new(1000);
         let run = Run::start(&context);
-        let region = crate::abi::hirsel_core_region_open(128);
+        // SAFETY: this context remains live and task-local through open.
+        let region = unsafe { crate::abi::hirsel_core_region_open(&context) };
         let metadata = size_of::<crate::region::Region>() as u64;
+        let granule = crate::region::GRANULE as u64;
         // SAFETY: the opaque pinned ABI region is live until close. All queried
         // checkpoints occur after its exclusive allocation call has returned.
         unsafe {
@@ -506,8 +511,8 @@ mod tests {
                 figures(),
                 Figures {
                     charged: 8,
-                    retained: metadata + 128,
-                    slack: 120
+                    retained: metadata + granule,
+                    slack: granule - 8
                 }
             );
             let entry = (*region).entry;
@@ -516,8 +521,8 @@ mod tests {
                 figures(),
                 Figures {
                     charged: 0,
-                    retained: metadata + 128,
-                    slack: 120
+                    retained: metadata + granule,
+                    slack: granule - 8
                 }
             );
             assert!(
@@ -525,7 +530,7 @@ mod tests {
                     .pointer
                     .is_null()
             );
-            assert_eq!(figures().slack, 96);
+            assert_eq!(figures().slack, granule - 8);
             assert!(
                 !crate::abi::hirsel_core_region_alloc(&context, region, 200, 8, 200, false)
                     .pointer
@@ -535,8 +540,8 @@ mod tests {
                 figures(),
                 Figures {
                     charged: 224,
-                    retained: metadata + 328,
-                    slack: 96
+                    retained: metadata + granule + 24 + 200,
+                    slack: granule - 8
                 }
             );
             crate::abi::hirsel_core_region_close(region);
@@ -702,7 +707,8 @@ mod tests {
     fn nested_checkpoint_can_close_a_preexisting_pinned_region() {
         let context = Context::new(1000);
         let outer = Run::start(&context);
-        let region = crate::abi::hirsel_core_region_open(128);
+        // SAFETY: this context remains live and task-local through open.
+        let region = unsafe { crate::abi::hirsel_core_region_open(&context) };
         // SAFETY: this native handle remains pinned through its unique close.
         unsafe {
             crate::abi::hirsel_core_region_alloc(&context, region, 8, 8, 8, false);

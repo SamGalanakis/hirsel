@@ -58,7 +58,7 @@ int main(void) {
     assert(hirsel_core_try_unwrap(counted.pointer, false));
     if (--*count == 0) hirsel_core_free(counted.pointer, 16);
 
-    HirselCoreRegion *region = hirsel_core_region_open(128);
+    HirselCoreRegion *region = hirsel_core_region_open(context);
     HirselCoreAllocation stable = hirsel_core_region_alloc(context, region, 64, 16, 64, false);
     assert(stable.pointer);
     assert(*(uint64_t *)((unsigned char *)region + HIRSEL_CORE_REGION_CHARGE) == 64);

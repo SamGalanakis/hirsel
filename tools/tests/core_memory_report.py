@@ -35,7 +35,7 @@ class MemoryReport(unittest.TestCase):
             self.assertEqual(trimmed['charged_bytes'], 288)
             self.assertEqual(allocated['retained_bytes'], trimmed['retained_bytes'])
             self.assertGreater(allocated['retained_bytes'], closed['retained_bytes'] + 128)
-            self.assertEqual([allocated['slack_bytes'], trimmed['slack_bytes'], closed['slack_bytes']], [120, 120, 0])
+            self.assertEqual([allocated['slack_bytes'], trimmed['slack_bytes'], closed['slack_bytes']], [4088, 4088, 0])
             self.assertEqual(closed['peak_charged_bytes'], 288)
             self.assertEqual(phases['run_end']['retained_bytes'], 0)
             for phase in report['phases']:

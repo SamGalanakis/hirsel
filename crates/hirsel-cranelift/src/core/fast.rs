@@ -217,28 +217,34 @@ impl Function<'_, '_, '_> {
         self.debit(payer, charge, available)?;
         let held = self.b.ins().iadd(held, charge);
         self.store_word(region, memory_layout::REGION_CHARGE, held);
+        let stored_size = self.load_word(region, memory_layout::REGION_SIZE);
+        let stored_alignment = self.load_word(region, memory_layout::REGION_ALIGNMENT);
+        let same_size = self.b.ins().icmp(IntCC::Equal, stored_size, size);
+        let same_align = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, stored_alignment, align as i64);
+        let same_pool = self.b.ins().band(same_size, same_align);
         let cursor = self.load_word(region, memory_layout::REGION_CURSOR);
         let limit = self.load_word(region, memory_layout::REGION_END);
-        let mask = self.b.ins().iconst(types::I64, (align - 1) as i64);
-        let (rounded, overflow) = self.b.ins().uadd_overflow(cursor, mask);
-        let start = self.b.ins().band_imm_s(rounded, -(align as i64));
-        let one = self.b.ins().iconst(types::I64, 1);
-        let bytes = self.b.ins().umax(size, one);
-        let (end, end_overflow) = self.b.ins().uadd_overflow(start, bytes);
-        let over = self.b.ins().bor(overflow, end_overflow);
+        let stride = self.load_word(region, memory_layout::REGION_STRIDE);
+        let remaining = self.b.ins().isub(limit, cursor);
         let room = self
             .b
             .ins()
-            .icmp(IntCC::UnsignedLessThanOrEqual, end, limit);
-        let valid = self.b.ins().icmp_imm_s(IntCC::Equal, over, 0);
-        let room = self.b.ins().band(room, valid);
+            .icmp(IntCC::UnsignedLessThanOrEqual, stride, remaining);
+        let room = self.b.ins().band(room, same_pool);
         let bump = self.b.create_block();
         let refill = self.cold_block();
         self.b.ins().brif(room, bump, &[], refill, &[]);
         self.b.switch_to_block(bump);
+        let end = self.b.ins().iadd(cursor, stride);
         self.store_word(region, memory_layout::REGION_CURSOR, end);
+        let occupied = self.load_word(region, memory_layout::REGION_OCCUPIED);
+        let occupied = self.b.ins().iadd(occupied, stride);
+        self.store_word(region, memory_layout::REGION_OCCUPIED, occupied);
         let zero = self.b.ins().iconst(types::I64, 0);
-        self.b.ins().jump(done, &[start.into(), zero.into()]);
+        self.b.ins().jump(done, &[cursor.into(), zero.into()]);
         self.b.switch_to_block(refill);
         let zero = self.b.ins().iconst(types::I64, 0);
         let alignment = self.b.ins().iconst(types::I64, align as i64);

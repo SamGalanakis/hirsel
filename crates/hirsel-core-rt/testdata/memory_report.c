@@ -9,7 +9,7 @@ static void checkpoint(const char *s) {
 static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
                      HirselCoreMainResult *result) {
     (void)cfg;
-    void *region = hirsel_core_region_open(128);
+    void *region = hirsel_core_region_open(ctx);
     HirselCoreAllocation value = hirsel_core_region_alloc(ctx, region, 8, 8, 8, false);
     assert(value.pointer);
     checkpoint("allocated\n\"λ\"");

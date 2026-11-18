@@ -630,7 +630,7 @@ impl FunctionEmitter<'_> {
                 }
             }
             Inst::RegionOpen { result } => {
-                let p = self.intrinsic("hirsel_core_region_open", Type::Ptr, &[word(int(65536))]);
+                let p = self.intrinsic("hirsel_core_region_open", Type::Ptr, &[ptr(CONTEXT)]);
                 self.put(result, &p);
             }
             Inst::RegionClose { region } => {

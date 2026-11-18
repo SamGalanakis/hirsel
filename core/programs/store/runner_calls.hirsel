@@ -128,7 +128,8 @@ fn flood(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
 fn hung(mut tx: store.Tx, h: Hd, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
     let made: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1u64)
-    let (to, _) = result.unwrap(take made)
+    // Keep the receiver alive so the hung body's sends can poll a full channel.
+    let (to, inbox) = result.unwrap(take made)
     loop { let _ = channel.try_send(to, 0u64) }
 }
 fn answer(take k: u64) -> Result[u64, Capacity] {

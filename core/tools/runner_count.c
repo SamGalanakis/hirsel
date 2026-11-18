@@ -94,9 +94,9 @@ uint8_t __wrap_hirsel_core_try_send(HirselCoreChannel *channel, void *input) {
 }
 static uint64_t try_sends;
 #ifdef HUNG_BODY_SENDS
-static struct { uint64_t object, task, count; int before_slice; } senders[4];
+static struct { uint64_t object, task, count, first; int marker, retirement; } senders[4];
 static size_t sender_count;
-static uint64_t slice_task, slices;
+static uint64_t slice_task, slices, slice_at;
 static int too_many_senders;
 #endif
 static void event(void *state, HirselCoreEvent e) {
@@ -144,13 +144,19 @@ static void event(void *state, HirselCoreEvent e) {
             sender_count++;
             senders[i].object = e.object;
             senders[i].task = e.task;
-            senders[i].before_slice = slices == 0;
+            senders[i].first = try_sends;
+            senders[i].marker = marker_send;
+            senders[i].retirement = retirement_send && e.task == retiring_task;
         }
         senders[i].count++;
 #endif
     }
 #ifdef HUNG_BODY_SENDS
-    if (e.kind == HIRSEL_CORE_EVENT_STEP_SLICE) { slice_task = e.task; slices++; }
+    if (e.kind == HIRSEL_CORE_EVENT_STEP_SLICE) {
+        slice_task = e.task;
+        slice_at = try_sends;
+        slices++;
+    }
 #endif
 }
 #ifdef HUNG_BODY_SENDS
@@ -198,17 +204,21 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         for (size_t k = 0; k < sender_count; k++) fprintf(stderr, "runner_count: object %llu task %llu sends %llu\n", (unsigned long long)senders[k].object, (unsigned long long)senders[k].task, (unsigned long long)senders[k].count);
         return 105;
     }
+    /* RUNNER-SPEC §8, L6+L7 orders the compute before the hung call's stop.
+     * MEM-30 permits the compute to run at the slice end. */
     size_t body = 4, marker = 4, told = 4, retirement = 4;
     for (size_t k = 0; k < 4; k++) {
         if (senders[k].count == HUNG_BODY_SENDS) body = k;
-        else if (senders[k].count == 1 && senders[k].before_slice) marker = k;
-        else if (senders[k].count == 1) retirement = k;
-        else if (senders[k].count == HUNG_TOLDS) told = k;
+        else if (senders[k].count == 1 && senders[k].marker) marker = k;
+        else if (senders[k].count == 1 && senders[k].retirement) retirement = k;
+        else if (senders[k].count == HUNG_TOLDS && senders[k].task == publisher_task) told = k;
     }
     if (body == 4 || marker == 4 || told == 4 || retirement == 4 ||
         senders[body].task != slice_task || senders[marker].task == slice_task ||
-        senders[told].task == slice_task || !senders[marker].before_slice) {
-        fprintf(stderr, "runner_count: body=%zu marker=%zu told=%zu slice_task=%llu marker_before_slice=%d\n", body, marker, told, (unsigned long long)slice_task, marker < 4 ? senders[marker].before_slice : -1);
+        senders[marker].first >= senders[told].first ||
+        slice_at >= senders[told].first || senders[told].first >= senders[retirement].first) {
+        fprintf(stderr, "runner_count: body=%zu marker=%zu told=%zu retirement=%zu slice_task=%llu\n",
+                body, marker, told, retirement, (unsigned long long)slice_task);
         return 105;
     }
 #endif

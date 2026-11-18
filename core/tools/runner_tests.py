@@ -64,9 +64,10 @@ CALLS = ('release_digest', 'ready_after_activation', 'drain_answers_once', 'drai
 # wake to the head, so the total is 1 + 4 + 1. The evaluator's count comes from
 # its event log; natively, core/tools/runner_count.c is linked into the case's test
 # executable as its event sink and fails the run on any other count.
-# L7 adds32664 sends by the hung body and one marker by the other session's
-# compute body; the marker precedes the head's exhaustion slice (kind21). The head's three
-# answers to s0 go to one inbox. Its head retirement wake follows the slice.
+# L7 adds 32664 sends by the hung body and one marker by the other session's
+# compute body. RUNNER-SPEC.md §8, L6+L7 orders the compute before the hung
+# call's stop, observed at its first publisher offer. MEM-30 makes the slice
+# a scheduling point. The three answers to s0 go to one inbox.
 COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, 32669)}
 PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}
 HUNG_TOLDS = 3
@@ -103,24 +104,28 @@ def counted(name, report):
             retirement.add(e[1])
         wakes_head = site == 'store@1/runner/try_head' and e[1] in retirement
         if e[0] != kind or site in observed or wakes_head:
-            attributed.append(e)
-    events = attributed
-    if sum(1 for e in events if e[0] == kind) != want:
+            attributed.append((e, site))
+    if sum(1 for e, _ in attributed if e[0] == kind) != want:
         return False
     if name == 'calls_deadline_hung':
         sends = {}
-        for at, e in enumerate(events):
-            if e[0] == 7:
-                sends.setdefault(e[2], []).append((at, e[1]))
+        for at, (e, site) in enumerate(attributed):
+            if e[0] == kind:
+                sends.setdefault(e[2], []).append((at, e[1], site))
         if sorted(map(len, sends.values())) != [1, 1, HUNG_TOLDS, 32664]:
             return False
         told = next(v for v in sends.values() if len(v) == HUNG_TOLDS)
-        marker, retirement = sorted(v[0] for v in sends.values() if len(v) == 1)
+        marker = next((v[0] for v in sends.values() if len(v) == 1
+                       and v[0][2] == 'store@1/runner_calls/answer'), None)
+        retirement = next((v[0] for v in sends.values() if len(v) == 1
+                           and v[0][2] == 'store@1/runner/try_head'), None)
         body = next(v for v in sends.values() if len(v) == 32664)
-        slices = [(at, e[1]) for at, e in enumerate(events) if e[0] == 21]
-        return (len(slices) == 1 and marker[0] < slices[0][0] < retirement[0]
+        slices = [(at, e[1]) for at, (e, _) in enumerate(attributed) if e[0] == 21]
+        return (marker is not None and retirement is not None and len(slices) == 1
+                and marker[0] < told[0][0]
+                and slices[0][0] < told[0][0] < retirement[0]
                 and marker[1] != slices[0][1] == body[0][1]
-                and all(t != slices[0][1] for _, t in told))
+                and all(t != slices[0][1] and site == 'store@1/runner/offer' for _, t, site in told))
     return True
 
 

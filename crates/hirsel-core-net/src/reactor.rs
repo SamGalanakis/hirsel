@@ -1,5 +1,5 @@
-//! Combined directional registration, adapted from Go runtime/netpoll_epoll.go.
-//! Slot generations replace pointer tokens; dispatch and release share one worker.
+//! Persistent edge-triggered interests, adapted from Go runtime/netpoll_epoll.go.
+//! Slot generations identify sockets across poll and dispatch.
 use std::{
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
@@ -122,12 +122,6 @@ impl Poller {
         }
     }
 }
-#[derive(Clone, Copy)]
-struct Wait {
-    token: u64,
-    generation: u32,
-}
-
 fn tag(index: usize, generation: u32) -> u64 {
     index as u64 | (u64::from(generation) << 32)
 }
@@ -137,14 +131,13 @@ struct Record {
     owners: u8,
     reset: bool,
     ended: bool,
-    waiters: [Option<Wait>; 2],
+    waiters: [Option<u64>; 2],
     registered: bool,
+    read_drained: bool,
+    read_terminal: bool,
 }
 struct Slot {
     generation: u32,
-    // Registration generation is independent of the socket carrier's lifetime.
-    // It lasts across slot reuse, and a new arm publishes a fresh epoll tag.
-    armed_generation: u32,
     record: Option<Record>,
 }
 /// O(1) host storage per live descriptor. No table is sized from the fd limit.
@@ -154,6 +147,7 @@ pub struct Sockets {
     free: Vec<u32>,
     poller: Option<Arc<Poller>>,
     live: usize,
+    waiting: usize,
     model: Option<crate::model::Model>,
     model_keys: std::collections::BTreeSet<u64>,
 }
@@ -167,6 +161,7 @@ impl Sockets {
             free: Vec::new(),
             poller: None,
             live: 0,
+            waiting: 0,
             model: Some(model),
             model_keys: Default::default(),
         }
@@ -190,7 +185,6 @@ impl Sockets {
             let index = u32::try_from(self.slots.len()).ok()?;
             self.slots.push(Slot {
                 generation: 1,
-                armed_generation: 0,
                 record: None,
             });
             index
@@ -203,6 +197,8 @@ impl Sockets {
             ended: false,
             waiters: [None; 2],
             registered: false,
+            read_drained: false,
+            read_terminal: false,
         });
         self.live += 1;
         Some((u64::from(slot.generation) << 34) | (u64::from(index) << 2))
@@ -226,13 +222,17 @@ impl Sockets {
         self.record(key).reset
     }
     pub fn mark_reset(&mut self, key: u64) {
-        self.record_mut(key).reset = true;
+        let r = self.record_mut(key);
+        r.reset = true;
+        r.read_drained = false;
     }
     pub fn ended(&self, key: u64) -> bool {
         self.record(key).ended
     }
     pub fn mark_ended(&mut self, key: u64) {
-        self.record_mut(key).ended = true;
+        let r = self.record_mut(key);
+        r.ended = true;
+        r.read_drained = false;
     }
     pub fn split(&mut self, key: u64) -> (u64, u64) {
         if crate::model::Model::owns(key) {
@@ -241,123 +241,99 @@ impl Sockets {
         self.record_mut(key).owners = 6;
         (key | 1, key | 2)
     }
-    fn update(
-        &mut self,
-        index: usize,
-        generation: u32,
-        waiters: [Option<Wait>; 2],
-    ) -> io::Result<()> {
+    pub fn read_drained(&self, key: u64) -> bool {
+        self.record(key).read_drained
+    }
+    pub fn mark_read_drained(&mut self, key: u64) {
+        let r = self.record_mut(key);
+        if r.registered && !r.read_terminal && !r.reset {
+            r.read_drained = true;
+        }
+    }
+    /// Register a socket once and publish this direction's current waiter.
+    pub fn arm(&mut self, key: u64, write: bool, token: u64) -> io::Result<u64> {
+        let index = ((key >> 2) as u32) as usize;
+        if !self.slots[index].record.as_ref().unwrap().registered {
+            self.poller()?;
+            let slot = &mut self.slots[index];
+            let r = slot.record.as_mut().unwrap();
+            self.poller.as_ref().unwrap().ctl(
+                libc::EPOLL_CTL_ADD,
+                r.fd.as_raw_fd(),
+                (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET) as u32,
+                tag(index, slot.generation),
+            )?;
+            r.registered = true;
+        }
         let slot = &mut self.slots[index];
         let r = slot.record.as_mut().unwrap();
-        let mut flags = 0;
-        if waiters[0].is_some() {
-            flags |= libc::EPOLLIN | libc::EPOLLRDHUP;
+        if r.waiters[usize::from(write)].replace(token).is_none() {
+            self.waiting += 1;
         }
-        if waiters[1].is_some() {
-            flags |= libc::EPOLLOUT;
+        Ok(tag(index, slot.generation))
+    }
+    pub fn disarm(&mut self, key: u64, write: bool) {
+        if self.record_mut(key).waiters[usize::from(write)]
+            .take()
+            .is_some()
+        {
+            self.waiting -= 1;
         }
-        if flags == 0 {
-            if r.registered {
-                self.poller
-                    .as_ref()
-                    .unwrap()
-                    .ctl(libc::EPOLL_CTL_DEL, r.fd.as_raw_fd(), 0, 0)?;
-            }
-        } else {
-            self.poller.as_ref().unwrap().ctl(
-                if r.registered {
-                    libc::EPOLL_CTL_MOD
-                } else {
-                    libc::EPOLL_CTL_ADD
-                },
-                r.fd.as_raw_fd(),
-                flags as u32,
-                tag(index, generation),
-            )?;
-        }
-        r.registered = flags != 0;
-        r.waiters = waiters;
-        slot.armed_generation = generation;
-        Ok(())
     }
-    /// Returns the identity attached to the new epoll registration.
-    pub fn arm(&mut self, key: u64, write: bool, token: u64) -> io::Result<u64> {
-        self.poller()?;
-        let index = ((key >> 2) as u32) as usize;
-        let slot = &self.slots[index];
-        // Only the driver's current epoll_wait batch can retain an old tag.
-        // It cannot span a generation wrap. Reserve u64::MAX for eventfd.
-        let generation = slot.armed_generation.wrapping_add(1) % u32::MAX;
-        let wait = Wait { token, generation };
-        let mut waiters = slot.record.as_ref().unwrap().waiters;
-        waiters[usize::from(write)] = Some(wait);
-        self.update(index, wait.generation, waiters)?;
-        Ok(tag(index, wait.generation))
-    }
-    pub fn disarm(&mut self, key: u64, write: bool) -> io::Result<()> {
-        let index = ((key >> 2) as u32) as usize;
-        let slot = &self.slots[index];
-        let mut waiters = slot.record.as_ref().unwrap().waiters;
-        waiters[usize::from(write)] = None;
-        self.update(index, slot.armed_generation, waiters)
-    }
-    /// Dispatch a host event only for the current registration.
-    pub fn dispatch(
-        &mut self,
-        identity: u64,
-        flags: u32,
-        mut ready: impl FnMut(u64),
-    ) -> io::Result<()> {
+    /// An edge names a live socket. A direction's waiter still retries its
+    /// syscall before committing a result, including after stale readiness.
+    pub fn dispatch(&mut self, identity: u64, flags: u32, mut ready: impl FnMut(u64)) {
         let index = identity as u32 as usize;
         let Some(slot) = self.slots.get_mut(index) else {
-            return Ok(());
+            return;
         };
-        let generation = (identity >> 32) as u32;
-        if slot.armed_generation != generation {
-            return Ok(());
+        if slot.generation != (identity >> 32) as u32 {
+            return;
         }
-        let Some(r) = slot.record.as_ref() else {
-            return Ok(());
+        let Some(r) = slot.record.as_mut() else {
+            return;
         };
-        let mut waiters = r.waiters;
         let failed = flags & (libc::EPOLLERR | libc::EPOLLHUP) as u32 != 0;
-        for (direction, mask) in [libc::EPOLLIN | libc::EPOLLRDHUP, libc::EPOLLOUT]
-            .into_iter()
-            .enumerate()
-        {
-            if (failed || flags & mask as u32 != 0)
-                && let Some(wait) = waiters[direction].take()
-            {
-                ready(wait.token);
+        let terminal = failed || flags & libc::EPOLLRDHUP as u32 != 0;
+        if terminal || flags & libc::EPOLLIN as u32 != 0 {
+            r.read_drained = false;
+            r.read_terminal |= terminal;
+            if let Some(token) = r.waiters[0].take() {
+                self.waiting -= 1;
+                ready(token);
             }
         }
-        self.update(index, generation, waiters)
+        if (failed || flags & libc::EPOLLOUT as u32 != 0)
+            && let Some(token) = r.waiters[1].take()
+        {
+            self.waiting -= 1;
+            ready(token);
+        }
     }
     /// Poll only returned registrations. The token covers the kernel poll,
     /// while the caller has exclusive access to the socket registry.
     pub fn poll(&mut self, timeout_ms: i32, ready: impl FnMut(u64)) -> io::Result<usize> {
+        if timeout_ms == 0 && self.waiting == 0 {
+            return Ok(0);
+        }
         let Some(poller) = self.poller.as_ref() else {
             return Ok(0);
         };
         let Some(events) = poller.poll(timeout_ms)? else {
             return Ok(0);
         };
-        self.dispatch_polled(events, ready)
+        Ok(self.dispatch_polled(events, ready))
     }
 
-    /// Apply a poll from this registry's driver. A re-arm between collection
-    /// and dispatch invalidates the old kernel identity.
-    pub fn dispatch_polled(
-        &mut self,
-        events: PollEvents,
-        mut ready: impl FnMut(u64),
-    ) -> io::Result<usize> {
+    /// Apply a poll from this registry's driver. Closing or reusing a slot
+    /// invalidates any edge still in a worker's poll batch.
+    pub fn dispatch_polled(&mut self, events: PollEvents, mut ready: impl FnMut(u64)) -> usize {
         for event in &events.events[..events.len] {
             if event.u64 != u64::MAX {
-                self.dispatch(event.u64, event.events, &mut ready)?;
+                self.dispatch(event.u64, event.events, &mut ready);
             }
         }
-        Ok(events.len)
+        events.len
     }
 
     pub fn release(&mut self, key: u64) {
@@ -380,6 +356,8 @@ impl Sockets {
         r.owners &= !(1 << direction);
         if r.owners == 0 {
             let fd = r.fd.as_raw_fd();
+            let waiting = r.waiters.iter().flatten().count();
+            self.waiting -= waiting;
             let index = ((key >> 2) as u32) as usize;
             let slot = &mut self.slots[index];
             if slot.record.as_ref().unwrap().registered {
@@ -454,9 +432,7 @@ mod tests {
         assert!(busy);
         let events = driver.poll(0).unwrap().unwrap();
         let mut tokens = Vec::new();
-        sockets
-            .dispatch_polled(events, |token| tokens.push(token))
-            .unwrap();
+        sockets.dispatch_polled(events, |token| tokens.push(token));
         assert_eq!(tokens, [17]);
     }
 }

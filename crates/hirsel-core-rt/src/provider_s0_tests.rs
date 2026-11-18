@@ -1150,8 +1150,8 @@ fn s0_children_keep_distinct_host_file_slots() {
     assert_ne!(rec.result(41).0.value, rec.result(42).0.value);
 }
 
-/// The read bit on a shared descriptor wakes only the read direction.
-/// Replacing an arm invalidates its old epoll tag even on the same slot.
+/// An edge wakes only its direction. A batch collected before closing a
+/// socket cannot wake a waiter on the replacement in the same slot.
 #[test]
 fn s0_net_rearm_ignores_stale_directional_readiness() {
     use std::os::unix::net::UnixStream;
@@ -1162,22 +1162,19 @@ fn s0_net_rearm_ignores_stale_directional_readiness() {
     sockets.arm(key, false, 101).unwrap();
     let first = sockets.arm(key, true, 201).unwrap();
     let mut ready = Vec::new();
-    sockets
-        .dispatch(first, libc::EPOLLIN as u32, |t| ready.push(t))
-        .unwrap();
+    sockets.dispatch(first, libc::EPOLLIN as u32, |t| ready.push(t));
     assert_eq!(ready, [101]);
+    sockets.dispatch(first, libc::EPOLLOUT as u32, |t| ready.push(t));
+    assert_eq!(ready, [101, 201]);
 
-    let second = sockets.arm(key, false, 102).unwrap();
-    sockets
-        .dispatch(first, libc::EPOLLIN as u32, |t| ready.push(t))
-        .unwrap();
-    assert_eq!(ready, [101], "the old bit must not wake the rearmed reader");
-    sockets
-        .dispatch(second, libc::EPOLLOUT as u32, |t| ready.push(t))
-        .unwrap();
-    sockets
-        .dispatch(second, libc::EPOLLIN as u32, |t| ready.push(t))
-        .unwrap();
+    sockets.release(key);
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let replacement = sockets.insert(socket.into()).unwrap();
+    let second = sockets.arm(replacement, false, 102).unwrap();
+    assert_eq!(first as u32, second as u32, "the registry reuses the slot");
+    sockets.dispatch(first, libc::EPOLLIN as u32, |t| ready.push(t));
+    assert_eq!(ready, [101, 201], "the old edge must not wake a new reader");
+    sockets.dispatch(second, libc::EPOLLIN as u32, |t| ready.push(t));
     assert_eq!(ready, [101, 201, 102]);
 }
 

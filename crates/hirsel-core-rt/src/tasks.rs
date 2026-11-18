@@ -1264,7 +1264,7 @@ impl Scheduler {
     /// already woken the operation, and a later request applies at the task's
     /// next cancellation point (CONC-7). Readiness before timers is the network
     /// rule that readiness wins a tie with a deadline (net-proposal-999 D3).
-    unsafe fn capture_wakes(&mut self, captured: &mut Vec<ReadyArm>) {
+    unsafe fn capture_wakes(&mut self, captured: &mut Vec<ReadyArm>, net_timeout: i32) {
         // SAFETY: idle owns every task and operation frame.
         if !self.tapes.live.is_empty() {
             // SAFETY: idle owns tasks; retirement removes queued requests.
@@ -1283,7 +1283,7 @@ impl Scheduler {
                 self.tape_inputs();
             }
         }
-        self.poll_net(0);
+        self.poll_net(net_timeout);
         // SAFETY: no task is running; every parked operation's frame is pinned.
         unsafe {
             if !self.cancels.is_empty() {
@@ -1342,11 +1342,11 @@ impl Scheduler {
         }
     }
 
-    unsafe fn take_wakes(&mut self) {
+    unsafe fn take_wakes(&mut self, net_timeout: i32) {
         // SAFETY: the cooperative scheduler owns this whole dispatch turn.
         unsafe {
             let mut captured = std::mem::take(&mut self.ready_arms);
-            self.capture_wakes(&mut captured);
+            self.capture_wakes(&mut captured, net_timeout);
             for ready in captured.drain(..) {
                 #[cfg(any(test, feature = "testing"))]
                 if let Some(script) = &self.script {
@@ -1477,9 +1477,20 @@ impl Scheduler {
             return;
         }
         if !self.net.is_null() {
+            let readies = &self.readies;
+            let notify = self.pool.is_some();
             // SAFETY: the run pins its shared registry; no task runs during polling.
-            unsafe { (*self.net).poll(timeout, |token| self.readies.push(token)) }
-                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+            unsafe {
+                (*self.net).poll(timeout, |token| {
+                    if notify {
+                        readies.push(token);
+                    } else {
+                        // The only dispatcher is already awake.
+                        readies.enqueue(token);
+                    }
+                })
+            }
+            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
         }
     }
 
@@ -1753,9 +1764,12 @@ impl Readies {
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<u64>> {
         self.tokens.lock().unwrap_or_else(|e| e.into_inner())
     }
-    fn push(&self, token: u64) {
+    fn enqueue(&self, token: u64) {
         self.lock().push(token);
         self.pending.store(true, Ordering::Release);
+    }
+    fn push(&self, token: u64) {
+        self.enqueue(token);
         self.worker.unpark();
         for peer in self.peers.lock().unwrap().iter() {
             peer.unpark();
@@ -3336,12 +3350,31 @@ impl RunPtr {
                             pool.units.fetch_sub(1, Ordering::AcqRel);
                         }
                     }
-                    (*run).take_wakes();
-                    let task = (*run).pop();
+                    // An idle native run can collect readiness in its wait.
+                    // Ready tokens are still applied before any expired timer.
+                    let run = &mut *run;
+                    let wait_for_net = pool.is_none()
+                        && !run.net.is_null()
+                        && run.model.is_none()
+                        && run.head.is_null()
+                        && run.deferred.is_null()
+                        && run.tapes.live.is_empty()
+                        && run.cancels.is_empty()
+                        && !run.readies.pending.load(Ordering::Acquire)
+                        && run.has_outside_wait();
+                    let timeout = if wait_for_net {
+                        poll_timeout(run.timers.as_ref().and_then(|task| task.timer_deadline))
+                    } else {
+                        0
+                    };
+                    run.take_wakes(timeout);
+                    let task = run.pop();
                     if task.is_null() {
-                        let flow_pending =
-                            pool.is_some_and(|pool| pool.units.load(Ordering::Acquire) != 0);
-                        (*run).idle(flow_pending);
+                        if !wait_for_net {
+                            let flow_pending =
+                                pool.is_some_and(|pool| pool.units.load(Ordering::Acquire) != 0);
+                            run.idle(flow_pending);
+                        }
                         continue;
                     }
                     task
@@ -3398,7 +3431,7 @@ impl RunPtr {
                 let task = if let Some(woken) = flow_wake {
                     woken.0
                 } else if direct.is_null() {
-                    (*run).capture_wakes(&mut captured);
+                    (*run).capture_wakes(&mut captured, 0);
                     for ready in captured.drain(..) {
                         #[cfg(any(test, feature = "testing"))]
                         if let Some(script) = &pool.script {
@@ -3542,8 +3575,7 @@ impl RunPtr {
             unsafe {
                 let run = &mut *self.0;
                 if let Some(net) = run.net.as_mut() {
-                    net.dispatch_polled(events, |token| run.readies.push(token))
-                        .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                    net.dispatch_polled(events, |token| run.readies.push(token));
                 }
             }
         } else if let Some(deadline) = deadline {
@@ -4169,7 +4201,7 @@ mod ready_routing_laws {
             ROUTE_WAKES.set(0);
             // SAFETY: task/operation frames and callback storage are pinned; no fiber runs.
             unsafe {
-                run.take_wakes();
+                run.take_wakes(0);
             }
             let work = ROUTE_WORK.get();
             println!(
@@ -4210,7 +4242,7 @@ mod ready_routing_laws {
                     run.readies.push(token);
                 }
                 unsafe {
-                    run.take_wakes();
+                    run.take_wakes(0);
                 }
                 assert_eq!(ROUTE_WAKES.get(), 3, "dedup_dropped");
                 assert_eq!(counters[0], 3);
@@ -4236,17 +4268,15 @@ mod ready_routing_laws {
                 tasks[0].state = State::Provider;
                 run.parked.insert(4, &mut *tasks[0]);
                 sockets.arm(replacement, false, 4).unwrap();
-                sockets
-                    .dispatch(stale, libc::EPOLLIN as u32, |token| run.readies.push(token))
-                    .unwrap();
+                sockets.dispatch(stale, libc::EPOLLIN as u32, |token| run.readies.push(token));
                 unsafe {
-                    run.take_wakes();
+                    run.take_wakes(0);
                 }
                 assert_eq!(ROUTE_WAKES.get(), 3, "route_ignores_generation");
                 assert_eq!(run.parked.live.len(), 1);
                 peer.write_all(b"new").unwrap();
                 unsafe {
-                    run.take_wakes();
+                    run.take_wakes(0);
                 }
                 assert_eq!(ROUTE_WAKES.get(), 4);
                 assert_eq!(counters[0], 4);
@@ -4258,7 +4288,7 @@ mod ready_routing_laws {
                     run.readies.push(token);
                 }
                 unsafe {
-                    run.take_wakes();
+                    run.take_wakes(0);
                 }
                 println!(
                     "ready_dedup tokens={} route_key_operations={}",

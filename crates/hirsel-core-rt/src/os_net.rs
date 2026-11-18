@@ -175,9 +175,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
         let sockets = &mut *n.sockets;
         let key = n.connecting.unwrap_or(request.handle);
         if !first && request.operation != LISTEN {
-            if let Err(e) = sockets.disarm(key, write) {
-                return Some(error(e.raw_os_error().unwrap_or(libc::EIO)));
-            }
+            sockets.disarm(key, write);
         }
         let result = match request.operation {
             LISTEN => {
@@ -277,14 +275,21 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
             ACCEPT => {
                 let mut peer = zeroed();
                 let mut len = size_of::<libc::sockaddr_storage>() as u32;
-                match retry(|| {
-                    libc::accept4(
-                        sockets.fd(key),
-                        (&mut peer as *mut libc::sockaddr_storage).cast(),
-                        &mut len,
-                        libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                    ) as isize
-                }) {
+                let accepted = loop {
+                    let result = retry(|| {
+                        libc::accept4(
+                            sockets.fd(key),
+                            (&mut peer as *mut libc::sockaddr_storage).cast(),
+                            &mut len,
+                            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                        ) as isize
+                    });
+                    // An aborted peer does not prove the accept queue is drained.
+                    if result != Err(libc::ECONNABORTED) {
+                        break result;
+                    }
+                };
+                match accepted {
                     Ok(fd) => {
                         let owned = OwnedFd::from_raw_fd(fd as i32);
                         n.address = decoded(&mut peer);
@@ -298,7 +303,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                             Err(e) => Err(e),
                         }
                     }
-                    Err(libc::EAGAIN | libc::ECONNABORTED) => return None,
+                    Err(libc::EAGAIN) => return None,
                     Err(e) => Err(e),
                 }
             }
@@ -333,6 +338,9 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                             b.len += count as usize;
                             if count == 0 {
                                 sockets.mark_ended(key);
+                            } else if b.len < b.capacity {
+                                // Linux stream short reads drain the readable prefix.
+                                sockets.mark_read_drained(key);
                             }
                         }
                         Ok(Outcome {
@@ -340,7 +348,12 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                             ..Outcome::default()
                         })
                     }
-                    Err(libc::EAGAIN) if !receiving || !sockets.reset(key) => return None,
+                    Err(libc::EAGAIN) if !receiving || !sockets.reset(key) => {
+                        if receiving {
+                            sockets.mark_read_drained(key);
+                        }
+                        return None;
+                    }
                     Err(e)
                         if matches!(e, libc::ECONNRESET | libc::EPIPE | libc::ETIMEDOUT)
                             || (e == libc::ENOTCONN && sockets.reset(key))
@@ -399,31 +412,36 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
     unsafe {
         let request = &mut *request;
         let n = &mut *request.path.cast_mut().cast::<NetworkRequest>();
-        if let Some(outcome) = attempt(request, n, first) {
-            return finish(request, n, outcome);
-        }
+        let drained = first
+            && request.operation == RECV
+            && request.buffer.len < request.buffer.capacity
+            && (*n.sockets).read_drained(request.handle);
+        let deadline = if drained {
+            let deadline = pending_deadline(n);
+            // Even a drained reader gets one try at an already-expired deadline.
+            if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+                let outcome = attempt(request, n, first).unwrap_or_else(|| signal(6));
+                return finish(request, n, outcome);
+            }
+            deadline
+        } else {
+            if let Some(outcome) = attempt(request, n, first) {
+                return finish(request, n, outcome);
+            }
+            let deadline = pending_deadline(n);
+            if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
+                return finish(request, n, signal(6));
+            }
+            deadline
+        };
         let key = n.connecting.unwrap_or(request.handle);
         let write = matches!(request.operation, CONNECT | SEND);
-        let deadline = pending_deadline(n);
-        // An already-expired wait gets its one try, but never registers to park.
-        if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
-            return finish(request, n, signal(6));
-        }
         if let Err(e) = (*n.sockets).arm(key, write, token) {
             return finish(request, n, error(e.raw_os_error().unwrap_or(libc::EIO)));
         }
-        // Register then retry closes the readiness-before-park window, including partial reads.
-        if let Some(outcome) = attempt(request, n, false) {
-            return finish(request, n, outcome);
-        }
-        if let Err(e) = (*n.sockets).arm(key, write, token) {
-            return finish(request, n, error(e.raw_os_error().unwrap_or(libc::EIO)));
-        }
+        // ADD sees existing readiness. Later edges remain queued until the
+        // registry owner can dispatch the waiter published by arm.
         crate::tasks::attach_net(n.sockets, (*n.sockets).poller().unwrap());
-        if deadline.is_some_and(|at| at <= crate::os::monotonic_ns()) {
-            let _ = (*n.sockets).disarm(key, write);
-            return finish(request, n, signal(6));
-        }
         Step {
             kind: STEP_PENDING,
             deadline_ns: deadline.unwrap_or(0),
@@ -442,7 +460,7 @@ pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Out
         let r = &*request;
         let n = &mut *r.path.cast_mut().cast::<NetworkRequest>();
         let key = n.connecting.unwrap_or(r.handle);
-        let _ = (*n.sockets).disarm(key, matches!(r.operation, CONNECT | SEND));
+        (*n.sockets).disarm(key, matches!(r.operation, CONNECT | SEND));
         finish(r, n, signal(if reason == ABORT_CANCEL { 7 } else { 6 })).outcome
     }
 }

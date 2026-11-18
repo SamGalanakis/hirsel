@@ -10,8 +10,11 @@ each connection at spawn, and keeps its reservation through the last
 request and linger. It counts accepted peers before reading a head and
 moves the per-IP count after validating a trusted forwarding field.
 
-The raw handler receives an anchored `Request`, a mutable `Body` and a
-read-only view of shared state. It returns `Reply(Response)` or an error.
+The raw handler receives an anchored `Request`, a scratch `Region`, a
+mutable `Body` and a read-only view of shared state. The region's allocations
+count against `handler_bytes` and the region closes when the handler exits.
+Copy data into owned values to keep it in a reply. The handler returns
+`Reply(Response)` or an error.
 One task parses, handles and writes each request in turn. The router,
 stream and upgrade slices extend dispatch and the outcome boundary.
 

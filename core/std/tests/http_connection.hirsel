@@ -13,20 +13,40 @@ type TestServer: send {
     cfg: http.Config
 }
 
-fn echo(req: http.Request, mut b: http.Body, clock: Clock) -> Result[http.Outcome, http.ResponseError] waits {
+type EchoState: shareable + send {
+    clock: Clock
+}
+
+fn echo(req: http.Request, scratch: Region, mut b: http.Body, state: EchoState) -> Result[http.Outcome, http.ResponseError] waits {
     let allocated: Result[Bytes, Capacity] = list.with_capacity(192)
     let mut out = match take allocated {
         Ok(take x) => take x,
         Error(e) => return Error(Allocation(e))
     }
     let raw_path = http.path(req)
-    if raw_path == string.as_bytes("/large") {
+    if raw_path == string.as_bytes("/scratch") {
+        let first: Result[SpanBuilder[u8, in scratch], Capacity] = span.with_capacity(scratch, 3072)
+        let mut buf = match take first {
+            Ok(take x) => take x,
+            Error(e) => return Error(Allocation(e)),
+        }
+        let second: Result[SpanBuilder[u8, in scratch], Capacity] = span.with_capacity(scratch, 4096)
+        let charged = match take second {
+            Error(_) => true,
+            Ok(_) => false,
+        }
+        result.unwrap(span.push(mut buf, b'x'))
+        let contents = span.finish(take buf)
+        if !charged || contents[0] != b'x' {
+            return Ok(Reply(http.response(500, take out, true)?))
+        }
+    } else if raw_path == string.as_bytes("/large") {
         result.unwrap(list.fill(mut out, 160, b'x'))
     } else if raw_path == string.as_bytes("/direct") {
         result.unwrap(list.fill(mut out, 2048, b'Z'))
     } else if raw_path == string.as_bytes("/when") {
         let mut time = string.new()
-        result.unwrap(string.push_u64(mut time, host.mono_ns(clock)))
+        result.unwrap(string.push_u64(mut time, host.mono_ns(state.clock)))
         let _ = list.append(mut out, string.as_bytes(time))
     } else if raw_path != string.as_bytes("/skip") {
         if let Some(inline) = http.inline_body(req) {
@@ -48,7 +68,7 @@ fn test_server(take server: TestServer) waits {
     let TestServer(listener: take l, c: c, tasks: tasks, cfg: take cfg) = take server
     let mut listeners: List[Listener] = result.unwrap(list.with_capacity(1))
     result.unwrap(list.push(mut listeners, take l))
-    result.unwrap(http.serve(take listeners, c, tasks, take cfg, echo, c))
+    result.unwrap(http.serve(take listeners, c, tasks, take cfg, echo, EchoState(clock: c)))
 }
 
 fn listen_for_law(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config) -> (Task[()], Addr) waits {
@@ -248,6 +268,14 @@ fn pipelined(n: Net, c: Clock, tasks: Tasks, take requests: Bytes, count: u64, l
         offset += h.end
     }
     nbytes - offset == last_body
+}
+
+// HTTP-6. Scratch hits the request allowance and the next request on the
+// same connection can use the full allowance again.
+// expect: run http_request_scratch(network) = true
+fn http_request_scratch(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+    let requests = result.unwrap(b"GET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\n\r\nGET /scratch HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    pipelined(n, c, tasks, take requests, 3, 0)
 }
 
 // L5. When ignoring a one-byte body the next head is preserved. An unread

@@ -1027,7 +1027,7 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
     FinalReply(write_succeeded(write_unit(mut b.writer, out, r.body, b.clock, write_end)))
 }
 
-fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S, mut cache: DateCache) -> Step waits {
+fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, frame: Framing, mut b: Body, mut out: Bytes, cfg: Config, handler: fn(Request, Region, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S, mut cache: DateCache) -> Step waits {
     let outcome = bound bytes cfg.handler_bytes {
         let normalized = match segments_of(part(input, meta.path)) {
             Ok(take x) => take x,
@@ -1052,7 +1052,9 @@ fn handle[S: shareable + send](input: Bytes, h: http1.Head, meta: RequestHead, f
             b.decoder.remaining = 0
         }
         let req = Request(input: view input, head: view h, meta: meta, segments: take normalized, inline_body: inline, deadline: b.handler_deadline)
-        let result = handler(req, mut b, state)
+        let result = region scratch {
+            handler(req, scratch, mut b, state)
+        }
         let returned = host.mono_ns(b.clock)
         if b.output_failed {
             return CloseConnection
@@ -1119,7 +1121,7 @@ type ConnectionJob[S: shareable + send]: send {
     cfg: Arc[Config],
     peer: Ip,
     at: u64,
-    handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits,
+    handler: fn(Request, Region, mut Body, S) -> Result[Outcome, ResponseError] waits,
     state: Arc[S],
     inbox: Sender[ConnectionSignal],
     slot: u64,
@@ -1148,7 +1150,7 @@ fn connection[S: shareable + send](take job: ConnectionJob[S]) waits {
     let _ = run_connection(take socket, c, cfg, peer, accepted, handler, state, inbox, slot)
 }
 
-fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S, inbox: Sender[ConnectionSignal], slot: u64) -> u64 waits {
+fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, handler: fn(Request, Region, mut Body, S) -> Result[Outcome, ResponseError] waits, state: S, inbox: Sender[ConnectionSignal], slot: u64) -> u64 waits {
     let (r, w) = net.split(take socket)
     let mut reader = take r
     let mut writer = take w
@@ -1408,7 +1410,7 @@ fn serve_alloc[T](take r: Result[T, Capacity]) -> Result[T, ServeError] {
 
 /// Serves a group of listeners with one handler per connection. The raw
 /// handler entry is also the seam for the router's later route selection.
-pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, handler: fn(Request, mut Body, S) -> Result[Outcome, ResponseError] waits, take state: S) -> Result[(), ServeError] waits {
+pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, handler: fn(Request, Region, mut Body, S) -> Result[Outcome, ResponseError] waits, take state: S) -> Result[(), ServeError] waits {
     if !valid_config(cfg) {
         return Error(Configuration)
     }

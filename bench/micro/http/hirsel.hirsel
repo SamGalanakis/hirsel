@@ -1,6 +1,6 @@
 // B1 selects this entry in a source view of std.http so it measures the
 // production connection task with exactly one accepted socket.
-fn b1_handler(request: Request, mut body: Body, state: ()) -> Result[Outcome, ResponseError] {
+fn b1_handler(request: Request, scratch: Region, mut body: Body, state: ()) -> Result[Outcome, ResponseError] {
     let payload = result.unwrap(b"Hello, world")
     let mut reply = response(200, take payload, false)?
     header(mut reply, result.unwrap(b"content-type"), result.unwrap(b"text/plain"))?

@@ -352,6 +352,8 @@ pub(crate) fn cohort() -> usize {
 
 /// Queued grants per hand-off affinity decision.
 const AFFINITY_WINDOW: u32 = 64;
+/// A worker off the home L3 moves once this fraction of its window crossed.
+const AFFINITY_SHARE: u32 = 8;
 
 /// The home cohort, the one with most of the process's allowed CPUs (the
 /// lowest on a tie), and those CPUs. None when the process runs in one L3.
@@ -576,7 +578,11 @@ impl Owner {
         }
         self.grants.set(0);
         self.crossed.set(0);
-        if 2 * crossed > AFFINITY_WINDOW
+        // A share, not a majority: workers off the home L3 that trade the
+        // token among themselves see few crossings each, yet every cohort
+        // switch still pays a cross-L3 transfer. Once one of them moves, the
+        // rest see more crossings and follow.
+        if crossed >= AFFINITY_WINDOW / AFFINITY_SHARE
             && let Some((home, cpus)) = home()
             && self.cohort.get() != *home
         {

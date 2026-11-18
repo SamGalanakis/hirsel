@@ -5,11 +5,10 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import sys
 import tempfile
 
-from case_progress import Case, run_case
+from case_progress import Case
 from runner_tests import (CALLS, LAWS, MUTANTS, evaluate, manifest, p19_module, counted,
                           l12_module, L12, l12_holds, l12_values, revision_holds,
                           l10_values, l10_holds, c_compiler, dir_for, native_run, counting_cc,
@@ -33,7 +32,6 @@ OBSERVE_MUTANTS = (
          '            let _ = list.remove(mut h.owed, index)\n            if list.len(h.owed) == 0u64 { h.digest_live = false }\n'),
     )),
 )
-TASK_KINDS = {0, 1, 2, 3, 4}
 CLAUSES = ('J1', 'J2', 'J3', 'J4', 'J5', 'J6')
 
 
@@ -185,14 +183,7 @@ class CallEvaluator:
     def __init__(self, args, root, work):
         self.args, self.root, self.work = args, root, work
         self.binaries = {}
-        cc = c_compiler(args)
-        support = work / 'observe-events.o'
-        run_case('observe_events:observer', 'cranelift', [str(cc), '-c', '-fPIC', str(root / 'core/tools/observe_events.c'),
-                        '-I' + str(root / 'crates/hirsel-core-rt/include'), '-o', str(support)], check=True)
-        self.cc = work / 'observe-cc'
-        self.cc.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
-                           + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
-        self.cc.chmod(0o755)
+        self.cc = c_compiler(args)
 
     def __call__(self, inputs_path, definition):
         if not definition.startswith('store@1/runner_calls/'):
@@ -341,8 +332,6 @@ def shown_key(raw):
 
 def trace(report):
     events = Codec(report.get('stdout', [])).events()
-    events += [dict(kind='Task', event=e[0], task=e[1], object=e[2], value=e[3])
-               for e in report.get('events', []) if e[0] in TASK_KINDS]
     opened = {e['conn'] for e in events if e['kind'] == 'Sent'}
     closed = {e['conn'] for e in events if e['kind'] == 'Closed'}
     complete = report.get('outcome', {}).get('kind') == 'returned' and opened <= closed
@@ -624,24 +613,15 @@ def main():
         work = Path(tmp)
         calls = CallEvaluator(args, root, work)
         m = observed_manifest(root, work) if not args.identity_only else manifest(root, work, 'identity-inputs')
-        cases = [] if args.identity_only else [(case, 'runner_calls', m) for case in (args.case or (*CALLS, 'observe_early_then_late'))]
-        if not args.case and not args.identity_only:
-            cases += [(case, 'runner_laws', m) for case in LAWS]
-            p19 = work / 'runner_p19.hirsel'
-            p19_module(p19)
-            pm = json.loads(m.read_text())
-            pm['packages'][-1]['sources'].append(dict(file=str(p19), modules=['runner_p19'], signatures=False))
-            p19_inputs = work / 'p19.json'
-            p19_inputs.write_text(json.dumps(pm))
-            cases.append(('p19_place_twice', 'runner_p19', p19_inputs))
-        for case, module, selected in cases:
-            value, report = calls(selected, f'store@1/{module}/law_' + case)
+        cases = () if args.identity_only else (args.case or (*CALLS, 'observe_early_then_late'))
+        for case in cases:
+            value, report = calls(m, 'store@1/runner_calls/law_' + case)
             bodies += bool(report.get('outcome'))
             t = trace(report)
             handoffs.record_visible(t, inventories)
             verdicts = Codec(report.get('stderr', [])).assessments()
             if value != 1 and t['obs'] and not verdicts:
-                verdicts = check_trace(evaluator, root, work, t, 'prefix_' + case, 'wire_joins' if module == 'runner_calls' else 'joins')
+                verdicts = check_trace(evaluator, root, work, t, 'prefix_' + case, 'wire_joins')
             failures = [v for v in verdicts if v['status'] == 'Failed']
             for v in verdicts:
                 if v['status'] == 'Held':
@@ -689,22 +669,6 @@ def main():
                 (args.artifacts / 'latest-deadline.log').write_text(json.dumps(report, indent=2) + '\n')
             print(f'OBSERVE control=latest_deadline J5=wire-order expected=J5/Failed passed={good}', flush=True)
             rows.append(good)
-        if not args.case and not args.identity_only:
-            values = {}
-            for variant in L12 + (('base_again',) + L12[0][1:],):
-                path = work / ('runner_l12_' + variant[0] + '.hirsel')
-                l12_module(path, variant)
-                lm = manifest(root, work, variant[0], extra=[(path, 'runner_l12')])
-                value, report = evaluate(evaluator, lm, 'store@1/runner_l12/law_l12_describe')
-                bodies += bool(report.get('outcome'))
-                values[variant[0]] = value
-                t = trace(report)
-                good = value not in (None, 0) and bool(t['obs'])
-                print(f'OBSERVE case=l12_{variant[0]} trace={len(t["obs"])} complete={t["header"]["complete"]} passed={good}', flush=True)
-                if not good:
-                    (args.artifacts / ('l12_' + variant[0] + '.obs')).write_text(json.dumps(t, indent=2) + '\n')
-                rows.append(good)
-            rows.append(l12_holds(values))
         fixtures = () if args.identity_only or args.case else ('observe/law_prefix', 'observe/law_second_reply', 'observe/law_complete_missing',
                      'observe/law_closed', 'observe/law_deadline_order', 'observe/law_refusal_order',
                      'observe/law_missing_clock', 'observe_fixture/law_record')

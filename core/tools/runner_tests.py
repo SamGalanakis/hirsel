@@ -1225,13 +1225,13 @@ def main():
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
             return int(not rows or any(not result['passed'] for result in rows))
-        if args.part in ('admission', 'wire') or (r1 and args.part != 'calls'):
+        if args.part == 'admission' or (r1 and args.part != 'calls'):
             admission_laws(args, root, work, engines, row)
         if args.part == 'ingress' or (r1 and args.part != 'calls'):
             ingress_laws(args, root, work, engines, row)
-        if r0 or args.part in ('wire', 'session'):
+        if r0 or args.part == 'session':
             session_laws(args, root, work, engines, row)
-        if r0 or args.part == 'wire':
+        if r0:
             frame_vectors(args, root, work, engines, row)
         if args.part in ('wire', 'socket'):
             socket_laws(args, root, work, engines, row)

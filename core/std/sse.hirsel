@@ -1,0 +1,146 @@
+pub opaque type EventBuf: send {
+    data: Bytes
+}
+
+pub type SseError: key = Field | Utf8 | TooLarge
+
+pub fn buffer(size: u64) -> Result[EventBuf, Capacity] {
+    let data: Bytes = list.with_capacity(size)?
+    Ok(EventBuf(data: take data))
+}
+
+pub fn as_bytes(out: EventBuf) -> View[Bytes] in out {
+    view out.data
+}
+
+pub fn into_bytes(take out: EventBuf) -> Bytes {
+    let EventBuf(data: take data) = take out
+    take data
+}
+
+fn valid_field(value: String, id_field: bool) -> bool {
+    for c in string.as_bytes(value) {
+        if c == b'\r' || c == b'\n' || id_field && c == 0 {
+            return false
+        }
+    }
+    true
+}
+
+fn line(raw: Bytes, from: u64) -> (u64, u64) {
+    let n = list.len(raw)
+    let mut end = from
+    while end < n && raw[end] != b'\r' && raw[end] != b'\n' {
+        end += 1
+    }
+    if end == n {
+        (end, end)
+    } else if raw[end] == b'\r' && end + 1 < n && raw[end + 1] == b'\n' {
+        (end, end + 2)
+    } else {
+        (end, end + 1)
+    }
+}
+
+fn size_for_lines(raw: Bytes, prefix: u64) -> u64 {
+    let n = list.len(raw)
+    let mut start: u64 = 0
+    let mut needed: u64 = 0
+    loop {
+        let (end, next) = line(raw, start)
+        needed = int.saturating_add(needed, int.saturating_add(end - start, prefix + 1))
+        if end == n {
+            return needed
+        }
+        start = next
+    }
+}
+
+fn push_line(mut data: Bytes, prefix: String, value: Bytes) {
+    let _ = list.append(mut data, string.as_bytes(prefix))
+    let _ = list.append(mut data, value)
+    let _ = list.push(mut data, b'\n')
+}
+
+fn push_lines(mut data: Bytes, prefix: String, raw: Bytes) {
+    let n = list.len(raw)
+    let mut start: u64 = 0
+    loop {
+        let (end, next) = line(raw, start)
+        push_line(mut data, prefix, list.slice(raw, start, end))
+        if end == n {
+            return
+        }
+        start = next
+    }
+}
+
+fn spare(out: EventBuf) -> u64 {
+    list.capacity(out.data) - list.len(out.data)
+}
+
+pub fn event(mut out: EventBuf, name: Option[String], id: Option[String], data: Bytes) -> Result[(), SseError] {
+    let mut size = int.saturating_add(size_for_lines(data, 6), 1)
+    if let Some(value) = name {
+        if !valid_field(value, false) {
+            return Error(Field)
+        }
+        size = int.saturating_add(size, int.saturating_add(string.byte_len(value), 8))
+    }
+    if let Some(value) = id {
+        if !valid_field(value, true) {
+            return Error(Field)
+        }
+        size = int.saturating_add(size, int.saturating_add(string.byte_len(value), 5))
+    }
+    if !string.is_utf8(data) {
+        return Error(Utf8)
+    }
+    if size > spare(out) {
+        return Error(TooLarge)
+    }
+    if let Some(value) = name {
+        push_line(mut out.data, "event: ", string.as_bytes(value))
+    }
+    if let Some(value) = id {
+        push_line(mut out.data, "id: ", string.as_bytes(value))
+    }
+    push_lines(mut out.data, "data: ", data)
+    let _ = list.push(mut out.data, b'\n')
+    Ok(())
+}
+
+pub fn comment(mut out: EventBuf, text: String) -> Result[(), SseError] {
+    let prefix = if text == "" {
+        ":"
+    } else {
+        ": "
+    }
+    let raw = string.as_bytes(text)
+    if int.saturating_add(size_for_lines(raw, string.byte_len(prefix)), 1) > spare(out) {
+        return Error(TooLarge)
+    }
+    push_lines(mut out.data, prefix, raw)
+    let _ = list.push(mut out.data, b'\n')
+    Ok(())
+}
+
+pub fn retry(mut out: EventBuf, milliseconds: u64) -> Result[(), SseError] {
+    let mut width: u64 = 1
+    let mut divisor: u64 = 1
+    while milliseconds / divisor >= 10 {
+        divisor *= 10
+        width += 1
+    }
+    if 9 + width > spare(out) {
+        return Error(TooLarge)
+    }
+    let _ = list.append(mut out.data, string.as_bytes("retry: "))
+    while divisor != 0 {
+        let digit: u8 = int.narrow(milliseconds / divisor % 10)
+        let _ = list.push(mut out.data, b'0' + digit)
+        divisor /= 10
+    }
+    let _ = list.append(mut out.data, string.as_bytes("\n\n"))
+    Ok(())
+}

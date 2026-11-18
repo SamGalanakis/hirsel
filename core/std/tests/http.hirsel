@@ -10,6 +10,53 @@ fn refused(status: u16) -> Result[http.Framing, http.BodyError] {
     Error(http.BodyError(status: status, close: true))
 }
 
+// WHATWG dispatches at a blank line only when at least one data field was read.
+fn dispatched_events(raw: Bytes) -> u64 {
+    let mut start: u64 = 0
+    let mut count: u64 = 0
+    let mut data = false
+    for end in 0u64 .. list.len(raw) {
+        if raw[end] == b'\n' {
+            if end == start {
+                if data {
+                    count += 1
+                }
+                data = false
+            } else if end - start >= 5 && list.slice(raw, start, start + 5) == string.as_bytes("data:") {
+                data = true
+            }
+            start = end + 1
+        }
+    }
+    count
+}
+
+// HTTP-13. The wire spellings follow WHATWG's event stream line grammar.
+// Refused fields, invalid UTF-8 and insufficient room leave the prior event intact.
+// expect: run http_sse_atomic_event() = true
+fn http_sse_atomic_event() -> bool {
+    let mut out = result.unwrap(sse.buffer(80))
+    let expected = string.as_bytes("event: message\nid: 42\ndata: a\ndata: b\ndata: c\ndata: \n\n")
+    let data = string.as_bytes("a\r\nb\rc\n")
+    if sse.event(mut out, Some("message"), Some("42"), data) != Ok(()) || sse.as_bytes(out) != expected {
+        return false
+    }
+    for cut in 0u64 .. list.len(expected) {
+        if dispatched_events(list.slice(sse.as_bytes(out), 0, cut)) != 0 {
+            return false
+        }
+    }
+    if dispatched_events(sse.as_bytes(out)) != 1 {
+        return false
+    }
+    let bad_utf8 = result.unwrap(b"\xff")
+    if sse.event(mut out, Some("bad\nname"), None, data) != Error(Field) || sse.event(mut out, None, Some("bad\u{0}id"), data) != Error(Field) || sse.event(mut out, None, None, bad_utf8) != Error(Utf8) || sse.event(mut out, Some("a long name that will not fit in the remaining room"), None, data) != Error(TooLarge) || sse.as_bytes(out) != expected {
+        return false
+    }
+    let mut control = result.unwrap(sse.buffer(32))
+    sse.comment(mut control, "") == Ok(()) && sse.retry(mut control, 12000) == Ok(()) && sse.as_bytes(control) == string.as_bytes(":\n\nretry: 12000\n\n")
+}
+
 // RFC 9112 section 6.3(7): requests without either field have no body.
 // expect: run no_body() = true
 fn no_body() -> bool {

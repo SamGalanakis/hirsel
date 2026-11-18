@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 extern void *store_crash_new(uint64_t);
@@ -31,6 +32,7 @@ typedef struct { pid_t pid; int fd,finished,status; } Child;
 static int rpc;
 static unsigned port;
 static char saved_token[43]="-";
+static int freeze_sync, sync_parked;
 static void transfer(int fd,void *data,size_t len,int writing) {
     uint8_t *p=data;
     while(len) {
@@ -41,10 +43,18 @@ static void transfer(int fd,void *data,size_t len,int writing) {
     }
 }
 static HirselCoreWait ready(void *s,HirselCoreHostRequest *r,uint64_t token) {
-    (void)s;(void)r;(void)token;return (HirselCoreWait){0};
+    (void)s;(void)token;
+    if(freeze_sync && r->operation==16) {
+        sync_parked=1;
+        return (HirselCoreWait){.kind=2};
+    }
+    return (HirselCoreWait){0};
 }
 static HirselCoreStep issue(void *s,HirselCoreHostRequest *r,uint64_t token) {
     (void)s;(void)token;
+    if(r->operation==12 && r->buffer.len==6 && !memcmp(r->buffer.data,"FREEZE",6)) freeze_sync=1;
+    if(r->operation==12 && r->buffer.len==7 && !memcmp(r->buffer.data,"FROZEN?",7) && !sync_parked)
+        return (HirselCoreStep){.outcome.error.tag=1};
     Request q={r->handle,r->path_len,r->buffer.len,r->buffer.capacity,r->operation,r->mode};
     transfer(rpc,&q,sizeof q,1);
     transfer(rpc,(void *)r->path,r->path_len,1);
@@ -63,7 +73,9 @@ static HirselCoreStep resume(void *s,HirselCoreHostRequest *r,uint64_t token) {
     (void)s;(void)r;(void)token;abort();
 }
 static HirselCoreHostOutcome cancel(void *s,HirselCoreHostRequest *r,uint64_t token,uint8_t why) {
-    (void)s;(void)r;(void)token;(void)why;abort();
+    (void)s;(void)token;(void)why;
+    if(freeze_sync && r->operation==16) return (HirselCoreHostOutcome){.error.tag=4};
+    abort();
 }
 static HirselCoreHostOutcome deliver(void *s,HirselCoreHostRequest *r,HirselCoreHostOutcome out) {
     (void)s;(void)r;return out;
@@ -140,9 +152,17 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
     static const char *modes[]={"init","write","read"};
     port=0;
     char floor[32];snprintf(floor,sizeof floor,"%llu",(unsigned long long)store_crash_floor(state));
-    const char *server_args[]={modes[number],scenario,store_crash_acked(state)?"new":"prefix",floor};
-    Child server=launch(input,sources,entry,server_args,4,-1),client={.fd=-1,.finished=1};
+    const char *server_args[]={modes[number],scenario,store_crash_acked(state)?"new":"prefix",floor,saved_token};
+    int deadline_case=!strcmp(scenario,"runner-deadline");
+    Child server=launch(input,sources,entry,server_args,deadline_case?5:4,-1),client={.fd=-1,.finished=1};
+    struct timespec start;
+    if(deadline_case && clock_gettime(CLOCK_MONOTONIC,&start)) abort();
     while(!server.finished || !client.finished) {
+        if(deadline_case) {
+            struct timespec now;
+            if(clock_gettime(CLOCK_MONOTONIC,&now)) abort();
+            if(now.tv_sec-start.tv_sec>=8) {stop(&server);fprintf(stderr,"runner-deadline: forced teardown did not finish\n");return 120;}
+        }
         if(port && client.pid==0) {
             char address[16];snprintf(address,sizeof address,"%u",port);
             const char *client_args[]={"client",scenario,modes[number],address,saved_token};

@@ -40,7 +40,8 @@ def run_cuts(executable, engine, env=None, scenarios=SCENARIOS):
 
 
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
-                entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c"):
+                entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c",
+                count_only=()):
     build = work / (engine + '-crash')
     build.mkdir()
     if cc is None:
@@ -78,4 +79,8 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
         raise RuntimeError(result.stdout)
     env = dict(os.environ if environment is None else environment)
     env['LD_LIBRARY_PATH'] = str(bridge.resolve().parent) + ':' + env.get('LD_LIBRARY_PATH', '')
-    return run_cuts(executable, engine, env, scenarios)
+    rows = run_cuts(executable, engine, env, scenarios)
+    for scenario in count_only:
+        checked([str(executable), scenario, 'count'], env)
+        rows.append(dict(scenario=scenario, passed=True))
+    return rows

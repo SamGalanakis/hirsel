@@ -51,7 +51,7 @@ type Server: send { net: Net, clock: Clock, tasks: Tasks, random: Random, args: 
 
 fn server(take seed: Server) -> () waits {
     let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post) = take seed
-    let mut listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) { Ok((take l, _)) => take l, Error(_) => return }
+    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) { Ok((take l, _)) => take l, Error(_) => return }
     let (policy, take policy_handle) = result.unwrap(store.ingress.start(tasks, c, random, store.ingress.defaults(), 8388608u64))
     let mut handle = take policy_handle
     let mut config = store.runner.wire_defaults(1048576u64, 1048576u64)
@@ -62,7 +62,7 @@ fn server(take seed: Server) -> () waits {
     let make: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[(), H]] = fn() -> store.runner.Service[store.runner.WireSession[(), H]] {
         store.runner.wire_place_service(code.describe(place), policy, head, c, tasks, config, a)
     }
-    let _ = store.runner.serve_admitted(n, mut listener, tasks, c, post, config, 128u64, list.new(), policy, make)
+    let _ = store.runner.serve_admitted(take listener, tasks, c, post, config, 128u64, list.new(), policy, make)
     task.cancel(mut handle)
     let _ = task.join(take handle)
 }
@@ -83,14 +83,14 @@ fn fault_service() -> store.runner.Service[()] {
 }
 
 fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Exit] waits {
-    let mut listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
+    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
         Ok((take l, _)) => take l,
         Error(_) => return Error(Exit(status: 1u8)),
     }
     let mail = result.unwrap(store.runner.mailbox(1u64))
     let mut config = store.runner.wire_defaults(0u64, 0u64)
     if reject { config.budget = 100u64 }
-    match store.runner.serve(n, mut listener, tasks, c, store.runner.post(mail), config, 1u64, list.new(), fault_service) {
+    match store.runner.serve(take listener, tasks, c, store.runner.post(mail), config, 1u64, list.new(), fault_service) {
         Error(Configuration) => if reject { Ok(()) } else { Error(Exit(status: 1u8)) },
         Ok(()) => if reject { Error(Exit(status: 1u8)) } else { Ok(()) },
         Error(_) => Error(Exit(status: 1u8)),

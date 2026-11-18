@@ -51,7 +51,7 @@ CHUNK = 500
 # evaluator (the registry's map grows to 2 MiB while its old table is live).
 N_PLACE = 16 * 1024 * 1024
 
-CALLS = ('calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
+CALLS = ('release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'l14_handles', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'publisher_never_blocks', 'owed_ended_delivered')
 
 # L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
@@ -653,6 +653,17 @@ def crashes(args, root, work, engine, name, runner=None, scenarios=CRASHES):
     checked([str(build / (engine + '-crash') / 'store'), POISON, 'count'], env)
     return rows
 
+def drain_deadline(args, root, work, engine, name, runner=None, activation=False):
+    inputs_path = manifest(root, work, name, runner,
+                           [(root / 'core/programs/store/runner_crash.hirsel', 'runner_crash')])
+    build = work / name
+    build.mkdir()
+    return run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
+                       entry='store@1/runner_crash/main', adapter='runner_crash.c',
+                       scenarios=('runner-activation',) if activation else (),
+                       count_only=() if activation else ('runner-deadline',))
+
+
 def manifest(root, work, name, runner=None, extra=()):
     m = inputs(root)
     sources = m['packages'][-1]['sources']
@@ -1066,7 +1077,7 @@ def main():
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'refused_send_releases_timer', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max'])
     p.add_argument('--admission-mutant', action='append', choices=['slot_freed_at_answer', 'refusal_rows_uncapped', 'reset_drops_held'])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'ingress', 'admission', 'socket', 'calls', 'deadline', 'activation'])
     args = p.parse_args()
     r0, r1 = args.part in (None, 'r0'), args.part in (None, 'r1', 'calls')
     selected_calls = args.call_law or CALLS
@@ -1086,6 +1097,20 @@ def main():
             if args.report:
                 args.report.write_text(json.dumps(rows, indent=2) + '\n')
             return int(any(not r['passed'] for r in rows))
+        crash_laws = {'deadline': 'one_drain_deadline', 'activation': 'atomic_activation'}
+        for part, law in crash_laws.items():
+            if args.part not in (None, 'r1', part):
+                continue
+            for engine in (name for name in engines if name != 'evaluator'):
+                try:
+                    row(engine=engine, law=law, passed=True,
+                        result=drain_deadline(args, root, work, engine, f'{law}-{engine}', activation=part == 'activation'))
+                except RuntimeError as error:
+                    row(engine=engine, law=law, passed=False, result=str(error))
+        if args.part in crash_laws:
+            if args.report:
+                args.report.write_text(json.dumps(rows, indent=2) + '\n')
+            return int(not rows or any(not result['passed'] for result in rows))
         if args.part in ('admission', 'wire') or (r1 and args.part != 'calls'):
             admission_laws(args, root, work, engines, row)
         if args.part == 'ingress' or (r1 and args.part != 'calls'):
@@ -1123,7 +1148,7 @@ def main():
         if 'evaluator' in engines and r1:
             # Socket laws wait for W8a's model network provider. W3d qualifies
             # their unchanged assertions on both native engines.
-            for name in (n for n in selected_calls if n == 'l14_handles'):
+            for name in (n for n in selected_calls if n in ('l14_handles', 'release_digest', 'drain_answers_once')):
                 value, report = evaluate(evaluator, base, 'store@1/runner_calls/law_' + name)
                 row(engine='evaluator', law=name, passed=value == 1 and counted(name, report), result=report)
             for name in (() if args.part == 'calls' else SUBS):

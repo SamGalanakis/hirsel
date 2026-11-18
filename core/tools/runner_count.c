@@ -36,7 +36,7 @@ static int item_named(uint64_t site, const char *name) {
 }
 extern HirselCoreSpawn __real_hirsel_core_spawn(HirselCoreContext *, uint64_t, uint64_t, void *, HirselCoreTaskBody, HirselCoreTaskLayout, uint64_t);
 HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx, uint64_t tasks, uint64_t bytes, void *input, HirselCoreTaskBody body, HirselCoreTaskLayout layout, uint64_t site) {
-    publisher_spawn = item_named(site, "place_head");
+    publisher_spawn = item_named(site, "start_publisher");
     HirselCoreSpawn out = __real_hirsel_core_spawn(ctx, tasks, bytes, input, body, layout, site);
     publisher_spawn = 0;
     return out;

@@ -382,9 +382,171 @@ fn count(d: Dir, c: Clock, r: Random, tasks: Tasks) -> (u64, u64) waits {
     (v, n)
 }
 
+type DeadlinePlace: send {
+    config: runner.PlaceConfig[(), Hd], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+}
+
+fn deadline_place(take fixture: DeadlinePlace) -> Result[runner.Ended, runner.StartError] waits {
+    let DeadlinePlace(config: take config, stop: take stop, status: take status, watch: take watch) = take fixture
+    runner.operate(take config, take stop, status, Some(take watch))
+}
+
+fn status_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
+
+fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, phase: String, uncut: bool) -> () waits {
+    let codec: std.codec.Codec[Bytes] = std.codec.of_list()
+    let mut old_previous: Bytes = list.new()
+    let mut old_current: Bytes = list.new()
+    result.unwrap(list.append(mut old_previous, string.as_bytes("previous release")))
+    result.unwrap(list.append(mut old_current, string.as_bytes("current release")))
+    if phase == "init" {
+        let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+        let value: std.codec.Codec[u64] = std.codec.of()
+        let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
+        let _ = result.unwrap(store.create_table(mut db, store.spec("hirsel.runner.activation", std.codec.key_u8(), codec)))
+        let table = result.unwrap(store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), codec))
+        let written = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+            store.put(mut tx, table, 0u8, old_current)?
+            store.put(mut tx, table, 1u8, old_previous)
+        }))
+        if let Committed(done) = written { result.unwrap(store.durable(mut db, done.ticket)) } else { fail("activation: failed to seed both rows") }
+        result.unwrap(store.close(take db))
+        return
+    }
+    let mut existing = options()
+    existing.create = false
+    let mut expected_version = 0u64
+    if phase == "read" {
+        let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
+        let table = result.unwrap(store.table(mut db, "hirsel.runner.activation", std.codec.key_u8(), codec))
+        let snap = store.snapshot(db)
+        let current = option.unwrap(result.unwrap(store.get(snap, store.shape(table), 0u8)))
+        let previous = option.unwrap(result.unwrap(store.get(snap, store.shape(table), 1u8)))
+        let same_release = current != old_current
+        if same_release {
+            want(previous == old_current, "activation: current changed but previous did not")
+            let describe: std.codec.Codec[runner.Describe] = std.codec.of()
+            let decoded = result.unwrap(result.unwrap(std.codec.decode(describe, current)))
+            want(list.len(decoded.exported) == 3u64 && decoded.exported[0u64].described.identity == code.identity(code.describe(bump)) &&
+                 decoded.exported[1u64].described.identity == code.identity(code.describe(deny)) &&
+                 decoded.exported[2u64].described.identity == code.identity(code.describe(trip)), "activation: incorrect new release")
+        } else {
+            want(!uncut && previous == old_previous, "activation: previous changed without current or acknowledged release missing")
+        }
+        expected_version = store.version(snap) + if same_release { 0u64 } else { 1u64 }
+        result.unwrap(store.close(take db))
+    }
+    let (policy, policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
+    let settings = runner.PlaceConfig(backing: Disk(d, existing), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles),
+        session: runner.wire_defaults(131072u64, N_PLACE), max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
+        listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
+        stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
+    let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
+    let running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take seed, deadline_place))
+    let phases = result.unwrap(channel.receive(watcher))
+    loop {
+        match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("activation: no Ready") }
+    }
+    if phase == "write" { result.unwrap(stdout.write(out, "DONE")) }
+    result.unwrap(channel.send(stop, ()))
+    if let Ok(Ok(Stopped)) = task.join(take running) {} else { fail("activation: empty place did not stop") }
+    let mut stopping_policy = take policy_handle
+    task.cancel(mut stopping_policy)
+    let _ = task.join(take stopping_policy)
+    if phase == "read" {
+        let db = result.unwrap(store.open(tasks, d, c, r, existing))
+        want(store.version(store.snapshot(db)) == expected_version, "activation: wrong write count on restart")
+        result.unwrap(store.close(take db))
+    }
+}
+
+fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net) -> () waits {
+    let (policy, policy_handle) = result.unwrap(ingress.start(tasks, c, r, ingress.defaults(), 1048576u64))
+    let (stop, stopping): (Sender[()], Receiver[()]) = result.unwrap(channel.new(1u64))
+    let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = result.unwrap(channel.new(1u64))
+    let status = result.unwrap(runner.status_root())
+    let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+    wire.socket.max_frame = 65536u64
+    let config = runner.PlaceConfig(backing: Disk(d, options()), place: code.describe(place), n_place: N_PLACE, handles: code.describe(handles),
+        session: wire, max_sessions: 1u64, proxies: list.new(), policy: take policy, n_publisher: 1048576u64,
+        listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
+        stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64))
+    let seed = DeadlinePlace(config: take config, stop: take stopping, status: latest.handle(status), watch: take watch)
+    let running = result.unwrap(task.spawn(tasks, bytes 50331648u64, take seed, deadline_place))
+    let phases = result.unwrap(channel.receive(watcher))
+    loop {
+        match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("runner-deadline: no Ready") }
+    }
+    let mut keys: List[Bytes] = list.new()
+    result.unwrap(list.push(mut keys, body_key(0u64)))
+    let connection = result.unwrap(wire_client.connect(tasks, n, status_address(latest.read(status)), c, r, keys, None, wire.socket))
+    remember(out, connection.token)
+    result.unwrap(stdout.write(out, "FREEZE"))
+    wire_client.send_frame(connection, Call(0u32, 0u64, 0u32, 10000u32, u64_bytes(9u64)))
+    let watchdog = host.mono_ns(c) + 5000000000u64
+    while let Error(_) = stdout.write(out, "FROZEN?") {
+        let now = host.mono_ns(c)
+        if now >= watchdog { fail("runner-deadline: no journal sync to freeze") }
+        host.sleep_until(c, now + 1000000u64)
+    }
+    result.unwrap(channel.send(stop, ()))
+    match task.join(take running) {
+        Ok(Ok(Forced(1u64))) => (),
+        _ => fail("runner-deadline: expected exactly one logically abandoned send"),
+    }
+    let mut abandoned = 0u64
+    while let Ok(take frame) = wire_client.next(connection) {
+        match frame {
+            Batch(_, _, _, done) => for outcome in done {
+                if let Abandoned = outcome.outcome { abandoned += 1u64 } else { fail("runner-deadline: answered a send past the cut") }
+            },
+            _ => fail("runner-deadline: unexpected wire frame"),
+        }
+    }
+    want(abandoned <= 1u64, "runner-deadline: duplicate Abandoned")
+    let _ = wire_client.close(take connection)
+    let mut policy_task = take policy_handle
+    task.cancel(mut policy_task)
+    let _ = task.join(take policy_task)
+    result.unwrap(stdout.write(out, "DONE"))
+}
+
+fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () waits {
+    let mut existing = options()
+    existing.create = false
+    let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
+    let data = result.unwrap(handles(mut db))
+    let named = option.unwrap(token(option.unwrap(args.get(argv, 4u64))))
+    let stream = wire_client.stream(named, 0u32)
+    want(match result.unwrap(store.get(store.snapshot(db), store.shape(data.t), 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
+    let digest = store.request_digest(body_key(0u64), u64_bytes(9u64))
+    match result.unwrap(store.admit(mut db, stream, 0u64, digest)) {
+        Admitted(_) => (),
+        Abandoned(_) => (),
+        _ => fail("runner-deadline: frozen position is not retryable without a prior reply"),
+    }
+    result.unwrap(store.close(take db))
+}
+
 pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0u64))
     let scenario = option.unwrap(args.get(argv, 1u64))
+    if scenario == "runner-activation" {
+        activation_pairs(d, c, r, tasks, n, out, result.unwrap(string.from(phase)), option.unwrap(args.get(argv, 2u64)) == "new")
+        return Ok(())
+    }
+    if scenario == "runner-deadline" {
+        if phase == "init" {
+            let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+            let value: std.codec.Codec[u64] = std.codec.of()
+            let created = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), value)))
+            result.unwrap(store.durable(mut db, created))
+            result.unwrap(store.close(take db))
+        } else if phase == "write" { freeze_until_stop(d, c, r, tasks, out, n) } else { deadline_reopen(d, c, r, tasks, argv) }
+        return Ok(())
+    }
     if phase == "client" {
         let mode = option.unwrap(args.get(argv, 2u64))
         let port: u16 = int.narrow(arg_u64(option.unwrap(args.get(argv, 3u64))))

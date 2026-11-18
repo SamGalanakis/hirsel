@@ -15,7 +15,7 @@
 //!   also starts on the heap. That loop reuses its capacity after each pop,
 //!   so the inline frame growth would save only the initial allocations.
 //! - the base of an index, `x[i]`;
-//! - a bare argument to a function or callable, which is a view (OWN-7);
+//! - a bare argument to a resolved function's view parameter (OWN-7);
 //! - a `mut` argument of a call, which is lent for the call (OWN-7);
 //! - the source of a viewing `for`, or `view x`;
 //!
@@ -156,15 +156,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let kids = self.kids(p);
             match self.kind(p) {
                 NodeKind::Index if kids[0] == u => Some(false),
-                NodeKind::Call if kids[0] != u => match self.call_target(kids[0]) {
-                    Some(Target::ContextualConstructor { .. }) => None,
-                    Some(Target::Definition(id))
-                        if matches!(self.p.by_definition[id.0 as usize], Some(Def::Type(_))) =>
-                    {
-                        None
-                    }
-                    _ => Some(false),
-                },
+                NodeKind::Call if kids[0] != u => {
+                    let Target::Definition(id) = self.call_target(kids[0])? else {
+                        return None;
+                    };
+                    let Some(Def::Fn(f)) = self.p.by_definition[id.0 as usize] else {
+                        return None;
+                    };
+                    let arg = kids[1..].iter().position(|&arg| arg == u)?;
+                    let param = self.p.fns[f as usize].params.get(arg)?;
+                    (param.mode == Mode::View && !param.bytes).then_some(false)
+                }
                 NodeKind::For if kids[1] == u => Some(false),
                 NodeKind::Unary => match self.token_text(p) {
                     "view" => Some(false),

@@ -3407,14 +3407,14 @@ pub fn dispatch[C: send](mut service: Service[C], take frame: Frame) -> Result[O
 
 pub fn writer_bytes() -> u64 { 4096u64 }
 
-// Records are charge-v1: Reader is 285 (8+24+8+Decoder's 245),
-// ReadClosed holds Control's 133 plus Reader, so WireEvent is 426.
+// Records are charge-v1: Reader is 309 (8+24+8+Decoder's 245+8+16),
+// ReadClosed holds Control's 133 plus Reader, so WireEvent is 450.
 // The writer handoff's Bytes is 24; a read credit is ().
 // Children return (), costing 288 each; owner task returns Result<(), Error>
 // (Error's largest Capacity payload 16, plus two variant tags = 32).
 pub fn session_bytes(c: WireConfig) -> u64 {
     let units = 1u64 + c.q
-    let channels = 64u64 + units * 426u64 + 64u64 + 24u64 + 64u64
+    let channels = 64u64 + units * 450u64 + 64u64 + 24u64 + 64u64
     let outcomes = wire_outcome_reserve(c)
     let encode = 2u64 * wire_round(c.socket.max_frame + 14u64)
     reader_bytes(c) + writer_bytes() + 576u64 + channels + outcomes + c.budget + encode + c.n_service + c.n_place + 32768u64 + 4384u64 + wire_round(3u64 * units * 100u64)
@@ -3424,7 +3424,7 @@ pub opaque type WireEvent: send { e: WireInput }
 
 fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
 
-type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | Authenticated(Option[ingress.Principal]) | Rate(bool) | JoinReady | HelloExpired | Published(Frame) | Control(u8, std.websocket.Control) | Sent | ReadClosed(std.websocket.Control, std.wsock.Reader) | WriteClosed(std.wsock.Writer) | Ended(u16) | DrainWake
+type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | Authenticated(Option[ingress.Principal]) | Rate(bool) | JoinReady | HelloExpired | Published(Frame) | Control(u8, std.websocket.Control) | Sent | WriteTimedOut(u64) | ReadClosed(std.websocket.Control, std.wsock.Reader) | WriteClosed(std.wsock.Writer) | Ended(u16) | DrainWake
 
 // Read credits cover both the inbox and a reader blocked on publication. They
 // are acquired before decoding, so no extra reader-funded producer item exists.
@@ -3453,6 +3453,7 @@ fn wire_read(take x: WireRead) -> () waits {
                 Ok(Ping(control)) => { probing = false; break Control(10u8, control) },
                 Ok(Closed(control)) => { let _ = channel.send(to, wire_event(ReadClosed(control, take r))); return },
                 Ok(Reject(code)) => { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(code), take r))); return },
+                Error(Protocol(code)) => { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(code), take r))); return },
                 Error(Network(TimedOut)) => {
                     if probing { let _ = channel.send(to, wire_event(ReadClosed(wire_close_control(1001u16), take r))); return }
                     probing = true
@@ -3475,12 +3476,25 @@ fn wire_write(take x: WireWrite) -> () waits {
             Error(_) => return,
         }
         let is_close = list.len(frame) != 0u64 && frame[0u64] & 15u8 == 8u8
-        let deadline = if is_close { At(clock, host.mono_ns(clock) + config.close_ms * 1000000u64) } else { Never }
+        let now = host.mono_ns(clock)
+        let mut end = if is_close { deadline_after(now, config.close_ms) } else { int.saturating_add(now, std.wsock.MESSAGE_NS) }
+        let mut can_close = !is_close
         let _ = std.wsock.stage(mut writer, take frame)
         loop {
-            match std.wsock.flush(mut writer, mut out, deadline) {
+            let flushed: Result[bool, std.wsock.Error] = if host.mono_ns(clock) >= end {
+                Error(Network(TimedOut))
+            } else { std.wsock.flush(mut writer, mut out, At(clock, end)) }
+            match flushed {
                 Ok(true) => break,
                 Ok(false) => {},
+                Error(Network(TimedOut)) => {
+                    if !can_close { let _ = channel.send(to, wire_event(Ended(1001u16))); return }
+                    // The Close frame cannot overtake a partial frame. Give the
+                    // sole writer the same close deadline as the owner.
+                    end = deadline_after(end, config.close_ms)
+                    can_close = false
+                    if let Error(_) = channel.send(to, wire_event(WriteTimedOut(end))) { return }
+                },
                 Error(_) => { let _ = channel.send(to, wire_event(Ended(1001u16))); return },
             }
         }
@@ -3729,6 +3743,17 @@ fn wire_owner[C: send](take x: WireOwner[C], mut abandoned: u64) -> Result[(), s
                 None
             },
             Sent => { busy = false; None },
+            WriteTimedOut(end) => {
+                if !closing {
+                    close_at = Some(end)
+                    match std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(1001u16)) {
+                        Ok(take close_frame) => { control = Some(take close_frame) },
+                        Error(e) => break Error(e),
+                    }
+                    closing = true
+                }
+                None
+            },
             ReadClosed(payload, take returned) => {
                 read_back = Some(take returned)
                 read_closed = true
@@ -3786,7 +3811,10 @@ fn wire_owner[C: send](take x: WireOwner[C], mut abandoned: u64) -> Result[(), s
         }
         let unarmed = match alarm { None => true, _ => false }
         if closing && unarmed {
-            let own_close = host.mono_ns(clock) + c.socket.close_ms * 1000000u64
+            let own_close = match close_at {
+                Some(end) => end,
+                None => deadline_after(host.mono_ns(clock), c.socket.close_ms),
+            }
             let deadline = match work.deadline { Some(cut) => if cut < own_close { cut } else { own_close }, None => own_close }
             close_at = Some(deadline)
             let close_wait = WireAlarm(clock: clock, at: deadline, to: channel.sender(to))

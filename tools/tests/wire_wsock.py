@@ -12,6 +12,7 @@ import tempfile
 import time
 
 from wire_process import stop_process
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
 KEY = b'dGhlIHNhbXBsZSBub25jZQ=='
@@ -90,13 +91,57 @@ def wait_ready(process, port=18089):
     raise AssertionError('echo did not listen')
 
 
+def session_with_hello():
+    s = connect(18094)
+    try:
+        hello = struct.pack('<III', 0, 1, 8) + b'deadline' + struct.pack('<I', 0)
+        s.sendall(REQUEST + frame(2, hello))
+        assert b'HTTP/1.1 101 ' in head(s)
+        assert read_frame(s) == (2, struct.pack('<IQI', 8, 0, 0))
+        return s
+    except BaseException:
+        s.close()
+        raise
+
+
+def incomplete_deadline():
+    with session_with_hello() as s:
+        s.sendall(frame(2, b'abc', fin=False))
+        start = time.monotonic()
+        for at in (12, 24):
+            time.sleep(max(0, start + at - time.monotonic()))
+            s.sendall(frame(9, b'p'))
+            assert read_frame(s) == (10, b'p')
+        s.settimeout(11)
+        assert read_frame(s) == (8, struct.pack('!H', 1001))
+        assert time.monotonic() - start >= 29
+        print('incomplete_message_deadline: PASS', flush=True)
+
+
+def blocked_write_deadline():
+    with session_with_hello() as s:
+        arg = b'a' * (262144 - 44)
+        call = struct.pack('<IIQIII', 1, 7, 2, 0, 1000, len(arg)) + arg
+        s.sendall(frame(2, call))
+        time.sleep(37)
+        s.settimeout(3)
+        got = bytearray()
+        while data := s.recv(65536):
+            got.extend(data)
+        assert bytes(got[:10]) == b'\x82\x7f' + struct.pack('!Q', 262144)
+        assert 10 < len(got) < 262154, len(got)
+        print('blocked_write_deadline: PASS', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--echo', type=Path)
     parser.add_argument('--client', type=Path)
     parser.add_argument('--session', type=Path)
     parser.add_argument('--idle-session', type=Path)
-    parser.add_argument('--session-codes-only', action='store_true')
+    session_mode = parser.add_mutually_exclusive_group()
+    session_mode.add_argument('--session-codes-only', action='store_true')
+    session_mode.add_argument('--session-deadlines-only', action='store_true')
     parser.add_argument('--cc', default='cc')
     parser.add_argument('--idle-echo', type=Path)
     parser.add_argument('--client-only', action='store_true')
@@ -109,6 +154,12 @@ def main():
                 process = subprocess.Popen([str(args.session.resolve())], env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
                 try:
                     wait_ready(process, 18094)
+                    if args.session_deadlines_only:
+                        with ThreadPoolExecutor(max_workers=2) as executor:
+                            checks = [executor.submit(law) for law in (incomplete_deadline, blocked_write_deadline)]
+                            for check in checks:
+                                check.result()
+                        return 0
                     if not args.session_codes_only:
                         with connect(18094) as stalled:
                             stalled.sendall(b'GET')

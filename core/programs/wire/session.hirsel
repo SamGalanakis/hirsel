@@ -9,6 +9,9 @@ fn step(mut context: (), mut work: store.runner.WireWork, take input: store.runn
             result.unwrap(list.push(mut done, store.runner.Done(stream: stream, p: p, outcome: Returned(take arg))))
             Ok(Some(Batch(0u64, list.new(), list.new(), take done)))
         },
+        WClient(Hello(Some(token), _), _) => {
+            if token == string.as_bytes("deadline") { Ok(Some(Reset(0u64, list.new()))) } else { Error(1013u16) }
+        },
         WClient(Unsubscribe(_), _) => Ok(Some(Reset(0u64, list.new()))),
         WClient(_, _) => Error(1013u16),
         _ => Ok(None),

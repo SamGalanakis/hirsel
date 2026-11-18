@@ -277,6 +277,11 @@ pub fn frame_count(d: Decoder) -> u64 {
     d.frames
 }
 
+/// Whether a frame header or a fragmented message is still incomplete.
+pub fn incomplete(d: Decoder) -> bool {
+    !d.ended && (d.have != 0 || d.fragmented)
+}
+
 /// Payload storage held by the decoder, excluding its inline header/control.
 /// O(1). Ex: `websocket.buffered(d)` for input-arrival accounting.
 pub fn buffered(d: Decoder) -> u64 {

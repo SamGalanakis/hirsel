@@ -453,7 +453,9 @@ pub opaque type Reader: send {
     half: ReadHalf,
     input: Bytes,
     cursor: u64,
-    decoder: websocket.Decoder
+    decoder: websocket.Decoder,
+    clock: Clock,
+    message_end: Option[u64]
 }
 
 pub opaque type Writer: send {
@@ -610,28 +612,65 @@ pub fn owe_pong(mut w: WriteBuffer, control: websocket.Control) {
     w.pong = Some(control)
 }
 
-/// Reads one protocol event with bounded 8192-byte scratch. Every decoded
-/// message is allocated here, in the reader task's account, before handoff.
+pub const MESSAGE_NS: u64 = 30000000000
+
+/// Reads one protocol event with bounded 8192-byte scratch. An incomplete
+/// message has one absolute deadline across reads and intervening controls.
 pub fn read(mut r: Reader, deadline: Until) -> Result[websocket.Event, Error] waits {
     let before = websocket.frame_count(r.decoder)
     let mut attempted = false
     loop {
+        let now = host.mono_ns(r.clock)
+        if let Some(end) = r.message_end {
+            if now >= end {
+                return Error(Protocol(1001u16))
+            }
+        }
         if attempted && expired(deadline) {
             return Error(Network(TimedOut))
         }
-        match websocket.next(mut r.decoder, r.input, mut r.cursor) {
-            Ok(Need) => if websocket.frame_count(r.decoder) != before {
+        let event = match websocket.next(mut r.decoder, r.input, mut r.cursor) {
+            Ok(take event) => take event,
+            Error(c) => return Error(Allocation(c))
+        }
+        if websocket.incomplete(r.decoder) {
+            if let None = r.message_end {
+                r.message_end = Some(int.saturating_add(now, MESSAGE_NS))
+            }
+        } else {
+            r.message_end = None
+        }
+        match take event {
+            Need => if websocket.frame_count(r.decoder) != before {
                 return Ok(Need)
             },
-            Ok(take event) => return Ok(take event),
-            Error(c) => return Error(Allocation(c))
+            take other => return Ok(take other),
         }
         list.clear(mut r.input)
         r.cursor = 0
         let max = list.capacity(r.input)
-        match host.recv_bounded(mut r.half, mut r.input, max, deadline) {
+        let read_until = match r.message_end {
+            Some(end) => match deadline {
+                At(_, earlier) => if earlier < end {
+                    deadline
+                } else {
+                    At(r.clock, end)
+                },
+                Never => At(r.clock, end),
+            },
+            None => deadline,
+        }
+        match host.recv_bounded(mut r.half, mut r.input, max, read_until) {
             Ok(0) => return Error(Eof),
             Ok(_) => {},
+            Error(TimedOut) => {
+                if let Some(end) = r.message_end {
+                    if host.mono_ns(r.clock) >= end {
+                        return Error(Protocol(1001u16))
+                    }
+                }
+                return Error(Network(TimedOut))
+            },
             Error(e) => return Error(Network(e))
         }
         attempted = true
@@ -839,7 +878,7 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
                 return Error(Http(503))
             }
             send_response(mut writer, response, string.as_bytes(""), deadline)?
-            Ok(Upgraded(reader: Reader(half: take reader, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame)), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
+            Ok(Upgraded(reader: Reader(half: take reader, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame), clock: clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
         },
         Refused(code) => {
             let _ = refuse(mut writer, code, deadline)
@@ -890,7 +929,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
             Error(c) => return Error(Allocation(c))
         }
         match checked {
-            Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame)), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
+            Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame), clock: clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
             Ready(_, false) => return Error(Http(400)),
             Failed(code) => return Error(Http(code)),
             Pending => {}

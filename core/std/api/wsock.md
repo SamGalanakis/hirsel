@@ -31,6 +31,9 @@ bytes from host.random for its challenge, requires hirsel.1, rejects extensions,
 and retains response read-ahead. It returns `Connected` and a client encoder.
 
 `read` drives the pure decoder over the ReadHalf with 8192-byte scratch.
+An incomplete message has a 30-second deadline from its first partial frame.
+Arriving bytes and interleaved controls leave that deadline fixed. Expiry
+returns `Protocol(1001)`.
 Decoded messages allocate in the task calling read. Moving them through a
 channel preserves that task's charge. The session must budget all outstanding
 reader-funded frames according to WIRE 2.3 arrangement (a).

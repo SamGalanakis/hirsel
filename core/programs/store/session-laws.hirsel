@@ -99,10 +99,10 @@ fn wire_owner_park(take rx: Receiver[()]) -> Result[(), std.wsock.Error] waits {
 }
 
 pub fn law_session_records(tasks: Tasks) -> bool waits {
-    // charge-v1: five WireEvents of 426 plus 64, one Bytes plus 64,
+    // charge-v1: five WireEvents of 450 plus 64, one Bytes plus 64,
     // a credit channel of zero-sized units plus 64; three test gates of 64;
     // two unit-returning task records of 288 and the owner record of 320.
-    let checked = bound bytes 3434u64 {
+    let checked = bound bytes 3554u64 {
         let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = result.unwrap(channel.new(5u64))
         let (writes, read_writes): (Sender[Bytes], Receiver[Bytes]) = result.unwrap(channel.new(1u64))
         let (credit, read_credit): (Sender[()], Receiver[()]) = result.unwrap(channel.new(5u64))

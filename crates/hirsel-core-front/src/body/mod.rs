@@ -1168,6 +1168,10 @@ struct Cx<'c, 'a, 'e> {
     numeric_sites: Vec<scalar_abi::NumericSite>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
     call_seq: u32,
+    /// The call whose copyable view arguments are passed by address rather than
+    /// snapshotted, and the arguments so passed.
+    direct_call: Option<u32>,
+    direct_args: Vec<(usize, TypeId, NodeId)>,
     callable_signatures: HashMap<TyId, closures::CallableAbi>,
     callable_reps: Vec<Rep>,
     callable_regions: Vec<u32>,
@@ -1320,6 +1324,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             numeric_sites: vec![],
             nested: Default::default(),
             call_seq: 0,
+            direct_call: None,
+            direct_args: vec![],
             callable_signatures: HashMap::default(),
             callable_reps: vec![],
             callable_regions: vec![],
@@ -1885,7 +1891,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.install(to, r, Some(value), n);
         Some(())
     }
-    fn snapshot(&mut self, from: ValueId, id: TypeId, n: NodeId) -> ValueId {
+    pub(super) fn snapshot(&mut self, from: ValueId, id: TypeId, n: NodeId) -> ValueId {
         let to = self.new_slot(PlaceTy::Declared(id), n);
         self.copy_to(to, from, id, n);
         let value = self.pointer(to, n);

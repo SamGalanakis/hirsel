@@ -263,6 +263,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             self.determined(f, found, checked, n);
         }
+        // A copyable view argument read from a place is passed by that place's
+        // address when nothing can write the place before the callee returns:
+        // every parameter views, every argument is evaluated without a write,
+        // the callee does not wait, and its result has no supplied destination.
+        // That every argument is plain data is known only once the arguments
+        // are typed; otherwise the passed places are snapshotted after the
+        // arguments, which no argument wrote.
+        let direct = g.body.is_some()
+            && !g.waits
+            && g.params
+                .iter()
+                .all(|q| matches!(q.mode, Mode::View | Mode::Steps | Mode::Bytes))
+            && self.expression_destination(n).is_none()
+            && args.iter().all(|&a| self.writes_nothing(a));
+        let outer_call = std::mem::replace(&mut self.direct_call, direct.then_some(call));
+        let outer_args = std::mem::take(&mut self.direct_args);
         let mut push = None;
         let mut replacement = None;
         let mut slot_push = None;
@@ -466,6 +482,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             self.step_callback(g.params[i].ty, vals[i], e);
             self.activate(vals[i], call, e);
+        }
+        self.direct_call = outer_call;
+        let passed = std::mem::replace(&mut self.direct_args, outer_args);
+        if !passed.is_empty() {
+            let plain = (0..g.params.len()).all(|i| {
+                let t = self.partial_rooted(g.params[i].ty, found, roots);
+                t != ERROR && t != HOLE && self.type_kind(t) == Kind::Plain
+            });
+            if !plain && self.live() {
+                for (i, id, e) in passed {
+                    vals[i] = vals[i].map(|from| self.snapshot(from, id, e));
+                }
+            }
         }
         for &(i, e) in later.iter() {
             match self.known_rooted(g.params[i].ty, found, roots) {
@@ -793,9 +822,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.emit_place(at, e)
                     };
                 } else if self.copies(ty) {
-                    // A copyable value is copied (OWN-7).
+                    // A copyable value is copied (OWN-7), unless the call reads
+                    // its place directly (`direct_call`).
                     self.use_place(at, Use::Value, e);
-                    *val = self.emit_place(at, e);
+                    *val = match self.rep(ty) {
+                        Ok(Rep::Place(id))
+                            if self.direct_call == Some(call)
+                                && mode == Mode::View
+                                && !self.is_view(ty)
+                                && self.type_kind(ty) == Kind::Plain =>
+                        {
+                            self.direct_args.push((i, id, e));
+                            self.place_ptr(at, e)
+                        }
+                        _ => self.emit_place(at, e),
+                    };
                 } else if mode == Mode::Take {
                     let name = self.slot_name(at.place.slot);
                     let message = format!("a moving place is passed as `take {name}`");
@@ -830,6 +871,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 true
             }
+            _ => false,
+        }
+    }
+    /// Evaluating `n` writes no place: it calls nothing and runs no statement.
+    fn writes_nothing(&self, n: NodeId) -> bool {
+        match self.kind(n) {
+            NodeKind::Path | NodeKind::Literal | NodeKind::Unit => true,
+            NodeKind::Unary if matches!(self.token_text(n), "mut" | "take") => false,
+            NodeKind::Group
+            | NodeKind::Unary
+            | NodeKind::Binary
+            | NodeKind::Index
+            | NodeKind::Projection
+            | NodeKind::BytesArgument => self.kids(n).iter().all(|&k| self.writes_nothing(k)),
             _ => false,
         }
     }

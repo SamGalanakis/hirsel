@@ -1,0 +1,66 @@
+// OWN-7: a copyable argument for a viewing parameter is its place's value at
+// the argument. A write to that place before the callee reads it, by a later
+// argument, through a `mut` argument of the same call, or through a callback
+// argument, is not seen by the callee.
+// expect: accept
+// expect: run later() = 1
+// expect: run sibling() = 1
+// expect: run callback() = 1
+// expect: run field() = 13
+// expect: run direct() = 15
+type Pair {
+    a: Inline[u64, 4],
+    b: u64
+}
+
+type Outer {
+    p: Pair,
+    n: u64
+}
+
+fn sum(p: Pair, z: u64) -> u64 {
+    p.a[0] + z
+}
+
+fn bump(mut p: Pair) -> u64 {
+    p.a[0] = 50
+    0
+}
+
+fn read_after_mut(p: Pair, mut q: Pair) -> u64 {
+    q.a[0] = 100
+    p.a[0]
+}
+
+fn read_after_call(p: Pair, f: scoped fn() -> u64) -> u64 {
+    let z = f()
+    p.a[0] + z
+}
+
+fn later() -> u64 {
+    let mut p = Pair(a:[1; 4], b: 2)
+    sum(p, bump(mut p))
+}
+
+fn sibling() -> u64 {
+    let mut p = Pair(a:[1; 4], b: 2)
+    read_after_mut(p, mut p)
+}
+
+fn callback() -> u64 {
+    let mut p = Pair(a:[1; 4], b: 2)
+    read_after_call(p, scoped fn() -> u64 {
+        p.a[0] = 7
+        0
+    })
+}
+
+fn field() -> u64 {
+    let mut o = Outer(p: Pair(a:[3; 4], b: 2), n: 10)
+    sum(o.p, o.n)
+}
+
+fn direct() -> u64 {
+    let p = Pair(a:[5; 4], b: 2)
+    sum(p, p.b * 5)
+}

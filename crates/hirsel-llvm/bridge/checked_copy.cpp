@@ -10,6 +10,8 @@
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
+#include <llvm/Transforms/Utils/Local.h>
 #include <llvm/Transforms/Utils/PromoteMemToReg.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Analysis/AssumptionCache.h>
@@ -500,6 +502,121 @@ extern "C" void hirsel_llvm_inline_loop_callbacks(void *Raw) {
         Budget -= Cost;
         Pending.append(Info.InlinedCallSites.begin(), Info.InlinedCallSites.end());
       }
+    }
+  }
+}
+
+
+// Inline the constant-argument leaf of a directly recursive function. Only
+// inspect branches on that argument. All effects, including failing prefixes,
+// stay in the cloned leaf and execute after dispatch.
+static CondBrInst *leafBranch(BasicBlock &Block, Argument &Arg, ConstantInt &Value,
+                              unsigned &Direction) {
+  auto *Branch = dyn_cast<CondBrInst>(Block.getTerminator());
+  auto *Cmp = Branch ? dyn_cast<ICmpInst>(Branch->getCondition()) : nullptr;
+  if (!Cmp || Cmp->getOperand(0) != &Arg) return nullptr;
+  auto *Rhs = dyn_cast<ConstantInt>(Cmp->getOperand(1));
+  if (!Rhs) return nullptr;
+  Direction = ICmpInst::compare(Value.getValue(), Rhs->getValue(), Cmp->getPredicate()) ? 0 : 1;
+  return Branch;
+}
+
+static bool hasSmallLeaf(Function &F, Argument &Arg, ConstantInt &Value,
+                         ArrayRef<CallInst *> Recursions) {
+  SmallPtrSet<BasicBlock *, 32> Visited;
+  SmallVector<BasicBlock *, 16> Pending{&F.getEntryBlock()};
+  unsigned Budget = 1024;
+  while (!Pending.empty()) {
+    auto *Block = Pending.pop_back_val();
+    if (!Visited.insert(Block).second) continue;
+    if (Block->size() > Budget || Block->hasAddressTaken() ||
+        llvm::any_of(*Block, [](Instruction &I) {
+          auto *Call = dyn_cast<CallBase>(&I);
+          return Call && (Call->cannotDuplicate() || Call->isConvergent());
+        }))
+      return false;
+    Budget -= Block->size();
+    unsigned Direction;
+    if (auto *Branch = leafBranch(*Block, Arg, Value, Direction))
+      Pending.push_back(Branch->getSuccessor(Direction));
+    else
+      Pending.append(succ_begin(Block), succ_end(Block));
+  }
+  return llvm::none_of(Recursions, [&](CallInst *C) { return Visited.contains(C->getParent()); });
+}
+
+static void inlineRecursiveLeaf(CallInst &Call, Function &Leaf, unsigned Index,
+                                ConstantInt &Value) {
+  IRBuilder<> B(&Call);
+  auto *Arg = B.CreateFreeze(Call.getArgOperand(Index));
+  auto *IsLeaf = B.CreateICmpEQ(Arg, &Value);
+  Instruction *LeafEnd, *RecursiveEnd;
+  SplitBlockAndInsertIfThenElse(IsLeaf, &Call, &LeafEnd, &RecursiveEnd);
+  auto *LeafCall = cast<CallInst>(Call.clone());
+  LeafCall->setCalledFunction(&Leaf);
+  LeafCall->setArgOperand(Index, &Value);
+  LeafCall->setTailCallKind(CallInst::TCK_None);
+  LeafCall->insertBefore(LeafEnd->getIterator());
+  if (!Call.getType()->isVoidTy()) {
+    auto *Result = PHINode::Create(Call.getType(), 2, "recursive.result", Call.getIterator());
+    Call.replaceAllUsesWith(Result);
+    Result->addIncoming(LeafCall, LeafEnd->getParent());
+    Result->addIncoming(&Call, RecursiveEnd->getParent());
+  }
+  Call.moveBeforePreserving(RecursiveEnd->getIterator());
+  Call.setTailCallKind(CallInst::TCK_None);
+  InlineFunctionInfo Info;
+  if (!InlineFunction(*LeafCall, Info, true).isSuccess()) {
+    LeafCall->setCalledFunction(Call.getCalledFunction());
+    LeafCall->setArgOperand(Index, Call.getArgOperand(Index));
+  }
+}
+
+extern "C" void hirsel_llvm_inline_recursive_leaves(void *Raw) {
+  auto &M = *static_cast<Module *>(Raw);
+  for (auto &F : make_early_inc_range(M)) {
+    if (F.isDeclaration() || !F.hasExactDefinition() || F.hasOptNone() || F.hasFnAttribute(Attribute::NoInline))
+      continue;
+    SmallVector<CallInst *, 4> Recursions;
+    for (auto &Use : F.uses())
+      if (auto *Call = dyn_cast<CallInst>(Use.getUser()))
+        if (Call->isCallee(&Use) && Call->getFunction() == &F)
+          Recursions.push_back(Call);
+    if (Recursions.empty() || Recursions.size() > 4 ||
+        llvm::any_of(Recursions, [](CallInst *C) {
+          return C->isMustTailCall() || C->hasFnAttr(Attribute::NoInline) ||
+                 C->cannotDuplicate() || C->hasOperandBundles();
+        }))
+      continue;
+    SmallVector<std::pair<Argument *, ConstantInt *>, 4> Candidates;
+    for (auto &Block : F) {
+      auto *Branch = dyn_cast<CondBrInst>(Block.getTerminator());
+      auto *Cmp = Branch ? dyn_cast<ICmpInst>(Branch->getCondition()) : nullptr;
+      if (!Cmp || !Cmp->isEquality()) continue;
+      auto *Arg = dyn_cast<Argument>(Cmp->getOperand(0));
+      auto *Value = dyn_cast<ConstantInt>(Cmp->getOperand(1));
+      if (Arg && Value && !llvm::is_contained(Candidates, std::make_pair(Arg, Value)))
+        Candidates.emplace_back(Arg, Value);
+    }
+    for (auto [Arg, Value] : Candidates) {
+      if (!hasSmallLeaf(F, *Arg, *Value, Recursions)) continue;
+      ValueToValueMapTy Map;
+      auto *Leaf = CloneFunction(&F, Map);
+      Leaf->setLinkage(GlobalValue::InternalLinkage);
+      Leaf->setComdat(nullptr);
+      auto &LeafArg = *Leaf->getArg(Arg->getArgNo());
+      for (auto &Block : *Leaf) {
+        unsigned Direction;
+        if (auto *Branch = leafBranch(Block, LeafArg, *Value, Direction))
+          Branch->setCondition(ConstantInt::getBool(M.getContext(), Direction == 0));
+        ConstantFoldTerminator(&Block);
+      }
+      removeUnreachableBlocks(*Leaf);
+      LeafArg.replaceAllUsesWith(Value);
+      for (auto *Call : Recursions)
+        inlineRecursiveLeaf(*Call, *Leaf, Arg->getArgNo(), *Value);
+      Leaf->eraseFromParent();
+      break;
     }
   }
 }

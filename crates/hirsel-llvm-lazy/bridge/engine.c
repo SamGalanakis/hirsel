@@ -19,6 +19,7 @@ extern void hirsel_llvm_promote_step_window(void *module);
 extern void hirsel_llvm_promote_development_slots(void *module);
 extern void hirsel_llvm_mark_loop_callbacks(void *module);
 extern void hirsel_llvm_inline_loop_callbacks(void *module);
+extern void hirsel_llvm_inline_recursive_leaves(void *module);
 extern void hirsel_llvm_guard_read_loops(void *module, void *machine);
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
@@ -652,6 +653,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         }
         if (!e) {
             hirsel_llvm_inline_loop_callbacks(module);
+            hirsel_llvm_inline_recursive_leaves(module);
             hirsel_llvm_guard_copy_loops(module, machine);
             hirsel_llvm_promote_step_window(module);
             hirsel_scalarize_aggregate_phis(module, context);

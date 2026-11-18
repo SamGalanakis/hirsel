@@ -1,0 +1,26 @@
+const FLOW_SOURCE: &str = concat!(
+    include_str!("../../../../core/front/cases/body/flow-native-pipeline.hirsel"),
+    include_str!("../../../../core/front/cases/body/flow-owner-laws.hirsel"),
+);
+const FLOW_CASES: [&str; 20] = [
+    "pipe",
+    "thermometer",
+    "zero_sized",
+    "handled_capacity",
+    "unhandled_capacity",
+    "equal_keys",
+    "frontier",
+    "failure_frontiers",
+    "closed_timing",
+    "dead_credit",
+    "per_port_credit",
+    "error_priority",
+    "seal",
+    "finish_failure",
+    "last_mark",
+    "empty_stage",
+    "forwarded_failure",
+    "advance_through_stage",
+    "copied_end",
+    "finish_drains_full_sink",
+];

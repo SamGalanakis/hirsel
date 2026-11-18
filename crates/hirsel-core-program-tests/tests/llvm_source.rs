@@ -13,6 +13,36 @@ use std::{
 };
 hirsel_guard::install!();
 include!("../../hirsel-llvm/tests/support/native.rs");
+include!("support/flow.rs");
+
+#[test]
+fn native_flow_corpus_agrees_with_the_owner_laws() {
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);
+    let mut cases: Vec<_> = FLOW_CASES
+        .iter()
+        .map(|name| Case {
+            function: names[*name],
+            args: vec![],
+            limit: 4000,
+            injection: None,
+        })
+        .collect();
+    cases.push(Case {
+        function: names["foreign_push"],
+        args: vec![],
+        limit: 4000,
+        injection: None,
+    });
+    let reports = execute(&program, &cases);
+    for (name, report) in FLOW_CASES.iter().zip(&reports) {
+        assert_eq!(report.outcome, eval::Outcome::Returned(vec![42]), "{name}");
+        assert_eq!(report.used, 0, "{name}");
+    }
+    assert_eq!(
+        reports.last().unwrap().outcome,
+        eval::Outcome::Failed(vec!["Bounds".to_owned()])
+    );
+}
 
 #[test]
 fn viewed_carrier_headers_thaw_after_success_error_and_failure() {

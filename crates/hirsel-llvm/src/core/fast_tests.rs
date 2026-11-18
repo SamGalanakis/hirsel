@@ -352,13 +352,26 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
         let name = symbol(&module, FuncId(0));
         fs::write(
             dir.join("test.c"),
-            format!("#include <stdint.h>\nextern uint8_t {name}(void*,void*,uint64_t);\nint main(void) {{ uint64_t node[2]={{UINT64_MAX,7}}; {name}(0,node,0);return 0; }}\n"),
+            format!(
+                r#"
+#include "hirsel_core_rt.h"
+extern uint8_t {name}(HirselCoreContext *, void *, uint64_t);
+int main(void) {{
+    HirselCoreContext *ctx = hirsel_core_context_new(1000);
+    uint64_t node[2] = {{UINT64_MAX, 7}};
+    {name}(ctx, node, 0);
+    hirsel_core_context_free(ctx);
+    return 0;
+}}
+"#,
+            ),
         )
         .unwrap();
         output(
             Command::new(prefix.join("bin/clang"))
                 .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
-                .args(["-std=c11", "-O0", "-fPIC", "-pie"])
+                .args(["-std=c11", "-O0", "-fPIC", "-pie", "-I"])
+                .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"))
                 .arg(dir.join("test.c"))
                 .arg(dir.join("core.o"))
                 .arg(&runtime)

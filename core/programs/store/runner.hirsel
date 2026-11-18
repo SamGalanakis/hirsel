@@ -3884,7 +3884,7 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
         } else { true }
     }
     let mut abandoned = 0u64
-    let received = std.wsock.server_with(take socket, take slot, peer, proxies, c.socket, clock, accepted, c.site, admission)
+    let received = std.wsock.server_with_site(take socket, take slot, peer, proxies, c.socket, clock, accepted, c.site, admission)
     let result: Result[(), std.wsock.Error] = match take received {
         Ok(None) => Ok(()),
         Ok(Some(take up)) => wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control), mut abandoned),

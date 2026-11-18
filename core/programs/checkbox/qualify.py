@@ -27,6 +27,13 @@ SERVER_EDITS = {
     "no_publish_to_others": ("runner", "        let has_content = next.reset",
                              "        if list.len(rows) == 0u64 && list.len(next.complete) == 0u64 { next.rows = list.new() }\n"
                              "        let has_content = next.reset"),
+    # Main projects one durable Release at a time. A Release can still group
+    # several commit keys, which must all appear in an observer's Batch.
+    "drop_row_on_coalesce": ("runner", "    let requested = wire_rows_size(live_rows)",
+                             "    if list.len(live_complete) == 0u64 && list.len(live_rows) > 1u64 && list.len(done) == 0u64 {\n"
+                             "        let _ = list.remove(mut live_rows, 0u64)\n"
+                             "    }\n"
+                             "    let requested = wire_rows_size(live_rows)"),
     "no_ip_session_limit": ("ingress", "if s.free == 0u64 { RejectedPolicy } else {",
                             "if false { RejectedPolicy } else {"),
     "no_principal_rate": ("ingress", "if s.mint_count >= c.mint_burst { false } else {", "if false { false } else {"),
@@ -40,6 +47,7 @@ MUTANT_CASES = {
     "unchecked_u32_arg": "toggle_smoke",
     "range_in_board": "toggle_no_rerun",
     "no_publish_to_others": "browser_ticks",
+    "drop_row_on_coalesce": "converge",
     "no_ip_session_limit": "session_limit_503",
     "no_principal_rate": "principal_limit_1013",
     "no_call_rate": "call_rate_overloaded",

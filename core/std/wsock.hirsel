@@ -700,10 +700,15 @@ pub fn refuse_socket(take socket: Socket, code: u16, deadline: Until) -> Result[
 /// The lease is consumed on every error path and returned with success until
 /// Hello acceptance. The accept loop acquires it before spawning session state.
 pub fn server(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64) -> Result[Upgraded, Error] waits {
-    let request = receive_request(take socket, config, clock, accepted_ns)?
-    upgrade_request(take request, take slot, peer, ingress, config, clock, scoped fn(ip: Ip) -> bool {
+    server_with(take socket, take slot, peer, ingress, config, clock, accepted_ns, scoped fn(ip: Ip) -> bool {
         true
     })
+}
+
+/// Runs the source admission policy after sanitization and before writing 101.
+pub fn server_with(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
+    let request = receive_request(take socket, config, clock, accepted_ns)?
+    upgrade_request(take request, take slot, peer, ingress, config, clock, admit)
 }
 
 pub type Asset {
@@ -762,7 +767,7 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
 
 /// Serve one request. Static responses close the connection. The source policy
 /// runs after sanitization and before writing 101.
-pub fn server_with(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
+pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
     let request = receive_request(take socket, config, clock, accepted_ns)?
     let use_upgrade = match site {
         None => true,

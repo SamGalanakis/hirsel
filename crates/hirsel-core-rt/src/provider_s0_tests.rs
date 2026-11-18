@@ -868,7 +868,10 @@ fn s0_cancel_precedes_a_later_ready_in_w() {
             assert!(join(context, task));
         }
     }
-    for body in [body::<false> as unsafe fn(*mut Context, *mut Rec), body::<true>] {
+    for body in [
+        body::<false> as unsafe fn(*mut Context, *mut Rec),
+        body::<true>,
+    ] {
         let mut rec = Rec::new(park_first, done0, never);
         run(&mut rec, false, body);
         assert_eq!(rec.count(1, Cb::Issue), 0, "a cancelled W never issues");
@@ -895,7 +898,10 @@ fn s0_cancel_precedes_a_later_ready_in_i() {
             assert!(join(context, task));
         }
     }
-    for body in [body::<false> as unsafe fn(*mut Context, *mut Rec), body::<true>] {
+    for body in [
+        body::<false> as unsafe fn(*mut Context, *mut Rec),
+        body::<true>,
+    ] {
         let mut rec = Rec::new(ready, pending_forever, done0);
         run(&mut rec, false, body);
         assert_eq!(rec.count(1, Cb::Abort(ABORT_CANCEL)), 1);

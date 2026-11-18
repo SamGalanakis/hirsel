@@ -42,7 +42,13 @@ fn owner_inboxes_and_handover_preserve_the_next_owner_event() {
     child.task_owner(1);
     let mut context = Context::with_funding(child);
     let pending = |owner| {
-        root.payer.get().domain().remote.lock().unwrap().pending_for(owner)
+        root.payer
+            .get()
+            .domain()
+            .remote
+            .lock()
+            .unwrap()
+            .pending_for(owner)
     };
     drop(Block::new(&context, Some(8), 8, 8).unwrap());
     assert!(!pending(0));
@@ -65,7 +71,13 @@ fn foreign_thread_routing_and_owner_reassignment_leave_no_stale_post() {
     child.task_owner(1);
     let context = Context::with_funding(child);
     let pending = |owner| {
-        root.payer.get().domain().remote.lock().unwrap().pending_for(owner)
+        root.payer
+            .get()
+            .domain()
+            .remote
+            .lock()
+            .unwrap()
+            .pending_for(owner)
     };
     let foreign = Foreign(vec![Block::new(&context, Some(8), 8, 8).unwrap()]);
     std::thread::spawn(move || foreign.release())
@@ -308,7 +320,10 @@ fn handover_order(order: HandoverOrder) -> (u64, Vec<crate::tasks::Event>) {
                 None
             };
             let held = Block::new(&*context, Some((*context).available()), 1, 8).unwrap();
-            let share = matches!(order, HandoverOrder::BeforeShare | HandoverOrder::AfterShare);
+            let share = matches!(
+                order,
+                HandoverOrder::BeforeShare | HandoverOrder::AfterShare
+            );
             let after = matches!(order, HandoverOrder::AfterCheck | HandoverOrder::AfterShare);
             let commit = || {
                 if share {
@@ -391,7 +406,10 @@ fn handover_is_visible_at_the_next_event_before_the_child_ends() {
 fn private_arc_share_folds_only_credits_posted_before_it() {
     use crate::tasks::{ARC_SHARE, CAPACITY, REFUND, SPAWN};
     for (order, want) in [
-        (HandoverOrder::BeforeShare, vec![(REFUND, 8), (ARC_SHARE, 2)]),
+        (
+            HandoverOrder::BeforeShare,
+            vec![(REFUND, 8), (ARC_SHARE, 2)],
+        ),
         (
             HandoverOrder::AfterShare,
             vec![(ARC_SHARE, 2), (REFUND, 8), (CAPACITY, 0)],
@@ -399,7 +417,11 @@ fn private_arc_share_folds_only_credits_posted_before_it() {
     ] {
         let (paid, events) = handover_order(order);
         assert_eq!(paid, 1);
-        let child = events.iter().find(|event| event.kind == SPAWN).unwrap().object;
+        let child = events
+            .iter()
+            .find(|event| event.kind == SPAWN)
+            .unwrap()
+            .object;
         let prefix: Vec<_> = events
             .iter()
             .filter(|event| {

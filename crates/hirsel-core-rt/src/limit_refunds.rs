@@ -243,6 +243,8 @@ impl Remote {
     }
     #[cfg(test)]
     pub(super) fn pending_for(&self, owner: u64) -> bool {
-        self.inboxes.get(&owner).is_some_and(|inbox| inbox.pending())
+        self.inboxes
+            .get(&owner)
+            .is_some_and(|inbox| inbox.pending())
     }
 }

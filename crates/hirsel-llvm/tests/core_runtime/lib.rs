@@ -221,7 +221,6 @@ pub unsafe extern "C" fn __wrap_hirsel_core_os_run_with_sources(
     status
 }
 
-
 /// Run a linked native fixture with T1's last-runnable schedule.
 /// # Safety
 /// The runner and entry obey the process ABI. The configuration stays live

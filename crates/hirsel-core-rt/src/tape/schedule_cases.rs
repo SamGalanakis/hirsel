@@ -328,17 +328,31 @@ pub(super) fn run() {
             let (header, all) = frames(bytes);
             // Each of the two W→I operations has one wake. Each Pending
             // re-arm disappears, leaving one DONE per issued task.
-            let wakes: Vec<_> = all.iter().filter_map(|frame| match frame {
-                Frame::Wake { task, .. } => Some(*task),
-                _ => None,
-            }).collect();
-            let dones: BTreeSet<_> = all.iter().filter_map(|frame| match frame {
-                Frame::Done { task, .. } => Some(*task),
-                _ => None,
-            }).collect();
+            let wakes: Vec<_> = all
+                .iter()
+                .filter_map(|frame| match frame {
+                    Frame::Wake { task, .. } => Some(*task),
+                    _ => None,
+                })
+                .collect();
+            let dones: BTreeSet<_> = all
+                .iter()
+                .filter_map(|frame| match frame {
+                    Frame::Done { task, .. } => Some(*task),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(wakes.len(), 2);
-            assert_eq!(wakes.into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([1, 2]));
-            assert_eq!(all.iter().filter(|frame| matches!(frame, Frame::Done { .. })).count(), usize::from(pending) * 2);
+            assert_eq!(
+                wakes.into_iter().collect::<BTreeSet<_>>(),
+                BTreeSet::from([1, 2])
+            );
+            assert_eq!(
+                all.iter()
+                    .filter(|frame| matches!(frame, Frame::Done { .. }))
+                    .count(),
+                usize::from(pending) * 2
+            );
             if pending {
                 assert_eq!(dones, BTreeSet::from([1, 2]));
             }

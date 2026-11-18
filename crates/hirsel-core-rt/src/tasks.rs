@@ -656,7 +656,10 @@ impl Scheduler {
                         }
                         Turn::Wake(_)
                             if (*target).state == State::Provider
-                                && matches!((*(*target).operation).state, OperationState::Waiting) =>
+                                && matches!(
+                                    (*(*target).operation).state,
+                                    OperationState::Waiting
+                                ) =>
                         {
                             group.consume_input();
                             group.cancel_wait((*(*target).operation).request);
@@ -664,7 +667,10 @@ impl Scheduler {
                         }
                         Turn::Done(_)
                             if (*target).state == State::Provider
-                                && matches!((*(*target).operation).state, OperationState::Issued { .. }) =>
+                                && matches!(
+                                    (*(*target).operation).state,
+                                    OperationState::Issued { .. }
+                                ) =>
                         {
                             self.wake_operation(target, Wake::Ready);
                         }
@@ -680,7 +686,10 @@ impl Scheduler {
                         if (*target).group.is_some_and(|g| g.same(group))
                             && (*target).state == State::Provider
                         {
-                            self.runnable(target, OperationState::ReadyToDeliver(Some(crate::tape::REFUSED)));
+                            self.runnable(
+                                target,
+                                OperationState::ReadyToDeliver(Some(crate::tape::REFUSED)),
+                            );
                         }
                         target = (*target).all;
                     }
@@ -859,7 +868,11 @@ impl Scheduler {
                             self.stepped(task, step);
                         }
                         Wake::Cancel | Wake::Timer => {
-                            let reason = if wake == Wake::Cancel { ABORT_CANCEL } else { ABORT_DEADLINE };
+                            let reason = if wake == Wake::Cancel {
+                                ABORT_CANCEL
+                            } else {
+                                ABORT_DEADLINE
+                            };
                             let outcome = (p.abort)(p.state, request, token, reason);
                             self.runnable(task, OperationState::ReadyToDeliver(Some(outcome)));
                         }
@@ -876,11 +889,15 @@ impl Scheduler {
         // SAFETY: as wake_operation.
         unsafe {
             match step.kind {
-                STEP_DONE => self.runnable(task, OperationState::ReadyToDeliver(Some(step.outcome))),
+                STEP_DONE => {
+                    self.runnable(task, OperationState::ReadyToDeliver(Some(step.outcome)))
+                }
                 STEP_PENDING => {
                     self.parked.insert((*(*task).operation).token, task);
                     self.remove_timer(task);
-                    (*(*task).operation).state = OperationState::Issued { deadline: step.deadline_ns };
+                    (*(*task).operation).state = OperationState::Issued {
+                        deadline: step.deadline_ns,
+                    };
                     if step.deadline_ns != 0 {
                         self.insert_timer(task, step.deadline_ns);
                     }
@@ -896,7 +913,8 @@ impl Scheduler {
         // SAFETY: as wake_operation.
         unsafe {
             let op = (*task).operation;
-            if (*op).observes_cancel && (*(*task).context).cancel_requested.load(Ordering::Acquire) {
+            if (*op).observes_cancel && (*(*task).context).cancel_requested.load(Ordering::Acquire)
+            {
                 self.wake_operation(task, Wake::Cancel);
             }
             if let OperationState::Issued { deadline } = (*op).state
@@ -925,7 +943,9 @@ pub(crate) struct Operation {
 enum OperationState {
     Waiting,
     ReadyToIssue,
-    Issued { deadline: u64 },
+    Issued {
+        deadline: u64,
+    },
     /// A missing outcome is the unissued operation's cancellation.
     ReadyToDeliver(Option<crate::provider::Outcome>),
 }
@@ -1302,7 +1322,9 @@ unsafe fn parked(
             let step = match step.take() {
                 Some(step) => step,
                 None => match op.state {
-                    OperationState::ReadyToIssue => (op.provider.issue)(op.provider.state, request, token),
+                    OperationState::ReadyToIssue => {
+                        (op.provider.issue)(op.provider.state, request, token)
+                    }
                     OperationState::ReadyToDeliver(outcome) => break outcome,
                     _ => unreachable!("resumed provider operation has no next action"),
                 },

@@ -123,7 +123,8 @@ pub async fn run(url: &str, wants: &[Want], config: Config) -> Result<Value> {
         match arrivals[owner].try_send(job) {
             Ok(()) => positions[owner] += 1,
             Err(mpsc::error::TrySendError::Full(_)) => missed += 1,
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err("load client stopped".into()),
+            // A caller ends only on an error; joining below reports that error.
+            Err(mpsc::error::TrySendError::Closed(_)) => break,
         }
     }
     drop(arrivals);

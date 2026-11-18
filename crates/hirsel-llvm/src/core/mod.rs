@@ -1366,8 +1366,12 @@ impl FunctionEmitter<'_> {
             inbounds,
         })
     }
-    /// `getelementptr i8, ptr p, i64 n`.
+    /// Address a byte within a place. At offset zero the base is the address.
     fn offset(&mut self, p: &Value, n: impl Into<i128>) -> Value {
+        let n = n.into();
+        if n == 0 {
+            return p.clone();
+        }
         self.gep(&Type::I8, p, &int(n), false)
     }
     fn offset_by(&mut self, p: &Value, n: &Value) -> Value {

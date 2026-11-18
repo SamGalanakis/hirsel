@@ -3390,6 +3390,7 @@ pub type Service[C: send]: send {
     context: C,
     step: fn(mut C, mut WireWork, take ServiceInput) -> Result[Option[Frame], u16],
     ready: fn(C) -> bool,
+    authenticate: fn(mut C, take Option[ingress.Principal]) -> Result[(), u16],
     finish: fn(mut C) -> Option[PubIn],
     check: fn(C, Frame) -> Option[u16]
 }
@@ -3410,7 +3411,7 @@ pub fn session_bytes(c: WireConfig) -> u64 {
     let units = 1u64 + c.q
     let channels = 64u64 + units * 450u64 + 64u64 + 24u64 + 64u64
     let outcomes = wire_outcome_reserve(c)
-    reader_bytes() + writer_bytes() + 576u64 + channels + outcomes + c.budget + c.n_service + c.n_place + 32768u64 + 4384u64 + wire_round(3u64 * units * 100u64)
+    reader_bytes() + writer_bytes() + 576u64 + channels + outcomes + c.budget + c.n_service + 32768u64 + 4384u64 + wire_round(3u64 * units * 100u64)
 }
 
 pub opaque type WireEvent: send { e: WireInput }
@@ -3421,8 +3422,19 @@ type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | Authenticated(Op
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(std.websocket.Control) | Ponged | PeerClosed(std.websocket.Control)
 type WireParsed: send { reader: std.wsock.Reader, packet: Result[Option[WirePacket], std.wsock.Error] }
-type WireAllocation: send = Decode(std.wsock.Reader, u64, Sender[WireParsed]) | Encode(Frame, Sender[Result[Bytes, std.wsock.Error]])
-type WirePool: send { inbox: Receiver[WireAllocation], config: std.wsock.Config, clock: Clock }
+type WireAllocation[C: send]: send = Decode(std.wsock.Reader, u64, Sender[WireParsed]) | Encode(Frame, Sender[Result[Bytes, std.wsock.Error]]) | Authenticate(Box[Service[C]], Option[ingress.Principal], Sender[Option[AuthenticatedState[C]]])
+type WirePool[C: send]: send { inbox: Receiver[WireAllocation[C]], config: std.wsock.Config, clock: Clock, tasks: Tasks, auth_bytes: u64 }
+type AuthenticatedState[C: send]: send { service: Box[Service[C]], status: Result[(), u16] }
+type AuthWork[C: send]: send { service: Box[Service[C]], principal: Option[ingress.Principal] }
+
+fn wire_auth_job[C: send](take job: AuthWork[C]) -> AuthenticatedState[C] {
+    let AuthWork(service: take owned, principal: take principal) = take job
+    let mut session = take owned
+    let authenticate = session.authenticate
+    let status = authenticate(mut session.context, take principal)
+    AuthenticatedState(service: take session, status: status)
+}
+
 
 fn wire_parse(mut reader: std.wsock.Reader, at: u64, clock: Clock) -> Result[Option[WirePacket], std.wsock.Error] {
     match std.wsock.decode_buffered(mut reader)? {
@@ -3446,8 +3458,8 @@ fn wire_parse(mut reader: std.wsock.Reader, at: u64, clock: Clock) -> Result[Opt
     }
 }
 
-fn wire_pool(take pool: WirePool) -> () waits {
-    let WirePool(inbox: take inbox, config: config, clock: clock) = take pool
+fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
+    let WirePool(inbox: take inbox, config: config, clock: clock, tasks: tasks, auth_bytes: auth_bytes) = take pool
     let mut encoder = match std.wsock.outbound(Server, config, None) { Ok(out) => out, Error(_) => return }
     while let Ok(take work) = channel.receive(inbox) {
         match take work {
@@ -3463,21 +3475,38 @@ fn wire_pool(take pool: WirePool) -> () waits {
                 }
                 let _ = channel.try_send(to, take encoded_frame)
             },
+            Authenticate(take owned, take principal, take to) => {
+                let run: fn(take AuthWork[C]) -> AuthenticatedState[C] waits = wire_auth_job
+                let job = AuthWork(service: take owned, principal: take principal)
+                let returned = match task.spawn(tasks, bytes auth_bytes, take job, run) {
+                    Ok(take running) => match task.join(take running) {
+                        Ok(take completed) => Some(take completed),
+                        Error(_) => None,
+                    },
+                    Error((_, AuthWork(service: take back, principal: _))) => Some(AuthenticatedState(service: take back, status: Error(1013u16))),
+                }
+                let _ = channel.try_send(to, take returned)
+            },
         }
     }
 }
 
-fn start_wire_pool(tasks: Tasks, c: WireConfig, clock: Clock, n: u64) -> Result[(Sender[WireAllocation], Task[()]), Capacity] {
-    let allocation_inbox: Result[(Sender[WireAllocation], Receiver[WireAllocation]), Capacity] = channel.new(1024u64)
+fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64) -> Result[(Sender[WireAllocation[C]], Task[()]), Capacity] {
+    let allocation_inbox: Result[(Sender[WireAllocation[C]], Receiver[WireAllocation[C]]), Capacity] = channel.new(1024u64)
     let (to, inbox) = match take allocation_inbox { Ok(take pair) => take pair, Error(cap) => return Error(cap) }
-    let pool = WirePool(inbox: take inbox, config: c.socket, clock: clock)
-    match task.spawn(tasks, bytes n, take pool, wire_pool) {
+    // Registry construction may reserve n_place. Hello key growth is bounded
+    // by the wire payload, rounded identities and the list of Bytes handles.
+    let auth_bytes = int.saturating_add(c.n_place, 6u64 * c.socket.max_frame + 32768u64)
+    let ceiling = if auth_bytes < 16777216u64 { auth_bytes } else { 16777216u64 }
+    let pool = WirePool(inbox: take inbox, config: c.socket, clock: clock, tasks: tasks, auth_bytes: ceiling)
+    let run: fn(take WirePool[C]) -> () waits = wire_pool
+    match task.spawn(tasks, bytes n, take pool, run) {
         Ok(take handle) => Ok((take to, take handle)),
         Error((cap, _)) => Error(cap),
     }
 }
 
-fn wire_pack(pool: Sender[WireAllocation], to: Sender[Result[Bytes, std.wsock.Error]], inbox: Receiver[Result[Bytes, std.wsock.Error]], take frame: Frame) -> Result[Bytes, std.wsock.Error] waits {
+fn wire_pack[C: send](pool: Sender[WireAllocation[C]], to: Sender[Result[Bytes, std.wsock.Error]], inbox: Receiver[Result[Bytes, std.wsock.Error]], take frame: Frame) -> Result[Bytes, std.wsock.Error] waits {
     if let Error(_) = channel.try_send(pool, Encode(take frame, channel.sender(to))) { return Error(Protocol(1013u16)) }
     match channel.receive(inbox) {
         Ok(Error(Allocation(_))) => Error(Protocol(1013u16)),
@@ -3487,7 +3516,7 @@ fn wire_pack(pool: Sender[WireAllocation], to: Sender[Result[Bytes, std.wsock.Er
 }
 
 // Read credits cover the inbox and a reader blocked on handing off a packet.
-type WireRead: send { reader: std.wsock.Reader, to: Sender[WireEvent], credits: Receiver[()], clock: Clock, config: std.wsock.Config, pool: Sender[WireAllocation] }
+type WireRead[C: send]: send { reader: std.wsock.Reader, to: Sender[WireEvent], credits: Receiver[()], clock: Clock, config: std.wsock.Config, pool: Sender[WireAllocation[C]] }
 type WireWrite: send { writer: std.wsock.Writer, from: Receiver[Bytes], to: Sender[WireEvent], out: std.wsock.Outbound, clock: Clock, config: std.wsock.Config }
 
 fn wire_return_reader(to: Sender[WireEvent], control: std.websocket.Control, take input: std.wsock.Reader) -> () waits {
@@ -3496,7 +3525,7 @@ fn wire_return_reader(to: Sender[WireEvent], control: std.websocket.Control, tak
     let _ = channel.send(to, wire_event(ReadClosed(control, take reader)))
 }
 
-fn wire_read(take x: WireRead) -> () waits {
+fn wire_read[C: send](take x: WireRead[C]) -> () waits {
     let WireRead(reader: take initial, to: take to, credits: take credits, clock: clock, config: config, pool: take pool) = take x
     let parsed: Result[(Sender[WireParsed], Receiver[WireParsed]), Capacity] = channel.new(1u64)
     let (reply, packets) = match take parsed { Ok(take pair) => take pair, Error(_) => { wire_return_reader(to, wire_close_control(1013u16), take initial); return } }
@@ -3651,12 +3680,13 @@ fn wire_close_payload(code: u16) -> Bytes {
     b
 }
 
-type WireOwner[C: send]: send { upgraded: std.wsock.Upgraded, service: Service[C], publisher: Sender[PubIn], config: WireConfig, clock: Clock, tasks: Tasks, managed: Option[OwnerControl] }
+type WireOwner[C: send]: send { upgraded: std.wsock.Upgraded, service: Box[Service[C]], publisher: Sender[PubIn], config: WireConfig, clock: Clock, tasks: Tasks, managed: Option[OwnerControl] }
 
 // Serves an already upgraded connection. W3c constructs the service at Hello;
 // its sender joins the one publisher inbox lazily at the first Subscribe.
 pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], to_publisher: Sender[PubIn], c: WireConfig, clock: Clock) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
-    let x = WireOwner(upgraded: take upgraded, service: take service, publisher: channel.sender(to_publisher), config: c, clock: clock, tasks: tasks, managed: None)
+    let boxed = match box.new(take service) { Ok(take accepted) => take accepted, Error((cap, _)) => return Error(cap) }
+    let x = WireOwner(upgraded: take upgraded, service: take boxed, publisher: channel.sender(to_publisher), config: c, clock: clock, tasks: tasks, managed: None)
     let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_connection_owner
     let allowance = if wire_configuration(c) { session_bytes(c) + 16777216u64 + 524288u64 } else { 0u64 }
     match task.spawn(tasks, bytes allowance, take x, run) {
@@ -3670,7 +3700,8 @@ fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.
     let mut abandoned = 0u64
     let c = x.config
     let pool_bytes = if c.n_pool < 16777216u64 { c.n_pool } else { 16777216u64 }
-    let (to, take holding) = match start_wire_pool(x.tasks, c, x.clock, pool_bytes) {
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(x.tasks, c, x.clock, pool_bytes)
+    let (to, take holding) = match take allocated {
         Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
     }
     let served = wire_owner(take x, to, mut abandoned)
@@ -3678,7 +3709,7 @@ fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.
     served
 }
 
-fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut abandoned: u64) -> Result[(), std.wsock.Error] waits {
+fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mut abandoned: u64) -> Result[(), std.wsock.Error] waits {
     let WireOwner(upgraded: take up, service: take initial_service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take managed) = take x
     let std.wsock.Upgraded(reader: take reader, writer: take writer, source: source, timers: timers, pending: take pending) = take up
     let new_events: Result[(Sender[WireEvent], Receiver[WireEvent]), Capacity] = channel.new(1u64 + c.q)
@@ -3703,10 +3734,13 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
     }
     let results: Result[(Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]), Capacity] = channel.new(1u64)
     let (encoded_to, encoded_from) = match take results { Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)) }
+    let auth_results: Result[(Sender[Option[AuthenticatedState[C]]], Receiver[Option[AuthenticatedState[C]]]), Capacity] = channel.new(1u64)
+    let (auth_to, auth_from) = match take auth_results { Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)) }
     let out = std.wsock.outbound(Server, c.socket, None)?
     let mut encoder = std.wsock.outbound(Server, c.socket, None)?
     let reading = WireRead(reader: take reader, to: channel.sender(to), credits: take credits, clock: clock, config: c.socket, pool: channel.sender(pool))
-    let mut rh = match task.spawn(tasks, bytes reader_bytes(), take reading, wire_read) {
+    let read_task: fn(take WireRead[C]) -> () waits = wire_read
+    let mut rh = match task.spawn(tasks, bytes reader_bytes(), take reading, read_task) {
         Ok(take h) => take h, Error((cap, _)) => return Error(Allocation(cap)),
     }
     let writing = WireWrite(writer: take writer, from: take writes, to: channel.sender(to), out: out, clock: clock, config: c.socket)
@@ -3719,9 +3753,10 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
         },
     }
     let mut service = take initial_service
+    let apply_input = service.step
     let mut work = wire_work()
     if let Some(life) = managed { work.drain = Some(latest.handle(life.drain)) }
-    if let Error(code) = (service.step)(mut service.context, mut work, WAttach(source, channel.sender(to), channel.sender(pub_to))) { wire_join(take rh, take wh); return Error(Protocol(code)) }
+    if let Error(code) = apply_input(mut service.context, mut work, WAttach(source, channel.sender(to), channel.sender(pub_to))) { wire_join(take rh, take wh); return Error(Protocol(code)) }
     let hello_at = std.wsock.hello_deadline(timers)
     let mut hello_seen = false
     let mut hello_alarm: Option[Task[()]] = None
@@ -3754,11 +3789,11 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
                 Error(Empty) => { run = 0u64; match channel.receive(inbox) { Ok(take e) => take e, Error(_) => break Ok(()) } },
                 _ => break Ok(()),
             }
-            if wire_taken(mut run, 1u64 + c.q) { let _ = (service.step)(mut service.context, mut work, WDrained) }
+            if wire_taken(mut run, 1u64 + c.q) { let _ = apply_input(mut service.context, mut work, WDrained) }
             take e
         }
         if wire_cut(work, clock) {
-            let _ = (service.step)(mut service.context, mut work, WForce)
+            let _ = apply_input(mut service.context, mut work, WForce)
             abandoned = work.abandoned
             expired = true
             break Ok(())
@@ -3766,7 +3801,7 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
         if let Some(life) = managed {
             if let Some(window) = drain_window(latest.read(life.drain)) {
                 if host.mono_ns(clock) >= window.admission && (match work.deadline { None => true, _ => false }) {
-                    let _ = (service.step)(mut service.context, mut work, WClose(window.deadline))
+                    let _ = apply_input(mut service.context, mut work, WClose(window.deadline))
                 }
             }
         }
@@ -3786,7 +3821,7 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
                     continue
                 }
                 if let Hello(_, _) = f { let _ = replace(mut hello_alarm, None) }
-                let handled: Result[Option[Frame], u16] = match checked { Some(code) => Error(code), None => (service.step)(mut service.context, mut work, WClient(take f, at)) }
+                let handled: Result[Option[Frame], u16] = match checked { Some(code) => Error(code), None => apply_input(mut service.context, mut work, WClient(take f, at)) }
                 if (service.ready)(service.context) { let _ = channel.try_send(credit, ()) } else { held_credit = true }
                 match take handled {
                     Ok(take next) => take next,
@@ -3801,11 +3836,27 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
                     },
                 }
             },
-            FromRunner(take e) => match (service.step)(mut service.context, mut work, WRunner(take e)) {
+            FromRunner(take e) => match apply_input(mut service.context, mut work, WRunner(take e)) {
                 Ok(take f) => take f, Error(code) => { control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code)))); closing = true; None },
             },
-            Authenticated(take p) => match (service.step)(mut service.context, mut work, WAuthenticated(take p)) {
-                Ok(take f) => take f, Error(code) => { control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code)))); closing = true; None },
+            Authenticated(take p) => {
+                let _ = replace(mut work.asking, None)
+                let reply = match channel.try_send(pool, Authenticate(take service, take p, channel.sender(auth_to))) {
+                    Ok(()) => match channel.receive(auth_from) {
+                        Ok(Some(take returned)) => take returned,
+                        _ => { wire_join(take rh, take wh); return Error(Protocol(1013u16)) },
+                    },
+                    Error(Full(Authenticate(take back, _, _))) => AuthenticatedState(service: take back, status: Error(1013u16)),
+                    Error(Closed(Authenticate(take back, _, _))) => AuthenticatedState(service: take back, status: Error(1013u16)),
+                    _ => { wire_join(take rh, take wh); return Error(Protocol(1013u16)) },
+                }
+                let AuthenticatedState(service: take restored, status: status) = take reply
+                service = take restored
+                if let Error(code) = status {
+                    control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code))))
+                    closing = true
+                }
+                None
             },
             JoinReady => None,
             DrainWake => None,
@@ -3815,7 +3866,7 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
                 closing = true
                 None
             },
-            Rate(allowed) => match (service.step)(mut service.context, mut work, WRate(allowed)) {
+            Rate(allowed) => match apply_input(mut service.context, mut work, WRate(allowed)) {
                 Ok(take f) => take f, Error(code) => { control = Some(result.unwrap(std.wsock.encode(mut encoder, true, 8u8, wire_close_payload(code)))); closing = true; None },
             },
             Published(take f) => { if closing { continue }; Some(take f) },
@@ -3867,7 +3918,7 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
             Ended(_) => break Ok(()),
         }
         if wire_cut(work, clock) {
-            let _ = (service.step)(mut service.context, mut work, WForce)
+            let _ = apply_input(mut service.context, mut work, WForce)
             abandoned = work.abandoned
             expired = true
             break Ok(())
@@ -3879,7 +3930,7 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
             }
             let writable = wire_ready(busy) && !write_closed && none(control)
                 && (list.len(work.output) == 0u64 || !work.output[0u64].external)
-            match (service.step)(mut service.context, mut work, WPoll(writable)) {
+            match apply_input(mut service.context, mut work, WPoll(writable)) {
                 Ok(Some(take f)) => {
                     if writable { outgoing = Some(take f) }
                     else if let Error(e) = wire_queue_external(mut work, c, take f) { break Error(e) }
@@ -3921,7 +3972,7 @@ fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation], mut a
                     Error(e) => break Error(e),
                 }
                 if wire_cut(work, clock) {
-                    let _ = (service.step)(mut service.context, mut work, WForce)
+                    let _ = apply_input(mut service.context, mut work, WForce)
                     abandoned = work.abandoned
                     expired = true
                     break Ok(())
@@ -3998,8 +4049,8 @@ fn wire_finish_owner[C: send](mut service: Service[C], pub_to: Sender[PubIn]) {
 // client cannot prevent the listener accepting another connection.
 type WireAccept[C: send]: send {
     socket: Socket, peer: Ip, accepted: u64, slot: std.wsock.Pending, proxies: List[std.wsock.Prefix],
-    policy: Option[ingress.Ingress], service: Service[C], publisher: Sender[PubIn], c: WireConfig, clock: Clock, tasks: Tasks,
-    control: Option[OwnerControl], completion: OwnerCompletion, allocation: Sender[WireAllocation],
+    policy: Option[ingress.Ingress], service: Box[Service[C]], publisher: Sender[PubIn], c: WireConfig, clock: Clock, tasks: Tasks,
+    control: Option[OwnerControl], completion: OwnerCompletion, allocation: Sender[WireAllocation[C]],
 }
 
 fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] waits {
@@ -4110,7 +4161,8 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
     let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock, policy: take policy,
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to) = take seed
     let pool = std.wsock.pending(config.socket)?
-    let (allocation, allocation_task) = match start_wire_pool(tasks, config, clock, config.n_pool) {
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, config.n_pool)
+    let (allocation, allocation_task) = match take allocated {
         Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
     }
     let credit: Result[(Sender[()], Receiver[()]), Capacity] = channel.new(1u64)
@@ -4180,12 +4232,13 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                 let prefixes = match take copied { Ok(take prefixes) => take prefixes, Error(_) => { start_socket_refusal(tasks, take socket, clock, at, config, to, id, mut refusing); continue } }
                 let made = bound bytes config.n_service { make() }
                 let service = match take made { Ok(take instance) => take instance, Error(_) => { start_socket_refusal(tasks, take socket, clock, at, config, to, id, mut refusing); continue } }
+                let boxed = match box.new(take service) { Ok(take held) => take held, Error(_) => { start_socket_refusal(tasks, take socket, clock, at, config, to, id, mut refusing); continue } }
                 let completion = match OwnerCompletion(to: channel.sender(to), id: id, abandoned: 0u64) { Ok(take completion) => take completion, Error(_) => continue }
                 let control: Option[OwnerControl] = match lifecycle {
                     Some(life) => Some(OwnerControl(id: id, to: channel.sender(to), drain: latest.handle(life.window))), _ => None,
                 }
                 let job = WireAccept(socket: take socket, peer: peer, accepted: at, slot: take slot, proxies: take prefixes,
-                    policy: match policy { Some(rules) => Some(ingress.share(rules)), _ => None }, service: take service, publisher: channel.sender(pub_to), c: config,
+                    policy: match policy { Some(rules) => Some(ingress.share(rules)), _ => None }, service: take boxed, publisher: channel.sender(pub_to), c: config,
                     clock: clock, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation))
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
                 let reserve = session_bytes(config) + if let Some(_) = lifecycle { 4096u64 } else { 0u64 }
@@ -4382,19 +4435,19 @@ fn wire_service_with_head[G: send, H: send](take reg: Registry[G, H], policy: in
         source: V4(0u32), me: None, publisher: None, caller: None, welcome_token: None, phase: 0u8, wants: list.new(), entries: list.new(), placing: 0u64,
         asking: false, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
         joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false)
-    Service(context: take context, step: wire_step, ready: wire_can_read, finish: wire_finish, check: wire_check_live)
+    Service(context: take context, step: wire_step, ready: wire_can_read, authenticate: wire_authenticate, finish: wire_finish, check: wire_check_live)
 }
 
 fn wire_can_read[G: send, H: send](s: WireSession[G, H]) -> bool {
     (s.phase == 0u8 || s.phase == 3u8) && !s.asking && match s.joining { None => true, _ => false }
 }
 
-fn wire_key(w: Want) -> Bytes {
-    let mut key: Bytes = result.unwrap(list.with_capacity(list.len(w.identity) + 16u64))
-    result.unwrap(list.append(mut key, w.identity))
-    result.unwrap(std.codec.put_u64(w.args_fp, mut key))
-    result.unwrap(std.codec.put_u64(w.result_fp, mut key))
-    key
+fn wire_key(w: Want) -> Result[Bytes, Capacity] {
+    let mut key: Bytes = list.with_capacity(list.len(w.identity) + 16u64)?
+    list.append(mut key, w.identity)?
+    std.codec.put_u64(w.args_fp, mut key)?
+    std.codec.put_u64(w.result_fp, mut key)?
+    Ok(take key)
 }
 
 fn wire_stream(caller: Caller, number: u32) -> Bytes {
@@ -4905,6 +4958,26 @@ fn wire_expired[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, 
     }
 }
 
+fn wire_authenticate[G: send, H: send](mut s: WireSession[G, H], take principal: Option[ingress.Principal]) -> Result[(), u16] {
+    s.asking = false
+    let (take caller, take token) = match take principal {
+        Some(take p) => ingress.welcome(take p),
+        None => return Error(1013u16),
+    }
+    s.caller = Some(take caller)
+    s.welcome_token = Some(take token)
+    if let Some(place) = s.place {
+        s.registry = match placed(place, s.config.n_place) { Ok(take r) => take r, Error(_) => return Error(1013u16) }
+    }
+    let wanted = replace(mut s.wants, list.new())
+    for take want in take wanted {
+        let key = match wire_key(want) { Ok(take key) => take key, Error(_) => return Error(1013u16) }
+        if let Error(_) = list.push(mut s.entries, take key) { return Error(1013u16) }
+    }
+    s.phase = 2u8
+    Ok(())
+}
+
 fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
     match take input {
         WAttach(source, take me, take pub_to) => {
@@ -4943,17 +5016,7 @@ fn wire_step[G: send, H: send](mut s: WireSession[G, H], mut work: WireWork, tak
         },
         WAuthenticated(take principal) => {
             let _ = replace(mut work.asking, None)
-            s.asking = false
-            let (take caller, take token) = match take principal {
-                Some(take p) => ingress.welcome(take p),
-                None => return Error(1013u16),
-            }
-            s.caller = Some(take caller)
-            s.welcome_token = Some(take token)
-            if let Some(place) = s.place { s.registry = match placed(place, s.config.n_place) { Ok(take r) => take r, Error(_) => return Error(1013u16) } }
-            let wanted = replace(mut s.wants, list.new())
-            for take want in take wanted { result.unwrap(list.push(mut s.entries, wire_key(want))) }
-            s.phase = 2u8
+            wire_authenticate(mut s, take principal)?
         },
         WRate(allowed) => {
             let _ = replace(mut work.asking, None)

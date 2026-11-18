@@ -140,10 +140,15 @@ enum State {
 }
 /// The first byte sends Arc count operations through the runtime commit path:
 /// taped replay, and a pool task whose events something records. Another
-/// pool task counts inline, and its event hooks skip what nothing observes.
+/// task counts inline. Its emitted code skips the init/share/release hooks
+/// while the second byte is clear and its payer's domain has no posted credit.
 #[repr(C)]
 pub struct Task {
     pub(crate) arc_runtime: bool,
+    /// Frozen at TASK_ARC_HOOKS: the inline init/share/release hooks must run
+    /// whatever the payer's credit (`Scheduler::arc_hooks`). Every writer of
+    /// an input recomputes it; the constructors start it set.
+    pub(crate) arc_hooks: bool,
     cancel: AtomicBool,
     replay: bool,
     latest_pair: bool,
@@ -1002,6 +1007,7 @@ struct Scheduler {
 }
 const _: () =
     assert!(std::mem::offset_of!(Task, arc_runtime) == crate::abi_layout::TASK_ARC_REPLAY);
+const _: () = assert!(std::mem::offset_of!(Task, arc_hooks) == crate::abi_layout::TASK_ARC_HOOKS);
 
 #[cfg(test)]
 pub(crate) unsafe fn task_stack(task: *const Task) -> Option<usize> {
@@ -1032,6 +1038,17 @@ impl Scheduler {
             return true;
         }
         self.provider.event.is_some()
+    }
+
+    /// Whether `task`'s inline Arc count events must take their hook even
+    /// with no posted credit: its tape records them, an open LATEST pair
+    /// closes on them, something else observes them, or a serial run with
+    /// sockets polls the network at every event.
+    fn arc_hooks(&self, task: &Task) -> bool {
+        task.group.is_some()
+            || task.latest_pair
+            || self.arc_observed()
+            || (self.pool.is_none() && !self.net.is_null())
     }
 
     fn id(&mut self) -> u64 {
@@ -2502,7 +2519,10 @@ unsafe fn record_folded(task_pointer: *mut Task, kind: u8, object: u64, value: u
             }
             group.event(|| live_index(task_pointer, group), kind == END);
         }
-        (*task_pointer).latest_pair = opens_pair;
+        if (*task_pointer).latest_pair != opens_pair {
+            (*task_pointer).latest_pair = opens_pair;
+            (*task_pointer).arc_hooks = (*(*task_pointer).run).arc_hooks(&*task_pointer);
+        }
     }
 }
 /// Publish the accounting change before a scheduler poll can switch tasks.
@@ -2538,12 +2558,8 @@ pub(crate) unsafe fn arc_unobserved(context: *const Context) -> bool {
     // task alone writes its tape and pair state while it runs.
     unsafe {
         let task = &*((*context).events as *const Task);
-        let run = &*task.run;
         !task.arc_runtime
-            && task.group.is_none()
-            && !task.latest_pair
-            && !run.arc_observed()
-            && (run.pool.is_some() || run.net.is_null())
+            && !task.arc_hooks
             && !(*(*context).current.pending_word()).load(Ordering::Acquire)
     }
 }
@@ -2712,8 +2728,20 @@ pub(crate) fn attach_net(
     } else {
         // SAFETY: the callback/task pins the run and its shared registry.
         unsafe {
-            (*(*task).run).net = sockets;
-            (*(*task).run).readies.clone()
+            let run = &mut *(*task).run;
+            run.net = sockets;
+            // Sockets change only a serial run's hooks, and its tasks all run
+            // on this thread; pool tasks keep their byte and are not touched.
+            let mut at = if run.pool.is_none() {
+                run.all
+            } else {
+                ptr::null_mut()
+            };
+            while !at.is_null() {
+                (*at).arc_hooks = run.arc_hooks(&*at);
+                at = (*at).all;
+            }
+            run.readies.clone()
         }
     };
     *readies.net.lock().unwrap_or_else(|e| e.into_inner()) = Some(poller);
@@ -2743,6 +2771,7 @@ pub(crate) fn attach_tape(group: Group) {
             (*task).group = Some(group);
             (*task).replay = group.replaying();
             (*task).arc_runtime |= (*task).replay || (*(*task).run).pool.is_some();
+            (*task).arc_hooks = true;
         }
     }
 }
@@ -3175,6 +3204,7 @@ pub unsafe fn run_root(
     };
     let mut root = Box::new(Task {
         arc_runtime: false,
+        arc_hooks: true,
         cancel: AtomicBool::new(false),
         replay: false,
         latest_pair: false,
@@ -3228,6 +3258,7 @@ pub unsafe fn run_root(
             .unwrap()
             .prepare(start, root_pointer.cast(), ptr::null_mut());
         run.all = root_pointer;
+        root.arc_hooks = run.arc_hooks(&root);
         if let Some(pool) = pool.as_deref().filter(|pool| !pool.serial_replay) {
             root.arc_runtime = run.arc_observed();
             root.worker = Some(0);
@@ -3675,6 +3706,7 @@ unsafe fn spawn_in(
         let child_context = abi::task_child(context, &mut record, bytes, id);
         let task = Box::new(Task {
             arc_runtime: false,
+            arc_hooks: true,
             cancel: AtomicBool::new(false),
             replay: false,
             latest_pair: false,
@@ -3721,6 +3753,7 @@ unsafe fn spawn_in(
                 *members += 1;
             }
         }
+        (*task).arc_hooks = (*run).arc_hooks(&*task);
         (*task).context = (*task).owned_context.as_mut().unwrap();
         (*(*task).context).events = if (*(*task).context).events != 0 {
             task.expose_provenance()
@@ -4175,6 +4208,7 @@ mod ready_routing_laws {
                 .map(|i| {
                     Box::new(Task {
                         arc_runtime: false,
+                        arc_hooks: true,
                         cancel: AtomicBool::new(false),
                         replay: false,
                         latest_pair: false,

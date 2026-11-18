@@ -67,8 +67,29 @@ fn core_operations(backend: Backend) {
             0,
         ),
     ];
+    let mut cases: Vec<(&str, String, u64, i32)> = cases
+        .into_iter()
+        .map(|(name, source, limit, exit)| (name, source.to_owned(), limit, exit))
+        .collect();
+    // MEM-20, as in the evaluator's arc_share_folds_a_pending_refund law: the
+    // child's unused 64-byte reservation is pending when the parent's 64th poll
+    // returns. An Arc share folds it, so both later room reads agree (0);
+    // without the share the first refused admission folds it (64).
+    for (name, share, expected) in [
+        ("Arc share folds a pending refund", "let other = arc.share(a); ", 0),
+        ("refund pending until the next owner event", "", 64),
+    ] {
+        let polls = "task.check_cancel(); ".repeat(64);
+        cases.push((
+            name,
+            format!("fn child(take x:u64) -> u64 {{ x }}\nfn room() -> u64 {{ let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c {{ Ok(_) => 0u64, Error(e) => e.available }} }}\npub fn main(tasks:Tasks) -> Result[(), Exit] {{ let a = result.unwrap(arc.new(7u64)); let h = result.unwrap(task.spawn(tasks,bytes 64,41u64,child)); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); if second - first == {expected}u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"),
+            1_048_576,
+            0,
+        ));
+    }
     let mut failures = vec![];
     for (name, source, limit, exit) in cases {
+        let source = source.as_str();
         let dir = tempfile::tempdir().unwrap();
         let mut request = source_request(source, dir.path());
         request.inputs.packages[1] =

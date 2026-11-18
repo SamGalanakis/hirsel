@@ -54,14 +54,19 @@ struct Links {
 #[repr(C, align(32))]
 pub(crate) struct Slot {
     local: UnsafeCell<LimitRecord>,
+    /// Frozen at SLOT_DOMAIN. Set when the forest page is made and never
+    /// changed, so a live payer word always leads to its domain.
+    domain: NonNull<Domain>,
     links: UnsafeCell<Links>,
     pending: AtomicU64,
     pending_zeros: AtomicUsize,
     next_pending: UnsafeCell<Option<NonNull<Slot>>>,
     handover: Cell<Option<u64>>,
-    domain: NonNull<Domain>,
     id: usize,
 }
+const _: () = assert!(std::mem::offset_of!(Slot, local) == crate::abi_layout::LIMIT_AVAILABLE);
+const _: () = assert!(std::mem::offset_of!(Slot, domain) == crate::abi_layout::SLOT_DOMAIN);
+const _: () = assert!(std::mem::offset_of!(Domain, pending) == crate::abi_layout::DOMAIN_PENDING);
 struct Forest {
     pages: Vec<Box<[Slot; 64]>>,
     length: usize,
@@ -310,12 +315,16 @@ impl Forest {
         }
     }
 }
+#[repr(C)]
 struct Domain {
+    /// Frozen at DOMAIN_PENDING: set with every posted refund and lowered
+    /// only when the domain has none queued. Emitted Arc events read it
+    /// through the payer's slot and skip their hook while it is clear.
+    pending: AtomicBool,
     forest: UnsafeCell<Forest>,
     handles: Cell<usize>,
     owner: Option<usize>,
     remote: Mutex<Remote>,
-    pending: AtomicBool,
     reap_inboxes: Cell<Option<NonNull<Inbox>>>,
 }
 #[derive(Clone, Copy)]

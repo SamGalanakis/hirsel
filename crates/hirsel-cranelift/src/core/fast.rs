@@ -38,6 +38,23 @@ impl Function<'_, '_, '_> {
             args,
         )
     }
+    pub fn arc_poll_event(
+        &mut self,
+        name: &'static str,
+        types: &[Ty],
+        args: &[Value],
+    ) -> Result<()> {
+        arc_hook(
+            &mut self.b,
+            &mut self.calls,
+            self.object,
+            self.context,
+            name,
+            types,
+            args,
+            false,
+        )
+    }
     pub fn admission(&mut self, payer: Value, charge: Value) -> Result<(Value, Value)> {
         let available = self.load_word(payer, memory_layout::LIMIT_AVAILABLE);
         let fits = self
@@ -327,6 +344,9 @@ pub(super) fn branch_on_arc_replay(
     b.ins().brif(active, replay, &[], inline, &[]);
 }
 
+/// A scheduled Arc init, share or release folds posted credits and records its
+/// event. The hook runs only when the task's TASK_ARC_HOOKS byte is set or its
+/// payer's domain has posted credit; otherwise it would do neither.
 pub(super) fn arc_event(
     b: &mut FunctionBuilder<'_>,
     calls: &mut calls::Calls<'_>,
@@ -335,6 +355,30 @@ pub(super) fn arc_event(
     name: &'static str,
     argument_types: &[Ty],
     arguments: &[Value],
+) -> Result<()> {
+    arc_hook(
+        b,
+        calls,
+        object,
+        context,
+        name,
+        argument_types,
+        arguments,
+        true,
+    )
+}
+
+/// `gated` false is the Arc unique test: a poll, so its hook always runs.
+#[allow(clippy::too_many_arguments)]
+fn arc_hook(
+    b: &mut FunctionBuilder<'_>,
+    calls: &mut calls::Calls<'_>,
+    object: &mut ObjectModule,
+    context: Value,
+    name: &'static str,
+    argument_types: &[Ty],
+    arguments: &[Value],
+    gated: bool,
 ) -> Result<()> {
     let call = b.create_block();
     let done = b.create_block();
@@ -346,7 +390,41 @@ pub(super) fn arc_event(
         memory_layout::CONTEXT_EVENTS as i32,
     );
     let empty = b.ins().icmp_imm_s(IntCC::Equal, events, 0);
-    b.ins().brif(empty, done, &[], call, &[]);
+    if gated {
+        let hooks = b.create_block();
+        let credit = b.create_block();
+        b.ins().brif(empty, done, &[], hooks, &[]);
+        b.switch_to_block(hooks);
+        let flag = b.ins().load(
+            types::I8,
+            Flags::trusted(),
+            events,
+            memory_layout::TASK_ARC_HOOKS as i32,
+        );
+        b.ins().brif(flag, call, &[], credit, &[]);
+        b.switch_to_block(credit);
+        // The payer and its domain may change between events; neither load
+        // is readonly, and the pending byte is an atomic (Acquire) load.
+        let payer = b.ins().load(
+            types::I64,
+            Flags::trusted(),
+            context,
+            memory_layout::CONTEXT_CURRENT_LIMIT as i32,
+        );
+        let domain = b.ins().load(
+            types::I64,
+            Flags::trusted(),
+            payer,
+            memory_layout::SLOT_DOMAIN as i32,
+        );
+        let at = b
+            .ins()
+            .iadd_imm(domain, memory_layout::DOMAIN_PENDING as i64);
+        let pending = b.ins().atomic_load(types::I8, Flags::trusted(), at);
+        b.ins().brif(pending, call, &[], done, &[]);
+    } else {
+        b.ins().brif(empty, done, &[], call, &[]);
+    }
     b.switch_to_block(call);
     // These four frozen hooks take context and at most one event operand.
     let mut params = [P; 2];

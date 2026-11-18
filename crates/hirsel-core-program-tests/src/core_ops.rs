@@ -124,6 +124,40 @@ fn spawn_adapts_scalar_place_and_unit_results_and_returns_refused_input() {
     }
 }
 
+/// MEM-20: the child's unused 64-byte reservation reaches the parent as a
+/// pending refund while the parent's 64th poll gives the child the turn. The
+/// parent's next own event folds it. An Arc share is that event, so both room
+/// reads after it agree; without it, the first refused admission is the folding
+/// event, so only the second read sees the 64 bytes.
+pub(crate) fn arc_share_refund_fold_source(share: bool) -> String {
+    let polls = "task.check_cancel(); ".repeat(64);
+    let share = if share {
+        "let other = arc.share(a); "
+    } else {
+        ""
+    };
+    format!(
+        "fn child(take x: u64) -> u64 {{ x }}\nfn room() -> u64 {{ let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c {{ Ok(_) => 0u64, Error(e) => e.available }} }}\nfn folded(tasks: Tasks) -> u64 waits {{ let a = result.unwrap(arc.new(7u64)); let h = result.unwrap(task.spawn(tasks, bytes 64, 41u64, child)); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); second - first }}\n"
+    )
+}
+
+#[test]
+fn arc_share_folds_a_pending_refund_like_any_owner_event() {
+    for (share, expected) in [(true, 0), (false, 64)] {
+        let source = arc_share_refund_fold_source(share);
+        let (index, modules) = canonical(&source);
+        let _p = Program::declare(&index, &modules);
+        let (module, functions) =
+            crate::SourceProgram::from_inputs(&index, &modules, |d| d.package_is("app", "1"));
+        let run = eval::run(&module, functions["folded"], &[1], 100_000);
+        assert_eq!(
+            run.outcome,
+            eval::Outcome::Returned(vec![expected]),
+            "share {share}"
+        );
+    }
+}
+
 #[test]
 fn counted_and_box_kernels_preserve_payloads_handback_and_exact_refunds() {
     let mut cases = vec![

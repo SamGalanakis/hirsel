@@ -347,7 +347,7 @@ impl Function<'_, '_, '_> {
                         node,
                     );
                     let unique = self.b.ins().icmp_imm_s(IntCC::Equal, count, 1);
-                    self.arc_event("hirsel_core_arc_unwrapped", &[boolean], &[unique])?;
+                    self.arc_poll_event("hirsel_core_arc_unwrapped", &[boolean], &[unique])?;
                     self.b.ins().jump(done, &[unique.into()]);
                     self.b.switch_to_block(done);
                     self.b.block_params(done)[0]

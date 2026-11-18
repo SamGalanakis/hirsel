@@ -74,19 +74,52 @@ impl FunctionEmitter<'_> {
         self.block(done);
     }
 
-    /// A scheduled Arc operation folds posted credits and records its event.
+    /// A scheduled Arc init, share or release folds posted credits and records
+    /// its event. The hook runs only when the task's TASK_ARC_HOOKS byte is set
+    /// or its payer's domain has posted credit; otherwise it would do neither.
     pub(super) fn arc_event(&mut self, name: &str, arguments: &[CArg]) {
+        self.arc_hook(name, arguments, true);
+    }
+    /// An Arc unique test is a poll, so its hook always runs.
+    pub(super) fn arc_poll_event(&mut self, name: &str, arguments: &[CArg]) {
+        self.arc_hook(name, arguments, false);
+    }
+    fn arc_hook(&mut self, name: &str, arguments: &[CArg], gated: bool) {
         let n = self.counter();
         let at = self.field_pointer(&CONTEXT, CONTEXT_EVENTS);
         let fixed = Memory {
             invariant: self.facts,
             ..Memory::aligned(8)
         };
-        let events = self.load_with(&Type::I64, &at, &fixed);
-        let empty = self.cmp(Predicate::Eq, &Type::I64, &events, &int(0));
+        let events = self.load_with(&Type::Ptr, &at, &fixed);
+        let empty = self.cmp(Predicate::Eq, &Type::Ptr, &events, &Value::Null);
         let done = Label::new("arc_event_done", n);
         let call = Label::new("arc_event_call", n);
-        self.likely(&empty, done, call);
+        if gated {
+            let hooks = Label::new("arc_event_hooks", n);
+            let credit = Label::new("arc_event_credit", n);
+            self.likely(&empty, done, hooks);
+            self.block(hooks);
+            let at = self.field_pointer(&events, TASK_ARC_HOOKS);
+            let flag = self.load(&Type::I8, &at, 1);
+            let quiet = self.cmp(Predicate::Eq, &Type::I8, &flag, &int(0));
+            self.likely(&quiet, credit, call);
+            self.block(credit);
+            // The payer and its domain may change between events; neither
+            // load is invariant, and the pending byte is an Acquire atomic.
+            let payer = self.current_payer();
+            let domain = self.load_native(&payer, SLOT_DOMAIN, Type::Ptr);
+            let at = self.field_pointer(&domain, DOMAIN_PENDING);
+            let pending = Memory {
+                ordering: Some(Ordering::Acquire),
+                ..Memory::aligned(1)
+            };
+            let flag = self.load_with(&Type::I8, &at, &pending);
+            let quiet = self.cmp(Predicate::Eq, &Type::I8, &flag, &int(0));
+            self.likely(&quiet, done, call);
+        } else {
+            self.likely(&empty, done, call);
+        }
         self.block(call);
         let mut args = vec![ptr(CONTEXT)];
         args.extend_from_slice(arguments);
@@ -487,7 +520,7 @@ impl FunctionEmitter<'_> {
         };
         let count = self.load_with(&Type::I64, node, &memory);
         let unique = self.cmp(Predicate::Eq, &Type::I64, &count, &int(1));
-        self.arc_event(
+        self.arc_poll_event(
             "hirsel_core_arc_unwrapped",
             &[zeroext(Type::I1, unique.clone())],
         );

@@ -22,6 +22,15 @@ pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
 pub const CONTEXT_STEPS: usize = 16;
 pub const TASK_ARC_REPLAY: usize = 0;
+// Nonzero when the task's init/share/release hooks must run whatever its credit:
+// a tape group, an open LATEST pair, an event sink or test schedule, or a
+// serial run with sockets.
+pub const TASK_ARC_HOOKS: usize = 1;
+// The payer word at CONTEXT_CURRENT_LIMIT is a slot; its domain pointer sits at
+// SLOT_DOMAIN and the domain's posted-refund flag (an atomic byte, read with
+// Acquire) at DOMAIN_PENDING.
+pub const SLOT_DOMAIN: usize = 16;
+pub const DOMAIN_PENDING: usize = 0;
 pub const LIMIT_AVAILABLE: usize = 0;
 pub const LIMIT_OUTSTANDING: usize = 8;
 pub const REGION_CURSOR: usize = 0;
@@ -89,9 +98,13 @@ pub const fn own_prefix(kind: u8) -> usize {
 // resources their separate prefix. Kind 3 is unused.
 
 // Arc count mutations are inline under the scheduler's event turn. After the
-// operation, with released before last-release glue, call the context-first
-// hook when task = context[CONTEXT_EVENTS] != 0. The hook folds the owner's
-// posted credits and records the event. Trace kinds are layout::event::ARC_*.
+// operation, with released before last-release glue, take the context-first
+// hook when task = context[CONTEXT_EVENTS] != 0. Initialized, shared and
+// released call it only when task[TASK_ARC_HOOKS] != 0 or the payer's
+// domain pending byte is set; otherwise the hook would neither fold credit nor
+// record. Unwrapped always calls it: a unique test is a poll. The hook folds
+// the owner's posted credits and records the event. Trace kinds are
+// layout::event::ARC_*.
 
 // Each allocation page owns a payer identity. Its outstanding charges keep the
 // original slot alive across scope exit. Free resolves the payer before its

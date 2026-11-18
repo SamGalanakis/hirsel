@@ -218,6 +218,16 @@ impl Sequencer {
 
     /// # Safety
     /// Node and cohort are the current holder's.
+    unsafe fn has_waiter(&self, node: *mut Node, cohort: usize) -> bool {
+        let c = &self.cohorts[cohort];
+        // SAFETY: the holder pins both of its nodes.
+        unsafe {
+            c.local.has_waiter(node) || self.global.has_waiter(&raw const c.node as *mut Node)
+        }
+    }
+
+    /// # Safety
+    /// Node and cohort are the current holder's.
     unsafe fn release(&self, node: *mut Node, cohort: usize, measured: bool) {
         let c = &self.cohorts[cohort];
         let global = &raw const c.node as *mut Node;
@@ -239,10 +249,10 @@ impl Sequencer {
     }
 }
 
-/// The calling CPU's cohort: its L3 id from sysfs, read once per process.
-fn current_cohort() -> usize {
+/// Each CPU's cohort: its L3 id from sysfs, read once per process.
+fn cohort_map() -> &'static [u8] {
     static L3: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    let ids = L3.get_or_init(|| {
+    L3.get_or_init(|| {
         (0..4096)
             .map_while(|cpu| {
                 std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/id"))
@@ -250,14 +260,25 @@ fn current_cohort() -> usize {
                     .map(|id| (id.trim().parse::<usize>().unwrap_or(0) % COHORTS) as u8)
             })
             .collect()
-    });
+    })
+}
+
+/// The calling CPU's cohort.
+fn current_cohort() -> usize {
     // SAFETY: sched_getcpu has no preconditions.
     let cpu = unsafe { libc::sched_getcpu() };
     usize::try_from(cpu)
         .ok()
-        .and_then(|cpu| ids.get(cpu))
+        .and_then(|cpu| cohort_map().get(cpu))
         .map_or(0, |&id| usize::from(id))
 }
+
+/// Keepable commits one holder may run without releasing.
+const KEPT_RUN: u32 = 64;
+
+/// Outermost acquisitions between re-reads of the worker's CPU. A worker
+/// rarely migrates, and a stale cohort only costs locality.
+const COHORT_RECHECK: u32 = 64;
 
 /// Spin briefly, then yield the CPU: a waiter that shares its CPU with the
 /// holder or a preempted enqueuer would otherwise spin out its whole time
@@ -281,19 +302,35 @@ pub(crate) struct Owner {
     depth: Cell<usize>,
     held: Cell<bool>,
     cohort: Cell<usize>,
+    recheck: Cell<u32>,
+    /// The outermost commit may be kept for the next one.
+    keepable: Cell<bool>,
+    /// Commits kept without a release since the last hand-off.
+    kept: Cell<u32>,
     published: fn(),
+    /// The run's live-unit count; one means this worker runs the only unit.
+    units: *const std::sync::atomic::AtomicUsize,
     #[cfg(feature = "testing")]
     sample: Option<Sample>,
 }
 impl Owner {
-    pub(crate) fn new(sequencer: &Sequencer, published: fn(), _measured: bool) -> Self {
+    pub(crate) fn new(
+        sequencer: &Sequencer,
+        published: fn(),
+        units: &std::sync::atomic::AtomicUsize,
+        _measured: bool,
+    ) -> Self {
         Self {
             sequencer,
             node: Node::default(),
             depth: Cell::new(0),
             held: Cell::new(false),
             cohort: Cell::new(0),
+            recheck: Cell::new(0),
+            keepable: Cell::new(false),
+            kept: Cell::new(0),
             published,
+            units,
             #[cfg(feature = "testing")]
             sample: _measured.then(Sample::default),
         }
@@ -301,8 +338,18 @@ impl Owner {
 
     /// False only when the holder served this node's request instead.
     fn acquire(&self) -> bool {
-        let cohort = current_cohort();
-        self.cohort.set(cohort);
+        let cohort = match self.recheck.get() {
+            0 => {
+                self.recheck.set(COHORT_RECHECK);
+                let cohort = current_cohort();
+                self.cohort.set(cohort);
+                cohort
+            }
+            n => {
+                self.recheck.set(n - 1);
+                self.cohort.get()
+            }
+        };
         // SAFETY: the pinned worker enqueues only its own idle node.
         let _queued =
             match unsafe { (*self.sequencer).acquire(&raw const self.node as *mut Node, cohort) } {
@@ -333,6 +380,25 @@ impl Owner {
     /// Serve linked delegated requests, then release. Nested entries made by
     /// a served request reuse the held token.
     fn finish(&self) {
+        // A keepable commit by the run's only live unit keeps the token for a
+        // bounded run while nobody waits: a requester can only be an idle
+        // worker or a timer turn, which wait the same at N=1. The next
+        // ordinary commit, switch or waiter ends the run.
+        // SAFETY: the pool outlives every worker's owner.
+        if self.keepable.replace(false)
+            && self.kept.get() < KEPT_RUN
+            && unsafe { (*self.units).load(Ordering::Acquire) } == 1
+        {
+            // SAFETY: this worker holds the token with its node and cohort.
+            let idle = unsafe {
+                !(*self.sequencer).has_waiter(&raw const self.node as *mut Node, self.cohort.get())
+            };
+            if idle {
+                self.kept.set(self.kept.get() + 1);
+                return;
+            }
+        }
+        self.kept.set(0);
         self.depth.set(1);
         // SAFETY: this worker holds the token with its node and cohort.
         let _served = unsafe {
@@ -431,6 +497,9 @@ pub(crate) fn enter() -> Guard {
     // SAFETY: install pins the current worker and its sequencer on this thread.
     if let Some(owner) = unsafe { owner.as_ref() } {
         let depth = owner.depth.get();
+        if depth == 0 {
+            owner.keepable.set(false);
+        }
         if !owner.held.replace(true) {
             // SAFETY: either enter reuses a token handed from the fiber or
             // its worker's outermost entry enqueues the idle node.
@@ -453,6 +522,19 @@ impl Drop for Guard {
             }
         }
     }
+}
+
+/// Enter a commit its owner may keep for the next one (see `Owner::finish`).
+#[inline(always)]
+pub(crate) fn enter_keepable() -> Guard {
+    let guard = enter();
+    // SAFETY: install pins the current worker on this thread.
+    if let Some(owner) = unsafe { guard.0.as_ref() }
+        && owner.depth.get() == 1
+    {
+        owner.keepable.set(true);
+    }
+    guard
 }
 
 /// Transfer commit custody across the physical switch to the same worker's

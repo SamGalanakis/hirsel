@@ -2228,6 +2228,12 @@ pub(crate) fn before_commit() -> crate::sequencer::Guard {
     crate::sequencer::enter()
 }
 
+/// An Arc count commit, which the sole live unit may keep for its next one.
+pub(crate) fn before_arc_commit() -> crate::sequencer::Guard {
+    replay_boundary(false);
+    crate::sequencer::enter_keepable()
+}
+
 /// Only a provider entry can reach a taped WAIT without first committing.
 pub(crate) fn before_provider_entry() -> crate::sequencer::Guard {
     replay_boundary(true);
@@ -2341,6 +2347,19 @@ pub(crate) fn group_index() -> u64 {
         task.as_ref()
             .and_then(|t| t.group)
             .map_or(0, |g| live_index(task, g))
+    }
+}
+
+/// `event` for a caller already inside its commit.
+#[inline(always)]
+pub(crate) fn event_committed(kind: u8, object: u64, value: u64) {
+    let task = CURRENT.get();
+    if !task.is_null() {
+        // SAFETY: the running task pins its scheduler; the caller holds the token.
+        unsafe {
+            record_event(task, kind, object, value);
+            poll_event(task, kind, value);
+        }
     }
 }
 
@@ -3211,8 +3230,12 @@ impl RunPtr {
             }
         } else {
             let domain = &pool.domains[&RESIDUAL_DOMAIN];
-            let mut owner =
-                crate::sequencer::Owner::new(&domain.sequencer, publish_deliveries, pool.measure);
+            let mut owner = crate::sequencer::Owner::new(
+                &domain.sequencer,
+                publish_deliveries,
+                &pool.units,
+                pool.measure,
+            );
             // SAFETY: scoped workers pin all operands. The root remains alive
             // until after every worker has returned its vacant-slot lease.
             unsafe {

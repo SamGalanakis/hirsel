@@ -82,6 +82,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result
     }
 
+    pub(super) fn call_target(&self, callee: NodeId) -> Option<&'c Target> {
+        if self.kind(callee) != NodeKind::Path {
+            return None;
+        }
+        let resolved = self.p.resolved(self.at, callee)?;
+        if matches!(resolved.target, Target::Definition(_))
+            && resolved.projections.start != resolved.projections.end
+        {
+            return None;
+        }
+        Some(&resolved.target)
+    }
+
     fn call_inner(
         &mut self,
         n: NodeId,
@@ -93,26 +106,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (callee, args) = (c[0], &c[1..]);
         self.out.counts.uses += 1;
         let p: &'c Program<'a> = self.p;
-        let target = match self.kind(callee) {
-            NodeKind::Path => match p.resolved(self.at, callee) {
-                Some(u)
-                    if u.projections.start != u.projections.end
-                        && matches!(u.target, Target::Definition(_)) =>
-                {
-                    return self.call_value(n, callee, args, want, scratch);
-                }
-                other => other.map(|u| &u.target),
-            },
-            _ => None,
-        };
-        let f = match target {
+        let f = match self.call_target(callee) {
             Some(Target::Definition(id)) => match p.by_definition[id.0 as usize].as_ref() {
                 Some(Def::Fn(f)) => *f as usize,
                 Some(Def::Type(d)) => return self.construct_record(n, *d, want),
                 // A constant is a value, so use the ordinary callable type check.
                 None => return self.call_value(n, callee, args, want, scratch),
             },
-            Some(Target::Missing) if self.kind(callee) == NodeKind::Path => {
+            Some(Target::Missing) => {
                 self.halt();
                 return (ERROR, None);
             }

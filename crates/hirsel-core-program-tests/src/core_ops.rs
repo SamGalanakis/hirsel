@@ -416,7 +416,7 @@ fn log_boxed_list_append_and_finish_in_evaluator() {
 fn wire_socket_model_carries_addresses_deadlines_and_bytes_on_evaluator() {
     use hirsel_core_net::{
         Rule, Sockets,
-        model::{Config, Model},
+        model::{Choice, Config, Model},
     };
     for latency in [0, 3] {
         let source = if latency == 0 {
@@ -429,7 +429,12 @@ fn wire_socket_model_carries_addresses_deadlines_and_bytes_on_evaluator() {
         let (program, names) = crate::SourceProgram::lower(&source, None);
         let model = Model::new(Config {
             latency_ns: latency,
-            prefix: vec![2, 2, 2, 2],
+            prefix: [
+                (Choice::Send, vec![2]),
+                (Choice::Delivery, vec![2, 2]),
+                (Choice::Receive, vec![2]),
+            ]
+            .into(),
             ..Config::default()
         });
         let mut network = eval::Network {

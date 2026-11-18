@@ -19,7 +19,8 @@
 //! copying the table), and the freeze and reservation records (crate::own).
 
 use crate::decls::{
-    DeclBody, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, is_core_prelude, kind,
+    DeclBody, FLOAT, FnDecl, INTEGER, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds,
+    is_core_prelude, kind,
 };
 use crate::own::{Act, Avail, Extent, Freeze, Hold, Origin, PStep, Place, breaks, join, overlap};
 use crate::types::*;
@@ -2279,6 +2280,10 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         if let Some((dest, id)) = self.dest
             && !self.is_view(self.fd.result)
+            // A rigid numeric result has only a template destination. Every
+            // closed signature returns it as a scalar.
+            && !matches!(*self.t.kind(self.fd.result), TyKind::Param(i)
+                if self.params[i as usize] & (INTEGER | FLOAT) != 0)
         {
             self.return_place =
                 Some(self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(id), body));

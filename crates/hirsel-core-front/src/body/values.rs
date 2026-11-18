@@ -975,6 +975,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let field = if can_place_fields
                         && lit.is_none()
                         && self.live()
+                        && !self.is_view(t)
                         && let Ok(Rep::Place(field)) = self.rep(t)
                         && let Some(ty) = self.known(own, &found)
                         && let Ok(Rep::Place(id)) = self.rep(ty)
